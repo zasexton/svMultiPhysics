@@ -31,8 +31,3 @@ solver_ramp_cp*.xml
 # Analysis scripts (not used by the test)
 compare_proc_diff.py
 compare_fsi.py
-
-# Obsolete per-equation sub-solver inputs (driver auto-builds sub-XMLs from solver.xml)
-solver_fluid*.xml
-solver_solid*.xml
-solver_mesh.xml
