@@ -188,7 +188,7 @@
 <!-- Partitioned coupling configuration -->
 <Partitioned_coupling>
   <Max_coupling_iterations> 400 </Max_coupling_iterations>
-  <Coupling_tolerance> 1e-10 </Coupling_tolerance>
+  <Coupling_tolerance> 1e-6 </Coupling_tolerance>
   <Initial_relaxation> 0.01 </Initial_relaxation>
   <Omega_max> 1.0 </Omega_max>
   <Coupling_method> aitken </Coupling_method>
