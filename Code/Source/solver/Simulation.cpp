@@ -52,6 +52,13 @@ void Simulation::read_parameters(const std::string& file_name)
   parameters.read_xml(file_name);
 }
 
+/// @brief Read solver parameters from an in-memory XML string (no file).
+//
+void Simulation::read_parameters_from_string(const std::string& xml_content)
+{
+  parameters.read_xml_from_string(xml_content);
+}
+
 /// @brief Set the simulation and module member data.
 ///
 /// Replicates the README subroutine lines to set COMMOD module varliables

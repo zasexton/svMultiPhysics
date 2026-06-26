@@ -1833,6 +1833,9 @@ class Parameters {
     void get_logging_levels(int& verbose, int& warning, int& debug);
     void print_parameters();
     void read_xml(std::string file_name);
+    void read_xml_from_string(const std::string& xml_content);
+    void set_values_from_doc(tinyxml2::XMLDocument& doc, tinyxml2::XMLError error,
+                             const std::string& source_desc);
 
     void set_contact_values(tinyxml2::XMLElement* root_element);
     void set_equation_values(tinyxml2::XMLElement* root_element);

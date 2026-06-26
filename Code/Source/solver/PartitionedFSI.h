@@ -110,9 +110,6 @@ private:
   std::ofstream coupling_log_;
   std::ofstream histor_log_;
 
-  // Temp XML file paths (cleaned up in destructor)
-  std::vector<std::string> temp_xml_paths_;
-
   void resolve_faces();
   void build_node_maps();
 

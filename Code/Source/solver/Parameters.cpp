@@ -222,14 +222,29 @@ void Parameters::print_parameters()
 
 /// @brief Set the simulation parameter values given in an XML format file.
 void Parameters::read_xml(std::string file_name)
-{ 
+{
   tinyxml2::XMLDocument doc;
-  
   auto error = doc.LoadFile(file_name.c_str());
-  
+  set_values_from_doc(doc, error, "XML file '" + file_name + "'");
+}
+
+// Parse parameters from an in-memory XML string (no file on disk). Used by the
+// partitioned FSI driver to initialize its sub-simulations directly from the
+// single solver.xml without writing temporary per-role XML files.
+void Parameters::read_xml_from_string(const std::string& xml_content)
+{
+  tinyxml2::XMLDocument doc;
+  auto error = doc.Parse(xml_content.c_str());
+  set_values_from_doc(doc, error, "in-memory sub-simulation XML");
+}
+
+void Parameters::set_values_from_doc(tinyxml2::XMLDocument& doc,
+                                     tinyxml2::XMLError error,
+                                     const std::string& source_desc)
+{
   auto root_element = doc.FirstChildElement(FSI_FILE.c_str());
   if (error != tinyxml2::XML_SUCCESS || root_element == nullptr) {
-    svmp::raise<svmp::ParseException>(SVMP_HERE, "The following error occurred while reading the XML file '" + file_name + "'.\n" +
+    svmp::raise<svmp::ParseException>(SVMP_HERE, "The following error occurred while reading the " + source_desc + ".\n" +
         "[svMultiPhysics] ERROR " + std::string(doc.ErrorStr()));
   }
 

@@ -41,6 +41,9 @@ class Simulation {
     // Read a solver paramerer input XML file.
     void read_parameters(const std::string& fileName);
 
+    // Read solver parameters from an in-memory XML string (no file on disk).
+    void read_parameters_from_string(const std::string& xml_content);
+
     // Set simulation and module member data from Parameters.
     void set_module_parameters();
 

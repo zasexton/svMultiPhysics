@@ -35,11 +35,13 @@ static bool has_nan(const SolutionStates& sol) {
 
 
 //----------------------------------------------------------------------
-// Helper: initialize one sub-simulation through the standard pipeline
+// Helper: initialize one sub-simulation through the standard pipeline.
+// xml_content is the in-memory sub-XML produced by build_sub_xml (no file
+// is written to disk).
 //----------------------------------------------------------------------
-static void init_sub_sim(Simulation* sim, const std::string& xml_path)
+static void init_sub_sim(Simulation* sim, const std::string& xml_content)
 {
-  read_files_ns::read_files(sim, xml_path);
+  read_files_ns::read_files(sim, xml_content, /*from_string=*/true);
   sim->logger.set_cout_write(false);
 
   // The mesh sub-sim includes a <Partitioned_coupling> stub so that read_files
@@ -61,8 +63,8 @@ static void init_sub_sim(Simulation* sim, const std::string& xml_path)
 
 //----------------------------------------------------------------------
 // build_sub_xml — extract one role's equation + its meshes from the
-// main XML and write a minimal standalone sub-simulation XML to a
-// temp file.  Returns the temp file path.
+// main XML and return a minimal standalone sub-simulation XML as an
+// in-memory string (consumed by read_files with from_string=true).
 //
 // Mesh association: the meshes included in the sub-XML are those whose
 // <Domain> value matches any <Domain id="..."> child of the target
@@ -169,14 +171,11 @@ std::string PartitionedFSI::build_sub_xml(const std::string& main_xml_path,
     sub_root->InsertEndChild(pcp);
   }
 
-  // Write to temp file alongside the main XML.
-  std::string base = main_xml_path;
-  auto slash = base.find_last_of('/');
-  std::string dir = (slash != std::string::npos) ? base.substr(0, slash + 1) : "./";
-  std::string temp_path = dir + ".partfsi_" + role + "_tmp.xml";
-  if (sub.SaveFile(temp_path.c_str()) != XML_SUCCESS)
-    throw std::runtime_error("[PartitionedFSI] Cannot write temp sub-XML: " + temp_path);
-  return temp_path;
+  // Serialize the sub-document to an in-memory string instead of writing a
+  // temp file. The string is handed directly to read_files(..., from_string).
+  tinyxml2::XMLPrinter printer;
+  sub.Print(&printer);
+  return std::string(printer.CStr());
 }
 
 //----------------------------------------------------------------------
@@ -191,35 +190,18 @@ PartitionedFSI::PartitionedFSI(Simulation* main_simulation,
   auto& cm = main_sim_->com_mod.cm;
   auto& cm_mod = main_sim_->cm_mod;
 
-  // Compute deterministic temp XML paths (same formula as in build_sub_xml).
-  auto make_path = [&](const std::string& role) -> std::string {
-    std::string base = xml_file_path_;
-    auto slash = base.find_last_of('/');
-    std::string dir = (slash != std::string::npos) ? base.substr(0, slash + 1) : "./";
-    return dir + ".partfsi_" + role + "_tmp.xml";
-  };
-  std::string fluid_xml = make_path("partitioned_fluid");
-  std::string solid_xml = make_path("partitioned_solid");
-  std::string mesh_xml  = make_path("partitioned_mesh");
-  temp_xml_paths_ = {fluid_xml, solid_xml, mesh_xml};
-
-  // Only rank 0 writes the XML files to avoid concurrent write corruption.
-  if (cm.mas(cm_mod)) {
-    build_sub_xml(xml_file_path_, "partitioned_fluid");
-    build_sub_xml(xml_file_path_, "partitioned_solid");
-    build_sub_xml(xml_file_path_, "partitioned_mesh");
-  }
-  MPI_Barrier(cm.com());
-
-  // 3 separate sub-sims: fluid, solid, mesh
+  // Build each role's sub-XML in memory from the single main solver.xml and
+  // initialize a standalone sub-simulation from it. No temp files are written:
+  // every rank parses the same main XML (read-only) and passes the resulting
+  // sub-XML string straight to read_files, so no rank-0 write / barrier is needed.
   fluid_sim_ = std::make_unique<Simulation>();
-  init_sub_sim(fluid_sim_.get(), fluid_xml);
+  init_sub_sim(fluid_sim_.get(), build_sub_xml(xml_file_path_, "partitioned_fluid"));
 
   solid_sim_ = std::make_unique<Simulation>();
-  init_sub_sim(solid_sim_.get(), solid_xml);
+  init_sub_sim(solid_sim_.get(), build_sub_xml(xml_file_path_, "partitioned_solid"));
 
   mesh_sim_ = std::make_unique<Simulation>();
-  init_sub_sim(mesh_sim_.get(), mesh_xml);
+  init_sub_sim(mesh_sim_.get(), build_sub_xml(xml_file_path_, "partitioned_mesh"));
 
   if (cm.mas(cm_mod)) {
     // Open log files
@@ -237,11 +219,7 @@ PartitionedFSI::PartitionedFSI(Simulation* main_simulation,
   build_node_maps();
 }
 
-PartitionedFSI::~PartitionedFSI()
-{
-  if (main_sim_->com_mod.cm.mas(main_sim_->cm_mod))
-    for (const auto& p : temp_xml_paths_) std::remove(p.c_str());
-}
+PartitionedFSI::~PartitionedFSI() = default;
 
 //----------------------------------------------------------------------
 // resolve_faces

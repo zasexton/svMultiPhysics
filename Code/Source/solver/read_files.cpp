@@ -1651,7 +1651,7 @@ void read_fiber_temporal_values_file(FiberReinforcementStressParameters& fiber_p
 // The many global COMMOD values set in the Fortan subroutine are set in the
 // Simulation::set_module_parameters() method.
 //
-void read_files(Simulation* simulation, const std::string& file_name)
+void read_files(Simulation* simulation, const std::string& file_name, bool from_string)
 {
   using namespace consts;
 
@@ -1663,12 +1663,18 @@ void read_files(Simulation* simulation, const std::string& file_name)
   dmsg.banner();
   #endif
 
-  // Read the solver XML file.
+  // Read the solver parameters. 'file_name' is either a path to an XML file or,
+  // when from_string is true, the XML content itself (used by the partitioned
+  // FSI driver to build sub-simulations without temp files).
   #ifdef debug_read_files
-  dmsg << "Read the solver XML file " << " ... ";
+  dmsg << "Read the solver XML " << " ... ";
   #endif
   if (!com_mod.resetSim) {
-    simulation->read_parameters(std::string(file_name));
+    if (from_string) {
+      simulation->read_parameters_from_string(file_name);
+    } else {
+      simulation->read_parameters(std::string(file_name));
+    }
   }
 
   auto& chnl_mod = simulation->get_chnl_mod();
