@@ -194,13 +194,22 @@ void read_bc(Simulation* simulation, EquationParameters* eq_params, eqType& lEq,
   // Allocate traction
   auto& com_mod = simulation->com_mod;
   lBc.h.resize(com_mod.nsd);
-
-  // [NOTE] Direction vectors can only have three values.
-  //
+  
+  // Set effective direction data.
   lBc.eDrn.resize(com_mod.nsd);
   auto effective_direction = bc_params->effective_direction();
-  for (int i = 0; i <  effective_direction.size(); i++) {
-    lBc.eDrn[i] = effective_direction[i];
+
+  if (effective_direction.size() != 0) {
+    if (effective_direction.size() != com_mod.nsd) {
+      auto effective_size = (std::stringstream() << "(" << effective_direction.size() << ")").str();
+      auto space_dim = (std::stringstream() << "(" << com_mod.nsd << ")").str();
+      svmp::raise<svmp::ParseException>("The size of the effective direction " + effective_size + 
+          " does not equal the number of space dimensions " + space_dim); 
+    }
+
+    for (int i = 0; i <  effective_direction.size(); i++) {
+      lBc.eDrn[i] = effective_direction[i];
+    }
   }
 
   auto ctmp = bc_params->time_dependence.value();
@@ -1109,11 +1118,6 @@ void read_cep_domain(Simulation* simulation, EquationParameters* eq_params, Doma
     throw std::runtime_error("[read_cep_domain] Unknown ode solver type '" + ode_solver_str + "'.");
   }
   lDmn.cep.odes.tIntType = time_integration_type;
-
-  if ((lDmn.cep.odes.tIntType == TimeIntegrationType::CN2) &&
-      (lDmn.cep.cepType == ElectrophysiologyModelType::TTP)) {
-    throw std::runtime_error("[read_cep_domain] Implicit time integration for tenTusscher-Panfilov model can give unexpected results. Use FE or RK4 instead");
-  }
 
   if (lDmn.cep.odes.tIntType == TimeIntegrationType::CN2) {
     lDmn.cep.odes.maxItr = 5;
@@ -2376,7 +2380,7 @@ void read_outputs(Simulation* simulation, EquationParameters* eq_params, eqType&
           continue;
 
         svmp::check_not_null<svmp::FE::NotInitializedException>(
-            dmn.cep.ionic_model, SVMP_HERE, "ionic model was not constructed.");
+            dmn.cep.ionic_model, "ionic model was not constructed.");
 
         const auto registered_outputs =
             dmn.cep.ionic_model->get_registered_outputs();
@@ -3318,4 +3322,3 @@ void set_equation_properties(Simulation* simulation, EquationParameters* eq_para
 }
 
 };
-
