@@ -4,6 +4,7 @@
 #include "PartitionedFSI.h"
 #include "Integrator.h"
 #include "all_fun.h"
+#include "consts.h"
 #include "fsi_coupling.h"
 #include "set_bc.h"
 #include "distribute.h"
@@ -11,6 +12,7 @@
 #include "output.h"
 #include "vtk_xml.h"
 #include "read_files.h"
+#include "utils.h"
 
 #include <cmath>
 #include <cstdio>
@@ -32,7 +34,6 @@ static bool has_nan(const SolutionStates& sol) {
         if (std::isnan((*arr)(i, a))) return true;
   return false;
 }
-
 
 //----------------------------------------------------------------------
 // Helper: initialize one sub-simulation through the standard pipeline.
@@ -221,6 +222,7 @@ PartitionedFSI::PartitionedFSI(Simulation* main_simulation,
 
   resolve_faces();
   build_node_maps();
+  build_solid_interface_force_mask();
 }
 
 PartitionedFSI::~PartitionedFSI() = default;
@@ -456,6 +458,67 @@ void PartitionedFSI::build_node_maps()
               << " dups, fluid " << count_dups(fluid_face_canonical_) << "/" << fluid_face_global_nNo_
               << " dups, mesh " << count_dups(mesh_face_canonical_) << "/" << mesh_face_global_nNo_
               << " dups" << std::endl;
+  }
+}
+
+//----------------------------------------------------------------------
+// build_solid_interface_force_mask — mask interface force components that
+// are prescribed by strong solid Dirichlet boundary conditions.
+//----------------------------------------------------------------------
+void PartitionedFSI::build_solid_interface_force_mask()
+{
+  auto& solid_com = solid_sim_->com_mod;
+  const int nsd = main_sim_->com_mod.nsd;
+
+  solid_interface_force_mask_.resize(nsd, solid_face_->nNo);
+  solid_interface_force_mask_ = 1.0;
+
+  std::unordered_map<int, int> interface_node_to_face_index;
+  interface_node_to_face_index.reserve(solid_face_->nNo);
+  for (int a = 0; a < solid_face_->nNo; a++) {
+    interface_node_to_face_index.emplace(solid_face_->gN(a), a);
+  }
+
+  if (solid_com.nEq == 0) {
+    return;
+  }
+
+  const auto& solid_eq = solid_com.eq[0];
+  for (int iBc = 0; iBc < solid_eq.nBc; iBc++) {
+    const auto& bc = solid_eq.bc[iBc];
+    if (!utils::btest(bc.bType, consts::iBC_Dir) || bc.weakDir) {
+      continue;
+    }
+    if (bc.iM < 0 || bc.iM >= solid_com.nMsh) {
+      continue;
+    }
+    const auto& mesh = solid_com.msh[bc.iM];
+    if (bc.iFa < 0 || bc.iFa >= mesh.nFa) {
+      continue;
+    }
+
+    bool has_effective_direction = false;
+    for (int i = 0; i < nsd; i++) {
+      if (i < bc.eDrn.size() && bc.eDrn(i) != 0) {
+        has_effective_direction = true;
+        break;
+      }
+    }
+
+    const auto& bc_face = mesh.fa[bc.iFa];
+    for (int a = 0; a < bc_face.nNo; a++) {
+      const auto it = interface_node_to_face_index.find(bc_face.gN(a));
+      if (it == interface_node_to_face_index.end()) {
+        continue;
+      }
+
+      const int interface_a = it->second;
+      for (int i = 0; i < nsd; i++) {
+        if (!has_effective_direction || (i < bc.eDrn.size() && bc.eDrn(i) != 0)) {
+          solid_interface_force_mask_(i, interface_a) = 0.0;
+        }
+      }
+    }
   }
 }
 
@@ -897,6 +960,13 @@ bool PartitionedFSI::solve_solid()
     for (int i = 0; i < nrows; i++)
       local_solid_force(i, a) =
           w * global_solid_force(i, solid_face_local_offset_ + a);
+  }
+
+  if (solid_interface_force_mask_.nrows() == nrows &&
+      solid_interface_force_mask_.ncols() == solid_face_->nNo) {
+    for (int a = 0; a < solid_face_->nNo; a++)
+      for (int i = 0; i < nrows; i++)
+        local_solid_force(i, a) *= solid_interface_force_mask_(i, a);
   }
 
   set_bc::set_bc_dir(solid_com, solid_sol);

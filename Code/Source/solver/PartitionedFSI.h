@@ -102,6 +102,7 @@ private:
   Array<double> disp_prev_;
   Array<double> vel_prev_;
   Array<double> local_fluid_interface_force_;
+  Array<double> solid_interface_force_mask_;
   double omega_;
   double first_res_norm_ = 0.0;
 
@@ -114,6 +115,7 @@ private:
 
   void resolve_faces();
   void build_node_maps();
+  void build_solid_interface_force_mask();
 
   /// Solve fluid equation with current interface velocity and ALE mesh velocity
   bool solve_fluid(const Array<double>& fluid_x_old,
