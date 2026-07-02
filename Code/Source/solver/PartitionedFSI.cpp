@@ -786,6 +786,22 @@ bool PartitionedFSI::solve_fluid(
       fluid_com.ale_mesh_velocity(i, a) = (1.0 - af) * mesh_vel_Yo(i, a)
                                          + af * mesh_vel_Yn(i, a);
 
+  // On the FSI interface, monolithic residual assembly has ALE velocity at
+  // the same generalized-alpha stage as the imposed fluid velocity.
+  auto sync_interface_ale_to_fluid_stage = [&]() {
+    const auto& Yo = fluid_sol.old.get_velocity();
+    const auto& Yn = fluid_sol.current.get_velocity();
+    const int s = fluid_com.eq[0].s;
+    for (int a = 0; a < fluid_face_->nNo; a++) {
+      const int Ac = fluid_face_->gN(a);
+      for (int i = 0; i < nsd; i++) {
+        fluid_com.ale_mesh_velocity(i, Ac) =
+            (1.0 - af) * Yo(s + i, Ac) + af * Yn(s + i, Ac);
+      }
+    }
+  };
+  sync_interface_ale_to_fluid_stage();
+
   fluid_int.step_equation(0, [&]() {
     set_bc::enforce_dirichlet_dofs_on_face(fluid_com, *fluid_face_, 0, nsd);
   });
