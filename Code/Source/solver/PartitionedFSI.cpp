@@ -199,6 +199,10 @@ PartitionedFSI::PartitionedFSI(Simulation* main_simulation,
 
   solid_sim_ = std::make_unique<Simulation>();
   init_sub_sim(solid_sim_.get(), build_sub_xml(xml_file_path_, "partitioned_solid"));
+  // Monolithic FSI advances the solid domain with the FSI equation's
+  // generalized-alpha coefficients, not standalone structural coefficients.
+  fsi_coupling::copy_time_integration_parameters(
+      fluid_sim_->com_mod.eq[0], solid_sim_->com_mod.eq[0]);
 
   mesh_sim_ = std::make_unique<Simulation>();
   init_sub_sim(mesh_sim_.get(), build_sub_xml(xml_file_path_, "partitioned_mesh"));

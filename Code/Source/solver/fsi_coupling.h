@@ -28,6 +28,14 @@ Array<double> extract_solid_displacement(
     const ComMod& com_mod, const eqType& solid_eq,
     const faceType& solid_face, const SolutionStates& solutions);
 
+/// @brief Copy generalized-alpha/Newmark coefficients from one equation to another.
+///
+/// Partitioned FSI uses a standalone structural subproblem, but to match the
+/// monolithic FSI structural domain it must use the same time-integration
+/// parameters as the FSI/fluid equation.
+void copy_time_integration_parameters(const eqType& source_eq,
+                                      eqType& target_eq);
+
 /// @brief Apply velocity as strong Dirichlet BC on fluid interface nodes.
 /// Directly sets Yn at the fluid equation DOF range for the face nodes.
 void apply_velocity_on_fluid(

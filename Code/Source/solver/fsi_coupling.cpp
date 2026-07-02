@@ -28,6 +28,19 @@ Array<double> extract_solid_displacement(
 }
 
 //----------------------------------------------------------------------
+// copy_time_integration_parameters
+//----------------------------------------------------------------------
+void copy_time_integration_parameters(const eqType& source_eq,
+                                      eqType& target_eq)
+{
+  target_eq.roInf = source_eq.roInf;
+  target_eq.am = source_eq.am;
+  target_eq.af = source_eq.af;
+  target_eq.beta = source_eq.beta;
+  target_eq.gam = source_eq.gam;
+}
+
+//----------------------------------------------------------------------
 // apply_velocity_on_fluid
 //----------------------------------------------------------------------
 void apply_velocity_on_fluid(
