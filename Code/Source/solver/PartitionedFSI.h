@@ -114,7 +114,9 @@ private:
   void build_node_maps();
 
   /// Solve fluid equation with current interface velocity and ALE mesh velocity
-  bool solve_fluid(const Array<double>& mesh_vel_Yo, const Array<double>& mesh_vel_Yn);
+  bool solve_fluid(const Array<double>& fluid_x_old,
+                   const Array<double>& mesh_vel_Yo,
+                   const Array<double>& mesh_vel_Yn);
 
   /// Extract fluid traction, transfer to solid, solve solid equation
   bool solve_solid();

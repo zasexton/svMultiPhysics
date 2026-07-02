@@ -85,9 +85,15 @@ public:
    * @param post_assembly Optional callback invoked after boundary condition
    *        application but before the linear solve. Used by partitioned FSI
    *        to inject interface traction into the residual.
+   * @param pre_boundary_conditions Optional callback invoked after volume
+   *        assembly and before boundary-condition assembly.
+   * @param post_boundary_conditions Optional callback invoked immediately after
+   *        boundary-condition assembly.
    * @return True if the equation converged, false if max iterations reached
    */
-  bool step_equation(int iEq, std::function<void()> post_assembly = nullptr);
+  bool step_equation(int iEq, std::function<void()> post_assembly = nullptr,
+                     std::function<void()> pre_boundary_conditions = nullptr,
+                     std::function<void()> post_boundary_conditions = nullptr);
 
   /**
    * @brief Perform predictor step for next time step

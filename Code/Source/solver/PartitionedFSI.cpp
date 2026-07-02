@@ -755,6 +755,7 @@ void PartitionedFSI::compute_interface_velocity()
 // vel_prev_ is global; extract this rank's local fluid face portion.
 //----------------------------------------------------------------------
 bool PartitionedFSI::solve_fluid(
+    const Array<double>& fluid_x_old,
     const Array<double>& mesh_vel_Yo, const Array<double>& mesh_vel_Yn)
 {
   auto& fluid_com = fluid_sim_->com_mod;
@@ -802,10 +803,28 @@ bool PartitionedFSI::solve_fluid(
   };
   sync_interface_ale_to_fluid_stage();
 
-  fluid_int.step_equation(0, [&]() {
+  // Monolithic FSI assembles the fluid volume on the generalized-alpha ALE
+  // geometry, but its face-based Neumann BC path uses the old mesh geometry
+  // through gnnb(). Match that split while boundary conditions are assembled.
+  Array<double> saved_fluid_x_for_bc;
+  auto use_old_geometry_for_boundary_conditions = [&]() {
+    if (fluid_x_old.nrows() != fluid_com.x.nrows() ||
+        fluid_x_old.ncols() != fluid_com.x.ncols()) {
+      throw std::runtime_error(
+          "[PartitionedFSI] Old fluid coordinates are incompatible with fluid coordinates.");
+    }
+    saved_fluid_x_for_bc = fluid_com.x;
+    fluid_com.x = fluid_x_old;
+  };
+  auto restore_staged_geometry_after_boundary_conditions = [&]() {
+    fluid_com.x = saved_fluid_x_for_bc;
+  };
+
+  bool fluid_ok = fluid_int.step_equation(0, [&]() {
     set_bc::enforce_dirichlet_dofs_on_face(fluid_com, *fluid_face_, 0, nsd);
-  });
-  return !has_nan(fluid_sol);
+  }, use_old_geometry_for_boundary_conditions,
+     restore_staged_geometry_after_boundary_conditions);
+  return fluid_ok && !has_nan(fluid_sol);
 }
 
 //----------------------------------------------------------------------
@@ -1004,7 +1023,7 @@ bool PartitionedFSI::step()
     }
 
     // ---- 2. Fluid solve ----
-    if (!solve_fluid(mesh_vel_Yo, mesh_vel_Yn)) {
+    if (!solve_fluid(x_ref, mesh_vel_Yo, mesh_vel_Yn)) {
       if (cm.mas(cm_mod)) std::cout << "  ABORT: NaN in fluid solve" << std::endl;
       return false;
     }

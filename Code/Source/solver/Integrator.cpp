@@ -176,7 +176,10 @@ bool Integrator::step() {
 // step_equation
 //------------------------
 /// @brief Solve a single equation to convergence without cycling to other equations
-bool Integrator::step_equation(int iEq, std::function<void()> post_assembly) {
+bool Integrator::step_equation(
+    int iEq, std::function<void()> post_assembly,
+    std::function<void()> pre_boundary_conditions,
+    std::function<void()> post_boundary_conditions) {
   using namespace consts;
 
   auto& com_mod = simulation_->com_mod;
@@ -215,7 +218,20 @@ bool Integrator::step_equation(int iEq, std::function<void()> post_assembly) {
     allocate_linear_system(eq);
     set_body_forces();
     assemble_equations();
-    apply_boundary_conditions();
+    if (pre_boundary_conditions) {
+      pre_boundary_conditions();
+    }
+    try {
+      apply_boundary_conditions();
+    } catch (...) {
+      if (post_boundary_conditions) {
+        post_boundary_conditions();
+      }
+      throw;
+    }
+    if (post_boundary_conditions) {
+      post_boundary_conditions();
+    }
 
     // Optional post-assembly callback (e.g., for injecting interface traction)
     if (post_assembly) {
