@@ -3,8 +3,8 @@
 
 #include "PartitionedFSI.h"
 #include "Integrator.h"
+#include "all_fun.h"
 #include "fsi_coupling.h"
-#include "post.h"
 #include "set_bc.h"
 #include "distribute.h"
 #include "initialize.h"
@@ -442,8 +442,8 @@ void PartitionedFSI::build_node_maps()
   mesh_face_canonical_  = build_face_dedup_map(*mesh_face_,  mesh_sim_->com_mod,
                                                mesh_face_global_nNo_,  cm, cm_mod);
 
-  // Owner flags for the solid interface face: the interface traction is a
-  // precomputed nodal force that must be injected exactly once per physical
+  // Owner flags for the solid interface face: the recovered interface force is
+  // a precomputed nodal load that must be injected exactly once per physical
   // node, since all_fun::commu sums it across ranks after the callback.
   solid_face_owner_ = build_face_owner_flags(*solid_face_, solid_sim_->com_mod, cm);
 
@@ -824,59 +824,85 @@ bool PartitionedFSI::solve_fluid(
     set_bc::enforce_dirichlet_dofs_on_face(fluid_com, *fluid_face_, 0, nsd);
   }, use_old_geometry_for_boundary_conditions,
      restore_staged_geometry_after_boundary_conditions);
+
+  if (fluid_ok && !has_nan(fluid_sol)) {
+    set_bc::set_bc_dir(fluid_com, fluid_sol);
+    fsi_coupling::apply_velocity_on_fluid(
+        fluid_com, fluid_com.eq[0], *fluid_face_, local_fluid_vel, fluid_sol);
+    sync_interface_ale_to_fluid_stage();
+
+    auto recover_interface_force_before_boundary_conditions = [&]() {
+      Array<double> fluid_residual = fluid_com.R;
+      if (!fluid_com.eq[fluid_com.cEq].assmTLS) {
+        all_fun::commu(fluid_com, fluid_residual);
+      }
+      local_fluid_interface_force_ =
+          fsi_coupling::extract_fluid_residual_force(
+              fluid_com, *fluid_face_, fluid_residual);
+
+      use_old_geometry_for_boundary_conditions();
+    };
+
+    fluid_int.assemble_equation_residual(0, [&]() {
+      set_bc::enforce_dirichlet_dofs_on_face(fluid_com, *fluid_face_, 0, nsd);
+    }, recover_interface_force_before_boundary_conditions,
+       restore_staged_geometry_after_boundary_conditions);
+  }
+
   return fluid_ok && !has_nan(fluid_sol);
 }
 
 //----------------------------------------------------------------------
-// solve_solid — extract traction from fluid, solve solid.
-// All-gathers local fluid traction to global, transfers to global solid,
+// solve_solid — transfer recovered fluid force, solve solid.
+// All-gathers local fluid force to global, transfers to global solid,
 // then extracts this rank's local solid portion.
 //----------------------------------------------------------------------
 bool PartitionedFSI::solve_solid()
 {
-  auto& fluid_com = fluid_sim_->com_mod;
   auto& solid_com = solid_sim_->com_mod;
-  auto& fluid_int = fluid_sim_->get_integrator();
   auto& solid_int = solid_sim_->get_integrator();
   auto& solid_sol = solid_int.get_solutions();
   auto& cm = main_sim_->com_mod.cm;
   auto& cm_mod = main_sim_->cm_mod;
 
-  // Compute local fluid traction, all-gather to global fluid face
-  auto local_fluid_traction = post::compute_face_traction(
-      fluid_com, fluid_sim_->cm_mod,
-      *fluid_mesh_, *fluid_face_, fluid_com.eq[0],
-      fluid_int.get_solutions());
-  // gather_face_data fills duplicate ring slots identically (compute_face_traction
-  // already summed across ranks via commu), so no dedup is needed here.
-  auto global_fluid_traction = gather_face_data(local_fluid_traction,
-                                                fluid_face_global_nNo_,
-                                                fluid_face_local_offset_,
-                                                cm, cm_mod);
+  const int nsd = main_sim_->com_mod.nsd;
+  if (local_fluid_interface_force_.nrows() != nsd ||
+      local_fluid_interface_force_.ncols() != fluid_face_->nNo) {
+    throw std::runtime_error(
+        "[PartitionedFSI] Fluid interface force is unavailable or has wrong shape.");
+  }
+
+  // All-gather the residual-recovered fluid force to the global fluid face.
+  // The residual copy was already communicated before Dirichlet row enforcement,
+  // so duplicate partition-ring slots carry identical physical-node values.
+  auto global_fluid_force = gather_face_data(local_fluid_interface_force_,
+                                             fluid_face_global_nNo_,
+                                             fluid_face_local_offset_,
+                                             cm, cm_mod);
 
   // Transfer global fluid → global solid, then extract local solid portion.
   // Only the owning (min-rank) slot of each node is read below, and that slot
   // is the canonical one that transfer_data writes, so no dedup is needed.
-  auto global_solid_traction = transfer_data(fluid_to_solid_map_,
-                                             global_fluid_traction,
-                                             solid_face_global_nNo_);
-  const int nrows = global_solid_traction.nrows();
-  Array<double> local_solid_traction(nrows, solid_face_->nNo);
+  auto global_solid_force = transfer_data(fluid_to_solid_map_,
+                                          global_fluid_force,
+                                          solid_face_global_nNo_);
+  const int nrows = global_solid_force.nrows();
+  Array<double> local_solid_force(nrows, solid_face_->nNo);
   for (int a = 0; a < solid_face_->nNo; a++) {
     // Apply the nodal force on the owning rank only; partition-ring nodes are
-    // shared by several ranks and all_fun::commu (called after the traction
+    // shared by several ranks and all_fun::commu (called after the force
     // callback in step_equation) SUMS R across them.  Subtracting the full
     // force on every sharing rank would multiply it by the node's multiplicity.
     double w = solid_face_owner_[a] ? 1.0 : 0.0;
     for (int i = 0; i < nrows; i++)
-      local_solid_traction(i, a) =
-          w * global_solid_traction(i, solid_face_local_offset_ + a);
+      local_solid_force(i, a) =
+          w * global_solid_force(i, solid_face_local_offset_ + a);
   }
 
   set_bc::set_bc_dir(solid_com, solid_sol);
   solid_int.step_equation(0, [&]() {
     fsi_coupling::apply_traction_on_solid(
-        solid_com, solid_com.eq[0], *solid_face_, local_solid_traction);
+        solid_com, solid_com.eq[0], *solid_face_, local_solid_force);
   });
   return !has_nan(solid_sol);
 }

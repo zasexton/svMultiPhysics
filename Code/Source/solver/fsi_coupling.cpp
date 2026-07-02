@@ -75,20 +75,44 @@ void apply_velocity_on_fluid(
 }
 
 //----------------------------------------------------------------------
+// extract_fluid_residual_force
+//----------------------------------------------------------------------
+Array<double> extract_fluid_residual_force(
+    const ComMod& com_mod,
+    const faceType& fluid_face,
+    const Array<double>& residual)
+{
+  const int nsd = com_mod.nsd;
+  if (residual.nrows() < nsd || residual.ncols() != com_mod.tnNo) {
+    throw std::runtime_error(
+        "[fsi_coupling] Fluid residual shape does not match fluid simulation.");
+  }
+
+  Array<double> force(nsd, fluid_face.nNo);
+  for (int a = 0; a < fluid_face.nNo; a++) {
+    int Ac = fluid_face.gN(a);
+    for (int i = 0; i < nsd; i++) {
+      force(i, a) = -residual(i, Ac);
+    }
+  }
+  return force;
+}
+
+//----------------------------------------------------------------------
 // apply_traction_on_solid
 //----------------------------------------------------------------------
 void apply_traction_on_solid(
     ComMod& com_mod, const eqType& solid_eq,
     const faceType& lFa,
-    const Array<double>& traction)
+    const Array<double>& force)
 {
-  // The traction array contains consistent nodal forces (external force on solid).
-  // In svMultiPhysics, external forces are SUBTRACTED from R (see b_l_elas:
-  // lR -= w*N*h). So R -= traction.
+  // The array contains consistent nodal forces (external force on solid).
+  // In svMultiPhysics, external forces are SUBTRACTED from R (for example:
+  // lR -= w*N*h). So R -= force.
   for (int a = 0; a < lFa.nNo; a++) {
     int Ac = lFa.gN(a);
-    for (int i = 0; i < traction.nrows(); i++) {
-      com_mod.R(i, Ac) -= traction(i, a);
+    for (int i = 0; i < force.nrows(); i++) {
+      com_mod.R(i, Ac) -= force(i, a);
     }
   }
 }

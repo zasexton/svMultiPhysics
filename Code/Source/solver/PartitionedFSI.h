@@ -39,7 +39,7 @@ struct PartitionedFSIConfig {
 /// Implements Dirichlet-Neumann coupling with Aitken relaxation:
 ///   1. Transfer solid displacement to mesh interface, solve mesh equation
 ///   2. Deform fluid mesh using mesh displacement, solve fluid equation
-///   3. Extract fluid traction, apply to solid, solve solid equation
+///   3. Recover fluid interface residual force, apply to solid, solve solid equation
 ///   4. Extract solid displacement, apply Aitken relaxation
 ///   5. Check coupling convergence
 ///
@@ -93,13 +93,15 @@ private:
   std::vector<int> mesh_face_canonical_;
 
   // Per-local-node owner flag for the solid interface face: 1 if THIS rank is
-  // the min-rank owner of the node, else 0.  Used to apply the interface
-  // traction exactly once per physical node (it is summed by all_fun::commu).
+  // the min-rank owner of the node, else 0.  Used to apply the recovered
+  // interface force exactly once per physical node (it is summed by
+  // all_fun::commu).
   std::vector<int> solid_face_owner_;
 
   // Coupling state — indexed by GLOBAL solid face nodes (replicated on all ranks)
   Array<double> disp_prev_;
   Array<double> vel_prev_;
+  Array<double> local_fluid_interface_force_;
   double omega_;
   double first_res_norm_ = 0.0;
 
@@ -118,7 +120,7 @@ private:
                    const Array<double>& mesh_vel_Yo,
                    const Array<double>& mesh_vel_Yn);
 
-  /// Extract fluid traction, transfer to solid, solve solid equation
+  /// Transfer recovered fluid interface force to solid, solve solid equation
   bool solve_solid();
 
   /// Solve mesh equation with relaxed displacement, deform fluid mesh
