@@ -75,6 +75,21 @@ void apply_displacement_on_mesh(
     const Array<double>& displacement,
     SolutionStates& solutions);
 
+/// @brief Compute staged ALE fluid mesh coordinates from mesh displacement.
+///
+/// The returned coordinates are
+/// x_stage = x_ref + theta * (mesh_Dn - mesh_Do), using the mesh equation
+/// displacement block starting at mesh_s. For a generalized-alpha fluid solve,
+/// theta should be the fluid equation alpha_f; before output/old-state update,
+/// theta should be 1.0.
+Array<double> staged_fluid_mesh_coordinates(
+    const Array<double>& x_ref,
+    const Array<double>& mesh_Dn,
+    const Array<double>& mesh_Do,
+    int mesh_s,
+    int nsd,
+    double theta);
+
 } // namespace fsi_coupling
 
 #endif // FSI_COUPLING_H

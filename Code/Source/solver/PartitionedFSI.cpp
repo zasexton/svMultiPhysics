@@ -852,7 +852,6 @@ bool PartitionedFSI::solve_solid()
 //----------------------------------------------------------------------
 bool PartitionedFSI::solve_mesh(const Array<double>& x_ref, int mesh_s)
 {
-  auto& fluid_com = fluid_sim_->com_mod;
   auto& mesh_com  = mesh_sim_->com_mod;
   auto& mesh_int  = mesh_sim_->get_integrator();
   auto& mesh_sol  = mesh_int.get_solutions();
@@ -878,15 +877,28 @@ bool PartitionedFSI::solve_mesh(const Array<double>& x_ref, int mesh_s)
   });
   if (has_nan(mesh_sol)) return false;
 
-  // Deform fluid mesh: apply only the INCREMENT (Dn - Do) to x_ref
-  // so that fluid_com.x = x_original + Dn
-  auto& mesh_Dn = mesh_sol.current.get_displacement();
-  auto& mesh_Do = mesh_sol.old.get_displacement();
-  for (int a = 0; a < fluid_com.tnNo; a++)
-    for (int i = 0; i < nsd; i++)
-      fluid_com.x(i, a) = x_ref(i, a)
-                         + mesh_Dn(i + mesh_s, a) - mesh_Do(i + mesh_s, a);
+  // Match the generalized-alpha fluid residual geometry used by monolithic
+  // FSI: fluid assembly sees x_ref + alpha_f * (Dn - Do).
+  update_fluid_mesh_coordinates(x_ref, mesh_s, fluid_sim_->com_mod.eq[0].af);
   return true;
+}
+
+//----------------------------------------------------------------------
+// update_fluid_mesh_coordinates
+//----------------------------------------------------------------------
+void PartitionedFSI::update_fluid_mesh_coordinates(
+    const Array<double>& x_ref, int mesh_s, double theta)
+{
+  auto& fluid_com = fluid_sim_->com_mod;
+  auto& mesh_sol = mesh_sim_->get_integrator().get_solutions();
+
+  fluid_com.x = fsi_coupling::staged_fluid_mesh_coordinates(
+      x_ref,
+      mesh_sol.current.get_displacement(),
+      mesh_sol.old.get_displacement(),
+      mesh_s,
+      main_sim_->com_mod.nsd,
+      theta);
 }
 
 //======================================================================
@@ -1059,6 +1071,11 @@ bool PartitionedFSI::step()
 
     if (rel < config_.coupling_tolerance) { converged = true; break; }
   }
+  if (converged) {
+    // Keep saved results and the next time step's reference coordinates at
+    // the full n+1 mesh position after solving the fluid on n+alpha_f geometry.
+    update_fluid_mesh_coordinates(x_ref, mesh_s, 1.0);
+  }
   return converged;
 }
 
@@ -1077,10 +1094,33 @@ void PartitionedFSI::save_results()
       bool l2 = ((cTS % com.saveIncr) == 0);
       bool l3 = (cTS >= com.saveATS);
       if (l2 && l3) {
-        output::output_result(sim, com.timeP, 3, 0);
-        vtk_xml::write_vtus(sim, sol, false);
+        Array<double> saved_fluid_x;
+        bool restore_fluid_x = false;
+        if (sim == fluid_sim_.get()) {
+          auto& mesh_x = mesh_sim_->com_mod.x;
+          if (mesh_x.nrows() != com.x.nrows() ||
+              mesh_x.ncols() != com.x.ncols()) {
+            throw std::runtime_error(
+                "[PartitionedFSI] Fluid and mesh coordinate arrays are incompatible for output.");
+          }
+          saved_fluid_x = com.x;
+          com.x = mesh_x;
+          restore_fluid_x = true;
+        }
+
+        try {
+          output::output_result(sim, com.timeP, 3, 0);
+          vtk_xml::write_vtus(sim, sol, false);
+        } catch (...) {
+          if (restore_fluid_x) {
+            com.x = saved_fluid_x;
+          }
+          throw;
+        }
+        if (restore_fluid_x) {
+          com.x = saved_fluid_x;
+        }
       }
     }
   }
 }
-

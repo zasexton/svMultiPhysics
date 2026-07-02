@@ -122,6 +122,10 @@ private:
   /// Solve mesh equation with relaxed displacement, deform fluid mesh
   bool solve_mesh(const Array<double>& x_ref, int mesh_s);
 
+  /// Update fluid mesh coordinates with a staged mesh displacement increment
+  void update_fluid_mesh_coordinates(const Array<double>& x_ref, int mesh_s,
+                                     double theta);
+
   /// Compute vel_prev_ (global) from disp_prev_ (global) using Newmark relationship
   void compute_interface_velocity();
 

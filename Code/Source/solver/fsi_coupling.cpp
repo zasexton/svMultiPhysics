@@ -4,6 +4,9 @@
 #include "fsi_coupling.h"
 #include "Integrator.h"
 
+#include <cmath>
+#include <stdexcept>
+
 namespace fsi_coupling {
 
 //----------------------------------------------------------------------
@@ -124,6 +127,41 @@ void apply_displacement_on_mesh(
       Yn(i + s, Ac) = v_new;
     }
   }
+}
+
+//----------------------------------------------------------------------
+// staged_fluid_mesh_coordinates
+//----------------------------------------------------------------------
+Array<double> staged_fluid_mesh_coordinates(
+    const Array<double>& x_ref,
+    const Array<double>& mesh_Dn,
+    const Array<double>& mesh_Do,
+    int mesh_s,
+    int nsd,
+    double theta)
+{
+  if (nsd <= 0 || mesh_s < 0 || !std::isfinite(theta)) {
+    throw std::runtime_error(
+        "[fsi_coupling] Invalid inputs for staged fluid mesh coordinates.");
+  }
+  if (x_ref.nrows() != nsd ||
+      mesh_Dn.ncols() != x_ref.ncols() ||
+      mesh_Do.ncols() != x_ref.ncols() ||
+      mesh_Dn.nrows() < mesh_s + nsd ||
+      mesh_Do.nrows() < mesh_s + nsd) {
+    throw std::runtime_error(
+        "[fsi_coupling] Mesh displacement shapes do not match fluid coordinates.");
+  }
+
+  Array<double> x_stage(nsd, x_ref.ncols());
+  for (int a = 0; a < x_ref.ncols(); a++) {
+    for (int i = 0; i < nsd; i++) {
+      x_stage(i, a) = x_ref(i, a)
+                    + theta * (mesh_Dn(i + mesh_s, a)
+                             - mesh_Do(i + mesh_s, a));
+    }
+  }
+  return x_stage;
 }
 
 } // namespace fsi_coupling
