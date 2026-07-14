@@ -1470,7 +1470,10 @@ class DomainParameters : public ParameterLists
     // Parameters for sub-elements under the Domain element.
     ConstitutiveModelParameters constitutive_model;
     FiberReinforcementStressParameters fiber_reinforcement_stress;
-    StimulusParameters stimulus;
+    /// @todo This uses `unique_ptr` unlike most similar containers because
+    /// `ParameterLists::params_map` stores pointers to members of each object.
+    /// Revisit this when the `Parameters` classes are refactored.
+    std::vector<std::unique_ptr<StimulusParameters>> stimuli;
     FluidViscosityParameters fluid_viscosity;
     SolidViscosityParameters solid_viscosity;
 
