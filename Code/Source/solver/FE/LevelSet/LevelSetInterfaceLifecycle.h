@@ -120,11 +120,18 @@ struct LevelSetGeneratedInterfaceResult {
     bool success{false};
     int interface_marker{-1};
     std::uint64_t value_revision{0};
+    // The generated domain and the unqualified summary/counters below retain
+    // every rank-local cell, including ghosts, because halo rules are needed
+    // by distributed assembly and cache refresh.  Physical/global reductions
+    // must use owned_summary and the owned_* counters instead.
     interfaces::LevelSetInterfaceDomain domain{};
     interfaces::CutInterfaceDomainSummary summary{};
+    interfaces::CutInterfaceDomainSummary owned_summary{};
     std::string diagnostic{};
     std::size_t cell_count{0};
+    std::size_t owned_cell_count{0};
     std::size_t corner_linearized_cell_count{0};
+    std::size_t owned_corner_linearized_cell_count{0};
     std::size_t max_cell_node_count{0};
     std::size_t max_corner_node_count{0};
     ImplicitCutQuadratureBackend implicit_cut_quadrature_backend{
@@ -132,9 +139,14 @@ struct LevelSetGeneratedInterfaceResult {
     int achieved_interface_quadrature_order{0};
     int achieved_volume_quadrature_order{0};
     std::size_t implicit_cut_fallback_cell_count{0};
+    std::size_t owned_implicit_cut_fallback_cell_count{0};
     std::array<std::size_t, 5> selected_implicit_cut_quadrature_backend_counts{};
+    std::array<std::size_t, 5>
+        owned_selected_implicit_cut_quadrature_backend_counts{};
     std::size_t backend_volume_quadrature_point_count{0};
     std::size_t backend_interface_quadrature_point_count{0};
+    std::size_t owned_backend_volume_quadrature_point_count{0};
+    std::size_t owned_backend_interface_quadrature_point_count{0};
     double backend_elapsed_seconds{0.0};
     std::size_t cell_cache_hits{0};
     std::size_t cell_cache_misses{0};
@@ -145,6 +157,7 @@ struct LevelSetGeneratedInterfaceResult {
     std::size_t affected_cell_neighborhood_count{0};
     std::size_t domain_cache_hits{0};
     std::size_t linear_full_cell_fast_path_count{0};
+    std::size_t owned_linear_full_cell_fast_path_count{0};
     GeometryTangentPolicy geometry_tangent_policy{
         GeometryTangentPolicy::RefreshedFrozenQuadrature};
 };

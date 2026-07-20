@@ -888,7 +888,7 @@ void populateLinearCornerDifferentiatedSensitivityRecords(
 [[nodiscard]] std::optional<GeneratedInterfaceCellDiagnostics>
 appendLinearFullCellFastPath(
     interfaces::LevelSetInterfaceDomain& domain,
-    int mesh_dimension,
+    const assembly::IMeshAccess& mesh,
     ElementType type,
     const interfaces::LevelSetCellCutInput& input,
     const LevelSetCellEvaluator& evaluator,
@@ -904,9 +904,9 @@ appendLinearFullCellFastPath(
     }
 
     interfaces::LevelSetCellCutResult cut;
-    if (mesh_dimension == 2 && interfaces::supportsLinearLevelSetCellCut2D(type)) {
+    if (mesh.dimension() == 2 && interfaces::supportsLinearLevelSetCellCut2D(type)) {
         cut = interfaces::cutLinearLevelSetCell2D(request, input);
-    } else if (mesh_dimension == 3 &&
+    } else if (mesh.dimension() == 3 &&
                interfaces::supportsLinearLevelSetCellCut3D(type)) {
         cut = interfaces::cutLinearLevelSetCell3D(request, input);
     } else {
@@ -920,6 +920,11 @@ appendLinearFullCellFastPath(
     int achieved_volume_quadrature_order =
         request.resolvedVolumeQuadratureOrder();
     for (auto& region : cut.volume_regions) {
+        region.parent_cell_global_id = mesh.globalEntityIdsAvailable()
+                                           ? mesh.getCellGlobalId(cell_id)
+                                           : cell_id;
+        region.owner_rank = mesh.getCellOwnerRank(cell_id);
+        region.stable_id = 0u;
         region.implicit_quadrature_backend =
             implicitCutQuadratureBackendName(selected_backend);
         region.implicit_fallback_status = "None";
@@ -1171,7 +1176,7 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
 
     if (auto full_cell_fast_path =
             appendLinearFullCellFastPath(domain,
-                                         mesh.dimension(),
+                                         mesh,
                                          type,
                                          input,
                                          evaluator,
@@ -1279,9 +1284,19 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
         backend_result.cut,
         backend_result.fallback_used);
     for (auto& fragment : backend_result.cut.fragments) {
+        fragment.parent_cell_global_id = mesh.globalEntityIdsAvailable()
+                                             ? mesh.getCellGlobalId(cell_id)
+                                             : cell_id;
+        fragment.owner_rank = mesh.getCellOwnerRank(cell_id);
+        fragment.stable_id = 0u;
         domain.addFragment(std::move(fragment));
     }
     for (auto& region : backend_result.cut.volume_regions) {
+        region.parent_cell_global_id = mesh.globalEntityIdsAvailable()
+                                           ? mesh.getCellGlobalId(cell_id)
+                                           : cell_id;
+        region.owner_rank = mesh.getCellOwnerRank(cell_id);
+        region.stable_id = 0u;
         domain.addVolumeRegion(std::move(region));
     }
 
@@ -1382,6 +1397,114 @@ void mixGeneratedCellCacheReal(std::uint64_t& h, Real value) noexcept
     mixGeneratedCellCacheHash(h, bits);
 }
 
+[[nodiscard]] GlobalIndex stableParentCellIdentity(
+    const interfaces::CutInterfaceFragment& fragment) noexcept
+{
+    return fragment.parent_cell_global_id != INVALID_GLOBAL_INDEX
+               ? fragment.parent_cell_global_id
+               : static_cast<GlobalIndex>(fragment.parent_cell);
+}
+
+[[nodiscard]] GlobalIndex stableParentCellIdentity(
+    const interfaces::CutInterfaceVolumeRegion& region) noexcept
+{
+    return region.parent_cell_global_id != INVALID_GLOBAL_INDEX
+               ? region.parent_cell_global_id
+               : static_cast<GlobalIndex>(region.parent_cell);
+}
+
+[[nodiscard]] interfaces::CutInterfaceDomainSummary summarizeOwnedDomain(
+    const interfaces::LevelSetInterfaceDomain& domain,
+    const assembly::IMeshAccess& mesh)
+{
+    interfaces::CutInterfaceDomainSummary summary;
+    summary.interface_marker = domain.request().interface_marker;
+    const auto is_owned_parent = [&](MeshIndex parent_cell) {
+        const auto cell = static_cast<GlobalIndex>(parent_cell);
+        return cell >= 0 && cell < mesh.numCells() && mesh.isOwnedCell(cell);
+    };
+
+    for (const auto& fragment : domain.fragments()) {
+        if (!is_owned_parent(fragment.parent_cell)) {
+            continue;
+        }
+        ++summary.fragment_count;
+        if (fragment.degeneracy != interfaces::CutInterfaceDegeneracy::None) {
+            ++summary.degenerate_fragment_count;
+        }
+        if (!fragment.active()) {
+            continue;
+        }
+        ++summary.active_fragment_count;
+        summary.quadrature_point_count +=
+            fragment.quadraturePointCount(domain.request());
+        summary.measure += fragment.measure;
+    }
+    for (const auto& region : domain.volumeRegions()) {
+        if (!is_owned_parent(region.parent_cell)) {
+            continue;
+        }
+        ++summary.volume_region_count;
+        if (!region.active()) {
+            continue;
+        }
+        ++summary.active_volume_region_count;
+        summary.volume_quadrature_point_count +=
+            region.quadraturePointCount();
+        if (region.side == geometry::CutIntegrationSide::Negative) {
+            summary.negative_volume_measure += region.measure;
+        } else if (region.side == geometry::CutIntegrationSide::Positive) {
+            summary.positive_volume_measure += region.measure;
+        }
+    }
+    summary.total_quadrature_point_count =
+        summary.quadrature_point_count +
+        summary.volume_quadrature_point_count;
+    return summary;
+}
+
+void populateOwnedGeneratedInterfaceMetrics(
+    LevelSetGeneratedInterfaceResult& result,
+    const assembly::IMeshAccess& mesh,
+    const std::vector<LevelSetGeneratedInterfaceLifecycle::Cache::CellSlot>&
+        cached_cells)
+{
+    result.owned_summary = summarizeOwnedDomain(result.domain, mesh);
+    result.owned_cell_count = 0u;
+    result.owned_corner_linearized_cell_count = 0u;
+    result.owned_implicit_cut_fallback_cell_count = 0u;
+    result.owned_selected_implicit_cut_quadrature_backend_counts = {};
+    result.owned_backend_volume_quadrature_point_count = 0u;
+    result.owned_backend_interface_quadrature_point_count = 0u;
+    result.owned_linear_full_cell_fast_path_count = 0u;
+
+    mesh.forEachOwnedCell([&](GlobalIndex cell_id) {
+        ++result.owned_cell_count;
+        if (cell_id < 0 ||
+            static_cast<std::size_t>(cell_id) >= cached_cells.size() ||
+            !cached_cells[static_cast<std::size_t>(cell_id)].valid) {
+            return;
+        }
+        const auto& diagnostics =
+            cached_cells[static_cast<std::size_t>(cell_id)].cell.diagnostics;
+        ++result.owned_selected_implicit_cut_quadrature_backend_counts[
+            implicitCutQuadratureBackendIndex(diagnostics.selected_backend)];
+        if (diagnostics.corner_linearized) {
+            ++result.owned_corner_linearized_cell_count;
+        }
+        if (diagnostics.fallback_used) {
+            ++result.owned_implicit_cut_fallback_cell_count;
+        }
+        if (diagnostics.linear_full_cell_fast_path) {
+            ++result.owned_linear_full_cell_fast_path_count;
+        }
+        result.owned_backend_volume_quadrature_point_count +=
+            diagnostics.volume_quadrature_point_count;
+        result.owned_backend_interface_quadrature_point_count +=
+            diagnostics.interface_quadrature_point_count;
+    });
+}
+
 struct GeneratedInterfaceCellSignature {
     std::uint64_t value{0};
     Real min_level_set_value{0.0};
@@ -1473,7 +1596,7 @@ void appendCachedGeneratedInterfaceCell(
         fragment.max_level_set_value = signature.max_level_set_value;
         fragment.stable_id = interfaces::cutInterfaceStableId(
             fragment.interface_marker,
-            fragment.parent_cell,
+            stableParentCellIdentity(fragment),
             fragment.local_fragment_index,
             request.source.value_revision);
         domain.addFragment(std::move(fragment));
@@ -1484,7 +1607,7 @@ void appendCachedGeneratedInterfaceCell(
         region.max_level_set_value = signature.max_level_set_value;
         region.stable_id = interfaces::cutVolumeStableId(
             region.interface_marker,
-            region.parent_cell,
+            stableParentCellIdentity(region),
             region.local_region_index,
             region.side,
             request.source.value_revision);
@@ -1501,7 +1624,7 @@ void appendUnchangedCachedGeneratedInterfaceCell(
         fragment.interface_marker = request.interface_marker;
         fragment.stable_id = interfaces::cutInterfaceStableId(
             fragment.interface_marker,
-            fragment.parent_cell,
+            stableParentCellIdentity(fragment),
             fragment.local_fragment_index,
             request.source.value_revision);
         domain.addFragment(std::move(fragment));
@@ -1510,7 +1633,7 @@ void appendUnchangedCachedGeneratedInterfaceCell(
         region.interface_marker = request.interface_marker;
         region.stable_id = interfaces::cutVolumeStableId(
             region.interface_marker,
-            region.parent_cell,
+            stableParentCellIdentity(region),
             region.local_region_index,
             region.side,
             request.source.value_revision);
@@ -1782,7 +1905,7 @@ findChangedGeneratedInterfaceCellSignature(
         }
         copied.stable_id =
             interfaces::cutInterfaceStableId(copied.interface_marker,
-                                             copied.parent_cell,
+                                             stableParentCellIdentity(copied),
                                              copied.local_fragment_index,
                                              revision);
         domain.addFragment(std::move(copied));
@@ -1799,7 +1922,7 @@ findChangedGeneratedInterfaceCellSignature(
         }
         copied.stable_id =
             interfaces::cutVolumeStableId(copied.interface_marker,
-                                          copied.parent_cell,
+                                          stableParentCellIdentity(copied),
                                           copied.local_region_index,
                                           copied.side,
                                           revision);
@@ -1849,7 +1972,7 @@ retargetCachedGeneratedInterfaceDomainExcludingCells(
         copied.interface_marker = request.interface_marker;
         copied.stable_id =
             interfaces::cutInterfaceStableId(copied.interface_marker,
-                                             copied.parent_cell,
+                                             stableParentCellIdentity(copied),
                                              copied.local_fragment_index,
                                              revision);
         domain.addFragment(std::move(copied));
@@ -1865,7 +1988,7 @@ retargetCachedGeneratedInterfaceDomainExcludingCells(
         copied.interface_marker = request.interface_marker;
         copied.stable_id =
             interfaces::cutVolumeStableId(copied.interface_marker,
-                                          copied.parent_cell,
+                                          stableParentCellIdentity(copied),
                                           copied.local_region_index,
                                           copied.side,
                                           revision);
@@ -1998,6 +2121,15 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
             "generated level-set interface requires a scalar nodal field");
     }
     const auto& mesh = system.meshAccess();
+    if (mesh.parallelSize() < 1 || mesh.parallelRank() < 0 ||
+        mesh.parallelRank() >= mesh.parallelSize()) {
+        throw std::invalid_argument(
+            "generated level-set interface requires valid mesh communicator metadata");
+    }
+    if (mesh.parallelSize() > 1 && !mesh.globalEntityIdsAvailable()) {
+        throw std::invalid_argument(
+            "distributed generated level-set geometry requires globally unique cell and face ids");
+    }
     if (entity_map->numVertices() != mesh.numVertices()) {
         throw std::invalid_argument(
             "generated level-set interface requires field and mesh vertex counts to match");
@@ -2088,6 +2220,8 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
             cached_result.domain, mesh, *entity_map, offset);
         cached_result.affected_cell_neighborhood_layers =
             options.affected_cell_neighborhood_layers;
+        populateOwnedGeneratedInterfaceMetrics(
+            cached_result, mesh, cache_->cells);
         return cached_result;
     }
     std::size_t cell_count = 0u;
@@ -2224,6 +2358,8 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
             cached_result.affected_cell_neighborhood_count =
                 changed_cells->affected_cell_neighborhood_count;
             cached_result.backend_elapsed_seconds = 0.0;
+            populateOwnedGeneratedInterfaceMetrics(
+                cached_result, mesh, cache_->cells);
             cache_->domain.coefficients.assign(coefficients.begin(),
                                                coefficients.end());
             cache_->domain.result = cached_result;
@@ -2498,6 +2634,7 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
         affected_cell_neighborhood_count;
     result.linear_full_cell_fast_path_count =
         linear_full_cell_fast_path_count;
+    populateOwnedGeneratedInterfaceMetrics(result, mesh, cache_->cells);
     result.success =
         result.summary.active_fragment_count > 0u ||
         result.summary.active_volume_region_count > 0u;

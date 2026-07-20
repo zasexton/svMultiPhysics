@@ -342,6 +342,75 @@ std::uint64_t MeshAccess::coordinateConfigurationKey() const {
     return key;
 }
 
+bool MeshAccess::globalEntityIdsAvailable() const {
+    const auto& cells = mesh_.cell_gids();
+    const auto& faces = mesh_.face_gids();
+    return cells.size() == mesh_.n_cells() &&
+           faces.size() == mesh_.n_faces() &&
+           std::all_of(cells.begin(), cells.end(), [](const auto id) {
+               return id != svmp::INVALID_GID;
+           }) &&
+           std::all_of(faces.begin(), faces.end(), [](const auto id) {
+               return id != svmp::INVALID_GID;
+           });
+}
+
+GlobalIndex MeshAccess::getCellGlobalId(GlobalIndex cell_id) const {
+    if (cell_id < 0 || cell_id >= numCells()) {
+        throw FEException("MeshAccess: cell_id out of range",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+    const auto& ids = mesh_.cell_gids();
+    if (static_cast<std::size_t>(cell_id) >= ids.size() ||
+        ids[static_cast<std::size_t>(cell_id)] == svmp::INVALID_GID) {
+        throw FEException("MeshAccess: globally unique cell id is unavailable",
+                          __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+    }
+    return static_cast<GlobalIndex>(ids[static_cast<std::size_t>(cell_id)]);
+}
+
+GlobalIndex MeshAccess::getBoundaryFaceGlobalId(GlobalIndex face_id) const {
+    if (face_id < 0 || face_id >= static_cast<GlobalIndex>(mesh_.n_faces())) {
+        throw FEException("MeshAccess: face_id out of range",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+    const auto& ids = mesh_.face_gids();
+    if (static_cast<std::size_t>(face_id) >= ids.size() ||
+        ids[static_cast<std::size_t>(face_id)] == svmp::INVALID_GID) {
+        throw FEException("MeshAccess: globally unique face id is unavailable",
+                          __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+    }
+    return static_cast<GlobalIndex>(ids[static_cast<std::size_t>(face_id)]);
+}
+
+int MeshAccess::parallelRank() const {
+    return static_cast<int>(mesh_.rank());
+}
+
+int MeshAccess::parallelSize() const {
+    return mesh_.world_size();
+}
+
+int MeshAccess::getCellOwnerRank(GlobalIndex cell_id) const {
+    if (cell_id < 0 || cell_id >= numCells()) {
+        throw FEException("MeshAccess: cell_id out of range",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+    return static_cast<int>(
+        mesh_.owner_rank_cell(static_cast<svmp::index_t>(cell_id)));
+}
+
+int MeshAccess::getBoundaryFaceOwnerRank(GlobalIndex face_id,
+                                         GlobalIndex parent_cell) const {
+    (void)parent_cell;
+    if (face_id < 0 || face_id >= static_cast<GlobalIndex>(mesh_.n_faces())) {
+        throw FEException("MeshAccess: face_id out of range",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+    return static_cast<int>(
+        mesh_.owner_rank_face(static_cast<svmp::index_t>(face_id)));
+}
+
 bool MeshAccess::isOwnedCell(GlobalIndex cell_id) const {
     if (cell_id < 0 || cell_id >= numCells()) return false;
     return mesh_.is_owned_cell(static_cast<svmp::index_t>(cell_id));

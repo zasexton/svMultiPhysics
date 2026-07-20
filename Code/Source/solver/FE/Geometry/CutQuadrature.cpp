@@ -132,6 +132,92 @@ void attach_policy(CutQuadratureRule& rule,
 
 } // namespace
 
+MappedCutCodimensionTwoGeometry mapReferenceCutCodimensionTwoGeometry(
+    const CutQuadraturePoint& point,
+    int parent_dimension,
+    const CutGeometryJacobian& jacobian,
+    const CutGeometryJacobian& inverse_jacobian)
+{
+    if (parent_dimension != 2 && parent_dimension != 3) {
+        throw std::invalid_argument(
+            "codimension-two cut geometry requires a 2D or 3D parent");
+    }
+    const auto finite_vector = [](const std::array<Real, 3>& value) noexcept {
+        return std::isfinite(value[0]) && std::isfinite(value[1]) &&
+               std::isfinite(value[2]);
+    };
+    const auto map_vector = [](const CutGeometryJacobian& matrix,
+                               const std::array<Real, 3>& value) noexcept {
+        return std::array<Real, 3>{{
+            matrix[0][0] * value[0] + matrix[0][1] * value[1] +
+                matrix[0][2] * value[2],
+            matrix[1][0] * value[0] + matrix[1][1] * value[1] +
+                matrix[1][2] * value[2],
+            matrix[2][0] * value[0] + matrix[2][1] * value[1] +
+                matrix[2][2] * value[2]}};
+    };
+    const auto map_covector = [](const CutGeometryJacobian& inverse,
+                                 const std::array<Real, 3>& value) noexcept {
+        return std::array<Real, 3>{{
+            inverse[0][0] * value[0] + inverse[1][0] * value[1] +
+                inverse[2][0] * value[2],
+            inverse[0][1] * value[0] + inverse[1][1] * value[1] +
+                inverse[2][1] * value[2],
+            inverse[0][2] * value[0] + inverse[1][2] * value[1] +
+                inverse[2][2] * value[2]}};
+    };
+    const auto normalize_checked = [&](const std::array<Real, 3>& value,
+                                       const char* label) {
+        const Real length = norm(value);
+        if (!finite_vector(value) || !std::isfinite(length) ||
+            length <= Real{1.0e-30}) {
+            throw std::invalid_argument(
+                std::string("codimension-two cut geometry has an invalid ") +
+                label);
+        }
+        return scale(value, Real{1.0} / length);
+    };
+
+    if (!std::isfinite(point.weight) || point.weight <= Real{0.0}) {
+        throw std::invalid_argument(
+            "codimension-two cut geometry requires a positive reference weight");
+    }
+
+    MappedCutCodimensionTwoGeometry mapped;
+    mapped.interface_normal = normalize_checked(
+        map_covector(inverse_jacobian, point.normal), "interface normal");
+    mapped.boundary_normal = normalize_checked(
+        map_covector(inverse_jacobian, point.boundary_normal),
+        "boundary normal");
+
+    if (parent_dimension == 3) {
+        const auto tangent_ref = normalize_checked(point.tangent,
+                                                   "reference tangent");
+        const auto tangent_physical = map_vector(jacobian, tangent_ref);
+        mapped.measure_scale = norm(tangent_physical);
+        mapped.tangent = normalize_checked(tangent_physical,
+                                           "physical tangent");
+    } else {
+        mapped.measure_scale = Real{1.0};
+        if (norm(point.tangent) > Real{1.0e-30}) {
+            mapped.tangent = normalize_checked(
+                map_vector(jacobian, unit_or_default(point.tangent)),
+                "physical tangent");
+        }
+    }
+    if (!std::isfinite(mapped.measure_scale) ||
+        mapped.measure_scale <= Real{0.0}) {
+        throw std::invalid_argument(
+            "codimension-two cut geometry has an invalid measure scale");
+    }
+    mapped.weight = point.weight * mapped.measure_scale;
+    if (!std::isfinite(mapped.weight) || mapped.weight <= Real{0.0}) {
+        throw std::invalid_argument(
+            "codimension-two cut geometry has an invalid physical weight");
+    }
+    return mapped;
+}
+
 CutQuadratureRule makeAxisAlignedBoxCutVolumeQuadrature(
     const std::array<Real, 3>& min_corner,
     const std::array<Real, 3>& max_corner,

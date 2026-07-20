@@ -105,6 +105,15 @@ void CompositeMeshAccess::build(
             state.access = std::make_unique<MeshAccess>(*state.mesh);
         }
 
+        if (!participants_.empty() &&
+            (state.access->parallelRank() !=
+                 participants_.front().access->parallelRank() ||
+             state.access->parallelSize() !=
+                 participants_.front().access->parallelSize())) {
+            throw composite_error(
+                "all participants must use the same communicator rank and size");
+        }
+
         if (dimension_ == 0) {
             dimension_ = state.access->dimension();
         } else if (dimension_ != state.access->dimension()) {
@@ -473,6 +482,68 @@ void CompositeMeshAccess::getCellCoordinates(
     const auto location = cellLocation(cell_id);
     const auto& state = participants_[location.participant_index];
     state.access->getCellCoordinates(location.local_id, frame, coords);
+}
+
+bool CompositeMeshAccess::globalEntityIdsAvailable() const
+{
+    // Participant global-id namespaces are not guaranteed disjoint.  A
+    // multi-participant distributed cut domain therefore fails closed until
+    // the composite mesh owns an explicit namespace map.
+    return participants_.size() == 1u &&
+           participants_.front().access->globalEntityIdsAvailable();
+}
+
+GlobalIndex CompositeMeshAccess::getCellGlobalId(GlobalIndex cell_id) const
+{
+    if (!globalEntityIdsAvailable()) {
+        throw composite_error(
+            "partition-independent cell ids are unavailable for this composite mesh");
+    }
+    const auto location = cellLocation(cell_id);
+    return participants_[location.participant_index].access->getCellGlobalId(
+        location.local_id);
+}
+
+GlobalIndex CompositeMeshAccess::getBoundaryFaceGlobalId(
+    GlobalIndex face_id) const
+{
+    if (!globalEntityIdsAvailable()) {
+        throw composite_error(
+            "partition-independent face ids are unavailable for this composite mesh");
+    }
+    const auto location = storedFaceLocation(face_id);
+    return participants_[location.participant_index]
+        .access->getBoundaryFaceGlobalId(location.local_id);
+}
+
+int CompositeMeshAccess::parallelRank() const
+{
+    return participants_.front().access->parallelRank();
+}
+
+int CompositeMeshAccess::parallelSize() const
+{
+    return participants_.front().access->parallelSize();
+}
+
+int CompositeMeshAccess::getCellOwnerRank(GlobalIndex cell_id) const
+{
+    const auto location = cellLocation(cell_id);
+    return participants_[location.participant_index].access->getCellOwnerRank(
+        location.local_id);
+}
+
+int CompositeMeshAccess::getBoundaryFaceOwnerRank(
+    GlobalIndex face_id, GlobalIndex parent_cell) const
+{
+    const auto face_location = storedFaceLocation(face_id);
+    const auto cell_location = cellLocation(parent_cell);
+    if (face_location.participant_index != cell_location.participant_index) {
+        throw composite_error("face and cell belong to different participants");
+    }
+    return participants_[face_location.participant_index]
+        .access->getBoundaryFaceOwnerRank(face_location.local_id,
+                                          cell_location.local_id);
 }
 
 LocalIndex CompositeMeshAccess::getLocalFaceIndex(

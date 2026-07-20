@@ -239,23 +239,17 @@ public:
         }
 
         int marker = stableGeneratedInterfaceMarker(key, marker_base_, marker_range_);
-        if (key.requested_marker >= 0) {
-            const auto owner = marker_to_key_.find(marker);
-            if (owner != marker_to_key_.end() && owner->second != stable_key) {
-                throw std::invalid_argument("generated interface marker is already assigned to another domain");
-            }
-        } else {
-            const int start = marker;
-            while (true) {
-                const auto owner = marker_to_key_.find(marker);
-                if (owner == marker_to_key_.end() || owner->second == stable_key) {
-                    break;
-                }
-                marker = marker_base_ + ((marker - marker_base_ + 1) % marker_range_);
-                if (marker == start) {
-                    throw std::invalid_argument("generated interface marker registry is full");
-                }
-            }
+        const auto owner = marker_to_key_.find(marker);
+        if (owner != marker_to_key_.end() && owner->second != stable_key) {
+            // Every formulation consumer independently derives the same stable
+            // marker from its domain key.  Linear probing here would make the
+            // generated quadrature marker disagree with those installed form
+            // records, silently coupling unrelated interfaces.  Fail closed
+            // and require an explicit, unique marker instead.
+            throw std::invalid_argument(
+                "generated interface marker collision between domain keys '" +
+                owner->second + "' and '" + stable_key +
+                "'; assign an explicit unique interface marker");
         }
 
         key_to_marker_[stable_key] = marker;
@@ -302,6 +296,8 @@ struct CutInterfaceQuadraturePoint {
 struct CutInterfaceVolumeRegion {
     int interface_marker{-1};
     MeshIndex parent_cell{static_cast<MeshIndex>(-1)};
+    GlobalIndex parent_cell_global_id{INVALID_GLOBAL_INDEX};
+    int owner_rank{-1};
     LocalIndex local_region_index{INVALID_LOCAL_INDEX};
     std::uint64_t stable_id{0};
     geometry::CutIntegrationSide side{geometry::CutIntegrationSide::Negative};
@@ -372,6 +368,8 @@ struct CutInterfaceVolumeRegion {
         rule.provenance.embedded_geometry_id = request.source.identifier();
         rule.provenance.cut_topology_id = topology_id;
         rule.provenance.parent_entity = parent_cell;
+        rule.provenance.parent_entity_global_id = parent_cell_global_id;
+        rule.provenance.owner_rank = owner_rank;
         rule.provenance.marker = interface_marker;
         rule.provenance.cut_topology_revision = stable_id;
         rule.provenance.predicate_policy_key = request.quadrature_policy_key;
@@ -407,7 +405,10 @@ struct CutInterfaceVolumeRegion {
         rule.frame = request.frame;
         rule.full_cell_equivalent = full_cell_equivalent;
         if (quadrature_points.empty()) {
-            geometry::CutQuadraturePoint qp{centroid, normal, measure};
+            geometry::CutQuadraturePoint qp;
+            qp.point = centroid;
+            qp.normal = normal;
+            qp.weight = measure;
             qp.parent_coordinate = centroid;
             qp.reference_measure_factor = measure;
             rule.points.push_back(qp);
@@ -431,6 +432,8 @@ struct CutInterfaceVolumeRegion {
 struct CutInterfaceFragment {
     int interface_marker{-1};
     MeshIndex parent_cell{static_cast<MeshIndex>(-1)};
+    GlobalIndex parent_cell_global_id{INVALID_GLOBAL_INDEX};
+    int owner_rank{-1};
     LocalIndex local_fragment_index{INVALID_LOCAL_INDEX};
     std::uint64_t stable_id{0};
     CutInterfaceFragmentKind kind{CutInterfaceFragmentKind::Segment};
@@ -556,6 +559,8 @@ struct CutInterfaceFragment {
         rule.provenance.embedded_geometry_id = request.source.identifier();
         rule.provenance.cut_topology_id = topology_id;
         rule.provenance.parent_entity = parent_cell;
+        rule.provenance.parent_entity_global_id = parent_cell_global_id;
+        rule.provenance.owner_rank = owner_rank;
         rule.provenance.marker = interface_marker;
         rule.provenance.cut_topology_revision = stable_id;
         rule.provenance.predicate_policy_key = request.quadrature_policy_key;
@@ -719,7 +724,7 @@ struct GeneratedInterfaceTwoSidedBinding {
 
 [[nodiscard]] inline std::uint64_t cutInterfaceStableId(
     int interface_marker,
-    MeshIndex parent_cell,
+    GlobalIndex parent_cell_identity,
     LocalIndex local_fragment_index,
     std::uint64_t source_revision) noexcept {
     std::uint64_t h = 1469598103934665603ull;
@@ -728,7 +733,7 @@ struct GeneratedInterfaceTwoSidedBinding {
         h *= 1099511628211ull;
     };
     mix(static_cast<std::uint64_t>(interface_marker));
-    mix(static_cast<std::uint64_t>(parent_cell));
+    mix(static_cast<std::uint64_t>(parent_cell_identity));
     mix(static_cast<std::uint64_t>(local_fragment_index));
     mix(source_revision);
     return h;
@@ -736,7 +741,7 @@ struct GeneratedInterfaceTwoSidedBinding {
 
 [[nodiscard]] inline std::uint64_t cutVolumeStableId(
     int interface_marker,
-    MeshIndex parent_cell,
+    GlobalIndex parent_cell_identity,
     LocalIndex local_region_index,
     geometry::CutIntegrationSide side,
     std::uint64_t source_revision) noexcept {
@@ -746,7 +751,7 @@ struct GeneratedInterfaceTwoSidedBinding {
         h *= 1099511628211ull;
     };
     mix(static_cast<std::uint64_t>(interface_marker));
-    mix(static_cast<std::uint64_t>(parent_cell));
+    mix(static_cast<std::uint64_t>(parent_cell_identity));
     mix(static_cast<std::uint64_t>(local_region_index));
     mix(static_cast<std::uint64_t>(side));
     mix(source_revision);
@@ -756,8 +761,27 @@ struct GeneratedInterfaceTwoSidedBinding {
 [[nodiscard]] inline bool cutQuadratureRuleDeterministicLess(
     const geometry::CutQuadratureRule& a,
     const geometry::CutQuadratureRule& b) noexcept {
-    if (a.provenance.parent_entity != b.provenance.parent_entity) {
-        return a.provenance.parent_entity < b.provenance.parent_entity;
+    const auto a_parent =
+        a.provenance.parent_entity_global_id != INVALID_GLOBAL_INDEX
+            ? a.provenance.parent_entity_global_id
+            : static_cast<GlobalIndex>(a.provenance.parent_entity);
+    const auto b_parent =
+        b.provenance.parent_entity_global_id != INVALID_GLOBAL_INDEX
+            ? b.provenance.parent_entity_global_id
+            : static_cast<GlobalIndex>(b.provenance.parent_entity);
+    if (a_parent != b_parent) {
+        return a_parent < b_parent;
+    }
+    const auto a_boundary =
+        a.provenance.parent_boundary_entity_global_id != INVALID_GLOBAL_INDEX
+            ? a.provenance.parent_boundary_entity_global_id
+            : static_cast<GlobalIndex>(a.provenance.parent_boundary_entity);
+    const auto b_boundary =
+        b.provenance.parent_boundary_entity_global_id != INVALID_GLOBAL_INDEX
+            ? b.provenance.parent_boundary_entity_global_id
+            : static_cast<GlobalIndex>(b.provenance.parent_boundary_entity);
+    if (a_boundary != b_boundary) {
+        return a_boundary < b_boundary;
     }
     if (a.side != b.side) {
         return a.side < b.side;
@@ -836,9 +860,13 @@ public:
             fragment.local_fragment_index = static_cast<LocalIndex>(fragments_.size());
         }
         if (fragment.stable_id == 0) {
+            const auto parent_identity =
+                fragment.parent_cell_global_id != INVALID_GLOBAL_INDEX
+                    ? fragment.parent_cell_global_id
+                    : static_cast<GlobalIndex>(fragment.parent_cell);
             fragment.stable_id =
                 cutInterfaceStableId(fragment.interface_marker,
-                                     fragment.parent_cell,
+                                     parent_identity,
                                      fragment.local_fragment_index,
                                      request_.source.value_revision);
         }
@@ -853,9 +881,13 @@ public:
             region.local_region_index = static_cast<LocalIndex>(volume_regions_.size());
         }
         if (region.stable_id == 0) {
+            const auto parent_identity =
+                region.parent_cell_global_id != INVALID_GLOBAL_INDEX
+                    ? region.parent_cell_global_id
+                    : static_cast<GlobalIndex>(region.parent_cell);
             region.stable_id =
                 cutVolumeStableId(region.interface_marker,
-                                  region.parent_cell,
+                                  parent_identity,
                                   region.local_region_index,
                                   region.side,
                                   request_.source.value_revision);

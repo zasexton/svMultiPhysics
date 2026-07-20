@@ -306,8 +306,12 @@ TEST(CutQuadrature, ClosedTopologyRulesPreserveCurvedIsoparametricSubcellAndInte
         true,
         true});
     input.curved_interface_points = {
-        CutQuadraturePoint{{{0.25, 0.0, 0.0}}, {{0.0, 0.0, 1.0}}, 0.2},
-        CutQuadraturePoint{{{0.25, 0.5, 0.02}}, {{0.0, 0.0, 1.0}}, 0.3}};
+        CutQuadraturePoint{.point = {{0.25, 0.0, 0.0}},
+                           .normal = {{0.0, 0.0, 1.0}},
+                           .weight = 0.2},
+        CutQuadraturePoint{.point = {{0.25, 0.5, 0.02}},
+                           .normal = {{0.0, 0.0, 1.0}},
+                           .weight = 0.3}};
 
     const auto rules = makeClosedTopologyCutQuadrature(input);
     EXPECT_TRUE(rules.conservation.ok);
@@ -335,9 +339,15 @@ TEST(CutQuadrature, CurvedAndMomentFittedRulesCarryFrameAndExactnessMetadata)
     policy.name = "curved-surface-rule";
 
     const auto curved = makeCurvedInterfaceQuadrature(
-        {{{{0.0, 0.0, 0.0}}, {{0.0, 0.0, 2.0}}, 0.25},
-         {{{1.0, 0.0, 0.0}}, {{0.0, 0.0, 2.0}}, 0.25},
-         {{{0.0, 1.0, 0.0}}, {{0.0, 0.0, 2.0}}, 0.50}},
+        {CutQuadraturePoint{.point = {{0.0, 0.0, 0.0}},
+                            .normal = {{0.0, 0.0, 2.0}},
+                            .weight = 0.25},
+         CutQuadraturePoint{.point = {{1.0, 0.0, 0.0}},
+                            .normal = {{0.0, 0.0, 2.0}},
+                            .weight = 0.25},
+         CutQuadraturePoint{.point = {{0.0, 1.0, 0.0}},
+                            .normal = {{0.0, 0.0, 2.0}},
+                            .weight = 0.50}},
         CutGeometryFrame::Current,
         policy,
         provenance);
@@ -424,9 +434,9 @@ TEST(CutQuadrature, SphericalCapReferencesValidateCurvedAndMomentFittedRules)
     curved_policy.name = "analytic-spherical-reference";
 
     const auto cap_surface = makeCurvedInterfaceQuadrature(
-        {{{{cut_coordinate + 0.5 * cap_height, 0.0, 0.0}},
-          {{2.0, 0.0, 0.0}},
-          cap_area}},
+        {CutQuadraturePoint{.point = {{cut_coordinate + 0.5 * cap_height, 0.0, 0.0}},
+                            .normal = {{2.0, 0.0, 0.0}},
+                            .weight = cap_area}},
         CutGeometryFrame::Current,
         curved_policy,
         provenance);
@@ -440,9 +450,9 @@ TEST(CutQuadrature, SphericalCapReferencesValidateCurvedAndMomentFittedRules)
     EXPECT_NEAR(cap_surface.points[0].normal[0], 1.0, 1.0e-14);
 
     const auto disk_interface = makeCurvedInterfaceQuadrature(
-        {{{{cut_coordinate, 0.0, 0.0}},
-          {{1.0, 0.0, 0.0}},
-          disk_area}},
+        {CutQuadraturePoint{.point = {{cut_coordinate, 0.0, 0.0}},
+                            .normal = {{1.0, 0.0, 0.0}},
+                            .weight = disk_area}},
         CutGeometryFrame::Current,
         curved_policy,
         provenance);
@@ -463,9 +473,9 @@ TEST(CutQuadrature, CurvedReferenceDiagnosticsRejectDegenerateAnalyticRules)
     policy.polynomial_order = 2;
 
     const auto degenerate_cap = makeCurvedInterfaceQuadrature(
-        {{{{1.0, 0.0, 0.0}},
-          {{1.0, 0.0, 0.0}},
-          0.0}},
+        {CutQuadraturePoint{.point = {{1.0, 0.0, 0.0}},
+                            .normal = {{1.0, 0.0, 0.0}},
+                            .weight = 0.0}},
         CutGeometryFrame::Reference,
         policy,
         provenance);
@@ -549,8 +559,12 @@ TEST(CutQuadrature, DiagnosticsRejectMalformedCurvedQuadratureRules)
     inverted_normals.measure = 1.0;
     inverted_normals.parent_measure = 1.0;
     inverted_normals.points = {
-        CutQuadraturePoint{{{0.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0}}, 0.5},
-        CutQuadraturePoint{{{1.0, 0.0, 0.0}}, {{0.0, 0.0, -1.0}}, 0.5}};
+        CutQuadraturePoint{.point = {{0.0, 0.0, 0.0}},
+                           .normal = {{0.0, 0.0, 1.0}},
+                           .weight = 0.5},
+        CutQuadraturePoint{.point = {{1.0, 0.0, 0.0}},
+                           .normal = {{0.0, 0.0, -1.0}},
+                           .weight = 0.5}};
 
     const auto inverted = diagnoseCutQuadrature(inverted_normals);
     EXPECT_FALSE(inverted.ok);
@@ -565,8 +579,12 @@ TEST(CutQuadrature, DiagnosticsRejectMalformedCurvedQuadratureRules)
 
     CutQuadratureRule mismatched_weights = inverted_normals;
     mismatched_weights.points = {
-        CutQuadraturePoint{{{0.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0}}, 0.25},
-        CutQuadraturePoint{{{1.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0}}, 0.25}};
+        CutQuadraturePoint{.point = {{0.0, 0.0, 0.0}},
+                           .normal = {{0.0, 0.0, 1.0}},
+                           .weight = 0.25},
+        CutQuadraturePoint{.point = {{1.0, 0.0, 0.0}},
+                           .normal = {{0.0, 0.0, 1.0}},
+                           .weight = 0.25}};
     const auto mismatched = diagnoseCutQuadrature(mismatched_weights);
     EXPECT_FALSE(mismatched.ok);
     EXPECT_TRUE(mismatched.conservation_failure);

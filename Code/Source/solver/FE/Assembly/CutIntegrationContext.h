@@ -15,6 +15,9 @@
 
 #include "Core/Types.h"
 #include "Geometry/CutQuadrature.h"
+#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/GeneratedActiveBoundaryDomain.h"
+#include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -27,6 +30,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -356,6 +360,10 @@ public:
         generated_volume_markers_.clear();
         generated_interface_rule_indices_by_marker_.clear();
         generated_interface_two_sided_bindings_by_marker_.clear();
+        generated_active_boundary_marker_keys_.clear();
+        generated_interface_boundary_marker_keys_.clear();
+        free_surface_geometry_snapshots_.clear();
+        free_surface_snapshot_revision_by_marker_.clear();
         generated_interface_markers_.clear();
         facet_set_rule_indices_by_marker_.clear();
         facet_set_markers_.clear();
@@ -499,6 +507,13 @@ public:
             throw std::invalid_argument(
                 "generated level-set volume side filter requires Negative or Positive side");
         }
+        if (generated_interface_boundary_marker_keys_.find(marker) !=
+                generated_interface_boundary_marker_keys_.end() ||
+            generated_active_boundary_marker_keys_.find(marker) !=
+                generated_active_boundary_marker_keys_.end()) {
+            throw std::invalid_argument(
+                "generated level-set interface marker collides with an imported generated boundary marker");
+        }
         setExpectedGeneratedSourceValueRevision(marker,
                                                 domain.request().source.value_revision);
         const auto make_sensitivity_metadata =
@@ -618,6 +633,217 @@ public:
         }
     }
 
+    void addGeneratedInterfaceBoundaryIntersectionDomain(
+        const interfaces::GeneratedInterfaceBoundaryIntersectionDomain& domain) {
+        const int marker = domain.marker();
+        if (marker < 0) {
+            throw std::invalid_argument(
+                "generated interface-boundary intersection domain requires a nonnegative marker");
+        }
+        auto rules = domain.intersectionQuadratureRules();
+        if (rules.empty()) {
+            return;
+        }
+        interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey marker_key;
+        marker_key.source = domain.request().source;
+        marker_key.domain_id = domain.request().generated_domain_id;
+        marker_key.isovalue = domain.request().isovalue;
+        marker_key.interface_marker = domain.request().interface_marker;
+        marker_key.boundary_marker = domain.request().boundary_marker;
+        marker_key.requested_marker = domain.request().intersection_marker;
+        const auto stable_key = marker_key.stableKey();
+        const auto registered_key =
+            generated_interface_boundary_marker_keys_.find(marker);
+        if (registered_key != generated_interface_boundary_marker_keys_.end()) {
+            throw std::invalid_argument(
+                registered_key->second == stable_key
+                    ? "generated interface-boundary domain was imported more than once"
+                    : "generated interface-boundary marker hash collision detected");
+        }
+        const auto existing_rules =
+            generated_interface_rule_indices_by_marker_.find(marker);
+        if (existing_rules != generated_interface_rule_indices_by_marker_.end() &&
+            !existing_rules->second.empty()) {
+            throw std::invalid_argument(
+                "generated interface-boundary marker collides with an existing generated-interface marker");
+        }
+        generated_interface_boundary_marker_keys_.emplace(marker, stable_key);
+        auto& indices = generated_interface_rule_indices_by_marker_[marker];
+        if (indices.empty()) {
+            generated_interface_markers_.push_back(marker);
+        }
+        for (auto& rule : rules) {
+            indices.push_back(interface_rules_.size());
+            interface_rules_.push_back(std::move(rule));
+            markModified();
+        }
+    }
+
+    void addGeneratedActiveBoundaryDomain(
+        const interfaces::GeneratedActiveBoundaryDomain& domain) {
+        const int marker = domain.marker();
+        if (marker < 0) {
+            throw std::invalid_argument(
+                "generated active-boundary domain requires a nonnegative marker");
+        }
+        interfaces::GeneratedActiveBoundaryMarkerKey marker_key;
+        marker_key.source = domain.request().source;
+        marker_key.domain_id = domain.request().generated_domain_id;
+        marker_key.isovalue = domain.request().isovalue;
+        marker_key.interface_marker = domain.request().interface_marker;
+        marker_key.boundary_marker = domain.request().boundary_marker;
+        marker_key.side = domain.request().side;
+        marker_key.requested_marker = domain.request().active_boundary_marker;
+        const auto stable_key = marker_key.stableKey();
+        if (generated_interface_boundary_marker_keys_.find(marker) !=
+                generated_interface_boundary_marker_keys_.end() ||
+            generated_interface_rule_indices_by_marker_.find(marker) !=
+                generated_interface_rule_indices_by_marker_.end()) {
+            throw std::invalid_argument(
+                "generated active-boundary marker collides with an existing generated-interface marker");
+        }
+        const auto [registered, inserted] =
+            generated_active_boundary_marker_keys_.emplace(marker, stable_key);
+        if (!inserted) {
+            throw std::invalid_argument(
+                registered->second == stable_key
+                    ? "generated active-boundary domain was imported more than once"
+                    : "generated active-boundary marker hash collision detected");
+        }
+        auto rules = domain.boundaryQuadratureRules();
+        auto& indices = generated_interface_rule_indices_by_marker_[marker];
+        if (indices.empty()) {
+            generated_interface_markers_.push_back(marker);
+        }
+        for (auto& rule : rules) {
+            indices.push_back(interface_rules_.size());
+            interface_rules_.push_back(std::move(rule));
+            markModified();
+        }
+    }
+
+    void addFreeSurfaceGeometrySnapshot(
+        std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot> snapshot,
+        std::optional<geometry::CutIntegrationSide> volume_side_filter =
+            std::nullopt) {
+        if (!snapshot || !snapshot->revision().complete()) {
+            throw std::invalid_argument(
+                "cut integration requires a complete free-surface geometry snapshot");
+        }
+        const Real threshold_error = std::abs(
+            snapshot->policy().minimum_retained_volume_fraction -
+            minGeneratedCutVolumeFraction());
+        const Real threshold_tolerance =
+            Real{64.0} * std::numeric_limits<Real>::epsilon() *
+            std::max(Real{1.0}, minGeneratedCutVolumeFraction());
+        if (threshold_error > threshold_tolerance) {
+            throw std::invalid_argument(
+                "free-surface snapshot and cut context use different volume-retention policies");
+        }
+        const auto revision_key =
+            snapshot->revision().snapshot_revision_key;
+        const auto bind_marker = [&](int marker) {
+            if (marker < 0) {
+                throw std::invalid_argument(
+                    "free-surface snapshot contains a negative generated marker");
+            }
+            const auto [stored, inserted] =
+                free_surface_snapshot_revision_by_marker_.emplace(
+                    marker, revision_key);
+            if (!inserted && stored->second != revision_key) {
+                throw std::invalid_argument(
+                    "generated marker is already bound to a different free-surface snapshot revision");
+            }
+        };
+
+        bind_marker(snapshot->interfaceDomain().marker());
+        for (const auto& contact : snapshot->contactDomains()) {
+            bind_marker(contact.marker());
+        }
+        for (const auto& active : snapshot->activeBoundaryDomains()) {
+            bind_marker(active.marker());
+        }
+        addGeneratedInterfaceDomain(snapshot->interfaceDomain(),
+                                    volume_side_filter);
+        for (const auto& contact : snapshot->contactDomains()) {
+            addGeneratedInterfaceBoundaryIntersectionDomain(contact);
+        }
+        for (const auto& active : snapshot->activeBoundaryDomains()) {
+            addGeneratedActiveBoundaryDomain(active);
+        }
+        free_surface_geometry_snapshots_.push_back(std::move(snapshot));
+        markModified();
+    }
+
+    [[nodiscard]] bool hasFreeSurfaceGeometrySnapshotForMarker(int marker) const {
+        return free_surface_snapshot_revision_by_marker_.find(marker) !=
+               free_surface_snapshot_revision_by_marker_.end();
+    }
+
+    [[nodiscard]] std::uint64_t freeSurfaceGeometrySnapshotRevisionForMarker(
+        int marker) const {
+        const auto found =
+            free_surface_snapshot_revision_by_marker_.find(marker);
+        if (found == free_surface_snapshot_revision_by_marker_.end()) {
+            throw std::invalid_argument(
+                "generated marker is not bound to an authoritative free-surface geometry snapshot");
+        }
+        return found->second;
+    }
+
+    [[nodiscard]] const std::vector<
+        std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>>&
+    freeSurfaceGeometrySnapshots() const noexcept {
+        return free_surface_geometry_snapshots_;
+    }
+
+    void assertFreeSurfaceGeometrySnapshotCurrentForMarker(int marker) const {
+        const auto bound =
+            free_surface_snapshot_revision_by_marker_.find(marker);
+        if (bound == free_surface_snapshot_revision_by_marker_.end()) {
+            return;
+        }
+        const interfaces::FreeSurfaceGeometrySnapshot* snapshot = nullptr;
+        for (const auto& candidate : free_surface_geometry_snapshots_) {
+            if (candidate &&
+                candidate->revision().snapshot_revision_key == bound->second) {
+                snapshot = candidate.get();
+                break;
+            }
+        }
+        if (snapshot == nullptr || !snapshot->revision().complete()) {
+            throw std::invalid_argument(
+                "generated marker references an unavailable free-surface geometry snapshot");
+        }
+        const auto expected_source_revision =
+            snapshot->revision().source_value_revision;
+        const auto interface_rules =
+            generated_interface_rule_indices_by_marker_.find(marker);
+        if (interface_rules !=
+            generated_interface_rule_indices_by_marker_.end()) {
+            for (const auto index : interface_rules->second) {
+                if (index >= interface_rules_.size() ||
+                    interface_rules_[index].provenance.source_value_revision !=
+                        expected_source_revision) {
+                    throw std::invalid_argument(
+                        "generated interface rule does not declare its complete free-surface snapshot revision");
+                }
+            }
+        }
+        const auto volume_rules =
+            generated_volume_rule_indices_by_marker_.find(marker);
+        if (volume_rules != generated_volume_rule_indices_by_marker_.end()) {
+            for (const auto index : volume_rules->second) {
+                if (index >= volume_rules_.size() ||
+                    volume_rules_[index].provenance.source_value_revision !=
+                        expected_source_revision) {
+                    throw std::invalid_argument(
+                        "generated volume rule does not declare its complete free-surface snapshot revision");
+                }
+            }
+        }
+    }
+
     void addKinematicData(EmbeddedBoundaryKinematicData data) {
         kinematic_data_.push_back(std::move(data));
         markModified();
@@ -662,6 +888,7 @@ public:
     }
 
     void assertGeneratedInterfaceRulesCurrentForMarker(int marker) const {
+        assertFreeSurfaceGeometrySnapshotCurrentForMarker(marker);
         const auto expected_it = expected_source_value_revision_by_marker_.find(marker);
         if (expected_it == expected_source_value_revision_by_marker_.end()) {
             return;
@@ -687,6 +914,7 @@ public:
     void assertGeneratedVolumeRulesCurrentForMarkerAndSide(
         int marker,
         geometry::CutIntegrationSide side) const {
+        assertFreeSurfaceGeometrySnapshotCurrentForMarker(marker);
         if (side == geometry::CutIntegrationSide::Interface) {
             return;
         }
@@ -1239,14 +1467,17 @@ public:
                 std::vector<geometry::CutQuadraturePoint> curved_points;
                 curved_points.reserve(patch.quadrature_points.size());
                 for (std::size_t i = 0; i < patch.quadrature_points.size(); ++i) {
-                    curved_points.push_back({
-                        {{static_cast<Real>(patch.quadrature_points[i][0]),
-                          static_cast<Real>(patch.quadrature_points[i][1]),
-                          static_cast<Real>(patch.quadrature_points[i][2])}},
-                        {{static_cast<Real>(patch.quadrature_normals[i][0]),
-                          static_cast<Real>(patch.quadrature_normals[i][1]),
-                          static_cast<Real>(patch.quadrature_normals[i][2])}},
-                        static_cast<Real>(patch.quadrature_weights[i])});
+                    geometry::CutQuadraturePoint qp;
+                    qp.point = {{
+                        static_cast<Real>(patch.quadrature_points[i][0]),
+                        static_cast<Real>(patch.quadrature_points[i][1]),
+                        static_cast<Real>(patch.quadrature_points[i][2])}};
+                    qp.normal = {{
+                        static_cast<Real>(patch.quadrature_normals[i][0]),
+                        static_cast<Real>(patch.quadrature_normals[i][1]),
+                        static_cast<Real>(patch.quadrature_normals[i][2])}};
+                    qp.weight = static_cast<Real>(patch.quadrature_weights[i]);
+                    curved_points.push_back(qp);
                 }
                 policy.kind = geometry::CutQuadratureConstructionKind::CurvedTopologySubdivision;
                 policy.polynomial_order = patch.geometry_order;
@@ -1647,6 +1878,14 @@ private:
         generated_interface_rule_indices_by_marker_{};
     std::unordered_map<int, std::vector<interfaces::GeneratedInterfaceTwoSidedBinding>>
         generated_interface_two_sided_bindings_by_marker_{};
+    std::unordered_map<int, std::string>
+        generated_active_boundary_marker_keys_{};
+    std::unordered_map<int, std::string>
+        generated_interface_boundary_marker_keys_{};
+    std::vector<std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>>
+        free_surface_geometry_snapshots_{};
+    std::unordered_map<int, std::uint64_t>
+        free_surface_snapshot_revision_by_marker_{};
     std::vector<int> generated_interface_markers_{};
     std::unordered_map<int, std::vector<std::size_t>> facet_set_rule_indices_by_marker_{};
     std::vector<int> facet_set_markers_{};

@@ -324,10 +324,10 @@ TEST(LevelSetInterfaceDomain, GeneratedInterfaceMarkerRegistryHonorsExplicitMark
     EXPECT_THROW((void)registry.assign(colliding), std::invalid_argument);
 }
 
-TEST(LevelSetInterfaceDomain, GeneratedInterfaceMarkerRegistryResolvesHashCollisions)
+TEST(LevelSetInterfaceDomain, GeneratedInterfaceMarkerRegistryRejectsHashCollisions)
 {
     GeneratedInterfaceMarkerRegistry registry(/*marker_base=*/200,
-                                             /*marker_range=*/2);
+                                             /*marker_range=*/1);
 
     GeneratedInterfaceMarkerKey first;
     first.source = LevelSetInterfaceSource::fromEvaluator("first");
@@ -338,13 +338,10 @@ TEST(LevelSetInterfaceDomain, GeneratedInterfaceMarkerRegistryResolvesHashCollis
     second.domain_id = "interface";
 
     const int first_marker = registry.assign(first);
-    const int second_marker = registry.assign(second);
-    EXPECT_NE(first_marker, second_marker);
     EXPECT_GE(first_marker, 200);
-    EXPECT_LT(first_marker, 202);
-    EXPECT_GE(second_marker, 200);
-    EXPECT_LT(second_marker, 202);
-    EXPECT_EQ(registry.size(), 2u);
+    EXPECT_LT(first_marker, 201);
+    EXPECT_THROW((void)registry.assign(second), std::invalid_argument);
+    EXPECT_EQ(registry.size(), 1u);
 }
 
 TEST(LevelSetInterfaceDomain, LinearFragmentQuadratureRulesCarryCentroidWeightsAndNormals)

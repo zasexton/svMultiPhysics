@@ -499,6 +499,43 @@ public:
     /// cell identifiers must leave this false.
     [[nodiscard]] virtual bool cellIdsAreDense() const { return false; }
 
+    /// True when cell and face identifiers below are globally unique across
+    /// the communicator.  Distributed geometry consumers must not infer
+    /// global identity from rank-local storage indices.
+    [[nodiscard]] virtual bool globalEntityIdsAvailable() const { return false; }
+
+    /// Globally unique cell identifier.  The serial-compatible default uses
+    /// the visible cell id; distributed adapters must override this together
+    /// with @ref globalEntityIdsAvailable.
+    [[nodiscard]] virtual GlobalIndex getCellGlobalId(GlobalIndex cell_id) const
+    {
+        return cell_id;
+    }
+
+    /// Globally unique boundary-face identifier.  The serial-compatible
+    /// default uses the visible face id.
+    [[nodiscard]] virtual GlobalIndex getBoundaryFaceGlobalId(
+        GlobalIndex face_id) const
+    {
+        return face_id;
+    }
+
+    /// Rank and communicator size represented by this adapter.
+    [[nodiscard]] virtual int parallelRank() const { return 0; }
+    [[nodiscard]] virtual int parallelSize() const { return 1; }
+
+    /// Authoritative owner of a locally visible cell or boundary face.
+    [[nodiscard]] virtual int getCellOwnerRank(GlobalIndex cell_id) const
+    {
+        return isOwnedCell(cell_id) ? parallelRank() : -1;
+    }
+
+    [[nodiscard]] virtual int getBoundaryFaceOwnerRank(
+        GlobalIndex /*face_id*/, GlobalIndex parent_cell) const
+    {
+        return getCellOwnerRank(parent_cell);
+    }
+
     /// Check if cell is locally owned
     [[nodiscard]] virtual bool isOwnedCell(GlobalIndex cell_id) const = 0;
 

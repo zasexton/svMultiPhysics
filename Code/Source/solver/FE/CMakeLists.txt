@@ -454,6 +454,7 @@ set(FE_QUADRATURE_HEADERS
     Quadrature/QuadratureFactory.h
     Quadrature/QuadratureCache.h
     Quadrature/ReferenceMonomialIntegrals.h
+    Quadrature/ImplicitBoundaryIntersectionQuadrature.h
     Quadrature/PositionBasedParams.h
     Quadrature/PositionBasedTriangleQuadrature.h
     Quadrature/PositionBasedTetrahedronQuadrature.h
@@ -477,6 +478,7 @@ set(FE_QUADRATURE_SOURCES
     Quadrature/QuadratureFactory.cpp
     Quadrature/QuadratureCache.cpp
     Quadrature/ReferenceMonomialIntegrals.cpp
+    Quadrature/ImplicitBoundaryIntersectionQuadrature.cpp
     Quadrature/PositionBasedTriangleQuadrature.cpp
     Quadrature/PositionBasedTetrahedronQuadrature.cpp
     Quadrature/SymmetricTriangleQuadrature.cpp
@@ -833,7 +835,11 @@ set(FE_GEOMETRY_HEADERS
     Geometry/GeometryMapping.h
     Geometry/GeometryFrameUtils.h
     Geometry/CutQuadrature.h
+    Geometry/CutQuadratureMapping.h
     Interfaces/CutInterfaceFieldEvaluation.h
+    Interfaces/FreeSurfaceGeometrySnapshot.h
+    Interfaces/GeneratedActiveBoundaryDomain.h
+    Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h
     Interfaces/LevelSetInterfaceDiagnostics.h
     Interfaces/LevelSetInterfaceGeometryWriter.h
     Interfaces/LevelSetInterfaceBuilder.h
@@ -861,7 +867,11 @@ set(FE_GEOMETRY_HEADERS
 set(FE_GEOMETRY_SOURCES
     Geometry/FrameGeometry.cpp
     Geometry/CutQuadrature.cpp
+    Geometry/CutQuadratureMapping.cpp
     Interfaces/CutInterfaceFieldEvaluation.cpp
+    Interfaces/FreeSurfaceGeometrySnapshot.cpp
+    Interfaces/GeneratedActiveBoundaryDomain.cpp
+    Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.cpp
     Interfaces/LevelSetInterfaceDiagnostics.cpp
     Interfaces/LevelSetInterfaceGeometryWriter.cpp
     Interfaces/LevelSetInterfaceBuilder.cpp
@@ -2203,6 +2213,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Quadrature/test_QuadratureFactory.cpp
         Tests/Unit/Quadrature/test_PolynomialExactnessSweep.cpp
         Tests/Unit/Quadrature/test_SurfaceQuadraturePermutations.cpp
+        Tests/Unit/Quadrature/test_ImplicitBoundaryIntersectionQuadrature.cpp
         Tests/Unit/Quadrature/test_PositionBasedQuadrature.cpp
         Tests/Unit/Quadrature/test_SymmetricTriangleQuadrature.cpp
         Tests/Unit/Quadrature/test_SymmetricTetrahedronQuadrature.cpp
@@ -2271,6 +2282,8 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Geometry/test_FrameGeometry.cpp
         Tests/Unit/Geometry/test_CutQuadrature.cpp
         Tests/Unit/Geometry/test_CutInterfaceFieldEvaluation.cpp
+        Tests/Unit/Geometry/test_GeneratedActiveBoundaryDomain.cpp
+        Tests/Unit/Geometry/test_GeneratedInterfaceBoundaryIntersectionDomain.cpp
         Tests/Unit/Geometry/test_LevelSetInterfaceBuilder.cpp
         Tests/Unit/Geometry/test_LevelSetInterfaceDiagnostics.cpp
         Tests/Unit/Geometry/test_LevelSetInterfaceDomain.cpp

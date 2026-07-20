@@ -55,6 +55,8 @@ enum class CutGeometryFrame : std::uint8_t {
 struct CutQuadraturePoint {
     std::array<Real, 3> point{{0.0, 0.0, 0.0}};
     std::array<Real, 3> normal{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> boundary_normal{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> tangent{{0.0, 0.0, 0.0}};
     Real weight{0.0};
     std::array<Real, 3> parent_coordinate{{0.0, 0.0, 0.0}};
     Real reference_measure_factor{0.0};
@@ -65,11 +67,21 @@ struct CutQuadraturePoint {
 struct CutQuadratureProvenance {
     std::string embedded_geometry_id{};
     std::string cut_topology_id{};
+    // Rank-local parent id used to address assembly storage.
     MeshIndex parent_entity{static_cast<MeshIndex>(-1)};
+    MeshIndex parent_boundary_entity{static_cast<MeshIndex>(-1)};
+    // Partition-independent identities and the authoritative owner.  These
+    // remain distinct from parent_entity because assembly requires local ids.
+    GlobalIndex parent_entity_global_id{INVALID_GLOBAL_INDEX};
+    GlobalIndex parent_boundary_entity_global_id{INVALID_GLOBAL_INDEX};
+    int owner_rank{-1};
     int marker{-1};
     std::uint64_t cut_topology_revision{0};
     std::uint64_t predicate_policy_key{0};
     std::uint64_t source_value_revision{0};
+    // Immediate generated-geometry parent, when this rule is derived from
+    // another retained fragment (for example a contact rule from a surface).
+    std::uint64_t source_stable_id{0};
     CutQuadratureConstructionKind construction{CutQuadratureConstructionKind::AxisAlignedBoxClip};
     CutGeometryFrame frame{CutGeometryFrame::Reference};
     std::string implicit_geometry_mode{};
@@ -96,6 +108,14 @@ struct CutQuadratureConstructionPolicy {
 struct CutQuadratureRule {
     CutQuadratureKind kind{CutQuadratureKind::Volume};
     CutIntegrationSide side{CutIntegrationSide::Negative};
+    /**
+     * Dimension of the integration set in the parent cell. A negative value
+     * selects the legacy inference (cell dimension for Volume and parent
+     * dimension minus one for Face/Interface). Generated codimension-two
+     * rules must set this explicitly: zero for a point in 2D and one for a
+     * line in 3D.
+     */
+    int geometric_dimension{-1};
     std::vector<CutQuadraturePoint> points{};
     Real measure{0.0};
     Real parent_measure{0.0};
@@ -109,6 +129,29 @@ struct CutQuadratureRule {
     bool curved_geometry{false};
     bool full_cell_equivalent{false};
 };
+
+using CutGeometryJacobian = std::array<std::array<Real, 3>, 3>;
+
+/** Physical geometry obtained by mapping one reference codimension-two point. */
+struct MappedCutCodimensionTwoGeometry {
+    std::array<Real, 3> interface_normal{{1.0, 0.0, 0.0}};
+    std::array<Real, 3> boundary_normal{{0.0, 1.0, 0.0}};
+    std::array<Real, 3> tangent{{1.0, 0.0, 0.0}};
+    Real measure_scale{1.0};
+    Real weight{0.0};
+};
+
+/**
+ * Map a strict reference-frame d-2 quadrature point to physical geometry.
+ * In 2D the point weight is invariant. In 3D the line weight receives
+ * `|J t_ref|`; covectors (both normals) receive `J^{-T}` and are normalized.
+ */
+[[nodiscard]] MappedCutCodimensionTwoGeometry
+mapReferenceCutCodimensionTwoGeometry(
+    const CutQuadraturePoint& point,
+    int parent_dimension,
+    const CutGeometryJacobian& jacobian,
+    const CutGeometryJacobian& inverse_jacobian);
 
 struct CutQuadratureValidityPolicy {
     Real min_fraction{1.0e-10};

@@ -90,6 +90,14 @@ public:
     [[nodiscard]] std::uint64_t activeConfigurationEpoch() const override;
     [[nodiscard]] std::uint64_t coordinateConfigurationKey() const override;
     [[nodiscard]] bool cellIdsAreDense() const override { return true; }
+    [[nodiscard]] bool globalEntityIdsAvailable() const override;
+    [[nodiscard]] GlobalIndex getCellGlobalId(GlobalIndex cell_id) const override;
+    [[nodiscard]] GlobalIndex getBoundaryFaceGlobalId(GlobalIndex face_id) const override;
+    [[nodiscard]] int parallelRank() const override;
+    [[nodiscard]] int parallelSize() const override;
+    [[nodiscard]] int getCellOwnerRank(GlobalIndex cell_id) const override;
+    [[nodiscard]] int getBoundaryFaceOwnerRank(
+        GlobalIndex face_id, GlobalIndex parent_cell) const override;
 
     [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override;
     [[nodiscard]] ElementType getCellType(GlobalIndex cell_id) const override;
