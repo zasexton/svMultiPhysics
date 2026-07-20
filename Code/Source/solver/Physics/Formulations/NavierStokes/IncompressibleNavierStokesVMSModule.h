@@ -245,6 +245,11 @@ struct IncompressibleNavierStokesVMSOptions {
         FreeSurfaceKinematicEnforcement kinematic_enforcement{
             FreeSurfaceKinematicEnforcement::None};
         ScalarValue kinematic_penalty{0.0};
+        // Local to this fitted free-surface boundary. Generic weak velocity
+        // conditions retain the module-level Nitsche policy below.
+        FE::Real kinematic_nitsche_gamma{10.0};
+        bool kinematic_nitsche_symmetric{true};
+        bool kinematic_nitsche_scale_with_p{true};
 
         FreeSurfaceCutCellStabilization cut_cell_stabilization{};
         FreeSurfaceVelocityExtension velocity_extension{};

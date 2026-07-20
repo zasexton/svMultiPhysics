@@ -1731,6 +1731,12 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule: penalty free-surface kinematics require a nonzero kinematic_penalty");
     }
+    if (bc.kinematic_enforcement == FreeSurfaceKinematicEnforcement::Nitsche &&
+        (!std::isfinite(bc.kinematic_nitsche_gamma) ||
+         !(bc.kinematic_nitsche_gamma > FE::Real{0.0}))) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: Nitsche free-surface kinematics require a finite positive boundary-local kinematic_nitsche_gamma");
+    }
 
     for (const auto& contact_line : bc.contact_lines) {
         if (contact_line.model == FreeSurfaceContactLineModel::Pinned) {
@@ -3247,9 +3253,9 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: unsupported fitted free-surface normal kinematic policy");
         }
-        if (!(options.nitsche_gamma > 0.0)) {
+        if (!(bc.kinematic_nitsche_gamma > 0.0)) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: Nitsche free-surface kinematics require nitsche_gamma > 0");
+                "IncompressibleNavierStokesVMSModule: Nitsche free-surface kinematics require kinematic_nitsche_gamma > 0");
         }
 
         const auto normal_mismatch = normalTrace(u - mesh_velocity, n);
@@ -3262,18 +3268,18 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
             mu / hNormal(),
             u,
             bc::TraceNitscheOptions{
-                .gamma = options.nitsche_gamma,
-                .variant = options.nitsche_symmetric
+                .gamma = bc.kinematic_nitsche_gamma,
+                .variant = bc.kinematic_nitsche_symmetric
                     ? bc::NitscheVariant::Symmetric
                     : bc::NitscheVariant::Unsymmetric,
-                .scale_with_p = options.nitsche_scale_with_p});
+                .scale_with_p = bc.kinematic_nitsche_scale_with_p});
 
         momentum_form = momentum_form + integrateOnFreeSurface(
             (p - normal_stress_u) * v_normal +
             penalty * normal_mismatch * v_normal,
             bc,
             ale_enabled);
-        if (options.nitsche_symmetric) {
+        if (bc.kinematic_nitsche_symmetric) {
             momentum_form = momentum_form - integrateOnFreeSurface(
                 normal_stress_v * normal_mismatch, bc, ale_enabled);
             continuity_form = continuity_form + integrateOnFreeSurface(
@@ -3340,7 +3346,7 @@ void installFittedFreeSurfaceMeshKinematics(
                 bc.kinematic_penalty,
                 freeSurfaceValueName("ns_free_surface_mesh_kinematic_penalty", bc));
         case FreeSurfaceKinematicEnforcement::Nitsche:
-            return FormExpr::constant(options.nitsche_gamma) / hNormal();
+            return FormExpr::constant(bc.kinematic_nitsche_gamma) / hNormal();
         case FreeSurfaceKinematicEnforcement::None:
             break;
         }

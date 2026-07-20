@@ -2261,12 +2261,12 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceNitscheKinematicsAddsBoun
     opts.enable_ale = true;
     opts.enable_convection = false;
     opts.mesh_velocity_field_name = "mesh_velocity";
-    opts.nitsche_gamma = 16.0;
 
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
         .implementation = ns::FreeSurfaceImplementation::FittedALE,
         .boundary_marker = marker,
         .kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::Nitsche,
+        .kinematic_nitsche_gamma = 16.0,
     });
 
     FE::systems::FESystem system(mesh);
@@ -2311,17 +2311,175 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceNitscheKinematicsRejectsN
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
     opts.enable_convection = false;
-    opts.nitsche_gamma = 0.0;
 
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
         .implementation = ns::FreeSurfaceImplementation::FittedALE,
         .boundary_marker = marker,
         .kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::Nitsche,
+        .kinematic_nitsche_gamma = 0.0,
     });
 
     FE::systems::FESystem system(mesh);
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
     EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+}
+
+TEST(MovingDomainPhysics,
+     FittedFreeSurfaceNitschePoliciesAreBoundaryLocalAndOrderInvariant)
+{
+    constexpr int low_marker = 381;
+    constexpr int high_marker = 382;
+    using Boundary =
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary;
+
+    struct AssemblySnapshot {
+        std::vector<FE::Real> residual;
+        std::vector<FE::Real> jacobian;
+    };
+
+    struct GenericNitschePolicy {
+        FE::Real gamma;
+        bool symmetric;
+        bool scale_with_p;
+    };
+
+    const auto assemble = [](std::vector<Boundary> boundaries,
+                             bool add_generic_weak_velocity,
+                             int active_marker,
+                             GenericNitschePolicy generic_policy =
+                                 {43.0, false, false}) {
+        auto mesh =
+            std::make_shared<SingleTetraBoundaryMeshAccess>(active_marker);
+        auto u_space = makeVelocitySpace(mesh);
+        auto p_space = makePressureSpace(mesh);
+        auto opts = baseNavierStokesOptions();
+        opts.enable_ale = true;
+        opts.enable_convection = false;
+        opts.mesh_velocity_field_name = "mesh_velocity";
+        opts.free_surface = std::move(boundaries);
+
+        // Deliberately distinct from either free-surface policy. These values
+        // belong only to generic weak velocity conditions.
+        opts.nitsche_gamma = generic_policy.gamma;
+        opts.nitsche_symmetric = generic_policy.symmetric;
+        opts.nitsche_scale_with_p = generic_policy.scale_with_p;
+        if (add_generic_weak_velocity) {
+            opts.velocity_dirichlet_weak.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+                    .boundary_marker = active_marker,
+                    .value = {0.25, -0.5, 0.75},
+                });
+        }
+
+        FE::systems::FESystem system(mesh);
+        ns::IncompressibleNavierStokesVMSModule module(
+            u_space, p_space, std::move(opts));
+        module.registerOn(system);
+        system.setup({}, makeSingleTetraSetupInputs());
+
+        const auto mesh_velocity = system.findFieldByName("mesh_velocity");
+        EXPECT_NE(mesh_velocity, FE::INVALID_FIELD_ID);
+        system.setPrescribedFieldCoefficients(
+            mesh_velocity,
+            constantVectorTetraCoefficients(0.25, 0.5, 0.75));
+
+        const auto dofs = system.dofHandler().getNumDofs();
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(dofs), FE::Real{0.0});
+        const std::vector<FE::Real> previous_solution = solution;
+        FE::systems::SystemStateView state;
+        state.dt = 1.0;
+        state.u = std::span<const FE::Real>(solution);
+        state.u_prev = std::span<const FE::Real>(previous_solution);
+        const FE::systems::BackwardDifferenceIntegrator integrator;
+        const auto time_context = integrator.buildContext(
+            /*max_time_derivative_order=*/1, state);
+        state.time_integration = &time_context;
+
+        FE::assembly::DenseMatrixView matrix(dofs);
+        FE::assembly::DenseVectorView residual(dofs);
+        matrix.zero();
+        residual.zero();
+        FE::systems::AssemblyRequest request;
+        request.op = "equations";
+        request.want_matrix = true;
+        request.want_vector = true;
+        const auto result =
+            system.assemble(request, state, &matrix, &residual);
+        EXPECT_TRUE(result.success) << result.error_message;
+
+        AssemblySnapshot snapshot;
+        snapshot.residual.resize(static_cast<std::size_t>(dofs));
+        snapshot.jacobian.resize(
+            static_cast<std::size_t>(dofs * dofs));
+        for (FE::GlobalIndex row = 0; row < dofs; ++row) {
+            snapshot.residual[static_cast<std::size_t>(row)] = residual[row];
+            for (FE::GlobalIndex column = 0; column < dofs; ++column) {
+                snapshot.jacobian[static_cast<std::size_t>(
+                    row * dofs + column)] =
+                    matrix.getMatrixEntry(row, column);
+            }
+        }
+        return snapshot;
+    };
+
+    const Boundary low{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = low_marker,
+        .kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::Nitsche,
+        .kinematic_nitsche_gamma = 7.0,
+        .kinematic_nitsche_symmetric = true,
+        .kinematic_nitsche_scale_with_p = false,
+    };
+    const Boundary high{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = high_marker,
+        .kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::Nitsche,
+        .kinematic_nitsche_gamma = 29.0,
+        .kinematic_nitsche_symmetric = false,
+        .kinematic_nitsche_scale_with_p = true,
+    };
+
+    const auto expect_same = [](const AssemblySnapshot& lhs,
+                                const AssemblySnapshot& rhs) {
+        ASSERT_EQ(lhs.residual.size(), rhs.residual.size());
+        ASSERT_EQ(lhs.jacobian.size(), rhs.jacobian.size());
+        for (std::size_t i = 0; i < lhs.residual.size(); ++i) {
+            EXPECT_NEAR(lhs.residual[i], rhs.residual[i], 1.0e-13);
+        }
+        for (std::size_t i = 0; i < lhs.jacobian.size(); ++i) {
+            EXPECT_NEAR(lhs.jacobian[i], rhs.jacobian[i], 1.0e-13);
+        }
+    };
+
+    const auto forward_on_low =
+        assemble({low, high}, false, low_marker);
+    const auto reverse_on_low =
+        assemble({high, low}, false, low_marker);
+    const auto forward_on_high =
+        assemble({low, high}, false, high_marker);
+    const auto reverse_on_high =
+        assemble({high, low}, false, high_marker);
+    expect_same(forward_on_low, reverse_on_low);
+    expect_same(forward_on_high, reverse_on_high);
+
+    const auto low_only = assemble({low}, false, low_marker);
+    const auto high_only = assemble({high}, false, high_marker);
+    expect_same(forward_on_low, low_only);
+    expect_same(forward_on_high, high_only);
+    EXPECT_NE(low_only.residual, high_only.residual);
+    EXPECT_NE(low_only.jacobian, high_only.jacobian);
+
+    const auto low_with_other_generic_policy = assemble(
+        {low}, false, low_marker, {61.0, true, true});
+    expect_same(low_only, low_with_other_generic_policy);
+
+    constexpr int generic_marker = 383;
+    const auto generic_with_low_policy =
+        assemble({low}, true, generic_marker);
+    const auto generic_with_high_policy =
+        assemble({high}, true, generic_marker);
+    expect_same(generic_with_low_policy, generic_with_high_policy);
 }
 
 TEST(MovingDomainPhysics, FittedFreeSurfaceKinematicPolicyOptionsAreExplicit)

@@ -2693,19 +2693,19 @@ void append_free_surface_bc(
           {"Kinematic_nitsche_gamma", "KinematicNitscheGamma",
            "Free_surface_nitsche_gamma", "FreeSurfaceNitscheGamma",
            "Nitsche_gamma", "NitscheGamma"})) {
-    options.nitsche_gamma = static_cast<svmp::FE::Real>(*gamma);
+    fs.kinematic_nitsche_gamma = static_cast<svmp::FE::Real>(*gamma);
   }
   if (const auto symmetric = first_defined_bool(
           bc.params,
           {"Kinematic_nitsche_symmetric", "KinematicNitscheSymmetric",
            "Nitsche_symmetric", "NitscheSymmetric"})) {
-    options.nitsche_symmetric = *symmetric;
+    fs.kinematic_nitsche_symmetric = *symmetric;
   }
   if (const auto scale_with_p = first_defined_bool(
           bc.params,
           {"Kinematic_nitsche_scale_with_p", "KinematicNitscheScaleWithP",
            "Nitsche_scale_with_p", "NitscheScaleWithP"})) {
-    options.nitsche_scale_with_p = *scale_with_p;
+    fs.kinematic_nitsche_scale_with_p = *scale_with_p;
   }
 
   const auto cut_cell_stabilization_enabled = first_defined_bool(
