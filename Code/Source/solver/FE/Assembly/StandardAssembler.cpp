@@ -2803,6 +2803,8 @@ void mixCutVolumeBasisCacheHash(std::uint64_t& h, Real value) noexcept
         mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(i));
         mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(rule.kind));
         mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(rule.side));
+        mixCutVolumeBasisCacheHash(
+            h, static_cast<std::uint64_t>(rule.geometric_dimension + 1));
         mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(rule.points.size()));
         mixCutVolumeBasisCacheHash(h, rule.measure);
         mixCutVolumeBasisCacheHash(h, rule.parent_measure);
@@ -2886,10 +2888,10 @@ void mixCutVolumeBasisCacheHash(std::uint64_t& h, Real value) noexcept
     }};
 }
 
-void remapCutInterfaceSurfaceGeometry(AssemblyContext& context,
-                                      const geometry::CutQuadratureRule& rule,
-                                      int dimension,
-                                      const char* error_prefix)
+void remapCutInterfaceGeometry(AssemblyContext& context,
+                               const geometry::CutQuadratureRule& rule,
+                               int dimension,
+                               const char* error_prefix)
 {
     const auto n_qpts = context.numQuadraturePoints();
     FE_THROW_IF(rule.points.size() != static_cast<std::size_t>(n_qpts), FEException,
@@ -2902,8 +2904,36 @@ void remapCutInterfaceSurfaceGeometry(AssemblyContext& context,
     std::vector<AssemblyContext::Vector3D> normals;
     normals.reserve(rule.points.size());
 
+    const int geometric_dimension =
+        rule.geometric_dimension >= 0 ? rule.geometric_dimension
+                                      : dimension - 1;
+    FE_THROW_IF(geometric_dimension < 0 ||
+                    geometric_dimension >= dimension,
+                FEException,
+                std::string(error_prefix) +
+                    ": invalid generated-interface geometric dimension");
+    FE_THROW_IF(geometric_dimension != dimension - 1 &&
+                    geometric_dimension != dimension - 2,
+                FEException,
+                std::string(error_prefix) +
+                    ": only codimension-one and codimension-two generated-interface rules are supported");
+
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const auto& qp = rule.points[static_cast<std::size_t>(q)];
+        if (geometric_dimension == dimension - 2) {
+            geometry::MappedCutCodimensionTwoGeometry mapped;
+            try {
+                mapped = geometry::mapReferenceCutCodimensionTwoGeometry(
+                    qp, dimension, jacobians[q], inverse_jacobians[q]);
+            } catch (const std::invalid_argument& error) {
+                FE_THROW(FEException,
+                         std::string(error_prefix) + ": " + error.what());
+            }
+            normals.push_back(mapped.interface_normal);
+            integration_weights[q] = mapped.weight;
+            continue;
+        }
+
         AssemblyContext::Vector3D n_ref{{qp.normal[0], qp.normal[1], qp.normal[2]}};
         n_ref = normalizeOr(n_ref, AssemblyContext::Vector3D{{Real{1.0}, Real{0.0}, Real{0.0}}});
 
@@ -2911,21 +2941,27 @@ void remapCutInterfaceSurfaceGeometry(AssemblyContext& context,
         const auto n_phys = normalizeOr(n_phys_raw, n_ref);
         normals.push_back(n_phys);
 
-        Real surface_scale = Real{1.0};
-        if (dimension == 3) {
-            surface_scale = std::abs(jacobian_dets[q]) * norm3(n_phys_raw);
-        } else if (dimension == 2) {
-            const AssemblyContext::Vector3D tangent_ref{{-n_ref[1], n_ref[0], Real{0.0}}};
-            const auto tangent_phys = referenceToPhysicalVector(jacobians[q], tangent_ref);
-            surface_scale = norm3(tangent_phys);
+        Real measure_scale = Real{1.0};
+        if (geometric_dimension == dimension - 1 && dimension == 3) {
+            measure_scale = std::abs(jacobian_dets[q]) * norm3(n_phys_raw);
+        } else if (geometric_dimension == dimension - 1 && dimension == 2) {
+            const AssemblyContext::Vector3D tangent_ref{
+                {-n_ref[1], n_ref[0], Real{0.0}}};
+            const auto tangent_phys =
+                referenceToPhysicalVector(jacobians[q], tangent_ref);
+            measure_scale = norm3(tangent_phys);
         } else {
             FE_THROW(FEException,
-                     std::string(error_prefix) + ": generated cut-interface assembly requires a 2D or 3D mesh");
+                     std::string(error_prefix) +
+                         ": generated cut-interface assembly requires a 2D or 3D mesh");
         }
 
-        FE_THROW_IF(!std::isfinite(surface_scale) || surface_scale <= Real{0.0}, FEException,
-                    std::string(error_prefix) + ": invalid cut-interface surface Jacobian");
-        integration_weights[q] = qp.weight * surface_scale;
+        FE_THROW_IF(!std::isfinite(measure_scale) ||
+                        measure_scale <= Real{0.0},
+                    FEException,
+                    std::string(error_prefix) +
+                        ": invalid cut-interface measure Jacobian");
+        integration_weights[q] = qp.weight * measure_scale;
     }
 
     context.setNormals(normals);
@@ -11621,7 +11657,7 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
             prepareGeometry(context_, mesh, cell_id, cut_rule);
             prepareBasis(context_, mesh, cell_id, test_space, trial_space, required_data, cut_rule);
             prepareFrameExplicitGeometry(context_, mesh, cell_id, cell_type, cut_rule, required_data);
-            remapCutInterfaceSurfaceGeometry(
+            remapCutInterfaceGeometry(
                 context_, rule, mesh.dimension(), "StandardAssembler::assembleCutInterfaces");
             context_.markEmbeddedBoundaryFace(cell_id, LocalIndex{0}, active_marker);
 
@@ -11629,7 +11665,7 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
                 prepareGeometry(context_plus, mesh, cell_id, cut_rule);
                 prepareBasis(context_plus, mesh, cell_id, test_space, trial_space, required_data, cut_rule);
                 prepareFrameExplicitGeometry(context_plus, mesh, cell_id, cell_type, cut_rule, required_data);
-                remapCutInterfaceSurfaceGeometry(
+                remapCutInterfaceGeometry(
                     context_plus, rule, mesh.dimension(), "StandardAssembler::assembleCutInterfaces");
                 context_plus.markEmbeddedBoundaryFace(cell_id, LocalIndex{0}, active_marker);
                 orientGeneratedInterfaceContextForSide(

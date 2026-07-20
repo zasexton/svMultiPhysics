@@ -31,6 +31,7 @@
 #include "Forms/FormKernels.h"
 #include "Forms/MonolithicCellKernel.h"
 #include "Forms/Vocabulary.h"
+#include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Spaces/FunctionSpace.h"
 #include "Spaces/HDivSpace.h"
@@ -40,6 +41,7 @@
 #include "Constraints/AffineConstraints.h"
 #include "Elements/LagrangeElement.h"
 #include "Geometry/MappingFactory.h"
+#include "Interfaces/GeneratedActiveBoundaryDomain.h"
 
 #include <algorithm>
 #include <cmath>
@@ -312,6 +314,13 @@ public:
             {2.0, 1.0, 0.0},
             {0.0, 1.0, 0.0},
         };
+        cell_ = {0, 1, 2, 3};
+    }
+
+    explicit AffineSingleQuadMeshAccess(
+        std::array<std::array<Real, 3>, 4> nodes)
+        : nodes_(nodes.begin(), nodes.end())
+    {
         cell_ = {0, 1, 2, 3};
     }
 
@@ -2024,6 +2033,37 @@ public:
     }
 };
 
+class CutInterfaceMeasureKernel final : public AssemblyKernel {
+public:
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::IntegrationWeights;
+    }
+
+    void computeCell(const AssemblyContext&, KernelOutput&) override {}
+
+    [[nodiscard]] bool hasInterfaceFace() const noexcept override { return true; }
+
+    void computeInterfaceFace(const AssemblyContext& ctx_minus,
+                              const AssemblyContext&,
+                              int,
+                              KernelOutput& output_minus,
+                              KernelOutput& output_plus,
+                              KernelOutput& coupling_mp,
+                              KernelOutput& coupling_pm) override
+    {
+        const auto n_test = ctx_minus.numTestDofs();
+        const auto n_trial = ctx_minus.numTrialDofs();
+        output_minus.reserve(n_test, n_trial, false, true);
+        output_plus.reserve(n_test, n_trial, false, false);
+        coupling_mp.reserve(n_test, n_trial, false, false);
+        coupling_pm.reserve(n_test, n_trial, false, false);
+        for (LocalIndex q = 0; q < ctx_minus.numQuadraturePoints(); ++q) {
+            output_minus.vectorEntry(0) += ctx_minus.integrationWeight(q);
+        }
+    }
+};
+
 class CutInterfaceBasisLoadKernel : public AssemblyKernel {
 public:
     explicit CutInterfaceBasisLoadKernel(Real load) : load_(load) {}
@@ -3451,6 +3491,89 @@ interfaces::LevelSetInterfaceDomain makeReferencePlaneInterfaceDomain(int marker
     return domain;
 }
 
+interfaces::GeneratedInterfaceBoundaryIntersectionDomain
+makeReferencePointContactDomain(int marker,
+                                const std::array<Real, 3>& point,
+                                const std::array<Real, 3>& normal)
+{
+    interfaces::GeneratedInterfaceBoundaryIntersectionRequest request;
+    request.source =
+        interfaces::LevelSetInterfaceSource::fromField(FieldId{11}, 0u, 1u);
+    request.generated_domain_id = "unit-reference-contact-point";
+    request.interface_marker = marker + 1000;
+    request.boundary_marker = 17;
+    request.intersection_marker = marker;
+    request.frame = geometry::CutGeometryFrame::Reference;
+
+    interfaces::GeneratedInterfaceBoundaryIntersectionDomain domain(request);
+    interfaces::GeneratedInterfaceBoundaryIntersectionFragment fragment;
+    fragment.parent_cell = 0;
+    fragment.parent_face = 0;
+    fragment.kind =
+        interfaces::GeneratedInterfaceBoundaryIntersectionKind::Point;
+    fragment.measure = Real{1.0};
+    fragment.interface_normal = normal;
+    fragment.quadrature_points.push_back(
+        interfaces::GeneratedInterfaceBoundaryIntersectionQuadraturePoint{
+            .point = point,
+            .parent_coordinate = point,
+            .interface_normal = normal,
+            .weight = Real{1.0},
+            .reference_measure_factor = Real{1.0}});
+    domain.addFragment(std::move(fragment));
+    return domain;
+}
+
+interfaces::GeneratedInterfaceBoundaryIntersectionDomain
+makeReferenceLineContactDomain(int marker,
+                               const std::array<Real, 3>& a,
+                               const std::array<Real, 3>& b,
+                               const std::array<Real, 3>& normal)
+{
+    interfaces::GeneratedInterfaceBoundaryIntersectionRequest request;
+    request.source =
+        interfaces::LevelSetInterfaceSource::fromField(FieldId{12}, 0u, 1u);
+    request.generated_domain_id = "unit-reference-contact-line";
+    request.interface_marker = marker + 1000;
+    request.boundary_marker = 18;
+    request.intersection_marker = marker;
+    request.frame = geometry::CutGeometryFrame::Reference;
+
+    const std::array<Real, 3> delta{
+        {b[0] - a[0], b[1] - a[1], b[2] - a[2]}};
+    const Real reference_length =
+        std::sqrt(delta[0] * delta[0] + delta[1] * delta[1] +
+                  delta[2] * delta[2]);
+    const std::array<Real, 3> tangent{
+        {delta[0] / reference_length,
+         delta[1] / reference_length,
+         delta[2] / reference_length}};
+    const std::array<Real, 3> midpoint{
+        {(a[0] + b[0]) * Real{0.5},
+         (a[1] + b[1]) * Real{0.5},
+         (a[2] + b[2]) * Real{0.5}}};
+
+    interfaces::GeneratedInterfaceBoundaryIntersectionDomain domain(request);
+    interfaces::GeneratedInterfaceBoundaryIntersectionFragment fragment;
+    fragment.parent_cell = 0;
+    fragment.parent_face = 0;
+    fragment.kind =
+        interfaces::GeneratedInterfaceBoundaryIntersectionKind::Segment;
+    fragment.measure = reference_length;
+    fragment.interface_normal = normal;
+    fragment.tangent = tangent;
+    fragment.quadrature_points.push_back(
+        interfaces::GeneratedInterfaceBoundaryIntersectionQuadraturePoint{
+            .point = midpoint,
+            .parent_coordinate = midpoint,
+            .interface_normal = normal,
+            .tangent = tangent,
+            .weight = reference_length,
+            .reference_measure_factor = reference_length});
+    domain.addFragment(std::move(fragment));
+    return domain;
+}
+
 CutIntegrationContext makeTwoCellReferenceCutVolumeContext(int marker)
 {
     CutIntegrationContext context;
@@ -3814,6 +3937,193 @@ TEST(StandardAssemblerCutInterfaces, MapsReferenceInterfaceMeasureToPhysicalSurf
     EXPECT_NEAR(rhs.getVectorEntry(1), 0.0, 1e-12);
     EXPECT_NEAR(rhs.getVectorEntry(2), Real{6.0} / std::sqrt(Real{61.0}), 1e-12);
     EXPECT_NEAR(rhs.getVectorEntry(3), Real{4.0} / std::sqrt(Real{61.0}), 1e-12);
+}
+
+TEST(StandardAssemblerCutInterfaces,
+     SharpActiveBoundaryHalfWetMeasureAndFullyDryResidualAreExact)
+{
+    constexpr int marker = 2314;
+    AffineSingleQuadMeshAccess mesh;
+    spaces::H1Space space(ElementType::Quad4, /*order=*/1);
+    auto dof_map = createSingleCellDofMap(4);
+
+    interfaces::GeneratedActiveBoundaryRequest request;
+    request.source = interfaces::LevelSetInterfaceSource::fromField(
+        FieldId{31}, /*layout_revision=*/2u, /*value_revision=*/7u);
+    request.generated_domain_id = "sharp-active-boundary-assembly";
+    request.interface_marker = 1314;
+    request.boundary_marker = 17;
+    request.active_boundary_marker = marker;
+    request.side = geometry::CutIntegrationSide::Negative;
+    request.quadrature_order = 1;
+    request.source_value_revision = 7u;
+
+    interfaces::GeneratedActiveBoundaryDomain half_wet(request);
+    interfaces::GeneratedActiveBoundaryFragment fragment;
+    fragment.parent_cell = 0;
+    fragment.parent_face = 0;
+    fragment.side = geometry::CutIntegrationSide::Negative;
+    fragment.represented_implicit_geometry_mode = "LinearCorner";
+    fragment.represented_implicit_quadrature_backend = "LinearCorner";
+    fragment.represented_implicit_fallback_status = "None";
+    fragment.boundary_normal = {{0.0, -1.0, 0.0}};
+    fragment.measure = 1.0;
+    fragment.parent_measure = 2.0;
+    fragment.achieved_quadrature_order = 1;
+    fragment.topology_id = "bottom-edge-negative-half";
+    fragment.vertices = {{{-1.0, -1.0, 0.0}}, {{0.0, -1.0, 0.0}}};
+    fragment.quadrature_points.push_back(geometry::CutQuadraturePoint{
+        .point = {{-0.5, -1.0, 0.0}},
+        .normal = fragment.boundary_normal,
+        .weight = 1.0,
+        .parent_coordinate = {{-0.5, -1.0, 0.0}},
+        .reference_measure_factor = 1.0,
+    });
+    half_wet.addFragment(std::move(fragment));
+
+    const auto assemble_measure = [&](const auto& domain) {
+        DenseVectorView rhs(4);
+        CutIntegrationContext cut_context;
+        cut_context.addGeneratedActiveBoundaryDomain(domain);
+        StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        assembler.initialize();
+        CutInterfaceMeasureKernel kernel;
+        const auto result = assembler.assembleCutInterfaces(
+            mesh,
+            cut_context,
+            marker,
+            space,
+            space,
+            kernel,
+            nullptr,
+            &rhs,
+            /*assemble_matrix=*/false,
+            /*assemble_vector=*/true);
+        EXPECT_TRUE(result.success);
+        return rhs.getVectorEntry(0);
+    };
+
+    EXPECT_NEAR(assemble_measure(half_wet), 1.0, 1.0e-14);
+
+    interfaces::GeneratedActiveBoundaryDomain fully_dry(request);
+    EXPECT_EQ(assemble_measure(fully_dry), 0.0);
+}
+
+TEST(StandardAssemblerCutInterfaces,
+     CodimensionTwoPointMeasureIsInvariantUnderRotationStretchAndHScaling)
+{
+    constexpr int marker = 1314;
+    constexpr Real sqrt_two = Real{1.4142135623730950488};
+    const auto assemble_measure = [&](Real h) {
+        const std::array<Real, 3> origin{{1.0, -2.0, 0.0}};
+        const std::array<Real, 3> edge_x{
+            {h * sqrt_two, h * sqrt_two, 0.0}};
+        const std::array<Real, 3> edge_y{
+            {-h / sqrt_two, h / sqrt_two, 0.0}};
+        const auto sum = [](const std::array<Real, 3>& a,
+                            const std::array<Real, 3>& b) {
+            return std::array<Real, 3>{{a[0] + b[0],
+                                        a[1] + b[1],
+                                        a[2] + b[2]}};
+        };
+        AffineSingleQuadMeshAccess mesh(
+            std::array<std::array<Real, 3>, 4>{
+                origin,
+                sum(origin, edge_x),
+                sum(sum(origin, edge_x), edge_y),
+                sum(origin, edge_y)});
+        spaces::H1Space space(ElementType::Quad4, /*order=*/1);
+        auto dof_map = createSingleCellDofMap(4);
+        DenseVectorView rhs(4);
+        CutIntegrationContext cut_context;
+        cut_context.addGeneratedInterfaceBoundaryIntersectionDomain(
+            makeReferencePointContactDomain(
+                marker,
+                std::array<Real, 3>{{0.2, -1.0, 0.0}},
+                std::array<Real, 3>{{0.0, -1.0, 0.0}}));
+        StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        assembler.initialize();
+        CutInterfaceMeasureKernel kernel;
+        const auto result = assembler.assembleCutInterfaces(
+            mesh, cut_context, marker, space, space, kernel,
+            nullptr, &rhs, false, true);
+        EXPECT_TRUE(result.success);
+        EXPECT_EQ(result.interface_faces_assembled, 1);
+        return rhs.getVectorEntry(0);
+    };
+
+    EXPECT_NEAR(assemble_measure(Real{0.25}), Real{1.0}, 1e-12);
+    EXPECT_NEAR(assemble_measure(Real{4.0}), Real{1.0}, 1e-12);
+}
+
+TEST(StandardAssemblerCutInterfaces,
+     CodimensionTwoLineUsesAffineTangentJacobianAndCorrectHScaling)
+{
+    constexpr int marker = 1315;
+    constexpr Real inv_sqrt_two = Real{0.7071067811865475244};
+    const std::array<Real, 3> a{{0.1, 0.1, 0.1}};
+    const std::array<Real, 3> b{{0.6, 0.3, 0.1}};
+    const auto assemble_measure = [&](Real h) {
+        const std::array<Real, 3> origin{{-0.5, 0.75, 1.25}};
+        const std::array<Real, 3> col0{
+            {h * Real{2.0} * inv_sqrt_two,
+             h * Real{2.0} * inv_sqrt_two,
+             0.0}};
+        const std::array<Real, 3> col1{
+            {-h * Real{3.0} * inv_sqrt_two,
+             h * Real{3.0} * inv_sqrt_two,
+             0.0}};
+        const std::array<Real, 3> col2{{0.0, 0.0, h * Real{4.0}}};
+        const auto sum = [](const std::array<Real, 3>& x,
+                            const std::array<Real, 3>& y) {
+            return std::array<Real, 3>{{x[0] + y[0],
+                                        x[1] + y[1],
+                                        x[2] + y[2]}};
+        };
+        ConfigurableSingleTetraMeshAccess mesh(
+            std::array<std::array<Real, 3>, 4>{
+                origin,
+                sum(origin, col0),
+                sum(origin, col1),
+                sum(origin, col2)},
+            std::array<GlobalIndex, 4>{0, 1, 2, 3});
+        spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+        auto dof_map = createSingleCellDofMap(4);
+        DenseVectorView rhs(4);
+        CutIntegrationContext cut_context;
+        cut_context.addGeneratedInterfaceBoundaryIntersectionDomain(
+            makeReferenceLineContactDomain(
+                marker,
+                a,
+                b,
+                std::array<Real, 3>{{0.0, 0.0, 1.0}}));
+        StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        assembler.initialize();
+        CutInterfaceMeasureKernel kernel;
+        const auto result = assembler.assembleCutInterfaces(
+            mesh, cut_context, marker, space, space, kernel,
+            nullptr, &rhs, false, true);
+        EXPECT_TRUE(result.success);
+        EXPECT_EQ(result.interface_faces_assembled, 1);
+
+        const std::array<Real, 3> physical_delta{
+            {Real{0.5} * col0[0] + Real{0.2} * col1[0],
+             Real{0.5} * col0[1] + Real{0.2} * col1[1],
+             Real{0.5} * col0[2] + Real{0.2} * col1[2]}};
+        const Real expected =
+            std::sqrt(physical_delta[0] * physical_delta[0] +
+                      physical_delta[1] * physical_delta[1] +
+                      physical_delta[2] * physical_delta[2]);
+        EXPECT_NEAR(rhs.getVectorEntry(0), expected, 1e-12);
+        return rhs.getVectorEntry(0);
+    };
+
+    const Real coarse = assemble_measure(Real{2.0});
+    const Real fine = assemble_measure(Real{0.5});
+    EXPECT_NEAR(coarse / fine, Real{4.0}, 1e-12);
 }
 
 TEST(StandardAssemblerCutInterfaces, AssemblesOneSidedInterfaceLoadOnGeneratedSurface)
