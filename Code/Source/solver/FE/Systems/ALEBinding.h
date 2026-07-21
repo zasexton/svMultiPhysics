@@ -59,6 +59,9 @@ struct ALEBinding {
     void configureInstallOptions(FormInstallOptions& install) const;
 };
 
+void validateALEBinding(const FESystem& system,
+                        const ALEBindingOptions& options);
+
 [[nodiscard]] ALEBinding resolveALEBinding(FESystem& system, ALEBindingOptions options);
 
 } // namespace systems
