@@ -896,6 +896,7 @@ set(FE_GEOMETRY_SOURCES
 set(FE_LEVELSET_HEADERS
     LevelSet/LevelSet.h
     LevelSet/LevelSetConservativePhaseOperator.h
+    LevelSet/LevelSetConservativePhaseState.h
     LevelSet/LevelSetConservativePhaseTransport.h
     LevelSet/LevelSetOptions.h
     LevelSet/LevelSetTransport.h
@@ -912,6 +913,7 @@ set(FE_LEVELSET_HEADERS
 
 set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetConservativePhaseOperator.cpp
+    LevelSet/LevelSetConservativePhaseState.cpp
     LevelSet/LevelSetConservativePhaseTransport.cpp
     LevelSet/LevelSetTransport.cpp
     LevelSet/LevelSetVelocityExtensionConstraint.cpp
@@ -2320,6 +2322,7 @@ if(FE_BUILD_TESTS)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/LevelSet/test_main.cpp)
         set(FE_LEVELSET_TEST_SOURCES
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseOperator.cpp
+            Tests/Unit/LevelSet/test_LevelSetConservativePhaseState.cpp
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseTransport.cpp
             Tests/Unit/LevelSet/test_LevelSetDiagnostics.cpp
             Tests/Unit/LevelSet/test_LevelSetCurvatureProjection.cpp

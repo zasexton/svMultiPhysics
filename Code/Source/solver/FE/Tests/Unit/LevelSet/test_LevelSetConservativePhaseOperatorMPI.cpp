@@ -1,7 +1,10 @@
 #include "LevelSet/LevelSetConservativePhaseOperator.h"
+#include "LevelSet/LevelSetConservativePhaseState.h"
 
 #include "Assembly/Assembler.h"
+#include "Assembly/CutIntegrationContext.h"
 #include "Dofs/EntityDofMap.h"
+#include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemSetup.h"
@@ -46,6 +49,20 @@ public:
     [[nodiscard]] int dimension() const override { return 2; }
     [[nodiscard]] int parallelRank() const override { return rank_; }
     [[nodiscard]] int parallelSize() const override { return 2; }
+    [[nodiscard]] bool globalEntityIdsAvailable() const override
+    {
+        return true;
+    }
+    [[nodiscard]] FE::GlobalIndex getCellGlobalId(
+        FE::GlobalIndex cell) const override
+    {
+        return 10 + cell;
+    }
+    [[nodiscard]] int getCellOwnerRank(
+        FE::GlobalIndex cell) const override
+    {
+        return static_cast<int>(cell);
+    }
     [[nodiscard]] bool revisionTrackingAvailable() const override { return true; }
     [[nodiscard]] std::uint64_t geometryRevision() const override { return 7u; }
     [[nodiscard]] std::uint64_t topologyRevision() const override { return 11u; }
@@ -242,8 +259,41 @@ TEST(LevelSetConservativePhaseOperatorMPI,
             FE::ElementType::Quad4, /*order=*/1),
         .components = 1,
     });
+    const auto phi_field = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = std::make_shared<FE::spaces::H1Space>(
+            FE::ElementType::Quad4, /*order=*/1),
+        .components = 1,
+    });
     system.setup(phaseSetupOptions(rank, MPI_COMM_WORLD),
                  phaseSetupInputs());
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& phi_dofs = system.fieldDofHandler(phi_field);
+    const auto phi_offset = static_cast<std::size_t>(
+        system.fieldDofOffset(phi_field));
+    for (FE::GlobalIndex vertex = 0; vertex < mesh->numVertices(); ++vertex) {
+        const auto dof = vertexDof(phi_dofs, vertex);
+        ASSERT_GE(dof, 0);
+        solution[phi_offset + static_cast<std::size_t>(dof)] =
+            mesh->getNodeCoordinates(vertex)[0] - FE::Real{0.75};
+    }
+    constexpr int interface_marker = 8124;
+    level_set::LevelSetGeneratedInterfaceOptions interface_options;
+    interface_options.level_set_field_name = "phi";
+    interface_options.domain_id = "distributed_phase_state";
+    interface_options.requested_interface_marker = interface_marker;
+    interface_options.interface_quadrature_order = 2;
+    interface_options.volume_quadrature_order = 2;
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto generated = lifecycle.build(
+        system, interface_options, solution);
+    ASSERT_TRUE(generated.success) << generated.diagnostic;
+    auto cut_context =
+        std::make_shared<FE::assembly::CutIntegrationContext>();
+    cut_context->addGeneratedInterfaceDomain(generated.domain);
+    system.setCutIntegrationContext(std::move(cut_context));
 
     const auto graph = level_set::buildLevelSetP1PhaseTransportGraph(
         system, indicator_field);
@@ -260,8 +310,19 @@ TEST(LevelSetConservativePhaseOperatorMPI,
     EXPECT_NEAR(graph.physical_measure, 2.0, 2.0e-14);
     EXPECT_NEAR(graph.total_lumped_control_volume, 2.0, 2.0e-14);
 
+    level_set::LevelSetP1PhaseProjectionOptions projection_options;
+    projection_options.interface_marker = interface_marker;
+    const auto projection =
+        level_set::projectLevelSetP1PhaseIndicatorFromCutContext(
+            system, indicator_field, graph, projection_options);
+    ASSERT_TRUE(projection.success) << projection.diagnostic;
+    EXPECT_TRUE(projection.phase_bounds_satisfied);
+    EXPECT_TRUE(projection.global_measure_closure_satisfied);
+    EXPECT_NEAR(projection.retained_liquid_measure, 0.75, 3.0e-14);
+    EXPECT_NEAR(projection.projected_liquid_measure, 0.75, 3.0e-14);
+
     const auto& dofs = system.fieldDofHandler(indicator_field);
-    std::vector<FE::Real> indicator(graph.nodes, 0.0);
+    std::vector<FE::Real> indicator = projection.liquid_indicator;
     std::vector<FE::Real> lower(graph.nodes, 0.0);
     std::vector<FE::Real> upper(graph.nodes, 1.0);
     std::vector<std::array<FE::Real, 3>> velocity(graph.nodes);
@@ -270,8 +331,6 @@ TEST(LevelSetConservativePhaseOperatorMPI,
         ASSERT_GE(dof, 0);
         const auto index = static_cast<std::size_t>(dof);
         const auto point = mesh->getNodeCoordinates(vertex);
-        indicator[index] = std::clamp(
-            FE::Real{1.5} - point[0], FE::Real{0.0}, FE::Real{1.0});
         velocity[index] = {
             FE::Real{0.8} + FE::Real{0.1} * point[0],
             FE::Real{-0.2} + FE::Real{0.05} * point[1],
@@ -316,6 +375,16 @@ TEST(LevelSetConservativePhaseOperatorMPI,
     MPI_Allreduce(&local_checksum, &maximum_checksum, 1,
                   MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
     EXPECT_EQ(minimum_checksum, maximum_checksum);
+
+    std::vector<FE::Real> minimum_projected(graph.nodes, 0.0);
+    std::vector<FE::Real> maximum_projected(graph.nodes, 0.0);
+    MPI_Allreduce(indicator.data(), minimum_projected.data(),
+                  static_cast<int>(graph.nodes), MPI_DOUBLE, MPI_MIN,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(indicator.data(), maximum_projected.data(),
+                  static_cast<int>(graph.nodes), MPI_DOUBLE, MPI_MAX,
+                  MPI_COMM_WORLD);
+    EXPECT_EQ(minimum_projected, maximum_projected);
 
     const auto stage = level_set::advanceLevelSetP1ConservativePhaseStage(
         graph, indicator, lower, upper, velocity, /*time_step=*/0.02);
