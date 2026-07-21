@@ -650,6 +650,14 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
               summary.quadrature_point_count + 12u);
     EXPECT_NEAR(summary.negative_volume_measure, 0.5, 1.0e-14);
     EXPECT_NEAR(summary.positive_volume_measure, 0.5, 1.0e-14);
+    ASSERT_EQ(square_domain.volumeRegions().size(), 2u);
+    for (const auto& region : square_domain.volumeRegions()) {
+        ASSERT_FALSE(region.reference_subcells.empty());
+        for (const auto& subcell : region.reference_subcells) {
+            EXPECT_EQ(subcell.vertex_count, 3u);
+            EXPECT_DOUBLE_EQ(subcell.measure_scale, 1.0);
+        }
+    }
 
     auto rules = square_domain.volumeQuadratureRules();
     ASSERT_EQ(rules.size(), 2u);
@@ -693,6 +701,14 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
     EXPECT_EQ(summary.total_quadrature_point_count,
               summary.quadrature_point_count +
                   summary.volume_quadrature_point_count);
+    ASSERT_EQ(tetra_domain.volumeRegions().size(), 2u);
+    for (const auto& region : tetra_domain.volumeRegions()) {
+        ASSERT_FALSE(region.reference_subcells.empty());
+        for (const auto& subcell : region.reference_subcells) {
+            EXPECT_EQ(subcell.vertex_count, 4u);
+            EXPECT_DOUBLE_EQ(subcell.measure_scale, 1.0);
+        }
+    }
 
     rules = tetra_domain.volumeQuadratureRules();
     ASSERT_EQ(rules.size(), 2u);

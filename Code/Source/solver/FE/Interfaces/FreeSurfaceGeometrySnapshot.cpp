@@ -1291,6 +1291,99 @@ makePiecewiseAffineMomentCertificate(
         FreeSurfaceGeometryMomentCertificateSource::PiecewiseAffineGeometry);
 }
 
+[[nodiscard]] std::vector<MomentCertificateSample>
+referenceSubcellMomentSamples(
+    std::span<const CutInterfaceReferenceSimplex> subcells,
+    int ambient_dimension,
+    int polynomial_order)
+{
+    if (ambient_dimension < 1 || ambient_dimension > 3 || subcells.empty()) {
+        throw std::invalid_argument(
+            "volume moment certificate requires a nonempty reference-simplex decomposition");
+    }
+    std::vector<MomentCertificateSample> samples;
+    for (const auto& subcell : subcells) {
+        const auto expected_vertex_count =
+            static_cast<std::uint8_t>(ambient_dimension + 1);
+        if (subcell.vertex_count != expected_vertex_count ||
+            !std::isfinite(subcell.measure_scale) ||
+            !(subcell.measure_scale > Real{0.0})) {
+            throw std::invalid_argument(
+                "volume moment certificate has an invalid reference simplex");
+        }
+        const ElementType element_type =
+            ambient_dimension == 1
+                ? ElementType::Line2
+                : (ambient_dimension == 2 ? ElementType::Triangle3
+                                          : ElementType::Tetra4);
+        const auto quadrature = quadrature::QuadratureFactory::create(
+            element_type, polynomial_order);
+        const auto& a = subcell.vertices[0];
+        const auto ab = subtractPoint(subcell.vertices[1], a);
+        const auto ac = ambient_dimension >= 2
+                            ? subtractPoint(subcell.vertices[2], a)
+                            : std::array<Real, 3>{{0.0, 0.0, 0.0}};
+        const auto ad = ambient_dimension == 3
+                            ? subtractPoint(subcell.vertices[3], a)
+                            : std::array<Real, 3>{{0.0, 0.0, 0.0}};
+        const Real jacobian =
+            ambient_dimension == 1
+                ? Real{0.5} * norm(ab)
+                : (ambient_dimension == 2
+                       ? norm(crossPoint(ab, ac))
+                       : std::abs(ab[0] * (ac[1] * ad[2] - ac[2] * ad[1]) -
+                                  ab[1] * (ac[0] * ad[2] - ac[2] * ad[0]) +
+                                  ab[2] * (ac[0] * ad[1] - ac[1] * ad[0])));
+        if (!(jacobian > Real{0.0}) || !std::isfinite(jacobian)) {
+            throw std::invalid_argument(
+                "volume moment certificate has a degenerate reference simplex");
+        }
+        samples.reserve(samples.size() + quadrature->num_points());
+        for (std::size_t q = 0; q < quadrature->num_points(); ++q) {
+            const auto coordinate = quadrature->point(q);
+            std::array<Real, 3> point{};
+            if (ambient_dimension == 1) {
+                const Real t = Real{0.5} * (coordinate[0] + Real{1.0});
+                point = {{a[0] + t * ab[0],
+                          a[1] + t * ab[1],
+                          a[2] + t * ab[2]}};
+            } else {
+                point = {{a[0] + coordinate[0] * ab[0] +
+                                     coordinate[1] * ac[0],
+                          a[1] + coordinate[0] * ab[1] +
+                                     coordinate[1] * ac[1],
+                          a[2] + coordinate[0] * ab[2] +
+                                     coordinate[1] * ac[2]}};
+                if (ambient_dimension == 3) {
+                    point[0] += coordinate[2] * ad[0];
+                    point[1] += coordinate[2] * ad[1];
+                    point[2] += coordinate[2] * ad[2];
+                }
+            }
+            samples.push_back(MomentCertificateSample{
+                .point = point,
+                .weight = quadrature->weight(q) * jacobian *
+                          subcell.measure_scale});
+        }
+    }
+    return samples;
+}
+
+[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+makeReferenceSubcellMomentCertificate(
+    std::span<const CutInterfaceReferenceSimplex> subcells,
+    const geometry::CutQuadratureRule& rule,
+    int ambient_dimension)
+{
+    const auto samples = referenceSubcellMomentSamples(
+        subcells, ambient_dimension, rule.exact_polynomial_order);
+    return makeMomentCertificateFromSamples(
+        samples,
+        ambient_dimension,
+        rule.exact_polynomial_order,
+        FreeSurfaceGeometryMomentCertificateSource::PiecewiseAffineGeometry);
+}
+
 [[nodiscard]] FreeSurfaceGeometryMomentCertificate
 makeStoredGeneratedMomentCertificate(
     const geometry::CutQuadratureRule& rule,
@@ -1348,6 +1441,11 @@ makeVolumeRegionMomentCertificate(
     if (rule.full_cell_equivalent) {
         throw std::invalid_argument(
             "full-cell moment certificates require the parent reference element");
+    }
+    if (rule.frame == geometry::CutGeometryFrame::Reference &&
+        !region.reference_subcells.empty()) {
+        return makeReferenceSubcellMomentCertificate(
+            region.reference_subcells, rule, ambient_dimension);
     }
     if (rule.frame == geometry::CutGeometryFrame::Reference &&
         rule.exact_polynomial_order <= 1) {
@@ -2355,6 +2453,8 @@ std::size_t FreeSurfaceGeometrySnapshot::residentBytes() const noexcept
         bytes += region.topology_id.capacity();
         bytes += region.implicit_quadrature_backend.capacity();
         bytes += region.implicit_fallback_status.capacity();
+        bytes += region.reference_subcells.capacity() *
+                 sizeof(CutInterfaceReferenceSimplex);
         bytes += region.quadrature_points.capacity() *
                  sizeof(geometry::CutQuadraturePoint);
     }

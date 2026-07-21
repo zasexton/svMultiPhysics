@@ -293,6 +293,21 @@ struct CutInterfaceQuadraturePoint {
     Real gradient_norm{0.0};
 };
 
+/**
+ * Affine reference simplex retained independently of a generated volume rule.
+ *
+ * The vertices describe the source-region decomposition used to certify
+ * polynomial moments without reusing the rule's quadrature samples.  A
+ * segment has two vertices, a triangle three, and a tetrahedron four.
+ * measure_scale records an explicit conservative normalization applied by the
+ * backend after constructing the geometric decomposition.
+ */
+struct CutInterfaceReferenceSimplex {
+    std::uint8_t vertex_count{0u};
+    std::array<std::array<Real, 3>, 4> vertices{};
+    Real measure_scale{1.0};
+};
+
 struct CutInterfaceVolumeRegion {
     int interface_marker{-1};
     MeshIndex parent_cell{static_cast<MeshIndex>(-1)};
@@ -313,6 +328,7 @@ struct CutInterfaceVolumeRegion {
     std::string implicit_fallback_status{};
     bool full_cell_equivalent{false};
     int achieved_quadrature_order{-1};
+    std::vector<CutInterfaceReferenceSimplex> reference_subcells{};
     std::vector<geometry::CutQuadraturePoint> quadrature_points{};
 
     [[nodiscard]] bool active() const noexcept {

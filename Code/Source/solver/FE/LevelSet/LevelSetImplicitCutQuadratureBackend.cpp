@@ -632,6 +632,98 @@ constexpr int kTerminalTopologyExtraSubdivisionDepth = 2;
              (tet.a[2] + tet.b[2] + tet.c[2] + tet.d[2]) / Real{4.0}}};
 }
 
+[[nodiscard]] interfaces::CutInterfaceReferenceSimplex referenceTriangle(
+    const std::array<Real, 3>& a,
+    const std::array<Real, 3>& b,
+    const std::array<Real, 3>& c) noexcept
+{
+    interfaces::CutInterfaceReferenceSimplex simplex;
+    simplex.vertex_count = 3u;
+    simplex.vertices[0] = a;
+    simplex.vertices[1] = b;
+    simplex.vertices[2] = c;
+    return simplex;
+}
+
+[[nodiscard]] interfaces::CutInterfaceReferenceSimplex referenceTetrahedron(
+    const std::array<Real, 3>& a,
+    const std::array<Real, 3>& b,
+    const std::array<Real, 3>& c,
+    const std::array<Real, 3>& d) noexcept
+{
+    interfaces::CutInterfaceReferenceSimplex simplex;
+    simplex.vertex_count = 4u;
+    simplex.vertices[0] = a;
+    simplex.vertices[1] = b;
+    simplex.vertices[2] = c;
+    simplex.vertices[3] = d;
+    return simplex;
+}
+
+[[nodiscard]] Real referenceSimplexMeasure(
+    const interfaces::CutInterfaceReferenceSimplex& simplex,
+    int dimension) noexcept
+{
+    if (simplex.vertex_count != static_cast<std::uint8_t>(dimension + 1)) {
+        return Real{-1.0};
+    }
+    for (std::size_t i = 0u; i < simplex.vertex_count; ++i) {
+        if (!finiteArray(simplex.vertices[i])) {
+            return Real{-1.0};
+        }
+    }
+    if (!std::isfinite(simplex.measure_scale) ||
+        !(simplex.measure_scale > Real{0.0})) {
+        return Real{-1.0};
+    }
+    const auto ab = subtract(simplex.vertices[1], simplex.vertices[0]);
+    Real measure = Real{-1.0};
+    if (dimension == 2) {
+        const auto ac = subtract(simplex.vertices[2], simplex.vertices[0]);
+        measure = Real{0.5} * norm3(cross(ab, ac));
+    } else if (dimension == 3) {
+        const auto ac = subtract(simplex.vertices[2], simplex.vertices[0]);
+        const auto ad = subtract(simplex.vertices[3], simplex.vertices[0]);
+        measure = std::abs(dot(ab, cross(ac, ad))) / Real{6.0};
+    }
+    if (!std::isfinite(measure) || !(measure > Real{0.0})) {
+        return Real{-1.0};
+    }
+    return measure * simplex.measure_scale;
+}
+
+[[nodiscard]] std::vector<interfaces::CutInterfaceReferenceSimplex>
+rectangleReferenceSubcells(const Rectangle2D& rect)
+{
+    const std::array<Real, 3> v0{{rect.xmin, rect.ymin, 0.0}};
+    const std::array<Real, 3> v1{{rect.xmax, rect.ymin, 0.0}};
+    const std::array<Real, 3> v2{{rect.xmax, rect.ymax, 0.0}};
+    const std::array<Real, 3> v3{{rect.xmin, rect.ymax, 0.0}};
+    return {referenceTriangle(v0, v1, v2),
+            referenceTriangle(v0, v2, v3)};
+}
+
+[[nodiscard]] std::vector<interfaces::CutInterfaceReferenceSimplex>
+boxReferenceSubcells(const Box3D& box)
+{
+    const std::array<Real, 3> v0{{box.xmin, box.ymin, box.zmin}};
+    const std::array<Real, 3> v1{{box.xmax, box.ymin, box.zmin}};
+    const std::array<Real, 3> v2{{box.xmax, box.ymax, box.zmin}};
+    const std::array<Real, 3> v3{{box.xmin, box.ymax, box.zmin}};
+    const std::array<Real, 3> v4{{box.xmin, box.ymin, box.zmax}};
+    const std::array<Real, 3> v5{{box.xmax, box.ymin, box.zmax}};
+    const std::array<Real, 3> v6{{box.xmax, box.ymax, box.zmax}};
+    const std::array<Real, 3> v7{{box.xmin, box.ymax, box.zmax}};
+    return {
+        referenceTetrahedron(v0, v1, v2, v6),
+        referenceTetrahedron(v0, v2, v3, v6),
+        referenceTetrahedron(v0, v3, v7, v6),
+        referenceTetrahedron(v0, v7, v4, v6),
+        referenceTetrahedron(v0, v4, v5, v6),
+        referenceTetrahedron(v0, v5, v1, v6),
+    };
+}
+
 [[nodiscard]] std::array<Real, 3> midpoint(
     const std::array<Real, 3>& a,
     const std::array<Real, 3>& b) noexcept
@@ -3045,6 +3137,7 @@ void appendFullRectangleRegion(
             region.quadrature_points =
                 rectangleVolumeQuadraturePoints(
                     rect, request.resolvedVolumeQuadratureOrder());
+            region.reference_subcells = rectangleReferenceSubcells(rect);
             for (auto& point : region.quadrature_points) {
                 point.normal = region.normal;
             }
@@ -3101,6 +3194,7 @@ void appendFullBoxRegion(
             region.quadrature_points =
                 boxVolumeQuadraturePoints(
                     box, request.resolvedVolumeQuadratureOrder());
+            region.reference_subcells = boxReferenceSubcells(box);
             for (auto& point : region.quadrature_points) {
                 point.normal = region.normal;
             }
@@ -3155,6 +3249,8 @@ void appendFullTriangleRegion(
             region.quadrature_points =
                 triangleVolumeQuadraturePoints(
                     tri.a, tri.b, tri.c, request.resolvedVolumeQuadratureOrder());
+            region.reference_subcells = {
+                referenceTriangle(tri.a, tri.b, tri.c)};
             for (auto& point : region.quadrature_points) {
                 point.normal = region.normal;
             }
@@ -3211,6 +3307,8 @@ void appendFullTetrahedronRegion(
             region.quadrature_points =
                 tetrahedronVolumeQuadraturePoints(
                     tet, request.resolvedVolumeQuadratureOrder());
+            region.reference_subcells = {
+                referenceTetrahedron(tet.a, tet.b, tet.c, tet.d)};
             for (auto& point : region.quadrature_points) {
                 point.normal = region.normal;
             }
@@ -4418,6 +4516,9 @@ void recordRecursiveBackendDiagnostics(
             point.weight *= scale;
             point.reference_measure_factor *= scale;
         }
+        for (auto& subcell : region.reference_subcells) {
+            subcell.measure_scale *= scale;
+        }
     }
 
     return "; conservative_volume_closure_scale=" + formatReal(scale) +
@@ -5521,6 +5622,30 @@ validateImplicitCutQuadratureBackendCellResult(
                 "; volume_fraction=" + formatReal(region.volume_fraction) +
                 "; quadrature_points=" +
                     std::to_string(region.quadrature_points.size()));
+        }
+        if (!region.reference_subcells.empty()) {
+            const int dimension = element_dimension(linearized_input.element_type);
+            Real subcell_measure_sum = Real{0.0};
+            for (const auto& subcell : region.reference_subcells) {
+                const Real subcell_measure =
+                    referenceSimplexMeasure(subcell, dimension);
+                if (!(subcell_measure > Real{0.0}) ||
+                    !std::isfinite(subcell_measure)) {
+                    return failedValidation(
+                        ImplicitCutQuadratureDiagnosticStatus::Failed,
+                        "implicit cut backend returned an invalid reference-simplex decomposition");
+                }
+                subcell_measure_sum += subcell_measure;
+            }
+            if (std::abs(subcell_measure_sum - region.measure) >
+                measureTolerance(request.tolerance, region.measure)) {
+                return failedValidation(
+                    ImplicitCutQuadratureDiagnosticStatus::Failed,
+                    "implicit cut backend reference-simplex decomposition does not match the region measure"
+                    "; region_measure=" + formatReal(region.measure) +
+                    "; subcell_measure_sum=" +
+                        formatReal(subcell_measure_sum));
+            }
         }
         parent_measure = std::max(parent_measure, region.parent_measure);
         if (region.side == geometry::CutIntegrationSide::Negative) {

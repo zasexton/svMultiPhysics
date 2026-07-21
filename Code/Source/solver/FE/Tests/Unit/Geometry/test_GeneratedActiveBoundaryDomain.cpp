@@ -2,6 +2,7 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
+#include "Interfaces/LevelSetInterfaceBuilder.h"
 
 #include <gtest/gtest.h>
 
@@ -1557,6 +1558,95 @@ TEST(FreeSurfaceGeometrySnapshot,
             snapshotPolicyWithoutBoundary(),
             verticalScalar(),
             "compensating_phase_moment_defects"),
+        std::invalid_argument);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
+     CertifiesQuadraticVolumeRulesFromSourceSubcells)
+{
+    constexpr int interface_marker = 124;
+    const SingleQuadBoundaryMesh mesh;
+    auto make_domain = []() {
+        auto request = interfaceRequest(interface_marker);
+        request.interface_quadrature_order = 1;
+        request.volume_quadrature_order = 2;
+        interfaces::LevelSetCellCutInput input;
+        input.parent_cell = 0;
+        input.element_type = FE::ElementType::Quad4;
+        input.node_coordinates = {
+            {{-1.0, -1.0, 0.0}},
+            {{1.0, -1.0, 0.0}},
+            {{1.0, 1.0, 0.0}},
+            {{-1.0, 1.0, 0.0}},
+        };
+        input.level_set_values = {-1.0, 1.0, 1.0, -1.0};
+        auto cut = interfaces::cutLinearLevelSetCell2D(request, input);
+        interfaces::LevelSetInterfaceDomain domain(request);
+        for (auto& fragment : cut.fragments) {
+            domain.addFragment(std::move(fragment));
+        }
+        for (auto& region : cut.volume_regions) {
+            domain.addVolumeRegion(std::move(region));
+        }
+        return domain;
+    };
+
+    auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        make_domain(),
+        {},
+        {},
+        mesh,
+        snapshotPolicyWithoutBoundary(),
+        verticalScalar(),
+        "source_subcell_quadratic_volume");
+    ASSERT_NE(snapshot, nullptr);
+    EXPECT_EQ(snapshot->ledger().stored_generated_moment_certificate_count,
+              0u);
+    std::size_t volume_rule_count = 0u;
+    for (const auto& record : snapshot->rules()) {
+        if (record.reference_rule.kind !=
+            FE::geometry::CutQuadratureKind::Volume) {
+            continue;
+        }
+        ++volume_rule_count;
+        EXPECT_EQ(record.reference_rule.exact_polynomial_order, 2);
+        EXPECT_EQ(record.moment_certificate.source,
+                  interfaces::FreeSurfaceGeometryMomentCertificateSource::
+                      PiecewiseAffineGeometry);
+    }
+    EXPECT_EQ(volume_rule_count, 2u);
+
+    auto defect = make_domain();
+    interfaces::LevelSetInterfaceDomain mutated(defect.request());
+    for (auto fragment : defect.fragments()) {
+        mutated.addFragment(std::move(fragment));
+    }
+    bool changed = false;
+    for (auto region : defect.volumeRegions()) {
+        if (!changed &&
+            region.side == FE::geometry::CutIntegrationSide::Negative) {
+            ASSERT_GE(region.quadrature_points.size(), 2u);
+            ASSERT_NEAR(region.quadrature_points[0].weight,
+                        region.quadrature_points[1].weight,
+                        1.0e-15);
+            region.quadrature_points[0].point[1] += 0.05;
+            region.quadrature_points[0].parent_coordinate[1] += 0.05;
+            region.quadrature_points[1].point[1] -= 0.05;
+            region.quadrature_points[1].parent_coordinate[1] -= 0.05;
+            changed = true;
+        }
+        mutated.addVolumeRegion(std::move(region));
+    }
+    ASSERT_TRUE(changed);
+    EXPECT_THROW(
+        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+            std::move(mutated),
+            {},
+            {},
+            mesh,
+            snapshotPolicyWithoutBoundary(),
+            verticalScalar(),
+            "source_subcell_quadratic_volume_defect"),
         std::invalid_argument);
 }
 

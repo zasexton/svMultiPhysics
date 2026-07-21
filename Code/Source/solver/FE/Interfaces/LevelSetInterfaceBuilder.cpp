@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <initializer_list>
 #include <stdexcept>
 #include <utility>
 
@@ -558,15 +559,41 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
                : clipPolygonToPositiveLevelSet(polygon, tolerance);
 }
 
-[[nodiscard]] RegionMoments cutSideMoments2D(
-    const std::vector<std::array<Real, 3>>& points,
-    const std::vector<Real>& signed_values,
-    std::size_t count,
-    geometry::CutIntegrationSide side,
-    Real tolerance)
+[[nodiscard]] CutInterfaceReferenceSimplex makeReferenceSimplex(
+    std::initializer_list<std::array<Real, 3>> vertices)
 {
-    return polygonMoments2D(
-        cutSidePolygon2D(points, signed_values, count, side, tolerance));
+    if (vertices.size() < 2u || vertices.size() > 4u) {
+        throw std::invalid_argument(
+            "reference simplex requires two through four vertices");
+    }
+    CutInterfaceReferenceSimplex simplex;
+    simplex.vertex_count = static_cast<std::uint8_t>(vertices.size());
+    std::copy(vertices.begin(), vertices.end(), simplex.vertices.begin());
+    return simplex;
+}
+
+[[nodiscard]] std::vector<CutInterfaceReferenceSimplex>
+referenceTrianglesFromPolygon(const std::vector<SignedPoint>& polygon,
+                              Real tolerance)
+{
+    std::vector<CutInterfaceReferenceSimplex> triangles;
+    if (polygon.size() < 3u) {
+        return triangles;
+    }
+    const auto& origin = polygon.front().point;
+    const Real minimum_area =
+        std::max(Real{1.0e-30}, tolerance * tolerance);
+    triangles.reserve(polygon.size() - 2u);
+    for (std::size_t i = 1u; i + 1u < polygon.size(); ++i) {
+        const auto& b = polygon[i].point;
+        const auto& c = polygon[i + 1u].point;
+        const Real area =
+            Real{0.5} * norm3(cross(sub(b, origin), sub(c, origin)));
+        if (area > minimum_area) {
+            triangles.push_back(makeReferenceSimplex({origin, b, c}));
+        }
+    }
+    return triangles;
 }
 
 [[nodiscard]] std::vector<geometry::CutQuadraturePoint> polygonQuadrature2D(
@@ -850,6 +877,45 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     return points;
 }
 
+[[nodiscard]] std::vector<CutInterfaceReferenceSimplex>
+referenceTetrahedraFromFaces(
+    const std::vector<std::vector<std::array<Real, 3>>>& faces,
+    Real tolerance)
+{
+    std::vector<std::array<Real, 3>> unique_points;
+    for (const auto& face : faces) {
+        for (const auto& point : face) {
+            addUniquePoint(unique_points, point, tolerance);
+        }
+    }
+    if (unique_points.empty()) {
+        return {};
+    }
+
+    std::array<Real, 3> center{{0.0, 0.0, 0.0}};
+    for (const auto& point : unique_points) {
+        center = add(center, point);
+    }
+    center = scale(center, Real{1.0} / static_cast<Real>(unique_points.size()));
+
+    std::vector<CutInterfaceReferenceSimplex> tetrahedra;
+    const Real minimum_volume =
+        std::max(Real{1.0e-30}, tolerance * tolerance * tolerance);
+    for (const auto& face : faces) {
+        if (face.size() < 3u) {
+            continue;
+        }
+        for (std::size_t i = 1u; i + 1u < face.size(); ++i) {
+            if (tetraVolume(center, face[0], face[i], face[i + 1u]) >
+                minimum_volume) {
+                tetrahedra.push_back(makeReferenceSimplex(
+                    {center, face[0], face[i], face[i + 1u]}));
+            }
+        }
+    }
+    return tetrahedra;
+}
+
 [[nodiscard]] RegionMoments complementMoments(
     const RegionMoments& parent,
     const RegionMoments& part)
@@ -910,7 +976,8 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     const std::string& suffix,
     std::vector<geometry::CutQuadraturePoint> quadrature_points = {},
     bool full_cell_equivalent = false,
-    int achieved_quadrature_order = -1)
+    int achieved_quadrature_order = -1,
+    std::vector<CutInterfaceReferenceSimplex> reference_subcells = {})
 {
     CutInterfaceVolumeRegion region;
     region.interface_marker = request.interface_marker;
@@ -929,6 +996,7 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     region.topology_id = "cell-" + std::to_string(input.parent_cell) + "-" + suffix;
     region.full_cell_equivalent = full_cell_equivalent;
     region.achieved_quadrature_order = achieved_quadrature_order;
+    region.reference_subcells = std::move(reference_subcells);
     for (auto& point : quadrature_points) {
         point.normal = region.normal;
     }
@@ -1253,28 +1321,29 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     }
     fragment.normal = normal;
     fragment.measure = measure;
-    const auto negative_moments =
-        cutSideMoments2D(input.node_coordinates,
+    const auto negative_polygon =
+        cutSidePolygon2D(input.node_coordinates,
                          signed_values,
                          count,
                          geometry::CutIntegrationSide::Negative,
                          request.tolerance);
+    const auto positive_polygon =
+        cutSidePolygon2D(input.node_coordinates,
+                         signed_values,
+                         count,
+                         geometry::CutIntegrationSide::Positive,
+                         request.tolerance);
+    const auto negative_moments = polygonMoments2D(negative_polygon);
     const auto positive_moments =
         complementMoments(parent_moments, negative_moments);
-    auto negative_quadrature =
-        cutSideQuadrature2D(input.node_coordinates,
-                            signed_values,
-                            count,
-                            geometry::CutIntegrationSide::Negative,
-                            request.tolerance,
-                            planar_volume_order);
-    auto positive_quadrature =
-        cutSideQuadrature2D(input.node_coordinates,
-                            signed_values,
-                            count,
-                            geometry::CutIntegrationSide::Positive,
-                            request.tolerance,
-                            planar_volume_order);
+    auto negative_quadrature = polygonQuadrature2D(
+        negative_polygon, request.tolerance, planar_volume_order);
+    auto positive_quadrature = polygonQuadrature2D(
+        positive_polygon, request.tolerance, planar_volume_order);
+    auto negative_reference_subcells = referenceTrianglesFromPolygon(
+        negative_polygon, request.tolerance);
+    auto positive_reference_subcells = referenceTrianglesFromPolygon(
+        positive_polygon, request.tolerance);
     fragment.negative_volume_fraction =
         parent_measure > Real{0.0}
             ? clampFraction(negative_moments.measure / parent_measure)
@@ -1329,7 +1398,8 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          "cut-negative-volume",
                          negative_quadrature,
                          false,
-                         planar_volume_order));
+                         planar_volume_order,
+                         std::move(negative_reference_subcells)));
     appendSideVolumeRegion(
         result,
         makeVolumeRegion(request,
@@ -1346,7 +1416,8 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          "cut-positive-volume",
                          positive_quadrature,
                          false,
-                         planar_volume_order));
+                         planar_volume_order,
+                         std::move(positive_reference_subcells)));
     result.fragments.push_back(std::move(fragment));
     return result;
 }
@@ -1574,6 +1645,10 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
         polyhedronQuadratureFromFaces(negative_faces, request.tolerance);
     auto positive_quadrature =
         polyhedronQuadratureFromFaces(positive_faces, request.tolerance);
+    auto negative_reference_subcells =
+        referenceTetrahedraFromFaces(negative_faces, request.tolerance);
+    auto positive_reference_subcells =
+        referenceTetrahedraFromFaces(positive_faces, request.tolerance);
     fragment.negative_volume_fraction =
         parent_measure > Real{0.0}
             ? clampFraction(negative_moments.measure / parent_measure)
@@ -1622,7 +1697,10 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                          signed_values,
                          0u,
                          "cut-negative-volume",
-                         negative_quadrature));
+                         negative_quadrature,
+                         false,
+                         -1,
+                         std::move(negative_reference_subcells)));
     appendSideVolumeRegion(
         result,
         makeVolumeRegion(request,
@@ -1637,7 +1715,10 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                          signed_values,
                          1u,
                          "cut-positive-volume",
-                         positive_quadrature));
+                         positive_quadrature,
+                         false,
+                         -1,
+                         std::move(positive_reference_subcells)));
     result.fragments.push_back(std::move(fragment));
     return result;
 }

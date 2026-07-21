@@ -5643,6 +5643,21 @@ TEST(LevelSetInterfaceLifecycle, LinearBackendOutputPassesCommonValidation)
         side_measure += region.measure;
     }
     EXPECT_NEAR(side_measure, parent_measure, 1.0e-12);
+
+    auto malformed_result = result;
+    ASSERT_FALSE(malformed_result.cut.volume_regions.empty());
+    ASSERT_FALSE(malformed_result.cut.volume_regions.front()
+                     .reference_subcells.empty());
+    malformed_result.cut.volume_regions.front()
+        .reference_subcells.front()
+        .measure_scale *= 2.0;
+    const auto malformed_validation =
+        level_set::validateImplicitCutQuadratureBackendCellResult(
+            request, backend_input, malformed_result);
+    EXPECT_FALSE(malformed_validation.ok);
+    EXPECT_NE(malformed_validation.diagnostic.find(
+                  "reference-simplex decomposition does not match"),
+              std::string::npos);
 }
 
 TEST(LevelSetInterfaceLifecycle, InvalidBackendOutputIsRejected)
@@ -6151,6 +6166,16 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP1LineMatchesLinearMeasures)
     EXPECT_NEAR(result.summary.negative_volume_measure, 2.0, 1.0e-12);
     EXPECT_NEAR(result.summary.positive_volume_measure, 2.0, 1.0e-12);
     EXPECT_NEAR(result.summary.measure, 2.0, 1.0e-12);
+    for (const auto& region : result.domain.volumeRegions()) {
+        if (!region.active() || region.full_cell_equivalent) {
+            continue;
+        }
+        ASSERT_FALSE(region.reference_subcells.empty());
+        for (const auto& subcell : region.reference_subcells) {
+            EXPECT_EQ(subcell.vertex_count, 3u);
+            EXPECT_GT(subcell.measure_scale, 0.0);
+        }
+    }
 }
 
 TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleSeededLineCutsMatchAnalyticAreas)
@@ -6257,6 +6282,16 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP1PlaneMatchesHexMeasures)
     EXPECT_NEAR(result.summary.negative_volume_measure, 4.0, 1.0e-12);
     EXPECT_NEAR(result.summary.positive_volume_measure, 4.0, 1.0e-12);
     EXPECT_NEAR(result.summary.measure, 4.0, 1.0e-12);
+    for (const auto& region : result.domain.volumeRegions()) {
+        if (!region.active() || region.full_cell_equivalent) {
+            continue;
+        }
+        ASSERT_FALSE(region.reference_subcells.empty());
+        for (const auto& subcell : region.reference_subcells) {
+            EXPECT_EQ(subcell.vertex_count, 4u);
+            EXPECT_GT(subcell.measure_scale, 0.0);
+        }
+    }
 }
 
 TEST(LevelSetInterfaceLifecycle,
