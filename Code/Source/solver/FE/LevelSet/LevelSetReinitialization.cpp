@@ -7,11 +7,14 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -27,37 +30,58 @@ using interfaces::CutInterfaceFragmentKind;
 using interfaces::LevelSetCellCutInput;
 using interfaces::LevelSetInterfaceSource;
 
-void rejectDistributedProjectionReinitialization(
-    const dofs::DofHandler& dof_handler)
-{
 #if FE_HAS_MPI
+[[nodiscard]] bool usesMultipleRanks(const dofs::DofHandler& dof_handler)
+{
     int initialized = 0;
     int finalized = 0;
     MPI_Initialized(&initialized);
     if (initialized != 0) {
         MPI_Finalized(&finalized);
     }
-    if (initialized != 0 && finalized == 0 &&
-        dof_handler.mpiComm() != MPI_COMM_NULL) {
-        int communicator_size = 1;
-        MPI_Comm_size(dof_handler.mpiComm(), &communicator_size);
-        if (communicator_size > 1) {
-            throw std::invalid_argument(
-                "level-set signed-distance projection reinitialization is "
-                "unsupported on MPI communicators with more than one rank: "
-                "interface primitive construction and coefficient binding "
-                "are currently rank-local");
-        }
+    if (initialized == 0 || finalized != 0 ||
+        dof_handler.mpiComm() == MPI_COMM_NULL) {
+        return false;
     }
-#else
-    (void)dof_handler;
-#endif
+
+    int communicator_size = 1;
+    MPI_Comm_size(dof_handler.mpiComm(), &communicator_size);
+    return communicator_size > 1;
 }
+
+[[nodiscard]] MPI_Datatype mpiRealType()
+{
+    if constexpr (std::is_same_v<Real, double>) {
+        return MPI_DOUBLE;
+    } else if constexpr (std::is_same_v<Real, float>) {
+        return MPI_FLOAT;
+    } else {
+        return MPI_LONG_DOUBLE;
+    }
+}
+#endif
 
 struct SurfacePrimitive {
     CutInterfaceFragmentKind kind{CutInterfaceFragmentKind::Segment};
     GlobalIndex parent_cell{-1};
     std::vector<std::array<Real, 3>> points{};
+};
+
+struct EdgeZeroCrossing {
+    GlobalIndex dof_a{-1};
+    GlobalIndex dof_b{-1};
+    std::array<Real, 3> point_a{};
+    std::array<Real, 3> point_b{};
+    Real original_t{0.0};
+};
+
+struct CutCellPrimitiveData {
+    int owner_rank{0};
+    GlobalIndex parent_cell{-1};
+    ElementType element_type{ElementType::Unknown};
+    std::vector<GlobalIndex> dofs{};
+    std::vector<SurfacePrimitive> primitives{};
+    std::vector<EdgeZeroCrossing> crossings{};
 };
 
 [[nodiscard]] Real dot(const std::array<Real, 3>& a,
@@ -303,12 +327,15 @@ struct SurfacePrimitive {
 
 struct LinearInterfacePrimitiveSet {
     std::vector<SurfacePrimitive> primitives{};
-    std::vector<GlobalIndex> cut_cell_ids{};
-    std::size_t cut_cells{0u};
+    std::vector<CutCellPrimitiveData> cut_cells{};
 };
+
+[[nodiscard]] std::vector<std::array<std::size_t, 2>> cornerEdges(
+    ElementType type);
 
 [[nodiscard]] LinearInterfacePrimitiveSet buildLinearInterfacePrimitives(
     const assembly::IMeshAccess& mesh,
+    const dofs::DofHandler& field_dofs,
     const dofs::EntityDofMap& entity_map,
     Real tolerance,
     std::span<const Real> coefficients)
@@ -322,7 +349,7 @@ struct LinearInterfacePrimitiveSet {
     LinearInterfacePrimitiveSet output;
     std::vector<GlobalIndex> cell_nodes;
     std::vector<std::array<Real, 3>> cell_coordinates;
-    mesh.forEachCell([&](GlobalIndex cell_id) {
+    mesh.forEachOwnedCell([&](GlobalIndex cell_id) {
         const auto type = mesh.getCellType(cell_id);
         const std::size_t count = cornerCount(type);
         if (count == 0u) {
@@ -358,27 +385,386 @@ struct LinearInterfacePrimitiveSet {
             return;
         }
 
-        bool added_cell_fragment = false;
+        CutCellPrimitiveData cell_data;
+        cell_data.owner_rank = mesh.parallelRank();
+        cell_data.parent_cell = mesh.globalEntityIdsAvailable()
+                                    ? mesh.getCellGlobalId(cell_id)
+                                    : cell_id;
+        cell_data.element_type = type;
+        const auto cell_dofs = field_dofs.getCellDofs(cell_id);
+        cell_data.dofs.assign(cell_dofs.begin(), cell_dofs.end());
         for (const auto& fragment : cut_result.fragments) {
             if (!fragment.active()) {
                 continue;
             }
             SurfacePrimitive primitive;
             primitive.kind = fragment.kind;
-            primitive.parent_cell = cell_id;
+            primitive.parent_cell = cell_data.parent_cell;
             primitive.points.reserve(fragment.vertices.size());
             for (const auto& vertex : fragment.vertices) {
                 primitive.points.push_back(vertex.point);
             }
-            output.primitives.push_back(std::move(primitive));
-            added_cell_fragment = true;
+            output.primitives.push_back(primitive);
+            cell_data.primitives.push_back(std::move(primitive));
         }
-        if (added_cell_fragment) {
-            output.cut_cell_ids.push_back(cell_id);
-            ++output.cut_cells;
+        if (cell_data.primitives.empty()) {
+            return;
         }
+
+        for (const auto edge : cornerEdges(type)) {
+            if (edge[0] >= count || edge[1] >= count) {
+                continue;
+            }
+            const auto dofs_a = entity_map.getVertexDofs(cell_nodes[edge[0]]);
+            const auto dofs_b = entity_map.getVertexDofs(cell_nodes[edge[1]]);
+            if (dofs_a.size() != 1u || dofs_b.size() != 1u) {
+                continue;
+            }
+            const auto ia = static_cast<std::size_t>(dofs_a.front());
+            const auto ib = static_cast<std::size_t>(dofs_b.front());
+            if (ia >= coefficients.size() || ib >= coefficients.size()) {
+                continue;
+            }
+            const Real a = coefficients[ia];
+            const Real b = coefficients[ib];
+            if (!((a < -tolerance && b > tolerance) ||
+                  (a > tolerance && b < -tolerance))) {
+                continue;
+            }
+            const Real denominator = a - b;
+            if (std::abs(denominator) <= tolerance) {
+                continue;
+            }
+            EdgeZeroCrossing crossing{
+                .dof_a = dofs_a.front(),
+                .dof_b = dofs_b.front(),
+                .point_a = cell_coordinates[edge[0]],
+                .point_b = cell_coordinates[edge[1]],
+                .original_t = std::clamp(a / denominator,
+                                         Real{0.0},
+                                         Real{1.0}),
+            };
+            if (crossing.dof_b < crossing.dof_a) {
+                std::swap(crossing.dof_a, crossing.dof_b);
+                std::swap(crossing.point_a, crossing.point_b);
+                crossing.original_t = Real{1.0} - crossing.original_t;
+            }
+            cell_data.crossings.push_back(std::move(crossing));
+        }
+        output.cut_cells.push_back(std::move(cell_data));
     });
     return output;
+}
+
+#if FE_HAS_MPI
+template <typename T>
+void appendPod(std::vector<std::byte>& bytes, const T& value)
+{
+    static_assert(std::is_trivially_copyable_v<T>);
+    const auto old_size = bytes.size();
+    bytes.resize(old_size + sizeof(T));
+    std::memcpy(bytes.data() + old_size, &value, sizeof(T));
+}
+
+template <typename T>
+[[nodiscard]] T readPod(std::span<const std::byte> bytes,
+                        std::size_t& offset)
+{
+    static_assert(std::is_trivially_copyable_v<T>);
+    if (offset > bytes.size() || sizeof(T) > bytes.size() - offset) {
+        throw std::runtime_error(
+            "distributed level-set reinitialization received a truncated primitive snapshot");
+    }
+    T value{};
+    std::memcpy(&value, bytes.data() + offset, sizeof(T));
+    offset += sizeof(T);
+    return value;
+}
+
+[[nodiscard]] std::vector<std::byte> serializePrimitiveSet(
+    const LinearInterfacePrimitiveSet& set)
+{
+    std::vector<std::byte> bytes;
+    appendPod(bytes, static_cast<std::uint64_t>(set.cut_cells.size()));
+    for (const auto& cell : set.cut_cells) {
+        appendPod(bytes, static_cast<std::int32_t>(cell.owner_rank));
+        appendPod(bytes, static_cast<std::int64_t>(cell.parent_cell));
+        appendPod(bytes, static_cast<std::uint8_t>(cell.element_type));
+        appendPod(bytes, static_cast<std::uint64_t>(cell.dofs.size()));
+        for (const auto dof : cell.dofs) {
+            appendPod(bytes, static_cast<std::int64_t>(dof));
+        }
+        appendPod(bytes, static_cast<std::uint64_t>(cell.primitives.size()));
+        for (const auto& primitive : cell.primitives) {
+            appendPod(bytes, static_cast<std::uint8_t>(primitive.kind));
+            appendPod(bytes, static_cast<std::int64_t>(primitive.parent_cell));
+            appendPod(bytes,
+                      static_cast<std::uint64_t>(primitive.points.size()));
+            for (const auto& point : primitive.points) {
+                appendPod(bytes, point[0]);
+                appendPod(bytes, point[1]);
+                appendPod(bytes, point[2]);
+            }
+        }
+        appendPod(bytes, static_cast<std::uint64_t>(cell.crossings.size()));
+        for (const auto& crossing : cell.crossings) {
+            appendPod(bytes, static_cast<std::int64_t>(crossing.dof_a));
+            appendPod(bytes, static_cast<std::int64_t>(crossing.dof_b));
+            for (const auto value : crossing.point_a) {
+                appendPod(bytes, value);
+            }
+            for (const auto value : crossing.point_b) {
+                appendPod(bytes, value);
+            }
+            appendPod(bytes, crossing.original_t);
+        }
+    }
+    return bytes;
+}
+
+void appendDeserializedPrimitiveSet(std::span<const std::byte> bytes,
+                                    LinearInterfacePrimitiveSet& output)
+{
+    std::size_t offset = 0u;
+    const auto cell_count = readPod<std::uint64_t>(bytes, offset);
+    for (std::uint64_t cell_index = 0; cell_index < cell_count; ++cell_index) {
+        CutCellPrimitiveData cell;
+        cell.owner_rank = readPod<std::int32_t>(bytes, offset);
+        cell.parent_cell = static_cast<GlobalIndex>(
+            readPod<std::int64_t>(bytes, offset));
+        cell.element_type = static_cast<ElementType>(
+            readPod<std::uint8_t>(bytes, offset));
+
+        const auto dof_count = readPod<std::uint64_t>(bytes, offset);
+        cell.dofs.reserve(static_cast<std::size_t>(dof_count));
+        for (std::uint64_t i = 0; i < dof_count; ++i) {
+            cell.dofs.push_back(static_cast<GlobalIndex>(
+                readPod<std::int64_t>(bytes, offset)));
+        }
+
+        const auto primitive_count = readPod<std::uint64_t>(bytes, offset);
+        cell.primitives.reserve(static_cast<std::size_t>(primitive_count));
+        for (std::uint64_t i = 0; i < primitive_count; ++i) {
+            SurfacePrimitive primitive;
+            primitive.kind = static_cast<CutInterfaceFragmentKind>(
+                readPod<std::uint8_t>(bytes, offset));
+            primitive.parent_cell = static_cast<GlobalIndex>(
+                readPod<std::int64_t>(bytes, offset));
+            const auto point_count = readPod<std::uint64_t>(bytes, offset);
+            primitive.points.reserve(static_cast<std::size_t>(point_count));
+            for (std::uint64_t point = 0; point < point_count; ++point) {
+                primitive.points.push_back({{
+                    readPod<Real>(bytes, offset),
+                    readPod<Real>(bytes, offset),
+                    readPod<Real>(bytes, offset),
+                }});
+            }
+            cell.primitives.push_back(std::move(primitive));
+        }
+
+        const auto crossing_count = readPod<std::uint64_t>(bytes, offset);
+        cell.crossings.reserve(static_cast<std::size_t>(crossing_count));
+        for (std::uint64_t i = 0; i < crossing_count; ++i) {
+            EdgeZeroCrossing crossing;
+            crossing.dof_a = static_cast<GlobalIndex>(
+                readPod<std::int64_t>(bytes, offset));
+            crossing.dof_b = static_cast<GlobalIndex>(
+                readPod<std::int64_t>(bytes, offset));
+            for (auto& value : crossing.point_a) {
+                value = readPod<Real>(bytes, offset);
+            }
+            for (auto& value : crossing.point_b) {
+                value = readPod<Real>(bytes, offset);
+            }
+            crossing.original_t = readPod<Real>(bytes, offset);
+            cell.crossings.push_back(std::move(crossing));
+        }
+        output.cut_cells.push_back(std::move(cell));
+    }
+    if (offset != bytes.size()) {
+        throw std::runtime_error(
+            "distributed level-set reinitialization received trailing primitive snapshot bytes");
+    }
+}
+#endif
+
+[[nodiscard]] LinearInterfacePrimitiveSet globalizePrimitiveSet(
+    const dofs::DofHandler& field_dofs,
+    LinearInterfacePrimitiveSet local)
+{
+#if FE_HAS_MPI
+    if (usesMultipleRanks(field_dofs)) {
+        const auto local_bytes = serializePrimitiveSet(local);
+        if (local_bytes.size() >
+            static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+            throw std::runtime_error(
+                "distributed level-set reinitialization primitive snapshot exceeds MPI count capacity");
+        }
+
+        int communicator_size = 1;
+        MPI_Comm_size(field_dofs.mpiComm(), &communicator_size);
+        const int local_count = static_cast<int>(local_bytes.size());
+        std::vector<int> counts(static_cast<std::size_t>(communicator_size), 0);
+        MPI_Allgather(&local_count,
+                      1,
+                      MPI_INT,
+                      counts.data(),
+                      1,
+                      MPI_INT,
+                      field_dofs.mpiComm());
+        std::vector<int> displacements(counts.size(), 0);
+        std::size_t total = 0u;
+        for (std::size_t rank = 0; rank < counts.size(); ++rank) {
+            if (counts[rank] < 0 ||
+                total > static_cast<std::size_t>(
+                            std::numeric_limits<int>::max() - counts[rank])) {
+                throw std::runtime_error(
+                    "distributed level-set reinitialization primitive gather exceeds MPI displacement capacity");
+            }
+            displacements[rank] = static_cast<int>(total);
+            total += static_cast<std::size_t>(counts[rank]);
+        }
+        std::vector<std::byte> gathered(total);
+        MPI_Allgatherv(local_bytes.data(),
+                       local_count,
+                       MPI_BYTE,
+                       gathered.data(),
+                       counts.data(),
+                       displacements.data(),
+                       MPI_BYTE,
+                       field_dofs.mpiComm());
+
+        LinearInterfacePrimitiveSet global;
+        for (std::size_t rank = 0; rank < counts.size(); ++rank) {
+            const auto begin = static_cast<std::size_t>(displacements[rank]);
+            const auto count = static_cast<std::size_t>(counts[rank]);
+            appendDeserializedPrimitiveSet(
+                std::span<const std::byte>(gathered.data() + begin, count),
+                global);
+        }
+        std::sort(global.cut_cells.begin(),
+                  global.cut_cells.end(),
+                  [](const auto& a, const auto& b) {
+                      return std::pair{a.parent_cell, a.owner_rank} <
+                             std::pair{b.parent_cell, b.owner_rank};
+                  });
+        for (const auto& cell : global.cut_cells) {
+            global.primitives.insert(global.primitives.end(),
+                                     cell.primitives.begin(),
+                                     cell.primitives.end());
+        }
+        return global;
+    }
+#else
+    (void)field_dofs;
+#endif
+    return local;
+}
+
+[[nodiscard]] std::vector<Real> ownerSynchronizedCoefficients(
+    const dofs::DofHandler& field_dofs,
+    std::span<const Real> coefficients)
+{
+    std::vector<Real> synchronized(coefficients.begin(), coefficients.end());
+#if FE_HAS_MPI
+    if (!usesMultipleRanks(field_dofs)) {
+        return synchronized;
+    }
+    if (synchronized.size() >
+        static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            "distributed level-set reinitialization coefficient vector exceeds MPI count capacity");
+    }
+
+    const auto& owned = field_dofs.getPartition().locallyOwned();
+    std::vector<Real> local(synchronized.size(), Real{0.0});
+    std::vector<int> local_owner_count(synchronized.size(), 0);
+    for (std::size_t i = 0; i < synchronized.size(); ++i) {
+        if (owned.contains(static_cast<GlobalIndex>(i))) {
+            local[i] = synchronized[i];
+            local_owner_count[i] = 1;
+        }
+    }
+    std::vector<int> owner_count(synchronized.size(), 0);
+    MPI_Allreduce(local.data(),
+                  synchronized.data(),
+                  static_cast<int>(synchronized.size()),
+                  mpiRealType(),
+                  MPI_SUM,
+                  field_dofs.mpiComm());
+    MPI_Allreduce(local_owner_count.data(),
+                  owner_count.data(),
+                  static_cast<int>(owner_count.size()),
+                  MPI_INT,
+                  MPI_SUM,
+                  field_dofs.mpiComm());
+    if (std::any_of(owner_count.begin(), owner_count.end(),
+                    [](int count) { return count != 1; })) {
+        throw std::runtime_error(
+            "distributed level-set reinitialization requires exactly one owner for every coefficient");
+    }
+#else
+    (void)field_dofs;
+#endif
+    return synchronized;
+}
+
+void synchronizeDofPoints(const dofs::DofHandler& field_dofs,
+                          std::vector<unsigned char>& bound,
+                          std::vector<std::array<Real, 3>>& points)
+{
+#if FE_HAS_MPI
+    if (!usesMultipleRanks(field_dofs)) {
+        return;
+    }
+    if (points.size() >
+        static_cast<std::size_t>(std::numeric_limits<int>::max() / 3)) {
+        throw std::runtime_error(
+            "distributed level-set reinitialization point vector exceeds MPI count capacity");
+    }
+
+    const auto& owned = field_dofs.getPartition().locallyOwned();
+    std::vector<Real> local(points.size() * 3u, Real{0.0});
+    std::vector<Real> global(local.size(), Real{0.0});
+    std::vector<int> local_owner_count(points.size(), 0);
+    std::vector<int> owner_count(points.size(), 0);
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (bound[i] == 0u ||
+            !owned.contains(static_cast<GlobalIndex>(i))) {
+            continue;
+        }
+        local[3u * i] = points[i][0];
+        local[3u * i + 1u] = points[i][1];
+        local[3u * i + 2u] = points[i][2];
+        local_owner_count[i] = 1;
+    }
+    MPI_Allreduce(local.data(),
+                  global.data(),
+                  static_cast<int>(global.size()),
+                  mpiRealType(),
+                  MPI_SUM,
+                  field_dofs.mpiComm());
+    MPI_Allreduce(local_owner_count.data(),
+                  owner_count.data(),
+                  static_cast<int>(owner_count.size()),
+                  MPI_INT,
+                  MPI_SUM,
+                  field_dofs.mpiComm());
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (owner_count[i] != 1) {
+            throw std::runtime_error(
+                "distributed level-set reinitialization could not bind exactly one owner coordinate to every coefficient");
+        }
+        points[i] = {{global[3u * i],
+                      global[3u * i + 1u],
+                      global[3u * i + 2u]}};
+        bound[i] = 1u;
+    }
+#else
+    (void)field_dofs;
+    (void)bound;
+    (void)points;
+#endif
 }
 
 class DisjointSet {
@@ -442,14 +828,6 @@ private:
     }
 }
 
-struct EdgeZeroCrossing {
-    GlobalIndex dof_a{-1};
-    GlobalIndex dof_b{-1};
-    std::array<Real, 3> point_a{};
-    std::array<Real, 3> point_b{};
-    Real original_t{0.0};
-};
-
 struct ZeroSetDisplacementEvaluation {
     bool topology_preserved{true};
     Real max_displacement{0.0};
@@ -458,51 +836,13 @@ struct ZeroSetDisplacementEvaluation {
 };
 
 [[nodiscard]] std::vector<EdgeZeroCrossing> collectOriginalZeroCrossings(
-    const assembly::IMeshAccess& mesh,
-    const dofs::EntityDofMap& entity_map,
-    const LinearInterfacePrimitiveSet& primitive_set,
-    Real tolerance,
-    std::span<const Real> coefficients)
+    const LinearInterfacePrimitiveSet& primitive_set)
 {
     std::vector<EdgeZeroCrossing> crossings;
-    std::vector<GlobalIndex> nodes;
-    std::vector<std::array<Real, 3>> points;
-    for (const auto cell : primitive_set.cut_cell_ids) {
-        mesh.getCellNodes(cell, nodes);
-        mesh.getCellCoordinates(cell, points);
-        for (const auto edge : cornerEdges(mesh.getCellType(cell))) {
-            if (edge[0] >= nodes.size() || edge[1] >= nodes.size() ||
-                edge[0] >= points.size() || edge[1] >= points.size()) {
-                continue;
-            }
-            const auto dofs_a = entity_map.getVertexDofs(nodes[edge[0]]);
-            const auto dofs_b = entity_map.getVertexDofs(nodes[edge[1]]);
-            if (dofs_a.size() != 1u || dofs_b.size() != 1u) {
-                continue;
-            }
-            const auto ia = static_cast<std::size_t>(dofs_a.front());
-            const auto ib = static_cast<std::size_t>(dofs_b.front());
-            if (ia >= coefficients.size() || ib >= coefficients.size()) {
-                continue;
-            }
-            const Real a = coefficients[ia];
-            const Real b = coefficients[ib];
-            if (!((a < -tolerance && b > tolerance) ||
-                  (a > tolerance && b < -tolerance))) {
-                continue;
-            }
-            const Real denom = a - b;
-            if (std::abs(denom) <= tolerance) {
-                continue;
-            }
-            crossings.push_back(EdgeZeroCrossing{
-                .dof_a = dofs_a.front(),
-                .dof_b = dofs_b.front(),
-                .point_a = points[edge[0]],
-                .point_b = points[edge[1]],
-                .original_t = std::clamp(a / denom, Real{0.0}, Real{1.0}),
-            });
-        }
+    for (const auto& cell : primitive_set.cut_cells) {
+        crossings.insert(crossings.end(),
+                         cell.crossings.begin(),
+                         cell.crossings.end());
     }
     std::sort(crossings.begin(), crossings.end(), [](const auto& a, const auto& b) {
         const auto a0 = std::min(a.dof_a, a.dof_b);
@@ -567,7 +907,6 @@ template <typename ForEachDofPoint>
 [[nodiscard]] LevelSetSignedDistanceRepairResult repairSignedDistanceCoefficientsFromPrimitives(
     const assembly::IMeshAccess& mesh,
     const dofs::DofHandler& field_dofs,
-    const dofs::EntityDofMap& entity_map,
     const LevelSetReinitializationOptions& options,
     std::span<const Real> input_coefficients,
     std::vector<Real>& repaired_coefficients,
@@ -577,7 +916,7 @@ template <typename ForEachDofPoint>
     LevelSetSignedDistanceRepairResult result;
     result.method = LevelSetReinitializationMethod::Projection;
     result.interface_fragments = primitive_set.primitives.size();
-    result.cut_cells = primitive_set.cut_cells;
+    result.cut_cells = primitive_set.cut_cells.size();
     if (primitive_set.primitives.empty()) {
         result.success = false;
         result.diagnostic = "level-set signed-distance repair found no active interface fragments";
@@ -602,6 +941,7 @@ template <typename ForEachDofPoint>
     };
 
     for_each_dof_point(collect_dof_point);
+    synchronizeDofPoints(field_dofs, bound, dof_points);
 
     const auto unrepaired =
         static_cast<std::size_t>(std::count(bound.begin(),
@@ -623,19 +963,15 @@ template <typename ForEachDofPoint>
     // primitive distance.
     std::vector<Real> cut_support_distance(
         expected, std::numeric_limits<Real>::infinity());
-    for (const auto cell : primitive_set.cut_cell_ids) {
-        const auto cell_dofs = field_dofs.getCellDofs(cell);
-        for (const auto dof : cell_dofs) {
+    for (const auto& cell : primitive_set.cut_cells) {
+        for (const auto dof : cell.dofs) {
             if (dof < 0 || static_cast<std::size_t>(dof) >= expected) {
                 throw std::invalid_argument(
                     "level-set signed-distance repair found a cut-cell DOF outside the coefficient span");
             }
             auto& local_distance =
                 cut_support_distance[static_cast<std::size_t>(dof)];
-            for (const auto& primitive : primitive_set.primitives) {
-                if (primitive.parent_cell != cell) {
-                    continue;
-                }
+            for (const auto& primitive : cell.primitives) {
                 local_distance = std::min(
                     local_distance,
                     distanceToPrimitiveSupportingGeometry(
@@ -675,10 +1011,9 @@ template <typename ForEachDofPoint>
     // visible on corner edges.
     DisjointSet components(expected);
     std::vector<unsigned char> in_cut_patch(expected, 0u);
-    for (const auto cell : primitive_set.cut_cell_ids) {
-        const auto cell_dofs = field_dofs.getCellDofs(cell);
+    for (const auto& cell : primitive_set.cut_cells) {
         std::optional<std::size_t> first;
-        for (const auto dof : cell_dofs) {
+        for (const auto dof : cell.dofs) {
             if (dof < 0 || static_cast<std::size_t>(dof) >= expected) {
                 throw std::invalid_argument(
                     "level-set signed-distance repair found a cut-cell DOF outside the coefficient span");
@@ -699,14 +1034,13 @@ template <typename ForEachDofPoint>
             component_requires_common_scale.emplace(components.find(i), false);
         }
     }
-    for (const auto cell : primitive_set.cut_cell_ids) {
-        const auto cell_dofs = field_dofs.getCellDofs(cell);
+    for (const auto& cell : primitive_set.cut_cells) {
         const bool high_order =
-            cell_dofs.size() > cornerCount(mesh.getCellType(cell));
+            cell.dofs.size() > cornerCount(cell.element_type);
         if (!high_order) {
             continue;
         }
-        for (const auto dof : cell_dofs) {
+        for (const auto dof : cell.dofs) {
             component_requires_common_scale[components.find(
                 static_cast<std::size_t>(dof))] = true;
         }
@@ -777,12 +1111,7 @@ template <typename ForEachDofPoint>
         }
     }
 
-    const auto crossings = collectOriginalZeroCrossings(
-        mesh,
-        entity_map,
-        primitive_set,
-        options.signed_distance_tolerance,
-        input_coefficients);
+    const auto crossings = collectOriginalZeroCrossings(primitive_set);
     const Real displacement_gate = std::max(
         options.max_zero_set_displacement,
         Real{32.0} * std::numeric_limits<Real>::epsilon());
@@ -1279,8 +1608,6 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
     std::span<const Real> input_coefficients,
     std::vector<Real>& repaired_coefficients)
 {
-    rejectDistributedProjectionReinitialization(level_set_dofs);
-
     const auto expected = static_cast<std::size_t>(level_set_dofs.getNumDofs());
     if (!(options.signed_distance_tolerance > 0.0) ||
         !std::isfinite(options.signed_distance_tolerance)) {
@@ -1322,20 +1649,22 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
             "level-set signed-distance repair requires a scalar nodal field");
     }
 
-    repaired_coefficients.assign(input_coefficients.begin(), input_coefficients.end());
-
-    const auto primitive_set =
+    const auto synchronized = ownerSynchronizedCoefficients(
+        level_set_dofs, input_coefficients);
+    const auto primitive_set = globalizePrimitiveSet(
+        level_set_dofs,
         buildLinearInterfacePrimitives(mesh,
+                                       level_set_dofs,
                                        *entity_map,
                                        options.signed_distance_tolerance,
-                                       input_coefficients);
-    return repairSignedDistanceCoefficientsFromPrimitives(
+                                       synchronized));
+    std::vector<Real> candidate(synchronized.begin(), synchronized.end());
+    auto result = repairSignedDistanceCoefficientsFromPrimitives(
         mesh,
         level_set_dofs,
-        *entity_map,
         options,
-        input_coefficients,
-        repaired_coefficients,
+        synchronized,
+        candidate,
         primitive_set,
         [&](const auto& repair_dof_at_point) {
             for (GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
@@ -1348,6 +1677,8 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
                                     mesh.getNodeCoordinates(vertex));
             }
         });
+    repaired_coefficients = std::move(candidate);
+    return result;
 }
 
 LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
@@ -1357,8 +1688,6 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
     std::span<const Real> input_solution,
     std::vector<Real>& repaired_solution)
 {
-    rejectDistributedProjectionReinitialization(system.dofHandler());
-
     if (!(options.signed_distance_tolerance > 0.0) ||
         !std::isfinite(options.signed_distance_tolerance) ||
         options.max_iterations <= 0 ||
@@ -1385,6 +1714,8 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
     std::copy_n(input_solution.begin() + static_cast<std::ptrdiff_t>(offset),
                 n_field_dofs,
                 field_coefficients.begin());
+    field_coefficients = ownerSynchronizedCoefficients(field_dofs,
+                                                       field_coefficients);
 
     std::vector<Real> repaired_field;
     repaired_field.assign(field_coefficients.begin(), field_coefficients.end());
@@ -1394,11 +1725,13 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
         throw std::invalid_argument(
             "level-set signed-distance repair requires a scalar nodal field");
     }
-    const auto primitive_set =
+    const auto primitive_set = globalizePrimitiveSet(
+        field_dofs,
         buildLinearInterfacePrimitives(mesh_access,
+                                       field_dofs,
                                        *entity_map,
                                        options.signed_distance_tolerance,
-                                       field_coefficients);
+                                       field_coefficients));
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     const auto* native_mesh = system.mesh();
@@ -1406,7 +1739,6 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
         auto result = repairSignedDistanceCoefficientsFromPrimitives(
             mesh_access,
             field_dofs,
-            *entity_map,
             options,
             std::span<const Real>(field_coefficients.data(),
                                   field_coefficients.size()),
@@ -1438,7 +1770,6 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
     auto result = repairSignedDistanceCoefficientsFromPrimitives(
         mesh_access,
         field_dofs,
-        *entity_map,
         options,
         std::span<const Real>(field_coefficients.data(),
                               field_coefficients.size()),
@@ -1470,7 +1801,6 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
     auto result = repairSignedDistanceCoefficientsFromPrimitives(
         mesh_access,
         field_dofs,
-        *entity_map,
         options,
         std::span<const Real>(field_coefficients.data(),
                               field_coefficients.size()),

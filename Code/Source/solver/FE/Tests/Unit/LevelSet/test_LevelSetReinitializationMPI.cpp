@@ -10,10 +10,11 @@
 
 #include <mpi.h>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstddef>
 #include <memory>
-#include <stdexcept>
-#include <string>
 #include <vector>
 
 namespace {
@@ -67,7 +68,7 @@ namespace level_set = svmp::FE::level_set;
 }
 
 TEST(LevelSetReinitializationMPI,
-     ProjectionFailsClosedBeforeMutatingStateOrCandidate)
+     ProjectionUsesGlobalOwnerStateAndInterfaceSnapshot)
 {
     int rank = 0;
     int size = 1;
@@ -86,51 +87,88 @@ TEST(LevelSetReinitializationMPI,
     const auto count =
         static_cast<std::size_t>(system.dofHandler().getNumDofs());
     ASSERT_GE(count, 4u);
+    std::vector<FE::Real> local_x_sum(count, 0.0);
+    std::vector<int> local_x_count(count, 0);
+    const auto& mesh_access = system.meshAccess();
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    std::vector<std::array<FE::Real, 3>> coordinates;
+    mesh_access.forEachCell([&](FE::GlobalIndex cell) {
+        mesh_access.getCellCoordinates(cell, coordinates);
+        const auto dofs = field_dofs.getCellDofs(cell);
+        ASSERT_EQ(dofs.size(), coordinates.size());
+        for (std::size_t local = 0; local < dofs.size(); ++local) {
+            const auto dof = static_cast<std::size_t>(dofs[local]);
+            ASSERT_LT(dof, count);
+            local_x_sum[dof] += coordinates[local][0];
+            ++local_x_count[dof];
+        }
+    });
+
+    std::vector<FE::Real> global_x_sum(count, 0.0);
+    std::vector<int> global_x_count(count, 0);
+    MPI_Allreduce(local_x_sum.data(),
+                  global_x_sum.data(),
+                  static_cast<int>(count),
+                  MPI_DOUBLE,
+                  MPI_SUM,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(local_x_count.data(),
+                  global_x_count.data(),
+                  static_cast<int>(count),
+                  MPI_INT,
+                  MPI_SUM,
+                  MPI_COMM_WORLD);
+
+    std::vector<FE::Real> expected_distance(count, 0.0);
     std::vector<FE::Real> accepted_state(count, 0.0);
-    for (std::size_t i = 0; i < accepted_state.size(); ++i) {
-        accepted_state[i] = FE::Real{-0.35} +
-                            FE::Real{0.2} * static_cast<FE::Real>(i);
+    for (std::size_t i = 0; i < count; ++i) {
+        ASSERT_GT(global_x_count[i], 0);
+        const auto x = global_x_sum[i] /
+                       static_cast<FE::Real>(global_x_count[i]);
+        expected_distance[i] = x - FE::Real{0.5};
+        accepted_state[i] = FE::Real{2.0} * expected_distance[i];
     }
     const auto accepted_state_before = accepted_state;
     std::vector<FE::Real> candidate{FE::Real{91.0},
                                     FE::Real{-17.0},
                                     FE::Real{42.0}};
-    const auto candidate_before = candidate;
 
-    std::string diagnostic;
-    bool rejected = false;
-    try {
-        (void)level_set::repairLevelSetSignedDistanceByProjection(
-            system,
-            phi,
-            level_set::LevelSetReinitializationOptions{},
-            accepted_state,
-            candidate);
-    } catch (const std::invalid_argument& error) {
-        rejected = true;
-        diagnostic = error.what();
+    level_set::LevelSetReinitializationOptions options;
+    options.max_iterations = 2;
+    options.pseudo_time_step_scale = 1.0;
+    options.interface_band_width = 4.0;
+    options.signed_distance_tolerance = 1.0e-12;
+    options.max_zero_set_displacement = 1.0e-12;
+    const auto result = level_set::repairLevelSetSignedDistanceByProjection(
+        system, phi, options, accepted_state, candidate);
+
+    EXPECT_TRUE(result.success) << result.diagnostic;
+    EXPECT_TRUE(result.converged) << result.diagnostic;
+    EXPECT_TRUE(result.zero_set_bound_satisfied);
+    EXPECT_EQ(result.cut_cells, 1u);
+    EXPECT_EQ(result.interface_fragments, 1u);
+    EXPECT_EQ(accepted_state, accepted_state_before);
+    ASSERT_EQ(candidate.size(), expected_distance.size());
+    for (std::size_t i = 0; i < candidate.size(); ++i) {
+        EXPECT_NEAR(candidate[i], expected_distance[i], 1.0e-12);
     }
 
-    EXPECT_TRUE(rejected);
-    EXPECT_NE(diagnostic.find(
-                  "unsupported on MPI communicators with more than one rank"),
-              std::string::npos);
-    EXPECT_NE(diagnostic.find(
-                  "interface primitive construction and coefficient binding "
-                  "are currently rank-local"),
-              std::string::npos);
-    EXPECT_EQ(accepted_state, accepted_state_before);
-    EXPECT_EQ(candidate, candidate_before);
-
-    int local_rejected = rejected ? 1 : 0;
-    int all_rejected = 0;
-    MPI_Allreduce(&local_rejected,
-                  &all_rejected,
+    const auto local_max_error = [&]() {
+        FE::Real value = 0.0;
+        for (std::size_t i = 0; i < candidate.size(); ++i) {
+            value = std::max(value,
+                             std::abs(candidate[i] - expected_distance[i]));
+        }
+        return value;
+    }();
+    FE::Real global_max_error = 0.0;
+    MPI_Allreduce(&local_max_error,
+                  &global_max_error,
                   1,
-                  MPI_INT,
-                  MPI_MIN,
+                  MPI_DOUBLE,
+                  MPI_MAX,
                   MPI_COMM_WORLD);
-    EXPECT_EQ(all_rejected, 1);
+    EXPECT_LE(global_max_error, 1.0e-12);
 }
 
 } // namespace

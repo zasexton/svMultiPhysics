@@ -69,10 +69,11 @@ struct LevelSetSignedDistanceRepairResult {
  * iterative, displacement-bounded projection rather than a
  * Hamilton-Jacobi PDE.  max_iterations and pseudo_time_step_scale control the
  * relaxation and the result reports geometric edge-crossing displacement.
- * Projection reinitialization currently supports single-rank communicators
- * only. Both overloads reject a multi-rank DOF communicator before modifying
- * the output candidate because primitive construction and coefficient binding
- * are rank-local.
+ * On a distributed DOF layout, accepted coefficients and DOF coordinates are
+ * taken from their unique owners, cut primitives and zero-crossing guards are
+ * gathered from owned cells, and every rank evaluates the same immutable
+ * global projection snapshot.  The output candidate is assigned only after
+ * all collective validation and projection work completes.
  */
 [[nodiscard]] LevelSetSignedDistanceRepairResult
 repairLevelSetSignedDistanceByProjection(
