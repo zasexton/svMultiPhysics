@@ -4,6 +4,7 @@
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/MeshAccess.h"
 #include "FE/Dofs/EntityDofMap.h"
+#include "FE/Geometry/CutQuadratureMapping.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "FE/LevelSet/LevelSetRestart.h"
 #include "FE/Spaces/H1Space.h"
@@ -394,7 +395,10 @@ TEST(ActiveDomainOutput, CollectsPhysicalCutVolumeMeasureOnScaledQuad)
   cut_rule.provenance.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
   cut_rule.provenance.parent_entity = 0;
   cut_rule.points.push_back(
-      {{{0.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0}}, 2.0});
+      svmp::FE::geometry::CutQuadraturePoint{
+          .point = {{0.0, 0.0, 0.0}},
+          .normal = {{0.0, 0.0, 1.0}},
+          .weight = 2.0});
 
   const std::vector<const svmp::FE::geometry::CutQuadratureRule*> rules = {
       &cut_rule,
@@ -442,7 +446,10 @@ TEST(ActiveDomainOutput, CollectsPhysicalMeasureForHighOrderCurvedCutRule)
   cut_rule.provenance.implicit_quadrature_backend = "SayeHyperrectangle";
   cut_rule.provenance.achieved_quadrature_order = 4;
   cut_rule.points.push_back(
-      {{{0.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0}}, 2.0});
+      svmp::FE::geometry::CutQuadraturePoint{
+          .point = {{0.0, 0.0, 0.0}},
+          .normal = {{0.0, 0.0, 1.0}},
+          .weight = 2.0});
 
   const std::vector<const svmp::FE::geometry::CutQuadratureRule*> rules = {
       &cut_rule,
@@ -480,31 +487,23 @@ TEST(ActiveDomainOutput, WritesMappedWetVolumeFractionForCurvedRule)
   cut_rule.provenance.implicit_geometry_mode = "HighOrderImplicit";
   cut_rule.provenance.implicit_quadrature_backend = "SayeHyperrectangle";
   cut_rule.points.push_back(
-      {{{0.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0}}, 2.0});
-
-  svmp::FE::geometry::CutQuadratureRule full_rule = cut_rule;
-  full_rule.measure = 4.0;
-  full_rule.parent_measure = 4.0;
-  full_rule.volume_fraction = 1.0;
-  full_rule.full_cell_equivalent = true;
-  full_rule.points.front().weight = 4.0;
+      svmp::FE::geometry::CutQuadraturePoint{
+          .point = {{0.75, 0.5, 0.0}},
+          .normal = {{0.0, 0.0, 1.0}},
+          .weight = 2.0});
 
   const std::vector<const svmp::FE::geometry::CutQuadratureRule*> cut_rules = {
       &cut_rule,
   };
-  const std::vector<const svmp::FE::geometry::CutQuadratureRule*> full_rules = {
-      &full_rule,
-  };
   const auto cut_summary =
       application::core::collectCutVolumeMeasures(mesh_access, cut_rules);
-  const auto full_summary =
-      application::core::collectCutVolumeMeasures(mesh_access, full_rules);
+  const auto parent_physical_measure =
+      svmp::FE::geometry::physicalCellMeasureFromMapping(mesh_access, 0);
 
   ASSERT_EQ(cut_summary.physical_rule_count, 1u);
-  ASSERT_EQ(full_summary.physical_rule_count, 1u);
-  ASSERT_GT(full_summary.physical_measure, 0.0);
+  ASSERT_GT(parent_physical_measure, 0.0);
   const auto expected_fraction =
-      cut_summary.physical_measure / full_summary.physical_measure;
+      cut_summary.physical_measure / parent_physical_measure;
   ASSERT_NE(expected_fraction, cut_rule.volume_fraction);
 
   const auto fields_written =
@@ -556,7 +555,10 @@ TEST(ActiveDomainOutput, HighOrderWetVolumeDriftUsesPhysicalMeasure)
   initial_rule.provenance.implicit_quadrature_backend = "SayeHyperrectangle";
   initial_rule.provenance.achieved_quadrature_order = 4;
   initial_rule.points.push_back(
-      {{{0.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0}}, 2.0});
+      svmp::FE::geometry::CutQuadraturePoint{
+          .point = {{0.0, 0.0, 0.0}},
+          .normal = {{0.0, 0.0, 1.0}},
+          .weight = 2.0});
 
   auto later_rule = initial_rule;
   later_rule.measure = 2.2;
@@ -622,7 +624,10 @@ TEST(ActiveDomainOutput, CollectsPhysicalFullCellMeasureOnDistortedQuad)
   full_rule.provenance.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
   full_rule.provenance.parent_entity = 0;
   full_rule.points.push_back(
-      {{{0.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0}}, 4.0});
+      svmp::FE::geometry::CutQuadraturePoint{
+          .point = {{0.0, 0.0, 0.0}},
+          .normal = {{0.0, 0.0, 1.0}},
+          .weight = 4.0});
 
   const std::vector<const svmp::FE::geometry::CutQuadratureRule*> rules = {
       &full_rule,
@@ -662,7 +667,10 @@ TEST(ActiveDomainOutput, UnflaggedFullMeasureRuleUsesMappedQuadraturePoints)
   rule.provenance.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
   rule.provenance.parent_entity = 0;
   rule.points.push_back(
-      {{{-1.0, -1.0, 0.0}}, {{0.0, 0.0, 1.0}}, 4.0});
+      svmp::FE::geometry::CutQuadraturePoint{
+          .point = {{-1.0, -1.0, 0.0}},
+          .normal = {{0.0, 0.0, 1.0}},
+          .weight = 4.0});
 
   const std::vector<const svmp::FE::geometry::CutQuadratureRule*> rules = {
       &rule,

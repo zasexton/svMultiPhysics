@@ -9,7 +9,6 @@
 
 #include "Assembly/Assembler.h"
 #include "Basis/NodeOrderingConventions.h"
-#include "Quadrature/ImplicitBoundaryIntersectionQuadrature.h"
 
 #include <algorithm>
 #include <cmath>
@@ -711,16 +710,14 @@ buildGeneratedInterfaceBoundaryIntersectionDomain(
             continue;
         }
         for (const auto& face : faces_it->second) {
-            if (mesh.getCellGeometryOrder(fragment.parent_cell) > 1 ||
-                !quadrature::supportsImplicitBoundaryIntersectionQuadrature(
-                    mesh.getCellType(fragment.parent_cell))) {
+            if (face.face_corners.size() < 2u) {
                 auto skipped = skippedFragment(
                     req,
                     fragment.parent_cell,
                     face.face_id,
                     GeneratedInterfaceBoundaryIntersectionDegeneracy::
                         UnsupportedHighOrder,
-                    "high-order boundary intersection is not supported by the linear generated-interface boundary builder");
+                    "the authoritative interface fragment cannot be restricted to this boundary topology");
                 skipped.parent_cell_global_id =
                     mesh.globalEntityIdsAvailable()
                         ? mesh.getCellGlobalId(fragment.parent_cell)

@@ -515,7 +515,8 @@ TEST(GeneratedInterfaceBoundaryIntersectionDomain, ImportsRulesIntoCutContextByG
     EXPECT_TRUE(context.interfaceRulesForMarker(interface_marker).empty());
 }
 
-TEST(GeneratedInterfaceBoundaryIntersectionDomain, HighOrderBoundaryFailsClosed)
+TEST(GeneratedInterfaceBoundaryIntersectionDomain,
+     RestrictsAuthoritativeFragmentOnHighOrderParentGeometry)
 {
     constexpr int interface_marker = 204;
     constexpr int wall_marker = 8;
@@ -534,20 +535,29 @@ TEST(GeneratedInterfaceBoundaryIntersectionDomain, HighOrderBoundaryFailsClosed)
     fragment.parent_cell = 0;
     fragment.kind = CutInterfaceFragmentKind::Polygon;
     fragment.measure = 0.5;
-    fragment.vertices.push_back(CutInterfaceVertex{.point = {{0.25, 0.0, 0.0}}});
-    fragment.vertices.push_back(CutInterfaceVertex{.point = {{0.25, 0.0, 0.75}}});
-    fragment.vertices.push_back(CutInterfaceVertex{.point = {{0.25, 0.75, 0.0}}});
+    fragment.vertices.push_back(
+        CutInterfaceVertex{.point = {{0.25, 0.0, 0.0}},
+                           .parent_coordinate = {{0.25, 0.0, 0.0}}});
+    fragment.vertices.push_back(
+        CutInterfaceVertex{.point = {{0.25, 0.0, 0.75}},
+                           .parent_coordinate = {{0.25, 0.0, 0.75}}});
+    fragment.vertices.push_back(
+        CutInterfaceVertex{.point = {{0.25, 0.75, 0.0}},
+                           .parent_coordinate = {{0.25, 0.75, 0.0}}});
     interface_domain.addFragment(std::move(fragment));
 
     const auto domain = buildGeneratedInterfaceBoundaryIntersectionDomain(
         intersectionRequest(interface_marker, wall_marker), interface_domain, mesh);
 
     const auto summary = domain.summary();
-    EXPECT_EQ(summary.active_fragment_count, 0u);
-    EXPECT_EQ(summary.skipped_fragment_count, 1u);
+    EXPECT_EQ(summary.active_fragment_count, 1u);
+    EXPECT_EQ(summary.skipped_fragment_count, 0u);
     ASSERT_EQ(domain.fragments().size(), 1u);
     EXPECT_EQ(domain.fragments().front().degeneracy,
-              GeneratedInterfaceBoundaryIntersectionDegeneracy::UnsupportedHighOrder);
+              GeneratedInterfaceBoundaryIntersectionDegeneracy::None);
+    EXPECT_NEAR(domain.fragments().front().measure, 0.75, 1.0e-14);
+    EXPECT_EQ(domain.fragments().front().source_interface_stable_id,
+              interface_domain.fragments().front().stable_id);
 }
 
 TEST(GeneratedInterfaceBoundaryIntersectionDomain,

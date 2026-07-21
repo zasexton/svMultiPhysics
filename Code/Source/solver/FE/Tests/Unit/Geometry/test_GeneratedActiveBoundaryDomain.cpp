@@ -1,4 +1,5 @@
 #include "Assembly/CutIntegrationContext.h"
+#include "Basis/NodeOrderingConventions.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 
@@ -22,13 +23,26 @@ public:
                                     int rank = 0,
                                     int size = 1,
                                     int owner_rank = 0,
-                                    bool owned = true)
+                                    bool owned = true,
+                                    FE::ElementType type = FE::ElementType::Quad4,
+                                    std::vector<std::array<FE::Real, 3>>
+                                        coordinates = {})
         : marker_(marker)
         , rank_(rank)
         , size_(size)
         , owner_rank_(owner_rank)
         , owned_(owned)
+        , type_(type)
+        , coordinates_(std::move(coordinates))
     {
+        if (coordinates_.empty()) {
+            coordinates_ = {
+                {{0.0, 0.0, 0.0}},
+                {{1.0, 0.0, 0.0}},
+                {{1.0, 1.0, 0.0}},
+                {{0.0, 1.0, 0.0}},
+            };
+        }
     }
 
     [[nodiscard]] FE::GlobalIndex numCells() const override { return 1; }
@@ -62,11 +76,14 @@ public:
         return owned_ && cell == 0;
     }
     [[nodiscard]] FE::ElementType getCellType(FE::GlobalIndex) const override {
-        return FE::ElementType::Quad4;
+        return type_;
     }
     void getCellNodes(FE::GlobalIndex,
                       std::vector<FE::GlobalIndex>& nodes) const override {
-        nodes = {0, 1, 2, 3};
+        nodes.resize(coordinates_.size());
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            nodes[i] = static_cast<FE::GlobalIndex>(i);
+        }
     }
     [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
         FE::GlobalIndex node) const override {
@@ -75,7 +92,7 @@ public:
     void getCellCoordinates(
         FE::GlobalIndex,
         std::vector<std::array<FE::Real, 3>>& coordinates) const override {
-        coordinates.assign(coordinates_.begin(), coordinates_.end());
+        coordinates = coordinates_;
     }
     [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
         FE::GlobalIndex face,
@@ -119,12 +136,8 @@ private:
     int size_{1};
     int owner_rank_{0};
     bool owned_{true};
-    const std::array<std::array<FE::Real, 3>, 4> coordinates_{{
-        {{0.0, 0.0, 0.0}},
-        {{1.0, 0.0, 0.0}},
-        {{1.0, 1.0, 0.0}},
-        {{0.0, 1.0, 0.0}},
-    }};
+    FE::ElementType type_{FE::ElementType::Quad4};
+    std::vector<std::array<FE::Real, 3>> coordinates_{};
 };
 
 interfaces::CutInterfaceDomainRequest interfaceRequest(int marker)
@@ -609,6 +622,90 @@ TEST(GeneratedActiveBoundaryDomain,
         EXPECT_NEAR(partition.max_partition_error, 0.0, 2.0e-13);
         ++marker;
     }
+}
+
+TEST(GeneratedActiveBoundaryDomain,
+     CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping)
+{
+    constexpr int interface_marker = 260;
+    constexpr int wall_marker = 19;
+    std::vector<std::array<FE::Real, 3>> coordinates;
+    coordinates.reserve(9u);
+    for (std::size_t node = 0u; node < 9u; ++node) {
+        const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(
+            FE::ElementType::Quad9, node);
+        const FE::Real x = xi[0];
+        const FE::Real y = xi[1] + FE::Real{0.1} *
+                                      (FE::Real{1.0} - x * x) *
+                                      (FE::Real{1.0} - xi[1]);
+        coordinates.push_back({{x, y, 0.0}});
+    }
+    const SingleQuadBoundaryMesh mesh(
+        wall_marker,
+        /*rank=*/0,
+        /*size=*/1,
+        /*owner_rank=*/0,
+        /*owned=*/true,
+        FE::ElementType::Quad9,
+        std::move(coordinates));
+    auto interface_domain = verticalInterfaceWithVolumes(interface_marker);
+    auto contact_domain =
+        interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+            contactRequest(interface_marker, wall_marker),
+            interface_domain,
+            mesh);
+
+    std::array<FE::Real, 9> values{};
+    for (std::size_t node = 0u; node < values.size(); ++node) {
+        values[node] = FE::basis::ReferenceNodeLayout::get_node_coords(
+                           FE::ElementType::Quad9, node)[0];
+    }
+    interfaces::GeneratedActiveBoundaryScalarField field;
+    field.value_at_node = [&values](FE::GlobalIndex node) {
+        return values.at(static_cast<std::size_t>(node));
+    };
+    auto negative = interfaces::buildGeneratedActiveBoundaryDomain(
+        activeRequest(interface_marker,
+                      wall_marker,
+                      FE::geometry::CutIntegrationSide::Negative),
+        interface_domain,
+        contact_domain,
+        mesh,
+        field);
+    auto positive = interfaces::buildGeneratedActiveBoundaryDomain(
+        activeRequest(interface_marker,
+                      wall_marker,
+                      FE::geometry::CutIntegrationSide::Positive),
+        interface_domain,
+        contact_domain,
+        mesh,
+        field);
+    EXPECT_NO_THROW(interfaces::validateGeneratedActiveBoundaryPartition(
+        negative, positive, interface_domain, contact_domain, mesh));
+
+    auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        std::move(interface_domain),
+        {std::move(contact_domain)},
+        {std::move(negative), std::move(positive)},
+        mesh,
+        {},
+        verticalScalar(),
+        "curved_quadratic_boundary");
+    const auto wet_rules = snapshot->retainedRules(
+        interfaces::FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary);
+    ASSERT_EQ(wet_rules.size(), 1u);
+    const FE::Real expected_arc =
+        FE::Real{0.5} *
+        (std::sqrt(FE::Real{1.16}) +
+         std::asinh(FE::Real{0.4}) / FE::Real{0.4});
+    EXPECT_GT(wet_rules.front()->physical_rule.physical_measure,
+              wet_rules.front()->reference_rule.measure);
+    EXPECT_NEAR(wet_rules.front()->physical_rule.physical_measure,
+                expected_arc,
+                5.0e-5);
+    EXPECT_NEAR(snapshot->ledger().maximum_boundary_partition_error,
+                0.0,
+                1.0e-12);
 }
 
 TEST(FreeSurfaceGeometrySnapshot,

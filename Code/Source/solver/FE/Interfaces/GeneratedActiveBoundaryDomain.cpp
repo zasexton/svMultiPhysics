@@ -775,10 +775,6 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
     mesh.forEachBoundaryFace(
         req.boundary_marker,
         [&](GlobalIndex face, GlobalIndex cell) {
-            if (mesh.getCellGeometryOrder(cell) > 1) {
-                throw std::invalid_argument(
-                    "sharp active-boundary clipping is not yet supported for high-order parent geometry");
-            }
             const auto type = mesh.getCellType(cell);
             const auto represented = representedImplicitForCell(
                 interface_domain, static_cast<MeshIndex>(cell));
