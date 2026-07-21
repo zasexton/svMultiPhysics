@@ -899,6 +899,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetConservativePhaseArtifact.h
     LevelSet/LevelSetConservativePhaseState.h
     LevelSet/LevelSetConservativePhaseTransport.h
+    LevelSet/LevelSetConservativePhaseRegions.h
     LevelSet/LevelSetOptions.h
     LevelSet/LevelSetTransport.h
     LevelSet/LevelSetVelocityExtensionConstraint.h
@@ -917,6 +918,7 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetConservativePhaseArtifact.cpp
     LevelSet/LevelSetConservativePhaseState.cpp
     LevelSet/LevelSetConservativePhaseTransport.cpp
+    LevelSet/LevelSetConservativePhaseRegions.cpp
     LevelSet/LevelSetTransport.cpp
     LevelSet/LevelSetVelocityExtensionConstraint.cpp
     LevelSet/LevelSetCellEvaluator.cpp
@@ -2326,6 +2328,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseArtifact.cpp
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseBenchmarks.cpp
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseOperator.cpp
+            Tests/Unit/LevelSet/test_LevelSetConservativePhaseRegions.cpp
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseState.cpp
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseTransport.cpp
             Tests/Unit/LevelSet/test_LevelSetDiagnostics.cpp

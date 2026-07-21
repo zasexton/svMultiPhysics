@@ -240,8 +240,8 @@ publication. The writer closes a temporary sibling and atomically publishes a
 no-replacement final link; an existing final or temporary path is a hard
 failure rather than an overwrite.
 
-Each artifact contains accepted step/time and graph revisions; all stage and
-limiter invariant flags and residuals; every nodal control-volume state,
+Artifact schema version 2 contains accepted step/time and graph revisions; all
+stage and limiter invariant flags and residuals; every nodal control-volume state,
 Courant number, source, transfer, factor, and balance; every canonical edge and
 pair-cancellation residual; every resolved and subthreshold component ledger;
 and the complete reinitialization, reconciliation, mismatch, phase-measure,
@@ -249,12 +249,35 @@ geometry-measure, and displacement history for that accepted transaction.
 Serial tests cover schema content, stale-file refusal, malformed-ledger
 rejection, and cadence ordering. The two-rank application test requires a
 rank-local preflight fault to fail collectively before publication and a valid
-stage to produce exactly one output-rank artifact.
+stage to produce exactly one output-rank artifact. Artifact policy and region
+membership fingerprints must also agree across ranks.
 
-These artifacts close the control-volume/component observability gap; they do
-not by themselves qualify film, sheet, rim, or satellite tracking. Those
-morphology labels require a geometry-based classifier and the declared
-translation, rotation, wall, Zalesak, Enright, jet, and filament matrices.
+Film, sheet, and rim accounting uses explicit fixed Eulerian control-volume
+regions rather than an undocumented automatic shape guess. Configure
+`Conservative_phase_fixed_flux_regions` as semicolon-separated entries of the
+form
+`name|kind|xmin|xmax|ymin|ymax|zmin|zmax`; `*` is an unbounded coordinate and
+the supported kinds are `wall_film`, `sheet`, `rim`, `resolved_satellite`, and
+`observer`. Membership is evaluated from canonical phase-node coordinates and
+held fixed over a transport stage. For each region, the ledger lists every
+member control volume and algebraic edge crossing its boundary, reconstructs
+the low-order/raw/limited crossing flux, and verifies all three local balances.
+Overlapping observers are allowed because each is an independent diagnostic;
+names and binary membership are fail-closed.
+
+`Conservative_phase_classify_nonprimary_components_as_satellites=true` is a
+separate explicit policy. It labels every resolved component except the
+largest limited-measure component as an individual satellite; an equal-measure
+tie selects the smallest deterministic component identifier as primary. This
+policy is disabled by default because two deliberately initialized peer drops
+must not be silently reinterpreted as a primary drop and a satellite.
+
+The fixed-region and opt-in satellite ledgers close the numerical
+control-volume observability gap. They do not automatically extract moving
+crown morphology or establish physical resolution. Qualification still needs
+predeclared geometry classifiers or observer boxes and the declared
+translation, rotation, wall, Zalesak, Enright, jet, and filament refinement
+matrices.
 
 ## Primary method references
 

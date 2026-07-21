@@ -1218,6 +1218,10 @@ TEST(LevelSetTransport,
         options.conservative_phase.flux_artifact_cadence_steps = 0;
     });
     expect_rejected_without_fields([](auto& options) {
+        options.conservative_phase.fixed_flux_regions.push_back(
+            level_set::LevelSetPhaseRegionBox{});
+    });
+    expect_rejected_without_fields([](auto& options) {
         options.conservative_phase.geometry_measure_tolerance = 0.0;
     });
 }

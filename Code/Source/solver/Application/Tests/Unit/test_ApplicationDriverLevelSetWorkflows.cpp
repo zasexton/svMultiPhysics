@@ -4134,6 +4134,9 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   auto& phase_options = requests_.front().conservative_phase;
   phase_options.write_flux_artifacts = true;
   phase_options.flux_artifact_cadence_steps = 2;
+  phase_options.fixed_flux_regions =
+      svmp::FE::level_set::parseLevelSetPhaseRegionBoxes(
+          "test_film|wall_film|*|*|*|*|*|*");
 
   auto result = applyConservativePhaseCandidates(
       sim_,
@@ -4187,6 +4190,11 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   EXPECT_NE(contents.find("\"post_reinitialization_phase_measure\":"),
             std::string::npos);
   EXPECT_NE(contents.find("\"post_correction_phase_measure\":"),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"tracked_regions\":1"),
+            std::string::npos);
+  EXPECT_NE(contents.find(
+                "\"regions\":[{\"name\":\"test_film\",\"kind\":\"wall_film\""),
             std::string::npos);
   EXPECT_THROW(
       writeAcceptedConservativePhaseArtifacts(

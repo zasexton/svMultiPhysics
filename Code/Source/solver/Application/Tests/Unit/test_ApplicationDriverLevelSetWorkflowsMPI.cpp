@@ -2264,6 +2264,13 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   stage.discrete_divergence_mass_source = {0.0, 0.0};
   stage.flux_edges.assign(flux_edges.begin(), flux_edges.end());
   stage.correction = std::move(correction);
+  candidate.maintenance_ledgers.front().region_ledger =
+      svmp::FE::level_set::buildLevelSetPhaseRegionLedgers(
+          stage.correction,
+          std::span<const
+              svmp::FE::level_set::LevelSetPhaseRegionDefinition>{});
+  ASSERT_TRUE(candidate.maintenance_ledgers.front().region_ledger.success)
+      << candidate.maintenance_ledgers.front().region_ledger.diagnostic;
 
   auto inconsistent_requests = requests;
   if (rank == 1) {
@@ -2274,6 +2281,30 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       writeAcceptedConservativePhaseArtifacts(
           params,
           inconsistent_requests,
+          candidate,
+          12u,
+          svmp::FE::Real{0.6},
+          svmp::FE::Real{0.05},
+          17u,
+          svmp::MeshComm::world()),
+      std::runtime_error);
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (rank == 0) {
+    EXPECT_FALSE(std::filesystem::exists(output_directory));
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+
+  auto inconsistent_region_requests = requests;
+  if (rank == 1) {
+    inconsistent_region_requests.front().conservative_phase
+        .fixed_flux_regions =
+        svmp::FE::level_set::parseLevelSetPhaseRegionBoxes(
+            "rank_one_only|observer|*|*|*|*|*|*");
+  }
+  EXPECT_THROW(
+      writeAcceptedConservativePhaseArtifacts(
+          params,
+          inconsistent_region_requests,
           candidate,
           12u,
           svmp::FE::Real{0.6},

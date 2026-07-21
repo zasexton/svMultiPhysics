@@ -20,6 +20,7 @@
 #include "FE/LevelSet/LevelSetCellEvaluator.h"
 #include "FE/LevelSet/LevelSetConservativePhaseOperator.h"
 #include "FE/LevelSet/LevelSetConservativePhaseArtifact.h"
+#include "FE/LevelSet/LevelSetConservativePhaseRegions.h"
 #include "FE/LevelSet/LevelSetConservativePhaseState.h"
 #include "FE/LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
@@ -63,6 +64,7 @@
 #include <iomanip>
 #include <iostream>
 #include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -3164,6 +3166,20 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
             {"Conservative_phase_flux_artifact_cadence_steps",
              "ConservativePhaseFluxArtifactCadenceSteps"})) {
       request.conservative_phase.flux_artifact_cadence_steps = *cadence;
+    }
+    if (const auto classify = first_defined_bool_parameter(
+            eq_params,
+            {"Conservative_phase_classify_nonprimary_components_as_satellites",
+             "ConservativePhaseClassifyNonprimaryComponentsAsSatellites"})) {
+      request.conservative_phase
+          .classify_nonprimary_components_as_satellites = *classify;
+    }
+    if (const auto regions = first_defined_parameter(
+            eq_params,
+            {"Conservative_phase_fixed_flux_regions",
+             "ConservativePhaseFixedFluxRegions"})) {
+      request.conservative_phase.fixed_flux_regions =
+          svmp::FE::level_set::parseLevelSetPhaseRegionBoxes(*regions);
     }
     if (const auto tolerance = first_defined_double_parameter(
             eq_params,
@@ -11286,6 +11302,57 @@ sampleConservativePhaseVelocity(
   return velocity;
 }
 
+std::vector<std::array<svmp::FE::Real, 3>>
+conservativePhaseNodeCoordinates(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::FieldId phase_field,
+    const svmp::FE::level_set::LevelSetP1PhaseTransportGraph& graph)
+{
+  const auto* entity_map =
+      system.fieldDofHandler(phase_field).getEntityDofMap();
+  if (entity_map == nullptr) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase fixed regions require a vertex-nodal phase field.");
+  }
+  const auto& mesh = system.meshAccess();
+  std::vector<svmp::FE::Real> accumulated(
+      graph.nodes * 4u, svmp::FE::Real{0.0});
+  for (svmp::FE::GlobalIndex vertex = 0;
+       vertex < mesh.numVertices(); ++vertex) {
+    const auto dofs = entity_map->getVertexDofs(vertex);
+    if (dofs.size() != 1u || dofs.front() < 0 ||
+        static_cast<std::size_t>(dofs.front()) >= graph.nodes) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase fixed regions require exactly one in-range phase DOF per vertex.");
+    }
+    const auto coordinate = mesh.getNodeCoordinates(vertex);
+    const auto node = static_cast<std::size_t>(dofs.front());
+    for (std::size_t dimension = 0u; dimension < 3u; ++dimension) {
+      if (!std::isfinite(coordinate[dimension])) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase fixed region found a non-finite node coordinate.");
+      }
+      accumulated[4u * node + dimension] += coordinate[dimension];
+    }
+    accumulated[4u * node + 3u] += svmp::FE::Real{1.0};
+  }
+  allReduceConservativePhaseBuffer(
+      accumulated, activeFESystemCommunicator(system));
+  std::vector<std::array<svmp::FE::Real, 3>> coordinates(graph.nodes);
+  for (std::size_t node = 0u; node < graph.nodes; ++node) {
+    const auto samples = accumulated[4u * node + 3u];
+    if (!std::isfinite(samples) || !(samples > svmp::FE::Real{0.0})) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase fixed region left a graph node without coordinates.");
+    }
+    for (std::size_t dimension = 0u; dimension < 3u; ++dimension) {
+      coordinates[node][dimension] =
+          accumulated[4u * node + dimension] / samples;
+    }
+  }
+  return coordinates;
+}
+
 std::pair<std::vector<svmp::FE::Real>, std::vector<svmp::FE::Real>>
 conservativePhaseOneRingBounds(
     const svmp::FE::level_set::LevelSetP1PhaseTransportGraph& graph,
@@ -11481,6 +11548,7 @@ struct ConservativePhaseMaintenanceStageLedger {
   ConservativePhaseMomentMismatch post_correction_mismatch{};
   svmp::FE::level_set::LevelSetP1PhaseTransportStageResult
       transport_stage{};
+  svmp::FE::level_set::LevelSetPhaseRegionLedgerResult region_ledger{};
   svmp::FE::level_set::LevelSetSignedDistanceRepairResult
       reinitialization{};
   ConservativePhaseGeometryReconciliationResult reconciliation{};
@@ -11496,6 +11564,108 @@ struct ConservativePhaseCandidateResult {
   std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
       geometry_transaction{};
 };
+
+template <typename Value>
+void mixConservativePhaseArtifactFingerprint(
+    std::uint64_t& fingerprint,
+    const Value& value) noexcept
+{
+  static_assert(std::is_trivially_copyable_v<Value>);
+  const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
+  for (std::size_t index = 0u; index < sizeof(Value); ++index) {
+    fingerprint ^= static_cast<std::uint64_t>(bytes[index]);
+    fingerprint *= 1099511628211ull;
+  }
+}
+
+void mixConservativePhaseArtifactFingerprint(
+    std::uint64_t& fingerprint,
+    std::string_view value) noexcept
+{
+  mixConservativePhaseArtifactFingerprint(fingerprint, value.size());
+  for (const char character : value) {
+    fingerprint ^=
+        static_cast<std::uint64_t>(static_cast<unsigned char>(character));
+    fingerprint *= 1099511628211ull;
+  }
+}
+
+void mixConservativePhaseArtifactFingerprint(
+    std::uint64_t& fingerprint,
+    const std::string& value) noexcept
+{
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, std::string_view(value));
+}
+
+std::uint64_t conservativePhaseArtifactFingerprint(
+    const LevelSetMaintenanceRequest& request,
+    const ConservativePhaseMaintenanceStageLedger& ledger)
+{
+  std::uint64_t fingerprint = 14695981039346656037ull;
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, request.level_set_field_name);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint,
+      request.conservative_phase.liquid_indicator.field_name);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint,
+      request.volume_cut_request.has_value()
+          ? std::string_view(request.volume_cut_request->domain_id)
+          : std::string_view{});
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint,
+      request.conservative_phase
+          .classify_nonprimary_components_as_satellites);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, request.conservative_phase.fixed_flux_regions.size());
+  for (const auto& box : request.conservative_phase.fixed_flux_regions) {
+    mixConservativePhaseArtifactFingerprint(fingerprint, box.name);
+    mixConservativePhaseArtifactFingerprint(fingerprint, box.kind);
+    for (std::size_t dimension = 0u; dimension < 3u; ++dimension) {
+      mixConservativePhaseArtifactFingerprint(
+          fingerprint, box.minimum[dimension]);
+      mixConservativePhaseArtifactFingerprint(
+          fingerprint, box.maximum[dimension]);
+    }
+  }
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.region_ledger.regions.size());
+  for (const auto& region : ledger.region_ledger.regions) {
+    mixConservativePhaseArtifactFingerprint(fingerprint, region.name);
+    mixConservativePhaseArtifactFingerprint(fingerprint, region.kind);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.member_nodes.size());
+    for (const auto node : region.member_nodes) {
+      mixConservativePhaseArtifactFingerprint(fingerprint, node);
+    }
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.crossing_edges.size());
+    for (const auto& edge : region.crossing_edges) {
+      mixConservativePhaseArtifactFingerprint(
+          fingerprint, edge.first_node);
+      mixConservativePhaseArtifactFingerprint(
+          fingerprint, edge.second_node);
+      mixConservativePhaseArtifactFingerprint(
+          fingerprint, edge.low_order_mass_transfer_into_region);
+      mixConservativePhaseArtifactFingerprint(
+          fingerprint,
+          edge.raw_antidiffusive_mass_transfer_into_region);
+      mixConservativePhaseArtifactFingerprint(
+          fingerprint,
+          edge.limited_antidiffusive_mass_transfer_into_region);
+    }
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.previous_liquid_measure);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.low_order_liquid_measure);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.raw_target_liquid_measure);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.limited_liquid_measure);
+  }
+  return fingerprint;
+}
 
 void writeAcceptedConservativePhaseArtifacts(
     const Parameters& params,
@@ -11561,15 +11731,24 @@ void writeAcceptedConservativePhaseArtifacts(
     artifact_due[index] = due_on_any_rank && !not_due_on_any_rank;
     any_artifact_due = any_artifact_due || artifact_due[index];
     if (artifact_due[index]) {
-      if (candidate.maintenance_ledgers.size() != requests.size()) {
-        local_preflight_failure = true;
-        continue;
-      }
+      const bool local_ledger_ready =
+          candidate.maintenance_ledgers.size() == requests.size() &&
+          request.conservative_phase_graph.has_value() &&
+          request.volume_cut_request.has_value() &&
+          candidate.maintenance_ledgers.size() > index &&
+          candidate.maintenance_ledgers[index].transport_stage.success &&
+          candidate.maintenance_ledgers[index].region_ledger.success;
       local_preflight_failure =
-          !request.conservative_phase_graph.has_value() ||
-          !request.volume_cut_request.has_value() ||
-          !candidate.maintenance_ledgers[index].transport_stage.success ||
-          local_preflight_failure;
+          !local_ledger_ready || local_preflight_failure;
+      const auto fingerprint = local_ledger_ready
+          ? conservativePhaseArtifactFingerprint(
+                request, candidate.maintenance_ledgers[index])
+          : 0u;
+      const auto [minimum_fingerprint, maximum_fingerprint] =
+          globalMinMaxUint64(fingerprint, comm);
+      if (minimum_fingerprint != maximum_fingerprint) {
+        local_preflight_failure = true;
+      }
     }
   }
   if (globalAnyBool(local_preflight_failure, comm)) {
@@ -11681,6 +11860,7 @@ void writeAcceptedConservativePhaseArtifacts(
           ledger.post_correction_mismatch.total_residual;
       context.retained_assembly_geometry_measure =
           ledger.post_correction_geometry_measure;
+      context.region_ledger = ledger.region_ledger;
       artifact =
           svmp::FE::level_set::writeLevelSetConservativePhaseArtifact(
               output_directory, context, ledger.transport_stage);
@@ -11714,6 +11894,7 @@ void writeAcceptedConservativePhaseArtifacts(
           << " nodes=" << artifact.nodes
           << " edges=" << artifact.edges
           << " resolved_components=" << artifact.resolved_components
+          << " tracked_regions=" << artifact.tracked_regions
           << " subthreshold_component_present="
           << (artifact.subthreshold_component_present ? "true" : "false")
           << std::endl;
@@ -12228,6 +12409,36 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       accepted_phase_masses[request_index][node] =
           graph.lumped_control_volume[node] * limited_phase[node];
     }
+    std::vector<svmp::FE::level_set::LevelSetPhaseRegionDefinition>
+        region_definitions;
+    if (!request.conservative_phase.fixed_flux_regions.empty()) {
+      const auto coordinates = conservativePhaseNodeCoordinates(
+          system, phase_field, graph);
+      region_definitions =
+          svmp::FE::level_set::makeAxisAlignedBoxPhaseRegions(
+              request.conservative_phase.fixed_flux_regions,
+              coordinates);
+    }
+    if (request.conservative_phase
+            .classify_nonprimary_components_as_satellites) {
+      auto satellites = svmp::FE::level_set::
+          makeNonprimaryComponentSatelliteRegions(stage.correction);
+      region_definitions.insert(
+          region_definitions.end(),
+          std::make_move_iterator(satellites.begin()),
+          std::make_move_iterator(satellites.end()));
+    }
+    maintenance_ledger.region_ledger =
+        svmp::FE::level_set::buildLevelSetPhaseRegionLedgers(
+            stage.correction,
+            region_definitions,
+            request.conservative_phase.invariant_tolerance);
+    if (!maintenance_ledger.region_ledger.success) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase fixed region ledger failed for field '" +
+          request.conservative_phase.liquid_indicator.field_name +
+          "': " + maintenance_ledger.region_ledger.diagnostic);
+    }
 
     application::core::oopCout()
         << "[svMultiPhysics::Application] Conservative phase staged"
@@ -12257,6 +12468,10 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
                .limited_liquid_measure
         << " max_component_balance_residual="
         << stage.correction.maximum_component_balance_residual
+        << " tracked_regions="
+        << maintenance_ledger.region_ledger.regions.size()
+        << " max_region_balance_residual="
+        << maintenance_ledger.region_ledger.maximum_balance_residual
         << " limited_edges=" << stage.correction.limited_edges
         << " courant=" << stage.maximum_courant << std::endl;
     maintenance_ledger.transport_stage = std::move(stage);
@@ -12677,6 +12892,50 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         emit_component_ledger(
             transport.correction.subthreshold_component,
             "subthreshold");
+      }
+      for (const auto& region : maintenance_ledger.region_ledger.regions) {
+        application::core::oopCout()
+            << std::setprecision(17)
+            << "[svMultiPhysics::Application] Conservative phase region ledger"
+            << " diagnostic=conservative_phase_region_ledger"
+            << " field='"
+            << request.conservative_phase.liquid_indicator.field_name
+            << "'"
+            << " step=" << history.stepIndex() + 1
+            << " region='" << region.name << "'"
+            << " kind="
+            << svmp::FE::level_set::levelSetPhaseRegionKindName(
+                   region.kind)
+            << " nodes=" << region.member_nodes.size()
+            << " internal_edges=" << region.internal_edges
+            << " crossing_edges=" << region.crossing_edges.size()
+            << " previous_liquid_measure="
+            << region.previous_liquid_measure
+            << " low_order_liquid_measure="
+            << region.low_order_liquid_measure
+            << " raw_target_liquid_measure="
+            << region.raw_target_liquid_measure
+            << " limited_liquid_measure="
+            << region.limited_liquid_measure
+            << " physical_boundary_mass_transfer="
+            << region.physical_boundary_mass_transfer
+            << " discrete_divergence_mass_source="
+            << region.discrete_divergence_mass_source
+            << " low_order_crossing_mass_transfer="
+            << region.low_order_crossing_mass_transfer
+            << " raw_crossing_antidiffusive_mass_transfer="
+            << region.raw_crossing_antidiffusive_mass_transfer
+            << " limited_crossing_antidiffusive_mass_transfer="
+            << region.limited_crossing_antidiffusive_mass_transfer
+            << " low_order_balance_residual="
+            << region.low_order_balance_residual
+            << " raw_target_balance_residual="
+            << region.raw_target_balance_residual
+            << " limited_balance_residual="
+            << region.limited_balance_residual
+            << " maximum_internal_pair_cancellation_residual="
+            << region.maximum_internal_pair_cancellation_residual
+            << std::endl;
       }
     }
     result.changed = candidate != result.original_solution;

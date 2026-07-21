@@ -8,11 +8,13 @@
 
 #include "Core/Types.h"
 #include "LevelSet/LevelSetConservativePhaseOperator.h"
+#include "LevelSet/LevelSetConservativePhaseRegions.h"
 #include "LevelSet/LevelSetReinitialization.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 
 namespace svmp::FE::level_set {
@@ -77,6 +79,7 @@ struct LevelSetConservativePhaseArtifactContext {
     Real post_correction_geometry_measure{0.0};
     LevelSetConservativePhaseMismatchArtifact post_correction_mismatch{};
     Real retained_assembly_geometry_measure{0.0};
+    std::optional<LevelSetPhaseRegionLedgerResult> region_ledger{};
 };
 
 struct LevelSetConservativePhaseArtifactResult {
@@ -86,6 +89,7 @@ struct LevelSetConservativePhaseArtifactResult {
     std::size_t nodes{0u};
     std::size_t edges{0u};
     std::size_t resolved_components{0u};
+    std::size_t tracked_regions{0u};
     bool subthreshold_component_present{false};
     std::string diagnostic{};
 };

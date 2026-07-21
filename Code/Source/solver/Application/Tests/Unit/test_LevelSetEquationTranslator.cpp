@@ -382,7 +382,7 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
   ASSERT_NE(phase_insertion, std::string::npos);
   expected.insert(
       phase_insertion,
-      R"json(,"conservative_phase":{"enabled":false,"field":"liquid_indicator","source":"Unknown","auto_register":true,"liquid_side":"Negative","invariant_tolerance":9.9999999999999998e-13,"component_activity_tolerance":1e-08,"maximum_courant":1,"enforce_courant_limit":true,"require_constant_preservation":true,"write_flux_artifacts":false,"flux_artifact_cadence_steps":1,"impermeable_normal_velocity_tolerance":1e-10,"reconcile_geometry":true,"geometry_measure_tolerance":1e-10,"geometry_correction_max_iterations":50,"maximum_geometry_displacement_fraction":0.10000000000000001,"boundary_flux_policy":"closed_boundary_only","newton_policy":"held_at_previous_accepted_endpoint"})json");
+      R"json(,"conservative_phase":{"enabled":false,"field":"liquid_indicator","source":"Unknown","auto_register":true,"liquid_side":"Negative","invariant_tolerance":9.9999999999999998e-13,"component_activity_tolerance":1e-08,"maximum_courant":1,"enforce_courant_limit":true,"require_constant_preservation":true,"write_flux_artifacts":false,"flux_artifact_cadence_steps":1,"classify_nonprimary_components_as_satellites":false,"fixed_flux_regions":[],"impermeable_normal_velocity_tolerance":1e-10,"reconcile_geometry":true,"geometry_measure_tolerance":1e-10,"geometry_correction_max_iterations":50,"maximum_geometry_displacement_fraction":0.10000000000000001,"boundary_flux_policy":"closed_boundary_only","newton_policy":"held_at_previous_accepted_endpoint"})json");
   EXPECT_EQ(artifact->json, expected);
 #endif
 }
@@ -478,6 +478,14 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
       "Conservative_phase_flux_artifact_cadence_steps"] =
       svmp::Physics::ParameterValue{true, "3"};
   input.equation_params[
+      "Conservative_phase_classify_nonprimary_components_as_satellites"] =
+      svmp::Physics::ParameterValue{true, "true"};
+  input.equation_params[
+      "Conservative_phase_fixed_flux_regions"] =
+      svmp::Physics::ParameterValue{
+          true,
+          "film|wall_film|0|1|0|0.1|*|*;rim|rim|0.8|1|0.5|1|*|*"};
+  input.equation_params[
       "Conservative_phase_impermeable_normal_velocity_tolerance"] =
       svmp::Physics::ParameterValue{true, "7.0e-9"};
   input.equation_params["Conservative_phase_reconcile_geometry"] =
@@ -526,6 +534,15 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
   EXPECT_NE(artifact->json.find(
                 "\"flux_artifact_cadence_steps\":3"),
             std::string::npos);
+  EXPECT_NE(artifact->json.find(
+                "\"classify_nonprimary_components_as_satellites\":true"),
+            std::string::npos);
+  EXPECT_NE(artifact->json.find(
+                "\"fixed_flux_regions\":[{\"name\":\"film\",\"kind\":\"wall_film\""),
+            std::string::npos);
+  EXPECT_NE(artifact->json.find(
+                "{\"name\":\"rim\",\"kind\":\"rim\""),
+            std::string::npos);
   EXPECT_NE(artifact->json.find("\"reconcile_geometry\":false"),
             std::string::npos);
   EXPECT_NE(artifact->json.find(
@@ -534,6 +551,38 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
   EXPECT_NE(artifact->json.find(
                 "\"ordering\":\"conservative_phase_transport_then_raw_geometry_rebuild_then_wall_aware_reinitialization_then_local_geometry_reconciliation_then_validation_then_commit\""),
             std::string::npos);
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     RejectsMalformedConservativePhaseRegionsBeforeRegistration)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryQuadMesh();
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "quad";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "constant"};
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
+  input.equation_params[
+      "Conservative_phase_fixed_flux_regions"] =
+      svmp::Physics::ParameterValue{
+          true, "film|wall_film|1|0|0|0.1|*|*"};
+
+  svmp::FE::systems::FESystem system(mesh);
+  EXPECT_THROW(
+      static_cast<void>(
+          application::translators::level_set::createModule(
+              input, system)),
+      std::invalid_argument);
+  EXPECT_EQ(system.findFieldByName("phi"), svmp::FE::INVALID_FIELD_ID);
 #endif
 }
 

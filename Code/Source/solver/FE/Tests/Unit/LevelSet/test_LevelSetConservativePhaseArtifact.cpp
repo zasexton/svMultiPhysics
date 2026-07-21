@@ -84,6 +84,17 @@ TEST(LevelSetConservativePhaseArtifact,
     };
     context.reinitialization.diagnostic = "not due \"quoted\"";
     context.reconciliation.diagnostic = "no correction required";
+    const std::vector<level_set::LevelSetPhaseRegionDefinition> regions{
+        level_set::LevelSetPhaseRegionDefinition{
+            .name = "film",
+            .kind = level_set::LevelSetPhaseRegionKind::WallFilm,
+            .node_membership = {1u, 0u},
+        },
+    };
+    context.region_ledger = level_set::buildLevelSetPhaseRegionLedgers(
+        stage.correction, regions);
+    ASSERT_TRUE(context.region_ledger->success)
+        << context.region_ledger->diagnostic;
 
     const auto artifact =
         level_set::writeLevelSetConservativePhaseArtifact(
@@ -96,12 +107,15 @@ TEST(LevelSetConservativePhaseArtifact,
     EXPECT_EQ(artifact.nodes, 2u);
     EXPECT_EQ(artifact.edges, 1u);
     EXPECT_EQ(artifact.resolved_components, 1u);
+    EXPECT_EQ(artifact.tracked_regions, 1u);
 
     std::ifstream input(artifact.path);
     ASSERT_TRUE(input.is_open());
     const std::string contents{
         std::istreambuf_iterator<char>{input},
         std::istreambuf_iterator<char>{}};
+    EXPECT_NE(contents.find("\"artifact_schema_version\":2"),
+              std::string::npos);
     EXPECT_NE(contents.find(
                   "\"artifact\":\"conservative_phase_flux_ledger\""),
               std::string::npos);
@@ -118,6 +132,15 @@ TEST(LevelSetConservativePhaseArtifact,
                   "\"limited_local_mass_balance_residual\":"),
               std::string::npos);
     EXPECT_NE(contents.find("\"courant\":0.25"),
+              std::string::npos);
+    EXPECT_NE(contents.find(
+                  "\"regions\":[\"film\"],\"courant\":"),
+              std::string::npos);
+    EXPECT_NE(contents.find(
+                  "\"regions\":[{\"name\":\"film\",\"kind\":\"wall_film\""),
+              std::string::npos);
+    EXPECT_NE(contents.find(
+                  "\"low_order_mass_transfer_into_region\":"),
               std::string::npos);
     EXPECT_NE(contents.find(
                   "\"reinitialization_diagnostic\":\"not due \\\"quoted\\\"\""),
@@ -156,6 +179,16 @@ TEST(LevelSetConservativePhaseArtifact,
     EXPECT_FALSE(incomplete.success);
     EXPECT_NE(incomplete.diagnostic.find("complete transport"),
               std::string::npos);
+
+    auto malformed_region_context = context;
+    malformed_region_context.accepted_step = 11u;
+    malformed_region_context.region_ledger->regions.front()
+        .crossing_edges.front().second_node = 0;
+    const auto malformed_region =
+        level_set::writeLevelSetConservativePhaseArtifact(
+            output_directory, malformed_region_context, stage);
+    EXPECT_FALSE(malformed_region.success);
+    EXPECT_FALSE(std::filesystem::exists(malformed_region.path));
 
     auto stale_context = context;
     stale_context.accepted_step = 10u;

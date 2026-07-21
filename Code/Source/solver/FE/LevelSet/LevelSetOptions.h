@@ -8,6 +8,7 @@
 
 #include "Core/Types.h"
 #include "Forms/BoundaryConditions.h"
+#include "LevelSet/LevelSetConservativePhaseRegions.h"
 #include "Spaces/FunctionSpace.h"
 
 #include <array>
@@ -202,6 +203,8 @@ struct LevelSetConservativePhaseOptions {
     bool require_constant_preservation{true};
     bool write_flux_artifacts{false};
     int flux_artifact_cadence_steps{1};
+    bool classify_nonprimary_components_as_satellites{false};
+    std::vector<LevelSetPhaseRegionBox> fixed_flux_regions{};
     Real impermeable_normal_velocity_tolerance{1.0e-10};
     bool reconcile_geometry{true};
     Real geometry_measure_tolerance{1.0e-10};

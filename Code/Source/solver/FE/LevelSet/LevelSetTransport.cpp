@@ -678,6 +678,16 @@ void validateConservativePhaseOptions(
         throw std::invalid_argument(
             "installLevelSetTransport: conservative phase flux artifact cadence must be positive");
     }
+    try {
+        static_cast<void>(makeAxisAlignedBoxPhaseRegions(
+            phase.fixed_flux_regions,
+            std::span<const std::array<Real, 3>>{}));
+    } catch (const std::invalid_argument& error) {
+        throw std::invalid_argument(
+            std::string(
+                "installLevelSetTransport: invalid conservative phase fixed flux region: ") +
+            error.what());
+    }
     if (!std::isfinite(phase.impermeable_normal_velocity_tolerance) ||
         phase.impermeable_normal_velocity_tolerance < Real{0.0}) {
         throw std::invalid_argument(

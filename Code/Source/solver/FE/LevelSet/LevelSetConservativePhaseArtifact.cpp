@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <set>
 #include <sstream>
 #include <string_view>
 #include <system_error>
@@ -126,6 +127,50 @@ template <typename... Values>
         reinitialization.preserve_band_width);
 }
 
+[[nodiscard]] bool finiteRegionLedgerResult(
+    const LevelSetPhaseRegionLedgerResult& result) noexcept
+{
+    if (!result.success || !result.all_balances_satisfied ||
+        !finiteValues(result.maximum_balance_residual,
+                      result.maximum_flux_reconstruction_residual)) {
+        return false;
+    }
+    for (const auto& region : result.regions) {
+        if (region.name.empty() || !region.balance_satisfied ||
+            !finiteValues(
+                region.previous_liquid_measure,
+                region.low_order_liquid_measure,
+                region.raw_target_liquid_measure,
+                region.limited_liquid_measure,
+                region.physical_boundary_mass_transfer,
+                region.discrete_divergence_mass_source,
+                region.low_order_nodal_interior_mass_transfer,
+                region.raw_nodal_antidiffusive_mass_transfer,
+                region.limited_nodal_antidiffusive_mass_transfer,
+                region.low_order_crossing_mass_transfer,
+                region.raw_crossing_antidiffusive_mass_transfer,
+                region.limited_crossing_antidiffusive_mass_transfer,
+                region.low_order_flux_reconstruction_residual,
+                region.raw_flux_reconstruction_residual,
+                region.limited_flux_reconstruction_residual,
+                region.low_order_balance_residual,
+                region.raw_target_balance_residual,
+                region.limited_balance_residual,
+                region.maximum_internal_pair_cancellation_residual)) {
+            return false;
+        }
+        for (const auto& edge : region.crossing_edges) {
+            if (!finiteValues(
+                    edge.low_order_mass_transfer_into_region,
+                    edge.raw_antidiffusive_mass_transfer_into_region,
+                    edge.limited_antidiffusive_mass_transfer_into_region)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] bool finiteContext(
     const LevelSetConservativePhaseArtifactContext& context) noexcept
 {
@@ -135,6 +180,8 @@ template <typename... Values>
            finiteReconciliation(context.reconciliation) &&
            finiteMismatch(context.post_reinitialization_mismatch) &&
            finiteMismatch(context.post_correction_mismatch) &&
+           (!context.region_ledger.has_value() ||
+            finiteRegionLedgerResult(*context.region_ledger)) &&
            finiteValues(context.raw_post_transport_phase_measure,
                         context.post_limit_phase_measure,
                         context.raw_post_transport_geometry_measure,
@@ -274,6 +321,76 @@ template <typename... Values>
            finiteComponent(correction.subthreshold_component);
 }
 
+[[nodiscard]] bool validRegionLedgerShape(
+    const std::optional<LevelSetPhaseRegionLedgerResult>& result,
+    const LevelSetPhaseFluxCorrectionResult& correction) noexcept
+{
+    if (!result.has_value()) {
+        return true;
+    }
+    const auto node_count = correction.nodes.size();
+    std::set<std::pair<GlobalIndex, GlobalIndex>> correction_edges;
+    for (const auto& edge : correction.edges) {
+        correction_edges.emplace(edge.first_node, edge.second_node);
+    }
+    std::set<std::string> names;
+    for (const auto& region : result->regions) {
+        if (std::string_view(levelSetPhaseRegionKindName(region.kind)) ==
+                "unknown" ||
+            !names.insert(region.name).second ||
+            !std::is_sorted(region.member_nodes.begin(),
+                            region.member_nodes.end()) ||
+            std::adjacent_find(region.member_nodes.begin(),
+                               region.member_nodes.end()) !=
+                region.member_nodes.end()) {
+            return false;
+        }
+        for (const auto node : region.member_nodes) {
+            if (node < 0 || static_cast<std::size_t>(node) >= node_count) {
+                return false;
+            }
+        }
+        std::size_t expected_internal_edges = 0u;
+        std::size_t expected_crossing_edges = 0u;
+        for (const auto& edge : correction.edges) {
+            const bool first_inside = std::binary_search(
+                region.member_nodes.begin(),
+                region.member_nodes.end(), edge.first_node);
+            const bool second_inside = std::binary_search(
+                region.member_nodes.begin(),
+                region.member_nodes.end(), edge.second_node);
+            expected_internal_edges += first_inside && second_inside ? 1u : 0u;
+            expected_crossing_edges += first_inside != second_inside ? 1u : 0u;
+        }
+        if (region.internal_edges != expected_internal_edges ||
+            region.crossing_edges.size() != expected_crossing_edges) {
+            return false;
+        }
+        std::set<std::pair<GlobalIndex, GlobalIndex>> seen_crossing_edges;
+        for (const auto& edge : region.crossing_edges) {
+            if (edge.first_node < 0 ||
+                edge.second_node <= edge.first_node ||
+                static_cast<std::size_t>(edge.second_node) >= node_count ||
+                !correction_edges.contains(
+                    {edge.first_node, edge.second_node}) ||
+                !seen_crossing_edges.emplace(
+                    edge.first_node, edge.second_node).second) {
+                return false;
+            }
+            const bool first_inside = std::binary_search(
+                region.member_nodes.begin(),
+                region.member_nodes.end(), edge.first_node);
+            const bool second_inside = std::binary_search(
+                region.member_nodes.begin(),
+                region.member_nodes.end(), edge.second_node);
+            if (first_inside == second_inside) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] const char* reinitializationMethodName(
     LevelSetReinitializationMethod method) noexcept
 {
@@ -322,6 +439,82 @@ void writeComponent(std::ostream& output,
            << component.limited_balance_residual << '}';
 }
 
+void writeRegion(std::ostream& output,
+                 const LevelSetPhaseRegionLedger& region)
+{
+    output << '{' << "\"name\":";
+    writeJsonString(output, region.name);
+    output << ",\"kind\":";
+    writeJsonString(output, levelSetPhaseRegionKindName(region.kind));
+    output << ",\"balance_satisfied\":";
+    writeBool(output, region.balance_satisfied);
+    output << ",\"member_nodes\":[";
+    for (std::size_t index = 0u;
+         index < region.member_nodes.size(); ++index) {
+        if (index != 0u) {
+            output << ',';
+        }
+        output << region.member_nodes[index];
+    }
+    output << "],\"internal_edges\":" << region.internal_edges
+           << ",\"crossing_edges\":[";
+    for (std::size_t index = 0u;
+         index < region.crossing_edges.size(); ++index) {
+        if (index != 0u) {
+            output << ',';
+        }
+        const auto& edge = region.crossing_edges[index];
+        output << "{\"first_node\":" << edge.first_node
+               << ",\"second_node\":" << edge.second_node
+               << ",\"low_order_mass_transfer_into_region\":"
+               << edge.low_order_mass_transfer_into_region
+               << ",\"raw_antidiffusive_mass_transfer_into_region\":"
+               << edge.raw_antidiffusive_mass_transfer_into_region
+               << ",\"limited_antidiffusive_mass_transfer_into_region\":"
+               << edge.limited_antidiffusive_mass_transfer_into_region
+               << '}';
+    }
+    output << "]"
+           << ",\"previous_liquid_measure\":"
+           << region.previous_liquid_measure
+           << ",\"low_order_liquid_measure\":"
+           << region.low_order_liquid_measure
+           << ",\"raw_target_liquid_measure\":"
+           << region.raw_target_liquid_measure
+           << ",\"limited_liquid_measure\":"
+           << region.limited_liquid_measure
+           << ",\"physical_boundary_mass_transfer\":"
+           << region.physical_boundary_mass_transfer
+           << ",\"discrete_divergence_mass_source\":"
+           << region.discrete_divergence_mass_source
+           << ",\"low_order_nodal_interior_mass_transfer\":"
+           << region.low_order_nodal_interior_mass_transfer
+           << ",\"raw_nodal_antidiffusive_mass_transfer\":"
+           << region.raw_nodal_antidiffusive_mass_transfer
+           << ",\"limited_nodal_antidiffusive_mass_transfer\":"
+           << region.limited_nodal_antidiffusive_mass_transfer
+           << ",\"low_order_crossing_mass_transfer\":"
+           << region.low_order_crossing_mass_transfer
+           << ",\"raw_crossing_antidiffusive_mass_transfer\":"
+           << region.raw_crossing_antidiffusive_mass_transfer
+           << ",\"limited_crossing_antidiffusive_mass_transfer\":"
+           << region.limited_crossing_antidiffusive_mass_transfer
+           << ",\"low_order_flux_reconstruction_residual\":"
+           << region.low_order_flux_reconstruction_residual
+           << ",\"raw_flux_reconstruction_residual\":"
+           << region.raw_flux_reconstruction_residual
+           << ",\"limited_flux_reconstruction_residual\":"
+           << region.limited_flux_reconstruction_residual
+           << ",\"low_order_balance_residual\":"
+           << region.low_order_balance_residual
+           << ",\"raw_target_balance_residual\":"
+           << region.raw_target_balance_residual
+           << ",\"limited_balance_residual\":"
+           << region.limited_balance_residual
+           << ",\"maximum_internal_pair_cancellation_residual\":"
+           << region.maximum_internal_pair_cancellation_residual << '}';
+}
+
 void writeArtifact(
     std::ostream& output,
     const LevelSetConservativePhaseArtifactContext& context,
@@ -329,7 +522,7 @@ void writeArtifact(
 {
     const auto& correction = stage.correction;
     output << std::setprecision(std::numeric_limits<Real>::max_digits10);
-    output << "{\"artifact_schema_version\":1"
+    output << "{\"artifact_schema_version\":2"
            << ",\"artifact\":\"conservative_phase_flux_ledger\""
            << ",\"phase_field\":";
     writeJsonString(output, context.phase_field_name);
@@ -463,6 +656,25 @@ void writeArtifact(
            << correction.components.size()
            << ",\"subthreshold_component_present\":";
     writeBool(output, correction.subthreshold_component_present);
+    output << ",\"region_ledger_present\":";
+    writeBool(output, context.region_ledger.has_value());
+    output << ",\"tracked_regions\":"
+           << (context.region_ledger.has_value()
+                   ? context.region_ledger->regions.size()
+                   : 0u)
+           << ",\"region_balances_satisfied\":";
+    writeBool(output,
+              !context.region_ledger.has_value() ||
+                  context.region_ledger->all_balances_satisfied);
+    output << ",\"maximum_region_balance_residual\":"
+           << (context.region_ledger.has_value()
+                   ? context.region_ledger->maximum_balance_residual
+                   : Real{0.0})
+           << ",\"maximum_region_flux_reconstruction_residual\":"
+           << (context.region_ledger.has_value()
+                   ? context.region_ledger
+                         ->maximum_flux_reconstruction_residual
+                   : Real{0.0});
     output << "},\"maintenance_summary\":{\"reinitialization_due\":";
     writeBool(output, context.reinitialization_due);
     output << ",\"reinitialization_applied\":";
@@ -604,6 +816,23 @@ void writeArtifact(
         output << "{\"node\":" << node.node
                << ",\"component_id\":"
                << correction.node_component_ids[index]
+               << ",\"regions\":[";
+        bool first_region = true;
+        if (context.region_ledger.has_value()) {
+            for (const auto& region : context.region_ledger->regions) {
+                if (!std::binary_search(
+                        region.member_nodes.begin(),
+                        region.member_nodes.end(), node.node)) {
+                    continue;
+                }
+                if (!first_region) {
+                    output << ',';
+                }
+                writeJsonString(output, region.name);
+                first_region = false;
+            }
+        }
+        output << "]"
                << ",\"courant\":" << stage.nodal_courant[index]
                << ",\"lumped_control_volume\":"
                << node.lumped_control_volume
@@ -683,6 +912,16 @@ void writeArtifact(
                        correction.subthreshold_component,
                        "subthreshold");
     }
+    output << "],\"regions\":[";
+    if (context.region_ledger.has_value()) {
+        for (std::size_t index = 0u;
+             index < context.region_ledger->regions.size(); ++index) {
+            if (index != 0u) {
+                output << ',';
+            }
+            writeRegion(output, context.region_ledger->regions[index]);
+        }
+    }
     output << "]}\n";
 }
 
@@ -700,6 +939,9 @@ writeLevelSetConservativePhaseArtifact(
     result.resolved_components = stage.correction.components.size();
     result.subthreshold_component_present =
         stage.correction.subthreshold_component_present;
+    result.tracked_regions = context.region_ledger.has_value()
+        ? context.region_ledger->regions.size()
+        : 0u;
     std::filesystem::path temporary_path;
     try {
         if (output_directory.empty() || context.phase_field_name.empty() ||
@@ -710,6 +952,8 @@ writeLevelSetConservativePhaseArtifact(
             return result;
         }
         if (!finiteContext(context) || !finiteStage(stage) ||
+            !validRegionLedgerShape(
+                context.region_ledger, stage.correction) ||
             !context.geometry_validated_before_commit || !stage.success ||
             !stage.correction.success ||
             stage.correction.node_component_ids.size() !=

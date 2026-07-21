@@ -386,6 +386,33 @@ constexpr const char* json_bool(bool value) noexcept
   return value ? "true" : "false";
 }
 
+std::string phase_region_boxes_json(
+    const std::vector<ls::LevelSetPhaseRegionBox>& boxes)
+{
+  std::ostringstream out;
+  out.imbue(std::locale::classic());
+  out << '[';
+  for (std::size_t index = 0u; index < boxes.size(); ++index) {
+    if (index != 0u) {
+      out << ',';
+    }
+    const auto& box = boxes[index];
+    out << "{\"name\":" << json_string(box.name)
+        << ",\"kind\":"
+        << json_string(ls::levelSetPhaseRegionKindName(box.kind))
+        << ",\"minimum\":["
+        << json_real(box.minimum[0]) << ','
+        << json_real(box.minimum[1]) << ','
+        << json_real(box.minimum[2]) << ']'
+        << ",\"maximum\":["
+        << json_real(box.maximum[0]) << ','
+        << json_real(box.maximum[1]) << ','
+        << json_real(box.maximum[2]) << "]}";
+  }
+  out << ']';
+  return out.str();
+}
+
 std::string json_scalar_value(const ls::ScalarValue& value)
 {
   if (const auto* literal = std::get_if<svmp::FE::Real>(&value)) {
@@ -507,6 +534,12 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << json_bool(options.conservative_phase.write_flux_artifacts)
       << ",\"flux_artifact_cadence_steps\":"
       << options.conservative_phase.flux_artifact_cadence_steps
+      << ",\"classify_nonprimary_components_as_satellites\":"
+      << json_bool(options.conservative_phase
+                       .classify_nonprimary_components_as_satellites)
+      << ",\"fixed_flux_regions\":"
+      << phase_region_boxes_json(
+             options.conservative_phase.fixed_flux_regions)
       << ",\"impermeable_normal_velocity_tolerance\":"
       << json_real(options.conservative_phase
                        .impermeable_normal_velocity_tolerance)
@@ -1299,6 +1332,20 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
            "ConservativePhaseFluxArtifactCadenceSteps"},
           "Conservative_phase_flux_artifact_cadence_steps")) {
     options.conservative_phase.flux_artifact_cadence_steps = *value;
+  }
+  if (const auto value = get_defined_bool(
+          params,
+          {"Conservative_phase_classify_nonprimary_components_as_satellites",
+           "ConservativePhaseClassifyNonprimaryComponentsAsSatellites"})) {
+    options.conservative_phase
+        .classify_nonprimary_components_as_satellites = *value;
+  }
+  if (const auto value = get_defined_string(
+          params,
+          {"Conservative_phase_fixed_flux_regions",
+           "ConservativePhaseFixedFluxRegions"})) {
+    options.conservative_phase.fixed_flux_regions =
+        ls::parseLevelSetPhaseRegionBoxes(*value);
   }
   if (const auto value = get_defined_real(
           params,
