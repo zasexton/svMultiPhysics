@@ -33,6 +33,10 @@ parseLevelSetCurvatureSmoothingMode(std::string_view value);
 struct LevelSetCurvatureProjectionOptions {
     Real isovalue{0.0};
     Real gradient_tolerance{1.0e-10};
+    // Relative numerical-rank tolerance for the coordinate-scaled,
+    // column-pivoted weighted least-squares fit.  The historical member/XML
+    // name is retained for input compatibility; normal equations are not
+    // formed.
     Real normal_equation_tolerance{1.0e-12};
     Real max_normalized_fit_residual{0.0};
     int max_neighbor_rings{2};

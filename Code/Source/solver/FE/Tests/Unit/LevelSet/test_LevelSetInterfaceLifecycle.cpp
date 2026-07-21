@@ -5,6 +5,8 @@
 #include "Assembly/Assembler.h"
 #include "Assembly/CutDomainAssembler.h"
 #include "Assembly/CutIntegrationContext.h"
+#include "Assembly/GlobalSystemView.h"
+#include "Assembly/StandardAssembler.h"
 #include "Basis/NodeOrderingConventions.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
@@ -24,6 +26,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <random>
 #include <set>
 #include <span>
@@ -351,6 +354,20 @@ public:
     explicit SingleHexMeshAccess(FE::ElementType type = FE::ElementType::Hex8)
         : type_(type)
     {
+    }
+
+    SingleHexMeshAccess(FE::ElementType type,
+                        const std::array<FE::Real, 3>& origin,
+                        const std::array<FE::Real, 3>& extents)
+        : type_(type)
+    {
+        for (auto& node : nodes_) {
+            for (std::size_t d = 0; d < 3u; ++d) {
+                node[d] = origin[d] +
+                          FE::Real{0.5} * (node[d] + FE::Real{1.0}) *
+                              extents[d];
+            }
+        }
     }
 
     [[nodiscard]] FE::GlobalIndex numCells() const override { return 1; }
@@ -2525,6 +2542,35 @@ private:
     }
 };
 
+/** Integrate one against a nodal test basis.  Summing the assembled vector
+ * uses partition of unity and therefore reports the physical cut volume after
+ * StandardAssembler has mapped a reference-frame generated rule. */
+class PhysicalCutVolumeMeasureKernel final
+    : public FE::assembly::AssemblyKernel {
+public:
+    [[nodiscard]] FE::assembly::RequiredData getRequiredData() const override
+    {
+        return FE::assembly::RequiredData::BasisValues |
+               FE::assembly::RequiredData::IntegrationWeights;
+    }
+
+    void computeCell(const FE::assembly::AssemblyContext& ctx,
+                     FE::assembly::KernelOutput& output) override
+    {
+        const auto n_test = ctx.numTestDofs();
+        output.reserve(n_test,
+                       ctx.numTrialDofs(),
+                       /*need_matrix=*/false,
+                       /*need_vector=*/true);
+        for (FE::LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+            const auto weight = ctx.integrationWeight(q);
+            for (FE::LocalIndex i = 0; i < n_test; ++i) {
+                output.vectorEntry(i) += weight * ctx.basisValue(i, q);
+            }
+        }
+    }
+};
+
 void populateMeasureAssemblyContext(
     const FE::geometry::CutQuadratureRule& rule,
     FE::assembly::AssemblyContext& ctx)
@@ -3648,6 +3694,15 @@ TEST(LevelSetCellEvaluator, P2RespondsToEdgeDofsAtInteriorNodes)
     EXPECT_EQ(at_edge_node.interpolation_order, 2);
     EXPECT_EQ(at_edge_node.implicit_geometry_order, 2);
     EXPECT_NEAR(at_edge_node.value, 2.0, 1.0e-12);
+
+    const auto linear_corner =
+        evaluator.evaluateLinearCorner(0, {{0.5, 0.0, 0.0}});
+    EXPECT_EQ(linear_corner.interpolation_order, 2);
+    EXPECT_EQ(linear_corner.implicit_geometry_order, 1);
+    EXPECT_NEAR(linear_corner.value, 0.0, 1.0e-12);
+    EXPECT_NEAR(linear_corner.reference_gradient[0], 0.0, 1.0e-12);
+    EXPECT_NEAR(linear_corner.reference_gradient[1], 0.0, 1.0e-12);
+    EXPECT_NEAR(linear_corner.reference_gradient[2], 0.0, 1.0e-12);
 
     const auto at_vertex = evaluator.evaluate(0, {{0.0, 0.0, 0.0}});
     EXPECT_NEAR(at_vertex.value, 0.0, 1.0e-12);
@@ -6129,6 +6184,86 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP1PlaneMatchesHexMeasures)
     EXPECT_NEAR(result.summary.negative_volume_measure, 4.0, 1.0e-12);
     EXPECT_NEAR(result.summary.positive_volume_measure, 4.0, 1.0e-12);
     EXPECT_NEAR(result.summary.measure, 4.0, 1.0e-12);
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     SayeHexReferenceVolumeRulesMapToPhysicalCutVolume)
+{
+    constexpr int interface_marker = 191;
+    const std::array<FE::Real, 3> origin{{2.0, -1.0, 4.0}};
+    const std::array<FE::Real, 3> extents{{2.0, 3.0, 4.0}};
+    const auto mesh = std::make_shared<SingleHexMeshAccess>(
+        FE::ElementType::Hex8, origin, extents);
+    auto scalar_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleHexSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto cut_x = origin[0] + FE::Real{0.5} * extents[0];
+    for (FE::GlobalIndex vertex = 0; vertex < 8; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex, x[0] - cut_x);
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "saye-physical-volume-regression";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.interface_quadrature_order = 1;
+    options.volume_quadrature_order = 2;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto generated = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(generated.success) << generated.diagnostic;
+
+    // Generated-domain summaries are explicitly reference-frame measures: a
+    // half cut of [-1,1]^3 has measure four regardless of physical scaling.
+    EXPECT_NEAR(generated.summary.negative_volume_measure, 4.0, 1.0e-12);
+
+    FE::assembly::CutIntegrationContext context;
+    ASSERT_NO_THROW(context.addGeneratedInterfaceDomain(
+        generated.domain, FE::geometry::CutIntegrationSide::Negative));
+
+    FE::assembly::StandardAssembler assembler;
+    assembler.setDofMap(system.fieldDofHandler(phi).getDofMap());
+    assembler.initialize();
+    FE::assembly::DenseVectorView rhs(
+        system.fieldDofHandler(phi).getNumDofs());
+    PhysicalCutVolumeMeasureKernel kernel;
+    const auto assembly = assembler.assembleCutVolumes(
+        *mesh,
+        context,
+        interface_marker,
+        FE::geometry::CutIntegrationSide::Negative,
+        *scalar_space,
+        *scalar_space,
+        kernel,
+        /*matrix_view=*/nullptr,
+        &rhs,
+        /*assemble_matrix=*/false,
+        /*assemble_vector=*/true);
+    ASSERT_TRUE(assembly.success) << assembly.error_message;
+    ASSERT_GT(assembly.elements_assembled, 0);
+
+    const auto assembled_physical_volume =
+        std::accumulate(rhs.data().begin(), rhs.data().end(), FE::Real{0.0});
+    const auto expected_physical_volume =
+        FE::Real{0.5} * extents[0] * extents[1] * extents[2];
+    EXPECT_NEAR(assembled_physical_volume,
+                expected_physical_volume,
+                1.0e-11);
 }
 
 TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP1LineMatchesLinearTriangleMeasures)

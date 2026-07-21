@@ -24,6 +24,9 @@ std::vector<double> collectWetVolumeFractions(
     const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules);
 
 struct CutVolumeMeasureSummary {
+  // Counts and measures include locally owned parent cells only.  Generated
+  // rules on ghost cells remain available in the cut context for assembly but
+  // must not contribute again to communicator-wide physical totals.
   svmp::FE::Real reference_measure{0.0};
   svmp::FE::Real physical_measure{0.0};
   std::size_t rule_count{0};

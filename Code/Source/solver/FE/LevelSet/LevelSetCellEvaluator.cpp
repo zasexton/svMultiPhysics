@@ -1,5 +1,7 @@
 #include "LevelSet/LevelSetCellEvaluator.h"
 
+#include "Basis/LagrangeBasis.h"
+
 #include <cstddef>
 #include <stdexcept>
 #include <string>
@@ -27,6 +29,39 @@ void validateScalarC0Space(const spaces::FunctionSpace& space)
     }
 }
 
+[[nodiscard]] ElementType linearCornerElementType(ElementType type) noexcept
+{
+    switch (type) {
+    case ElementType::Line2:
+    case ElementType::Line3:
+        return ElementType::Line2;
+    case ElementType::Triangle3:
+    case ElementType::Triangle6:
+        return ElementType::Triangle3;
+    case ElementType::Quad4:
+    case ElementType::Quad8:
+    case ElementType::Quad9:
+        return ElementType::Quad4;
+    case ElementType::Tetra4:
+    case ElementType::Tetra10:
+        return ElementType::Tetra4;
+    case ElementType::Hex8:
+    case ElementType::Hex20:
+    case ElementType::Hex27:
+        return ElementType::Hex8;
+    case ElementType::Wedge6:
+    case ElementType::Wedge15:
+    case ElementType::Wedge18:
+        return ElementType::Wedge6;
+    case ElementType::Pyramid5:
+    case ElementType::Pyramid13:
+    case ElementType::Pyramid14:
+        return ElementType::Pyramid5;
+    default:
+        return ElementType::Unknown;
+    }
+}
+
 } // namespace
 
 LevelSetCellEvaluator::LevelSetCellEvaluator(
@@ -43,6 +78,11 @@ LevelSetCellEvaluator::LevelSetCellEvaluator(
             field_coefficients_.size()) {
         throw std::invalid_argument(
             "level-set cell evaluator received too few field coefficients");
+    }
+    const auto linear_type = linearCornerElementType(space.element_type());
+    if (linear_type != ElementType::Unknown) {
+        linear_corner_basis_ =
+            std::make_shared<basis::LagrangeBasis>(linear_type, 1);
     }
 }
 
@@ -105,6 +145,50 @@ LevelSetCellEvaluation LevelSetCellEvaluator::evaluate(
     } catch (const std::exception& ex) {
         throw std::invalid_argument(
             "level-set cell evaluator could not evaluate cell " +
+            std::to_string(cell_id) + ": " + ex.what());
+    }
+}
+
+LevelSetCellEvaluation LevelSetCellEvaluator::evaluateLinearCorner(
+    GlobalIndex cell_id,
+    const std::array<Real, 3>& parent_coordinate) const
+{
+    try {
+        if (!linear_corner_basis_) {
+            throw std::invalid_argument(
+                "the field element has no supported LinearCorner topology");
+        }
+        const auto& coefficients = cachedCellCoefficients(cell_id);
+        const auto corner_count = linear_corner_basis_->size();
+        if (coefficients.size() < corner_count) {
+            throw std::invalid_argument(
+                "the cell has fewer coefficients than corner vertices");
+        }
+
+        const auto point = toSpacePoint(parent_coordinate);
+        std::vector<Real> values;
+        std::vector<basis::Gradient> gradients;
+        linear_corner_basis_->evaluate_values(point, values);
+        linear_corner_basis_->evaluate_gradients(point, gradients);
+        if (values.size() != corner_count || gradients.size() != corner_count) {
+            throw std::invalid_argument(
+                "the LinearCorner basis returned an inconsistent size");
+        }
+
+        LevelSetCellEvaluation evaluation;
+        for (std::size_t i = 0; i < corner_count; ++i) {
+            evaluation.value += coefficients[i] * values[i];
+            for (std::size_t d = 0; d < 3u; ++d) {
+                evaluation.reference_gradient[d] +=
+                    coefficients[i] * gradients[i][d];
+            }
+        }
+        evaluation.interpolation_order = interpolationOrder(cell_id);
+        evaluation.implicit_geometry_order = 1;
+        return evaluation;
+    } catch (const std::exception& ex) {
+        throw std::invalid_argument(
+            "level-set LinearCorner evaluator could not evaluate cell " +
             std::to_string(cell_id) + ": " + ex.what());
     }
 }

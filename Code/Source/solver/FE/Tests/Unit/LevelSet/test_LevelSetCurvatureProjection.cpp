@@ -23,15 +23,23 @@ namespace level_set = svmp::FE::level_set;
 class StructuredQuadMeshAccess final : public FE::assembly::IMeshAccess {
 public:
     StructuredQuadMeshAccess(int nx, int ny, FE::Real h)
-        : nx_(nx), ny_(ny), h_(h)
+        : StructuredQuadMeshAccess(nx, ny, h, h)
+    {
+    }
+
+    StructuredQuadMeshAccess(int nx,
+                             int ny,
+                             FE::Real hx,
+                             FE::Real hy)
+        : nx_(nx), ny_(ny), hx_(hx), hy_(hy)
     {
         for (int j = 0; j <= ny_; ++j) {
             for (int i = 0; i <= nx_; ++i) {
                 nodes_.push_back({{
                     (static_cast<FE::Real>(i) -
-                     static_cast<FE::Real>(nx_) * FE::Real{0.5}) * h_,
+                     static_cast<FE::Real>(nx_) * FE::Real{0.5}) * hx_,
                     (static_cast<FE::Real>(j) -
-                     static_cast<FE::Real>(ny_) * FE::Real{0.5}) * h_,
+                     static_cast<FE::Real>(ny_) * FE::Real{0.5}) * hy_,
                     FE::Real{0.0},
                 }});
             }
@@ -168,7 +176,8 @@ private:
 
     int nx_{0};
     int ny_{0};
-    FE::Real h_{1.0};
+    FE::Real hx_{1.0};
+    FE::Real hy_{1.0};
     std::uint64_t geometry_revision_{1u};
     std::uint64_t topology_revision_{1u};
     std::vector<std::array<FE::Real, 3>> nodes_{};
@@ -387,6 +396,40 @@ FE::Real circleCurvatureMeanError(int nx, FE::Real h, FE::Real radius)
     return error_sum / static_cast<FE::Real>(samples);
 }
 
+FE::Real recoveredQuadraticCurvatureAtOrigin(FE::Real hx, FE::Real hy)
+{
+    StructuredQuadMeshAccess mesh(/*nx=*/6, /*ny=*/6, hx, hy);
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()),
+                              FE::Real{0.0});
+    FE::GlobalIndex origin = -1;
+    FE::Real origin_radius2 = std::numeric_limits<FE::Real>::infinity();
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto x = mesh.getNodeCoordinates(vertex);
+        // At the origin, grad(phi)=(1,0) and Hessian(phi)_yy=2, hence
+        // div(grad(phi)/|grad(phi)|)=2 exactly.
+        phi[static_cast<std::size_t>(vertex)] =
+            x[0] + FE::Real{0.5} * FE::Real{2.0} * x[1] * x[1];
+        const FE::Real radius2 = x[0] * x[0] + x[1] * x[1];
+        if (radius2 < origin_radius2) {
+            origin_radius2 = radius2;
+            origin = vertex;
+        }
+    }
+    if (origin < 0 || origin_radius2 != FE::Real{0.0}) {
+        throw std::runtime_error("structured curvature test has no origin vertex");
+    }
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.max_neighbor_rings = 2;
+    std::vector<FE::Real> curvature;
+    const auto result = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, options, curvature);
+    if (!result.success) {
+        throw std::runtime_error(result.diagnostic);
+    }
+    return curvature.at(static_cast<std::size_t>(origin));
+}
+
 } // namespace
 
 TEST(LevelSetCurvatureProjection, RecoversCircleCurvatureFromSignedDistance)
@@ -439,6 +482,35 @@ TEST(LevelSetCurvatureProjection, CircleCurvatureErrorImprovesWithRefinement)
 
     EXPECT_LT(fine_error, coarse_error);
     EXPECT_LT(fine_error, 0.08);
+}
+
+TEST(LevelSetCurvatureProjection,
+     QuadraticRecoveryIsInvariantUnderMeshLengthUnits)
+{
+    EXPECT_NEAR(recoveredQuadraticCurvatureAtOrigin(1.0e-6, 1.0e-6),
+                2.0,
+                2.0e-5);
+    EXPECT_NEAR(recoveredQuadraticCurvatureAtOrigin(1.0, 1.0),
+                2.0,
+                2.0e-11);
+    EXPECT_NEAR(recoveredQuadraticCurvatureAtOrigin(1.0e6, 1.0e6),
+                2.0,
+                2.0e-5);
+}
+
+TEST(LevelSetCurvatureProjection,
+     QuadraticRecoveryHandlesStrongCoordinateAnisotropy)
+{
+    // At a 10^6 aspect ratio the y^2 signal in mixed x/y nodal values is only
+    // about four decimal digits above double-precision roundoff.  The bound is
+    // therefore set by information already lost in the input coefficients,
+    // not by the scaled QR solve.
+    EXPECT_NEAR(recoveredQuadraticCurvatureAtOrigin(1.0e-6, 1.0),
+                2.0,
+                3.0e-5);
+    EXPECT_NEAR(recoveredQuadraticCurvatureAtOrigin(1.0, 1.0e-6),
+                2.0,
+                3.0e-5);
 }
 
 TEST(LevelSetCurvatureProjection, NarrowBandRestrictsRecoveryToInterfaceVertices)
@@ -655,6 +727,36 @@ TEST(LevelSetCurvatureProjection, RejectsNegativeNarrowBandWidth)
     EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
                      mesh, phi, options, curvature),
                  std::invalid_argument);
+}
+
+TEST(LevelSetCurvatureProjection, RejectsInvalidLeastSquaresTolerances)
+{
+    StructuredQuadMeshAccess mesh(/*nx=*/6, /*ny=*/6, /*h=*/0.1);
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()),
+                              FE::Real{0.0});
+    std::vector<FE::Real> curvature;
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.gradient_tolerance =
+        std::numeric_limits<FE::Real>::infinity();
+    EXPECT_THROW(
+        (void)level_set::projectLevelSetMeanCurvatureToVertices(
+            mesh, phi, options, curvature),
+        std::invalid_argument);
+
+    options = level_set::LevelSetCurvatureProjectionOptions{};
+    options.normal_equation_tolerance =
+        std::numeric_limits<FE::Real>::quiet_NaN();
+    EXPECT_THROW(
+        (void)level_set::projectLevelSetMeanCurvatureToVertices(
+            mesh, phi, options, curvature),
+        std::invalid_argument);
+
+    options.normal_equation_tolerance = FE::Real{1.0};
+    EXPECT_THROW(
+        (void)level_set::projectLevelSetMeanCurvatureToVertices(
+            mesh, phi, options, curvature),
+        std::invalid_argument);
 }
 
 TEST(LevelSetCurvatureProjection, FailsClosedWhenNarrowBandHasNoVertices)

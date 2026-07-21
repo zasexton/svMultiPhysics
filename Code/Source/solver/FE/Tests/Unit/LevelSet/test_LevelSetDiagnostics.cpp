@@ -198,6 +198,10 @@ TEST(LevelSetDiagnostics, ReportsVolumeAndSignedDistanceError)
 
     level_set::LevelSetOutputDiagnosticsOptions options{};
     options.signed_distance.signed_distance_tolerance = 1.0e-12;
+    // This diagnostic test exercises the exact one-step update.  The production
+    // defaults deliberately under-relax over several pseudo-time iterations.
+    options.signed_distance.pseudo_time_step_scale = 1.0;
+    options.signed_distance.max_iterations = 1;
     options.has_reference_negative_volume = true;
     options.reference_negative_volume = 0.125;
 

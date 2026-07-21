@@ -12,8 +12,13 @@
 #include "Systems/FESystem.h"
 
 #include <array>
+#include <memory>
 #include <span>
 #include <vector>
+
+namespace svmp::FE::basis {
+class LagrangeBasis;
+}
 
 namespace svmp::FE::level_set {
 
@@ -39,6 +44,11 @@ public:
         GlobalIndex cell_id,
         const std::array<Real, 3>& parent_coordinate) const;
 
+    /** Evaluate the P1/Q1 corner interpolant used by LinearCorner cutting. */
+    [[nodiscard]] LevelSetCellEvaluation evaluateLinearCorner(
+        GlobalIndex cell_id,
+        const std::array<Real, 3>& parent_coordinate) const;
+
 private:
     [[nodiscard]] const std::vector<Real>& cachedCellCoefficients(
         GlobalIndex cell_id) const;
@@ -49,6 +59,7 @@ private:
     mutable bool cached_cell_valid_{false};
     mutable GlobalIndex cached_cell_id_{static_cast<GlobalIndex>(-1)};
     mutable std::vector<Real> cached_cell_coefficients_{};
+    std::shared_ptr<const basis::LagrangeBasis> linear_corner_basis_{};
 };
 
 [[nodiscard]] LevelSetCellEvaluator makeLevelSetCellEvaluator(

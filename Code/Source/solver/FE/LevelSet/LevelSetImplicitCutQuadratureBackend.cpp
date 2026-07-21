@@ -2638,6 +2638,58 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
             if (matched_edge_roots && mark_boundary_degenerate()) {
                 return true;
             }
+            if (diagnostics.first_curved_fragment_failure_detail.empty()) {
+                std::ostringstream detail;
+                detail << "shape=tetrahedron"
+                       << "; tet_vertices="
+                       << formatPointList({tet.a, tet.b, tet.c, tet.d})
+                       << "; base_vertices=" << formatPointList(base_vertices)
+                       << "; edge_roots=" << formatPointList(edge_roots)
+                       << "; matched_edge_roots="
+                       << (matched_edge_roots ? "true" : "false")
+                       << "; seed=" << formatPoint(seed)
+                       << "; f_seed="
+                       << formatReal(signedLevelSetValue(input, seed))
+                       << "; saw_search_segment="
+                       << (saw_search_segment ? "true" : "false")
+                       << "; saw_root=" << (saw_root ? "true" : "false")
+                       << "; saw_gradient="
+                       << (saw_gradient ? "true" : "false");
+                for (std::size_t direction_index = 0u;
+                     direction_index < projection_directions.size();
+                     ++direction_index) {
+                    std::array<Real, 3> search_start;
+                    std::array<Real, 3> search_end;
+                    Real guess_fraction = 0.5;
+                    detail << "; direction_" << direction_index << "="
+                           << formatPoint(projection_directions[direction_index]);
+                    if (lineTetrahedronSearchSegment(
+                            tet,
+                            seed,
+                            projection_directions[direction_index],
+                            search_start,
+                            search_end,
+                            guess_fraction)) {
+                        detail << "; segment_" << direction_index << "=("
+                               << formatPoint(search_start) << ","
+                               << formatPoint(search_end) << ")"
+                               << "; segment_values_" << direction_index
+                               << "=("
+                               << formatReal(
+                                      signedLevelSetValue(input, search_start))
+                               << ","
+                               << formatReal(
+                                      signedLevelSetValue(input, search_end))
+                               << ")"
+                               << "; guess_fraction_" << direction_index
+                               << "=" << formatReal(guess_fraction);
+                    } else {
+                        detail << "; segment_" << direction_index
+                               << "=unavailable";
+                    }
+                }
+                diagnostics.first_curved_fragment_failure_detail = detail.str();
+            }
             if (!saw_search_segment) {
                 return fail_search_segment();
             }
@@ -3273,16 +3325,11 @@ void appendLinearizedTriangleCut(
     }
 }
 
-void appendLinearizedTetrahedronCut(
-    interfaces::LevelSetCellCutResult& cut,
+[[nodiscard]] interfaces::LevelSetCellCutResult makeLinearizedTetrahedronCut(
     const interfaces::CutInterfaceDomainRequest& request,
     const ImplicitCutQuadratureBackendCellInput& input,
-    const Tetrahedron3D& tet,
-    Real parent_measure,
-    SayeHyperrectangleDiagnostics& diagnostics)
+    const Tetrahedron3D& tet)
 {
-    ++diagnostics.linearized_leaf_count;
-
     interfaces::LevelSetCellCutInput leaf;
     leaf.parent_cell = input.linearized_input.parent_cell;
     leaf.element_type = ElementType::Tetra4;
@@ -3297,6 +3344,19 @@ void appendLinearizedTetrahedronCut(
 
     auto leaf_cut = interfaces::cutLinearLevelSetCell3D(request, leaf);
     alignLeafCutNormalsWithEvaluator(leaf_cut, input);
+    return leaf_cut;
+}
+
+void appendLinearizedTetrahedronCutResult(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Tetrahedron3D& tet,
+    Real parent_measure,
+    interfaces::LevelSetCellCutResult leaf_cut,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    ++diagnostics.linearized_leaf_count;
     diagnostics.interface_fragment_count +=
         static_cast<int>(leaf_cut.fragments.size());
     for (auto& fragment : leaf_cut.fragments) {
@@ -3324,6 +3384,24 @@ void appendLinearizedTetrahedronCut(
         leaf_cut.degeneracy != interfaces::CutInterfaceDegeneracy::NoCut) {
         cut.degeneracy = leaf_cut.degeneracy;
     }
+}
+
+void appendLinearizedTetrahedronCut(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Tetrahedron3D& tet,
+    Real parent_measure,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    appendLinearizedTetrahedronCutResult(
+        cut,
+        request,
+        input,
+        tet,
+        parent_measure,
+        makeLinearizedTetrahedronCut(request, input, tet),
+        diagnostics);
 }
 
 [[nodiscard]] std::array<std::array<Real, 3>, 8> boxVertices(
@@ -3857,6 +3935,104 @@ void appendAdaptiveTriangleCut(
     }
 }
 
+void appendTopologyAwareLinearizedTetrahedronCut(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Tetrahedron3D& tet,
+    Real parent_measure,
+    int terminal_extra_depth,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    const auto samples = tetrahedronSamplePoints(tet);
+    bool has_negative = false;
+    bool has_positive = false;
+    Real min_signed = std::numeric_limits<Real>::infinity();
+    Real max_signed = -std::numeric_limits<Real>::infinity();
+    for (const auto& point : samples) {
+        const Real value = signedLevelSetValue(input, point);
+        min_signed = std::min(min_signed, value);
+        max_signed = std::max(max_signed, value);
+        has_negative = has_negative || value <= request.implicit_cut_root_tolerance;
+        has_positive = has_positive || value >= -request.implicit_cut_root_tolerance;
+    }
+
+    if (!has_negative || !has_positive) {
+        appendFullTetrahedronRegion(
+            cut,
+            request,
+            input,
+            tet,
+            has_negative ? geometry::CutIntegrationSide::Negative
+                         : geometry::CutIntegrationSide::Positive,
+            parent_measure,
+            min_signed,
+            max_signed,
+            diagnostics);
+        return;
+    }
+
+    auto leaf_cut = makeLinearizedTetrahedronCut(request, input, tet);
+    std::size_t linearized_edge_root_count = 0u;
+    for (const auto& fragment : leaf_cut.fragments) {
+        if (fragment.active()) {
+            linearized_edge_root_count += fragment.vertices.size();
+        }
+    }
+
+    int local_iterations = 0;
+    const auto sampled_edge_roots =
+        tetrahedronEdgeRoots(input, request, tet, local_iterations);
+    diagnostics.root_finder_iteration_count += local_iterations;
+    const bool topology_mismatch =
+        !leaf_cut.hasActiveFragments() ||
+        sampled_edge_roots.size() != linearized_edge_root_count;
+    if (topology_mismatch &&
+        terminal_extra_depth < kTerminalTopologyExtraSubdivisionDepth) {
+        ++diagnostics.terminal_topology_refinement_count;
+        diagnostics.max_terminal_topology_extra_depth =
+            std::max(diagnostics.max_terminal_topology_extra_depth,
+                     terminal_extra_depth + 1);
+        ++diagnostics.subdivision_count;
+
+        const auto ab = midpoint(tet.a, tet.b);
+        const auto ac = midpoint(tet.a, tet.c);
+        const auto ad = midpoint(tet.a, tet.d);
+        const auto bc = midpoint(tet.b, tet.c);
+        const auto bd = midpoint(tet.b, tet.d);
+        const auto cd = midpoint(tet.c, tet.d);
+        const std::array<Tetrahedron3D, 8> children{{
+            Tetrahedron3D{tet.a, ab, ac, ad},
+            Tetrahedron3D{ab, tet.b, bc, bd},
+            Tetrahedron3D{ac, bc, tet.c, cd},
+            Tetrahedron3D{ad, bd, cd, tet.d},
+            Tetrahedron3D{ab, ac, ad, cd},
+            Tetrahedron3D{ab, ac, bc, cd},
+            Tetrahedron3D{ab, ad, bd, cd},
+            Tetrahedron3D{ab, bc, bd, cd},
+        }};
+        for (const auto& child : children) {
+            appendTopologyAwareLinearizedTetrahedronCut(
+                cut,
+                request,
+                input,
+                child,
+                parent_measure,
+                terminal_extra_depth + 1,
+                diagnostics);
+        }
+        return;
+    }
+
+    appendLinearizedTetrahedronCutResult(cut,
+                                         request,
+                                         input,
+                                         tet,
+                                         parent_measure,
+                                         std::move(leaf_cut),
+                                         diagnostics);
+}
+
 void appendAdaptiveTetrahedronCut(
     interfaces::LevelSetCellCutResult& cut,
     const interfaces::CutInterfaceDomainRequest& request,
@@ -3898,8 +4074,14 @@ void appendAdaptiveTetrahedronCut(
     }
 
     if (depth >= max_depth) {
-        appendLinearizedTetrahedronCut(
-            cut, request, input, tet, parent_measure, diagnostics);
+        appendTopologyAwareLinearizedTetrahedronCut(
+            cut,
+            request,
+            input,
+            tet,
+            parent_measure,
+            /*terminal_extra_depth=*/0,
+            diagnostics);
         return;
     }
 
@@ -4040,6 +4222,10 @@ void appendAdaptiveTetrahedronCut(
                diagnostics.curved_fragment_boundary_degenerate_count);
     appendRootPolishDiagnostics(diagnostic,
                                 diagnostics.root_finder_iteration_count);
+    if (!diagnostics.first_curved_fragment_failure_detail.empty()) {
+        diagnostic += "; first_curved_fragment_failure_detail={" +
+                      diagnostics.first_curved_fragment_failure_detail + "}";
+    }
     return diagnostic;
 }
 
@@ -4146,6 +4332,10 @@ void appendAdaptiveTetrahedronCut(
                diagnostics.curved_fragment_boundary_degenerate_count);
     appendRootPolishDiagnostics(diagnostic,
                                 diagnostics.root_finder_iteration_count);
+    if (!diagnostics.first_curved_fragment_failure_detail.empty()) {
+        diagnostic += "; first_curved_fragment_failure_detail={" +
+                      diagnostics.first_curved_fragment_failure_detail + "}";
+    }
     return diagnostic;
 }
 

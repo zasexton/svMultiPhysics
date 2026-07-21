@@ -25,6 +25,11 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
     EXPECT_FALSE(options.supg.enabled);
     EXPECT_DOUBLE_EQ(options.supg.tau_scale, 0.5);
     EXPECT_DOUBLE_EQ(options.supg.velocity_epsilon, 1.0e-12);
+    EXPECT_DOUBLE_EQ(options.supg.transient_scale, 2.0);
+    EXPECT_FALSE(options.supg.discontinuity_capturing_enabled);
+    EXPECT_DOUBLE_EQ(options.supg.discontinuity_capturing_scale, 0.1);
+    EXPECT_DOUBLE_EQ(options.supg.gradient_epsilon, 1.0e-12);
+    EXPECT_DOUBLE_EQ(options.supg.discontinuity_capturing_max_courant, 0.5);
     EXPECT_FALSE(options.reinitialization.enabled);
     EXPECT_EQ(options.reinitialization.method,
               level_set::LevelSetReinitializationMethod::Projection);
@@ -33,12 +38,20 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
     EXPECT_DOUBLE_EQ(options.reinitialization.pseudo_time_step_scale, 0.3);
     EXPECT_DOUBLE_EQ(options.reinitialization.interface_band_width, 3.0);
     EXPECT_DOUBLE_EQ(options.reinitialization.signed_distance_tolerance, 1.0e-6);
+    EXPECT_DOUBLE_EQ(options.reinitialization.preserve_band_width, 0.0);
+    EXPECT_DOUBLE_EQ(options.reinitialization.max_zero_set_displacement, 1.0e-10);
     EXPECT_FALSE(options.volume_correction.enabled);
     EXPECT_EQ(options.volume_correction.cadence_steps, 1);
     EXPECT_TRUE(options.volume_correction.use_initial_negative_volume_as_target);
     EXPECT_DOUBLE_EQ(options.volume_correction.target_negative_volume, 0.0);
     EXPECT_DOUBLE_EQ(options.volume_correction.volume_tolerance, 1.0e-10);
     EXPECT_EQ(options.volume_correction.max_iterations, 50);
+    EXPECT_DOUBLE_EQ(options.volume_correction.minimum_relative_volume_error, 1.0e-6);
+    EXPECT_DOUBLE_EQ(options.volume_correction.maximum_interface_displacement_fraction, 0.1);
+    EXPECT_DOUBLE_EQ(
+        options.volume_correction
+            .maximum_cumulative_interface_displacement_fraction,
+        1.0);
     EXPECT_TRUE(options.boundaries.inflow.empty());
     EXPECT_TRUE(options.boundaries.outflow.empty());
 }
@@ -57,6 +70,11 @@ TEST(LevelSetOptions, ExplicitTransportOptions)
     options.supg.enabled = true;
     options.supg.tau_scale = 0.25;
     options.supg.velocity_epsilon = 1.0e-8;
+    options.supg.transient_scale = 1.5;
+    options.supg.discontinuity_capturing_enabled = false;
+    options.supg.discontinuity_capturing_scale = 0.2;
+    options.supg.gradient_epsilon = 1.0e-9;
+    options.supg.discontinuity_capturing_max_courant = 0.3;
     options.reinitialization.enabled = true;
     options.reinitialization.method = level_set::LevelSetReinitializationMethod::Projection;
     options.reinitialization.cadence_steps = 4;
@@ -64,12 +82,17 @@ TEST(LevelSetOptions, ExplicitTransportOptions)
     options.reinitialization.pseudo_time_step_scale = 0.20;
     options.reinitialization.interface_band_width = 2.5;
     options.reinitialization.signed_distance_tolerance = 1.0e-5;
+    options.reinitialization.max_zero_set_displacement = 2.0e-8;
     options.volume_correction.enabled = true;
     options.volume_correction.cadence_steps = 5;
     options.volume_correction.use_initial_negative_volume_as_target = false;
     options.volume_correction.target_negative_volume = 0.375;
     options.volume_correction.volume_tolerance = 1.0e-7;
     options.volume_correction.max_iterations = 24;
+    options.volume_correction.minimum_relative_volume_error = 2.0e-5;
+    options.volume_correction.maximum_interface_displacement_fraction = 0.025;
+    options.volume_correction
+        .maximum_cumulative_interface_displacement_fraction = 0.25;
     options.boundaries.inflow.push_back(level_set::LevelSetInflowBoundary{
         .boundary_marker = 11,
         .value = svmp::FE::Real{2.5},
@@ -92,6 +115,11 @@ TEST(LevelSetOptions, ExplicitTransportOptions)
     EXPECT_TRUE(options.supg.enabled);
     EXPECT_DOUBLE_EQ(options.supg.tau_scale, 0.25);
     EXPECT_DOUBLE_EQ(options.supg.velocity_epsilon, 1.0e-8);
+    EXPECT_DOUBLE_EQ(options.supg.transient_scale, 1.5);
+    EXPECT_FALSE(options.supg.discontinuity_capturing_enabled);
+    EXPECT_DOUBLE_EQ(options.supg.discontinuity_capturing_scale, 0.2);
+    EXPECT_DOUBLE_EQ(options.supg.gradient_epsilon, 1.0e-9);
+    EXPECT_DOUBLE_EQ(options.supg.discontinuity_capturing_max_courant, 0.3);
     EXPECT_TRUE(options.reinitialization.enabled);
     EXPECT_EQ(options.reinitialization.method, level_set::LevelSetReinitializationMethod::Projection);
     EXPECT_EQ(options.reinitialization.cadence_steps, 4);
@@ -99,12 +127,19 @@ TEST(LevelSetOptions, ExplicitTransportOptions)
     EXPECT_DOUBLE_EQ(options.reinitialization.pseudo_time_step_scale, 0.20);
     EXPECT_DOUBLE_EQ(options.reinitialization.interface_band_width, 2.5);
     EXPECT_DOUBLE_EQ(options.reinitialization.signed_distance_tolerance, 1.0e-5);
+    EXPECT_DOUBLE_EQ(options.reinitialization.max_zero_set_displacement, 2.0e-8);
     EXPECT_TRUE(options.volume_correction.enabled);
     EXPECT_EQ(options.volume_correction.cadence_steps, 5);
     EXPECT_FALSE(options.volume_correction.use_initial_negative_volume_as_target);
     EXPECT_DOUBLE_EQ(options.volume_correction.target_negative_volume, 0.375);
     EXPECT_DOUBLE_EQ(options.volume_correction.volume_tolerance, 1.0e-7);
     EXPECT_EQ(options.volume_correction.max_iterations, 24);
+    EXPECT_DOUBLE_EQ(options.volume_correction.minimum_relative_volume_error, 2.0e-5);
+    EXPECT_DOUBLE_EQ(options.volume_correction.maximum_interface_displacement_fraction, 0.025);
+    EXPECT_DOUBLE_EQ(
+        options.volume_correction
+            .maximum_cumulative_interface_displacement_fraction,
+        0.25);
     ASSERT_EQ(options.boundaries.inflow.size(), 1u);
     EXPECT_EQ(options.boundaries.inflow.front().boundary_marker, 11);
     EXPECT_DOUBLE_EQ(std::get<svmp::FE::Real>(options.boundaries.inflow.front().value), 2.5);

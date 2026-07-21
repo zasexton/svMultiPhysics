@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <limits>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -26,8 +27,36 @@ using interfaces::CutInterfaceFragmentKind;
 using interfaces::LevelSetCellCutInput;
 using interfaces::LevelSetInterfaceSource;
 
+void rejectDistributedProjectionReinitialization(
+    const dofs::DofHandler& dof_handler)
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0 &&
+        dof_handler.mpiComm() != MPI_COMM_NULL) {
+        int communicator_size = 1;
+        MPI_Comm_size(dof_handler.mpiComm(), &communicator_size);
+        if (communicator_size > 1) {
+            throw std::invalid_argument(
+                "level-set signed-distance projection reinitialization is "
+                "unsupported on MPI communicators with more than one rank: "
+                "interface primitive construction and coefficient binding "
+                "are currently rank-local");
+        }
+    }
+#else
+    (void)dof_handler;
+#endif
+}
+
 struct SurfacePrimitive {
     CutInterfaceFragmentKind kind{CutInterfaceFragmentKind::Segment};
+    GlobalIndex parent_cell{-1};
     std::vector<std::array<Real, 3>> points{};
 };
 
@@ -53,6 +82,14 @@ struct SurfacePrimitive {
                                         Real s) noexcept
 {
     return {{a[0] * s, a[1] * s, a[2] * s}};
+}
+
+[[nodiscard]] std::array<Real, 3> cross(const std::array<Real, 3>& a,
+                                        const std::array<Real, 3>& b) noexcept
+{
+    return {{a[1] * b[2] - a[2] * b[1],
+             a[2] * b[0] - a[0] * b[2],
+             a[0] * b[1] - a[1] * b[0]}};
 }
 
 [[nodiscard]] Real norm(const std::array<Real, 3>& a) noexcept
@@ -229,8 +266,44 @@ struct SurfacePrimitive {
     return best;
 }
 
+[[nodiscard]] Real distanceToPrimitiveSupportingGeometry(
+    const std::array<Real, 3>& point,
+    const SurfacePrimitive& primitive,
+    int dimension) noexcept
+{
+    if (primitive.points.empty()) {
+        return std::numeric_limits<Real>::infinity();
+    }
+    if (primitive.points.size() == 1u || dimension <= 1) {
+        return distance(point, primitive.points.front());
+    }
+    if (dimension == 2 || primitive.points.size() == 2u) {
+        const auto direction = sub(primitive.points[1], primitive.points[0]);
+        const Real length_squared = dot(direction, direction);
+        if (!(length_squared > Real{0.0})) {
+            return distance(point, primitive.points[0]);
+        }
+        const auto offset = sub(point, primitive.points[0]);
+        const Real projection = dot(offset, direction) / length_squared;
+        return norm(sub(offset, scale(direction, projection)));
+    }
+
+    const auto first = primitive.points.front();
+    for (std::size_t i = 1u; i + 1u < primitive.points.size(); ++i) {
+        const auto a = sub(primitive.points[i], first);
+        const auto b = sub(primitive.points[i + 1u], first);
+        const auto normal = cross(a, b);
+        const Real normal_length = norm(normal);
+        if (normal_length > Real{0.0}) {
+            return std::abs(dot(sub(point, first), normal)) / normal_length;
+        }
+    }
+    return pointPrimitiveDistance(point, primitive);
+}
+
 struct LinearInterfacePrimitiveSet {
     std::vector<SurfacePrimitive> primitives{};
+    std::vector<GlobalIndex> cut_cell_ids{};
     std::size_t cut_cells{0u};
 };
 
@@ -292,6 +365,7 @@ struct LinearInterfacePrimitiveSet {
             }
             SurfacePrimitive primitive;
             primitive.kind = fragment.kind;
+            primitive.parent_cell = cell_id;
             primitive.points.reserve(fragment.vertices.size());
             for (const auto& vertex : fragment.vertices) {
                 primitive.points.push_back(vertex.point);
@@ -300,56 +374,200 @@ struct LinearInterfacePrimitiveSet {
             added_cell_fragment = true;
         }
         if (added_cell_fragment) {
+            output.cut_cell_ids.push_back(cell_id);
             ++output.cut_cells;
         }
     });
     return output;
 }
 
-[[nodiscard]] Real medianPrimitiveDiameter(
-    const LinearInterfacePrimitiveSet& primitive_set)
+class DisjointSet {
+public:
+    explicit DisjointSet(std::size_t size) : parent_(size), rank_(size, 0u)
+    {
+        for (std::size_t i = 0; i < size; ++i) {
+            parent_[i] = i;
+        }
+    }
+
+    [[nodiscard]] std::size_t find(std::size_t value)
+    {
+        if (parent_[value] != value) {
+            parent_[value] = find(parent_[value]);
+        }
+        return parent_[value];
+    }
+
+    void unite(std::size_t a, std::size_t b)
+    {
+        a = find(a);
+        b = find(b);
+        if (a == b) {
+            return;
+        }
+        if (rank_[a] < rank_[b]) {
+            std::swap(a, b);
+        }
+        parent_[b] = a;
+        if (rank_[a] == rank_[b]) {
+            ++rank_[a];
+        }
+    }
+
+private:
+    std::vector<std::size_t> parent_{};
+    std::vector<unsigned char> rank_{};
+};
+
+[[nodiscard]] std::vector<std::array<std::size_t, 2>> cornerEdges(
+    ElementType type)
 {
-    std::vector<Real> diameters;
-    diameters.reserve(primitive_set.primitives.size());
-    for (const auto& primitive : primitive_set.primitives) {
-        const auto& points = primitive.points;
-        Real diameter = 0.0;
-        for (std::size_t i = 0; i + 1u < points.size(); ++i) {
-            for (std::size_t j = i + 1u; j < points.size(); ++j) {
-                diameter = std::max(diameter, distance(points[i], points[j]));
-            }
-        }
-        if (std::isfinite(diameter) && diameter > Real{0.0}) {
-            diameters.push_back(diameter);
-        }
+    switch (type) {
+    case ElementType::Line2:
+    case ElementType::Line3:
+        return {{{0u, 1u}}};
+    case ElementType::Triangle3:
+    case ElementType::Triangle6:
+        return {{{0u, 1u}}, {{1u, 2u}}, {{2u, 0u}}};
+    case ElementType::Quad4:
+    case ElementType::Quad8:
+    case ElementType::Quad9:
+        return {{{0u, 1u}}, {{1u, 2u}}, {{2u, 3u}}, {{3u, 0u}}};
+    case ElementType::Tetra4:
+    case ElementType::Tetra10:
+        return {{{0u, 1u}}, {{0u, 2u}}, {{0u, 3u}},
+                {{1u, 2u}}, {{1u, 3u}}, {{2u, 3u}}};
+    default:
+        return {};
     }
-    if (diameters.empty()) {
-        return Real{0.0};
-    }
-    const auto mid =
-        diameters.begin() + static_cast<std::ptrdiff_t>(diameters.size() / 2u);
-    std::nth_element(diameters.begin(), mid, diameters.end());
-    return *mid;
 }
 
-[[nodiscard]] Real resolvePreserveBandWidth(
-    const LevelSetReinitializationOptions& options,
-    const LinearInterfacePrimitiveSet& primitive_set)
+struct EdgeZeroCrossing {
+    GlobalIndex dof_a{-1};
+    GlobalIndex dof_b{-1};
+    std::array<Real, 3> point_a{};
+    std::array<Real, 3> point_b{};
+    Real original_t{0.0};
+};
+
+struct ZeroSetDisplacementEvaluation {
+    bool topology_preserved{true};
+    Real max_displacement{0.0};
+    Real l2_displacement{0.0};
+    std::size_t samples{0u};
+};
+
+[[nodiscard]] std::vector<EdgeZeroCrossing> collectOriginalZeroCrossings(
+    const assembly::IMeshAccess& mesh,
+    const dofs::EntityDofMap& entity_map,
+    const LinearInterfacePrimitiveSet& primitive_set,
+    Real tolerance,
+    std::span<const Real> coefficients)
 {
-    if (options.preserve_band_width == Real{0.0}) {
-        return Real{0.0};
+    std::vector<EdgeZeroCrossing> crossings;
+    std::vector<GlobalIndex> nodes;
+    std::vector<std::array<Real, 3>> points;
+    for (const auto cell : primitive_set.cut_cell_ids) {
+        mesh.getCellNodes(cell, nodes);
+        mesh.getCellCoordinates(cell, points);
+        for (const auto edge : cornerEdges(mesh.getCellType(cell))) {
+            if (edge[0] >= nodes.size() || edge[1] >= nodes.size() ||
+                edge[0] >= points.size() || edge[1] >= points.size()) {
+                continue;
+            }
+            const auto dofs_a = entity_map.getVertexDofs(nodes[edge[0]]);
+            const auto dofs_b = entity_map.getVertexDofs(nodes[edge[1]]);
+            if (dofs_a.size() != 1u || dofs_b.size() != 1u) {
+                continue;
+            }
+            const auto ia = static_cast<std::size_t>(dofs_a.front());
+            const auto ib = static_cast<std::size_t>(dofs_b.front());
+            if (ia >= coefficients.size() || ib >= coefficients.size()) {
+                continue;
+            }
+            const Real a = coefficients[ia];
+            const Real b = coefficients[ib];
+            if (!((a < -tolerance && b > tolerance) ||
+                  (a > tolerance && b < -tolerance))) {
+                continue;
+            }
+            const Real denom = a - b;
+            if (std::abs(denom) <= tolerance) {
+                continue;
+            }
+            crossings.push_back(EdgeZeroCrossing{
+                .dof_a = dofs_a.front(),
+                .dof_b = dofs_b.front(),
+                .point_a = points[edge[0]],
+                .point_b = points[edge[1]],
+                .original_t = std::clamp(a / denom, Real{0.0}, Real{1.0}),
+            });
+        }
     }
-    if (options.preserve_band_width > Real{0.0}) {
-        return options.preserve_band_width;
+    std::sort(crossings.begin(), crossings.end(), [](const auto& a, const auto& b) {
+        const auto a0 = std::min(a.dof_a, a.dof_b);
+        const auto a1 = std::max(a.dof_a, a.dof_b);
+        const auto b0 = std::min(b.dof_a, b.dof_b);
+        const auto b1 = std::max(b.dof_a, b.dof_b);
+        return std::pair{a0, a1} < std::pair{b0, b1};
+    });
+    crossings.erase(
+        std::unique(crossings.begin(), crossings.end(), [](const auto& a, const auto& b) {
+            return std::min(a.dof_a, a.dof_b) == std::min(b.dof_a, b.dof_b) &&
+                   std::max(a.dof_a, a.dof_b) == std::max(b.dof_a, b.dof_b);
+        }),
+        crossings.end());
+    return crossings;
+}
+
+[[nodiscard]] ZeroSetDisplacementEvaluation evaluateZeroSetDisplacement(
+    std::span<const EdgeZeroCrossing> crossings,
+    std::span<const Real> coefficients,
+    Real tolerance)
+{
+    ZeroSetDisplacementEvaluation evaluation;
+    Real displacement_squared_sum = 0.0;
+    for (const auto& crossing : crossings) {
+        const auto ia = static_cast<std::size_t>(crossing.dof_a);
+        const auto ib = static_cast<std::size_t>(crossing.dof_b);
+        if (ia >= coefficients.size() || ib >= coefficients.size()) {
+            evaluation.topology_preserved = false;
+            return evaluation;
+        }
+        const Real a = coefficients[ia];
+        const Real b = coefficients[ib];
+        const Real denominator = a - b;
+        if (!std::isfinite(a) || !std::isfinite(b) ||
+            !std::isfinite(denominator) ||
+            std::abs(denominator) <= tolerance ||
+            !((a < Real{0.0} && b > Real{0.0}) ||
+              (a > Real{0.0} && b < Real{0.0}))) {
+            evaluation.topology_preserved = false;
+            return evaluation;
+        }
+        const Real repaired_t =
+            std::clamp(a / denominator, Real{0.0}, Real{1.0});
+        const Real displacement =
+            std::abs(repaired_t - crossing.original_t) *
+            distance(crossing.point_a, crossing.point_b);
+        evaluation.max_displacement =
+            std::max(evaluation.max_displacement, displacement);
+        displacement_squared_sum += displacement * displacement;
+        ++evaluation.samples;
     }
-    // Automatic band: preserve DOFs within ~1.5 local interface primitive
-    // diameters. The corner-linear primitives span roughly one cell each, so
-    // this keeps every DOF that shapes the discrete interface untouched.
-    return Real{1.5} * medianPrimitiveDiameter(primitive_set);
+    if (evaluation.samples > 0u) {
+        evaluation.l2_displacement =
+            std::sqrt(displacement_squared_sum /
+                      static_cast<Real>(evaluation.samples));
+    }
+    return evaluation;
 }
 
 template <typename ForEachDofPoint>
 [[nodiscard]] LevelSetSignedDistanceRepairResult repairSignedDistanceCoefficientsFromPrimitives(
+    const assembly::IMeshAccess& mesh,
+    const dofs::DofHandler& field_dofs,
+    const dofs::EntityDofMap& entity_map,
     const LevelSetReinitializationOptions& options,
     std::span<const Real> input_coefficients,
     std::vector<Real>& repaired_coefficients,
@@ -367,64 +585,27 @@ template <typename ForEachDofPoint>
     }
 
     const auto expected = input_coefficients.size();
-    Real interface_displacement_squared_sum = 0.0;
-    std::vector<unsigned char> repaired_once(expected, 0u);
-    const Real preserve_band = resolvePreserveBandWidth(options, primitive_set);
-    result.preserve_band_width = preserve_band;
-
-    const auto repair_dof_at_point = [&](GlobalIndex dof,
-                                         const std::array<Real, 3>& x) {
+    std::vector<unsigned char> bound(expected, 0u);
+    std::vector<std::array<Real, 3>> dof_points(expected);
+    const auto collect_dof_point = [&](GlobalIndex dof,
+                                       const std::array<Real, 3>& x) {
         if (dof < 0 || static_cast<std::size_t>(dof) >= expected) {
             throw std::invalid_argument(
                 "level-set signed-distance repair found a cell DOF outside the coefficient span");
         }
         const auto dof_index = static_cast<std::size_t>(dof);
-        if (repaired_once[dof_index] != 0u) {
+        if (bound[dof_index] != 0u) {
             return;
         }
-
-        const auto original = input_coefficients[dof_index];
-        const Real d = nearestDistanceToInterface(x, primitive_set.primitives);
-        if (!std::isfinite(d)) {
-            throw std::runtime_error(
-                "level-set signed-distance repair produced a non-finite distance");
-        }
-        if (preserve_band > Real{0.0} && d <= preserve_band) {
-            // Preserve near-interface DOFs: the original coefficients define
-            // the discrete interface (including its high-order shape), and
-            // replacing them with distances to the linearized primitives
-            // would move the zero contour onto that linearization.
-            repaired_once[dof_index] = 1u;
-            ++result.preserved_dofs;
-            return;
-        }
-        Real repaired = 0.0;
-        if (original > options.signed_distance_tolerance) {
-            repaired = d;
-        } else if (original < -options.signed_distance_tolerance) {
-            repaired = -d;
-        }
-        repaired_coefficients[dof_index] = repaired;
-        repaired_once[dof_index] = 1u;
-
-        const Real abs_update = std::abs(repaired - original);
-        result.max_abs_update = std::max(result.max_abs_update, abs_update);
-        result.max_distance = std::max(result.max_distance, d);
-        if (options.interface_band_width > Real{0.0} &&
-            std::abs(original) <= options.interface_band_width) {
-            result.max_interface_displacement =
-                std::max(result.max_interface_displacement, abs_update);
-            interface_displacement_squared_sum += abs_update * abs_update;
-            ++result.interface_displacement_samples;
-        }
-        ++result.repaired_dofs;
+        dof_points[dof_index] = x;
+        bound[dof_index] = 1u;
     };
 
-    for_each_dof_point(repair_dof_at_point);
+    for_each_dof_point(collect_dof_point);
 
     const auto unrepaired =
-        static_cast<std::size_t>(std::count(repaired_once.begin(),
-                                            repaired_once.end(),
+        static_cast<std::size_t>(std::count(bound.begin(),
+                                            bound.end(),
                                             static_cast<unsigned char>(0u)));
     if (unrepaired != 0u) {
         result.success = false;
@@ -435,12 +616,263 @@ template <typename ForEachDofPoint>
         return result;
     }
 
-    if (result.interface_displacement_samples > 0u) {
-        result.l2_interface_displacement =
-            std::sqrt(interface_displacement_squared_sum /
-                      static_cast<Real>(result.interface_displacement_samples));
+    // In cut cells, use the supporting line/plane of the local interface
+    // fragment.  Extending that geometry past the clipped cell/wall endpoint
+    // avoids the radial-distance artifact that otherwise rotates normals at a
+    // contact point.  Away from cut cells, retain the true nearest finite-
+    // primitive distance.
+    std::vector<Real> cut_support_distance(
+        expected, std::numeric_limits<Real>::infinity());
+    for (const auto cell : primitive_set.cut_cell_ids) {
+        const auto cell_dofs = field_dofs.getCellDofs(cell);
+        for (const auto dof : cell_dofs) {
+            if (dof < 0 || static_cast<std::size_t>(dof) >= expected) {
+                throw std::invalid_argument(
+                    "level-set signed-distance repair found a cut-cell DOF outside the coefficient span");
+            }
+            auto& local_distance =
+                cut_support_distance[static_cast<std::size_t>(dof)];
+            for (const auto& primitive : primitive_set.primitives) {
+                if (primitive.parent_cell != cell) {
+                    continue;
+                }
+                local_distance = std::min(
+                    local_distance,
+                    distanceToPrimitiveSupportingGeometry(
+                        dof_points[static_cast<std::size_t>(dof)],
+                        primitive,
+                        mesh.dimension()));
+            }
+        }
     }
+
+    std::vector<Real> signed_distance_target(expected, 0.0);
+    std::vector<Real> distances(expected, 0.0);
+    for (std::size_t i = 0; i < expected; ++i) {
+        const Real finite_distance = nearestDistanceToInterface(
+            dof_points[i], primitive_set.primitives);
+        const Real d = std::isfinite(cut_support_distance[i])
+                           ? cut_support_distance[i]
+                           : finite_distance;
+        if (!std::isfinite(d)) {
+            throw std::runtime_error(
+                "level-set signed-distance repair produced a non-finite distance");
+        }
+        distances[i] = d;
+        result.max_distance = std::max(result.max_distance, d);
+        if (input_coefficients[i] > options.signed_distance_tolerance) {
+            signed_distance_target[i] = d;
+        } else if (input_coefficients[i] < -options.signed_distance_tolerance) {
+            signed_distance_target[i] = -d;
+        }
+    }
+
+    // Linear nodal cells can move toward the local signed-distance target while
+    // a geometric line search below explicitly bounds movement of every
+    // original cut-edge crossing.  High-order cells need a stronger invariant:
+    // a common positive multiplier on all DOFs in their connected cut patch
+    // preserves the complete polynomial zero set, including roots that are not
+    // visible on corner edges.
+    DisjointSet components(expected);
+    std::vector<unsigned char> in_cut_patch(expected, 0u);
+    for (const auto cell : primitive_set.cut_cell_ids) {
+        const auto cell_dofs = field_dofs.getCellDofs(cell);
+        std::optional<std::size_t> first;
+        for (const auto dof : cell_dofs) {
+            if (dof < 0 || static_cast<std::size_t>(dof) >= expected) {
+                throw std::invalid_argument(
+                    "level-set signed-distance repair found a cut-cell DOF outside the coefficient span");
+            }
+            const auto index = static_cast<std::size_t>(dof);
+            in_cut_patch[index] = 1u;
+            if (first.has_value()) {
+                components.unite(*first, index);
+            } else {
+                first = index;
+            }
+        }
+    }
+
+    std::map<std::size_t, bool> component_requires_common_scale;
+    for (std::size_t i = 0; i < expected; ++i) {
+        if (in_cut_patch[i] != 0u) {
+            component_requires_common_scale.emplace(components.find(i), false);
+        }
+    }
+    for (const auto cell : primitive_set.cut_cell_ids) {
+        const auto cell_dofs = field_dofs.getCellDofs(cell);
+        const bool high_order =
+            cell_dofs.size() > cornerCount(mesh.getCellType(cell));
+        if (!high_order) {
+            continue;
+        }
+        for (const auto dof : cell_dofs) {
+            component_requires_common_scale[components.find(
+                static_cast<std::size_t>(dof))] = true;
+        }
+    }
+
+    std::map<std::size_t, std::pair<Real, Real>> scale_sums;
+    for (std::size_t i = 0; i < expected; ++i) {
+        if (in_cut_patch[i] == 0u) {
+            continue;
+        }
+        auto& sums = scale_sums[components.find(i)];
+        sums.first += input_coefficients[i] * signed_distance_target[i];
+        sums.second += input_coefficients[i] * input_coefficients[i];
+    }
+    std::map<std::size_t, Real> component_target_scale;
+    for (const auto& [root, sums] : scale_sums) {
+        Real fitted = Real{1.0};
+        if (sums.second > options.signed_distance_tolerance *
+                              options.signed_distance_tolerance) {
+            fitted = sums.first / sums.second;
+        }
+        if (!std::isfinite(fitted) || fitted <= Real{0.0}) {
+            fitted = Real{1.0};
+        }
+        component_target_scale[root] = fitted;
+    }
+
+    std::vector<Real> target(expected, 0.0);
+    std::vector<unsigned char> update_enabled(expected, 1u);
+    for (std::size_t i = 0; i < expected; ++i) {
+        if (in_cut_patch[i] != 0u) {
+            const auto root = components.find(i);
+            target[i] = component_requires_common_scale.at(root)
+                            ? component_target_scale.at(root) *
+                                  input_coefficients[i]
+                            : signed_distance_target[i];
+        } else {
+            target[i] = signed_distance_target[i];
+            if (options.interface_band_width > Real{0.0} &&
+                distances[i] > options.interface_band_width) {
+                update_enabled[i] = 0u;
+                target[i] = input_coefficients[i];
+                ++result.preserved_dofs;
+            }
+        }
+    }
+
+    const Real relaxation = std::clamp(
+        options.pseudo_time_step_scale, Real{0.0}, Real{1.0});
+    std::vector<Real> unconstrained(input_coefficients.begin(),
+                                    input_coefficients.end());
+    for (int iteration = 1; iteration <= options.max_iterations; ++iteration) {
+        Real max_remaining = 0.0;
+        for (std::size_t i = 0; i < expected; ++i) {
+            if (update_enabled[i] == 0u) {
+                continue;
+            }
+            unconstrained[i] +=
+                relaxation * (target[i] - unconstrained[i]);
+            max_remaining = std::max(
+                max_remaining,
+                std::abs(target[i] - unconstrained[i]));
+        }
+        result.iterations = iteration;
+        result.max_iteration_residual = max_remaining;
+        if (max_remaining <= options.signed_distance_tolerance) {
+            break;
+        }
+    }
+
+    const auto crossings = collectOriginalZeroCrossings(
+        mesh,
+        entity_map,
+        primitive_set,
+        options.signed_distance_tolerance,
+        input_coefficients);
+    const Real displacement_gate = std::max(
+        options.max_zero_set_displacement,
+        Real{32.0} * std::numeric_limits<Real>::epsilon());
+
+    repaired_coefficients = unconstrained;
+    auto displacement = evaluateZeroSetDisplacement(
+        crossings,
+        repaired_coefficients,
+        options.signed_distance_tolerance);
+    if (!displacement.topology_preserved ||
+        displacement.max_displacement > displacement_gate) {
+        // Along a convex coefficient path every individual linear-edge root is
+        // a monotone fractional-linear function until topology changes.  A
+        // scalar bisection therefore finds the largest admissible redistance
+        // update without exceeding the user-visible geometric guard.
+        Real lower = Real{0.0};
+        Real upper = Real{1.0};
+        std::vector<Real> candidate(expected, 0.0);
+        for (int iteration = 0; iteration < 64; ++iteration) {
+            const Real fraction = Real{0.5} * (lower + upper);
+            for (std::size_t i = 0; i < expected; ++i) {
+                candidate[i] = input_coefficients[i] +
+                               fraction *
+                                   (unconstrained[i] - input_coefficients[i]);
+            }
+            const auto trial = evaluateZeroSetDisplacement(
+                crossings,
+                candidate,
+                options.signed_distance_tolerance);
+            if (trial.topology_preserved &&
+                trial.max_displacement <= displacement_gate) {
+                lower = fraction;
+            } else {
+                upper = fraction;
+            }
+        }
+        for (std::size_t i = 0; i < expected; ++i) {
+            repaired_coefficients[i] = input_coefficients[i] +
+                                       lower *
+                                           (unconstrained[i] -
+                                            input_coefficients[i]);
+        }
+        displacement = evaluateZeroSetDisplacement(
+            crossings,
+            repaired_coefficients,
+            options.signed_distance_tolerance);
+    }
+
+    result.max_iteration_residual = 0.0;
+    for (std::size_t i = 0; i < expected; ++i) {
+        if (update_enabled[i] == 0u) {
+            continue;
+        }
+        const Real abs_update =
+            std::abs(repaired_coefficients[i] - input_coefficients[i]);
+        result.max_abs_update = std::max(result.max_abs_update, abs_update);
+        result.max_signed_distance_error = std::max(
+            result.max_signed_distance_error,
+            std::abs(repaired_coefficients[i] - signed_distance_target[i]));
+        result.max_iteration_residual = std::max(
+            result.max_iteration_residual,
+            std::abs(repaired_coefficients[i] - target[i]));
+        ++result.repaired_dofs;
+    }
+
+    if (!displacement.topology_preserved) {
+        result.success = false;
+        result.diagnostic =
+            "level-set signed-distance repair changed interface topology on a cut edge";
+        return result;
+    }
+    result.max_interface_displacement = displacement.max_displacement;
+    result.l2_interface_displacement = displacement.l2_displacement;
+    result.interface_displacement_samples = displacement.samples;
+    result.zero_set_bound_satisfied =
+        displacement.max_displacement <= displacement_gate;
+    if (!result.zero_set_bound_satisfied) {
+        result.success = false;
+        result.diagnostic =
+            "level-set signed-distance repair exceeded max_zero_set_displacement";
+        return result;
+    }
+    result.converged =
+        result.max_iteration_residual <= options.signed_distance_tolerance &&
+        result.max_signed_distance_error <= options.signed_distance_tolerance;
     result.success = true;
+    if (!result.converged) {
+        result.diagnostic =
+            "level-set signed-distance repair did not reach the signed-distance tolerance; partial repair must not be applied in production";
+    }
     return result;
 }
 
@@ -847,10 +1279,38 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
     std::span<const Real> input_coefficients,
     std::vector<Real>& repaired_coefficients)
 {
+    rejectDistributedProjectionReinitialization(level_set_dofs);
+
     const auto expected = static_cast<std::size_t>(level_set_dofs.getNumDofs());
-    if (!(options.signed_distance_tolerance > 0.0)) {
+    if (!(options.signed_distance_tolerance > 0.0) ||
+        !std::isfinite(options.signed_distance_tolerance)) {
         throw std::invalid_argument(
             "level-set signed-distance repair requires a positive signed-distance tolerance");
+    }
+    if (options.max_iterations <= 0) {
+        throw std::invalid_argument(
+            "level-set signed-distance repair requires positive max_iterations");
+    }
+    if (!(options.pseudo_time_step_scale > 0.0) ||
+        !(options.pseudo_time_step_scale <= 1.0) ||
+        !std::isfinite(options.pseudo_time_step_scale)) {
+        throw std::invalid_argument(
+            "level-set signed-distance repair requires pseudo_time_step_scale in (0, 1]");
+    }
+    if (options.preserve_band_width > 0.0) {
+        throw std::invalid_argument(
+            "level-set signed-distance repair no longer supports preserve_band_width; "
+            "use max_zero_set_displacement to bound the redistance update instead");
+    }
+    if (!(options.interface_band_width > 0.0) ||
+        !std::isfinite(options.interface_band_width)) {
+        throw std::invalid_argument(
+            "level-set signed-distance repair requires a finite positive interface band width");
+    }
+    if (!(options.max_zero_set_displacement >= 0.0) ||
+        !std::isfinite(options.max_zero_set_displacement)) {
+        throw std::invalid_argument(
+            "level-set signed-distance repair requires a finite nonnegative zero-set displacement bound");
     }
     if (input_coefficients.size() != expected) {
         throw std::invalid_argument(
@@ -870,6 +1330,9 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
                                        options.signed_distance_tolerance,
                                        input_coefficients);
     return repairSignedDistanceCoefficientsFromPrimitives(
+        mesh,
+        level_set_dofs,
+        *entity_map,
         options,
         input_coefficients,
         repaired_coefficients,
@@ -894,6 +1357,22 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
     std::span<const Real> input_solution,
     std::vector<Real>& repaired_solution)
 {
+    rejectDistributedProjectionReinitialization(system.dofHandler());
+
+    if (!(options.signed_distance_tolerance > 0.0) ||
+        !std::isfinite(options.signed_distance_tolerance) ||
+        options.max_iterations <= 0 ||
+        !(options.pseudo_time_step_scale > 0.0) ||
+        !(options.pseudo_time_step_scale <= 1.0) ||
+        !std::isfinite(options.pseudo_time_step_scale) ||
+        !(options.interface_band_width > 0.0) ||
+        !std::isfinite(options.interface_band_width) ||
+        options.preserve_band_width > 0.0 ||
+        !(options.max_zero_set_displacement >= 0.0) ||
+        !std::isfinite(options.max_zero_set_displacement)) {
+        throw std::invalid_argument(
+            "level-set signed-distance repair received invalid tolerance, iteration, relaxation, preservation, or zero-set bound options");
+    }
     const auto& field_dofs = system.fieldDofHandler(level_set_field);
     const auto n_field_dofs = static_cast<std::size_t>(field_dofs.getNumDofs());
     const auto offset = static_cast<std::size_t>(system.fieldDofOffset(level_set_field));
@@ -925,6 +1404,9 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
     const auto* native_mesh = system.mesh();
     if (native_mesh == nullptr) {
         auto result = repairSignedDistanceCoefficientsFromPrimitives(
+            mesh_access,
+            field_dofs,
+            *entity_map,
             options,
             std::span<const Real>(field_coefficients.data(),
                                   field_coefficients.size()),
@@ -954,6 +1436,9 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
     }
 
     auto result = repairSignedDistanceCoefficientsFromPrimitives(
+        mesh_access,
+        field_dofs,
+        *entity_map,
         options,
         std::span<const Real>(field_coefficients.data(),
                               field_coefficients.size()),
@@ -983,6 +1468,9 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
         });
 #else
     auto result = repairSignedDistanceCoefficientsFromPrimitives(
+        mesh_access,
+        field_dofs,
+        *entity_map,
         options,
         std::span<const Real>(field_coefficients.data(),
                               field_coefficients.size()),

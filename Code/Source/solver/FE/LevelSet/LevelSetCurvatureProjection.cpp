@@ -98,27 +98,20 @@ struct FitObservation {
     Real weight{1.0};
 };
 
+struct RawFitObservation {
+    std::array<Real, 3> displacement{};
+    Real rhs{0.0};
+    Real relative_weight{1.0};
+};
+
 struct FitResidualMetrics {
     Real rms{0.0};
     Real normalized{0.0};
 };
 
-void accumulateSymmetricNormalEquations(
-    const std::array<Real, 9>& row,
-    std::size_t n,
-    Real rhs,
-    Real weight,
-    std::array<std::array<Real, 9>, 9>& ata,
-    std::array<Real, 9>& atb)
-{
-    for (std::size_t i = 0; i < n; ++i) {
-        const Real wi = weight * row[i];
-        atb[i] += wi * rhs;
-        for (std::size_t j = 0; j < n; ++j) {
-            ata[i][j] += wi * row[j];
-        }
-    }
-}
+[[nodiscard]] std::array<Real, 9> quadraticRow(
+    const std::array<Real, 3>& dx,
+    int dim) noexcept;
 
 [[nodiscard]] FitResidualMetrics computeFitResidualMetrics(
     std::span<const FitObservation> observations,
@@ -154,59 +147,225 @@ void accumulateSymmetricNormalEquations(
     return {rms, normalized};
 }
 
-[[nodiscard]] bool solveDenseSystem(std::array<std::array<Real, 9>, 9> a,
-                                    std::array<Real, 9> b,
-                                    std::size_t n,
-                                    Real tolerance,
-                                    std::array<Real, 9>& x)
+/**
+ * Solve the weighted rectangular fit directly, without forming A^T A.
+ *
+ * Column-pivoted Householder QR avoids squaring the stencil condition number.
+ * The rank threshold is relative to the largest initial weighted column norm;
+ * callers first nondimensionalize the coordinates, so this test is invariant
+ * under a change of mesh length units.
+ */
+[[nodiscard]] bool solveWeightedLeastSquares(
+    std::span<const FitObservation> observations,
+    std::size_t n,
+    Real relative_rank_tolerance,
+    std::array<Real, 9>& x)
 {
-    for (std::size_t k = 0; k < n; ++k) {
-        std::size_t pivot = k;
-        Real pivot_abs = std::abs(a[k][k]);
-        for (std::size_t r = k + 1u; r < n; ++r) {
-            const Real candidate = std::abs(a[r][k]);
-            if (candidate > pivot_abs) {
-                pivot = r;
-                pivot_abs = candidate;
-            }
-        }
-        if (!(pivot_abs > tolerance) || !std::isfinite(pivot_abs)) {
+    const std::size_t m = observations.size();
+    if (m < n || n == 0u) {
+        return false;
+    }
+
+    std::vector<std::array<Real, 9>> a(m);
+    std::vector<Real> b(m, Real{0.0});
+    std::array<std::size_t, 9> permutation{};
+    std::iota(permutation.begin(), permutation.end(), std::size_t{0u});
+
+    for (std::size_t r = 0; r < m; ++r) {
+        const auto& observation = observations[r];
+        if (!(observation.weight > Real{0.0}) ||
+            !std::isfinite(observation.weight) ||
+            !std::isfinite(observation.rhs)) {
             return false;
         }
-        if (pivot != k) {
-            std::swap(a[pivot], a[k]);
-            std::swap(b[pivot], b[k]);
+        const Real sqrt_weight = std::sqrt(observation.weight);
+        b[r] = sqrt_weight * observation.rhs;
+        for (std::size_t c = 0; c < n; ++c) {
+            a[r][c] = sqrt_weight * observation.row[c];
+            if (!std::isfinite(a[r][c])) {
+                return false;
+            }
         }
+    }
 
-        const Real diag = a[k][k];
+    Real reference_column_norm = Real{0.0};
+    for (std::size_t c = 0; c < n; ++c) {
+        Real norm2 = Real{0.0};
+        for (std::size_t r = 0; r < m; ++r) {
+            norm2 += a[r][c] * a[r][c];
+        }
+        reference_column_norm =
+            std::max(reference_column_norm, std::sqrt(norm2));
+    }
+    if (!(reference_column_norm > Real{0.0}) ||
+        !std::isfinite(reference_column_norm)) {
+        return false;
+    }
+    const Real rank_threshold =
+        relative_rank_tolerance * reference_column_norm;
+
+    for (std::size_t k = 0; k < n; ++k) {
+        std::size_t pivot_column = k;
+        Real pivot_norm2 = Real{-1.0};
         for (std::size_t c = k; c < n; ++c) {
-            a[k][c] /= diag;
+            Real column_norm2 = Real{0.0};
+            for (std::size_t r = k; r < m; ++r) {
+                column_norm2 += a[r][c] * a[r][c];
+            }
+            if (column_norm2 > pivot_norm2) {
+                pivot_norm2 = column_norm2;
+                pivot_column = c;
+            }
         }
-        b[k] /= diag;
+        const Real pivot_norm = std::sqrt(std::max(pivot_norm2, Real{0.0}));
+        if (!(pivot_norm > rank_threshold) || !std::isfinite(pivot_norm)) {
+            return false;
+        }
+        if (pivot_column != k) {
+            for (std::size_t r = 0; r < m; ++r) {
+                std::swap(a[r][k], a[r][pivot_column]);
+            }
+            std::swap(permutation[k], permutation[pivot_column]);
+        }
 
-        for (std::size_t r = 0; r < n; ++r) {
-            if (r == k) {
-                continue;
+        const Real alpha = -std::copysign(pivot_norm, a[k][k]);
+        std::vector<Real> reflector(m - k, Real{0.0});
+        for (std::size_t r = k; r < m; ++r) {
+            reflector[r - k] = a[r][k];
+        }
+        reflector[0] -= alpha;
+        Real reflector_norm2 = Real{0.0};
+        for (const Real value : reflector) {
+            reflector_norm2 += value * value;
+        }
+        if (!(reflector_norm2 > Real{0.0}) ||
+            !std::isfinite(reflector_norm2)) {
+            return false;
+        }
+
+        for (std::size_t c = k; c < n; ++c) {
+            Real projection = Real{0.0};
+            for (std::size_t r = k; r < m; ++r) {
+                projection += reflector[r - k] * a[r][c];
             }
-            const Real factor = a[r][k];
-            if (factor == Real{0.0}) {
-                continue;
+            const Real factor = Real{2.0} * projection / reflector_norm2;
+            for (std::size_t r = k; r < m; ++r) {
+                a[r][c] -= factor * reflector[r - k];
             }
-            for (std::size_t c = k; c < n; ++c) {
-                a[r][c] -= factor * a[k][c];
-            }
-            b[r] -= factor * b[k];
+        }
+        Real rhs_projection = Real{0.0};
+        for (std::size_t r = k; r < m; ++r) {
+            rhs_projection += reflector[r - k] * b[r];
+        }
+        const Real rhs_factor =
+            Real{2.0} * rhs_projection / reflector_norm2;
+        for (std::size_t r = k; r < m; ++r) {
+            b[r] -= rhs_factor * reflector[r - k];
+        }
+
+        a[k][k] = alpha;
+        for (std::size_t r = k + 1u; r < m; ++r) {
+            a[r][k] = Real{0.0};
+        }
+    }
+
+    std::array<Real, 9> pivoted_solution{};
+    for (std::size_t reverse = n; reverse > 0u; --reverse) {
+        const std::size_t row = reverse - 1u;
+        Real rhs = b[row];
+        for (std::size_t c = row + 1u; c < n; ++c) {
+            rhs -= a[row][c] * pivoted_solution[c];
+        }
+        const Real diagonal = a[row][row];
+        if (!(std::abs(diagonal) > rank_threshold) ||
+            !std::isfinite(diagonal)) {
+            return false;
+        }
+        pivoted_solution[row] = rhs / diagonal;
+        if (!std::isfinite(pivoted_solution[row])) {
+            return false;
         }
     }
 
     x.fill(Real{0.0});
-    for (std::size_t i = 0; i < n; ++i) {
-        if (!std::isfinite(b[i])) {
-            return false;
-        }
-        x[i] = b[i];
+    for (std::size_t c = 0; c < n; ++c) {
+        x[permutation[c]] = pivoted_solution[c];
     }
     return true;
+}
+
+[[nodiscard]] std::array<Real, 3> fitCoordinateScales(
+    std::span<const RawFitObservation> observations,
+    int dim) noexcept
+{
+    std::array<Real, 3> scales{{Real{0.0}, Real{0.0}, Real{1.0}}};
+    for (const auto& observation : observations) {
+        for (int d = 0; d < dim; ++d) {
+            scales[static_cast<std::size_t>(d)] =
+                std::max(scales[static_cast<std::size_t>(d)],
+                         std::abs(observation.displacement[
+                             static_cast<std::size_t>(d)]));
+        }
+    }
+    for (int d = 0; d < dim; ++d) {
+        if (!(scales[static_cast<std::size_t>(d)] > Real{0.0}) ||
+            !std::isfinite(scales[static_cast<std::size_t>(d)])) {
+            scales[static_cast<std::size_t>(d)] = Real{1.0};
+        }
+    }
+    return scales;
+}
+
+[[nodiscard]] std::vector<FitObservation> nondimensionalizeObservations(
+    std::span<const RawFitObservation> raw_observations,
+    const std::array<Real, 3>& coordinate_scales,
+    int dim)
+{
+    std::vector<FitObservation> observations;
+    observations.reserve(raw_observations.size());
+    for (const auto& raw : raw_observations) {
+        std::array<Real, 3> nondimensional_displacement{};
+        for (int d = 0; d < dim; ++d) {
+            nondimensional_displacement[static_cast<std::size_t>(d)] =
+                raw.displacement[static_cast<std::size_t>(d)] /
+                coordinate_scales[static_cast<std::size_t>(d)];
+        }
+        const Real distance2 = dot(nondimensional_displacement,
+                                   nondimensional_displacement);
+        if (!(distance2 > Real{0.0}) || !std::isfinite(distance2)) {
+            continue;
+        }
+        const Real weight = raw.relative_weight /
+                            std::max(distance2, Real{1.0e-24});
+        observations.push_back(FitObservation{
+            quadraticRow(nondimensional_displacement, dim),
+            raw.rhs,
+            weight});
+    }
+    return observations;
+}
+
+void dimensionalizeFitCoefficients(
+    std::array<Real, 9>& coefficients,
+    const std::array<Real, 3>& scales,
+    int dim) noexcept
+{
+    coefficients[0] /= scales[0];
+    coefficients[1] /= scales[1];
+    if (dim == 2) {
+        coefficients[2] /= scales[0] * scales[0];
+        coefficients[3] /= scales[0] * scales[1];
+        coefficients[4] /= scales[1] * scales[1];
+        return;
+    }
+
+    coefficients[2] /= scales[2];
+    coefficients[3] /= scales[0] * scales[0];
+    coefficients[4] /= scales[0] * scales[1];
+    coefficients[5] /= scales[0] * scales[2];
+    coefficients[6] /= scales[1] * scales[1];
+    coefficients[7] /= scales[1] * scales[2];
+    coefficients[8] /= scales[2] * scales[2];
 }
 
 [[nodiscard]] std::vector<std::vector<GlobalIndex>> buildVertexAdjacency(
@@ -1114,7 +1273,10 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
             "level-set curvature projection supports two- and three-dimensional meshes");
     }
     if (!(options.gradient_tolerance > Real{0.0}) ||
+        !std::isfinite(options.gradient_tolerance) ||
         !(options.normal_equation_tolerance > Real{0.0}) ||
+        !(options.normal_equation_tolerance < Real{1.0}) ||
+        !std::isfinite(options.normal_equation_tolerance) ||
         options.max_normalized_fit_residual < Real{0.0} ||
         !std::isfinite(options.max_normalized_fit_residual) ||
         !(options.supplemental_sample_weight > Real{0.0}) ||
@@ -1126,7 +1288,7 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
         options.smoothing_relaxation > Real{1.0} ||
         !std::isfinite(options.smoothing_relaxation)) {
         throw std::invalid_argument(
-            "level-set curvature projection requires positive tolerances, a nonnegative residual limit, a positive supplemental sample weight, a nonnegative narrow-band width, nonnegative smoothing iterations, and smoothing relaxation in [0,1]");
+            "level-set curvature projection requires a finite positive gradient tolerance, a finite relative rank tolerance in (0,1), a nonnegative residual limit, a positive supplemental sample weight, a nonnegative narrow-band width, nonnegative smoothing iterations, and smoothing relaxation in [0,1]");
     }
     for (const auto value : level_set_vertex_values) {
         if (!std::isfinite(value)) {
@@ -1187,9 +1349,7 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
         const auto center = mesh.getNodeCoordinates(vertex);
         const auto neighbors = collectNeighbors(vertex, adjacency, rings);
 
-        std::array<std::array<Real, 9>, 9> ata{};
-        std::array<Real, 9> atb{};
-        std::vector<FitObservation> observations;
+        std::vector<RawFitObservation> raw_observations;
         std::size_t rows = 0u;
         const auto center_value =
             level_set_vertex_values[static_cast<std::size_t>(vertex)];
@@ -1207,11 +1367,8 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
             }
             const Real rhs = level_set_vertex_values[neighbor_index] -
                              center_value;
-            const Real weight = Real{1.0} / std::max(distance2, Real{1.0e-24});
-            const auto row = quadraticRow(dx, dim);
-            accumulateSymmetricNormalEquations(
-                row, n_fit, rhs, weight, ata, atb);
-            observations.push_back(FitObservation{row, rhs, weight});
+            raw_observations.push_back(
+                RawFitObservation{dx, rhs, Real{1.0}});
             ++rows;
         }
         std::vector<std::size_t> sample_indices =
@@ -1251,12 +1408,8 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
                 continue;
             }
             const Real rhs = sample.value - center_value;
-            const Real weight = options.supplemental_sample_weight /
-                                std::max(distance2, Real{1.0e-24});
-            const auto row = quadraticRow(dx, dim);
-            accumulateSymmetricNormalEquations(
-                row, n_fit, rhs, weight, ata, atb);
-            observations.push_back(FitObservation{row, rhs, weight});
+            raw_observations.push_back(RawFitObservation{
+                dx, rhs, options.supplemental_sample_weight});
             ++rows;
             ++supplemental_rows;
         }
@@ -1269,17 +1422,34 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
             continue;
         }
 
-        std::array<Real, 9> coefficients{};
-        if (!solveDenseSystem(
-                ata, atb, n_fit, options.normal_equation_tolerance,
-                coefficients)) {
+        const auto coordinate_scales = fitCoordinateScales(
+            std::span<const RawFitObservation>(raw_observations.data(),
+                                               raw_observations.size()),
+            dim);
+        const auto observations = nondimensionalizeObservations(
+            std::span<const RawFitObservation>(raw_observations.data(),
+                                               raw_observations.size()),
+            coordinate_scales,
+            dim);
+        if (observations.size() < n_fit) {
+            ++result.insufficient_stencil_vertices;
+            continue;
+        }
+
+        std::array<Real, 9> normalized_coefficients{};
+        if (!solveWeightedLeastSquares(
+                std::span<const FitObservation>(observations.data(),
+                                                observations.size()),
+                n_fit,
+                options.normal_equation_tolerance,
+                normalized_coefficients)) {
             ++result.singular_stencil_vertices;
             continue;
         }
         const auto residual = computeFitResidualMetrics(
             std::span<const FitObservation>(observations.data(),
                                             observations.size()),
-            coefficients,
+            normalized_coefficients,
             n_fit,
             options.gradient_tolerance);
         if (!(std::isfinite(residual.rms) &&
@@ -1293,6 +1463,8 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
             continue;
         }
 
+        auto coefficients = normalized_coefficients;
+        dimensionalizeFitCoefficients(coefficients, coordinate_scales, dim);
         bool small_gradient = false;
         const Real kappa = curvatureFromFit(
             coefficients, dim, options.gradient_tolerance, small_gradient);
