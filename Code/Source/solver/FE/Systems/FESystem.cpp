@@ -6495,6 +6495,63 @@ std::optional<FieldId> FESystem::meshMotionField(MeshMotionFieldRole role) const
     return field;
 }
 
+void FESystem::declareMeshTangentialBoundaryPolicy(
+    MeshTangentialBoundaryPolicyDeclaration declaration)
+{
+    FE_THROW_IF(
+        !field_registry_.has(declaration.mesh_displacement_field),
+        InvalidArgumentException,
+        "FESystem::declareMeshTangentialBoundaryPolicy: unknown mesh "
+        "displacement field");
+    FE_THROW_IF(
+        declaration.boundary_marker < 0,
+        InvalidArgumentException,
+        "FESystem::declareMeshTangentialBoundaryPolicy: boundary marker "
+        "must be nonnegative");
+    FE_THROW_IF(
+        declaration.owner_component.empty(),
+        InvalidArgumentException,
+        "FESystem::declareMeshTangentialBoundaryPolicy: owner component "
+        "must be nonempty");
+    const auto bound_displacement =
+        meshMotionField(MeshMotionFieldRole::Displacement);
+    FE_THROW_IF(
+        bound_displacement.has_value() &&
+            *bound_displacement != declaration.mesh_displacement_field,
+        InvalidArgumentException,
+        "FESystem::declareMeshTangentialBoundaryPolicy: declaration does "
+        "not target the bound mesh displacement field");
+    const auto conflict = std::find_if(
+        mesh_tangential_boundary_policies_.begin(),
+        mesh_tangential_boundary_policies_.end(),
+        [&](const auto& existing) {
+            return existing.mesh_displacement_field ==
+                       declaration.mesh_displacement_field &&
+                   existing.boundary_marker == declaration.boundary_marker;
+        });
+    if (conflict != mesh_tangential_boundary_policies_.end()) {
+        throw InvalidArgumentException(
+            "FESystem::declareMeshTangentialBoundaryPolicy: boundary " +
+            std::to_string(declaration.boundary_marker) +
+            " already has tangential mesh-motion owner '" +
+            conflict->owner_component + "'; conflicting owner '" +
+            declaration.owner_component + "' is not permitted");
+    }
+
+    invalidateSetup();
+    FE_LOG_INFO(
+        "FESystem: diagnostic=mesh_tangential_boundary_policy marker=" +
+        std::to_string(declaration.boundary_marker) + " owner='" +
+        declaration.owner_component + "' policy=" +
+        (declaration.policy == MeshTangentialBoundaryPolicy::Free
+             ? std::string("Free")
+             : declaration.policy ==
+                       MeshTangentialBoundaryPolicy::SmoothingOnly
+                   ? std::string("SmoothingOnly")
+                   : std::string("Prescribed")));
+    mesh_tangential_boundary_policies_.push_back(std::move(declaration));
+}
+
 assembly::MeshMotionFieldAccess FESystem::meshMotionFieldAccess() const noexcept
 {
     auto access = mesh_motion_fields_;

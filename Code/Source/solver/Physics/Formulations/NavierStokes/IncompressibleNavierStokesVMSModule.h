@@ -348,6 +348,10 @@ struct IncompressibleNavierStokesVMSOptions {
             FreeSurfaceTangentialMeshPolicy::SmoothingOnly};
         std::array<ScalarValue, 3> prescribed_tangential_mesh_velocity{
             ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
+        // Weak penalty applied to the tangential mesh-velocity trace when
+        // tangential_mesh_policy is Prescribed.  Free and SmoothingOnly add
+        // no tangential boundary row.
+        ScalarValue tangential_mesh_penalty{1.0};
         FreeSurfaceKinematicEnforcement kinematic_enforcement{
             FreeSurfaceKinematicEnforcement::None};
         ScalarValue kinematic_penalty{0.0};

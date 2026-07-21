@@ -72,6 +72,28 @@ void PseudoElasticMeshMotionModule::registerOn(FE::systems::FESystem& system) co
             options_.auto_register_field,
             options_.bind_as_mesh_displacement});
 
+    for (const auto& bc : options_.tangential_policy) {
+        const auto system_policy = [&]() {
+            switch (bc.policy) {
+            case TangentialMeshPolicy::Free:
+                return FE::systems::MeshTangentialBoundaryPolicy::Free;
+            case TangentialMeshPolicy::SmoothingOnly:
+                return FE::systems::MeshTangentialBoundaryPolicy::SmoothingOnly;
+            case TangentialMeshPolicy::Prescribed:
+                return FE::systems::MeshTangentialBoundaryPolicy::Prescribed;
+            }
+            throw std::invalid_argument(
+                "PseudoElasticMeshMotionModule::registerOn: unknown tangential policy");
+        }();
+        system.declareMeshTangentialBoundaryPolicy(
+            FE::systems::MeshTangentialBoundaryPolicyDeclaration{
+                .mesh_displacement_field = binding.displacement_field,
+                .boundary_marker = bc.boundary_marker,
+                .policy = system_policy,
+                .owner_component = "PseudoElasticMeshMotionModule",
+            });
+    }
+
     if (!system.hasOperator(options_.operator_tag)) {
         system.addOperator(options_.operator_tag);
     }

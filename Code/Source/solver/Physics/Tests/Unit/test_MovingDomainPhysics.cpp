@@ -725,9 +725,9 @@ class SingleTetraBoundaryMeshAccess final : public FE::assembly::IMeshAccess {
 public:
     explicit SingleTetraBoundaryMeshAccess(int marker,
                                            bool expose_all_faces = false)
-        : marker_(marker)
-        , expose_all_faces_(expose_all_faces)
+        : expose_all_faces_(expose_all_faces)
     {
+        face_markers_.fill(marker);
         reference_nodes_ = {
             {0.0, 0.0, 0.0},
             {1.0, 0.0, 0.0},
@@ -736,6 +736,13 @@ public:
         };
         current_nodes_ = reference_nodes_;
         cell_ = {0, 1, 2, 3};
+    }
+
+    explicit SingleTetraBoundaryMeshAccess(
+        std::array<int, 4> face_markers)
+        : SingleTetraBoundaryMeshAccess(face_markers.front(), true)
+    {
+        face_markers_ = face_markers;
     }
 
     [[nodiscard]] FE::GlobalIndex numCells() const override { return 1; }
@@ -801,9 +808,10 @@ public:
         return expose_all_faces_ ? static_cast<FE::LocalIndex>(face_id) : 0;
     }
 
-    [[nodiscard]] int getBoundaryFaceMarker(FE::GlobalIndex /*face_id*/) const override
+    [[nodiscard]] int getBoundaryFaceMarker(FE::GlobalIndex face_id) const override
     {
-        return marker_;
+        const auto local_face = expose_all_faces_ ? face_id : 0;
+        return face_markers_.at(static_cast<std::size_t>(local_face));
     }
 
     [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
@@ -825,9 +833,11 @@ public:
     void forEachBoundaryFace(int marker,
                              std::function<void(FE::GlobalIndex, FE::GlobalIndex)> callback) const override
     {
-        if (marker < 0 || marker == marker_) {
-            const FE::GlobalIndex count = expose_all_faces_ ? 4 : 1;
-            for (FE::GlobalIndex face = 0; face < count; ++face) {
+        const FE::GlobalIndex count = expose_all_faces_ ? 4 : 1;
+        for (FE::GlobalIndex face = 0; face < count; ++face) {
+            if (marker < 0 ||
+                marker == face_markers_.at(
+                              static_cast<std::size_t>(face))) {
                 callback(face, 0);
             }
         }
@@ -851,8 +861,8 @@ public:
     }
 
 private:
-    int marker_{-1};
     bool expose_all_faces_{false};
+    std::array<int, 4> face_markers_{{-1, -1, -1, -1}};
     std::uint64_t geometry_revision_{1};
     std::vector<std::array<FE::Real, 3>> reference_nodes_{};
     std::vector<std::array<FE::Real, 3>> current_nodes_{};
@@ -3572,32 +3582,305 @@ TEST(MovingDomainPhysics, FittedFreeSurfaceKinematicPolicyOptionsAreExplicit)
     EXPECT_DOUBLE_EQ(std::get<FE::Real>(bc.prescribed_tangential_mesh_velocity[0]), 0.0);
     EXPECT_DOUBLE_EQ(std::get<FE::Real>(bc.prescribed_tangential_mesh_velocity[1]), 0.0);
     EXPECT_DOUBLE_EQ(std::get<FE::Real>(bc.prescribed_tangential_mesh_velocity[2]), 0.0);
+    EXPECT_DOUBLE_EQ(std::get<FE::Real>(bc.tangential_mesh_penalty), 1.0);
 }
 
-TEST(MovingDomainPhysics, FittedFreeSurfaceUnwiredTangentialPoliciesFailClosed)
+TEST(MovingDomainPhysics,
+     FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership)
 {
     constexpr int marker = 39;
     auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
 
-    for (const auto policy : {ns::FreeSurfaceTangentialMeshPolicy::Free,
-                              ns::FreeSurfaceTangentialMeshPolicy::Prescribed}) {
+    const std::array cases{
+        std::pair{ns::FreeSurfaceTangentialMeshPolicy::Free,
+                  FE::systems::MeshTangentialBoundaryPolicy::Free},
+        std::pair{ns::FreeSurfaceTangentialMeshPolicy::SmoothingOnly,
+                  FE::systems::MeshTangentialBoundaryPolicy::SmoothingOnly},
+        std::pair{ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
+                  FE::systems::MeshTangentialBoundaryPolicy::Prescribed},
+    };
+    for (const auto [policy, expected_policy] : cases) {
         auto opts = baseNavierStokesOptions();
         opts.enable_ale = true;
         opts.enable_convection = false;
-        opts.free_surface.push_back(
+        opts.mesh_velocity_source =
+            ns::ALEMeshVelocitySource::CoupledDisplacement;
+        opts.auto_register_mesh_displacement_field = true;
+        auto boundary =
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
                 .implementation = ns::FreeSurfaceImplementation::FittedALE,
                 .boundary_marker = marker,
                 .tangential_mesh_policy = policy,
+            };
+        if (policy ==
+            ns::FreeSurfaceTangentialMeshPolicy::Prescribed) {
+            boundary.prescribed_tangential_mesh_velocity = {
+                FE::Real{0.25}, FE::Real{-0.10}, FE::Real{0.05}};
+            boundary.tangential_mesh_penalty = FE::Real{8.0};
+        }
+        opts.free_surface.push_back(
+            std::move(boundary));
+
+        FE::systems::FESystem system(mesh);
+        ns::IncompressibleNavierStokesVMSModule module(
+            u_space, p_space, std::move(opts));
+        ASSERT_NO_THROW(module.registerOn(system));
+        const auto declarations =
+            system.meshTangentialBoundaryPolicies();
+        ASSERT_EQ(declarations.size(), 1u);
+        EXPECT_EQ(declarations.front().boundary_marker, marker);
+        EXPECT_EQ(declarations.front().policy, expected_policy);
+        const auto displacement = system.meshMotionField(
+            FE::systems::MeshMotionFieldRole::Displacement);
+        ASSERT_TRUE(displacement.has_value());
+        EXPECT_EQ(declarations.front().mesh_displacement_field,
+                  *displacement);
+
+        const bool has_tangential_descriptor = std::any_of(
+            system.boundaryConditionDescriptors().begin(),
+            system.boundaryConditionDescriptors().end(),
+            [](const auto& descriptor) {
+                return descriptor.trace_kind ==
+                       FE::analysis::TraceKind::TangentialComponent;
+            });
+        EXPECT_EQ(
+            has_tangential_descriptor,
+            policy == ns::FreeSurfaceTangentialMeshPolicy::Prescribed);
+    }
+}
+
+TEST(MovingDomainPhysics,
+     FittedFreeSurfacePrescribedTangentialVelocityRequiresCoupledDisplacement)
+{
+    constexpr int marker = 40;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::PrescribedData;
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation = ns::FreeSurfaceImplementation::FittedALE,
+            .boundary_marker = marker,
+            .tangential_mesh_policy =
+                ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
+            .prescribed_tangential_mesh_velocity = {
+                FE::Real{0.2}, FE::Real{0.0}, FE::Real{0.0}},
+        });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    EXPECT_TRUE(system.formulationRecords().empty());
+    EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
+}
+
+TEST(MovingDomainPhysics,
+     FittedFreeSurfaceRejectsMeshMotionTangentialOwnerInEitherOrder)
+{
+    constexpr int marker = 41;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+
+    const auto make_fluid_options = [&]() {
+        auto opts = baseNavierStokesOptions();
+        opts.enable_ale = true;
+        opts.mesh_velocity_source =
+            ns::ALEMeshVelocitySource::CoupledDisplacement;
+        opts.auto_register_mesh_displacement_field = true;
+        opts.free_surface.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+                .implementation = ns::FreeSurfaceImplementation::FittedALE,
+                .boundary_marker = marker,
+                .tangential_mesh_policy =
+                    ns::FreeSurfaceTangentialMeshPolicy::Free,
+            });
+        return opts;
+    };
+    const auto make_mesh_options = [&]() {
+        mm::HarmonicMeshMotionOptions opts;
+        opts.operator_tag = "mesh_motion";
+        opts.tangential_policy.push_back(mm::TangentialPolicyBC{
+            .boundary_marker = marker,
+            .policy = mm::TangentialMeshPolicy::Prescribed,
+            .quantity = mm::TangentialConstraintQuantity::Velocity,
+            .target = {FE::Real{0.1}, FE::Real{0.0}, FE::Real{0.0}},
+            .penalty = FE::Real{3.0},
+            .velocity_time_scale = FE::Real{1.0},
+        });
+        return opts;
+    };
+
+    {
+        FE::systems::FESystem system(mesh);
+        mm::HarmonicMeshMotionModule mesh_module(
+            u_space, make_mesh_options());
+        ASSERT_NO_THROW(mesh_module.registerOn(system));
+        ns::IncompressibleNavierStokesVMSModule fluid_module(
+            u_space, p_space, make_fluid_options());
+        EXPECT_THROW(fluid_module.registerOn(system), std::invalid_argument);
+        EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+    }
+
+    {
+        FE::systems::FESystem system(mesh);
+        ns::IncompressibleNavierStokesVMSModule fluid_module(
+            u_space, p_space, make_fluid_options());
+        ASSERT_NO_THROW(fluid_module.registerOn(system));
+        mm::HarmonicMeshMotionModule mesh_module(
+            u_space, make_mesh_options());
+        EXPECT_THROW(mesh_module.registerOn(system),
+                     FE::InvalidArgumentException);
+        EXPECT_FALSE(system.hasOperator("mesh_motion"));
+    }
+}
+
+TEST(MovingDomainPhysics,
+     FittedFreeSurfacePrescribedTangentialVelocityProjectsOutNormalTarget)
+{
+    constexpr int marker = 42;
+    const auto assemble_zero_state = [&](std::array<FE::Real, 3> target,
+                                         bool rotate_current_geometry) {
+        auto mesh =
+            std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+        if (rotate_current_geometry) {
+            // Apply the proper cyclic rotation x->y, y->z, z->x.  The
+            // exposed face normal consequently rotates from z to x.
+            mesh->setCurrentNodeCoordinates(1, {0.0, 1.0, 0.0});
+            mesh->setCurrentNodeCoordinates(2, {0.0, 0.0, 1.0});
+            mesh->setCurrentNodeCoordinates(3, {1.0, 0.0, 0.0});
+        }
+        auto u_space = makeVelocitySpace(mesh);
+        auto p_space = makePressureSpace(mesh);
+        auto opts = baseNavierStokesOptions();
+        opts.enable_ale = true;
+        opts.enable_convection = false;
+        opts.mesh_velocity_source =
+            ns::ALEMeshVelocitySource::CoupledDisplacement;
+        opts.auto_register_mesh_displacement_field = true;
+        opts.free_surface.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+                .implementation = ns::FreeSurfaceImplementation::FittedALE,
+                .boundary_marker = marker,
+                .tangential_mesh_policy =
+                    ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
+                .prescribed_tangential_mesh_velocity = {
+                    target[0], target[1], target[2]},
+                .tangential_mesh_penalty = FE::Real{7.0},
             });
 
         FE::systems::FESystem system(mesh);
         ns::IncompressibleNavierStokesVMSModule module(
             u_space, p_space, std::move(opts));
-        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
-    }
+        module.registerOn(system);
+        system.setup({}, makeSingleTetraSetupInputs());
+
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+            FE::Real{0.0});
+        FE::systems::SystemStateView state;
+        state.dt = FE::Real{1.0};
+        state.u = solution;
+        state.u_prev = solution;
+        const FE::systems::BackwardDifferenceIntegrator integrator;
+        const auto time_context = integrator.buildContext(
+            /*max_time_derivative_order=*/1, state);
+        state.time_integration = &time_context;
+        return residualNorm(system, state, "equations");
+    };
+
+    // The exposed face is z=0.  A normal target has no tangential trace,
+    // whereas an in-plane target produces a nonzero mesh-displacement row.
+    const auto normal_target_norm =
+        assemble_zero_state(
+            {FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.2}}, false);
+    const auto tangential_target_norm =
+        assemble_zero_state(
+            {FE::Real{0.2}, FE::Real{0.0}, FE::Real{0.0}}, false);
+    EXPECT_LT(normal_target_norm, FE::Real{1.0e-12});
+    EXPECT_GT(tangential_target_norm, FE::Real{1.0e-6});
+
+    const auto rotated_normal_target_norm =
+        assemble_zero_state(
+            {FE::Real{0.2}, FE::Real{0.0}, FE::Real{0.0}}, true);
+    const auto rotated_tangential_target_norm =
+        assemble_zero_state(
+            {FE::Real{0.0}, FE::Real{0.2}, FE::Real{0.0}}, true);
+    EXPECT_LT(rotated_normal_target_norm, FE::Real{1.0e-12});
+    EXPECT_GT(rotated_tangential_target_norm, FE::Real{1.0e-6});
+}
+
+TEST(MovingDomainPhysics,
+     FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal)
+{
+    constexpr int free_marker = 43;
+    constexpr int prescribed_marker = 44;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(
+        std::array<int, 4>{free_marker, prescribed_marker, 45, 46});
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.enable_convection = false;
+    opts.mesh_velocity_source =
+        ns::ALEMeshVelocitySource::CoupledDisplacement;
+    opts.auto_register_mesh_displacement_field = true;
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation = ns::FreeSurfaceImplementation::FittedALE,
+            .boundary_marker = free_marker,
+            .tangential_mesh_policy =
+                ns::FreeSurfaceTangentialMeshPolicy::Free,
+        });
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation = ns::FreeSurfaceImplementation::FittedALE,
+            .boundary_marker = prescribed_marker,
+            .tangential_mesh_policy =
+                ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
+            .prescribed_tangential_mesh_velocity = {
+                FE::Real{0.1}, FE::Real{-0.05}, FE::Real{0.0}},
+            .tangential_mesh_penalty = FE::Real{4.0},
+        });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    ASSERT_NO_THROW(module.registerOn(system));
+    const auto declarations = system.meshTangentialBoundaryPolicies();
+    ASSERT_EQ(declarations.size(), 2u);
+    const auto find_declaration = [&](int marker) {
+        return std::find_if(
+            declarations.begin(), declarations.end(),
+            [marker](const auto& declaration) {
+                return declaration.boundary_marker == marker;
+            });
+    };
+    const auto free_declaration = find_declaration(free_marker);
+    ASSERT_NE(free_declaration, declarations.end());
+    EXPECT_EQ(free_declaration->policy,
+              FE::systems::MeshTangentialBoundaryPolicy::Free);
+    const auto prescribed_declaration =
+        find_declaration(prescribed_marker);
+    ASSERT_NE(prescribed_declaration, declarations.end());
+    EXPECT_EQ(prescribed_declaration->policy,
+              FE::systems::MeshTangentialBoundaryPolicy::Prescribed);
+
+    const auto tangential_descriptor_count = std::count_if(
+        system.boundaryConditionDescriptors().begin(),
+        system.boundaryConditionDescriptors().end(),
+        [](const auto& descriptor) {
+            return descriptor.trace_kind ==
+                   FE::analysis::TraceKind::TangentialComponent;
+        });
+    EXPECT_EQ(tangential_descriptor_count, 1);
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 }
 
 TEST(MovingDomainPhysics, FreeSurfaceContactLineOptionsAreExplicit)
@@ -6193,6 +6476,16 @@ TEST(MovingDomainPhysics,
         "\"maximum_reference_extrapolation_distance\":4,"
         "\"maximum_absolute_coefficient\":16,"
         "\"maximum_row_l1_norm\":32}");
+    constexpr std::string_view tangential_velocity_fragment =
+        "\"prescribed_tangential_mesh_velocity\":[0,0,0]";
+    const auto tangential_insertion =
+        expected_with_aggregation_guards.find(
+            tangential_velocity_fragment);
+    ASSERT_NE(tangential_insertion, std::string::npos);
+    expected_with_aggregation_guards.insert(
+        tangential_insertion + tangential_velocity_fragment.size(),
+        ",\"tangential_mesh_penalty\":1,"
+        "\"tangential_mesh_owner\":\"FreeSurfaceBoundary\"");
     EXPECT_EQ(artifact->json, expected_with_aggregation_guards);
 }
 
@@ -9172,15 +9465,6 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
     normal.velocity_time_scale = 1.0;
     mesh_opts.normal_constraint.push_back(normal);
 
-    mm::TangentialPolicyBC tangent;
-    tangent.boundary_marker = marker;
-    tangent.policy = mm::TangentialMeshPolicy::Prescribed;
-    tangent.quantity = mm::TangentialConstraintQuantity::Velocity;
-    tangent.target = {0.05, -0.02, 0.01};
-    tangent.penalty = 5.0;
-    tangent.velocity_time_scale = 1.0;
-    mesh_opts.tangential_policy.push_back(tangent);
-
     mm::HarmonicMeshMotionModule mesh_module(u_space, mesh_opts);
     mesh_module.registerOn(system);
     const auto displacement = system.findFieldByName("mesh_displacement");
@@ -9197,6 +9481,11 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
         .implementation = ns::FreeSurfaceImplementation::FittedALE,
         .boundary_marker = marker,
         .external_pressure = 1.25,
+        .tangential_mesh_policy =
+            ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
+        .prescribed_tangential_mesh_velocity = {
+            FE::Real{0.05}, FE::Real{-0.02}, FE::Real{0.01}},
+        .tangential_mesh_penalty = FE::Real{5.0},
         .kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::Penalty,
         .kinematic_penalty = 9.0,
     });

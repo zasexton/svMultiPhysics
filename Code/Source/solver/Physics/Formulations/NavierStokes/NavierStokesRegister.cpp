@@ -3158,17 +3158,19 @@ void append_free_surface_bc(
     fs.normal_kinematic_policy = parse_free_surface_normal_kinematic_policy(
         *normal_policy, "Free-surface Normal_kinematic_policy");
   }
-  if (const auto tangential_policy = first_defined_string(
+  const auto tangential_policy = first_defined_string(
           bc.params,
           {"Tangential_mesh_policy", "TangentialMeshPolicy",
-           "Free_surface_tangential_mesh_policy", "FreeSurfaceTangentialMeshPolicy"})) {
+           "Free_surface_tangential_mesh_policy", "FreeSurfaceTangentialMeshPolicy"});
+  if (tangential_policy.has_value()) {
     fs.tangential_mesh_policy = parse_free_surface_tangential_mesh_policy(
         *tangential_policy, "Free-surface Tangential_mesh_policy");
   }
-  if (const auto tangential_velocity = first_defined_string(
+  const auto tangential_velocity = first_defined_string(
           bc.params,
           {"Prescribed_tangential_mesh_velocity", "PrescribedTangentialMeshVelocity",
-           "Tangential_mesh_velocity", "TangentialMeshVelocity"})) {
+           "Tangential_mesh_velocity", "TangentialMeshVelocity"});
+  if (tangential_velocity.has_value()) {
     const auto v = parse_real_vector3(
         *tangential_velocity, "Free-surface Prescribed_tangential_mesh_velocity");
     fs.prescribed_tangential_mesh_velocity = {
@@ -3176,8 +3178,38 @@ void append_free_surface_bc(
         IncompressibleNavierStokesVMSOptions::ScalarValue{v[1]},
         IncompressibleNavierStokesVMSOptions::ScalarValue{v[2]}};
     if (fs.tangential_mesh_policy != FreeSurfaceTangentialMeshPolicy::Prescribed) {
+      if (tangential_policy.has_value() && !explicit_legacy_configuration) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] Prescribed tangential mesh velocity "
+            "conflicts with an explicit non-Prescribed tangential policy.");
+      }
       fs.tangential_mesh_policy = FreeSurfaceTangentialMeshPolicy::Prescribed;
     }
+  }
+  const auto tangential_mesh_penalty = first_defined_double(
+      bc.params,
+      {"Tangential_mesh_penalty", "TangentialMeshPenalty",
+       "Prescribed_tangential_mesh_penalty",
+       "PrescribedTangentialMeshPenalty"});
+  if (tangential_mesh_penalty.has_value()) {
+    if (!std::isfinite(*tangential_mesh_penalty) ||
+        !(*tangential_mesh_penalty > 0.0)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Free-surface tangential mesh penalty "
+          "must be finite and positive.");
+    }
+    fs.tangential_mesh_penalty =
+        IncompressibleNavierStokesVMSOptions::ScalarValue{
+            static_cast<svmp::FE::Real>(*tangential_mesh_penalty)};
+  }
+  if (tangential_mesh_penalty.has_value() &&
+      fs.tangential_mesh_policy !=
+          FreeSurfaceTangentialMeshPolicy::Prescribed &&
+      !explicit_legacy_configuration) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Tangential_mesh_penalty requires "
+        "Tangential_mesh_policy=Prescribed; unused tangential settings are "
+        "accepted only by the explicit schema-1 legacy mode.");
   }
 
   if (const auto enforcement = first_defined_string(

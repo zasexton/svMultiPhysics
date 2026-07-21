@@ -3492,8 +3492,27 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
         validateFiniteConstantScalar(
             value, "prescribed tangential mesh velocity");
     }
+    validatePositiveConstantScalar(
+        bc.tangential_mesh_penalty, "tangential mesh penalty");
+    if (bc.tangential_mesh_policy !=
+        FreeSurfaceTangentialMeshPolicy::Prescribed) {
+        for (const auto& value : bc.prescribed_tangential_mesh_velocity) {
+            if (!FE::forms::bc::isZeroConstantScalarValue(value)) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: Free and "
+                    "SmoothingOnly tangential mesh policies cannot carry a "
+                    "prescribed tangential velocity");
+            }
+        }
+    }
 
     if (isUnfittedLevelSet(bc)) {
+        if (bc.tangential_mesh_policy !=
+            FreeSurfaceTangentialMeshPolicy::SmoothingOnly) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: tangential mesh "
+                "policies apply only to fitted-ALE free surfaces");
+        }
         if (ale_enabled) {
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: unfitted level-set free surfaces cannot currently be combined with ALE; the level-set transport must use the relative velocity u-w before this combination is supported");
@@ -3590,10 +3609,31 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: fitted free-surface kinematic enforcement requires a normal kinematic policy");
         }
-        if (bc.tangential_mesh_policy !=
-            FreeSurfaceTangentialMeshPolicy::SmoothingOnly) {
+        if (bc.tangential_mesh_policy ==
+                FreeSurfaceTangentialMeshPolicy::Prescribed &&
+            !ale_enabled) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: fitted free-surface tangential mesh policies Free and Prescribed are not yet connected to mesh motion; use SmoothingOnly until that coupling is installed");
+                "IncompressibleNavierStokesVMSModule: prescribed fitted "
+                "free-surface tangential mesh velocity requires ALE");
+        }
+        if (bc.tangential_mesh_policy ==
+                FreeSurfaceTangentialMeshPolicy::Prescribed &&
+            options.mesh_velocity_source !=
+                ALEMeshVelocitySource::CoupledDisplacement) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: prescribed fitted "
+                "free-surface tangential mesh velocity requires a coupled "
+                "mesh-displacement unknown");
+        }
+        for (int component = dim; component < 3; ++component) {
+            if (!FE::forms::bc::isZeroConstantScalarValue(
+                    bc.prescribed_tangential_mesh_velocity[
+                        static_cast<std::size_t>(component)])) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: prescribed "
+                    "tangential mesh velocity must lie in the mesh "
+                    "dimension");
+            }
         }
     }
 
@@ -5946,6 +5986,9 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
         "IncompressibleNavierStokesVMSModule: unsupported free-surface kinematic enforcement");
 }
 
+[[nodiscard]] const char* tangentialMeshPolicyName(
+    FreeSurfaceTangentialMeshPolicy policy) noexcept;
+
 void installFittedFreeSurfaceMeshKinematics(
     FE::systems::FESystem& system,
     const FreeSurfaceBoundary& bc,
@@ -5957,13 +6000,17 @@ void installFittedFreeSurfaceMeshKinematics(
 {
     using namespace FE::forms;
 
-    if (bc.implementation != FreeSurfaceImplementation::FittedALE ||
-        bc.kinematic_enforcement == FreeSurfaceKinematicEnforcement::None ||
-        !ale_binding.coupled()) {
+    if (bc.implementation != FreeSurfaceImplementation::FittedALE) {
         return;
     }
-    if (bc.normal_kinematic_policy !=
-        FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity) {
+    const bool install_normal_relation =
+        bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
+        bc.normal_kinematic_policy ==
+            FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity;
+    const bool install_tangential_relation =
+        bc.tangential_mesh_policy ==
+        FreeSurfaceTangentialMeshPolicy::Prescribed;
+    if (!ale_binding.coupled()) {
         return;
     }
     if (ale_binding.mesh_displacement_field == FE::INVALID_FIELD_ID) {
@@ -5977,6 +6024,43 @@ void installFittedFreeSurfaceMeshKinematics(
             "IncompressibleNavierStokesVMSModule: fitted free-surface mesh displacement field has no function space");
     }
 
+    const auto system_policy = [&]() {
+        switch (bc.tangential_mesh_policy) {
+        case FreeSurfaceTangentialMeshPolicy::Free:
+            return FE::systems::MeshTangentialBoundaryPolicy::Free;
+        case FreeSurfaceTangentialMeshPolicy::SmoothingOnly:
+            return FE::systems::MeshTangentialBoundaryPolicy::SmoothingOnly;
+        case FreeSurfaceTangentialMeshPolicy::Prescribed:
+            return FE::systems::MeshTangentialBoundaryPolicy::Prescribed;
+        }
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: unknown fitted "
+            "free-surface tangential mesh policy");
+    }();
+    system.declareMeshTangentialBoundaryPolicy(
+        FE::systems::MeshTangentialBoundaryPolicyDeclaration{
+            .mesh_displacement_field = ale_binding.mesh_displacement_field,
+            .boundary_marker = bc.boundary_marker,
+            .policy = system_policy,
+            .owner_component =
+                "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary",
+        });
+
+    FE_LOG_INFO(
+        std::string("IncompressibleNavierStokesVMSModule: fitted "
+                    "free-surface mesh policy") +
+        " marker=" + std::to_string(bc.boundary_marker) +
+        " tangential_policy=" +
+        tangentialMeshPolicyName(bc.tangential_mesh_policy) +
+        " tangential_owner=free_surface_boundary" +
+        " tangential_enforcement=" +
+        (install_tangential_relation ? "weak_velocity_penalty" : "none") +
+        " diagnostic=fitted_free_surface_mesh_policy");
+
+    if (!install_normal_relation && !install_tangential_relation) {
+        return;
+    }
+
     const auto psi = TestField(
         ale_binding.mesh_displacement_field,
         *rec.space,
@@ -5986,30 +6070,61 @@ void installFittedFreeSurfaceMeshKinematics(
         *rec.space,
         "d_mesh_free_surface");
     const auto n = currentNormal();
-    const auto normal_mismatch = normalTrace(dt(d_mesh) - u, n);
-    const auto penalty = [&]() {
-        switch (bc.kinematic_enforcement) {
-        case FreeSurfaceKinematicEnforcement::Penalty:
-            return bc::toScalarExpr(
-                bc.kinematic_penalty,
-                freeSurfaceValueName("ns_free_surface_mesh_kinematic_penalty", bc));
-        case FreeSurfaceKinematicEnforcement::Nitsche:
-            return FormExpr::constant(bc.kinematic_nitsche_gamma) / hNormal();
-        case FreeSurfaceKinematicEnforcement::None:
-            break;
-        }
-        return FormExpr::constant(0.0);
-    }();
+    FormExpr residual;
+    if (install_normal_relation) {
+        const auto normal_mismatch = normalTrace(dt(d_mesh) - u, n);
+        const auto penalty = [&]() {
+            switch (bc.kinematic_enforcement) {
+            case FreeSurfaceKinematicEnforcement::Penalty:
+                return bc::toScalarExpr(
+                    bc.kinematic_penalty,
+                    freeSurfaceValueName(
+                        "ns_free_surface_mesh_kinematic_penalty", bc));
+            case FreeSurfaceKinematicEnforcement::Nitsche:
+                return FormExpr::constant(bc.kinematic_nitsche_gamma) /
+                       hNormal();
+            case FreeSurfaceKinematicEnforcement::None:
+                break;
+            }
+            return FormExpr::constant(0.0);
+        }();
+        residual = integrateOnFreeSurface(
+            penalty * normal_mismatch * normalTrace(psi, n),
+            bc,
+            /*ale_enabled=*/true);
+    }
 
-    auto residual = integrateOnFreeSurface(
-        penalty * normal_mismatch * normalTrace(psi, n),
-        bc,
-        /*ale_enabled=*/true);
+    if (install_tangential_relation) {
+        auto target_components = bc::toVectorExpr(
+            bc.prescribed_tangential_mesh_velocity,
+            rec.components,
+            "ns_free_surface_tangential_mesh_velocity",
+            bc.boundary_marker,
+            bc::ComponentValueNameStyle::Component);
+        const auto target =
+            FormExpr::asVector(std::move(target_components));
+        const auto rate_gap = dt(d_mesh) - target;
+        const auto tangential_work =
+            inner(rate_gap, psi) -
+            normalTrace(rate_gap, n) * normalTrace(psi, n);
+        const auto tangential_penalty = bc::toScalarExpr(
+            bc.tangential_mesh_penalty,
+            freeSurfaceValueName(
+                "ns_free_surface_tangential_mesh_penalty", bc));
+        const auto tangential_residual = integrateOnFreeSurface(
+            tangential_penalty * tangential_work,
+            bc,
+            /*ale_enabled=*/true);
+        residual = residual.isValid()
+                       ? residual + tangential_residual
+                       : tangential_residual;
+    }
 
     auto install = base_install_options;
     install.compiler_options.use_symbolic_tangent = true;
     ale_binding.configureInstallOptions(install);
-    if (velocity_field != FE::INVALID_FIELD_ID) {
+    if (install_normal_relation &&
+        velocity_field != FE::INVALID_FIELD_ID) {
         install.extra_trial_fields.push_back(velocity_field);
     }
 
@@ -6019,6 +6134,23 @@ void installFittedFreeSurfaceMeshKinematics(
         {ale_binding.mesh_displacement_field},
         residual,
         install);
+
+    if (install_tangential_relation) {
+        FE::analysis::BoundaryConditionDescriptor descriptor;
+        descriptor.primary_variable =
+            FE::analysis::VariableKey::field(
+                ale_binding.mesh_displacement_field);
+        descriptor.boundary_marker = bc.boundary_marker;
+        descriptor.trace_kind =
+            FE::analysis::TraceKind::TangentialComponent;
+        descriptor.enforcement_kind =
+            FE::analysis::EnforcementKind::WeakPenalty;
+        descriptor.source =
+            "Fitted free-surface prescribed tangential mesh velocity on "
+            "marker " +
+            std::to_string(bc.boundary_marker);
+        system.addBoundaryConditionDescriptor(std::move(descriptor));
+    }
 }
 
 [[nodiscard]] std::string jsonString(std::string_view value)
@@ -6386,6 +6518,9 @@ void installFittedFreeSurfaceMeshKinematics(
             << jsonScalarValue(
                    boundary.prescribed_tangential_mesh_velocity[2])
             << ']'
+            << ",\"tangential_mesh_penalty\":"
+            << jsonScalarValue(boundary.tangential_mesh_penalty)
+            << ",\"tangential_mesh_owner\":\"FreeSurfaceBoundary\""
             << ",\"enforcement\":"
             << jsonString(kinematicEnforcementName(
                    boundary.kinematic_enforcement))
@@ -6714,6 +6849,40 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                                     options_.enable_ale,
                                     system,
                                     dim);
+        if (effective_bc.implementation ==
+                FreeSurfaceImplementation::FittedALE &&
+            options_.enable_ale &&
+            options_.mesh_velocity_source ==
+                ALEMeshVelocitySource::CoupledDisplacement) {
+            auto displacement_field = system.meshMotionField(
+                FE::systems::MeshMotionFieldRole::Displacement);
+            if (!displacement_field.has_value()) {
+                const auto named = system.findFieldByName(
+                    options_.mesh_displacement_field_name);
+                if (named != FE::INVALID_FIELD_ID) {
+                    displacement_field = named;
+                }
+            }
+            const auto conflict = std::find_if(
+                system.meshTangentialBoundaryPolicies().begin(),
+                system.meshTangentialBoundaryPolicies().end(),
+                [&](const auto& declaration) {
+                    return declaration.boundary_marker ==
+                               effective_bc.boundary_marker &&
+                           (!displacement_field.has_value() ||
+                            declaration.mesh_displacement_field ==
+                                *displacement_field);
+                });
+            if (conflict !=
+                system.meshTangentialBoundaryPolicies().end()) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: fitted "
+                    "free-surface tangential policy on marker " +
+                    std::to_string(effective_bc.boundary_marker) +
+                    " conflicts with existing mesh-motion owner '" +
+                    conflict->owner_component + "'");
+            }
+        }
         effective_free_surfaces.push_back(std::move(effective_bc));
     }
     validateGeneratedFreeSurfaceMarkerUniqueness(

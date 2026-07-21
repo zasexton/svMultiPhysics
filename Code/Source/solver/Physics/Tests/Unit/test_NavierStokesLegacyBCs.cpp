@@ -654,6 +654,83 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
 #endif
 }
 
+TEST(NavierStokesLegacyBCs,
+     FittedFreeSurfacePrescribedTangentialMeshPolicyTranslation)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 79;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Free_surface_configuration_schema_version"] =
+        defined("2");
+    input.equation_params["Enable_ALE"] = defined("true");
+    input.equation_params["Mesh_velocity_source"] =
+        defined("coupled_displacement");
+    input.equation_params["Auto_register_mesh_displacement_field"] =
+        defined("true");
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput bc{};
+    bc.name = "free_surface";
+    bc.boundary_marker = marker;
+    bc.params["Type"] = defined("Free_surface");
+    bc.params["Implementation"] = defined("FittedALE");
+    bc.params["Tangential_mesh_policy"] = defined("Prescribed");
+    bc.params["Prescribed_tangential_mesh_velocity"] =
+        defined("0.2, -0.1, 0.0");
+    bc.params["Tangential_mesh_penalty"] = defined("6.0");
+    input.boundary_conditions.push_back(std::move(bc));
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto module = svmp::Physics::EquationModuleRegistry::instance().create(
+        "fluid", input, system);
+    ASSERT_TRUE(module);
+    const auto policies = system.meshTangentialBoundaryPolicies();
+    ASSERT_EQ(policies.size(), 1u);
+    EXPECT_EQ(
+        policies.front().policy,
+        svmp::FE::systems::MeshTangentialBoundaryPolicy::Prescribed);
+    const auto artifact = module->effectiveConfigurationArtifact();
+    ASSERT_TRUE(artifact.has_value());
+    EXPECT_NE(
+        artifact->json.find(
+            "\"prescribed_tangential_mesh_velocity\":["
+            "0.20000000000000001,-0.10000000000000001,0]"),
+        std::string::npos);
+    EXPECT_NE(
+        artifact->json.find("\"tangential_mesh_penalty\":6"),
+        std::string::npos);
+    EXPECT_NE(
+        artifact->json.find(
+            "\"tangential_mesh_owner\":\"FreeSurfaceBoundary\""),
+        std::string::npos);
+    ASSERT_NO_THROW(system.setup());
+
+    auto conflicting_input = input;
+    conflicting_input.boundary_conditions.front()
+        .params["Tangential_mesh_policy"] = defined("Free");
+    svmp::FE::systems::FESystem rejected_system(mesh);
+    EXPECT_THROW(
+        (void)svmp::Physics::EquationModuleRegistry::instance().create(
+            "fluid", conflicting_input, rejected_system),
+        std::runtime_error);
+    EXPECT_EQ(rejected_system.findFieldByName("u"),
+              svmp::FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(rejected_system.meshTangentialBoundaryPolicies().empty());
+#endif
+}
+
 TEST(NavierStokesLegacyBCs, FittedFreeSurfacePrescribedAngleTranslationFailsClosed)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)

@@ -193,6 +193,20 @@ enum class MeshMotionFieldRole : std::uint8_t {
     PredictedVelocity
 };
 
+enum class MeshTangentialBoundaryPolicy : std::uint8_t {
+    Free,
+    SmoothingOnly,
+    Prescribed
+};
+
+struct MeshTangentialBoundaryPolicyDeclaration {
+    FieldId mesh_displacement_field{INVALID_FIELD_ID};
+    int boundary_marker{-1};
+    MeshTangentialBoundaryPolicy policy{
+        MeshTangentialBoundaryPolicy::SmoothingOnly};
+    std::string owner_component{};
+};
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 enum class MeshCoordinateUpdateMode : std::uint8_t {
     AbsoluteFromReference,
@@ -351,6 +365,12 @@ public:
     void bindMeshMotionField(std::string_view role_name, std::string_view field_name);
     [[nodiscard]] std::optional<FieldId> meshMotionField(MeshMotionFieldRole role) const noexcept;
     [[nodiscard]] assembly::MeshMotionFieldAccess meshMotionFieldAccess() const noexcept;
+    void declareMeshTangentialBoundaryPolicy(
+        MeshTangentialBoundaryPolicyDeclaration declaration);
+    [[nodiscard]] std::span<const MeshTangentialBoundaryPolicyDeclaration>
+    meshTangentialBoundaryPolicies() const noexcept {
+        return mesh_tangential_boundary_policies_;
+    }
     void setGeometricNonlinearityPolicy(GeometricNonlinearityPolicy policy);
     [[nodiscard]] const GeometricNonlinearityPolicy& geometricNonlinearityPolicy() const noexcept;
     [[nodiscard]] bool geometricNonlinearityEnabled() const noexcept;
@@ -1761,6 +1781,8 @@ private:
     double last_constraint_update_time_{0.0};
     double last_constraint_update_dt_{0.0};
     assembly::MeshMotionFieldAccess mesh_motion_fields_{};
+    std::vector<MeshTangentialBoundaryPolicyDeclaration>
+        mesh_tangential_boundary_policies_{};
     GeometricNonlinearityPolicy geometric_nonlinearity_policy_{};
 
 		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>> sparsity_by_op_{};
