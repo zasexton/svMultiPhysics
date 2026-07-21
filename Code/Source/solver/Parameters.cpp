@@ -3186,6 +3186,7 @@ MeshParameters::MeshParameters()
   //
   set_parameter("Domain", 0,  !required, domain_id);
   set_parameter("Domain_file_path", "", !required, domain_file_path);
+  set_parameter("Ghost_layers", 0, !required, ghost_layers);
 
   //set_parameter("Fiber_direction", {}, !required, fiber_direction);
   set_parameter("Fiber_direction_file_path", {}, !required, fiber_direction_file_paths);

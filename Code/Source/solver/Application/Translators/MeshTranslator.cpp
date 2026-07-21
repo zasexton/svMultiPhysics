@@ -406,6 +406,12 @@ namespace translators {
 
 std::shared_ptr<svmp::Mesh> MeshTranslator::loadMesh(const MeshParameters& params)
 {
+  const int ghost_layers = params.ghost_layers.value();
+  if (ghost_layers < 0) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] <Ghost_layers> inside <Add_mesh name=\"" +
+        params.name.value() + "\"> must be a nonnegative integer.");
+  }
   const std::string file_path = params.mesh_file_path.value();
   if (file_path.empty()) {
     throw std::runtime_error(
@@ -427,9 +433,11 @@ std::shared_ptr<svmp::Mesh> MeshTranslator::loadMesh(const MeshParameters& param
   }
   io_opts.kv["codim1_topology"] = "none";
   io_opts.kv["edge_topology"] = "false";
+  io_opts.kv["ghost_layers"] = std::to_string(ghost_layers);
 
   application::core::oopCout()
       << "[svMultiPhysics::Application] MeshTranslator: initial mesh storage codim1=none edge=false"
+      << " ghost_layers=" << ghost_layers
       << " (FE setup will materialize planned topology)." << std::endl;
 
   if (application::core::oopTraceEnabled()) {

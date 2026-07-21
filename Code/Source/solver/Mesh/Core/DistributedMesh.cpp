@@ -539,6 +539,27 @@ static MeshBase extract_submesh(const MeshBase& global_mesh,
     submesh_finalize.edge_storage = !global_mesh.edge2vertex().empty();
     submesh.finalize(submesh_finalize);
 
+    // Preserve the deformed configuration for both initial partition packets
+    // and later ghost-cell packets.  X_ref alone is insufficient when halo
+    // geometry is consumed while the current configuration is active.
+    if (global_mesh.has_current_coords()) {
+        std::vector<real_t> current_coords(local_vertices.size() * global_mesh.dim());
+        const auto& global_current = global_mesh.X_cur();
+        for (size_t i = 0; i < local_vertices.size(); ++i) {
+            const auto global_vertex = static_cast<size_t>(local_vertices[i]);
+            for (int d = 0; d < global_mesh.dim(); ++d) {
+                current_coords[i * static_cast<size_t>(global_mesh.dim()) +
+                               static_cast<size_t>(d)] =
+                    global_current[global_vertex * static_cast<size_t>(global_mesh.dim()) +
+                                   static_cast<size_t>(d)];
+            }
+        }
+        submesh.set_current_coords(current_coords);
+        if (global_mesh.active_configuration() == Configuration::Current) {
+            submesh.use_current_configuration();
+        }
+    }
+
     // Step 7: Copy field data if present
     // Preserve label registry (name <-> id) so downstream code can resolve labels.
     for (const auto& [label, name] : global_mesh.list_label_names()) {
@@ -1298,6 +1319,24 @@ static void serialize_mesh(const MeshBase& mesh, std::vector<char>& buffer) {
 
     append_gid_fields(EntityKind::Face, face_gids);
     append_gid_fields(EntityKind::Edge, edge_gids);
+
+    // Optional trailer: current/deformed coordinates.  Keeping this at the
+    // end preserves the existing packet layout for all preceding metadata and
+    // lets the reader continue to accept packets without the trailer.
+    constexpr std::uint64_t current_coords_magic = 0x53564d5058435552ULL; // "SVMPXCUR"
+    append_data(&current_coords_magic, sizeof(current_coords_magic));
+    const int has_current_coords = mesh.has_current_coords() ? 1 : 0;
+    const int active_configuration = static_cast<int>(mesh.active_configuration());
+    append_data(&has_current_coords, sizeof(has_current_coords));
+    append_data(&active_configuration, sizeof(active_configuration));
+    if (has_current_coords != 0) {
+        const auto& current = mesh.X_cur();
+        if (current.size() != mesh.n_vertices() * static_cast<size_t>(mesh.dim())) {
+            throw std::runtime_error(
+                "serialize_mesh: current-coordinate count does not match vertices");
+        }
+        append_data(current.data(), current.size() * sizeof(real_t));
+    }
 }
 
 // Deserialize a mesh from a byte buffer received via MPI
@@ -1707,6 +1746,34 @@ static void deserialize_mesh(const std::vector<char>& buffer, MeshBase& mesh) {
 
     read_gid_fields(EntityKind::Face, face_gids, [&](gid_t gid) { return mesh.global_to_local_face(gid); });
     read_gid_fields(EntityKind::Edge, edge_gids, [&](gid_t gid) { return mesh.global_to_local_edge(gid); });
+
+    if (offset < buffer.size()) {
+        constexpr std::uint64_t current_coords_magic = 0x53564d5058435552ULL; // "SVMPXCUR"
+        std::uint64_t magic = 0;
+        int has_current_coords = 0;
+        int active_configuration = static_cast<int>(Configuration::Reference);
+        read_data(&magic, sizeof(magic));
+        if (magic != current_coords_magic) {
+            throw std::runtime_error("deserialize_mesh: unrecognized packet trailer");
+        }
+        read_data(&has_current_coords, sizeof(has_current_coords));
+        read_data(&active_configuration, sizeof(active_configuration));
+        if (has_current_coords != 0) {
+            std::vector<real_t> current(static_cast<size_t>(n_vertices) *
+                                        static_cast<size_t>(dim));
+            if (!current.empty()) {
+                read_data(current.data(), current.size() * sizeof(real_t));
+            }
+            mesh.set_current_coords(current);
+            if (static_cast<Configuration>(active_configuration) !=
+                Configuration::Reference) {
+                mesh.use_current_configuration();
+            }
+        }
+        if (offset != buffer.size()) {
+            throw std::runtime_error("deserialize_mesh: trailing bytes after packet trailer");
+        }
+    }
 }
 
 #if defined(MESH_BUILD_TESTS)
@@ -2301,61 +2368,28 @@ inline FaceKey make_face_key(const MeshBase& mesh, index_t face_id) {
 
 // Extract a submesh containing a set of cells specified by global IDs.
 inline MeshBase extract_cells_by_gid(const MeshBase& mesh, const std::vector<gid_t>& cell_gids) {
-    MeshBase submesh;
-    const int dim = mesh.dim();
-
-    std::unordered_map<gid_t, index_t> gid_to_local_vertex;
-    gid_to_local_vertex.reserve(cell_gids.size() * 8);
-
-    std::vector<gid_t> new_vertex_gids;
-    std::vector<real_t> new_coords;
-    std::vector<gid_t> new_cell_gids;
-    std::vector<CellShape> new_cell_shapes;
-    std::vector<offset_t> new_offsets{0};
-    std::vector<index_t> new_conn;
-
-    const auto& X = mesh.X_ref();
-    const auto& vg = mesh.vertex_gids();
-
-    for (gid_t cg : cell_gids) {
-        const index_t c = mesh.global_to_local_cell(cg);
-        if (c == INVALID_INDEX) continue;
-
-        new_cell_gids.push_back(cg);
-        new_cell_shapes.push_back(mesh.cell_shape(c));
-
-        auto [cverts, nverts] = mesh.cell_vertices_span(c);
-        for (size_t i = 0; i < nverts; ++i) {
-            const index_t v = cverts[i];
-            const gid_t gid = vg[static_cast<size_t>(v)];
-            auto it = gid_to_local_vertex.find(gid);
-            if (it == gid_to_local_vertex.end()) {
-                const index_t new_id = static_cast<index_t>(new_vertex_gids.size());
-                gid_to_local_vertex[gid] = new_id;
-                new_vertex_gids.push_back(gid);
-                for (int d = 0; d < dim; ++d) {
-                    new_coords.push_back(X[static_cast<size_t>(v) * dim + d]);
-                }
-            }
-            new_conn.push_back(gid_to_local_vertex[gid]);
+    std::vector<index_t> local_cells;
+    local_cells.reserve(cell_gids.size());
+    for (const gid_t gid : cell_gids) {
+        const index_t cell = mesh.global_to_local_cell(gid);
+        if (cell != INVALID_INDEX) {
+            local_cells.push_back(cell);
         }
-        new_offsets.push_back(static_cast<offset_t>(new_conn.size()));
     }
 
-    // Empty packet: return a default-constructed mesh (caller decides how to handle).
-    if (new_cell_gids.empty()) {
-        return submesh;
+    if (local_cells.empty()) {
+        return MeshBase{};
     }
 
-    submesh.build_from_arrays(dim,
-                              std::move(new_coords),
-                              std::move(new_offsets),
-                              std::move(new_conn),
-                              std::move(new_cell_shapes));
-    submesh.set_vertex_gids(std::move(new_vertex_gids));
-    submesh.set_cell_gids(std::move(new_cell_gids));
-    submesh.finalize();
-    return submesh;
+    // Reuse the production partition extractor rather than constructing a
+    // topology-only packet here.  In particular, a ghost-cell packet must
+    // carry the same vertex/volume fields, labels, regions, refinement levels,
+    // sets, and field descriptors as an initially distributed submesh.
+    const std::vector<rank_t> unused_partition;
+    return extract_submesh(mesh,
+                           unused_partition,
+                           /*target_rank=*/0,
+                           &local_cells);
 }
 
 } // namespace
@@ -2372,6 +2406,25 @@ void DistributedMesh::build_ghost_layer(int levels) {
     // Always start from a clean (no-ghost) state.
     if (ghost_levels_ > 0 || !ghost_cells_.empty() || !ghost_vertices_.empty()) {
         clear_ghosts();
+    }
+
+    // Ghost discovery is face-adjacent.  Parallel load paths may deliberately
+    // defer codimension-1 storage (codim1=none) until FE topology planning, but
+    // the halo must be built before that planning/physical-boundary relabeling.
+    // Materialize full faces temporarily so partition interfaces are visible.
+    if (local_mesh_ && local_mesh_->n_cells() > 0 && local_mesh_->dim() >= 2 &&
+        local_mesh_->codim1_storage_mode() == MeshCodim1StorageMode::None) {
+        MeshFinalizeOptions topology_options{};
+        topology_options.codim1_storage = MeshCodim1StorageMode::Full;
+        topology_options.edge_storage = !local_mesh_->edge2vertex().empty();
+        local_mesh_->finalize(topology_options);
+    }
+    if (local_mesh_ && local_mesh_->n_cells() > 0 &&
+        local_mesh_->codim1_storage_mode() != MeshCodim1StorageMode::Full) {
+        throw std::runtime_error(
+            "DistributedMesh::build_ghost_layer requires full cell-face topology; "
+            "build the halo during parallel load before replacing topology with "
+            "physical boundary-only faces");
     }
 
     // Ensure ownership arrays exist for the base partition (owned/shared).
@@ -2548,6 +2601,7 @@ void DistributedMesh::build_ghost_layer(int levels) {
 
         // Track owner ranks for newly created vertices (best-effort).
         std::unordered_map<gid_t, rank_t> new_vertex_owner;
+        std::unordered_map<gid_t, std::vector<real_t>> new_vertex_current_coords;
 
         // Add new vertices from incoming meshes.
         for (const auto& [owner_rank, m] : incoming) {
@@ -2565,6 +2619,16 @@ void DistributedMesh::build_ghost_layer(int levels) {
                     new_coords.push_back(X[static_cast<size_t>(v) * dim + d]);
                 }
                 new_vertex_owner[gid] = owner_rank;
+                if (m.has_current_coords()) {
+                    const auto& current = m.X_cur();
+                    std::vector<real_t> vertex_current(static_cast<size_t>(dim));
+                    for (int d = 0; d < dim; ++d) {
+                        vertex_current[static_cast<size_t>(d)] =
+                            current[static_cast<size_t>(v) * static_cast<size_t>(dim) +
+                                    static_cast<size_t>(d)];
+                    }
+                    new_vertex_current_coords.emplace(gid, std::move(vertex_current));
+                }
             }
         }
 
@@ -2612,7 +2676,10 @@ void DistributedMesh::build_ghost_layer(int levels) {
                                        std::move(new_cell_shapes));
         local_mesh_->set_vertex_gids(std::move(new_vertex_gids));
 	        local_mesh_->set_cell_gids(std::move(new_cell_gids));
-	        local_mesh_->finalize();
+	        MeshFinalizeOptions rebuilt_topology_options{};
+	        rebuilt_topology_options.codim1_storage = MeshCodim1StorageMode::Full;
+	        rebuilt_topology_options.edge_storage = old_n_edges > 0;
+	        local_mesh_->finalize(rebuilt_topology_options);
 
 	        ensure_canonical_face_gids(*local_mesh_);
 	        ensure_canonical_edge_gids(*local_mesh_);
@@ -2621,17 +2688,42 @@ void DistributedMesh::build_ghost_layer(int levels) {
 	        for (const auto& [label, name] : label_registry) {
 	            local_mesh_->register_label(name, label);
 	        }
+	        for (const auto& [owner_rank, incoming_mesh] : incoming) {
+	            (void)owner_rank;
+	            for (const auto& [label, name] : incoming_mesh.list_label_names()) {
+	                const auto existing_label = local_mesh_->label_from_name(name);
+	                const auto existing_name = local_mesh_->label_name(label);
+	                if ((existing_label != INVALID_LABEL && existing_label != label) ||
+	                    (!existing_name.empty() && existing_name != name)) {
+	                    throw std::runtime_error(
+	                        "DistributedMesh::build_ghost_layer: inconsistent label registry "
+	                        "for imported label '" + name + "'");
+	                }
+	                local_mesh_->register_label(name, label);
+	            }
+	        }
 
 	        // Restore current coordinates and active configuration.
 	        if (old_has_current_coords) {
 	            const auto& rebuilt_coords = local_mesh_->X_ref();
+	            const auto& rebuilt_vertex_gids = local_mesh_->vertex_gids();
 	            std::vector<real_t> new_current_coords;
 	            new_current_coords.reserve(rebuilt_coords.size());
 	            new_current_coords.insert(new_current_coords.end(), old_current_coords.begin(), old_current_coords.end());
-	            if (rebuilt_coords.size() > old_current_coords.size()) {
-	                new_current_coords.insert(new_current_coords.end(),
-	                                          rebuilt_coords.begin() + old_current_coords.size(),
-	                                          rebuilt_coords.end());
+	            for (size_t v = old_n_vertices; v < local_mesh_->n_vertices(); ++v) {
+	                const auto gid = rebuilt_vertex_gids[v];
+	                const auto current_it = new_vertex_current_coords.find(gid);
+	                for (int d = 0; d < dim; ++d) {
+	                    if (current_it != new_vertex_current_coords.end() &&
+	                        current_it->second.size() == static_cast<size_t>(dim)) {
+	                        new_current_coords.push_back(
+	                            current_it->second[static_cast<size_t>(d)]);
+	                    } else {
+	                        new_current_coords.push_back(
+	                            rebuilt_coords[v * static_cast<size_t>(dim) +
+	                                           static_cast<size_t>(d)]);
+	                    }
+	                }
 	            }
 	            local_mesh_->set_current_coords(new_current_coords);
 	        }
@@ -2669,6 +2761,56 @@ void DistributedMesh::build_ghost_layer(int levels) {
 	            local_mesh_->set_cell_refinement_levels(std::move(levels));
 	        }
 
+	        // Install metadata carried by newly imported vertex/cell packets.
+	        // Existing base entities retain their local state; imported entities
+	        // are keyed by stable GID rather than sender-local numbering.
+	        auto merged_refinement_levels = local_mesh_->cell_refinement_levels();
+	        if (merged_refinement_levels.size() != local_mesh_->n_cells()) {
+	            merged_refinement_levels.assign(local_mesh_->n_cells(), 0);
+	        }
+	        for (const auto& [owner_rank, incoming_mesh] : incoming) {
+	            (void)owner_rank;
+	            const auto& incoming_vertex_gids = incoming_mesh.vertex_gids();
+	            const auto& incoming_vertex_labels = incoming_mesh.vertex_label_ids();
+	            if (incoming_vertex_labels.size() == incoming_mesh.n_vertices()) {
+	                for (size_t v = 0; v < incoming_mesh.n_vertices(); ++v) {
+	                    const auto local_vertex =
+	                        local_mesh_->global_to_local_vertex(incoming_vertex_gids[v]);
+	                    if (local_vertex == INVALID_INDEX ||
+	                        static_cast<size_t>(local_vertex) < old_n_vertices) {
+	                        continue;
+	                    }
+	                    const auto label = incoming_vertex_labels[v];
+	                    if (label != INVALID_LABEL) {
+	                        local_mesh_->set_vertex_label(local_vertex, label);
+	                    }
+	                }
+	            }
+
+	            const auto& incoming_cell_gids = incoming_mesh.cell_gids();
+	            const auto& incoming_regions = incoming_mesh.cell_region_ids();
+	            const auto& incoming_refinement = incoming_mesh.cell_refinement_levels();
+	            for (size_t c = 0; c < incoming_mesh.n_cells(); ++c) {
+	                const auto local_cell =
+	                    local_mesh_->global_to_local_cell(incoming_cell_gids[c]);
+	                if (local_cell == INVALID_INDEX ||
+	                    static_cast<size_t>(local_cell) < old_n_cells) {
+	                    continue;
+	                }
+	                if (incoming_regions.size() == incoming_mesh.n_cells()) {
+	                    local_mesh_->set_region_label(local_cell, incoming_regions[c]);
+	                }
+	                if (incoming_refinement.size() == incoming_mesh.n_cells()) {
+	                    merged_refinement_levels[static_cast<size_t>(local_cell)] =
+	                        incoming_refinement[c];
+	                }
+	            }
+	        }
+	        if (!merged_refinement_levels.empty()) {
+	            local_mesh_->set_cell_refinement_levels(
+	                std::move(merged_refinement_levels));
+	        }
+
 	        // Preserve face boundary labels / edge labels by canonical GID.
 	        if (!old_face_boundary_labels.empty() && face_gid_snapshot && !face_gid_snapshot->empty()) {
 	            const size_t n = std::min(old_face_boundary_labels.size(), face_gid_snapshot->size());
@@ -2696,6 +2838,55 @@ void DistributedMesh::build_ghost_layer(int levels) {
 	            }
 	        }
 
+	        std::unordered_set<gid_t> old_face_gid_set;
+	        std::unordered_set<gid_t> old_edge_gid_set;
+	        if (face_gid_snapshot) {
+	            old_face_gid_set.insert(face_gid_snapshot->begin(), face_gid_snapshot->end());
+	            old_face_gid_set.erase(INVALID_GID);
+	        }
+	        if (edge_gid_snapshot) {
+	            old_edge_gid_set.insert(edge_gid_snapshot->begin(), edge_gid_snapshot->end());
+	            old_edge_gid_set.erase(INVALID_GID);
+	        }
+	        for (const auto& [owner_rank, incoming_mesh] : incoming) {
+	            (void)owner_rank;
+	            const auto& incoming_face_gids = incoming_mesh.face_gids();
+	            const auto& incoming_face_labels = incoming_mesh.face_boundary_ids();
+	            if (incoming_face_gids.size() == incoming_mesh.n_faces() &&
+	                incoming_face_labels.size() == incoming_mesh.n_faces()) {
+	                for (size_t f = 0; f < incoming_mesh.n_faces(); ++f) {
+	                    const auto gid = incoming_face_gids[f];
+	                    const auto label = incoming_face_labels[f];
+	                    if (gid == INVALID_GID || label == INVALID_LABEL ||
+	                        old_face_gid_set.count(gid) != 0) {
+	                        continue;
+	                    }
+	                    const auto local_face = local_mesh_->global_to_local_face(gid);
+	                    if (local_face != INVALID_INDEX) {
+	                        local_mesh_->set_boundary_label(local_face, label);
+	                    }
+	                }
+	            }
+
+	            const auto& incoming_edge_gids = incoming_mesh.edge_gids();
+	            const auto& incoming_edge_labels = incoming_mesh.edge_label_ids();
+	            if (incoming_edge_gids.size() == incoming_mesh.n_edges() &&
+	                incoming_edge_labels.size() == incoming_mesh.n_edges()) {
+	                for (size_t e = 0; e < incoming_mesh.n_edges(); ++e) {
+	                    const auto gid = incoming_edge_gids[e];
+	                    const auto label = incoming_edge_labels[e];
+	                    if (gid == INVALID_GID || label == INVALID_LABEL ||
+	                        old_edge_gid_set.count(gid) != 0) {
+	                        continue;
+	                    }
+	                    const auto local_edge = local_mesh_->global_to_local_edge(gid);
+	                    if (local_edge != INVALID_INDEX) {
+	                        local_mesh_->set_edge_label(local_edge, label);
+	                    }
+	                }
+	            }
+	        }
+
 	        // Restore entity sets.
 	        for (const auto& set : saved_sets) {
 	            if (set.kind == EntityKind::Vertex || set.kind == EntityKind::Volume) {
@@ -2715,6 +2906,59 @@ void DistributedMesh::build_ghost_layer(int levels) {
 	                    local_mesh_->add_to_set(EntityKind::Edge, set.name, e);
 	                }
 	            }
+	        }
+	        for (const auto& [owner_rank, incoming_mesh] : incoming) {
+	            (void)owner_rank;
+	            const MeshBase* incoming_mesh_ptr = &incoming_mesh;
+	            auto merge_index_sets_by_gid = [this, incoming_mesh_ptr](EntityKind kind,
+	                                               const std::vector<gid_t>& gids) {
+	                for (const auto& set_name : incoming_mesh_ptr->list_sets(kind)) {
+	                    for (const auto incoming_id :
+	                         incoming_mesh_ptr->get_set(kind, set_name)) {
+	                        if (incoming_id < 0 ||
+	                            static_cast<size_t>(incoming_id) >= gids.size()) {
+	                            continue;
+	                        }
+	                        const auto gid = gids[static_cast<size_t>(incoming_id)];
+	                        const auto local_id =
+	                            kind == EntityKind::Vertex
+	                                ? local_mesh_->global_to_local_vertex(gid)
+	                                : local_mesh_->global_to_local_cell(gid);
+	                        if (local_id != INVALID_INDEX) {
+	                            local_mesh_->add_to_set(kind, set_name, local_id);
+	                        }
+	                    }
+	                }
+	            };
+	            merge_index_sets_by_gid(EntityKind::Vertex,
+	                                    incoming_mesh.vertex_gids());
+	            merge_index_sets_by_gid(EntityKind::Volume,
+	                                    incoming_mesh.cell_gids());
+
+	            auto merge_codim_sets_by_gid = [this, incoming_mesh_ptr](EntityKind kind,
+	                                               const std::vector<gid_t>& gids) {
+	                for (const auto& set_name : incoming_mesh_ptr->list_sets(kind)) {
+	                    for (const auto incoming_id :
+	                         incoming_mesh_ptr->get_set(kind, set_name)) {
+	                        if (incoming_id < 0 ||
+	                            static_cast<size_t>(incoming_id) >= gids.size()) {
+	                            continue;
+	                        }
+	                        const auto gid = gids[static_cast<size_t>(incoming_id)];
+	                        const auto local_id =
+	                            kind == EntityKind::Face
+	                                ? local_mesh_->global_to_local_face(gid)
+	                                : local_mesh_->global_to_local_edge(gid);
+	                        if (local_id != INVALID_INDEX) {
+	                            local_mesh_->add_to_set(kind, set_name, local_id);
+	                        }
+	                    }
+	                }
+	            };
+	            merge_codim_sets_by_gid(EntityKind::Face,
+	                                    incoming_mesh.face_gids());
+	            merge_codim_sets_by_gid(EntityKind::Edge,
+	                                    incoming_mesh.edge_gids());
 	        }
 
 	        // Restore fields (all kinds), remapping face/edge data by canonical GIDs.
@@ -2745,6 +2989,96 @@ void DistributedMesh::build_ghost_layer(int levels) {
                     }
                     std::memcpy(dst + static_cast<size_t>(new_id) * bpe,
                                 snap.data.data() + i * bpe,
+                                bpe);
+                }
+            }
+
+            // Populate entities appended from incoming ghost packets.  Prefix
+            // restoration above intentionally covers only the pre-existing
+            // partition; without this GID remap, new VTU point/cell fields are
+            // silently left at the zero fill above.
+            for (const auto& [owner_rank, incoming_mesh] : incoming) {
+                (void)owner_rank;
+                const auto incoming_handle =
+                    incoming_mesh.field_handle(snap.kind, snap.name);
+                if (incoming_handle.id == 0) {
+                    throw std::runtime_error(
+                        "DistributedMesh::build_ghost_layer: imported mesh is "
+                        "missing field '" + snap.name + "'");
+                }
+                if (incoming_mesh.field_type(incoming_handle) != snap.type ||
+                    incoming_mesh.field_components(incoming_handle) !=
+                        snap.components ||
+                    incoming_mesh.field_bytes_per_component_by_name(
+                        snap.kind, snap.name) != snap.bytes_per_component) {
+                    throw std::runtime_error(
+                        "DistributedMesh::build_ghost_layer: incompatible schema "
+                        "for imported field '" + snap.name + "'");
+                }
+                const auto* incoming_data = static_cast<const std::uint8_t*>(
+                    incoming_mesh.field_data(incoming_handle));
+                if (!incoming_data) {
+                    continue;
+                }
+
+                size_t incoming_count = 0;
+                const std::vector<gid_t>* incoming_gids = nullptr;
+                switch (snap.kind) {
+                    case EntityKind::Vertex:
+                        incoming_count = incoming_mesh.n_vertices();
+                        incoming_gids = &incoming_mesh.vertex_gids();
+                        break;
+                    case EntityKind::Volume:
+                        incoming_count = incoming_mesh.n_cells();
+                        incoming_gids = &incoming_mesh.cell_gids();
+                        break;
+                    case EntityKind::Face:
+                        incoming_count = incoming_mesh.n_faces();
+                        incoming_gids = &incoming_mesh.face_gids();
+                        break;
+                    case EntityKind::Edge:
+                        incoming_count = incoming_mesh.n_edges();
+                        incoming_gids = &incoming_mesh.edge_gids();
+                        break;
+                }
+                if (!incoming_gids || incoming_gids->size() != incoming_count) {
+                    continue;
+                }
+
+                for (size_t incoming_id = 0; incoming_id < incoming_count;
+                     ++incoming_id) {
+                    const auto gid = (*incoming_gids)[incoming_id];
+                    index_t local_id = INVALID_INDEX;
+                    bool copy_value = false;
+                    switch (snap.kind) {
+                        case EntityKind::Vertex:
+                            local_id = local_mesh_->global_to_local_vertex(gid);
+                            copy_value = local_id != INVALID_INDEX &&
+                                         static_cast<size_t>(local_id) >=
+                                             old_n_vertices;
+                            break;
+                        case EntityKind::Volume:
+                            local_id = local_mesh_->global_to_local_cell(gid);
+                            copy_value = local_id != INVALID_INDEX &&
+                                         static_cast<size_t>(local_id) >= old_n_cells;
+                            break;
+                        case EntityKind::Face:
+                            local_id = local_mesh_->global_to_local_face(gid);
+                            copy_value = local_id != INVALID_INDEX &&
+                                         old_face_gid_set.count(gid) == 0;
+                            break;
+                        case EntityKind::Edge:
+                            local_id = local_mesh_->global_to_local_edge(gid);
+                            copy_value = local_id != INVALID_INDEX &&
+                                         old_edge_gid_set.count(gid) == 0;
+                            break;
+                    }
+                    if (!copy_value || local_id < 0 ||
+                        static_cast<size_t>(local_id) >= new_count) {
+                        continue;
+                    }
+                    std::memcpy(dst + static_cast<size_t>(local_id) * bpe,
+                                incoming_data + incoming_id * bpe,
                                 bpe);
                 }
             }
@@ -3334,6 +3668,88 @@ void DistributedMesh::build_ghost_layer(int levels) {
 	    // Ghost-layer rebuild invalidates any existing exchange patterns; rebuild them now so
 	    // ghost/shared exchanges (fields/coordinates) use the correct post-ghost topology.
 	    build_exchange_patterns();
+
+	    // Canonicalize imported VTU-style fields from the entity owner.  VTKReader
+	    // fields intentionally have no FieldDescriptor, so the generic
+	    // update_exchange_ghost_fields() selector would otherwise omit them.
+	    // Explicit Exchange descriptors are safe here as well; None and
+	    // Accumulate retain the values copied from their owner's packet without
+	    // changing their declared synchronization semantics.
+	    std::vector<FieldHandle> owner_exchange_fields;
+	    for (const auto kind : {EntityKind::Vertex, EntityKind::Volume}) {
+	        auto names = local_mesh_->field_names(kind);
+	        std::sort(names.begin(), names.end());
+	        for (const auto& name : names) {
+	            const auto handle = local_mesh_->field_handle(kind, name);
+	            if (handle.id == 0) {
+	                continue;
+	            }
+	            const auto* descriptor = local_mesh_->field_descriptor(handle);
+	            if (descriptor == nullptr ||
+	                descriptor->ghost_policy == FieldGhostPolicy::Exchange) {
+	                owner_exchange_fields.push_back(handle);
+	            }
+	        }
+	    }
+	    update_ghosts(owner_exchange_fields);
+
+	    // Labels and cell classification metadata are not Mesh fields, but they
+	    // follow the same owner-authoritative rule.  Synchronize them explicitly
+	    // so a pre-existing shared vertex cannot retain a different label merely
+	    // because the imported ghost cell arrived from a non-owning rank.
+	    std::vector<label_t> synchronized_vertex_labels(local_mesh_->n_vertices(),
+	                                                    INVALID_LABEL);
+	    for (index_t vertex = 0;
+	         vertex < static_cast<index_t>(local_mesh_->n_vertices()); ++vertex) {
+	        synchronized_vertex_labels[static_cast<size_t>(vertex)] =
+	            local_mesh_->vertex_label(vertex);
+	    }
+	    if (!synchronized_vertex_labels.empty()) {
+	        exchange_entity_data(EntityKind::Vertex,
+	                             synchronized_vertex_labels.data(),
+	                             synchronized_vertex_labels.data(),
+	                             sizeof(label_t),
+	                             vertex_exchange_);
+	        for (index_t vertex = 0;
+	             vertex < static_cast<index_t>(local_mesh_->n_vertices()); ++vertex) {
+	            local_mesh_->set_vertex_label(
+	                vertex,
+	                synchronized_vertex_labels[static_cast<size_t>(vertex)]);
+	        }
+	    }
+
+	    std::vector<label_t> synchronized_regions(local_mesh_->n_cells(),
+	                                              INVALID_LABEL);
+	    std::vector<size_t> synchronized_refinement(local_mesh_->n_cells(), 0);
+	    for (index_t cell = 0;
+	         cell < static_cast<index_t>(local_mesh_->n_cells()); ++cell) {
+	        synchronized_regions[static_cast<size_t>(cell)] =
+	            local_mesh_->region_label(cell);
+	        synchronized_refinement[static_cast<size_t>(cell)] =
+	            local_mesh_->refinement_level(cell);
+	    }
+	    if (!synchronized_regions.empty()) {
+	        exchange_entity_data(EntityKind::Volume,
+	                             synchronized_regions.data(),
+	                             synchronized_regions.data(),
+	                             sizeof(label_t),
+	                             cell_exchange_);
+	        exchange_entity_data(EntityKind::Volume,
+	                             synchronized_refinement.data(),
+	                             synchronized_refinement.data(),
+	                             sizeof(size_t),
+	                             cell_exchange_);
+	        for (index_t cell = 0;
+	             cell < static_cast<index_t>(local_mesh_->n_cells()); ++cell) {
+	            local_mesh_->set_region_label(
+	                cell, synchronized_regions[static_cast<size_t>(cell)]);
+	        }
+	        local_mesh_->set_cell_refinement_levels(
+	            std::move(synchronized_refinement));
+	    }
+	    if (local_mesh_->has_current_coords()) {
+	        update_exchange_ghost_coordinates(Configuration::Current);
+	    }
 	#endif
 	}
 
@@ -8002,7 +8418,12 @@ void DistributedMesh::save_parallel(const MeshIOOptions& opts) const {
             auto* ghost = local_mesh_->field_data_as<std::uint8_t>(point_ghost_h);
             if (ghost) {
                 for (index_t v = 0; v < static_cast<index_t>(local_mesh_->n_vertices()); ++v) {
-                    ghost[static_cast<size_t>(v)] = is_ghost_vertex(v) ? static_cast<std::uint8_t>(1) : static_cast<std::uint8_t>(0);
+                    const bool nonowner_shared_replica =
+                        is_shared_vertex(v) && owner_rank_vertex(v) != my_rank_;
+                    ghost[static_cast<size_t>(v)] =
+                        (is_ghost_vertex(v) || nonowner_shared_replica)
+                            ? static_cast<std::uint8_t>(1)
+                            : static_cast<std::uint8_t>(0);
                 }
             }
         }

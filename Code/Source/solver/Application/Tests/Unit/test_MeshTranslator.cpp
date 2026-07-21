@@ -3,6 +3,7 @@
 #include "Application/Translators/MeshTranslator.h"
 #include "Mesh/Mesh.h"
 #include "Parameters.h"
+#include "tinyxml2.h"
 
 #ifdef MESH_HAS_VTK
 #include "Mesh/IO/VTKWriter.h"
@@ -233,6 +234,65 @@ std::shared_ptr<svmp::Mesh> load_volume_with_face(const std::filesystem::path& v
 #endif
 
 } // namespace
+
+TEST(MeshTranslatorGhostLayers, DefaultsToZeroAndParsesExplicitValue)
+{
+  MeshParameters defaults;
+  EXPECT_EQ(defaults.ghost_layers.value(), 0);
+
+  tinyxml2::XMLDocument document;
+  ASSERT_EQ(document.Parse(R"xml(
+<Add_mesh name="tank">
+  <Mesh_file_path>mesh.vtu</Mesh_file_path>
+  <Ghost_layers>2</Ghost_layers>
+</Add_mesh>
+)xml"), tinyxml2::XML_SUCCESS)
+      << document.ErrorStr();
+  auto* element = document.FirstChildElement("Add_mesh");
+  ASSERT_NE(element, nullptr);
+
+  MeshParameters parsed;
+  ASSERT_NO_THROW(parsed.set_values(element));
+  EXPECT_TRUE(parsed.ghost_layers.defined());
+  EXPECT_EQ(parsed.ghost_layers.value(), 2);
+}
+
+TEST(MeshTranslatorGhostLayers, RejectsNegativeValueBeforeMeshIO)
+{
+  MeshParameters parameters;
+  parameters.name.set("tank");
+  parameters.mesh_file_path.set("unused.vtu");
+  parameters.ghost_layers.set("-1");
+
+  EXPECT_THROW(
+      (void)application::translators::MeshTranslator::loadMesh(parameters),
+      std::invalid_argument);
+}
+
+TEST(MeshTranslatorGhostLayers, PassesAndLogsConfiguredChoice)
+{
+#ifndef MESH_HAS_VTK
+  GTEST_SKIP() << "VTK support is required for mesh translator I/O coverage.";
+#else
+  ensure_mpi_initialized_for_mesh_translator();
+  auto volume_path = unique_temp_path("svmp_meshtranslator_ghost_layers");
+  volume_path.replace_extension(".vtu");
+  write_volume_mesh(volume_path);
+
+  MeshParameters parameters;
+  parameters.name.set("tank");
+  parameters.mesh_file_path.set(volume_path.string());
+  parameters.ghost_layers.set("1");
+
+  testing::internal::CaptureStdout();
+  auto mesh = application::translators::MeshTranslator::loadMesh(parameters);
+  const auto output = testing::internal::GetCapturedStdout();
+  std::filesystem::remove(volume_path);
+
+  ASSERT_NE(mesh, nullptr);
+  EXPECT_NE(output.find("ghost_layers=1"), std::string::npos);
+#endif
+}
 
 TEST(MeshTranslatorFaceLabels, FallsBackToGlobalVertexIdsWhenCoordinatesDiffer)
 {

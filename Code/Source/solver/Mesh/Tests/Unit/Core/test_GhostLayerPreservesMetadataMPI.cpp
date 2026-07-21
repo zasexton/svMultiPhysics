@@ -313,7 +313,9 @@ static Expected capture_expected(const svmp::DistributedMesh& dmesh,
   return exp;
 }
 
-static void verify_expected(const svmp::DistributedMesh& dmesh, const Expected& exp) {
+static void verify_expected(const svmp::DistributedMesh& dmesh,
+                            const Expected& exp,
+                            bool allow_imported_set_members = false) {
   const auto& mesh = dmesh.local_mesh();
   ASSERT(mesh.has_current_coords());
   ASSERT_EQ(mesh.active_configuration(), svmp::Configuration::Current);
@@ -348,7 +350,10 @@ static void verify_expected(const svmp::DistributedMesh& dmesh, const Expected& 
       ASSERT(static_cast<size_t>(id) < mesh.vertex_gids().size());
       got.insert(mesh.vertex_gids()[static_cast<size_t>(id)]);
     }
-    ASSERT(got == exp.vset_gids);
+    ASSERT(allow_imported_set_members
+               ? std::includes(got.begin(), got.end(),
+                               exp.vset_gids.begin(), exp.vset_gids.end())
+               : got == exp.vset_gids);
   }
 
   ASSERT(mesh.has_set(svmp::EntityKind::Volume, "cset"));
@@ -359,7 +364,10 @@ static void verify_expected(const svmp::DistributedMesh& dmesh, const Expected& 
       ASSERT(static_cast<size_t>(id) < mesh.cell_gids().size());
       got.insert(mesh.cell_gids()[static_cast<size_t>(id)]);
     }
-    ASSERT(got == exp.cset_gids);
+    ASSERT(allow_imported_set_members
+               ? std::includes(got.begin(), got.end(),
+                               exp.cset_gids.begin(), exp.cset_gids.end())
+               : got == exp.cset_gids);
   }
 
   ASSERT(mesh.has_set(svmp::EntityKind::Face, "fset"));
@@ -370,7 +378,10 @@ static void verify_expected(const svmp::DistributedMesh& dmesh, const Expected& 
       ASSERT(static_cast<size_t>(id) < mesh.n_faces());
       got.insert(face_key(mesh, id));
     }
-    ASSERT(got == exp.fset_keys);
+    ASSERT(allow_imported_set_members
+               ? std::includes(got.begin(), got.end(),
+                               exp.fset_keys.begin(), exp.fset_keys.end())
+               : got == exp.fset_keys);
   }
 
   ASSERT(mesh.has_set(svmp::EntityKind::Edge, "eset"));
@@ -381,7 +392,10 @@ static void verify_expected(const svmp::DistributedMesh& dmesh, const Expected& 
       ASSERT(static_cast<size_t>(id) < mesh.n_edges());
       got.insert(edge_key(mesh, id));
     }
-    ASSERT(got == exp.eset_keys);
+    ASSERT(allow_imported_set_members
+               ? std::includes(got.begin(), got.end(),
+                               exp.eset_keys.begin(), exp.eset_keys.end())
+               : got == exp.eset_keys);
   }
 
   // Fields still exist and remain correct on marked entities.
@@ -422,7 +436,12 @@ static void verify_expected(const svmp::DistributedMesh& dmesh, const Expected& 
   for (const auto& [gid, label] : exp.vertex_labels) {
     const auto v = mesh.global_to_local_vertex(gid);
     if (v == svmp::INVALID_INDEX) continue;
-    ASSERT_EQ(mesh.vertex_label(v), label);
+    // A previously-unlabeled shared copy may acquire its canonical owner's
+    // valid label during halo synchronization.  Existing valid labels must
+    // never be lost or changed.
+    if (label != svmp::INVALID_LABEL) {
+      ASSERT_EQ(mesh.vertex_label(v), label);
+    }
   }
 }
 
@@ -601,14 +620,18 @@ int main(int argc, char** argv) {
     ASSERT_EQ(dmesh.local_mesh().n_cells(), 2u);
   }
 
-  svmp::test::verify_expected(dmesh, expected);
+  svmp::test::verify_expected(dmesh, expected,
+                              /*allow_imported_set_members=*/true);
 
   // Clear ghosts and validate metadata preservation.
   dmesh.clear_ghosts();
   ASSERT_EQ(dmesh.local_mesh().n_cells(), 1u);
   ASSERT_EQ(dmesh.local_mesh().n_vertices(), expected.base_n_vertices);
 
-  svmp::test::verify_expected(dmesh, expected);
+  // Imported global set membership on entities shared with the base partition
+  // remains valid after ghost cells are cleared.
+  svmp::test::verify_expected(dmesh, expected,
+                              /*allow_imported_set_members=*/true);
 
   if (rank == 0) {
     std::cout << "Ghost layer metadata preservation test PASSED (" << world << " ranks)\n";
@@ -617,4 +640,3 @@ int main(int argc, char** argv) {
   MPI_Finalize();
   return 0;
 }
-

@@ -1587,6 +1587,7 @@ class FaceParameters : public ParameterLists
 /// \code {.xml}
 /// <Add_mesh name="lumen" >
 ///   <Mesh_file_path> mesh/lumen/mesh-complete.mesh.vtu  </Mesh_file_path>
+///   <Ghost_layers> 0 </Ghost_layers>
 ///
 ///   <Add_face name="lumen_inlet">
 ///       <Face_file_path> mesh/lumen/mesh-surfaces/lumen_inlet.vtp </Face_file_path>
@@ -1631,6 +1632,7 @@ class MeshParameters : public ParameterLists
     //
     Parameter<int> domain_id;
     Parameter<std::string> domain_file_path;
+    Parameter<int> ghost_layers;
 
     VectorParameter<std::string> fiber_direction_file_paths;
     //Parameter<std::string> fiber_direction_file_path;

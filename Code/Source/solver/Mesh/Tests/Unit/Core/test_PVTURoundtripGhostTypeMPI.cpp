@@ -42,6 +42,8 @@
 
 #include <mpi.h>
 
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -113,6 +115,114 @@ static std::shared_ptr<MeshBase> create_hex_strip_partition(int rank) {
   return mesh;
 }
 
+static void attach_point_verification_fields(DistributedMesh& dmesh) {
+  auto& mesh = dmesh.local_mesh();
+  const auto node_id_handle = mesh.attach_field(
+      EntityKind::Vertex, "GlobalNodeID", FieldScalarType::Int32, 1);
+  const auto value_handle = mesh.attach_field(
+      EntityKind::Vertex, "PointVerificationValue", FieldScalarType::Float64, 1);
+  auto* node_ids = mesh.field_data_as<std::int32_t>(node_id_handle);
+  auto* values = mesh.field_data_as<real_t>(value_handle);
+  ASSERT(node_ids != nullptr);
+  ASSERT(values != nullptr);
+
+  for (index_t vertex = 0;
+       vertex < static_cast<index_t>(mesh.n_vertices()); ++vertex) {
+    const auto gid = mesh.vertex_gids()[static_cast<size_t>(vertex)];
+    node_ids[vertex] = static_cast<std::int32_t>(gid);
+    values[vertex] = static_cast<real_t>(gid) + real_t{0.25};
+  }
+}
+
+static void verify_written_point_duplicates(const DistributedMesh& dmesh,
+                                            const std::string& piece_path,
+                                            int rank,
+                                            int world) {
+  MeshIOOptions piece_opts;
+  piece_opts.format = "vtu";
+  piece_opts.path = piece_path;
+  const auto piece = MeshBase::load(piece_opts);
+
+  const auto ghost_handle =
+      piece.field_handle(EntityKind::Vertex, "vtkGhostType");
+  const auto node_id_handle =
+      piece.field_handle(EntityKind::Vertex, "GlobalNodeID");
+  const auto value_handle =
+      piece.field_handle(EntityKind::Vertex, "PointVerificationValue");
+  ASSERT(ghost_handle.id != 0);
+  ASSERT(node_id_handle.id != 0);
+  ASSERT(value_handle.id != 0);
+  ASSERT_EQ(piece.field_type(ghost_handle), FieldScalarType::UInt8);
+  ASSERT_EQ(piece.field_type(node_id_handle), FieldScalarType::Int32);
+  ASSERT_EQ(piece.field_type(value_handle), FieldScalarType::Float64);
+
+  const auto* ghosts =
+      piece.field_data_as<const std::uint8_t>(ghost_handle);
+  const auto* node_ids =
+      piece.field_data_as<const std::int32_t>(node_id_handle);
+  const auto* values = piece.field_data_as<const real_t>(value_handle);
+  ASSERT(ghosts != nullptr);
+  ASSERT(node_ids != nullptr);
+  ASSERT(values != nullptr);
+
+  const size_t global_vertex_count = static_cast<size_t>(4 * (world + 1));
+  std::vector<int> local_copy_count(global_vertex_count, 0);
+  std::vector<int> local_non_ghost_count(global_vertex_count, 0);
+  const auto& source_mesh = dmesh.local_mesh();
+
+  ASSERT_EQ(piece.n_vertices(), source_mesh.n_vertices());
+  for (index_t vertex = 0;
+       vertex < static_cast<index_t>(piece.n_vertices()); ++vertex) {
+    const auto gid = piece.vertex_gids()[static_cast<size_t>(vertex)];
+    ASSERT(gid >= 0);
+    ASSERT(static_cast<size_t>(gid) < global_vertex_count);
+    ASSERT_EQ(node_ids[vertex], static_cast<std::int32_t>(gid));
+    ASSERT(std::abs(values[vertex] -
+                    (static_cast<real_t>(gid) + real_t{0.25})) <= real_t{1e-12});
+    ASSERT(ghosts[vertex] == std::uint8_t{0} ||
+           ghosts[vertex] == std::uint8_t{1});
+
+    const auto source_vertex = source_mesh.global_to_local_vertex(gid);
+    ASSERT(source_vertex != INVALID_INDEX);
+    const bool expected_duplicate =
+        dmesh.is_ghost_vertex(source_vertex) ||
+        (dmesh.is_shared_vertex(source_vertex) &&
+         dmesh.owner_rank_vertex(source_vertex) != rank);
+    ASSERT_EQ(ghosts[vertex],
+              expected_duplicate ? std::uint8_t{1} : std::uint8_t{0});
+
+    ++local_copy_count[static_cast<size_t>(gid)];
+    if (ghosts[vertex] == std::uint8_t{0}) {
+      ++local_non_ghost_count[static_cast<size_t>(gid)];
+    }
+  }
+
+  std::vector<int> global_copy_count(global_vertex_count, 0);
+  std::vector<int> global_non_ghost_count(global_vertex_count, 0);
+  MPI_Allreduce(local_copy_count.data(),
+                global_copy_count.data(),
+                static_cast<int>(global_vertex_count),
+                MPI_INT,
+                MPI_SUM,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(local_non_ghost_count.data(),
+                global_non_ghost_count.data(),
+                static_cast<int>(global_vertex_count),
+                MPI_INT,
+                MPI_SUM,
+                MPI_COMM_WORLD);
+
+  int duplicated_global_ids = 0;
+  for (size_t gid = 0; gid < global_vertex_count; ++gid) {
+    ASSERT(global_copy_count[gid] >= 1);
+    ASSERT_EQ(global_non_ghost_count[gid], 1);
+    if (global_copy_count[gid] > 1) {
+      ++duplicated_global_ids;
+    }
+  }
+  ASSERT(duplicated_global_ids > 0);
+}
+
 } // namespace svmp::test
 
 int main(int argc, char** argv) {
@@ -142,6 +252,7 @@ int main(int argc, char** argv) {
   svmp::DistributedMesh dmesh(local_mesh, MPI_COMM_WORLD);
   dmesh.build_exchange_patterns();
   dmesh.build_ghost_layer(1);
+  svmp::test::attach_point_verification_fields(dmesh);
 
   // Create a unique output directory shared by all ranks.
   long long pid = 0;
@@ -177,6 +288,12 @@ int main(int argc, char** argv) {
   dmesh.save_parallel(save_opts);
 
   MPI_Barrier(MPI_COMM_WORLD);
+
+  svmp::test::verify_written_point_duplicates(
+      dmesh,
+      out_dir + "/mesh_p" + std::to_string(rank) + ".vtu",
+      rank,
+      world);
 
   svmp::MeshIOOptions load_opts;
   load_opts.format = "pvtu";
