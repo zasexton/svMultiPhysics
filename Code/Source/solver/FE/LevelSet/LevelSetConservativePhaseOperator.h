@@ -34,6 +34,7 @@ namespace svmp::FE::level_set {
 struct LevelSetP1PhaseGradientEdge {
     GlobalIndex first_node{-1};
     GlobalIndex second_node{-1};
+    int owner_rank{-1};
     std::array<Real, 3> first_test_second_gradient{};
     std::array<Real, 3> second_test_first_gradient{};
 };
@@ -45,8 +46,7 @@ struct LevelSetP1PhaseGraphOptions {
 };
 
 /**
- * @brief Serial P1 control-volume and gradient graph assembled from an FE
- * system.
+ * @brief P1 control-volume and gradient graph assembled from an FE system.
  *
  * `boundary_column_sum[i] = sum_j C_ji` is the discrete boundary vector
  * `integral_boundary N_i n ds`. `diagonal_gradient[i]` stores `C_ii`; the
@@ -59,10 +59,17 @@ struct LevelSetP1PhaseTransportGraph {
     bool positive_control_volumes_satisfied{false};
     bool gradient_row_sum_satisfied{false};
     bool measure_closure_satisfied{false};
+    bool edge_ownership_satisfied{false};
+    bool distributed{false};
+    bool replicated_sparse_graph{false};
     int dimension{0};
+    int parallel_rank{0};
+    int parallel_size{1};
     int maximum_quadrature_order{0};
     std::size_t cells{0u};
+    std::size_t local_owned_cells{0u};
     std::size_t nodes{0u};
+    std::size_t locally_owned_edges{0u};
     std::uint64_t geometry_revision{0u};
     std::uint64_t topology_revision{0u};
     std::uint64_t ownership_revision{0u};
@@ -86,10 +93,12 @@ struct LevelSetP1PhaseTransportGraph {
 /**
  * @brief Assemble the P1 mass-lumped control volumes and CG gradient graph.
  *
- * This entry point deliberately rejects multi-rank meshes. A distributed
- * implementation must assign unique edge ownership and exchange cell
- * contributions before invoking the correction kernel; silently assembling
- * only rank-local fragments would violate the conservation contract.
+ * In a multi-rank build, only owned cells contribute. Nodal quantities are
+ * summed on the field communicator and sparse edge fragments are merged into
+ * the same canonical replicated graph on every rank. Every edge has one
+ * logical owner: the lower of its two endpoint-owner ranks. Replication
+ * matches the globally indexed level-set state contract and does not duplicate
+ * an edge inside a stage ledger.
  */
 [[nodiscard]] LevelSetP1PhaseTransportGraph
 buildLevelSetP1PhaseTransportGraph(

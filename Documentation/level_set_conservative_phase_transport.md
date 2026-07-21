@@ -91,8 +91,23 @@ The graph builder validates partition of unity, the zero gradient sum,
 positive mapped quadrature and control volumes, the global row-sum identity,
 and closure of the summed lumped volumes against mapped physical measure.
 It records geometry, topology, ownership, numbering, and degree-of-freedom
-layout revisions. Multi-rank construction currently fails closed until unique
-edge ownership and sparse coefficient exchange are implemented.
+layout revisions. On multiple ranks, only owned cells contribute. Nodal
+coefficients are reduced on the field communicator, sparse edge fragments are
+merged in canonical order, and each edge is assigned one logical owner from
+its endpoint ownership. Endpoint ownership is compared across ranks before the
+graph is accepted. The resulting sparse graph is replicated because the
+current level-set state uses globally indexed replicated vectors; every rank
+therefore obtains the same single-edge ledger without counting ghost cells.
+Rank-local preflight and assembly failures are synchronized before later
+collectives so all ranks return the same failing-rank diagnostic.
+
+The two-rank operator test checks mapped mass, cancellation of the artificial
+partition-boundary remainder, unique owner coverage, identical graph and
+limited state on both ranks, bounded transport across the shared interface,
+constant preservation, and a fault injected on only one owned cell. Replacing
+the replicated sparse merge with owner-to-owner exchange is a scalability
+optimization that must preserve these public graph and ledger invariants. A
+separate rank-local invalid-option test guards the collective failure path.
 
 ## Fully discrete edge update
 

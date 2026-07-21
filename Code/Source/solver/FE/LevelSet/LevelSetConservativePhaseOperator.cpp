@@ -8,13 +8,22 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <exception>
 #include <initializer_list>
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
+
+#if FE_HAS_MPI
+#include <mpi.h>
+#endif
 
 namespace svmp::FE::level_set {
 namespace {
@@ -25,6 +34,444 @@ struct MutableGradientEdge {
     Vector3 first_test_second_gradient{};
     Vector3 second_test_first_gradient{};
 };
+
+struct PhaseGraphCollectiveContext {
+    bool active{false};
+    int rank{0};
+    int size{1};
+#if FE_HAS_MPI
+    MPI_Comm communicator{MPI_COMM_NULL};
+#endif
+};
+
+#if FE_HAS_MPI
+struct PackedGradientEdge {
+    std::int64_t first_node{-1};
+    std::int64_t second_node{-1};
+    std::array<Real, 3> first_test_second_gradient{};
+    std::array<Real, 3> second_test_first_gradient{};
+};
+
+static_assert(std::is_trivially_copyable_v<PackedGradientEdge>);
+static_assert(sizeof(PackedGradientEdge) ==
+              2u * sizeof(std::int64_t) + 6u * sizeof(Real));
+
+[[nodiscard]] MPI_Datatype mpiRealType() noexcept
+{
+    if constexpr (std::is_same_v<Real, float>) {
+        return MPI_FLOAT;
+    } else if constexpr (std::is_same_v<Real, double>) {
+        return MPI_DOUBLE;
+    }
+    return MPI_LONG_DOUBLE;
+}
+
+[[nodiscard]] MPI_Datatype mpiUnsigned64Type() noexcept
+{
+#ifdef MPI_UINT64_T
+    return MPI_UINT64_T;
+#else
+    if constexpr (std::is_same_v<std::uint64_t, unsigned long>) {
+        return MPI_UNSIGNED_LONG;
+    }
+    return MPI_UNSIGNED_LONG_LONG;
+#endif
+}
+#endif
+
+[[nodiscard]] PhaseGraphCollectiveContext phaseGraphCollectiveContext(
+    const assembly::IMeshAccess& mesh,
+    const dofs::DofHandler& dofs)
+{
+    PhaseGraphCollectiveContext context;
+    context.rank = mesh.parallelRank();
+    context.size = mesh.parallelSize();
+    if (context.rank < 0 || context.size < 1 ||
+        context.rank >= context.size) {
+        throw std::invalid_argument(
+            "P1 conservative phase graph received invalid mesh rank metadata");
+    }
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (context.size > 1) {
+        if (initialized == 0 || finalized != 0 ||
+            dofs.mpiComm() == MPI_COMM_NULL) {
+            throw std::invalid_argument(
+                "P1 conservative phase graph requires an active field communicator for multi-rank assembly");
+        }
+        int communicator_rank = 0;
+        int communicator_size = 1;
+        MPI_Comm_rank(dofs.mpiComm(), &communicator_rank);
+        MPI_Comm_size(dofs.mpiComm(), &communicator_size);
+        if (communicator_rank != context.rank ||
+            communicator_size != context.size) {
+            throw std::invalid_argument(
+                "P1 conservative phase graph mesh and field communicators disagree");
+        }
+        context.active = true;
+        context.communicator = dofs.mpiComm();
+    }
+#else
+    (void)dofs;
+    if (context.size > 1) {
+        throw std::invalid_argument(
+            "P1 conservative phase graph cannot assemble a multi-rank mesh without MPI support");
+    }
+#endif
+    return context;
+}
+
+[[nodiscard]] bool synchronizeLocalFailure(
+    const PhaseGraphCollectiveContext& context,
+    bool local_success,
+    const std::string& local_diagnostic,
+    std::string& collective_diagnostic)
+{
+#if FE_HAS_MPI
+    if (context.active) {
+        const int local_failed_rank =
+            local_success ? context.size : context.rank;
+        int first_failed_rank = context.size;
+        MPI_Allreduce(&local_failed_rank, &first_failed_rank, 1,
+                      MPI_INT, MPI_MIN, context.communicator);
+        if (first_failed_rank < context.size) {
+            constexpr std::size_t maximum_diagnostic_bytes = 4096u;
+            int length = 0;
+            if (context.rank == first_failed_rank) {
+                length = static_cast<int>(std::min(
+                    maximum_diagnostic_bytes, local_diagnostic.size()));
+            }
+            MPI_Bcast(&length, 1, MPI_INT, first_failed_rank,
+                      context.communicator);
+            std::vector<char> bytes(static_cast<std::size_t>(length));
+            if (context.rank == first_failed_rank && length > 0) {
+                std::copy_n(local_diagnostic.data(), length, bytes.data());
+            }
+            if (length > 0) {
+                MPI_Bcast(bytes.data(), length, MPI_CHAR,
+                          first_failed_rank, context.communicator);
+            }
+            collective_diagnostic =
+                "P1 conservative phase graph failed on rank " +
+                std::to_string(first_failed_rank) + ": " +
+                std::string(bytes.begin(), bytes.end());
+            return false;
+        }
+    }
+#else
+    (void)context;
+#endif
+    if (!local_success) {
+        collective_diagnostic = local_diagnostic;
+        return false;
+    }
+    return true;
+}
+
+void allReduceRealBufferSum(const PhaseGraphCollectiveContext& context,
+                            std::vector<Real>& values)
+{
+#if FE_HAS_MPI
+    if (context.active && !values.empty()) {
+        constexpr std::size_t maximum_chunk =
+            static_cast<std::size_t>(std::numeric_limits<int>::max());
+        std::vector<Real> reduced(values.size(), Real{0.0});
+        for (std::size_t offset = 0u; offset < values.size();) {
+            const std::size_t count =
+                std::min(maximum_chunk, values.size() - offset);
+            MPI_Allreduce(
+                values.data() + static_cast<std::ptrdiff_t>(offset),
+                reduced.data() + static_cast<std::ptrdiff_t>(offset),
+                static_cast<int>(count), mpiRealType(), MPI_SUM,
+                context.communicator);
+            offset += count;
+        }
+        values.swap(reduced);
+    }
+#else
+    (void)context;
+    (void)values;
+#endif
+}
+
+void allReduceVector3Sum(const PhaseGraphCollectiveContext& context,
+                         std::vector<Vector3>& values)
+{
+    std::vector<Real> flat(values.size() * 3u, Real{0.0});
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        for (std::size_t d = 0; d < 3u; ++d) {
+            flat[3u * i + d] = values[i][d];
+        }
+    }
+    allReduceRealBufferSum(context, flat);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        for (std::size_t d = 0; d < 3u; ++d) {
+            values[i][d] = flat[3u * i + d];
+        }
+    }
+}
+
+#if FE_HAS_MPI
+[[nodiscard]] Real allReduceReal(const PhaseGraphCollectiveContext& context,
+                                 Real local,
+                                 MPI_Op operation)
+{
+    if (context.active) {
+        Real global{0.0};
+        MPI_Allreduce(&local, &global, 1, mpiRealType(), operation,
+                      context.communicator);
+        return global;
+    }
+    return local;
+}
+
+[[nodiscard]] int allReduceInt(const PhaseGraphCollectiveContext& context,
+                               int local,
+                               MPI_Op operation)
+{
+    if (context.active) {
+        int global = 0;
+        MPI_Allreduce(&local, &global, 1, MPI_INT, operation,
+                      context.communicator);
+        return global;
+    }
+    return local;
+}
+
+[[nodiscard]] std::uint64_t allReduceUnsigned64(
+    const PhaseGraphCollectiveContext& context,
+    std::uint64_t local,
+    MPI_Op operation
+)
+{
+    if (context.active) {
+        std::uint64_t global = 0u;
+        MPI_Allreduce(&local, &global, 1, mpiUnsigned64Type(), operation,
+                      context.communicator);
+        return global;
+    }
+    return local;
+}
+#endif
+
+[[nodiscard]] Real allReduceRealSum(
+    const PhaseGraphCollectiveContext& context, Real local)
+{
+#if FE_HAS_MPI
+    return allReduceReal(context, local, MPI_SUM);
+#else
+    (void)context;
+    return local;
+#endif
+}
+
+[[nodiscard]] Real allReduceRealMin(
+    const PhaseGraphCollectiveContext& context, Real local)
+{
+#if FE_HAS_MPI
+    return allReduceReal(context, local, MPI_MIN);
+#else
+    (void)context;
+    return local;
+#endif
+}
+
+[[nodiscard]] Real allReduceRealMax(
+    const PhaseGraphCollectiveContext& context, Real local)
+{
+#if FE_HAS_MPI
+    return allReduceReal(context, local, MPI_MAX);
+#else
+    (void)context;
+    return local;
+#endif
+}
+
+[[nodiscard]] int allReduceIntMin(
+    const PhaseGraphCollectiveContext& context, int local)
+{
+#if FE_HAS_MPI
+    return allReduceInt(context, local, MPI_MIN);
+#else
+    (void)context;
+    return local;
+#endif
+}
+
+[[nodiscard]] int allReduceIntMax(
+    const PhaseGraphCollectiveContext& context, int local)
+{
+#if FE_HAS_MPI
+    return allReduceInt(context, local, MPI_MAX);
+#else
+    (void)context;
+    return local;
+#endif
+}
+
+[[nodiscard]] std::uint64_t allReduceUnsigned64Sum(
+    const PhaseGraphCollectiveContext& context, std::uint64_t local)
+{
+#if FE_HAS_MPI
+    return allReduceUnsigned64(context, local, MPI_SUM);
+#else
+    (void)context;
+    return local;
+#endif
+}
+
+[[nodiscard]] std::uint64_t allReduceUnsigned64Min(
+    const PhaseGraphCollectiveContext& context, std::uint64_t local)
+{
+#if FE_HAS_MPI
+    return allReduceUnsigned64(context, local, MPI_MIN);
+#else
+    (void)context;
+    return local;
+#endif
+}
+
+[[nodiscard]] std::uint64_t allReduceUnsigned64Max(
+    const PhaseGraphCollectiveContext& context, std::uint64_t local)
+{
+#if FE_HAS_MPI
+    return allReduceUnsigned64(context, local, MPI_MAX);
+#else
+    (void)context;
+    return local;
+#endif
+}
+
+void allReduceIntBufferMinMax(
+    const PhaseGraphCollectiveContext& context,
+    const std::vector<int>& local,
+    std::vector<int>& minimum,
+    std::vector<int>& maximum)
+{
+    minimum = local;
+    maximum = local;
+#if FE_HAS_MPI
+    if (context.active && !local.empty()) {
+        constexpr std::size_t maximum_chunk =
+            static_cast<std::size_t>(std::numeric_limits<int>::max());
+        for (std::size_t offset = 0u; offset < local.size();) {
+            const std::size_t count =
+                std::min(maximum_chunk, local.size() - offset);
+            const auto displacement = static_cast<std::ptrdiff_t>(offset);
+            MPI_Allreduce(local.data() + displacement,
+                          minimum.data() + displacement,
+                          static_cast<int>(count), MPI_INT, MPI_MIN,
+                          context.communicator);
+            MPI_Allreduce(local.data() + displacement,
+                          maximum.data() + displacement,
+                          static_cast<int>(count), MPI_INT, MPI_MAX,
+                          context.communicator);
+            offset += count;
+        }
+    }
+#else
+    (void)context;
+#endif
+}
+
+[[nodiscard]] std::map<std::pair<GlobalIndex, GlobalIndex>,
+                       MutableGradientEdge>
+globalizeGradientEdges(
+    const PhaseGraphCollectiveContext& context,
+    const std::map<std::pair<GlobalIndex, GlobalIndex>, MutableGradientEdge>&
+        local_edges)
+{
+#if FE_HAS_MPI
+    if (context.active) {
+        const int local_capacity_valid =
+            local_edges.size() <=
+                    static_cast<std::size_t>(
+                        std::numeric_limits<int>::max()) /
+                        sizeof(PackedGradientEdge)
+                ? 1
+                : 0;
+        int global_capacity_valid = 0;
+        MPI_Allreduce(&local_capacity_valid, &global_capacity_valid, 1,
+                      MPI_INT, MPI_MIN, context.communicator);
+        if (global_capacity_valid == 0) {
+            throw std::overflow_error(
+                "P1 conservative phase graph local edge snapshot exceeds MPI count capacity");
+        }
+        std::vector<PackedGradientEdge> packed;
+        packed.reserve(local_edges.size());
+        for (const auto& [endpoints, edge] : local_edges) {
+            packed.push_back(PackedGradientEdge{
+                .first_node = static_cast<std::int64_t>(endpoints.first),
+                .second_node = static_cast<std::int64_t>(endpoints.second),
+                .first_test_second_gradient =
+                    edge.first_test_second_gradient,
+                .second_test_first_gradient =
+                    edge.second_test_first_gradient,
+            });
+        }
+        const std::size_t local_bytes_size =
+            packed.size() * sizeof(PackedGradientEdge);
+        const int local_bytes = static_cast<int>(local_bytes_size);
+        std::vector<int> counts(static_cast<std::size_t>(context.size), 0);
+        MPI_Allgather(&local_bytes, 1, MPI_INT, counts.data(), 1,
+                      MPI_INT, context.communicator);
+        std::vector<int> displacements(counts.size(), 0);
+        std::size_t total_bytes = 0u;
+        for (std::size_t rank = 0; rank < counts.size(); ++rank) {
+            if (counts[rank] < 0 ||
+                counts[rank] % static_cast<int>(sizeof(PackedGradientEdge)) !=
+                    0 ||
+                total_bytes >
+                    static_cast<std::size_t>(
+                        std::numeric_limits<int>::max()) -
+                        static_cast<std::size_t>(counts[rank])) {
+                throw std::overflow_error(
+                    "P1 conservative phase graph aggregate edge snapshot exceeds MPI displacement capacity");
+            }
+            displacements[rank] = static_cast<int>(total_bytes);
+            total_bytes += static_cast<std::size_t>(counts[rank]);
+        }
+        std::vector<std::byte> gathered(total_bytes);
+        MPI_Allgatherv(
+            packed.empty() ? nullptr : packed.data(), local_bytes, MPI_BYTE,
+            gathered.empty() ? nullptr : gathered.data(), counts.data(),
+            displacements.data(), MPI_BYTE, context.communicator);
+
+        std::map<std::pair<GlobalIndex, GlobalIndex>, MutableGradientEdge>
+            global_edges;
+        for (std::size_t offset = 0u; offset < gathered.size();
+             offset += sizeof(PackedGradientEdge)) {
+            PackedGradientEdge packed_edge{};
+            std::memcpy(&packed_edge, gathered.data() + offset,
+                        sizeof(PackedGradientEdge));
+            const GlobalIndex first =
+                static_cast<GlobalIndex>(packed_edge.first_node);
+            const GlobalIndex second =
+                static_cast<GlobalIndex>(packed_edge.second_node);
+            if (first < 0 || first >= second) {
+                throw std::runtime_error(
+                    "P1 conservative phase graph received a malformed distributed edge record");
+            }
+            auto& edge = global_edges[{first, second}];
+            for (std::size_t d = 0; d < 3u; ++d) {
+                edge.first_test_second_gradient[d] +=
+                    packed_edge.first_test_second_gradient[d];
+                edge.second_test_first_gradient[d] +=
+                    packed_edge.second_test_first_gradient[d];
+            }
+        }
+        return global_edges;
+    }
+#else
+    (void)context;
+#endif
+    return local_edges;
+}
 
 [[nodiscard]] Real scaledTolerance(Real tolerance,
                                    std::initializer_list<Real> values)
@@ -120,29 +567,41 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
                 "P1 conservative phase graph received an invalid field";
             return result;
         }
+
+        const auto& mesh = system.meshAccess();
+        result.dimension = mesh.dimension();
+        const auto& record = system.fieldRecord(liquid_indicator_field);
+        const auto& dofs = system.fieldDofHandler(liquid_indicator_field);
+        const auto collective = phaseGraphCollectiveContext(mesh, dofs);
+        result.parallel_rank = collective.rank;
+        result.parallel_size = collective.size;
+        result.distributed = collective.active;
+        result.replicated_sparse_graph = collective.active;
+
+        result.geometry_revision = mesh.geometryRevision();
+        result.topology_revision = mesh.topologyRevision();
+        result.ownership_revision = mesh.ownershipRevision();
+        result.numbering_revision = mesh.numberingRevision();
+        result.dof_layout_revision = dofs.dofLayoutRevision();
+
+        bool local_preflight_success = true;
+        std::string local_preflight_diagnostic;
+        const auto reject_preflight = [&](std::string diagnostic) {
+            if (local_preflight_success) {
+                local_preflight_success = false;
+                local_preflight_diagnostic = std::move(diagnostic);
+            }
+        };
         if (!std::isfinite(options.invariant_tolerance) ||
             options.invariant_tolerance < Real{0.0} ||
             options.quadrature_order < 0) {
-            result.diagnostic =
-                "P1 conservative phase graph requires a nonnegative quadrature order and finite nonnegative tolerance";
-            return result;
+            reject_preflight(
+                "P1 conservative phase graph requires a nonnegative quadrature order and finite nonnegative tolerance");
         }
-
-        const auto& mesh = system.meshAccess();
-        if (mesh.parallelSize() != 1 ||
-            mesh.numOwnedCells() != mesh.numCells()) {
-            result.diagnostic =
-                "P1 conservative phase graph requires unique distributed edge ownership before multi-rank assembly";
-            return result;
-        }
-        result.dimension = mesh.dimension();
         if (result.dimension < 2 || result.dimension > 3) {
-            result.diagnostic =
-                "P1 conservative phase graph supports two- and three-dimensional meshes";
-            return result;
+            reject_preflight(
+                "P1 conservative phase graph supports two- and three-dimensional meshes");
         }
-
-        const auto& record = system.fieldRecord(liquid_indicator_field);
         if (record.components != 1 || !record.space ||
             record.space->space_type() != spaces::SpaceType::H1 ||
             record.space->field_type() != FieldType::Scalar ||
@@ -150,44 +609,121 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
             record.space->value_dimension() != 1 ||
             record.space->is_variable_order() ||
             record.space->polynomial_order() != 1) {
-            result.diagnostic =
-                "P1 conservative phase graph requires a fixed-order scalar P1 H1 field";
-            return result;
+            reject_preflight(
+                "P1 conservative phase graph requires a fixed-order scalar P1 H1 field");
         }
         if (!system.fieldParticipatesInUnknownVector(liquid_indicator_field)) {
-            result.diagnostic =
-                "P1 conservative phase graph requires a transported unknown field";
+            reject_preflight(
+                "P1 conservative phase graph requires a transported unknown field");
+        }
+        if (dofs.getNumDofs() <= 0 || dofs.getNumLocalDofs() < 0 ||
+            dofs.getNumLocalDofs() > dofs.getNumDofs()) {
+            reject_preflight(
+                "P1 conservative phase graph requires a valid nonempty field layout");
+        }
+        if (mesh.numOwnedCells() < 0 ||
+            mesh.numOwnedCells() > mesh.numCells()) {
+            reject_preflight(
+                "P1 conservative phase graph requires valid owned-cell metadata");
+        }
+        if (!synchronizeLocalFailure(
+                collective, local_preflight_success,
+                local_preflight_diagnostic, result.diagnostic)) {
             return result;
         }
 
-        const auto& dofs = system.fieldDofHandler(liquid_indicator_field);
-        if (dofs.getNumDofs() <= 0 ||
-            dofs.getNumLocalDofs() != dofs.getNumDofs()) {
+        const int minimum_dimension = allReduceIntMin(
+            collective, result.dimension);
+        const int maximum_dimension = allReduceIntMax(
+            collective, result.dimension);
+        const int minimum_requested_order = allReduceIntMin(
+            collective, options.quadrature_order);
+        const int maximum_requested_order = allReduceIntMax(
+            collective, options.quadrature_order);
+        const Real minimum_requested_tolerance = allReduceRealMin(
+            collective, options.invariant_tolerance);
+        const Real maximum_requested_tolerance = allReduceRealMax(
+            collective, options.invariant_tolerance);
+        const auto local_node_count =
+            static_cast<std::uint64_t>(dofs.getNumDofs());
+        const auto minimum_node_count = allReduceUnsigned64Min(
+            collective, local_node_count);
+        const auto maximum_node_count = allReduceUnsigned64Max(
+            collective, local_node_count);
+        if (minimum_dimension != maximum_dimension ||
+            minimum_requested_order != maximum_requested_order ||
+            minimum_requested_tolerance != maximum_requested_tolerance ||
+            minimum_node_count != maximum_node_count) {
             result.diagnostic =
-                "P1 conservative phase graph requires a nonempty serial field layout";
+                "P1 conservative phase graph requires identical dimension, options, and global field size on every rank";
             return result;
         }
-        result.nodes = static_cast<std::size_t>(dofs.getNumDofs());
+        result.dimension = minimum_dimension;
+        result.nodes = static_cast<std::size_t>(minimum_node_count);
+
+        const auto geometry_revision_min = allReduceUnsigned64Min(
+            collective, result.geometry_revision);
+        const auto geometry_revision_max = allReduceUnsigned64Max(
+            collective, result.geometry_revision);
+        const auto topology_revision_min = allReduceUnsigned64Min(
+            collective, result.topology_revision);
+        const auto topology_revision_max = allReduceUnsigned64Max(
+            collective, result.topology_revision);
+        const auto ownership_revision_min = allReduceUnsigned64Min(
+            collective, result.ownership_revision);
+        const auto ownership_revision_max = allReduceUnsigned64Max(
+            collective, result.ownership_revision);
+        const auto numbering_revision_min = allReduceUnsigned64Min(
+            collective, result.numbering_revision);
+        const auto numbering_revision_max = allReduceUnsigned64Max(
+            collective, result.numbering_revision);
+        const auto dof_revision_min = allReduceUnsigned64Min(
+            collective, result.dof_layout_revision);
+        const auto dof_revision_max = allReduceUnsigned64Max(
+            collective, result.dof_layout_revision);
+        if (geometry_revision_min != geometry_revision_max ||
+            topology_revision_min != topology_revision_max ||
+            ownership_revision_min != ownership_revision_max ||
+            numbering_revision_min != numbering_revision_max ||
+            dof_revision_min != dof_revision_max) {
+            result.diagnostic =
+                "P1 conservative phase graph requires synchronized mesh and field revisions on every rank";
+            return result;
+        }
+        result.geometry_revision = geometry_revision_min;
+        result.topology_revision = topology_revision_min;
+        result.ownership_revision = ownership_revision_min;
+        result.numbering_revision = numbering_revision_min;
+        result.dof_layout_revision = dof_revision_min;
+
         result.lumped_control_volume.assign(result.nodes, Real{0.0});
         result.diagonal_gradient.assign(result.nodes, Vector3{});
         result.boundary_column_sum.assign(result.nodes, Vector3{});
 
-        const GlobalIndex field_offset =
-            system.fieldDofOffset(liquid_indicator_field);
-        for (std::size_t i = 0; i < result.nodes; ++i) {
-            if (system.constraints().isConstrained(
-                    field_offset + static_cast<GlobalIndex>(i))) {
-                result.diagnostic =
-                    "P1 conservative phase graph does not accept constrained indicator nodes; boundary transport must enter through phase fluxes";
-                return result;
+        bool local_constraint_success = true;
+        std::string local_constraint_diagnostic;
+        try {
+            const GlobalIndex field_offset =
+                system.fieldDofOffset(liquid_indicator_field);
+            for (std::size_t i = 0; i < result.nodes; ++i) {
+                if (system.constraints().isConstrained(
+                        field_offset + static_cast<GlobalIndex>(i))) {
+                    local_constraint_success = false;
+                    local_constraint_diagnostic =
+                        "P1 conservative phase graph does not accept constrained indicator nodes; boundary transport must enter through phase fluxes";
+                    break;
+                }
             }
+        } catch (const std::exception& exception) {
+            local_constraint_success = false;
+            local_constraint_diagnostic = exception.what();
+        }
+        if (!synchronizeLocalFailure(
+                collective, local_constraint_success,
+                local_constraint_diagnostic, result.diagnostic)) {
+            return result;
         }
 
-        result.geometry_revision = mesh.geometryRevision();
-        result.topology_revision = mesh.topologyRevision();
-        result.ownership_revision = mesh.ownershipRevision();
-        result.numbering_revision = mesh.numberingRevision();
-        result.dof_layout_revision = dofs.dofLayoutRevision();
         result.minimum_jacobian_determinant =
             std::numeric_limits<Real>::infinity();
 
@@ -197,167 +733,234 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
         Real maximum_gradient_coefficient{0.0};
         Real maximum_physical_basis_gradient{0.0};
 
-        mesh.forEachOwnedCell([&](GlobalIndex cell) {
-            if (record.space->polynomial_order(cell) != 1) {
-                throw std::invalid_argument(
-                    "P1 conservative phase graph found a non-P1 cell");
-            }
-            const auto cell_dofs = dofs.getCellDofs(cell);
-            const auto& element = record.space->getElement(
-                mesh.getCellType(cell), cell);
-            const auto& basis = element.basis();
-            if (basis.is_vector_valued() ||
-                basis.basis_type() != BasisType::Lagrange ||
-                basis.order() != 1 || basis.size() != cell_dofs.size() ||
-                cell_dofs.size() <
-                    static_cast<std::size_t>(result.dimension + 1)) {
-                throw std::invalid_argument(
-                    "P1 conservative phase graph requires one scalar linear Lagrange basis value per cell DOF");
-            }
-            for (const auto dof : cell_dofs) {
-                if (dof < 0 ||
-                    static_cast<std::size_t>(dof) >= result.nodes) {
+        bool local_assembly_success = true;
+        std::string local_assembly_diagnostic;
+        try {
+            mesh.forEachOwnedCell([&](GlobalIndex cell) {
+                if (record.space->polynomial_order(cell) != 1) {
                     throw std::invalid_argument(
-                        "P1 conservative phase graph found a cell DOF outside the field layout");
+                        "P1 conservative phase graph found a non-P1 cell");
                 }
-            }
-
-            const auto mapping = makeCellMapping(mesh, cell);
-            if (!mapping || mapping->dimension() != result.dimension) {
-                throw std::invalid_argument(
-                    "P1 conservative phase graph found an incompatible geometry mapping");
-            }
-            const int quadrature_order = resolvedQuadratureOrder(
-                options.quadrature_order,
-                mesh.getCellGeometryOrder(cell));
-            result.maximum_quadrature_order = std::max(
-                result.maximum_quadrature_order, quadrature_order);
-            const auto quadrature = quadrature::QuadratureFactory::create(
-                mesh.getCellType(cell), quadrature_order);
-            if (!quadrature || quadrature->num_points() == 0u) {
-                throw std::invalid_argument(
-                    "P1 conservative phase graph received an empty quadrature rule");
-            }
-
-            const std::size_t local_size = cell_dofs.size();
-            std::vector<Real> local_mass(local_size, Real{0.0});
-            std::vector<Vector3> local_gradient(
-                local_size * local_size, Vector3{});
-            std::vector<Real> values;
-            std::vector<basis::Gradient> reference_gradients;
-            for (std::size_t q = 0; q < quadrature->num_points(); ++q) {
-                const auto xi = quadrature->point(q);
-                const Real determinant = mapping->jacobian_determinant(xi);
-                const Real quadrature_weight = quadrature->weight(q);
-                if (!std::isfinite(determinant) ||
-                    !(determinant > Real{0.0}) ||
-                    !std::isfinite(quadrature_weight) ||
-                    !(quadrature_weight > Real{0.0})) {
+                const auto cell_dofs = dofs.getCellDofs(cell);
+                const auto& element = record.space->getElement(
+                    mesh.getCellType(cell), cell);
+                const auto& basis = element.basis();
+                if (basis.is_vector_valued() ||
+                    basis.basis_type() != BasisType::Lagrange ||
+                    basis.order() != 1 || basis.size() != cell_dofs.size() ||
+                    cell_dofs.size() <
+                        static_cast<std::size_t>(result.dimension + 1)) {
                     throw std::invalid_argument(
-                        "P1 conservative phase graph found a nonpositive or non-finite mapped quadrature weight");
+                        "P1 conservative phase graph requires one scalar linear Lagrange basis value per cell DOF");
                 }
-                result.minimum_jacobian_determinant = std::min(
-                    result.minimum_jacobian_determinant, determinant);
-                const Real weight = determinant * quadrature_weight;
-                result.physical_measure += weight;
-
-                basis.evaluate_values(xi, values);
-                basis.evaluate_gradients(xi, reference_gradients);
-                if (values.size() != local_size ||
-                    reference_gradients.size() != local_size) {
-                    throw std::invalid_argument(
-                        "P1 conservative phase graph received inconsistent basis evaluations");
-                }
-                std::vector<math::Vector<Real, 3>> physical_gradients;
-                physical_gradients.reserve(local_size);
-                const auto inverse = mapping->jacobian_inverse(xi);
-                Real value_sum{0.0};
-                Vector3 gradient_sum{};
-                for (std::size_t local = 0; local < local_size; ++local) {
-                    if (!std::isfinite(values[local])) {
+                for (const auto dof : cell_dofs) {
+                    if (dof < 0 ||
+                        static_cast<std::size_t>(dof) >= result.nodes) {
                         throw std::invalid_argument(
-                            "P1 conservative phase graph found a non-finite basis value");
+                            "P1 conservative phase graph found a cell DOF outside the field layout");
                     }
-                    const auto physical_gradient =
-                        mapping->transform_gradient(
-                            reference_gradients[local], inverse);
-                    for (int d = 0; d < result.dimension; ++d) {
-                        if (!std::isfinite(
-                                physical_gradient[static_cast<std::size_t>(d)])) {
+                }
+
+                const auto mapping = makeCellMapping(mesh, cell);
+                if (!mapping || mapping->dimension() != result.dimension) {
+                    throw std::invalid_argument(
+                        "P1 conservative phase graph found an incompatible geometry mapping");
+                }
+                const int quadrature_order = resolvedQuadratureOrder(
+                    options.quadrature_order,
+                    mesh.getCellGeometryOrder(cell));
+                result.maximum_quadrature_order = std::max(
+                    result.maximum_quadrature_order, quadrature_order);
+                const auto quadrature = quadrature::QuadratureFactory::create(
+                    mesh.getCellType(cell), quadrature_order);
+                if (!quadrature || quadrature->num_points() == 0u) {
+                    throw std::invalid_argument(
+                        "P1 conservative phase graph received an empty quadrature rule");
+                }
+
+                const std::size_t local_size = cell_dofs.size();
+                std::vector<Real> local_mass(local_size, Real{0.0});
+                std::vector<Vector3> local_gradient(
+                    local_size * local_size, Vector3{});
+                std::vector<Real> values;
+                std::vector<basis::Gradient> reference_gradients;
+                for (std::size_t q = 0; q < quadrature->num_points(); ++q) {
+                    const auto xi = quadrature->point(q);
+                    const Real determinant = mapping->jacobian_determinant(xi);
+                    const Real quadrature_weight = quadrature->weight(q);
+                    if (!std::isfinite(determinant) ||
+                        !(determinant > Real{0.0}) ||
+                        !std::isfinite(quadrature_weight) ||
+                        !(quadrature_weight > Real{0.0})) {
+                        throw std::invalid_argument(
+                            "P1 conservative phase graph found a nonpositive or non-finite mapped quadrature weight");
+                    }
+                    result.minimum_jacobian_determinant = std::min(
+                        result.minimum_jacobian_determinant, determinant);
+                    const Real weight = determinant * quadrature_weight;
+                    result.physical_measure += weight;
+
+                    basis.evaluate_values(xi, values);
+                    basis.evaluate_gradients(xi, reference_gradients);
+                    if (values.size() != local_size ||
+                        reference_gradients.size() != local_size) {
+                        throw std::invalid_argument(
+                            "P1 conservative phase graph received inconsistent basis evaluations");
+                    }
+                    std::vector<math::Vector<Real, 3>> physical_gradients;
+                    physical_gradients.reserve(local_size);
+                    const auto inverse = mapping->jacobian_inverse(xi);
+                    Real value_sum{0.0};
+                    Vector3 gradient_sum{};
+                    for (std::size_t local = 0; local < local_size; ++local) {
+                        if (!std::isfinite(values[local])) {
                             throw std::invalid_argument(
-                                "P1 conservative phase graph found a non-finite physical basis gradient");
+                                "P1 conservative phase graph found a non-finite basis value");
+                        }
+                        const auto physical_gradient =
+                            mapping->transform_gradient(
+                                reference_gradients[local], inverse);
+                        for (int d = 0; d < result.dimension; ++d) {
+                            if (!std::isfinite(
+                                    physical_gradient[static_cast<std::size_t>(d)])) {
+                                throw std::invalid_argument(
+                                    "P1 conservative phase graph found a non-finite physical basis gradient");
+                            }
+                        }
+                        physical_gradients.push_back(physical_gradient);
+                        Vector3 physical_gradient_array{};
+                        for (int d = 0; d < result.dimension; ++d) {
+                            physical_gradient_array[static_cast<std::size_t>(d)] =
+                                physical_gradient[static_cast<std::size_t>(d)];
+                        }
+                        maximum_physical_basis_gradient = std::max(
+                            maximum_physical_basis_gradient,
+                            norm(physical_gradient_array, result.dimension));
+                        value_sum += values[local];
+                        addScaled(gradient_sum, physical_gradient,
+                                  Real{1.0}, result.dimension);
+                        local_mass[local] += weight * values[local];
+                    }
+                    result.maximum_partition_of_unity_residual = std::max(
+                        result.maximum_partition_of_unity_residual,
+                        std::abs(value_sum - Real{1.0}));
+                    result.maximum_gradient_partition_residual = std::max(
+                        result.maximum_gradient_partition_residual,
+                        norm(gradient_sum, result.dimension));
+
+                    for (std::size_t i = 0; i < local_size; ++i) {
+                        for (std::size_t j = 0; j < local_size; ++j) {
+                            addScaled(local_gradient[i * local_size + j],
+                                      physical_gradients[j],
+                                      weight * values[i], result.dimension);
                         }
                     }
-                    physical_gradients.push_back(physical_gradient);
-                    Vector3 physical_gradient_array{};
-                    for (int d = 0; d < result.dimension; ++d) {
-                        physical_gradient_array[static_cast<std::size_t>(d)] =
-                            physical_gradient[static_cast<std::size_t>(d)];
-                    }
-                    maximum_physical_basis_gradient = std::max(
-                        maximum_physical_basis_gradient,
-                        norm(physical_gradient_array, result.dimension));
-                    value_sum += values[local];
-                    addScaled(gradient_sum, physical_gradient,
-                              Real{1.0}, result.dimension);
-                    local_mass[local] += weight * values[local];
                 }
-                result.maximum_partition_of_unity_residual = std::max(
-                    result.maximum_partition_of_unity_residual,
-                    std::abs(value_sum - Real{1.0}));
-                result.maximum_gradient_partition_residual = std::max(
-                    result.maximum_gradient_partition_residual,
-                    norm(gradient_sum, result.dimension));
 
                 for (std::size_t i = 0; i < local_size; ++i) {
+                    const auto global_i = cell_dofs[i];
+                    const auto node_i = static_cast<std::size_t>(global_i);
+                    if (!std::isfinite(local_mass[i]) ||
+                        !(local_mass[i] > Real{0.0})) {
+                        throw std::invalid_argument(
+                            "P1 conservative phase graph found a nonpositive local lumped control volume");
+                    }
+                    result.lumped_control_volume[node_i] += local_mass[i];
                     for (std::size_t j = 0; j < local_size; ++j) {
-                        addScaled(local_gradient[i * local_size + j],
-                                  physical_gradients[j],
-                                  weight * values[i], result.dimension);
+                        const auto global_j = cell_dofs[j];
+                        const auto& coefficient =
+                            local_gradient[i * local_size + j];
+                        add(assembled_row_sum[node_i], coefficient,
+                            result.dimension);
+                        add(result.boundary_column_sum[
+                                static_cast<std::size_t>(global_j)],
+                            coefficient, result.dimension);
+                        maximum_gradient_coefficient = std::max(
+                            maximum_gradient_coefficient,
+                            norm(coefficient, result.dimension));
+                        if (i == j) {
+                            add(result.diagonal_gradient[node_i], coefficient,
+                                result.dimension);
+                            continue;
+                        }
+                        const auto endpoints = std::minmax(global_i, global_j);
+                        auto& edge = assembled_edges[{endpoints.first,
+                                                      endpoints.second}];
+                        if (global_i == endpoints.first) {
+                            add(edge.first_test_second_gradient, coefficient,
+                                result.dimension);
+                        } else {
+                            add(edge.second_test_first_gradient, coefficient,
+                                result.dimension);
+                        }
                     }
                 }
-            }
+                ++result.cells;
+            });
+        } catch (const std::exception& exception) {
+            local_assembly_success = false;
+            local_assembly_diagnostic = exception.what();
+        }
+        if (local_assembly_success &&
+            result.cells !=
+                static_cast<std::size_t>(mesh.numOwnedCells())) {
+            local_assembly_success = false;
+            local_assembly_diagnostic =
+                "P1 conservative phase graph owned-cell traversal count does not match mesh metadata";
+        }
+        if (!synchronizeLocalFailure(
+                collective, local_assembly_success,
+                local_assembly_diagnostic, result.diagnostic)) {
+            return result;
+        }
+        result.local_owned_cells = result.cells;
 
-            for (std::size_t i = 0; i < local_size; ++i) {
-                const auto global_i = cell_dofs[i];
-                const auto node_i = static_cast<std::size_t>(global_i);
-                if (!std::isfinite(local_mass[i]) ||
-                    !(local_mass[i] > Real{0.0})) {
-                    throw std::invalid_argument(
-                        "P1 conservative phase graph found a nonpositive local lumped control volume");
-                }
-                result.lumped_control_volume[node_i] += local_mass[i];
-                for (std::size_t j = 0; j < local_size; ++j) {
-                    const auto global_j = cell_dofs[j];
-                    const auto& coefficient =
-                        local_gradient[i * local_size + j];
-                    add(assembled_row_sum[node_i], coefficient,
-                        result.dimension);
-                    add(result.boundary_column_sum[
-                            static_cast<std::size_t>(global_j)],
-                        coefficient, result.dimension);
-                    maximum_gradient_coefficient = std::max(
-                        maximum_gradient_coefficient,
-                        norm(coefficient, result.dimension));
-                    if (i == j) {
-                        add(result.diagonal_gradient[node_i], coefficient,
-                            result.dimension);
-                        continue;
-                    }
-                    const auto endpoints = std::minmax(global_i, global_j);
-                    auto& edge = assembled_edges[{endpoints.first,
-                                                  endpoints.second}];
-                    if (global_i == endpoints.first) {
-                        add(edge.first_test_second_gradient, coefficient,
-                            result.dimension);
-                    } else {
-                        add(edge.second_test_first_gradient, coefficient,
-                            result.dimension);
-                    }
-                }
-            }
-            ++result.cells;
-        });
+        const auto global_cell_count = allReduceUnsigned64Sum(
+            collective, static_cast<std::uint64_t>(result.cells));
+        if (global_cell_count >
+            static_cast<std::uint64_t>(
+                std::numeric_limits<std::size_t>::max())) {
+            result.diagnostic =
+                "P1 conservative phase graph global cell count exceeds local index capacity";
+            return result;
+        }
+        result.cells = static_cast<std::size_t>(global_cell_count);
+        result.physical_measure = allReduceRealSum(
+            collective, result.physical_measure);
+        result.minimum_jacobian_determinant = allReduceRealMin(
+            collective, result.minimum_jacobian_determinant);
+        result.maximum_partition_of_unity_residual = allReduceRealMax(
+            collective, result.maximum_partition_of_unity_residual);
+        result.maximum_gradient_partition_residual = allReduceRealMax(
+            collective, result.maximum_gradient_partition_residual);
+        maximum_gradient_coefficient = allReduceRealMax(
+            collective, maximum_gradient_coefficient);
+        maximum_physical_basis_gradient = allReduceRealMax(
+            collective, maximum_physical_basis_gradient);
+        result.maximum_quadrature_order = allReduceIntMax(
+            collective, result.maximum_quadrature_order);
+        allReduceRealBufferSum(collective,
+                               result.lumped_control_volume);
+        allReduceVector3Sum(collective, result.diagonal_gradient);
+        allReduceVector3Sum(collective, result.boundary_column_sum);
+        allReduceVector3Sum(collective, assembled_row_sum);
+        assembled_edges = globalizeGradientEdges(
+            collective, assembled_edges);
+        maximum_gradient_coefficient = Real{0.0};
+        for (const auto& coefficient : result.diagonal_gradient) {
+            maximum_gradient_coefficient = std::max(
+                maximum_gradient_coefficient,
+                norm(coefficient, result.dimension));
+        }
+        for (const auto& [endpoints, edge] : assembled_edges) {
+            (void)endpoints;
+            maximum_gradient_coefficient = std::max(
+                maximum_gradient_coefficient,
+                std::max(norm(edge.first_test_second_gradient,
+                              result.dimension),
+                         norm(edge.second_test_first_gradient,
+                              result.dimension)));
+        }
 
         if (result.cells == 0u ||
             !std::isfinite(result.physical_measure) ||
@@ -422,16 +1025,71 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
             return result;
         }
 
+        std::vector<int> local_edge_owners;
+        local_edge_owners.reserve(assembled_edges.size());
+        bool local_ownership_success = true;
+        std::string ownership_diagnostic;
+        try {
+            for (const auto& [endpoints, edge] : assembled_edges) {
+                (void)edge;
+                int owner_rank = 0;
+                if (collective.active) {
+                    const int first_owner =
+                        dofs.getDofMap().getDofOwner(endpoints.first);
+                    const int second_owner =
+                        dofs.getDofMap().getDofOwner(endpoints.second);
+                    if (first_owner < 0 || second_owner < 0 ||
+                        first_owner >= collective.size ||
+                        second_owner >= collective.size) {
+                        local_ownership_success = false;
+                        ownership_diagnostic =
+                            "P1 conservative phase graph could not resolve a valid owner for every algebraic edge";
+                        break;
+                    }
+                    owner_rank = std::min(first_owner, second_owner);
+                }
+                local_edge_owners.push_back(owner_rank);
+            }
+        } catch (const std::exception& exception) {
+            local_ownership_success = false;
+            ownership_diagnostic = exception.what();
+        }
+        if (!synchronizeLocalFailure(
+                collective, local_ownership_success,
+                ownership_diagnostic, result.diagnostic)) {
+            result.edge_ownership_satisfied = false;
+            return result;
+        }
+
+        std::vector<int> minimum_edge_owners;
+        std::vector<int> maximum_edge_owners;
+        allReduceIntBufferMinMax(collective, local_edge_owners,
+                                 minimum_edge_owners,
+                                 maximum_edge_owners);
+        result.edge_ownership_satisfied =
+            minimum_edge_owners == maximum_edge_owners;
+        if (!result.edge_ownership_satisfied) {
+            result.diagnostic =
+                "P1 conservative phase graph found inconsistent algebraic edge ownership across ranks";
+            return result;
+        }
+
         result.edges.reserve(assembled_edges.size());
+        std::size_t edge_index = 0u;
         for (const auto& [endpoints, edge] : assembled_edges) {
+            const int owner_rank = minimum_edge_owners[edge_index++];
             result.edges.push_back(LevelSetP1PhaseGradientEdge{
                 .first_node = endpoints.first,
                 .second_node = endpoints.second,
+                .owner_rank = owner_rank,
                 .first_test_second_gradient =
                     edge.first_test_second_gradient,
                 .second_test_first_gradient =
                     edge.second_test_first_gradient,
             });
+            if (owner_rank == collective.rank) {
+                ++result.locally_owned_edges;
+            }
         }
         result.success = true;
         result.diagnostic = "ok";
