@@ -7,11 +7,17 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cctype>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <set>
+#include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 
@@ -165,6 +171,7 @@ VelocityExtensionMapSnapshot::VelocityExtensionMapSnapshot(
         "velocity-extension map snapshot received incomplete or incompatible data");
   }
   std::set<svmp::FE::GlobalIndex> owner_vertices;
+  std::set<svmp::gid_t> global_owner_vertices;
   std::size_t extended_rows = 0u;
   std::size_t outside_rows = 0u;
   std::size_t collision_rows = 0u;
@@ -181,6 +188,7 @@ VelocityExtensionMapSnapshot::VelocityExtensionMapSnapshot(
             component_assignment_.size() ||
         diagnostic.global_vertex == svmp::INVALID_GID ||
         !owner_vertices.insert(diagnostic.local_vertex).second ||
+        !global_owner_vertices.insert(diagnostic.global_vertex).second ||
         diagnostic.component_assignment !=
             component_assignment_[static_cast<std::size_t>(
                 diagnostic.local_vertex)] ||
@@ -280,6 +288,673 @@ VelocityExtensionMapSnapshot::VelocityExtensionMapSnapshot(
     throw std::invalid_argument(
         "velocity-extension map snapshot owner rows disagree with the aggregate report");
   }
+  std::set<std::pair<svmp::FE::GlobalIndex, int>> constraint_keys;
+  using DependencyField =
+      svmp::FE::level_set::VelocityExtensionDependencyField;
+  for (const auto& row : rows_) {
+    if (!owner_vertices.contains(row.vertex) || row.component < 0 ||
+        static_cast<std::size_t>(row.component) >= components_ ||
+        !constraint_keys.emplace(row.vertex, row.component).second) {
+      throw std::invalid_argument(
+          "velocity-extension map snapshot received an invalid or duplicate constraint row");
+    }
+    for (const auto& dependency : row.dependencies) {
+      if (dependency.vertex == svmp::FE::INVALID_GLOBAL_INDEX ||
+          dependency.vertex < 0 ||
+          static_cast<std::size_t>(dependency.vertex) >=
+              component_assignment_.size() ||
+          dependency.component < 0 ||
+          static_cast<std::size_t>(dependency.component) >= components_ ||
+          (dependency.field != DependencyField::SourceVelocity &&
+           dependency.field != DependencyField::ExtensionVelocity) ||
+          !std::isfinite(dependency.coefficient)) {
+        throw std::invalid_argument(
+            "velocity-extension map snapshot received an invalid constraint dependency");
+      }
+    }
+  }
+  for (const auto vertex : owner_vertices) {
+    for (std::size_t component = 0u; component < components_; ++component) {
+      if (!constraint_keys.contains(
+              {vertex, static_cast<int>(component)})) {
+        throw std::invalid_argument(
+            "velocity-extension map snapshot is missing an owner constraint component");
+      }
+    }
+  }
+}
+
+VelocityExtensionMapChangeReport compareVelocityExtensionMapSnapshots(
+    const VelocityExtensionMapSnapshot& current,
+    const VelocityExtensionMapSnapshot* previous)
+{
+  VelocityExtensionMapChangeReport change;
+  change.previous_available = previous != nullptr;
+  if (previous == nullptr) {
+    change.added_owner_rows = current.rowDiagnostics().size();
+    return change;
+  }
+
+  const auto& current_revision = current.revision();
+  const auto& previous_revision = previous->revision();
+  change.previous_revision_key = previous_revision.key();
+  change.revision_changed = current_revision != previous_revision;
+  change.mesh_geometry_changed =
+      current_revision.mesh_geometry != previous_revision.mesh_geometry;
+  change.mesh_topology_changed =
+      current_revision.mesh_topology != previous_revision.mesh_topology;
+  change.mesh_ownership_changed =
+      current_revision.mesh_ownership != previous_revision.mesh_ownership;
+  change.mesh_numbering_changed =
+      current_revision.mesh_numbering != previous_revision.mesh_numbering;
+  change.free_surface_geometry_changed =
+      current_revision.free_surface_geometry !=
+      previous_revision.free_surface_geometry;
+  change.level_set_values_changed =
+      current_revision.level_set_values != previous_revision.level_set_values;
+  change.active_set_changed =
+      current_revision.active_set != previous_revision.active_set;
+
+  const auto index_rows = [](const VelocityExtensionMapSnapshot& snapshot) {
+    std::map<svmp::gid_t, const VelocityExtensionGraphRowDiagnostic*> rows;
+    for (const auto& row : snapshot.rowDiagnostics()) {
+      if (!rows.emplace(row.global_vertex, &row).second) {
+        throw std::invalid_argument(
+            "velocity-extension map comparison requires unique owner global vertex identities");
+      }
+    }
+    return rows;
+  };
+  const auto current_rows = index_rows(current);
+  const auto previous_rows = index_rows(*previous);
+  change.removed_owner_rows = std::count_if(
+      previous_rows.begin(), previous_rows.end(), [&](const auto& item) {
+        return !current_rows.contains(item.first);
+      });
+
+  double preview_squared_change = 0.0;
+  for (const auto& [global_vertex, current_row] : current_rows) {
+    const auto previous_position = previous_rows.find(global_vertex);
+    if (previous_position == previous_rows.end()) {
+      ++change.added_owner_rows;
+      continue;
+    }
+    ++change.common_owner_rows;
+    const auto* previous_row = previous_position->second;
+    bool row_changed = false;
+    if (current_row->component_assignment !=
+        previous_row->component_assignment) {
+      ++change.component_assignment_changes;
+      row_changed = true;
+    }
+    const bool decision_changed =
+        current_row->disposition != previous_row->disposition ||
+        current_row->component_candidates !=
+            previous_row->component_candidates ||
+        current_row->band_layer != previous_row->band_layer ||
+        current_row->reconstruction_dimension !=
+            previous_row->reconstruction_dimension ||
+        current_row->numerical_rank != previous_row->numerical_rank ||
+        current_row->assigned != previous_row->assigned ||
+        current_row->regression_accepted !=
+            previous_row->regression_accepted ||
+        current_row->bounded_fallback_used !=
+            previous_row->bounded_fallback_used ||
+        current_row->condition_rejected !=
+            previous_row->condition_rejected ||
+        current_row->coefficient_rejected !=
+            previous_row->coefficient_rejected ||
+        current_row->wall_projected != previous_row->wall_projected;
+    if (decision_changed) {
+      ++change.row_decision_changes;
+      row_changed = true;
+    }
+
+    const auto dependency_map = [](const auto& row) {
+      std::map<svmp::gid_t, double> dependencies;
+      for (const auto& dependency : row.dependencies) {
+        if (!dependencies.emplace(dependency.global_vertex,
+                                  dependency.coefficient)
+                 .second) {
+          throw std::invalid_argument(
+              "velocity-extension map comparison requires unique graph dependencies");
+        }
+      }
+      return dependencies;
+    };
+    const auto current_dependencies = dependency_map(*current_row);
+    const auto previous_dependencies = dependency_map(*previous_row);
+    bool dependencies_changed =
+        current_dependencies.size() != previous_dependencies.size();
+    std::set<svmp::gid_t> dependency_vertices;
+    for (const auto& [vertex, coefficient] : current_dependencies) {
+      (void)coefficient;
+      dependency_vertices.insert(vertex);
+    }
+    for (const auto& [vertex, coefficient] : previous_dependencies) {
+      (void)coefficient;
+      dependency_vertices.insert(vertex);
+    }
+    for (const auto vertex : dependency_vertices) {
+      const auto current_coefficient = current_dependencies.contains(vertex)
+          ? current_dependencies.at(vertex)
+          : 0.0;
+      const auto previous_coefficient = previous_dependencies.contains(vertex)
+          ? previous_dependencies.at(vertex)
+          : 0.0;
+      const double coefficient_change =
+          std::abs(current_coefficient - previous_coefficient);
+      change.maximum_coefficient_change = std::max(
+          change.maximum_coefficient_change, coefficient_change);
+      dependencies_changed =
+          dependencies_changed || coefficient_change != 0.0;
+    }
+    if (dependencies_changed) {
+      ++change.dependency_row_changes;
+      row_changed = true;
+    }
+    change.changed_owner_rows += row_changed ? 1u : 0u;
+
+    if (current.components() != previous->components()) {
+      continue;
+    }
+    const auto current_local =
+        static_cast<std::size_t>(current_row->local_vertex);
+    const auto previous_local =
+        static_cast<std::size_t>(previous_row->local_vertex);
+    for (std::size_t component = 0u; component < current.components();
+         ++component) {
+      const double difference =
+          current.preview()[current_local * current.components() + component] -
+          previous->preview()[previous_local * previous->components() +
+                              component];
+      preview_squared_change += difference * difference;
+      change.preview_linf_change =
+          std::max(change.preview_linf_change, std::abs(difference));
+      ++change.preview_values_compared;
+    }
+  }
+  change.preview_l2_change = std::sqrt(preview_squared_change);
+  return change;
+}
+
+namespace {
+
+std::string velocityExtensionArtifactSafeToken(std::string_view value)
+{
+  std::string token;
+  token.reserve(value.size());
+  for (const char raw_character : value) {
+    const auto character = static_cast<unsigned char>(raw_character);
+    if (std::isalnum(character) != 0 || character == '-' ||
+        character == '_') {
+      token.push_back(static_cast<char>(character));
+    } else {
+      token.push_back('_');
+    }
+  }
+  return token.empty() ? std::string{"field"} : token;
+}
+
+void writeVelocityExtensionJsonString(std::ostream& output,
+                                      std::string_view value)
+{
+  output << '"';
+  for (const char raw_character : value) {
+    const auto character = static_cast<unsigned char>(raw_character);
+    switch (character) {
+    case '"':
+      output << "\\\"";
+      break;
+    case '\\':
+      output << "\\\\";
+      break;
+    case '\b':
+      output << "\\b";
+      break;
+    case '\f':
+      output << "\\f";
+      break;
+    case '\n':
+      output << "\\n";
+      break;
+    case '\r':
+      output << "\\r";
+      break;
+    case '\t':
+      output << "\\t";
+      break;
+    default:
+      if (character < 0x20u) {
+        output << "\\u" << std::hex << std::setw(4)
+               << std::setfill('0')
+               << static_cast<unsigned int>(character) << std::dec
+               << std::setfill(' ');
+      } else {
+        output << static_cast<char>(character);
+      }
+      break;
+    }
+  }
+  output << '"';
+}
+
+void writeVelocityExtensionBool(std::ostream& output, bool value)
+{
+  output << (value ? "true" : "false");
+}
+
+void writeVelocityExtensionFiniteOrNull(std::ostream& output, double value)
+{
+  if (std::isfinite(value)) {
+    output << value;
+  } else {
+    output << "null";
+  }
+}
+
+std::string_view velocityExtensionDependencyFieldName(
+    svmp::FE::level_set::VelocityExtensionDependencyField field) noexcept
+{
+  using Field =
+      svmp::FE::level_set::VelocityExtensionDependencyField;
+  return field == Field::SourceVelocity ? "source_velocity"
+                                        : "extension_velocity";
+}
+
+void writeVelocityExtensionMapChange(
+    std::ostream& output,
+    const VelocityExtensionMapChangeReport& change)
+{
+  output << "{\"previous_available\":";
+  writeVelocityExtensionBool(output, change.previous_available);
+  output << ",\"previous_revision_key\":"
+         << change.previous_revision_key
+         << ",\"revision_changed\":";
+  writeVelocityExtensionBool(output, change.revision_changed);
+  output << ",\"revision_domains_changed\":{"
+         << "\"mesh_geometry\":";
+  writeVelocityExtensionBool(output, change.mesh_geometry_changed);
+  output << ",\"mesh_topology\":";
+  writeVelocityExtensionBool(output, change.mesh_topology_changed);
+  output << ",\"mesh_ownership\":";
+  writeVelocityExtensionBool(output, change.mesh_ownership_changed);
+  output << ",\"mesh_numbering\":";
+  writeVelocityExtensionBool(output, change.mesh_numbering_changed);
+  output << ",\"free_surface_geometry\":";
+  writeVelocityExtensionBool(output, change.free_surface_geometry_changed);
+  output << ",\"level_set_values\":";
+  writeVelocityExtensionBool(output, change.level_set_values_changed);
+  output << ",\"active_set\":";
+  writeVelocityExtensionBool(output, change.active_set_changed);
+  output << "},\"common_owner_rows\":" << change.common_owner_rows
+         << ",\"added_owner_rows\":" << change.added_owner_rows
+         << ",\"removed_owner_rows\":" << change.removed_owner_rows
+         << ",\"changed_owner_rows\":" << change.changed_owner_rows
+         << ",\"component_assignment_changes\":"
+         << change.component_assignment_changes
+         << ",\"row_decision_changes\":"
+         << change.row_decision_changes
+         << ",\"dependency_row_changes\":"
+         << change.dependency_row_changes
+         << ",\"maximum_coefficient_change\":"
+         << change.maximum_coefficient_change
+         << ",\"preview_values_compared\":"
+         << change.preview_values_compared
+         << ",\"preview_l2_change\":" << change.preview_l2_change
+         << ",\"preview_linf_change\":" << change.preview_linf_change
+         << '}';
+}
+
+void writeVelocityExtensionMapArtifactJson(
+    std::ostream& output,
+    const VelocityExtensionMapArtifactContext& context,
+    const VelocityExtensionMapSnapshot& snapshot,
+    const VelocityExtensionMapChangeReport& change)
+{
+  output << std::setprecision(std::numeric_limits<double>::max_digits10);
+  output << "{\"schema\":\"svmp.velocity_extension_map.v1\""
+         << ",\"accepted_state\":{"
+         << "\"step\":" << context.accepted_step
+         << ",\"time\":" << context.accepted_time
+         << ",\"time_step\":" << context.time_step
+         << ",\"state_revision\":" << context.state_revision
+         << "},\"request\":{";
+  output << "\"level_set_field\":";
+  writeVelocityExtensionJsonString(output, context.level_set_field_name);
+  output << ",\"source_velocity_field\":";
+  writeVelocityExtensionJsonString(
+      output, context.source_velocity_field_name);
+  output << ",\"target_velocity_field\":";
+  writeVelocityExtensionJsonString(
+      output, context.target_velocity_field_name);
+  output << ",\"geometry_domain_id\":";
+  writeVelocityExtensionJsonString(output, context.geometry_domain_id);
+  output << ",\"operator_tag\":";
+  writeVelocityExtensionJsonString(output, context.operator_tag);
+  output << ",\"extension_method\":";
+  writeVelocityExtensionJsonString(output, context.extension_method);
+  output << ",\"retained_side\":";
+  writeVelocityExtensionJsonString(output, context.retained_side);
+  output << ",\"isovalue\":" << context.isovalue
+         << ",\"extension_band_layers\":"
+         << context.extension_band_layers
+         << ",\"enforce_wall_impermeability\":";
+  writeVelocityExtensionBool(output, context.enforce_wall_impermeability);
+  output << "},\"partition\":{"
+         << "\"rank\":" << context.rank
+         << ",\"ranks\":" << context.ranks
+         << ",\"scope\":\"owner_local_with_ghost_dependencies\"}"
+         << ",\"revision\":{";
+  const auto& revision = snapshot.revision();
+  output << "\"key\":" << revision.key()
+         << ",\"mesh_geometry\":" << revision.mesh_geometry
+         << ",\"mesh_topology\":" << revision.mesh_topology
+         << ",\"mesh_ownership\":" << revision.mesh_ownership
+         << ",\"mesh_numbering\":" << revision.mesh_numbering
+         << ",\"free_surface_geometry\":"
+         << revision.free_surface_geometry
+         << ",\"level_set_values\":" << revision.level_set_values
+         << ",\"active_set\":" << revision.active_set << '}';
+  output << ",\"revision_change\":";
+  writeVelocityExtensionMapChange(output, change);
+  const auto& report = snapshot.report();
+  output << ",\"guards\":{"
+         << "\"maximum_regression_condition\":"
+         << kVelocityExtensionMaxRegressionCondition
+         << ",\"coefficient_tolerance\":"
+         << kVelocityExtensionCoefficientTolerance
+         << ",\"row_tolerance\":" << kVelocityExtensionRowTolerance
+         << ",\"maximum_row_l1\":"
+         << 1.0 + kVelocityExtensionRowTolerance
+         << ",\"maximum_wet_to_dry_amplification\":"
+         << kVelocityExtensionMaxWetToDryAmplification << '}';
+  output << ",\"summary\":{"
+         << "\"components\":" << snapshot.components()
+         << ",\"owner_rows\":" << snapshot.rowDiagnostics().size()
+         << ",\"constraint_rows\":" << snapshot.rows().size()
+         << ",\"extended_vertices\":" << report.extended_vertices
+         << ",\"vertices_outside_band\":"
+         << report.vertices_outside_band
+         << ",\"wall_projected_vertices\":"
+         << report.wall_projected_vertices
+         << ",\"component_collision_vertices\":"
+         << report.component_collision_vertices
+         << ",\"regression_candidate_rows\":"
+         << report.regression_candidate_rows
+         << ",\"regression_accepted_rows\":"
+         << report.regression_accepted_rows
+         << ",\"bounded_fallback_rows\":"
+         << report.bounded_fallback_rows
+         << ",\"condition_rejected_rows\":"
+         << report.condition_rejected_rows
+         << ",\"coefficient_rejected_rows\":"
+         << report.coefficient_rejected_rows
+         << ",\"max_wall_normal_velocity\":"
+         << report.max_wall_normal_velocity
+         << ",\"max_regression_condition\":"
+         << report.max_regression_condition
+         << ",\"max_abs_graph_coefficient\":"
+         << report.max_abs_graph_coefficient
+         << ",\"max_graph_row_l1\":" << report.max_graph_row_l1
+         << ",\"max_graph_row_sum_error\":"
+         << report.max_graph_row_sum_error
+         << ",\"max_negative_graph_coefficient\":"
+         << report.max_negative_graph_coefficient
+         << ",\"max_constant_reproduction_error\":"
+         << report.max_constant_reproduction_error
+         << ",\"max_tangential_linear_reproduction_error\":"
+         << report.max_linear_reproduction_error
+         << ",\"max_extrapolation_distance\":"
+         << report.max_extrapolation_distance
+         << ",\"max_seed_speed\":" << report.max_seed_speed
+         << ",\"max_extended_speed\":" << report.max_extended_speed
+         << ",\"wet_to_dry_amplification\":"
+         << snapshot.wetToDryAmplification() << '}';
+
+  output << ",\"rows\":[";
+  for (std::size_t index = 0u; index < snapshot.rowDiagnostics().size();
+       ++index) {
+    if (index != 0u) {
+      output << ',';
+    }
+    const auto& row = snapshot.rowDiagnostics()[index];
+    output << "{\"local_vertex\":" << row.local_vertex
+           << ",\"global_vertex\":" << row.global_vertex
+           << ",\"disposition\":";
+    writeVelocityExtensionJsonString(
+        output, velocityExtensionRowDispositionName(row.disposition));
+    output << ",\"component_assignment\":"
+           << row.component_assignment
+           << ",\"component_candidates\":" << row.component_candidates
+           << ",\"band_layer\":" << row.band_layer
+           << ",\"reconstruction_dimension\":"
+           << row.reconstruction_dimension
+           << ",\"numerical_rank\":" << row.numerical_rank
+           << ",\"assigned\":";
+    writeVelocityExtensionBool(output, row.assigned);
+    output << ",\"regression_attempted\":";
+    writeVelocityExtensionBool(output, row.regression_attempted);
+    output << ",\"regression_accepted\":";
+    writeVelocityExtensionBool(output, row.regression_accepted);
+    output << ",\"bounded_fallback_used\":";
+    writeVelocityExtensionBool(output, row.bounded_fallback_used);
+    output << ",\"condition_rejected\":";
+    writeVelocityExtensionBool(output, row.condition_rejected);
+    output << ",\"coefficient_rejected\":";
+    writeVelocityExtensionBool(output, row.coefficient_rejected);
+    output << ",\"wall_projected\":";
+    writeVelocityExtensionBool(output, row.wall_projected);
+    output << ",\"condition_estimate\":";
+    writeVelocityExtensionFiniteOrNull(output, row.condition_estimate);
+    output << ",\"condition_estimate_finite\":";
+    writeVelocityExtensionBool(output, std::isfinite(row.condition_estimate));
+    output << ",\"proposed_coefficient_sum\":"
+           << row.proposed_coefficient_sum
+           << ",\"proposed_coefficient_l1\":"
+           << row.proposed_coefficient_l1
+           << ",\"proposed_max_abs_coefficient\":"
+           << row.proposed_max_abs_coefficient
+           << ",\"proposed_negative_weight_count\":"
+           << row.proposed_negative_weight_count
+           << ",\"proposed_max_negative_coefficient\":"
+           << row.proposed_max_negative_coefficient
+           << ",\"coefficient_sum\":" << row.coefficient_sum
+           << ",\"coefficient_l1\":" << row.coefficient_l1
+           << ",\"max_abs_coefficient\":" << row.max_abs_coefficient
+           << ",\"negative_weight_count\":"
+           << row.negative_weight_count
+           << ",\"max_negative_coefficient\":"
+           << row.max_negative_coefficient
+           << ",\"constant_reproduction_error\":"
+           << row.constant_reproduction_error
+           << ",\"max_tangential_linear_reproduction_error\":"
+           << row.max_tangential_linear_reproduction_error
+           << ",\"extrapolation_distance\":"
+           << row.extrapolation_distance
+           << ",\"dependency_max_speed\":"
+           << row.dependency_max_speed
+           << ",\"preview_speed\":" << row.preview_speed
+           << ",\"preview_amplification\":"
+           << row.preview_amplification << ",\"dependencies\":[";
+    for (std::size_t dependency = 0u;
+         dependency < row.dependencies.size(); ++dependency) {
+      if (dependency != 0u) {
+        output << ',';
+      }
+      const auto& item = row.dependencies[dependency];
+      output << "{\"local_vertex\":" << item.local_vertex
+             << ",\"global_vertex\":" << item.global_vertex
+             << ",\"coefficient\":" << item.coefficient << '}';
+    }
+    output << "]}";
+  }
+
+  std::map<svmp::FE::GlobalIndex, svmp::gid_t> global_by_local;
+  for (const auto& row : snapshot.rowDiagnostics()) {
+    global_by_local.emplace(row.local_vertex, row.global_vertex);
+    for (const auto& dependency : row.dependencies) {
+      const auto [position, inserted] = global_by_local.emplace(
+          dependency.local_vertex, dependency.global_vertex);
+      if (!inserted && position->second != dependency.global_vertex) {
+        throw std::invalid_argument(
+            "velocity-extension artifact found inconsistent local/global vertex identities");
+      }
+    }
+  }
+  output << "],\"constraints\":[";
+  for (std::size_t index = 0u; index < snapshot.rows().size(); ++index) {
+    if (index != 0u) {
+      output << ',';
+    }
+    const auto& row = snapshot.rows()[index];
+    const auto global_row = global_by_local.find(row.vertex);
+    if (global_row == global_by_local.end()) {
+      throw std::invalid_argument(
+          "velocity-extension artifact could not resolve a constraint row vertex identity");
+    }
+    output << "{\"local_vertex\":" << row.vertex
+           << ",\"global_vertex\":" << global_row->second
+           << ",\"component\":" << row.component
+           << ",\"dependencies\":[";
+    for (std::size_t dependency = 0u;
+         dependency < row.dependencies.size(); ++dependency) {
+      if (dependency != 0u) {
+        output << ',';
+      }
+      const auto& item = row.dependencies[dependency];
+      const auto global_dependency = global_by_local.find(item.vertex);
+      if (global_dependency == global_by_local.end()) {
+        throw std::invalid_argument(
+            "velocity-extension artifact could not resolve a dependency vertex identity");
+      }
+      output << "{\"field\":";
+      writeVelocityExtensionJsonString(
+          output, velocityExtensionDependencyFieldName(item.field));
+      output << ",\"local_vertex\":" << item.vertex
+             << ",\"global_vertex\":" << global_dependency->second
+             << ",\"component\":" << item.component
+             << ",\"coefficient\":" << item.coefficient << '}';
+    }
+    output << "]}";
+  }
+  output << "]}\n";
+}
+
+} // namespace
+
+VelocityExtensionMapArtifactResult writeVelocityExtensionMapArtifact(
+    const std::filesystem::path& output_directory,
+    const VelocityExtensionMapArtifactContext& context,
+    const VelocityExtensionMapSnapshot& snapshot,
+    const VelocityExtensionMapSnapshot* previous)
+{
+  VelocityExtensionMapArtifactResult result;
+  result.owner_rows = snapshot.rowDiagnostics().size();
+  result.constraint_rows = snapshot.rows().size();
+  std::filesystem::path temporary_path;
+  try {
+    if (output_directory.empty() || context.level_set_field_name.empty() ||
+        context.source_velocity_field_name.empty() ||
+        context.target_velocity_field_name.empty() ||
+        context.geometry_domain_id.empty() || context.operator_tag.empty() ||
+        context.extension_method.empty() || context.retained_side.empty() ||
+        context.accepted_step == 0u ||
+        !std::isfinite(context.accepted_time) ||
+        !std::isfinite(context.time_step) || context.time_step < 0.0 ||
+        !std::isfinite(context.isovalue) ||
+        context.extension_band_layers <= 0 || context.rank < 0 ||
+        context.ranks <= 0 || context.rank >= context.ranks) {
+      result.diagnostic =
+          "velocity-extension artifact requires a complete finite accepted context";
+      return result;
+    }
+    const auto change =
+        compareVelocityExtensionMapSnapshots(snapshot, previous);
+    std::filesystem::create_directories(output_directory);
+    std::ostringstream filename;
+    filename << "velocity_extension_map_"
+             << velocityExtensionArtifactSafeToken(
+                    context.target_velocity_field_name)
+             << '_' << velocityExtensionArtifactSafeToken(
+                            context.geometry_domain_id)
+             << "_step_" << std::setw(8) << std::setfill('0')
+             << context.accepted_step << "_state_" << context.state_revision
+             << "_map_" << snapshot.revision().key() << "_rank_"
+             << std::setw(6) << context.rank << ".json";
+    result.path = output_directory / filename.str();
+    temporary_path = result.path;
+    temporary_path += ".tmp";
+    if (std::filesystem::exists(result.path) ||
+        std::filesystem::exists(temporary_path)) {
+      result.diagnostic =
+          "velocity-extension artifact refuses to replace an existing final or temporary file";
+      return result;
+    }
+
+    bool write_failed = false;
+    {
+      std::ofstream output(temporary_path, std::ios::out | std::ios::trunc);
+      if (!output.is_open()) {
+        result.diagnostic =
+            "velocity-extension artifact could not open its temporary file";
+        return result;
+      }
+      writeVelocityExtensionMapArtifactJson(
+          output, context, snapshot, change);
+      output.flush();
+      output.close();
+      if (!output.good()) {
+        result.diagnostic =
+            "velocity-extension artifact failed while closing its temporary file";
+        write_failed = true;
+      }
+    }
+    if (write_failed) {
+      std::error_code cleanup_error;
+      std::filesystem::remove(temporary_path, cleanup_error);
+      return result;
+    }
+
+    std::error_code publication_error;
+    std::filesystem::create_hard_link(
+        temporary_path, result.path, publication_error);
+    if (publication_error) {
+      result.diagnostic =
+          "velocity-extension artifact could not atomically publish without replacement: " +
+          publication_error.message();
+      std::error_code cleanup_error;
+      std::filesystem::remove(temporary_path, cleanup_error);
+      return result;
+    }
+    std::error_code cleanup_error;
+    std::filesystem::remove(temporary_path, cleanup_error);
+    if (cleanup_error) {
+      result.diagnostic =
+          "velocity-extension artifact was published but its temporary link could not be removed: " +
+          cleanup_error.message();
+      std::error_code rollback_error;
+      std::filesystem::remove(result.path, rollback_error);
+      return result;
+    }
+    result.bytes = std::filesystem::file_size(result.path);
+    result.success = true;
+    result.diagnostic = "ok";
+  } catch (const std::exception& exception) {
+    if (!temporary_path.empty()) {
+      std::error_code cleanup_error;
+      std::filesystem::remove(temporary_path, cleanup_error);
+    }
+    result.diagnostic = exception.what();
+  } catch (...) {
+    if (!temporary_path.empty()) {
+      std::error_code cleanup_error;
+      std::filesystem::remove(temporary_path, cleanup_error);
+    }
+    result.diagnostic =
+        "velocity-extension artifact failed with an unknown exception";
+  }
+  return result;
 }
 
 bool solveSmallDenseSystem(

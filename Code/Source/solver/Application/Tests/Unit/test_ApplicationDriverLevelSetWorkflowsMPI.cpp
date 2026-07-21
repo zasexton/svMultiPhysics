@@ -2191,6 +2191,192 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
 }
 
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     VelocityExtensionArtifactsPublishEveryRankOrRollback)
+{
+  int rank = 0;
+  int size = 1;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  ASSERT_EQ(size, 2);
+
+  std::uint64_t unique = 0u;
+  if (rank == 0) {
+    unique = static_cast<std::uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+  }
+  MPI_Bcast(&unique, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+  const auto rollback_directory =
+      std::filesystem::temp_directory_path() /
+      ("svmp-velocity-extension-mpi-rollback-" +
+       std::to_string(unique));
+  const auto success_directory =
+      std::filesystem::temp_directory_path() /
+      ("svmp-velocity-extension-mpi-success-" +
+       std::to_string(unique));
+
+  const auto mesh = makePartitionedQuadStrip();
+  const auto input = makeExtensionInputs(*mesh);
+  const auto& revisions = mesh->event_bus().revision_state();
+  const auto map_revision = application::core::velocityExtensionMapRevision(
+      revisions.geometry,
+      revisions.topology,
+      revisions.ownership,
+      revisions.numbering,
+      71u,
+      input.phi,
+      input.active);
+  const auto snapshot =
+      application::core::buildVelocityExtensionMapSnapshot(
+          *mesh,
+          svmp::MeshComm::world(),
+          map_revision,
+          input.phi,
+          input.source,
+          kComponents,
+          input.active,
+          kComponents,
+          kComponents,
+          kCellCount,
+          false,
+          std::span<const WallVelocityExtensionConstraint>{});
+  ASSERT_TRUE(snapshot);
+  AcceptedVelocityExtensionMapRecord record{
+      .level_set_field_name = "phi",
+      .source_velocity_field_name = "Velocity",
+      .target_velocity_field_name = "LevelSetAdvectionVelocity",
+      .geometry_domain_id = "free_surface",
+      .operator_tag = "level_set",
+      .extension_method = "wall_compatible_normal",
+      .isovalue = 0.0,
+      .extension_band_layers = kCellCount,
+      .enforce_wall_impermeability = false,
+      .retained_side = LevelSetActiveSide::Negative,
+      .snapshot = snapshot,
+  };
+  std::vector<AcceptedVelocityExtensionMapRecord> records{record};
+  Parameters params;
+  params.general_simulation_parameters.save_results_in_folder.set(
+      rollback_directory.string());
+  AcceptedVelocityExtensionMapRegistry accepted_maps;
+
+  auto inconsistent_records = records;
+  if (rank == 1) {
+    inconsistent_records.front().target_velocity_field_name =
+        "DifferentExtensionField";
+  }
+  EXPECT_THROW(
+      writeAcceptedVelocityExtensionMapArtifacts(
+          params,
+          inconsistent_records,
+          1u,
+          0.1,
+          0.1,
+          41u,
+          svmp::MeshComm::world(),
+          accepted_maps),
+      std::runtime_error);
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (rank == 0) {
+    EXPECT_FALSE(std::filesystem::exists(rollback_directory));
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+
+  application::core::VelocityExtensionMapArtifactResult preexisting;
+  if (rank == 0) {
+    preexisting = application::core::writeVelocityExtensionMapArtifact(
+        rollback_directory / "velocity_extension_maps",
+        application::core::VelocityExtensionMapArtifactContext{
+            .level_set_field_name = record.level_set_field_name,
+            .source_velocity_field_name =
+                record.source_velocity_field_name,
+            .target_velocity_field_name =
+                record.target_velocity_field_name,
+            .geometry_domain_id = record.geometry_domain_id,
+            .operator_tag = record.operator_tag,
+            .extension_method = record.extension_method,
+            .retained_side = activeSideName(record.retained_side),
+            .accepted_step = 1u,
+            .accepted_time = 0.1,
+            .time_step = 0.1,
+            .state_revision = 41u,
+            .isovalue = record.isovalue,
+            .extension_band_layers = record.extension_band_layers,
+            .enforce_wall_impermeability =
+                record.enforce_wall_impermeability,
+            .rank = rank,
+            .ranks = size,
+        },
+        *snapshot);
+    ASSERT_TRUE(preexisting.success) << preexisting.diagnostic;
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+  EXPECT_THROW(
+      writeAcceptedVelocityExtensionMapArtifacts(
+          params,
+          records,
+          1u,
+          0.1,
+          0.1,
+          41u,
+          svmp::MeshComm::world(),
+          accepted_maps),
+      std::runtime_error);
+  EXPECT_TRUE(accepted_maps.empty());
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (rank == 0) {
+    std::size_t json_files = 0u;
+    for (const auto& entry : std::filesystem::directory_iterator(
+             rollback_directory / "velocity_extension_maps")) {
+      json_files += entry.path().extension() == ".json" ? 1u : 0u;
+    }
+    EXPECT_EQ(json_files, 1u)
+        << "The successful remote shard must be removed after any-rank publication failure.";
+    std::error_code cleanup_error;
+    std::filesystem::remove_all(rollback_directory, cleanup_error);
+    EXPECT_FALSE(cleanup_error);
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+
+  params.general_simulation_parameters.save_results_in_folder.set(
+      success_directory.string());
+  ASSERT_NO_THROW(writeAcceptedVelocityExtensionMapArtifacts(
+      params,
+      records,
+      2u,
+      0.2,
+      0.1,
+      42u,
+      svmp::MeshComm::world(),
+      accepted_maps));
+  EXPECT_EQ(accepted_maps.size(), 1u);
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (rank == 0) {
+    std::size_t json_files = 0u;
+    for (const auto& entry : std::filesystem::directory_iterator(
+             success_directory / "velocity_extension_maps")) {
+      if (entry.path().extension() != ".json") {
+        continue;
+      }
+      ++json_files;
+      std::ifstream input_stream(entry.path());
+      ASSERT_TRUE(input_stream.is_open());
+      const std::string contents{
+          std::istreambuf_iterator<char>{input_stream},
+          std::istreambuf_iterator<char>{}};
+      EXPECT_NE(contents.find(
+                    "\"schema\":\"svmp.velocity_extension_map.v1\""),
+                std::string::npos);
+      EXPECT_NE(contents.find("\"ranks\":2"), std::string::npos);
+    }
+    EXPECT_EQ(json_files, 2u);
+    std::error_code cleanup_error;
+    std::filesystem::remove_all(success_directory, cleanup_error);
+    EXPECT_FALSE(cleanup_error);
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
      ConservativePhaseArtifactPublishesOnceAfterCollectivePreflight)
 {
   int rank = 0;

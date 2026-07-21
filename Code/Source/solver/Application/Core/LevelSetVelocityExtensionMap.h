@@ -9,8 +9,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -185,6 +187,71 @@ private:
   WallCompatibleVelocityExtensionResult report_{};
   double wet_to_dry_amplification_{0.0};
 };
+
+struct VelocityExtensionMapChangeReport {
+  bool previous_available{false};
+  std::uint64_t previous_revision_key{0u};
+  bool revision_changed{false};
+  bool mesh_geometry_changed{false};
+  bool mesh_topology_changed{false};
+  bool mesh_ownership_changed{false};
+  bool mesh_numbering_changed{false};
+  bool free_surface_geometry_changed{false};
+  bool level_set_values_changed{false};
+  bool active_set_changed{false};
+  std::size_t common_owner_rows{0u};
+  std::size_t added_owner_rows{0u};
+  std::size_t removed_owner_rows{0u};
+  std::size_t changed_owner_rows{0u};
+  std::size_t component_assignment_changes{0u};
+  std::size_t row_decision_changes{0u};
+  std::size_t dependency_row_changes{0u};
+  std::size_t preview_values_compared{0u};
+  double maximum_coefficient_change{0.0};
+  double preview_l2_change{0.0};
+  double preview_linf_change{0.0};
+};
+
+struct VelocityExtensionMapArtifactContext {
+  std::string level_set_field_name{};
+  std::string source_velocity_field_name{};
+  std::string target_velocity_field_name{};
+  std::string geometry_domain_id{};
+  std::string operator_tag{};
+  std::string extension_method{};
+  std::string retained_side{};
+  std::uint64_t accepted_step{0u};
+  double accepted_time{0.0};
+  double time_step{0.0};
+  std::uint64_t state_revision{0u};
+  double isovalue{0.0};
+  int extension_band_layers{0};
+  bool enforce_wall_impermeability{false};
+  int rank{0};
+  int ranks{1};
+};
+
+struct VelocityExtensionMapArtifactResult {
+  bool success{false};
+  std::filesystem::path path{};
+  std::uintmax_t bytes{0u};
+  std::size_t owner_rows{0u};
+  std::size_t constraint_rows{0u};
+  std::string diagnostic{};
+};
+
+[[nodiscard]] VelocityExtensionMapChangeReport
+compareVelocityExtensionMapSnapshots(
+    const VelocityExtensionMapSnapshot& current,
+    const VelocityExtensionMapSnapshot* previous = nullptr);
+
+/** Atomically publish one accepted rank-local map shard without replacement. */
+[[nodiscard]] VelocityExtensionMapArtifactResult
+writeVelocityExtensionMapArtifact(
+    const std::filesystem::path& output_directory,
+    const VelocityExtensionMapArtifactContext& context,
+    const VelocityExtensionMapSnapshot& snapshot,
+    const VelocityExtensionMapSnapshot* previous = nullptr);
 
 [[nodiscard]] VelocityExtensionMapRevision velocityExtensionMapRevision(
     std::uint64_t mesh_geometry,

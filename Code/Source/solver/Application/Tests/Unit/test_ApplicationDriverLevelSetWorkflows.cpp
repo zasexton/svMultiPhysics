@@ -20,6 +20,9 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -3342,6 +3345,155 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_NE(topology_revision.key(), revision.key());
   EXPECT_NE(ownership_revision.key(), revision.key());
   EXPECT_NE(surface_revision.key(), revision.key());
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     VelocityExtensionMapArtifactRetainsRowsAndRevisionChanges)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  const auto mesh = makeWorkflowSkewedExtensionTriangleMesh();
+  std::vector<double> phi(mesh->n_vertices(), 0.0);
+  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
+  std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
+  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+    const auto point = workflowVertexPoint(*mesh, vertex);
+    phi[vertex] = point[0] - 0.5;
+    active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
+    source[2u * vertex] = 0.2;
+    source[2u * vertex + 1u] = -0.1;
+  }
+  const auto first_revision = application::core::velocityExtensionMapRevision(
+      11u, 12u, 13u, 14u, 15u, phi, active);
+  const auto first = application::core::buildVelocityExtensionMapSnapshot(
+      *mesh,
+      svmp::MeshComm::self(),
+      first_revision,
+      phi,
+      source,
+      2u,
+      active,
+      2u,
+      2u,
+      1,
+      false,
+      std::span<const WallVelocityExtensionConstraint>{});
+  ASSERT_TRUE(first);
+  ASSERT_EQ(first->report().bounded_fallback_rows, 1u);
+  ASSERT_EQ(first->report().coefficient_rejected_rows, 1u);
+
+  const auto output_directory =
+      std::filesystem::temp_directory_path() /
+      ("svmp_velocity_extension_artifact_" +
+       std::to_string(first_revision.key()));
+  std::error_code cleanup_error;
+  std::filesystem::remove_all(output_directory, cleanup_error);
+  ASSERT_FALSE(cleanup_error);
+  application::core::VelocityExtensionMapArtifactContext context{
+      .level_set_field_name = "phi",
+      .source_velocity_field_name = "Velocity",
+      .target_velocity_field_name = "LevelSetAdvectionVelocity",
+      .geometry_domain_id = "free_surface",
+      .operator_tag = "level_set",
+      .extension_method = "wall_compatible_normal",
+      .retained_side = "LevelSetNegative",
+      .accepted_step = 1u,
+      .accepted_time = 0.1,
+      .time_step = 0.1,
+      .state_revision = 101u,
+      .isovalue = 0.0,
+      .extension_band_layers = 1,
+      .enforce_wall_impermeability = false,
+      .rank = 0,
+      .ranks = 1,
+  };
+  const auto first_artifact =
+      application::core::writeVelocityExtensionMapArtifact(
+          output_directory, context, *first);
+  ASSERT_TRUE(first_artifact.success) << first_artifact.diagnostic;
+  EXPECT_EQ(first_artifact.owner_rows, mesh->n_vertices());
+  EXPECT_EQ(first_artifact.constraint_rows, 2u * mesh->n_vertices());
+  ASSERT_TRUE(std::filesystem::is_regular_file(first_artifact.path));
+  std::ifstream first_input(first_artifact.path);
+  ASSERT_TRUE(first_input.is_open());
+  const std::string first_json{
+      std::istreambuf_iterator<char>(first_input),
+      std::istreambuf_iterator<char>()};
+  EXPECT_NE(first_json.find("\"schema\":\"svmp.velocity_extension_map.v1\""),
+            std::string::npos);
+  EXPECT_NE(first_json.find("\"bounded_fallback_rows\":1"),
+            std::string::npos);
+  EXPECT_NE(first_json.find("\"coefficient_rejected\":true"),
+            std::string::npos);
+  EXPECT_NE(first_json.find("\"proposed_negative_weight_count\":1"),
+            std::string::npos);
+  EXPECT_NE(first_json.find("\"previous_available\":false"),
+            std::string::npos);
+
+  auto changed_phi = phi;
+  changed_phi[1] += 0.05;
+  auto changed_source = source;
+  for (auto& value : changed_source) {
+    value += 0.25;
+  }
+  const auto second_revision =
+      application::core::velocityExtensionMapRevision(
+          11u, 12u, 13u, 14u, 15u, changed_phi, active);
+  const auto second = application::core::buildVelocityExtensionMapSnapshot(
+      *mesh,
+      svmp::MeshComm::self(),
+      second_revision,
+      changed_phi,
+      changed_source,
+      2u,
+      active,
+      2u,
+      2u,
+      1,
+      false,
+      std::span<const WallVelocityExtensionConstraint>{});
+  ASSERT_TRUE(second);
+  const auto change = application::core::compareVelocityExtensionMapSnapshots(
+      *second, first.get());
+  EXPECT_TRUE(change.previous_available);
+  EXPECT_TRUE(change.revision_changed);
+  EXPECT_TRUE(change.level_set_values_changed);
+  EXPECT_EQ(change.common_owner_rows, mesh->n_vertices());
+  EXPECT_EQ(change.added_owner_rows, 0u);
+  EXPECT_EQ(change.removed_owner_rows, 0u);
+  EXPECT_EQ(change.preview_values_compared, 2u * mesh->n_vertices());
+  EXPECT_GT(change.preview_l2_change, 0.0);
+  EXPECT_GT(change.preview_linf_change, 0.0);
+
+  context.accepted_step = 2u;
+  context.accepted_time = 0.2;
+  context.state_revision = 102u;
+  const auto second_artifact =
+      application::core::writeVelocityExtensionMapArtifact(
+          output_directory, context, *second, first.get());
+  ASSERT_TRUE(second_artifact.success) << second_artifact.diagnostic;
+  std::ifstream second_input(second_artifact.path);
+  ASSERT_TRUE(second_input.is_open());
+  const std::string second_json{
+      std::istreambuf_iterator<char>(second_input),
+      std::istreambuf_iterator<char>()};
+  EXPECT_NE(second_json.find("\"previous_available\":true"),
+            std::string::npos);
+  EXPECT_NE(second_json.find("\"revision_changed\":true"),
+            std::string::npos);
+  EXPECT_NE(second_json.find("\"level_set_values\":true"),
+            std::string::npos);
+  const auto duplicate =
+      application::core::writeVelocityExtensionMapArtifact(
+          output_directory, context, *second, first.get());
+  EXPECT_FALSE(duplicate.success);
+  EXPECT_NE(duplicate.diagnostic.find("refuses to replace"),
+            std::string::npos);
+  cleanup_error.clear();
+  EXPECT_EQ(std::filesystem::remove_all(output_directory, cleanup_error), 3u);
+  EXPECT_FALSE(cleanup_error);
 #endif
 }
 

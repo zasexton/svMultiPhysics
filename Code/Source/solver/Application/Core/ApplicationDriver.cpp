@@ -1240,6 +1240,21 @@ struct LevelSetAdvectionVelocityRequest {
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
 };
 
+struct AcceptedVelocityExtensionMapRecord {
+  std::string level_set_field_name{};
+  std::string source_velocity_field_name{};
+  std::string target_velocity_field_name{};
+  std::string geometry_domain_id{};
+  std::string operator_tag{};
+  std::string extension_method{};
+  double isovalue{0.0};
+  int extension_band_layers{0};
+  bool enforce_wall_impermeability{false};
+  LevelSetActiveSide retained_side{LevelSetActiveSide::Negative};
+  std::shared_ptr<const application::core::VelocityExtensionMapSnapshot>
+      snapshot{};
+};
+
 std::vector<std::string> splitFaceNameList(std::string_view raw)
 {
   std::vector<std::string> names;
@@ -8308,7 +8323,8 @@ bool updateLevelSetAdvectionVelocitiesFromState(
     application::core::SimulationComponents& sim,
     const svmp::FE::systems::SystemStateView& state,
     const std::vector<LevelSetAdvectionVelocityRequest>& requests,
-    bool refresh_frozen_algebraic_map = true)
+    bool refresh_frozen_algebraic_map = true,
+    std::vector<AcceptedVelocityExtensionMapRecord>* refreshed_maps = nullptr)
 {
   if (!sim.fe_system || !sim.primary_mesh || requests.empty()) {
     return false;
@@ -8323,6 +8339,10 @@ bool updateLevelSetAdvectionVelocitiesFromState(
   const bool trace_updates =
       parseBoolEnv("SVMP_TRACE_LEVEL_SET_ADVECTION", false) ||
       application::core::oopTraceEnabled();
+
+  if (refreshed_maps != nullptr) {
+    refreshed_maps->clear();
+  }
 
   bool updated = false;
   for (const auto& request : requests) {
@@ -9068,6 +9088,22 @@ bool updateLevelSetAdvectionVelocitiesFromState(
           std::span<const svmp::FE::Real>(coefficients.data(),
                                           coefficients.size()));
     }
+    if (refreshed_maps != nullptr && algebraic_map_snapshot) {
+      refreshed_maps->push_back(AcceptedVelocityExtensionMapRecord{
+          .level_set_field_name = request.level_set_field_name,
+          .source_velocity_field_name = request.source_velocity_field_name,
+          .target_velocity_field_name = request.target_velocity_field_name,
+          .geometry_domain_id = request.domain_id,
+          .operator_tag = request.operator_tag,
+          .extension_method = request.extension_method,
+          .isovalue = request.isovalue,
+          .extension_band_layers = request.extension_band_layers,
+          .enforce_wall_impermeability =
+              request.enforce_wall_impermeability,
+          .retained_side = request.active_side,
+          .snapshot = algebraic_map_snapshot,
+      });
+    }
     updated = true;
     if (trace_updates) {
       application::core::oopCout()
@@ -9169,10 +9205,189 @@ bool updateLevelSetAdvectionVelocitiesFromState(
 bool updateLevelSetAdvectionVelocities(
     application::core::SimulationComponents& sim,
     svmp::FE::timestepping::TimeHistory& history,
-    const std::vector<LevelSetAdvectionVelocityRequest>& requests)
+    const std::vector<LevelSetAdvectionVelocityRequest>& requests,
+    std::vector<AcceptedVelocityExtensionMapRecord>* refreshed_maps = nullptr)
 {
   const auto state = stateViewForHistory(history);
-  return updateLevelSetAdvectionVelocitiesFromState(sim, state, requests);
+  return updateLevelSetAdvectionVelocitiesFromState(
+      sim, state, requests, true, refreshed_maps);
+}
+
+using AcceptedVelocityExtensionMapRegistry =
+    std::map<std::string,
+             std::shared_ptr<const
+                 application::core::VelocityExtensionMapSnapshot>>;
+
+std::string acceptedVelocityExtensionMapKey(
+    const AcceptedVelocityExtensionMapRecord& record)
+{
+  std::ostringstream key;
+  key << std::setprecision(std::numeric_limits<double>::max_digits10);
+  const auto append = [&](std::string_view value) {
+    key << value.size() << ':' << value << ';';
+  };
+  append(record.level_set_field_name);
+  append(record.source_velocity_field_name);
+  append(record.target_velocity_field_name);
+  append(record.geometry_domain_id);
+  append(record.operator_tag);
+  append(record.extension_method);
+  key << record.isovalue << ';' << record.extension_band_layers << ';'
+      << (record.enforce_wall_impermeability ? 1 : 0) << ';'
+      << static_cast<int>(record.retained_side);
+  return key.str();
+}
+
+std::uint64_t acceptedVelocityExtensionMapKeyFingerprint(
+    std::string_view key) noexcept
+{
+  std::uint64_t fingerprint = 1469598103934665603ull;
+  for (const char character : key) {
+    fingerprint ^=
+        static_cast<std::uint64_t>(static_cast<unsigned char>(character));
+    fingerprint *= 1099511628211ull;
+  }
+  return fingerprint == 0u ? 1u : fingerprint;
+}
+
+void writeAcceptedVelocityExtensionMapArtifacts(
+    const Parameters& params,
+    const std::vector<AcceptedVelocityExtensionMapRecord>& records,
+    std::uint64_t accepted_step,
+    double accepted_time,
+    double time_step,
+    std::uint64_t state_revision,
+    const svmp::MeshComm& comm,
+    AcceptedVelocityExtensionMapRegistry& accepted_maps)
+{
+  const double local_record_count = static_cast<double>(records.size());
+  if (globalMinDouble(local_record_count, comm) !=
+      globalMaxDouble(local_record_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted velocity-extension map count differs across ranks.");
+  }
+  if (records.empty()) {
+    return;
+  }
+
+  std::filesystem::path output_directory = ".";
+  if (params.general_simulation_parameters.save_results_in_folder.defined() &&
+      !params.general_simulation_parameters.save_results_in_folder
+           .value()
+           .empty()) {
+    output_directory =
+        params.general_simulation_parameters.save_results_in_folder.value();
+  }
+  output_directory /= "velocity_extension_maps";
+
+  bool local_preflight_failure = accepted_step == 0u ||
+                                 !std::isfinite(accepted_time) ||
+                                 !std::isfinite(time_step) || time_step < 0.0;
+  std::vector<std::string> record_keys;
+  record_keys.reserve(records.size());
+  std::set<std::string> unique_record_keys;
+  for (const auto& record : records) {
+    const auto key = acceptedVelocityExtensionMapKey(record);
+    record_keys.push_back(key);
+    local_preflight_failure =
+        local_preflight_failure || !record.snapshot ||
+        !unique_record_keys.insert(key).second;
+    const auto fingerprint =
+        acceptedVelocityExtensionMapKeyFingerprint(key);
+    const auto [minimum_fingerprint, maximum_fingerprint] =
+        globalMinMaxUint64(fingerprint, comm);
+    local_preflight_failure = local_preflight_failure ||
+                              minimum_fingerprint != maximum_fingerprint;
+  }
+  if (globalAnyBool(local_preflight_failure, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted velocity-extension artifact preflight failed on at least one rank.");
+  }
+
+  std::vector<application::core::VelocityExtensionMapArtifactResult>
+      artifacts;
+  artifacts.reserve(records.size());
+  for (std::size_t index = 0u; index < records.size(); ++index) {
+    const auto& record = records[index];
+    const auto previous = accepted_maps.find(record_keys[index]);
+    const auto* previous_snapshot =
+        previous == accepted_maps.end() ? nullptr : previous->second.get();
+    const application::core::VelocityExtensionMapArtifactContext context{
+        .level_set_field_name = record.level_set_field_name,
+        .source_velocity_field_name = record.source_velocity_field_name,
+        .target_velocity_field_name = record.target_velocity_field_name,
+        .geometry_domain_id = record.geometry_domain_id,
+        .operator_tag = record.operator_tag,
+        .extension_method = record.extension_method,
+        .retained_side = activeSideName(record.retained_side),
+        .accepted_step = accepted_step,
+        .accepted_time = accepted_time,
+        .time_step = time_step,
+        .state_revision = state_revision,
+        .isovalue = record.isovalue,
+        .extension_band_layers = record.extension_band_layers,
+        .enforce_wall_impermeability =
+            record.enforce_wall_impermeability,
+        .rank = comm.rank(),
+        .ranks = comm.size(),
+    };
+    artifacts.push_back(
+        application::core::writeVelocityExtensionMapArtifact(
+            output_directory,
+            context,
+            *record.snapshot,
+            previous_snapshot));
+  }
+
+  const bool local_publication_failure = std::any_of(
+      artifacts.begin(), artifacts.end(), [](const auto& artifact) {
+        return !artifact.success;
+      });
+  if (globalAnyBool(local_publication_failure, comm)) {
+    bool local_rollback_failure = false;
+    for (const auto& artifact : artifacts) {
+      if (!artifact.success || artifact.path.empty()) {
+        continue;
+      }
+      std::error_code removal_error;
+      if (!std::filesystem::remove(artifact.path, removal_error) ||
+          removal_error) {
+        local_rollback_failure = true;
+      }
+    }
+    if (globalAnyBool(local_rollback_failure, comm)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted velocity-extension artifact publication and collective rollback both failed.");
+    }
+    std::string local_diagnostic;
+    for (const auto& artifact : artifacts) {
+      if (!artifact.success) {
+        local_diagnostic = artifact.diagnostic;
+        break;
+      }
+    }
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted velocity-extension artifact publication failed: " +
+        local_diagnostic);
+  }
+
+  for (std::size_t index = 0u; index < records.size(); ++index) {
+    accepted_maps[record_keys[index]] = records[index].snapshot;
+    if (comm.rank() == 0) {
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] Accepted velocity-extension map artifact"
+          << " diagnostic=velocity_extension_map_artifact"
+          << " field='" << records[index].target_velocity_field_name << "'"
+          << " step=" << accepted_step
+          << " map_revision=" << records[index].snapshot->revision().key()
+          << " ranks=" << comm.size()
+          << " owner_rows_rank0=" << artifacts[index].owner_rows
+          << " constraint_rows_rank0=" << artifacts[index].constraint_rows
+          << " bytes_rank0=" << artifacts[index].bytes
+          << " path_rank0='" << artifacts[index].path.string() << "'"
+          << " outcome=written" << std::endl;
+    }
+  }
 }
 
 ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
@@ -13444,8 +13659,23 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       /*honor_cadence=*/false,
       curvature_projection_cache.get(),
       /*reuse_cached_on_projection_failure=*/false);
+  std::vector<AcceptedVelocityExtensionMapRecord>
+      steady_velocity_extension_maps;
   (void)updateLevelSetAdvectionVelocities(
-      sim, *sim.time_history, steady_level_set_advection_velocity);
+      sim,
+      *sim.time_history,
+      steady_level_set_advection_velocity,
+      &steady_velocity_extension_maps);
+  AcceptedVelocityExtensionMapRegistry steady_accepted_extension_maps;
+  writeAcceptedVelocityExtensionMapArtifacts(
+      params,
+      steady_velocity_extension_maps,
+      /*accepted_step=*/1u,
+      solve_time,
+      sim.time_history->dt(),
+      sim.time_history->u().valueRevision(),
+      activeFESystemCommunicator(*sim.fe_system),
+      steady_accepted_extension_maps);
   const auto steady_solution =
       gatherFeOrderedSolution(sim.time_history->u());
   const auto steady_contact_stages =
@@ -13756,6 +13986,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
 
   svmp::FE::timestepping::TimeLoopCallbacks callbacks{};
   std::vector<svmp::FE::Real> accepted_pressure_update_previous_solution;
+  AcceptedVelocityExtensionMapRegistry accepted_velocity_extension_maps;
+  const auto velocity_extension_artifact_comm =
+      activeFESystemCommunicator(*sim.fe_system);
   callbacks.on_step_start = [&](const svmp::FE::timestepping::TimeHistory& h) {
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_start step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
@@ -14233,8 +14466,22 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         /*honor_cadence=*/false,
         curvature_projection_cache.get(),
         /*reuse_cached_on_projection_failure=*/false);
+    std::vector<AcceptedVelocityExtensionMapRecord>
+        accepted_extension_map_records;
     (void)updateLevelSetAdvectionVelocities(
-        sim, h, level_set_advection_velocity);
+        sim,
+        h,
+        level_set_advection_velocity,
+        &accepted_extension_map_records);
+    writeAcceptedVelocityExtensionMapArtifacts(
+        params,
+        accepted_extension_map_records,
+        static_cast<std::uint64_t>(h.stepIndex()),
+        h.time(),
+        h.dt(),
+        h.u().valueRevision(),
+        velocity_extension_artifact_comm,
+        accepted_velocity_extension_maps);
     recordAcceptedFreeSurfaceDiscreteFunctionals(
         sim,
         static_cast<std::uint64_t>(h.stepIndex()),
