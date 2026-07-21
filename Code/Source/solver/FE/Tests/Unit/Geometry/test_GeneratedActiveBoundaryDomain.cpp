@@ -852,6 +852,8 @@ TEST(FreeSurfaceGeometrySnapshot,
                   snapshot->ledger()
                       .piecewise_affine_moment_certificate_count +
                   snapshot->ledger()
+                      .backend_reference_moment_certificate_count +
+                  snapshot->ledger()
                       .stored_generated_moment_certificate_count,
               snapshot->ledger().rule_count);
     EXPECT_EQ(snapshot->ledger().stored_generated_moment_certificate_count,

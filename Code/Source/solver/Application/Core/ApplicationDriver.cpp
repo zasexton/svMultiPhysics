@@ -10005,6 +10005,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << geometry_ledger.centroid_moment_certificate_count
         << " piecewise_affine_moment_certificates="
         << geometry_ledger.piecewise_affine_moment_certificate_count
+        << " backend_reference_moment_certificates="
+        << geometry_ledger.backend_reference_moment_certificate_count
         << " stored_generated_moment_certificates="
         << geometry_ledger.stored_generated_moment_certificate_count
         << " validated_rule_polynomial_moments="

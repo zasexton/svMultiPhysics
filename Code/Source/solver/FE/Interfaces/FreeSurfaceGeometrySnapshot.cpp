@@ -942,7 +942,15 @@ void validateRule(
             (positiveRole(record.role) && level_set < -scaled_tolerance)) {
             ++ledger.invalid_phase_point_count;
             throw std::invalid_argument(
-                "retained free-surface point has the wrong declared phase sign");
+                "retained free-surface point has the wrong declared phase sign"
+                "; role=" + std::to_string(static_cast<int>(record.role)) +
+                "; topology_id=" + record.topology_id +
+                "; point_index=" + std::to_string(q) +
+                "; xi=(" + std::to_string(physical.reference_point[0]) +
+                "," + std::to_string(physical.reference_point[1]) +
+                "," + std::to_string(physical.reference_point[2]) + ")" +
+                "; level_set=" + std::to_string(level_set) +
+                "; tolerance=" + std::to_string(scaled_tolerance));
         }
         if (record.role == FreeSurfaceGeometryRuleRole::Interface ||
             record.role == FreeSurfaceGeometryRuleRole::Contact) {
@@ -1385,13 +1393,14 @@ makeReferenceSubcellMomentCertificate(
 }
 
 [[nodiscard]] FreeSurfaceGeometryMomentCertificate
-makeStoredGeneratedMomentCertificate(
+makeBackendReferenceMomentCertificate(
+    std::span<const CutInterfaceQuadraturePoint> points,
     const geometry::CutQuadratureRule& rule,
     int ambient_dimension)
 {
     std::vector<MomentCertificateSample> samples;
-    samples.reserve(rule.points.size());
-    for (const auto& point : rule.points) {
+    samples.reserve(points.size());
+    for (const auto& point : points) {
         samples.push_back(MomentCertificateSample{
             .point = rule.frame == geometry::CutGeometryFrame::Reference
                          ? point.point
@@ -1402,7 +1411,7 @@ makeStoredGeneratedMomentCertificate(
         samples,
         ambient_dimension,
         rule.exact_polynomial_order,
-        FreeSurfaceGeometryMomentCertificateSource::StoredGeneratedGeometry);
+        FreeSurfaceGeometryMomentCertificateSource::BackendReferenceQuadrature);
 }
 
 [[nodiscard]] FreeSurfaceGeometryMomentCertificate
@@ -1432,6 +1441,30 @@ makeParentCellMomentCertificate(const assembly::IMeshAccess& mesh,
         FreeSurfaceGeometryMomentCertificateSource::ParentReferenceCell);
 }
 
+void requireUniqueAuthoritativeSourceIds(
+    const LevelSetInterfaceDomain& interface_domain)
+{
+    std::unordered_set<std::uint64_t> volume_source_ids;
+    volume_source_ids.reserve(interface_domain.volumeRegions().size());
+    for (const auto& region : interface_domain.volumeRegions()) {
+        if (region.active() &&
+            !volume_source_ids.insert(region.stable_id).second) {
+            throw std::invalid_argument(
+                "free-surface snapshot has duplicate authoritative volume-region stable ids");
+        }
+    }
+
+    std::unordered_set<std::uint64_t> interface_source_ids;
+    interface_source_ids.reserve(interface_domain.fragments().size());
+    for (const auto& fragment : interface_domain.fragments()) {
+        if (fragment.active() &&
+            !interface_source_ids.insert(fragment.stable_id).second) {
+            throw std::invalid_argument(
+                "free-surface snapshot has duplicate authoritative interface-fragment stable ids");
+        }
+    }
+}
+
 [[nodiscard]] FreeSurfaceGeometryMomentCertificate
 makeVolumeRegionMomentCertificate(
     const CutInterfaceVolumeRegion& region,
@@ -1459,7 +1492,8 @@ makeVolumeRegionMomentCertificate(
             rule.exact_polynomial_order,
             FreeSurfaceGeometryMomentCertificateSource::RegionMeasureCentroid);
     }
-    return makeStoredGeneratedMomentCertificate(rule, ambient_dimension);
+    throw std::invalid_argument(
+        "free-surface volume rule lacks independent source geometry for its polynomial-moment certificate");
 }
 
 [[nodiscard]] FreeSurfaceGeometryMomentCertificate
@@ -1468,6 +1502,11 @@ makeInterfaceFragmentMomentCertificate(
     const geometry::CutQuadratureRule& rule,
     int ambient_dimension)
 {
+    if (fragment.moment_certificate_order >= rule.exact_polynomial_order &&
+        !fragment.moment_certificate_points.empty()) {
+        return makeBackendReferenceMomentCertificate(
+            fragment.moment_certificate_points, rule, ambient_dimension);
+    }
     if (rule.frame == geometry::CutGeometryFrame::Reference &&
         fragment.kind != CutInterfaceFragmentKind::CurvedPatch) {
         std::vector<std::array<Real, 3>> vertices;
@@ -1481,7 +1520,8 @@ makeInterfaceFragmentMomentCertificate(
             rule,
             ambient_dimension);
     }
-    return makeStoredGeneratedMomentCertificate(rule, ambient_dimension);
+    throw std::invalid_argument(
+        "curved free-surface interface rule lacks independent backend reference quadrature");
 }
 
 [[nodiscard]] FreeSurfaceGeometryMomentCertificate
@@ -1501,7 +1541,8 @@ makeContactFragmentMomentCertificate(
             rule,
             ambient_dimension);
     }
-    return makeStoredGeneratedMomentCertificate(rule, ambient_dimension);
+    throw std::invalid_argument(
+        "free-surface contact rule lacks independent source geometry for its polynomial-moment certificate");
 }
 
 [[nodiscard]] FreeSurfaceGeometryMomentCertificate
@@ -1518,7 +1559,8 @@ makeActiveBoundaryFragmentMomentCertificate(
             rule,
             ambient_dimension);
     }
-    return makeStoredGeneratedMomentCertificate(rule, ambient_dimension);
+    throw std::invalid_argument(
+        "free-surface active-boundary rule lacks independent source geometry for its polynomial-moment certificate");
 }
 
 void validateRuleMomentCertificate(
@@ -1548,6 +1590,9 @@ void validateRuleMomentCertificate(
         break;
     case FreeSurfaceGeometryMomentCertificateSource::PiecewiseAffineGeometry:
         ++ledger.piecewise_affine_moment_certificate_count;
+        break;
+    case FreeSurfaceGeometryMomentCertificateSource::BackendReferenceQuadrature:
+        ++ledger.backend_reference_moment_certificate_count;
         break;
     case FreeSurfaceGeometryMomentCertificateSource::StoredGeneratedGeometry:
         ++ledger.stored_generated_moment_certificate_count;
@@ -1591,7 +1636,18 @@ void validateRuleMomentCertificate(
         if (error > tolerance) {
             ++ledger.false_achieved_order_count;
             throw std::invalid_argument(
-                "retained free-surface quadrature does not reproduce its authoritative polynomial-moment certificate");
+                "retained free-surface quadrature does not reproduce its authoritative polynomial-moment certificate"
+                "; role=" +
+                std::to_string(static_cast<int>(record.role)) +
+                "; topology_id=" + record.topology_id +
+                "; certificate_source=" +
+                std::to_string(static_cast<int>(certificate.source)) +
+                "; moment_index=" + std::to_string(moment_index) +
+                "; actual=" + std::to_string(actual) +
+                "; certified=" + std::to_string(certified.value) +
+                "; rule_measure=" + std::to_string(rule.measure) +
+                "; error=" + std::to_string(error) +
+                "; tolerance=" + std::to_string(tolerance));
         }
     }
 }
@@ -2446,6 +2502,8 @@ std::size_t FreeSurfaceGeometrySnapshot::residentBytes() const noexcept
         bytes += fragment.vertices.capacity() * sizeof(CutInterfaceVertex);
         bytes += fragment.quadrature_points.capacity() *
                  sizeof(CutInterfaceQuadraturePoint);
+        bytes += fragment.moment_certificate_points.capacity() *
+                 sizeof(CutInterfaceQuadraturePoint);
     }
     bytes += interface_domain_.volumeRegions().capacity() *
              sizeof(CutInterfaceVolumeRegion);
@@ -2569,6 +2627,7 @@ buildFreeSurfaceGeometrySnapshot(
     FreeSurfaceGeometryValidationLedger ledger;
     std::vector<FreeSurfaceGeometryRuleRecord> records;
 
+    requireUniqueAuthoritativeSourceIds(interface_domain);
     auto volume_rules = interface_domain.volumeQuadratureRules();
     auto interface_rules = interface_domain.interfaceQuadratureRules();
     records.reserve(volume_rules.size() + interface_rules.size());

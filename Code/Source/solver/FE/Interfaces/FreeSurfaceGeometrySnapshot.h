@@ -55,6 +55,7 @@ enum class FreeSurfaceGeometryMomentCertificateSource : std::uint8_t {
     ParentReferenceCell,
     RegionMeasureCentroid,
     PiecewiseAffineGeometry,
+    BackendReferenceQuadrature,
     StoredGeneratedGeometry
 };
 
@@ -164,6 +165,7 @@ struct FreeSurfaceGeometryValidationLedger {
     std::size_t parent_cell_moment_certificate_count{0};
     std::size_t centroid_moment_certificate_count{0};
     std::size_t piecewise_affine_moment_certificate_count{0};
+    std::size_t backend_reference_moment_certificate_count{0};
     std::size_t stored_generated_moment_certificate_count{0};
     std::size_t validated_rule_polynomial_moment_count{0};
     std::size_t validated_polynomial_moment_count{0};

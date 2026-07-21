@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -1161,30 +1162,103 @@ void appendTriangleSurfaceQuadratureSeeds(
     const std::array<Real, 3>& a,
     const std::array<Real, 3>& b,
     const std::array<Real, 3>& c,
+    const std::vector<std::array<Real, 4>>& unit_rule,
     std::vector<std::pair<std::array<Real, 3>, Real>>& seeds)
 {
-    const Real area = Real{0.5} * norm3(cross(subtract(b, a), subtract(c, a)));
-    if (!(area > Real{0.0}) || !std::isfinite(area)) {
+    const Real area =
+        Real{0.5} * norm3(cross(subtract(b, a), subtract(c, a)));
+    if (!(area > Real{0.0}) || !std::isfinite(area) ||
+        unit_rule.empty()) {
         return;
     }
-    constexpr Real high = Real{2.0} / Real{3.0};
-    constexpr Real low = Real{1.0} / Real{6.0};
-    const Real weight = area / Real{3.0};
-    const auto point = [](const std::array<Real, 3>& v0,
-                          const std::array<Real, 3>& v1,
-                          const std::array<Real, 3>& v2,
-                          Real w0,
-                          Real w1,
-                          Real w2) {
-        return std::array<Real, 3>{{
-            w0 * v0[0] + w1 * v1[0] + w2 * v2[0],
-            w0 * v0[1] + w1 * v1[1] + w2 * v2[1],
-            w0 * v0[2] + w1 * v1[2] + w2 * v2[2],
+    for (const auto& sample : unit_rule) {
+        const std::array<Real, 3> point{{
+            sample[0] * a[0] + sample[1] * b[0] + sample[2] * c[0],
+            sample[0] * a[1] + sample[1] * b[1] + sample[2] * c[1],
+            sample[0] * a[2] + sample[1] * b[2] + sample[2] * c[2],
         }};
+        const Real weight = sample[3] * area;
+        if (std::isfinite(weight) && weight > Real{0.0}) {
+            seeds.push_back({point, weight});
+        }
+    }
+}
+
+[[nodiscard]] std::vector<std::array<Real, 4>>
+positiveTriangleSurfaceUnitRule(int point_count)
+{
+    std::vector<std::array<Real, 4>> rule;
+    const auto append_three = [&](Real repeated,
+                                  Real distinct,
+                                  Real weight) {
+        rule.push_back({{distinct, repeated, repeated, weight}});
+        rule.push_back({{repeated, distinct, repeated, weight}});
+        rule.push_back({{repeated, repeated, distinct, weight}});
     };
-    seeds.push_back({point(a, b, c, high, low, low), weight});
-    seeds.push_back({point(a, b, c, low, high, low), weight});
-    seeds.push_back({point(a, b, c, low, low, high), weight});
+    const auto append_six = [&](Real first,
+                                Real second,
+                                Real third,
+                                Real weight) {
+        rule.push_back({{first, second, third, weight}});
+        rule.push_back({{first, third, second, weight}});
+        rule.push_back({{second, first, third, weight}});
+        rule.push_back({{second, third, first, weight}});
+        rule.push_back({{third, first, second, weight}});
+        rule.push_back({{third, second, first, weight}});
+    };
+    if (point_count == 3) {
+        append_three(Real{1.0} / Real{6.0},
+                     Real{2.0} / Real{3.0},
+                     Real{1.0} / Real{3.0});
+        return rule;
+    }
+    if (point_count == 7) {
+        rule.push_back({{Real{1.0} / Real{3.0},
+                         Real{1.0} / Real{3.0},
+                         Real{1.0} / Real{3.0},
+                         Real{0.225}}});
+        append_three(Real{0.470142064105115},
+                     Real{0.059715871789770},
+                     Real{0.132394152788506});
+        append_three(Real{0.101286507323456},
+                     Real{0.797426985353087},
+                     Real{0.125939180544827});
+        return rule;
+    }
+    if (point_count == 12) {
+        append_three(Real{0.063089014491502},
+                     Real{0.873821971016996},
+                     Real{0.050844906370207});
+        append_three(Real{0.249286745170910},
+                     Real{0.501426509658179},
+                     Real{0.116786275726379});
+        append_six(Real{0.636502499121399},
+                   Real{0.310352451033785},
+                   Real{0.053145049844816},
+                   Real{0.082851075618374});
+        return rule;
+    }
+    if (point_count == 16) {
+        rule.push_back({{Real{1.0} / Real{3.0},
+                         Real{1.0} / Real{3.0},
+                         Real{1.0} / Real{3.0},
+                         Real{0.144315607677787}}});
+        append_three(Real{0.459292588292723},
+                     Real{0.081414823414554},
+                     Real{0.095091634267285});
+        append_three(Real{0.170569307751760},
+                     Real{0.658861384496480},
+                     Real{0.103217370534718});
+        append_three(Real{0.050547228317031},
+                     Real{0.898905543365938},
+                     Real{0.032458497623198});
+        append_six(Real{0.008394777409958},
+                   Real{0.263112829634638},
+                   Real{0.728492392955404},
+                   Real{0.027230314174435});
+        return rule;
+    }
+    return {};
 }
 
 [[nodiscard]] bool matchPolishedRootsToBaseVertices(
@@ -1638,6 +1712,69 @@ void addUniqueParameter(std::vector<Real>& parameters,
             {Real{0.5} + offset, Real{5.0} / Real{18.0}}};
 }
 
+[[nodiscard]] std::vector<std::pair<Real, Real>>
+gaussLegendreUnitRulePointCount(int point_count)
+{
+    if (point_count <= 0) {
+        return {};
+    }
+    std::vector<std::pair<Real, Real>> rule(
+        static_cast<std::size_t>(point_count));
+    const Real pi = std::acos(Real{-1.0});
+    const int root_count = (point_count + 1) / 2;
+    for (int i = 0; i < root_count; ++i) {
+        Real root = std::cos(
+            pi * (static_cast<Real>(i) + Real{0.75}) /
+            (static_cast<Real>(point_count) + Real{0.5}));
+        Real derivative = Real{0.0};
+        for (int iteration = 0; iteration < 64; ++iteration) {
+            Real previous = Real{1.0};
+            Real current = root;
+            for (int degree = 2; degree <= point_count; ++degree) {
+                const Real next =
+                    ((Real{2.0} * static_cast<Real>(degree) - Real{1.0}) *
+                         root * current -
+                     (static_cast<Real>(degree) - Real{1.0}) * previous) /
+                    static_cast<Real>(degree);
+                previous = current;
+                current = next;
+            }
+            derivative = static_cast<Real>(point_count) *
+                         (root * current - previous) /
+                         (root * root - Real{1.0});
+            const Real update = current / derivative;
+            root -= update;
+            if (std::abs(update) <=
+                Real{8.0} * std::numeric_limits<Real>::epsilon()) {
+                break;
+            }
+        }
+        Real previous = Real{1.0};
+        Real current = root;
+        for (int degree = 2; degree <= point_count; ++degree) {
+            const Real next =
+                ((Real{2.0} * static_cast<Real>(degree) - Real{1.0}) *
+                     root * current -
+                 (static_cast<Real>(degree) - Real{1.0}) * previous) /
+                static_cast<Real>(degree);
+            previous = current;
+            current = next;
+        }
+        derivative = static_cast<Real>(point_count) *
+                     (root * current - previous) /
+                     (root * root - Real{1.0});
+        const Real weight =
+            Real{1.0} /
+            ((Real{1.0} - root * root) * derivative * derivative);
+        const auto left = static_cast<std::size_t>(i);
+        const auto right =
+            static_cast<std::size_t>(point_count - 1 - i);
+        rule[left] = {Real{0.5} * (Real{1.0} - root), weight};
+        rule[right] = {Real{0.5} * (Real{1.0} + root), weight};
+    }
+    return rule;
+}
+
 [[nodiscard]] int planarVolumeQuadratureOrder(
     const interfaces::CutInterfaceDomainRequest& request) noexcept
 {
@@ -1929,6 +2066,683 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
     return polishRootOnSegment(input, request, best_a, best_b, root, iterations);
 }
 
+enum class PlanarLineRuleFailure {
+    None,
+    SearchSegment,
+    RootSolve,
+    Gradient,
+    Weight,
+    MomentConvergence,
+};
+
+struct PlanarLineRuleResult {
+    bool ok{false};
+    PlanarLineRuleFailure failure{PlanarLineRuleFailure::None};
+    Real failed_parameter{0.0};
+    std::vector<interfaces::CutInterfaceQuadraturePoint> points{};
+    std::array<Real, 3> accumulated_normal{{0.0, 0.0, 0.0}};
+    Real measure{0.0};
+    Real max_root_residual{0.0};
+    Real min_gradient_norm{std::numeric_limits<Real>::infinity()};
+};
+
+template <typename SampleBuilder>
+[[nodiscard]] PlanarLineRuleResult buildPlanarLineRule(
+    const std::vector<std::pair<Real, Real>>& rule,
+    SampleBuilder&& build_sample)
+{
+    PlanarLineRuleResult result;
+    result.points.reserve(rule.size());
+    for (const auto& [parameter, unit_weight] : rule) {
+        interfaces::CutInterfaceQuadraturePoint point;
+        PlanarLineRuleFailure failure = PlanarLineRuleFailure::RootSolve;
+        if (!build_sample(parameter, point, failure)) {
+            result.failure = failure;
+            result.failed_parameter = parameter;
+            return result;
+        }
+        point.weight = unit_weight * point.reference_measure_factor;
+        if (!std::isfinite(point.weight) || !(point.weight > Real{0.0})) {
+            result.failure = PlanarLineRuleFailure::Weight;
+            result.failed_parameter = parameter;
+            return result;
+        }
+        result.max_root_residual = std::max(
+            result.max_root_residual, point.level_set_residual);
+        result.min_gradient_norm = std::min(
+            result.min_gradient_norm, point.gradient_norm);
+        for (std::size_t component = 0u; component < 3u; ++component) {
+            result.accumulated_normal[component] +=
+                point.normal[component] * point.weight;
+        }
+        result.measure += point.weight;
+        result.points.push_back(point);
+    }
+    if (!std::isfinite(result.measure) || !(result.measure > Real{0.0})) {
+        result.failure = PlanarLineRuleFailure::Weight;
+        return result;
+    }
+    result.ok = true;
+    return result;
+}
+
+[[nodiscard]] Real integerPowerNonnegative(Real value, int exponent) noexcept
+{
+    Real result{1.0};
+    for (int i = 0; i < exponent; ++i) {
+        result *= value;
+    }
+    return result;
+}
+
+[[nodiscard]] bool planarLineMomentRulesAgree(
+    const PlanarLineRuleResult& production,
+    const PlanarLineRuleResult& reference,
+    int polynomial_order,
+    Real tolerance) noexcept
+{
+    const auto moments_agree =
+        [&](int x_degree, int y_degree, int z_degree) {
+            Real production_moment{0.0};
+            Real reference_moment{0.0};
+            Real absolute_sum{0.0};
+            for (const auto& point : production.points) {
+                const Real contribution =
+                    point.weight *
+                    integerPowerNonnegative(point.point[0], x_degree) *
+                    integerPowerNonnegative(point.point[1], y_degree) *
+                    integerPowerNonnegative(point.point[2], z_degree);
+                production_moment += contribution;
+                absolute_sum += std::abs(contribution);
+            }
+            for (const auto& point : reference.points) {
+                reference_moment +=
+                    point.weight *
+                    integerPowerNonnegative(point.point[0], x_degree) *
+                    integerPowerNonnegative(point.point[1], y_degree) *
+                    integerPowerNonnegative(point.point[2], z_degree);
+            }
+            const Real scale = std::max(
+                {Real{1.0}, std::abs(reference_moment), absolute_sum});
+            const Real allowed =
+                tolerance + Real{4096.0} *
+                                std::numeric_limits<Real>::epsilon() * scale;
+            return std::abs(production_moment - reference_moment) <= allowed;
+        };
+    for (int total_degree = 0; total_degree <= polynomial_order;
+         ++total_degree) {
+        for (int x_degree = 0; x_degree <= total_degree; ++x_degree) {
+            const int y_degree = total_degree - x_degree;
+            if (!moments_agree(x_degree, y_degree, 0)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+struct SurfacePatchRuleResult {
+    bool ok{false};
+    PlanarLineRuleFailure failure{PlanarLineRuleFailure::None};
+    std::array<Real, 3> failed_seed{{0.0, 0.0, 0.0}};
+    bool saw_search_segment{false};
+    bool saw_root{false};
+    bool saw_gradient{false};
+    std::vector<interfaces::CutInterfaceQuadraturePoint> points{};
+    std::array<Real, 3> accumulated_normal{{0.0, 0.0, 0.0}};
+    Real measure{0.0};
+    Real max_root_residual{0.0};
+    Real min_gradient_norm{std::numeric_limits<Real>::infinity()};
+    Real maximum_moment_error{0.0};
+    Real maximum_moment_scaled_error{0.0};
+};
+
+[[nodiscard]] bool surfacePatchMomentRulesAgree(
+    const SurfacePatchRuleResult& production,
+    const SurfacePatchRuleResult& reference,
+    int polynomial_order,
+    Real tolerance,
+    Real& maximum_error,
+    Real& maximum_scaled_error) noexcept
+{
+    const auto moments_agree =
+        [&](int x_degree, int y_degree, int z_degree) {
+            Real production_moment{0.0};
+            Real reference_moment{0.0};
+            Real absolute_sum{0.0};
+            for (const auto& point : production.points) {
+                const Real contribution =
+                    point.weight *
+                    integerPowerNonnegative(point.point[0], x_degree) *
+                    integerPowerNonnegative(point.point[1], y_degree) *
+                    integerPowerNonnegative(point.point[2], z_degree);
+                production_moment += contribution;
+                absolute_sum += std::abs(contribution);
+            }
+            for (const auto& point : reference.points) {
+                reference_moment +=
+                    point.weight *
+                    integerPowerNonnegative(point.point[0], x_degree) *
+                    integerPowerNonnegative(point.point[1], y_degree) *
+                    integerPowerNonnegative(point.point[2], z_degree);
+            }
+            const Real scale = std::max(
+                {Real{1.0}, std::abs(reference_moment), absolute_sum});
+            const Real allowed =
+                std::max(tolerance * scale,
+                         Real{64.0} *
+                             std::numeric_limits<Real>::epsilon() * scale);
+            const Real error =
+                std::abs(production_moment - reference_moment);
+            maximum_error = std::max(maximum_error, error);
+            maximum_scaled_error = std::max(
+                maximum_scaled_error, error / allowed);
+            return error <= allowed;
+        };
+    for (int total_degree = 0; total_degree <= polynomial_order;
+         ++total_degree) {
+        for (int x_degree = 0; x_degree <= total_degree; ++x_degree) {
+            for (int y_degree = 0;
+                 y_degree <= total_degree - x_degree;
+                 ++y_degree) {
+                const int z_degree = total_degree - x_degree - y_degree;
+                if (!moments_agree(x_degree, y_degree, z_degree)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+void mergeSurfacePatchRule(SurfacePatchRuleResult& destination,
+                           SurfacePatchRuleResult source)
+{
+    destination.points.insert(destination.points.end(),
+                              std::make_move_iterator(source.points.begin()),
+                              std::make_move_iterator(source.points.end()));
+    for (std::size_t component = 0u; component < 3u; ++component) {
+        destination.accumulated_normal[component] +=
+            source.accumulated_normal[component];
+    }
+    destination.measure += source.measure;
+    destination.max_root_residual = std::max(
+        destination.max_root_residual, source.max_root_residual);
+    destination.min_gradient_norm = std::min(
+        destination.min_gradient_norm, source.min_gradient_norm);
+}
+
+void copySurfacePatchFailure(SurfacePatchRuleResult& destination,
+                             const SurfacePatchRuleResult& source)
+{
+    destination.failure = source.failure;
+    destination.failed_seed = source.failed_seed;
+    destination.saw_search_segment = source.saw_search_segment;
+    destination.saw_root = source.saw_root;
+    destination.saw_gradient = source.saw_gradient;
+}
+
+[[nodiscard]] std::array<Tetrahedron3D, 8> subdivideTetrahedron(
+    const Tetrahedron3D& tet) noexcept
+{
+    const auto ab = midpoint(tet.a, tet.b);
+    const auto ac = midpoint(tet.a, tet.c);
+    const auto ad = midpoint(tet.a, tet.d);
+    const auto bc = midpoint(tet.b, tet.c);
+    const auto bd = midpoint(tet.b, tet.d);
+    const auto cd = midpoint(tet.c, tet.d);
+    return {{
+        Tetrahedron3D{tet.a, ab, ac, ad},
+        Tetrahedron3D{ab, tet.b, bc, bd},
+        Tetrahedron3D{ac, bc, tet.c, cd},
+        Tetrahedron3D{ad, bd, cd, tet.d},
+        Tetrahedron3D{ab, ac, ad, cd},
+        Tetrahedron3D{ab, ac, bc, cd},
+        Tetrahedron3D{ab, ad, bd, cd},
+        Tetrahedron3D{ab, bc, bd, cd},
+    }};
+}
+
+[[nodiscard]] bool projectTetrahedronSurfaceFragmentRule(
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Tetrahedron3D& tet,
+    const interfaces::CutInterfaceFragment& linear_fragment,
+    int point_count,
+    int& local_iterations,
+    SurfacePatchRuleResult& result)
+{
+    std::vector<std::array<Real, 3>> base_vertices;
+    base_vertices.reserve(linear_fragment.vertices.size());
+    for (const auto& vertex : linear_fragment.vertices) {
+        base_vertices.push_back(vertex.point);
+    }
+    if (base_vertices.size() < 3u) {
+        result.failure = PlanarLineRuleFailure::Weight;
+        return false;
+    }
+
+    const auto edge_roots =
+        tetrahedronEdgeRoots(input, request, tet, local_iterations);
+    std::vector<std::array<Real, 3>> matched_roots;
+    if (matchPolishedRootsToBaseVertices(
+            edge_roots, base_vertices, matched_roots)) {
+        base_vertices = std::move(matched_roots);
+    }
+
+    const auto base_centroid = polygonCentroid(base_vertices);
+    const auto gradient_normal = interfaceNormalAt(input, base_centroid);
+    const auto base_normal =
+        polygonNormalOrDefault(base_vertices, gradient_normal);
+    if (!(norm3(base_normal) > Real{1.0e-14})) {
+        result.failure = PlanarLineRuleFailure::Gradient;
+        return false;
+    }
+
+    const auto unit_rule = positiveTriangleSurfaceUnitRule(point_count);
+    std::vector<std::pair<std::array<Real, 3>, Real>> surface_seeds;
+    surface_seeds.reserve(
+        (base_vertices.size() - 2u) * static_cast<std::size_t>(point_count));
+    for (std::size_t i = 1u; i + 1u < base_vertices.size(); ++i) {
+        appendTriangleSurfaceQuadratureSeeds(
+            base_vertices[0],
+            base_vertices[i],
+            base_vertices[i + 1u],
+            unit_rule,
+            surface_seeds);
+    }
+    if (surface_seeds.empty()) {
+        result.failure = PlanarLineRuleFailure::Weight;
+        return false;
+    }
+
+    result.points.reserve(surface_seeds.size());
+    for (const auto& [seed, planar_weight] : surface_seeds) {
+        const auto seed_normal = interfaceNormalAt(input, seed);
+        const std::array<std::array<Real, 3>, 3> projection_directions{{
+            base_normal,
+            gradient_normal,
+            seed_normal,
+        }};
+
+        bool saw_search_segment = false;
+        bool saw_root = false;
+        bool saw_gradient = false;
+        bool accepted = false;
+        interfaces::CutInterfaceQuadraturePoint accepted_point{};
+        for (const auto& projection_direction : projection_directions) {
+            const Real plane_projection =
+                std::abs(dot3(base_normal, projection_direction));
+            if (!(plane_projection > Real{1.0e-14})) {
+                continue;
+            }
+
+            std::array<Real, 3> search_start;
+            std::array<Real, 3> search_end;
+            Real guess_fraction = 0.5;
+            if (!lineTetrahedronSearchSegment(tet,
+                                               seed,
+                                               projection_direction,
+                                               search_start,
+                                               search_end,
+                                               guess_fraction)) {
+                continue;
+            }
+            saw_search_segment = true;
+
+            std::array<Real, 3> point;
+            if (!solveRootAlongSegmentNearGuess(input,
+                                                request,
+                                                search_start,
+                                                search_end,
+                                                guess_fraction,
+                                                point,
+                                                local_iterations)) {
+                continue;
+            }
+            saw_root = true;
+
+            const auto evaluation = input.evaluator->evaluate(
+                input.linearized_input.parent_cell, point);
+            const Real root_residual =
+                std::abs(evaluation.value - input.isovalue);
+            const Real gradient_norm = norm3(evaluation.reference_gradient);
+            if (!std::isfinite(root_residual) ||
+                !std::isfinite(gradient_norm) ||
+                !(gradient_norm > Real{1.0e-14})) {
+                continue;
+            }
+            const Real directional_derivative =
+                std::abs(dot3(evaluation.reference_gradient,
+                              projection_direction));
+            if (!(directional_derivative > Real{1.0e-14})) {
+                continue;
+            }
+            saw_gradient = true;
+
+            const Real reference_measure_factor =
+                plane_projection * gradient_norm / directional_derivative;
+            const Real weight = planar_weight * reference_measure_factor;
+            if (!std::isfinite(reference_measure_factor) ||
+                !std::isfinite(weight) || !(weight > Real{0.0})) {
+                continue;
+            }
+
+            accepted_point = interfaces::CutInterfaceQuadraturePoint{
+                .point = point,
+                .parent_coordinate = point,
+                .normal = normalizedOrDefault(evaluation.reference_gradient),
+                .weight = weight,
+                .reference_measure_factor = reference_measure_factor,
+                .level_set_residual = root_residual,
+                .gradient_norm = gradient_norm};
+            accepted = true;
+            break;
+        }
+
+        if (!accepted) {
+            std::array<Real, 3> point;
+            if (newtonProjectRootInsideTetrahedron(input,
+                                                   request,
+                                                   tet,
+                                                   seed,
+                                                   point,
+                                                   local_iterations)) {
+                saw_root = true;
+                const auto evaluation = input.evaluator->evaluate(
+                    input.linearized_input.parent_cell, point);
+                const Real root_residual =
+                    std::abs(evaluation.value - input.isovalue);
+                const Real gradient_norm =
+                    norm3(evaluation.reference_gradient);
+                const Real normal_projection =
+                    std::abs(dot3(evaluation.reference_gradient, base_normal));
+                if (std::isfinite(root_residual) &&
+                    std::isfinite(gradient_norm) &&
+                    gradient_norm > Real{1.0e-14} &&
+                    normal_projection > Real{1.0e-14}) {
+                    saw_gradient = true;
+                    const Real reference_measure_factor =
+                        gradient_norm / normal_projection;
+                    const Real weight =
+                        planar_weight * reference_measure_factor;
+                    if (std::isfinite(reference_measure_factor) &&
+                        std::isfinite(weight) && weight > Real{0.0}) {
+                        accepted_point =
+                            interfaces::CutInterfaceQuadraturePoint{
+                                .point = point,
+                                .parent_coordinate = point,
+                                .normal = normalizedOrDefault(
+                                    evaluation.reference_gradient),
+                                .weight = weight,
+                                .reference_measure_factor =
+                                    reference_measure_factor,
+                                .level_set_residual = root_residual,
+                                .gradient_norm = gradient_norm};
+                        accepted = true;
+                    }
+                }
+            }
+        }
+
+        if (!accepted) {
+            result.failed_seed = seed;
+            result.saw_search_segment = saw_search_segment;
+            result.saw_root = saw_root;
+            result.saw_gradient = saw_gradient;
+            result.failure =
+                !saw_search_segment
+                    ? PlanarLineRuleFailure::SearchSegment
+                    : (!saw_root ? PlanarLineRuleFailure::RootSolve
+                                : (!saw_gradient
+                                       ? PlanarLineRuleFailure::Gradient
+                                       : PlanarLineRuleFailure::Weight));
+            return false;
+        }
+
+        result.max_root_residual = std::max(
+            result.max_root_residual, accepted_point.level_set_residual);
+        result.min_gradient_norm = std::min(
+            result.min_gradient_norm, accepted_point.gradient_norm);
+        result.points.push_back(accepted_point);
+        for (std::size_t component = 0u; component < 3u; ++component) {
+            result.accumulated_normal[component] +=
+                accepted_point.normal[component] * accepted_point.weight;
+        }
+        result.measure += accepted_point.weight;
+    }
+    return true;
+}
+
+[[nodiscard]] bool appendPairedRefinedTetrahedronSurfaceRules(
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Tetrahedron3D& tet,
+    int forced_refinement_depth,
+    int recovery_depth,
+    int maximum_recovery_depth,
+    int production_point_count,
+    int reference_point_count,
+    int& local_iterations,
+    SurfacePatchRuleResult& production,
+    SurfacePatchRuleResult& reference)
+{
+    const auto average_three = [](const std::array<Real, 3>& a,
+                                  const std::array<Real, 3>& b,
+                                  const std::array<Real, 3>& c) {
+        return std::array<Real, 3>{{
+            (a[0] + b[0] + c[0]) / Real{3.0},
+            (a[1] + b[1] + c[1]) / Real{3.0},
+            (a[2] + b[2] + c[2]) / Real{3.0},
+        }};
+    };
+    const std::array<std::array<Real, 3>, 15> samples{{
+        tet.a,
+        tet.b,
+        tet.c,
+        tet.d,
+        midpoint(tet.a, tet.b),
+        midpoint(tet.a, tet.c),
+        midpoint(tet.a, tet.d),
+        midpoint(tet.b, tet.c),
+        midpoint(tet.b, tet.d),
+        midpoint(tet.c, tet.d),
+        average_three(tet.a, tet.b, tet.c),
+        average_three(tet.a, tet.b, tet.d),
+        average_three(tet.a, tet.c, tet.d),
+        average_three(tet.b, tet.c, tet.d),
+        tetrahedronCentroid(tet),
+    }};
+    Real minimum = std::numeric_limits<Real>::infinity();
+    Real maximum = -std::numeric_limits<Real>::infinity();
+    for (const auto& sample : samples) {
+        const Real value = signedLevelSetValue(input, sample);
+        minimum = std::min(minimum, value);
+        maximum = std::max(maximum, value);
+    }
+    const Real strict_tolerance = rootResidualTolerance(request);
+    if (!(minimum < -strict_tolerance && maximum > strict_tolerance)) {
+        return true;
+    }
+
+    const auto append_children = [&](int next_forced_depth,
+                                     int next_recovery_depth) {
+        SurfacePatchRuleResult child_production;
+        SurfacePatchRuleResult child_reference;
+        for (const auto& child : subdivideTetrahedron(tet)) {
+            if (!appendPairedRefinedTetrahedronSurfaceRules(
+                    request,
+                    input,
+                    child,
+                    next_forced_depth,
+                    next_recovery_depth,
+                    maximum_recovery_depth,
+                    production_point_count,
+                    reference_point_count,
+                    local_iterations,
+                    child_production,
+                    child_reference)) {
+                copySurfacePatchFailure(production, child_production);
+                copySurfacePatchFailure(reference, child_reference);
+                return false;
+            }
+        }
+        mergeSurfacePatchRule(production, std::move(child_production));
+        mergeSurfacePatchRule(reference, std::move(child_reference));
+        return true;
+    };
+
+    if (forced_refinement_depth > 0) {
+        return append_children(
+            forced_refinement_depth - 1, recovery_depth);
+    }
+
+    interfaces::LevelSetCellCutInput leaf;
+    leaf.parent_cell = input.linearized_input.parent_cell;
+    leaf.element_type = ElementType::Tetra4;
+    leaf.node_coordinates = {tet.a, tet.b, tet.c, tet.d};
+    leaf.level_set_values.reserve(leaf.node_coordinates.size());
+    for (const auto& point : leaf.node_coordinates) {
+        leaf.level_set_values.push_back(
+            input.evaluator
+                ->evaluate(input.linearized_input.parent_cell, point)
+                .value);
+    }
+    auto leaf_cut = interfaces::cutLinearLevelSetCell3D(request, leaf);
+    SurfacePatchRuleResult local_production;
+    SurfacePatchRuleResult local_reference;
+    bool found_active_fragment = false;
+    for (const auto& child_fragment : leaf_cut.fragments) {
+        if (!child_fragment.active()) {
+            continue;
+        }
+        found_active_fragment = true;
+        SurfacePatchRuleResult fragment_production;
+        SurfacePatchRuleResult fragment_reference;
+        const bool production_ok = projectTetrahedronSurfaceFragmentRule(
+            request,
+            input,
+            tet,
+            child_fragment,
+            production_point_count,
+            local_iterations,
+            fragment_production);
+        const bool reference_ok = projectTetrahedronSurfaceFragmentRule(
+            request,
+            input,
+            tet,
+            child_fragment,
+            reference_point_count,
+            local_iterations,
+            fragment_reference);
+        if (!production_ok || !reference_ok) {
+            if (recovery_depth < maximum_recovery_depth) {
+                return append_children(
+                    /*next_forced_depth=*/0,
+                    recovery_depth + 1);
+            }
+            copySurfacePatchFailure(
+                production,
+                production_ok ? fragment_reference : fragment_production);
+            copySurfacePatchFailure(reference, fragment_reference);
+            return false;
+        }
+        mergeSurfacePatchRule(
+            local_production, std::move(fragment_production));
+        mergeSurfacePatchRule(
+            local_reference, std::move(fragment_reference));
+    }
+    if (!found_active_fragment) {
+        if (recovery_depth < maximum_recovery_depth) {
+            return append_children(
+                /*next_forced_depth=*/0,
+                recovery_depth + 1);
+        }
+        production.failure = PlanarLineRuleFailure::RootSolve;
+        reference.failure = PlanarLineRuleFailure::RootSolve;
+        return false;
+    }
+    mergeSurfacePatchRule(production, std::move(local_production));
+    mergeSurfacePatchRule(reference, std::move(local_reference));
+    return true;
+}
+
+[[nodiscard]] bool buildPairedRefinedTetrahedronSurfaceRules(
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Tetrahedron3D& tet,
+    int refinement_depth,
+    int production_point_count,
+    int reference_point_count,
+    int& local_iterations,
+    SurfacePatchRuleResult& production,
+    SurfacePatchRuleResult& reference)
+{
+    if (!appendPairedRefinedTetrahedronSurfaceRules(
+            request,
+            input,
+            tet,
+            refinement_depth,
+            /*recovery_depth=*/0,
+            /*maximum_recovery_depth=*/2,
+            production_point_count,
+            reference_point_count,
+            local_iterations,
+            production,
+            reference)) {
+        return false;
+    }
+    if (!std::isfinite(production.measure) ||
+        !std::isfinite(reference.measure) || production.measure < Real{0.0} ||
+        reference.measure < Real{0.0}) {
+        production.failure = PlanarLineRuleFailure::Weight;
+        reference.failure = PlanarLineRuleFailure::Weight;
+        return false;
+    }
+    production.ok = true;
+    reference.ok = true;
+    return true;
+}
+
+template <typename SampleBuilder>
+[[nodiscard]] bool buildCertifiedPlanarLineRules(
+    int polynomial_order,
+    Real tolerance,
+    SampleBuilder&& build_sample,
+    PlanarLineRuleResult& production,
+    PlanarLineRuleResult& reference)
+{
+    constexpr std::array<std::pair<int, int>, 4> point_counts{{
+        {8, 12},
+        {12, 16},
+        {16, 24},
+        {24, 32},
+    }};
+    for (const auto& [production_count, reference_count] : point_counts) {
+        auto candidate = buildPlanarLineRule(
+            gaussLegendreUnitRulePointCount(production_count), build_sample);
+        if (!candidate.ok) {
+            production = std::move(candidate);
+            return false;
+        }
+        auto certificate = buildPlanarLineRule(
+            gaussLegendreUnitRulePointCount(reference_count), build_sample);
+        if (!certificate.ok) {
+            production = std::move(certificate);
+            return false;
+        }
+        if (planarLineMomentRulesAgree(
+                candidate, certificate, polynomial_order, tolerance)) {
+            production = std::move(candidate);
+            reference = std::move(certificate);
+            return true;
+        }
+    }
+    production = PlanarLineRuleResult{
+        .failure = PlanarLineRuleFailure::MomentConvergence};
+    return false;
+}
+
 [[nodiscard]] bool replaceWithRootPolishedRectangleFragment(
     interfaces::CutInterfaceFragment& fragment,
     const interfaces::CutInterfaceDomainRequest& request,
@@ -2019,22 +2833,19 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
     }};
     const std::array<Real, 3> transverse{{-tangent[1], tangent[0], 0.0}};
     const bool solve_y_as_function_of_x = std::abs(dx) >= std::abs(dy);
-    const auto rule =
-        gaussLegendreUnitRule(request.resolvedInterfaceQuadratureOrder());
-
-    std::vector<interfaces::CutInterfaceQuadraturePoint> quadrature_points;
-    quadrature_points.reserve(rule.size());
-    std::array<Real, 3> accumulated_normal{{0.0, 0.0, 0.0}};
-    Real measure = 0.0;
-    Real max_root_residual = 0.0;
-    Real min_gradient_norm = std::numeric_limits<Real>::infinity();
-    enum class RectanglePolishFailure {
-        SearchSegment,
-        RootSolve,
-        Gradient,
-        Weight,
-    };
-    for (const auto& [t, unit_weight] : rule) {
+    auto polishing_request = request;
+    polishing_request.tolerance =
+        std::min(polishing_request.tolerance, Real{1.0e-14});
+    polishing_request.implicit_cut_root_tolerance =
+        std::min(polishing_request.implicit_cut_root_tolerance,
+                 Real{1.0e-14});
+    polishing_request.implicit_cut_root_coordinate_tolerance =
+        std::min(polishing_request.implicit_cut_root_coordinate_tolerance,
+                 Real{1.0e-14});
+    const auto build_sample =
+        [&](Real t,
+            interfaces::CutInterfaceQuadraturePoint& output,
+            PlanarLineRuleFailure& failure) {
         const std::array<Real, 3> origin{{
             (Real{1.0} - t) * a[0] + t * b[0],
             (Real{1.0} - t) * a[1] + t * b[1],
@@ -2045,31 +2856,30 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
         Real root_residual = 0.0;
         Real gradient_norm = 0.0;
         Real reference_measure_factor = 0.0;
-        RectanglePolishFailure failure = RectanglePolishFailure::RootSolve;
         bool accepted = false;
 
         const auto try_fixed_axis = [&]() {
             if (solve_y_as_function_of_x) {
                 if (!solveRootAtFixedX(input,
-                                       request,
+                                       polishing_request,
                                        origin[0],
                                        rect.ymin,
                                        rect.ymax,
                                        origin[1],
                                        point,
                                        local_iterations)) {
-                    failure = RectanglePolishFailure::RootSolve;
+                    failure = PlanarLineRuleFailure::RootSolve;
                     return false;
                 }
             } else if (!solveRootAtFixedY(input,
-                                          request,
+                                          polishing_request,
                                           origin[1],
                                           rect.xmin,
                                           rect.xmax,
                                           origin[0],
                                           point,
                                           local_iterations)) {
-                failure = RectanglePolishFailure::RootSolve;
+                failure = PlanarLineRuleFailure::RootSolve;
                 return false;
             }
 
@@ -2080,14 +2890,14 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
             if (!std::isfinite(root_residual) ||
                 !std::isfinite(gradient_norm) ||
                 gradient_norm <= Real{1.0e-14}) {
-                failure = RectanglePolishFailure::Gradient;
+                failure = PlanarLineRuleFailure::Gradient;
                 return false;
             }
             const Real denominator =
                 solve_y_as_function_of_x ? evaluation.reference_gradient[1]
                                          : evaluation.reference_gradient[0];
             if (std::abs(denominator) <= Real{1.0e-14}) {
-                failure = RectanglePolishFailure::Gradient;
+                failure = PlanarLineRuleFailure::Gradient;
                 return false;
             }
             const Real slope =
@@ -2100,7 +2910,7 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
                 coordinate_span * std::sqrt(Real{1.0} + slope * slope);
             if (!std::isfinite(reference_measure_factor) ||
                 reference_measure_factor <= Real{0.0}) {
-                failure = RectanglePolishFailure::Weight;
+                failure = PlanarLineRuleFailure::Weight;
                 return false;
             }
             normal = normalizedOrDefault(evaluation.reference_gradient);
@@ -2114,17 +2924,17 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
             if (!lineRectangleSearchSegment(
                     rect, origin, transverse, search_start, search_end,
                     guess_fraction)) {
-                failure = RectanglePolishFailure::SearchSegment;
+                failure = PlanarLineRuleFailure::SearchSegment;
                 return false;
             }
             if (!solveRootAlongSegmentNearGuess(input,
-                                                request,
+                                                polishing_request,
                                                 search_start,
                                                 search_end,
                                                 guess_fraction,
                                                 point,
                                                 local_iterations)) {
-                failure = RectanglePolishFailure::RootSolve;
+                failure = PlanarLineRuleFailure::RootSolve;
                 return false;
             }
             const auto evaluation =
@@ -2134,13 +2944,13 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
             if (!std::isfinite(root_residual) ||
                 !std::isfinite(gradient_norm) ||
                 gradient_norm <= Real{1.0e-14}) {
-                failure = RectanglePolishFailure::Gradient;
+                failure = PlanarLineRuleFailure::Gradient;
                 return false;
             }
             const Real transverse_derivative =
                 dot3(evaluation.reference_gradient, transverse);
             if (std::abs(transverse_derivative) <= Real{1.0e-14}) {
-                failure = RectanglePolishFailure::Gradient;
+                failure = PlanarLineRuleFailure::Gradient;
                 return false;
             }
             const Real tangent_derivative =
@@ -2152,82 +2962,67 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
                                          height_slope * height_slope);
             if (!std::isfinite(reference_measure_factor) ||
                 reference_measure_factor <= Real{0.0}) {
-                failure = RectanglePolishFailure::Weight;
+                failure = PlanarLineRuleFailure::Weight;
                 return false;
             }
             normal = normalizedOrDefault(evaluation.reference_gradient);
             return true;
         };
 
-        accepted = try_fixed_axis() || try_transverse_segment();
+        accepted = try_transverse_segment() || try_fixed_axis();
         if (!accepted) {
-            if (diagnostics.first_curved_fragment_failure_detail.empty()) {
-                std::ostringstream detail;
-                detail << "shape=rectangle"
-                       << "; rect=(" << formatReal(rect.xmin) << ","
-                       << formatReal(rect.xmax) << "," << formatReal(rect.ymin)
-                       << "," << formatReal(rect.ymax) << ")"
-                       << "; root_a=" << formatPoint(a)
-                       << "; root_b=" << formatPoint(b)
-                       << "; origin=" << formatPoint(origin)
-                       << "; f_origin="
-                       << formatReal(signedLevelSetValue(input, origin))
-                       << "; transverse=" << formatPoint(transverse);
-                std::array<Real, 3> search_start;
-                std::array<Real, 3> search_end;
-                Real guess_fraction = 0.5;
-                if (lineRectangleSearchSegment(
-                        rect, origin, transverse, search_start, search_end,
-                        guess_fraction)) {
-                    detail << "; search_start=" << formatPoint(search_start)
-                           << "; f_search_start="
-                           << formatReal(
-                                  signedLevelSetValue(input, search_start))
-                           << "; search_end=" << formatPoint(search_end)
-                           << "; f_search_end="
-                           << formatReal(signedLevelSetValue(input, search_end))
-                           << "; guess_fraction="
-                           << formatReal(guess_fraction);
-                } else {
-                    detail << "; search_segment=unavailable";
-                }
-                diagnostics.first_curved_fragment_failure_detail = detail.str();
-            }
-            switch (failure) {
-            case RectanglePolishFailure::SearchSegment:
-                return fail_search_segment();
-            case RectanglePolishFailure::RootSolve:
-                return fail_root_solve();
-            case RectanglePolishFailure::Gradient:
-                return fail_gradient();
-            case RectanglePolishFailure::Weight:
-                return fail_weight();
-            }
+            return false;
         }
+        output = interfaces::CutInterfaceQuadraturePoint{
+            .point = point,
+            .parent_coordinate = point,
+            .normal = normal,
+            .weight = 0.0,
+            .reference_measure_factor = reference_measure_factor,
+            .level_set_residual = root_residual,
+            .gradient_norm = gradient_norm};
+        return true;
+    };
 
-        max_root_residual = std::max(max_root_residual, root_residual);
-        min_gradient_norm = std::min(min_gradient_norm, gradient_norm);
-        const Real weight = unit_weight * reference_measure_factor;
-        if (!std::isfinite(weight) || weight <= Real{0.0}) {
+    PlanarLineRuleResult production_rule;
+    PlanarLineRuleResult reference_rule;
+    if (!buildCertifiedPlanarLineRules(
+            request.resolvedInterfaceQuadratureOrder(),
+            request.tolerance,
+            build_sample,
+            production_rule,
+            reference_rule)) {
+        if (diagnostics.first_curved_fragment_failure_detail.empty()) {
+            diagnostics.first_curved_fragment_failure_detail =
+                "shape=rectangle; rect=(" + formatReal(rect.xmin) + "," +
+                formatReal(rect.xmax) + "," + formatReal(rect.ymin) + "," +
+                formatReal(rect.ymax) + "); root_a=" + formatPoint(a) +
+                "; root_b=" + formatPoint(b) +
+                "; failed_parameter=" +
+                formatReal(production_rule.failed_parameter);
+        }
+        switch (production_rule.failure) {
+        case PlanarLineRuleFailure::SearchSegment:
+            return fail_search_segment();
+        case PlanarLineRuleFailure::RootSolve:
+            return fail_root_solve();
+        case PlanarLineRuleFailure::Gradient:
+            return fail_gradient();
+        case PlanarLineRuleFailure::None:
+        case PlanarLineRuleFailure::Weight:
+        case PlanarLineRuleFailure::MomentConvergence:
             return fail_weight();
         }
-        quadrature_points.push_back(
-            interfaces::CutInterfaceQuadraturePoint{
-                .point = point,
-                .parent_coordinate = point,
-                .normal = normal,
-                .weight = weight,
-                .reference_measure_factor = reference_measure_factor,
-                .level_set_residual = root_residual,
-                .gradient_norm = gradient_norm});
-        accumulated_normal[0] += normal[0] * weight;
-        accumulated_normal[1] += normal[1] * weight;
-        accumulated_normal[2] += normal[2] * weight;
-        measure += weight;
     }
-    if (!std::isfinite(measure) || measure <= request.tolerance) {
+    if (production_rule.measure <= request.tolerance) {
         return fail_weight();
     }
+    auto quadrature_points = std::move(production_rule.points);
+    auto moment_certificate_points = std::move(reference_rule.points);
+    const auto accumulated_normal = production_rule.accumulated_normal;
+    const Real measure = production_rule.measure;
+    const Real max_root_residual = production_rule.max_root_residual;
+    const Real min_gradient_norm = production_rule.min_gradient_norm;
 
     fragment.vertices = {
         interfaces::CutInterfaceVertex{
@@ -2252,6 +3047,10 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
     fragment.normal = normalizedOrDefault(accumulated_normal);
     fragment.kind = interfaces::CutInterfaceFragmentKind::CurvedPatch;
     fragment.quadrature_points = std::move(quadrature_points);
+    fragment.moment_certificate_order =
+        request.resolvedInterfaceQuadratureOrder();
+    fragment.moment_certificate_points =
+        std::move(moment_certificate_points);
     fragment.topology_id =
         "cell-" + std::to_string(input.linearized_input.parent_cell) +
         "-root-polished-rectangle-branch-" +
@@ -2329,16 +3128,19 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
         0.0,
     }};
     const std::array<Real, 3> transverse{{-tangent[1], tangent[0], 0.0}};
-    const auto rule =
-        gaussLegendreUnitRule(request.resolvedInterfaceQuadratureOrder());
-
-    std::vector<interfaces::CutInterfaceQuadraturePoint> quadrature_points;
-    quadrature_points.reserve(rule.size());
-    std::array<Real, 3> accumulated_normal{{0.0, 0.0, 0.0}};
-    Real measure = 0.0;
-    Real max_root_residual = 0.0;
-    Real min_gradient_norm = std::numeric_limits<Real>::infinity();
-    for (const auto& [t, unit_weight] : rule) {
+    auto polishing_request = request;
+    polishing_request.tolerance =
+        std::min(polishing_request.tolerance, Real{1.0e-14});
+    polishing_request.implicit_cut_root_tolerance =
+        std::min(polishing_request.implicit_cut_root_tolerance,
+                 Real{1.0e-14});
+    polishing_request.implicit_cut_root_coordinate_tolerance =
+        std::min(polishing_request.implicit_cut_root_coordinate_tolerance,
+                 Real{1.0e-14});
+    const auto build_sample =
+        [&](Real t,
+            interfaces::CutInterfaceQuadraturePoint& output,
+            PlanarLineRuleFailure& failure) {
         const std::array<Real, 3> origin{{
             (Real{1.0} - t) * a[0] + t * b[0],
             (Real{1.0} - t) * a[1] + t * b[1],
@@ -2349,17 +3151,19 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
         Real guess_fraction = 0.5;
         if (!lineTriangleSearchSegment(
                 tri, origin, transverse, search_start, search_end, guess_fraction)) {
-            return fail_search_segment();
+            failure = PlanarLineRuleFailure::SearchSegment;
+            return false;
         }
         std::array<Real, 3> point;
         if (!solveRootAlongSegmentNearGuess(input,
-                                            request,
+                                            polishing_request,
                                             search_start,
                                             search_end,
                                             guess_fraction,
                                             point,
                                             local_iterations)) {
-            return fail_root_solve();
+            failure = PlanarLineRuleFailure::RootSolve;
+            return false;
         }
         const auto evaluation =
             input.evaluator->evaluate(input.linearized_input.parent_cell, point);
@@ -2369,43 +3173,67 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
         if (!std::isfinite(root_residual) ||
             !std::isfinite(gradient_norm) ||
             gradient_norm <= Real{1.0e-14}) {
-            return fail_gradient();
+            failure = PlanarLineRuleFailure::Gradient;
+            return false;
         }
         const Real transverse_derivative =
             dot3(evaluation.reference_gradient, transverse);
         if (std::abs(transverse_derivative) <= Real{1.0e-14}) {
-            return fail_gradient();
+            failure = PlanarLineRuleFailure::Gradient;
+            return false;
         }
         const Real tangent_derivative =
             dot3(evaluation.reference_gradient, tangent);
         const Real height_slope = -tangent_derivative / transverse_derivative;
         const Real reference_measure_factor =
             chord_length * std::sqrt(Real{1.0} + height_slope * height_slope);
-        const Real weight = unit_weight * reference_measure_factor;
-        if (!std::isfinite(weight) || weight <= Real{0.0}) {
+        if (!std::isfinite(reference_measure_factor) ||
+            !(reference_measure_factor > Real{0.0})) {
+            failure = PlanarLineRuleFailure::Weight;
+            return false;
+        }
+        const auto normal = normalizedOrDefault(evaluation.reference_gradient);
+        output = interfaces::CutInterfaceQuadraturePoint{
+            .point = point,
+            .parent_coordinate = point,
+            .normal = normal,
+            .weight = 0.0,
+            .reference_measure_factor = reference_measure_factor,
+            .level_set_residual = root_residual,
+            .gradient_norm = gradient_norm};
+        return true;
+    };
+
+    PlanarLineRuleResult production_rule;
+    PlanarLineRuleResult reference_rule;
+    if (!buildCertifiedPlanarLineRules(
+            request.resolvedInterfaceQuadratureOrder(),
+            request.tolerance,
+            build_sample,
+            production_rule,
+            reference_rule)) {
+        switch (production_rule.failure) {
+        case PlanarLineRuleFailure::SearchSegment:
+            return fail_search_segment();
+        case PlanarLineRuleFailure::RootSolve:
+            return fail_root_solve();
+        case PlanarLineRuleFailure::Gradient:
+            return fail_gradient();
+        case PlanarLineRuleFailure::None:
+        case PlanarLineRuleFailure::Weight:
+        case PlanarLineRuleFailure::MomentConvergence:
             return fail_weight();
         }
-
-        max_root_residual = std::max(max_root_residual, root_residual);
-        min_gradient_norm = std::min(min_gradient_norm, gradient_norm);
-        const auto normal = normalizedOrDefault(evaluation.reference_gradient);
-        quadrature_points.push_back(
-            interfaces::CutInterfaceQuadraturePoint{
-                .point = point,
-                .parent_coordinate = point,
-                .normal = normal,
-                .weight = weight,
-                .reference_measure_factor = reference_measure_factor,
-                .level_set_residual = root_residual,
-                .gradient_norm = gradient_norm});
-        accumulated_normal[0] += normal[0] * weight;
-        accumulated_normal[1] += normal[1] * weight;
-        accumulated_normal[2] += normal[2] * weight;
-        measure += weight;
     }
-    if (!std::isfinite(measure) || measure <= request.tolerance) {
+    if (production_rule.measure <= request.tolerance) {
         return fail_weight();
     }
+    auto quadrature_points = std::move(production_rule.points);
+    auto moment_certificate_points = std::move(reference_rule.points);
+    const auto accumulated_normal = production_rule.accumulated_normal;
+    const Real measure = production_rule.measure;
+    const Real max_root_residual = production_rule.max_root_residual;
+    const Real min_gradient_norm = production_rule.min_gradient_norm;
 
     fragment.vertices = {
         interfaces::CutInterfaceVertex{
@@ -2430,6 +3258,10 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
     fragment.normal = normalizedOrDefault(accumulated_normal);
     fragment.kind = interfaces::CutInterfaceFragmentKind::CurvedPatch;
     fragment.quadrature_points = std::move(quadrature_points);
+    fragment.moment_certificate_order =
+        request.resolvedInterfaceQuadratureOrder();
+    fragment.moment_certificate_points =
+        std::move(moment_certificate_points);
     fragment.topology_id =
         "cell-" + std::to_string(input.linearized_input.parent_cell) +
         "-root-polished-triangle-branch-" +
@@ -2556,6 +3388,8 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
         fragment.kind = interfaces::CutInterfaceFragmentKind::CurvedPatch;
         fragment.degeneracy = interfaces::CutInterfaceDegeneracy::SmallFragment;
         fragment.quadrature_points.clear();
+        fragment.moment_certificate_order = -1;
+        fragment.moment_certificate_points.clear();
         fragment.topology_id =
             "cell-" + std::to_string(input.linearized_input.parent_cell) +
             "-root-polished-tetrahedron-boundary-degenerate-" +
@@ -2574,242 +3408,132 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
         return true;
     };
 
-    std::vector<std::pair<std::array<Real, 3>, Real>> surface_seeds;
-    surface_seeds.reserve((base_vertices.size() - 2u) * 3u);
-    for (std::size_t i = 1u; i + 1u < base_vertices.size(); ++i) {
-        appendTriangleSurfaceQuadratureSeeds(
-            base_vertices[0], base_vertices[i], base_vertices[i + 1u],
-            surface_seeds);
-    }
-    if (surface_seeds.empty()) {
-        return fail_seed();
-    }
-
-    std::vector<interfaces::CutInterfaceQuadraturePoint> quadrature_points;
-    quadrature_points.reserve(surface_seeds.size());
-    std::array<Real, 3> accumulated_normal{{0.0, 0.0, 0.0}};
-    Real measure = 0.0;
-    Real max_root_residual = 0.0;
-    Real min_gradient_norm = std::numeric_limits<Real>::infinity();
-    for (const auto& [seed, planar_weight] : surface_seeds) {
-        const auto seed_normal = interfaceNormalAt(input, seed);
-        const std::array<std::array<Real, 3>, 3> projection_directions{{
-            base_normal,
-            gradient_normal,
-            seed_normal,
-        }};
-
-        bool saw_search_segment = false;
-        bool saw_root = false;
-        bool saw_gradient = false;
-        bool accepted = false;
-        interfaces::CutInterfaceQuadraturePoint accepted_point{};
-        for (const auto& projection_direction : projection_directions) {
-            const Real plane_projection =
-                std::abs(dot3(base_normal, projection_direction));
-            if (plane_projection <= Real{1.0e-14}) {
+    SurfacePatchRuleResult production_rule;
+    SurfacePatchRuleResult reference_rule;
+    bool certified = false;
+    constexpr std::array<std::pair<int, int>, 3> point_counts{{
+        {3, 7},
+        {7, 12},
+        {12, 16},
+    }};
+    const int minimum_production_point_count =
+        request.resolvedInterfaceQuadratureOrder() <= 2 ? 3 : 7;
+    for (int refinement_depth = 0;
+         refinement_depth <= 4 && !certified;
+         ++refinement_depth) {
+        for (const auto& [production_count, reference_count] : point_counts) {
+            if (production_count < minimum_production_point_count) {
                 continue;
             }
-
-            std::array<Real, 3> search_start;
-            std::array<Real, 3> search_end;
-            Real guess_fraction = 0.5;
-            if (!lineTetrahedronSearchSegment(tet,
-                                               seed,
-                                               projection_direction,
-                                               search_start,
-                                               search_end,
-                                               guess_fraction)) {
+            SurfacePatchRuleResult candidate;
+            SurfacePatchRuleResult certificate;
+            if (!buildPairedRefinedTetrahedronSurfaceRules(
+                    request,
+                    input,
+                    tet,
+                    refinement_depth,
+                    production_count,
+                    reference_count,
+                    local_iterations,
+                    candidate,
+                    certificate)) {
+                production_rule = std::move(candidate);
                 continue;
             }
-            saw_search_segment = true;
-
-            std::array<Real, 3> point;
-            if (!solveRootAlongSegmentNearGuess(input,
-                                                request,
-                                                search_start,
-                                                search_end,
-                                                guess_fraction,
-                                                point,
-                                                local_iterations)) {
+            if (candidate.points.empty()) {
+                if (matched_edge_roots && mark_boundary_degenerate()) {
+                    return true;
+                }
+                production_rule = SurfacePatchRuleResult{
+                    .failure = PlanarLineRuleFailure::RootSolve};
                 continue;
             }
-            saw_root = true;
-
-            const auto evaluation =
-                input.evaluator->evaluate(input.linearized_input.parent_cell, point);
-            const Real root_residual =
-                std::abs(evaluation.value - input.isovalue);
-            const Real gradient_norm = norm3(evaluation.reference_gradient);
-            if (!std::isfinite(root_residual) ||
-                !std::isfinite(gradient_norm) ||
-                gradient_norm <= Real{1.0e-14}) {
+            if (certificate.points.empty()) {
+                production_rule = std::move(certificate);
                 continue;
             }
-            const Real directional_derivative =
-                std::abs(dot3(evaluation.reference_gradient,
-                              projection_direction));
-            if (directional_derivative <= Real{1.0e-14}) {
-                continue;
+            Real maximum_moment_error{0.0};
+            Real maximum_moment_scaled_error{0.0};
+            if (surfacePatchMomentRulesAgree(
+                    candidate,
+                    certificate,
+                    request.resolvedInterfaceQuadratureOrder(),
+                    request.tolerance,
+                    maximum_moment_error,
+                    maximum_moment_scaled_error)) {
+                production_rule = std::move(candidate);
+                reference_rule = std::move(certificate);
+                certified = true;
+                break;
             }
-            saw_gradient = true;
-
-            const Real reference_measure_factor =
-                plane_projection * gradient_norm / directional_derivative;
-            const Real weight = planar_weight * reference_measure_factor;
-            if (!std::isfinite(reference_measure_factor) ||
-                !std::isfinite(weight) ||
-                weight <= Real{0.0}) {
-                continue;
-            }
-
-            const auto normal =
-                normalizedOrDefault(evaluation.reference_gradient);
-            accepted_point = interfaces::CutInterfaceQuadraturePoint{
-                .point = point,
-                .parent_coordinate = point,
-                .normal = normal,
-                .weight = weight,
-                .reference_measure_factor = reference_measure_factor,
-                .level_set_residual = root_residual,
-                .gradient_norm = gradient_norm};
-            accepted = true;
-            break;
+            production_rule = SurfacePatchRuleResult{
+                .failure = PlanarLineRuleFailure::MomentConvergence,
+                .maximum_moment_error = maximum_moment_error,
+                .maximum_moment_scaled_error =
+                    maximum_moment_scaled_error};
         }
+    }
 
-        if (!accepted) {
-            std::array<Real, 3> point;
-            if (newtonProjectRootInsideTetrahedron(input,
-                                                   request,
-                                                   tet,
-                                                   seed,
-                                                   point,
-                                                   local_iterations)) {
-                saw_root = true;
-                const auto evaluation =
-                    input.evaluator->evaluate(input.linearized_input.parent_cell,
-                                              point);
-                const Real root_residual =
-                    std::abs(evaluation.value - input.isovalue);
-                const Real gradient_norm = norm3(evaluation.reference_gradient);
-                if (std::isfinite(root_residual) &&
-                    std::isfinite(gradient_norm) &&
-                    gradient_norm > Real{1.0e-14}) {
-                    const Real normal_projection =
-                        std::abs(dot3(evaluation.reference_gradient,
-                                      base_normal));
-                    if (normal_projection > Real{1.0e-14}) {
-                        saw_gradient = true;
-                        const Real reference_measure_factor =
-                            gradient_norm / normal_projection;
-                        const Real weight =
-                            planar_weight * reference_measure_factor;
-                        if (std::isfinite(reference_measure_factor) &&
-                            std::isfinite(weight) &&
-                            weight > Real{0.0}) {
-                            const auto normal = normalizedOrDefault(
-                                evaluation.reference_gradient);
-                            accepted_point =
-                                interfaces::CutInterfaceQuadraturePoint{
-                                    .point = point,
-                                    .parent_coordinate = point,
-                                    .normal = normal,
-                                    .weight = weight,
-                                    .reference_measure_factor =
-                                        reference_measure_factor,
-                                    .level_set_residual = root_residual,
-                                    .gradient_norm = gradient_norm};
-                            accepted = true;
-                        }
-                    }
-                }
-            }
+    if (!certified) {
+        if (production_rule.failure !=
+                PlanarLineRuleFailure::MomentConvergence &&
+            matched_edge_roots && mark_boundary_degenerate()) {
+            return true;
         }
-
-        if (!accepted) {
-            if (matched_edge_roots && mark_boundary_degenerate()) {
-                return true;
+        if (diagnostics.first_curved_fragment_failure_detail.empty()) {
+            std::ostringstream detail;
+            detail << "shape=tetrahedron"
+                   << "; tet_vertices="
+                   << formatPointList({tet.a, tet.b, tet.c, tet.d})
+                   << "; base_vertices=" << formatPointList(base_vertices)
+                   << "; edge_roots=" << formatPointList(edge_roots)
+                   << "; matched_edge_roots="
+                   << (matched_edge_roots ? "true" : "false")
+                   << "; seed=" << formatPoint(production_rule.failed_seed)
+                   << "; f_seed="
+                   << formatReal(
+                          signedLevelSetValue(input, production_rule.failed_seed))
+                   << "; saw_search_segment="
+                   << (production_rule.saw_search_segment ? "true" : "false")
+                   << "; saw_root="
+                   << (production_rule.saw_root ? "true" : "false")
+                   << "; saw_gradient="
+                   << (production_rule.saw_gradient ? "true" : "false")
+                   << "; moment_convergence="
+                   << (production_rule.failure ==
+                               PlanarLineRuleFailure::MomentConvergence
+                           ? "false"
+                           : "not-reached")
+                   << "; maximum_moment_error="
+                   << formatReal(production_rule.maximum_moment_error)
+                   << "; maximum_moment_scaled_error="
+                   << formatReal(
+                          production_rule.maximum_moment_scaled_error);
+            diagnostics.first_curved_fragment_failure_detail = detail.str();
+        }
+        switch (production_rule.failure) {
+        case PlanarLineRuleFailure::SearchSegment:
+            return fail_search_segment();
+        case PlanarLineRuleFailure::RootSolve:
+            if (!matched_edge_roots) {
+                ++diagnostics.curved_fragment_root_solve_edge_root_mismatch;
             }
-            if (diagnostics.first_curved_fragment_failure_detail.empty()) {
-                std::ostringstream detail;
-                detail << "shape=tetrahedron"
-                       << "; tet_vertices="
-                       << formatPointList({tet.a, tet.b, tet.c, tet.d})
-                       << "; base_vertices=" << formatPointList(base_vertices)
-                       << "; edge_roots=" << formatPointList(edge_roots)
-                       << "; matched_edge_roots="
-                       << (matched_edge_roots ? "true" : "false")
-                       << "; seed=" << formatPoint(seed)
-                       << "; f_seed="
-                       << formatReal(signedLevelSetValue(input, seed))
-                       << "; saw_search_segment="
-                       << (saw_search_segment ? "true" : "false")
-                       << "; saw_root=" << (saw_root ? "true" : "false")
-                       << "; saw_gradient="
-                       << (saw_gradient ? "true" : "false");
-                for (std::size_t direction_index = 0u;
-                     direction_index < projection_directions.size();
-                     ++direction_index) {
-                    std::array<Real, 3> search_start;
-                    std::array<Real, 3> search_end;
-                    Real guess_fraction = 0.5;
-                    detail << "; direction_" << direction_index << "="
-                           << formatPoint(projection_directions[direction_index]);
-                    if (lineTetrahedronSearchSegment(
-                            tet,
-                            seed,
-                            projection_directions[direction_index],
-                            search_start,
-                            search_end,
-                            guess_fraction)) {
-                        detail << "; segment_" << direction_index << "=("
-                               << formatPoint(search_start) << ","
-                               << formatPoint(search_end) << ")"
-                               << "; segment_values_" << direction_index
-                               << "=("
-                               << formatReal(
-                                      signedLevelSetValue(input, search_start))
-                               << ","
-                               << formatReal(
-                                      signedLevelSetValue(input, search_end))
-                               << ")"
-                               << "; guess_fraction_" << direction_index
-                               << "=" << formatReal(guess_fraction);
-                    } else {
-                        detail << "; segment_" << direction_index
-                               << "=unavailable";
-                    }
-                }
-                diagnostics.first_curved_fragment_failure_detail = detail.str();
-            }
-            if (!saw_search_segment) {
-                return fail_search_segment();
-            }
-            if (!saw_root) {
-                if (!matched_edge_roots) {
-                    ++diagnostics.curved_fragment_root_solve_edge_root_mismatch;
-                }
-                return fail_root_solve();
-            }
-            if (!saw_gradient) {
-                return fail_gradient();
-            }
+            return fail_root_solve();
+        case PlanarLineRuleFailure::Gradient:
+            return fail_gradient();
+        case PlanarLineRuleFailure::None:
+        case PlanarLineRuleFailure::Weight:
+        case PlanarLineRuleFailure::MomentConvergence:
             return fail_weight();
         }
+    }
 
-        max_root_residual = std::max(max_root_residual,
-                                     accepted_point.level_set_residual);
-        min_gradient_norm = std::min(min_gradient_norm,
-                                     accepted_point.gradient_norm);
-        quadrature_points.push_back(accepted_point);
-        accumulated_normal[0] += accepted_point.normal[0] * accepted_point.weight;
-        accumulated_normal[1] += accepted_point.normal[1] * accepted_point.weight;
-        accumulated_normal[2] += accepted_point.normal[2] * accepted_point.weight;
-        measure += accepted_point.weight;
-    }
-    if (!std::isfinite(measure) || measure <= request.tolerance) {
-        return fail_weight();
-    }
+    auto quadrature_points = std::move(production_rule.points);
+    auto moment_certificate_points = std::move(reference_rule.points);
+    const auto accumulated_normal = production_rule.accumulated_normal;
+    const Real measure = production_rule.measure;
+    const Real max_root_residual = production_rule.max_root_residual;
+    const Real min_gradient_norm = production_rule.min_gradient_norm;
 
     fragment.vertices.clear();
     const auto& output_vertices =
@@ -2831,6 +3555,10 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
     fragment.normal = normalizedOrDefault(accumulated_normal);
     fragment.kind = interfaces::CutInterfaceFragmentKind::CurvedPatch;
     fragment.quadrature_points = std::move(quadrature_points);
+    fragment.moment_certificate_order =
+        request.resolvedInterfaceQuadratureOrder();
+    fragment.moment_certificate_points =
+        std::move(moment_certificate_points);
     fragment.topology_id =
         "cell-" + std::to_string(input.linearized_input.parent_cell) +
         "-root-polished-tetrahedron-branch-" +
@@ -3067,30 +3795,46 @@ void stampGeneratedVolumeRegionMetadata(
     const ImplicitCutQuadratureBackendCellInput& input,
     const char* construction_token)
 {
-    if (region.local_region_index == INVALID_LOCAL_INDEX) {
-        region.local_region_index =
-            static_cast<LocalIndex>(cut.volume_regions.size());
-    }
-    if (region.topology_id.empty()) {
-        region.topology_id =
-            "cell-" + std::to_string(input.linearized_input.parent_cell) +
-            "-volume-" + construction_token + "-" +
-            sideTopologyToken(region.side) + "-" +
-            std::to_string(region.local_region_index);
-    }
-    if (region.stable_id == 0u) {
-        region.stable_id =
-            interfaces::cutVolumeStableId(request.interface_marker,
-                                          input.linearized_input.parent_cell,
-                                          region.local_region_index,
-                                          region.side,
-                                          request.source.value_revision);
-    }
+    region.local_region_index =
+        static_cast<LocalIndex>(cut.volume_regions.size());
+    region.topology_id =
+        "cell-" + std::to_string(input.linearized_input.parent_cell) +
+        "-volume-" + construction_token + "-" +
+        sideTopologyToken(region.side) + "-" +
+        std::to_string(region.local_region_index);
+    region.stable_id =
+        interfaces::cutVolumeStableId(request.interface_marker,
+                                      input.linearized_input.parent_cell,
+                                      region.local_region_index,
+                                      region.side,
+                                      request.source.value_revision);
     if (region.achieved_quadrature_order < 0) {
         region.achieved_quadrature_order =
             interfaces::implementedLevelSetCutVolumeExactOrder(
                 request.resolvedVolumeQuadratureOrder());
     }
+}
+
+void stampGeneratedInterfaceFragmentMetadata(
+    interfaces::CutInterfaceFragment& fragment,
+    const interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const char* construction_token)
+{
+    fragment.local_fragment_index =
+        static_cast<LocalIndex>(cut.fragments.size());
+    fragment.topology_id =
+        "cell-" + std::to_string(input.linearized_input.parent_cell) +
+        "-interface-" + construction_token + "-" +
+        std::to_string(fragment.local_fragment_index);
+    fragment.branch_id = fragment.topology_id;
+    fragment.stable_id =
+        interfaces::cutInterfaceStableId(
+            request.interface_marker,
+            input.linearized_input.parent_cell,
+            fragment.local_fragment_index,
+            request.source.value_revision);
 }
 
 void appendFullRectangleRegion(
@@ -3355,6 +4099,8 @@ void appendLinearizedRectangleCut(
             fragment, request, input, rect, diagnostics);
         fragment.parent_cell = input.linearized_input.parent_cell;
         fragment.interface_marker = request.interface_marker;
+        stampGeneratedInterfaceFragmentMetadata(
+            fragment, cut, request, input, "rectangle");
         cut.fragments.push_back(std::move(fragment));
     }
     for (auto& region : leaf_cut.volume_regions) {
@@ -3363,6 +4109,22 @@ void appendLinearizedRectangleCut(
         region.parent_measure = parent_measure;
         region.volume_fraction =
             parent_measure > Real{0.0} ? region.measure / parent_measure : Real{0.0};
+        region.full_cell_equivalent =
+            parent_measure > Real{0.0} &&
+            std::abs(region.measure - parent_measure) <=
+                measureTolerance(request.tolerance, parent_measure);
+        if (!region.full_cell_equivalent &&
+            std::abs(region.measure - rectangleMeasure(rect)) <=
+                measureTolerance(request.tolerance, region.measure)) {
+            region.quadrature_points = rectangleVolumeQuadraturePoints(
+                rect, request.resolvedVolumeQuadratureOrder());
+            region.reference_subcells = rectangleReferenceSubcells(rect);
+            for (auto& point : region.quadrature_points) {
+                point.normal = region.normal;
+            }
+        }
+        stampGeneratedVolumeRegionMetadata(
+            region, cut, request, input, "linearized-rectangle");
         cut.volume_regions.push_back(std::move(region));
     }
     if (cut.degeneracy == interfaces::CutInterfaceDegeneracy::None) {
@@ -3401,6 +4163,8 @@ void appendLinearizedTriangleCut(
             fragment, request, input, tri, diagnostics);
         fragment.parent_cell = input.linearized_input.parent_cell;
         fragment.interface_marker = request.interface_marker;
+        stampGeneratedInterfaceFragmentMetadata(
+            fragment, cut, request, input, "triangle");
         cut.fragments.push_back(std::move(fragment));
     }
     for (auto& region : leaf_cut.volume_regions) {
@@ -3409,6 +4173,26 @@ void appendLinearizedTriangleCut(
         region.parent_measure = parent_measure;
         region.volume_fraction =
             parent_measure > Real{0.0} ? region.measure / parent_measure : Real{0.0};
+        region.full_cell_equivalent =
+            parent_measure > Real{0.0} &&
+            std::abs(region.measure - parent_measure) <=
+                measureTolerance(request.tolerance, parent_measure);
+        if (!region.full_cell_equivalent &&
+            std::abs(region.measure - triangleMeasure(tri)) <=
+                measureTolerance(request.tolerance, region.measure)) {
+            region.quadrature_points = triangleVolumeQuadraturePoints(
+                tri.a,
+                tri.b,
+                tri.c,
+                request.resolvedVolumeQuadratureOrder());
+            region.reference_subcells = {
+                referenceTriangle(tri.a, tri.b, tri.c)};
+            for (auto& point : region.quadrature_points) {
+                point.normal = region.normal;
+            }
+        }
+        stampGeneratedVolumeRegionMetadata(
+            region, cut, request, input, "linearized-triangle");
         cut.volume_regions.push_back(std::move(region));
     }
     if (leaf_cut.hasActiveFragments() &&
@@ -3458,10 +4242,15 @@ void appendLinearizedTetrahedronCutResult(
     diagnostics.interface_fragment_count +=
         static_cast<int>(leaf_cut.fragments.size());
     for (auto& fragment : leaf_cut.fragments) {
-        (void)replaceWithRootPolishedTetrahedronFragment(
-            fragment, request, input, tet, diagnostics);
+        if (request.implicit_quadrature_backend !=
+            "SayeHyperrectangle") {
+            (void)replaceWithRootPolishedTetrahedronFragment(
+                fragment, request, input, tet, diagnostics);
+        }
         fragment.parent_cell = input.linearized_input.parent_cell;
         fragment.interface_marker = request.interface_marker;
+        stampGeneratedInterfaceFragmentMetadata(
+            fragment, cut, request, input, "tetrahedron");
         cut.fragments.push_back(std::move(fragment));
     }
     for (auto& region : leaf_cut.volume_regions) {
@@ -3470,6 +4259,23 @@ void appendLinearizedTetrahedronCutResult(
         region.parent_measure = parent_measure;
         region.volume_fraction =
             parent_measure > Real{0.0} ? region.measure / parent_measure : Real{0.0};
+        region.full_cell_equivalent =
+            parent_measure > Real{0.0} &&
+            std::abs(region.measure - parent_measure) <=
+                measureTolerance(request.tolerance, parent_measure);
+        if (!region.full_cell_equivalent &&
+            std::abs(region.measure - tetrahedronMeasure(tet)) <=
+                measureTolerance(request.tolerance, region.measure)) {
+            region.quadrature_points = tetrahedronVolumeQuadraturePoints(
+                tet, request.resolvedVolumeQuadratureOrder());
+            region.reference_subcells = {
+                referenceTetrahedron(tet.a, tet.b, tet.c, tet.d)};
+            for (auto& point : region.quadrature_points) {
+                point.normal = region.normal;
+            }
+        }
+        stampGeneratedVolumeRegionMetadata(
+            region, cut, request, input, "linearized-tetrahedron");
         cut.volume_regions.push_back(std::move(region));
     }
     if (leaf_cut.hasActiveFragments() &&
@@ -5518,6 +6324,59 @@ validateImplicitCutQuadratureBackendCellResult(
                 }
             }
         }
+        if ((fragment.moment_certificate_order < 0) !=
+            fragment.moment_certificate_points.empty()) {
+            return failedValidation(
+                ImplicitCutQuadratureDiagnosticStatus::Failed,
+                "implicit cut backend returned incomplete interface moment-certificate evidence");
+        }
+        Real certificate_weight_sum = Real{0.0};
+        for (const auto& point : fragment.moment_certificate_points) {
+            geometry::CutQuadraturePoint qp;
+            qp.point = point.point;
+            qp.normal = point.normal;
+            qp.weight = point.weight;
+            qp.parent_coordinate = point.parent_coordinate;
+            qp.reference_measure_factor = point.reference_measure_factor;
+            qp.level_set_residual = point.level_set_residual;
+            qp.gradient_norm = point.gradient_norm;
+            if (!finitePoint(qp) || !(qp.weight > Real{0.0}) ||
+                point.level_set_residual >
+                    Real{10.0} * rootResidualTolerance(request) ||
+                !(point.gradient_norm > Real{0.0}) ||
+                !(norm3(point.normal) > Real{1.0e-30})) {
+                return failedValidation(
+                    ImplicitCutQuadratureDiagnosticStatus::Failed,
+                    "implicit cut backend returned invalid interface moment-certificate evidence");
+            }
+            certificate_weight_sum += point.weight;
+        }
+        if (!fragment.moment_certificate_points.empty() &&
+            std::abs(certificate_weight_sum - fragment.measure) >
+                measureTolerance(request.tolerance, fragment.measure)) {
+            return failedValidation(
+                ImplicitCutQuadratureDiagnosticStatus::Failed,
+                "implicit cut backend interface moment-certificate weights do not sum to the fragment measure");
+        }
+        if (!fragment.moment_certificate_points.empty()) {
+            SurfacePatchRuleResult production_moments;
+            production_moments.points = fragment.quadrature_points;
+            SurfacePatchRuleResult reference_moments;
+            reference_moments.points = fragment.moment_certificate_points;
+            Real maximum_moment_error{0.0};
+            Real maximum_moment_scaled_error{0.0};
+            if (!surfacePatchMomentRulesAgree(
+                    production_moments,
+                    reference_moments,
+                    fragment.moment_certificate_order,
+                    request.tolerance,
+                    maximum_moment_error,
+                    maximum_moment_scaled_error)) {
+                return failedValidation(
+                    ImplicitCutQuadratureDiagnosticStatus::Failed,
+                    "implicit cut backend interface quadrature does not reproduce its independent polynomial-moment reference");
+            }
+        }
         if (!fragment.quadrature_points.empty() &&
             fragment.measure > Real{0.0} &&
             std::abs(interface_weight_sum - fragment.measure) >
@@ -5549,6 +6408,16 @@ validateImplicitCutQuadratureBackendCellResult(
                     ImplicitCutQuadratureDiagnosticStatus::Failed,
                     "implicit cut backend returned invalid root-polished interface fragment metadata");
             }
+        }
+        if (fragment.active() &&
+            fragment.kind == interfaces::CutInterfaceFragmentKind::CurvedPatch &&
+            result.achieved_interface_quadrature_order > 1 &&
+            (fragment.moment_certificate_order <
+                 result.achieved_interface_quadrature_order ||
+             fragment.moment_certificate_points.empty())) {
+            return failedValidation(
+                ImplicitCutQuadratureDiagnosticStatus::Failed,
+                "implicit cut backend curved interface rule lacks an independent polynomial-moment reference");
         }
     }
 

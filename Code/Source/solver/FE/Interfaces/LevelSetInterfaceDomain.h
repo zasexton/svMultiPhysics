@@ -475,6 +475,8 @@ struct CutInterfaceFragment {
     bool root_polished{false};
     std::vector<CutInterfaceVertex> vertices{};
     std::vector<CutInterfaceQuadraturePoint> quadrature_points{};
+    int moment_certificate_order{-1};
+    std::vector<CutInterfaceQuadraturePoint> moment_certificate_points{};
 
     [[nodiscard]] bool active() const noexcept {
         return interface_marker >= 0 &&

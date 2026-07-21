@@ -12,6 +12,7 @@
 #include "Dofs/EntityDofMap.h"
 #include "Geometry/FrameGeometry.h"
 #include "Geometry/MappingFactory.h"
+#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/LevelSetInterfaceGeometryWriter.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
@@ -6770,6 +6771,145 @@ TEST(LevelSetInterfaceLifecycle, BackendIndependentValidationFixturesCheckRuleIn
     expectGeneratedCutRulesAreFinite(subcell_circle.domain);
 }
 
+TEST(LevelSetInterfaceLifecycle,
+     CurvedInterfaceMomentsUseIndependentBackendReferenceRules)
+{
+    constexpr FE::Real radius = 0.5;
+    constexpr int interface_marker = 2191;
+    const auto make_result = [&]() {
+        return buildSingleQuadCircleCut(FE::ElementType::Quad9,
+                                        /*level_set_order=*/2,
+                                        /*subdivision_depth=*/6,
+                                        /*interface_order=*/2,
+                                        /*volume_order=*/2,
+                                        interface_marker,
+                                        radius);
+    };
+    const auto make_scalar = []() {
+        FE::interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+        scalar.value = [](FE::GlobalIndex,
+                          const std::array<FE::Real, 3>& xi,
+                          const FE::geometry::CutQuadratureProvenance&) {
+            return xi[0] * xi[0] + xi[1] * xi[1] - radius * radius;
+        };
+        scalar.reference_gradient =
+            [](FE::GlobalIndex,
+               const std::array<FE::Real, 3>& xi,
+               const FE::geometry::CutQuadratureProvenance&) {
+                return std::array<FE::Real, 3>{{
+                    FE::Real{2.0} * xi[0],
+                    FE::Real{2.0} * xi[1],
+                    FE::Real{0.0},
+                }};
+            };
+        return scalar;
+    };
+    FE::interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    policy.require_complete_exterior_boundary_partition = false;
+    const SingleQuadMeshAccess mesh(FE::ElementType::Quad9);
+    const auto interface_only_domain = [](
+        const FE::interfaces::LevelSetInterfaceDomain& source) {
+        FE::interfaces::LevelSetInterfaceDomain domain(source.request());
+        for (const auto& fragment : source.fragments()) {
+            domain.addFragment(fragment);
+        }
+        return domain;
+    };
+
+    auto result = make_result();
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    auto interface_domain = interface_only_domain(result.domain);
+    const auto snapshot =
+        FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+            std::move(interface_domain),
+            {},
+            {},
+            mesh,
+            policy,
+            make_scalar(),
+            "curved-interface-reference-rule");
+    ASSERT_NE(snapshot, nullptr);
+    EXPECT_GT(snapshot->ledger().backend_reference_moment_certificate_count,
+              0u);
+    EXPECT_EQ(snapshot->ledger().stored_generated_moment_certificate_count,
+              0u);
+    std::size_t curved_interface_rule_count = 0u;
+    for (const auto& record : snapshot->rules()) {
+        if (record.role !=
+            FE::interfaces::FreeSurfaceGeometryRuleRole::Interface) {
+            continue;
+        }
+        ++curved_interface_rule_count;
+        EXPECT_TRUE(record.reference_rule.curved_geometry);
+        EXPECT_EQ(
+            record.moment_certificate.source,
+            FE::interfaces::FreeSurfaceGeometryMomentCertificateSource::
+                BackendReferenceQuadrature);
+    }
+    EXPECT_GT(curved_interface_rule_count, 0u);
+    EXPECT_EQ(snapshot->ledger().backend_reference_moment_certificate_count,
+              curved_interface_rule_count);
+
+    auto defect_result = make_result();
+    ASSERT_TRUE(defect_result.success) << defect_result.diagnostic;
+    FE::interfaces::LevelSetInterfaceDomain defect(
+        defect_result.domain.request());
+    bool changed = false;
+    for (auto fragment : defect_result.domain.fragments()) {
+        if (!changed && fragment.active() &&
+            fragment.kind ==
+                FE::interfaces::CutInterfaceFragmentKind::CurvedPatch &&
+            fragment.quadrature_points.size() >= 2u) {
+            const FE::Real shift =
+                FE::Real{0.05} *
+                std::min(fragment.quadrature_points[0].weight,
+                         fragment.quadrature_points[1].weight);
+            fragment.quadrature_points[0].weight += shift;
+            fragment.quadrature_points[1].weight -= shift;
+            changed = true;
+        }
+        defect.addFragment(std::move(fragment));
+    }
+    ASSERT_TRUE(changed);
+    EXPECT_THROW(
+        (void)FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+            std::move(defect),
+            {},
+            {},
+            mesh,
+            policy,
+            make_scalar(),
+            "curved-interface-reference-rule-defect"),
+        std::invalid_argument);
+
+    const auto duplicate_result = make_result();
+    ASSERT_TRUE(duplicate_result.success) << duplicate_result.diagnostic;
+    FE::interfaces::LevelSetInterfaceDomain duplicate(
+        duplicate_result.domain.request());
+    std::uint64_t first_active_stable_id = 0u;
+    bool duplicated = false;
+    for (auto fragment : duplicate_result.domain.fragments()) {
+        if (fragment.active() && first_active_stable_id == 0u) {
+            first_active_stable_id = fragment.stable_id;
+        } else if (fragment.active() && !duplicated) {
+            fragment.stable_id = first_active_stable_id;
+            duplicated = true;
+        }
+        duplicate.addFragment(std::move(fragment));
+    }
+    ASSERT_TRUE(duplicated);
+    EXPECT_THROW(
+        (void)FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+            std::move(duplicate),
+            {},
+            {},
+            mesh,
+            policy,
+            make_scalar(),
+            "curved-interface-duplicate-source"),
+        std::invalid_argument);
+}
+
 TEST(LevelSetInterfaceLifecycle, GeneratedOrderSummariesMatchRuleProvenance)
 {
     const auto result =
@@ -7468,7 +7608,7 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP2SphereCapApproximatesVolumeAn
                 1.5e-2);
     EXPECT_NEAR(result.summary.measure,
                 pi * radius * radius / 2.0,
-                8.0e-2);
+                8.0e-2) << result.diagnostic;
 
     const auto interface_rules = result.domain.interfaceQuadratureRules();
     ASSERT_FALSE(interface_rules.empty());
@@ -7511,6 +7651,9 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP2SphereCapApproximatesVolumeAn
         EXPECT_LE(fragment.max_root_residual,
                   options.implicit_cut_root_tolerance * 10.0);
         EXPECT_GT(fragment.min_gradient_norm, 1.0e-12);
+        EXPECT_EQ(fragment.moment_certificate_order, 2);
+        EXPECT_GT(fragment.moment_certificate_points.size(),
+                  fragment.quadrature_points.size());
         ++root_polished_active_fragment_count;
     }
     EXPECT_EQ(root_polished_active_fragment_count,
@@ -8669,7 +8812,7 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2SphereApproximatesVolumeAnd
                 8.0e-2);
     EXPECT_NEAR(result.summary.measure,
                 4.0 * pi * radius * radius,
-                2.5e-1);
+                2.5e-1) << result.diagnostic;
 
     const auto interface_rules = result.domain.interfaceQuadratureRules();
     ASSERT_FALSE(interface_rules.empty());
