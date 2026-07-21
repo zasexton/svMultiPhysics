@@ -20,11 +20,15 @@ The reusable correction kernel is implemented in
 `LevelSetConservativePhaseTransport`. The first geometry-aware P1 operator is
 implemented in `LevelSetConservativePhaseOperator`. It constructs lumped nodal
 control volumes and the full algebraic gradient graph from the actual physical
-mapping and quadrature. Production application wiring, geometry
-reconciliation, distributed ownership, and the required transport benchmark
-matrix remain separate qualification steps. Until those steps are complete,
-the existing signed-distance transport must continue to report that it is not
-locally conservative.
+mapping and quadrature. The production application projects `q` from the
+authoritative retained cut geometry, advances it on accepted time-step
+candidates, reconciles the signed-distance geometry to its nodal liquid
+moments, and commits the two fields together. Graph assembly, transport, and
+maintenance support the replicated global numbering used by the current MPI
+level-set state. The multi-resolution transport benchmark matrix and explicit
+film/sheet/rim/satellite morphology classification remain qualification work.
+When conservative phase transport is disabled, the independent signed-distance
+transport remains nonconservative and must continue to report that limitation.
 
 ## P1 finite-element flux construction
 
@@ -109,6 +113,29 @@ the replicated sparse merge with owner-to-owner exchange is a scalability
 optimization that must preserve these public graph and ledger invariants. A
 separate rank-local invalid-option test guards the collective failure path.
 
+## Accepted-step maintenance transaction
+
+The conservative liquid indicator is held at the previous accepted endpoint
+during the nonlinear solve. After a candidate step converges, production
+performs the following sequence inside one geometry transaction:
+
+1. advance and limit `q` with the conservative algebraic-edge operator;
+2. rebuild the raw transported signed-distance geometry;
+3. apply the configured wall-aware signed-distance repair when due;
+4. reconcile geometry locally against the transported nodal liquid moments;
+5. validate global measure, every nodal moment, cut-context provenance, and
+   all transport invariants; and
+6. commit the field state, generated geometry, lifecycle revisions, and
+   refresh cache together.
+
+A failed stage, nonconverged repair, displacement/topology guard, stale graph,
+or failed geometry invariant rejects the candidate and restores the field,
+cut-context, lifecycle, and cache checkpoints. No global level-set shift is
+part of this sequence. The retained maintenance ledger distinguishes raw
+post-transport, post-limit, post-reinitialization, post-correction, and retained
+assembly measures, together with nodal mismatch and interface/contact
+displacement measures.
+
 ## Fully discrete edge update
 
 Each interior algebraic edge is stored once in canonical orientation `i<j`.
@@ -190,6 +217,44 @@ The stage is rejected when any of these conditions fails:
   in the result.
 
 No global phase shift appears in this algorithm.
+
+## Connected-component ledgers and artifacts
+
+The correction constructs deterministic connected components from active
+phase-support nodes and algebraic edges. A component identifier is its smallest
+canonical node index, so it is invariant under rank ownership. Every resolved
+component records previous, low-order, raw-target, and limited liquid measure;
+physical-boundary and discrete-divergence transfer; low-order, raw, and limited
+interior transfer; and the three balance residuals. Nonzero activity below the
+declared component threshold is retained in a separate subthreshold bucket and
+is included in every component-closure invariant. It is never discarded to
+make a balance close.
+
+Machine-readable accepted-step artifacts are opt-in. Set
+`Conservative_phase_write_flux_artifacts=true` and select a positive cadence
+with `Conservative_phase_flux_artifact_cadence_steps`. On due accepted steps,
+the output rank writes
+`conservative_phase_flux/conservative_phase_flux_<field>_step_<step>.json`
+under the configured results directory. All ranks complete preflight before
+publication. The writer closes a temporary sibling and atomically publishes a
+no-replacement final link; an existing final or temporary path is a hard
+failure rather than an overwrite.
+
+Each artifact contains accepted step/time and graph revisions; all stage and
+limiter invariant flags and residuals; every nodal control-volume state,
+Courant number, source, transfer, factor, and balance; every canonical edge and
+pair-cancellation residual; every resolved and subthreshold component ledger;
+and the complete reinitialization, reconciliation, mismatch, phase-measure,
+geometry-measure, and displacement history for that accepted transaction.
+Serial tests cover schema content, stale-file refusal, malformed-ledger
+rejection, and cadence ordering. The two-rank application test requires a
+rank-local preflight fault to fail collectively before publication and a valid
+stage to produce exactly one output-rank artifact.
+
+These artifacts close the control-volume/component observability gap; they do
+not by themselves qualify film, sheet, rim, or satellite tracking. Those
+morphology labels require a geometry-based classifier and the declared
+translation, rotation, wall, Zalesak, Enright, jet, and filament matrices.
 
 ## Primary method references
 

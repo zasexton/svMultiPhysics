@@ -503,6 +503,10 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << ",\"require_constant_preservation\":"
       << json_bool(
              options.conservative_phase.require_constant_preservation)
+      << ",\"write_flux_artifacts\":"
+      << json_bool(options.conservative_phase.write_flux_artifacts)
+      << ",\"flux_artifact_cadence_steps\":"
+      << options.conservative_phase.flux_artifact_cadence_steps
       << ",\"impermeable_normal_velocity_tolerance\":"
       << json_real(options.conservative_phase
                        .impermeable_normal_velocity_tolerance)
@@ -1282,6 +1286,19 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
           {"Conservative_phase_require_constant_preservation",
            "ConservativePhaseRequireConstantPreservation"})) {
     options.conservative_phase.require_constant_preservation = *value;
+  }
+  if (const auto value = get_defined_bool(
+          params,
+          {"Conservative_phase_write_flux_artifacts",
+           "ConservativePhaseWriteFluxArtifacts"})) {
+    options.conservative_phase.write_flux_artifacts = *value;
+  }
+  if (const auto value = get_defined_int(
+          params,
+          {"Conservative_phase_flux_artifact_cadence_steps",
+           "ConservativePhaseFluxArtifactCadenceSteps"},
+          "Conservative_phase_flux_artifact_cadence_steps")) {
+    options.conservative_phase.flux_artifact_cadence_steps = *value;
   }
   if (const auto value = get_defined_real(
           params,

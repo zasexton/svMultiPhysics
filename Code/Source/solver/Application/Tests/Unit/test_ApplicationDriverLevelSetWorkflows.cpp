@@ -4120,6 +4120,92 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 }
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       WritesFluxArtifactOnlyAfterAnAcceptedCadenceStep)
+{
+  const auto unique = std::chrono::steady_clock::now()
+                          .time_since_epoch()
+                          .count();
+  const auto output_directory =
+      std::filesystem::temp_directory_path() /
+      ("svmp-conservative-phase-workflow-artifact-" +
+       std::to_string(unique));
+  params_->general_simulation_parameters.save_results_in_folder.set(
+      output_directory.string());
+  auto& phase_options = requests_.front().conservative_phase;
+  phase_options.write_flux_artifacts = true;
+  phase_options.flux_artifact_cadence_steps = 2;
+
+  auto result = applyConservativePhaseCandidates(
+      sim_,
+      history(),
+      requests_,
+      *params_,
+      lifecycle_,
+      refresh_cache_,
+      active_requests_);
+  ASSERT_TRUE(result.accept_step);
+  ASSERT_NE(result.geometry_transaction, nullptr);
+  ASSERT_NO_THROW(result.geometry_transaction->commit());
+  result.geometry_transaction.reset();
+
+  ASSERT_NO_THROW(writeAcceptedConservativePhaseArtifacts(
+      *params_,
+      requests_,
+      result,
+      1u,
+      svmp::FE::Real{0.05},
+      svmp::FE::Real{0.05},
+      history().u().valueRevision(),
+      svmp::MeshComm::world()));
+  EXPECT_FALSE(std::filesystem::exists(
+      output_directory / "conservative_phase_flux"));
+
+  phase_options.flux_artifact_cadence_steps = 1;
+  ASSERT_NO_THROW(writeAcceptedConservativePhaseArtifacts(
+      *params_,
+      requests_,
+      result,
+      1u,
+      svmp::FE::Real{0.05},
+      svmp::FE::Real{0.05},
+      history().u().valueRevision(),
+      svmp::MeshComm::world()));
+  const auto artifact_path =
+      output_directory / "conservative_phase_flux" /
+      "conservative_phase_flux_phase_step_00000001.json";
+  ASSERT_TRUE(std::filesystem::is_regular_file(artifact_path));
+  std::ifstream input(artifact_path);
+  ASSERT_TRUE(input.is_open());
+  const std::string contents{
+      std::istreambuf_iterator<char>{input},
+      std::istreambuf_iterator<char>{}};
+  EXPECT_NE(contents.find(
+                "\"maintenance_ordering\":\"conservative_phase_transport_then_raw_geometry_rebuild_then_wall_aware_reinitialization_then_local_geometry_reconciliation_then_validation_then_commit\""),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"raw_post_transport_phase_measure\":"),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"post_reinitialization_phase_measure\":"),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"post_correction_phase_measure\":"),
+            std::string::npos);
+  EXPECT_THROW(
+      writeAcceptedConservativePhaseArtifacts(
+          *params_,
+          requests_,
+          result,
+          1u,
+          svmp::FE::Real{0.05},
+          svmp::FE::Real{0.05},
+          history().u().valueRevision(),
+          svmp::MeshComm::world()),
+      std::runtime_error);
+
+  std::error_code cleanup_error;
+  std::filesystem::remove_all(output_directory, cleanup_error);
+  EXPECT_FALSE(cleanup_error);
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        NonconvergedReinitializationRejectsAndRestoresGeometry)
 {
   auto raw_candidate = initialized_solution_;

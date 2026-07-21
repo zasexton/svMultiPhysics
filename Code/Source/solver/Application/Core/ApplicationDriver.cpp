@@ -19,6 +19,7 @@
 #include "FE/LevelSet/LevelSetCurvatureProjection.h"
 #include "FE/LevelSet/LevelSetCellEvaluator.h"
 #include "FE/LevelSet/LevelSetConservativePhaseOperator.h"
+#include "FE/LevelSet/LevelSetConservativePhaseArtifact.h"
 #include "FE/LevelSet/LevelSetConservativePhaseState.h"
 #include "FE/LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
@@ -3151,6 +3152,18 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
             {"Conservative_phase_require_constant_preservation",
              "ConservativePhaseRequireConstantPreservation"})) {
       request.conservative_phase.require_constant_preservation = *preserve;
+    }
+    if (const auto write = first_defined_bool_parameter(
+            eq_params,
+            {"Conservative_phase_write_flux_artifacts",
+             "ConservativePhaseWriteFluxArtifacts"})) {
+      request.conservative_phase.write_flux_artifacts = *write;
+    }
+    if (const auto cadence = first_defined_int_parameter(
+            eq_params,
+            {"Conservative_phase_flux_artifact_cadence_steps",
+             "ConservativePhaseFluxArtifactCadenceSteps"})) {
+      request.conservative_phase.flux_artifact_cadence_steps = *cadence;
     }
     if (const auto tolerance = first_defined_double_parameter(
             eq_params,
@@ -11484,6 +11497,230 @@ struct ConservativePhaseCandidateResult {
       geometry_transaction{};
 };
 
+void writeAcceptedConservativePhaseArtifacts(
+    const Parameters& params,
+    const std::vector<LevelSetMaintenanceRequest>& requests,
+    const ConservativePhaseCandidateResult& candidate,
+    std::uint64_t accepted_step,
+    svmp::FE::Real accepted_time,
+    svmp::FE::Real time_step,
+    std::uint64_t state_revision,
+    const svmp::MeshComm& comm)
+{
+  const bool locally_any_artifact_configured =
+      std::any_of(
+          requests.begin(), requests.end(), [](const auto& request) {
+            return request.conservative_phase.enabled &&
+                   request.conservative_phase.write_flux_artifacts;
+          });
+  if (!globalAnyBool(locally_any_artifact_configured, comm)) {
+    return;
+  }
+
+  const double local_request_count =
+      static_cast<double>(requests.size());
+  if (globalMinDouble(local_request_count, comm) !=
+      globalMaxDouble(local_request_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase artifact request count differs across ranks.");
+  }
+
+  bool any_artifact_due = false;
+  bool local_preflight_failure = false;
+  std::vector<bool> artifact_due(requests.size(), false);
+  for (std::size_t index = 0u; index < requests.size(); ++index) {
+    const auto& request = requests[index];
+    const int cadence =
+        request.conservative_phase.flux_artifact_cadence_steps;
+    const bool locally_configured =
+        request.conservative_phase.enabled &&
+        request.conservative_phase.write_flux_artifacts;
+    const bool configured_on_any_rank =
+        globalAnyBool(locally_configured, comm);
+    const bool not_configured_on_any_rank =
+        globalAnyBool(!locally_configured, comm);
+    if (configured_on_any_rank && not_configured_on_any_rank) {
+      local_preflight_failure = true;
+    }
+    if (configured_on_any_rank &&
+        globalMinDouble(static_cast<double>(cadence), comm) !=
+            globalMaxDouble(static_cast<double>(cadence), comm)) {
+      local_preflight_failure = true;
+    }
+    if (locally_configured && cadence <= 0) {
+      local_preflight_failure = true;
+    }
+    const bool locally_due =
+        locally_configured && cadence > 0 &&
+        accepted_step % static_cast<std::uint64_t>(cadence) == 0u;
+    const bool due_on_any_rank = globalAnyBool(locally_due, comm);
+    const bool not_due_on_any_rank = globalAnyBool(!locally_due, comm);
+    if (due_on_any_rank && not_due_on_any_rank) {
+      local_preflight_failure = true;
+    }
+    artifact_due[index] = due_on_any_rank && !not_due_on_any_rank;
+    any_artifact_due = any_artifact_due || artifact_due[index];
+    if (artifact_due[index]) {
+      if (candidate.maintenance_ledgers.size() != requests.size()) {
+        local_preflight_failure = true;
+        continue;
+      }
+      local_preflight_failure =
+          !request.conservative_phase_graph.has_value() ||
+          !request.volume_cut_request.has_value() ||
+          !candidate.maintenance_ledgers[index].transport_stage.success ||
+          local_preflight_failure;
+    }
+  }
+  if (globalAnyBool(local_preflight_failure, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase artifact preflight failed on at least one rank.");
+  }
+  if (!any_artifact_due) {
+    return;
+  }
+
+  std::filesystem::path output_directory = ".";
+  if (params.general_simulation_parameters.save_results_in_folder.defined() &&
+      !params.general_simulation_parameters.save_results_in_folder
+           .value()
+           .empty()) {
+    output_directory =
+        params.general_simulation_parameters.save_results_in_folder.value();
+  }
+  output_directory /= "conservative_phase_flux";
+
+  for (std::size_t index = 0u; index < requests.size(); ++index) {
+    const auto& request = requests[index];
+    if (!artifact_due[index]) {
+      continue;
+    }
+    const auto& ledger = candidate.maintenance_ledgers[index];
+    const auto& graph = *request.conservative_phase_graph;
+    const auto& repair = ledger.reinitialization;
+    const auto& reconciliation = ledger.reconciliation;
+    svmp::FE::level_set::LevelSetConservativePhaseArtifactResult artifact;
+    if (comm.rank() == 0) {
+      svmp::FE::level_set::LevelSetConservativePhaseArtifactContext context;
+      context.phase_field_name =
+          request.conservative_phase.liquid_indicator.field_name;
+      context.level_set_field_name = request.level_set_field_name;
+      context.geometry_domain_id = request.volume_cut_request->domain_id;
+      context.accepted_step = accepted_step;
+      context.accepted_time = accepted_time;
+      context.time_step = time_step;
+      context.state_revision = state_revision;
+      context.graph_geometry_revision = graph.geometry_revision;
+      context.graph_topology_revision = graph.topology_revision;
+      context.graph_ownership_revision = graph.ownership_revision;
+      context.graph_numbering_revision = graph.numbering_revision;
+      context.graph_dof_layout_revision = graph.dof_layout_revision;
+      context.geometry_validated_before_commit = true;
+      context.reinitialization_due = ledger.reinitialization_due;
+      context.reinitialization_applied = ledger.reinitialization_applied;
+      context.reinitialization = repair;
+      context.reconciliation.success = reconciliation.success;
+      context.reconciliation.target_reached =
+          reconciliation.target_reached;
+      context.reconciliation.limited_by_displacement =
+          reconciliation.limited_by_displacement;
+      context.reconciliation.limited_by_topology =
+          reconciliation.limited_by_topology;
+      context.reconciliation.iterations = reconciliation.iterations;
+      context.reconciliation.line_search_evaluations =
+          reconciliation.line_search_evaluations;
+      context.reconciliation.geometry_refresh_requests =
+          reconciliation.geometry_refresh_requests;
+      context.reconciliation.geometry_rebuilds =
+          reconciliation.geometry_rebuilds;
+      context.reconciliation.rejected_geometry_trials =
+          reconciliation.rejected_geometry_trials;
+      context.reconciliation.contact_protected_nodes =
+          reconciliation.contact_protected_nodes;
+      context.reconciliation.allowed_interface_displacement =
+          reconciliation.allowed_interface_displacement;
+      context.reconciliation.accumulated_interface_displacement_bound =
+          reconciliation.accumulated_interface_displacement_bound;
+      context.reconciliation.initial_residual_norm =
+          reconciliation.initial_residual_norm;
+      context.reconciliation.final_residual_norm =
+          reconciliation.final_residual_norm;
+      context.reconciliation.maximum_final_nodal_residual =
+          reconciliation.maximum_final_nodal_residual;
+      context.reconciliation.final_total_residual =
+          reconciliation.final_total_residual;
+      context.reconciliation.maximum_removed_contact_increment =
+          reconciliation.maximum_removed_contact_increment;
+      context.reconciliation.last_rejected_trial_diagnostic =
+          reconciliation.last_rejected_trial_diagnostic;
+      context.reconciliation.diagnostic = reconciliation.diagnostic;
+      context.raw_post_transport_phase_measure =
+          ledger.raw_post_transport_phase_measure;
+      context.post_limit_phase_measure = ledger.post_limit_phase_measure;
+      context.raw_post_transport_geometry_measure =
+          ledger.raw_post_transport_geometry_measure;
+      context.post_reinitialization_phase_measure =
+          ledger.post_limit_phase_measure;
+      context.post_reinitialization_geometry_measure =
+          ledger.post_reinitialization_geometry_measure;
+      context.post_reinitialization_mismatch.maximum_nodal_residual =
+          ledger.post_reinitialization_mismatch.maximum_nodal_residual;
+      context.post_reinitialization_mismatch.residual_norm =
+          ledger.post_reinitialization_mismatch.residual_norm;
+      context.post_reinitialization_mismatch.total_residual =
+          ledger.post_reinitialization_mismatch.total_residual;
+      context.post_correction_phase_measure =
+          ledger.post_limit_phase_measure;
+      context.post_correction_geometry_measure =
+          ledger.post_correction_geometry_measure;
+      context.post_correction_mismatch.maximum_nodal_residual =
+          ledger.post_correction_mismatch.maximum_nodal_residual;
+      context.post_correction_mismatch.residual_norm =
+          ledger.post_correction_mismatch.residual_norm;
+      context.post_correction_mismatch.total_residual =
+          ledger.post_correction_mismatch.total_residual;
+      context.retained_assembly_geometry_measure =
+          ledger.post_correction_geometry_measure;
+      artifact =
+          svmp::FE::level_set::writeLevelSetConservativePhaseArtifact(
+              output_directory, context, ledger.transport_stage);
+      if (!artifact.success) {
+        application::core::oopCout()
+            << "[svMultiPhysics::Application] Conservative phase artifact"
+            << " diagnostic=conservative_phase_flux_artifact"
+            << " field='"
+            << request.conservative_phase.liquid_indicator.field_name
+            << "' step=" << accepted_step
+            << " outcome=failed"
+            << " reason='" << artifact.diagnostic << "'" << std::endl;
+      }
+    }
+    const bool publication_failed = globalAnyBool(
+        comm.rank() == 0 && !artifact.success, comm);
+    if (publication_failed) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase artifact publication failed on the output rank.");
+    }
+    if (comm.rank() == 0) {
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] Conservative phase artifact"
+          << " diagnostic=conservative_phase_flux_artifact"
+          << " field='"
+          << request.conservative_phase.liquid_indicator.field_name << "'"
+          << " step=" << accepted_step
+          << " outcome=written"
+          << " path='" << artifact.path.string() << "'"
+          << " bytes=" << artifact.bytes
+          << " nodes=" << artifact.nodes
+          << " edges=" << artifact.edges
+          << " resolved_components=" << artifact.resolved_components
+          << " subthreshold_component_present="
+          << (artifact.subthreshold_component_present ? "true" : "false")
+          << std::endl;
+    }
+  }
+}
+
 ConservativePhaseGeometryReconciliationResult
 reconcileConservativePhaseGeometry(
     application::core::SimulationComponents& sim,
@@ -13396,6 +13633,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       pending_contact_stage_constraints;
   std::vector<svmp::FE::Real> pending_contact_stage_solution;
   ConservativePhaseCandidateResult pending_phase_candidate;
+  ConservativePhaseCandidateResult accepted_phase_candidate;
   callbacks.on_before_step_accept =
       [&](svmp::FE::timestepping::TimeHistory& h,
           const svmp::FE::timestepping::NewtonReport& nr) {
@@ -13558,12 +13796,23 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << (changed ? "true" : "false")
               << std::endl;
         }
+        accepted_phase_candidate = std::move(pending_phase_candidate);
         pending_phase_candidate = ConservativePhaseCandidateResult{};
       };
   double vtk_total_time = 0.0;
   callbacks.on_step_accepted = [&](svmp::FE::timestepping::TimeHistory& h) {
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_accepted step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
+    writeAcceptedConservativePhaseArtifacts(
+        params,
+        level_set_maintenance,
+        accepted_phase_candidate,
+        static_cast<std::uint64_t>(h.stepIndex()),
+        static_cast<svmp::FE::Real>(h.time()),
+        static_cast<svmp::FE::Real>(h.dt()),
+        h.u().valueRevision(),
+        svmp::MeshComm::world());
+    accepted_phase_candidate = ConservativePhaseCandidateResult{};
     if (acceptedPressureUpdateDiagnosticEnabled() &&
         !accepted_pressure_update_previous_solution.empty()) {
       const auto current_solution = gatherFeOrderedSolution(h.u());

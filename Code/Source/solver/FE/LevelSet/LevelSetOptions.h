@@ -200,6 +200,8 @@ struct LevelSetConservativePhaseOptions {
     Real maximum_courant{1.0};
     bool enforce_courant_limit{true};
     bool require_constant_preservation{true};
+    bool write_flux_artifacts{false};
+    int flux_artifact_cadence_steps{1};
     Real impermeable_normal_velocity_tolerance{1.0e-10};
     bool reconcile_geometry{true};
     Real geometry_measure_tolerance{1.0e-10};

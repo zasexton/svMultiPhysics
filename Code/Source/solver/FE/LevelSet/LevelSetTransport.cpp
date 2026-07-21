@@ -674,6 +674,10 @@ void validateConservativePhaseOptions(
         throw std::invalid_argument(
             "installLevelSetTransport: conservative phase maximum Courant number must be in (0, 1]");
     }
+    if (phase.flux_artifact_cadence_steps <= 0) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase flux artifact cadence must be positive");
+    }
     if (!std::isfinite(phase.impermeable_normal_velocity_tolerance) ||
         phase.impermeable_normal_velocity_tolerance < Real{0.0}) {
         throw std::invalid_argument(

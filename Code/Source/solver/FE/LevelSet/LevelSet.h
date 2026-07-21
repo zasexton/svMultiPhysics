@@ -13,6 +13,7 @@
 
 #include "LevelSet/LevelSetDiagnostics.h"
 #include "LevelSet/LevelSetConservativePhaseOperator.h"
+#include "LevelSet/LevelSetConservativePhaseArtifact.h"
 #include "LevelSet/LevelSetConservativePhaseState.h"
 #include "LevelSet/LevelSetConservativePhaseTransport.h"
 #include "LevelSet/LevelSetCurvatureProjection.h"

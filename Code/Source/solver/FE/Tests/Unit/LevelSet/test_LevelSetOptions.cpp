@@ -70,6 +70,8 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
     EXPECT_DOUBLE_EQ(options.conservative_phase.maximum_courant, 1.0);
     EXPECT_TRUE(options.conservative_phase.enforce_courant_limit);
     EXPECT_TRUE(options.conservative_phase.require_constant_preservation);
+    EXPECT_FALSE(options.conservative_phase.write_flux_artifacts);
+    EXPECT_EQ(options.conservative_phase.flux_artifact_cadence_steps, 1);
     EXPECT_DOUBLE_EQ(
         options.conservative_phase.impermeable_normal_velocity_tolerance,
         1.0e-10);

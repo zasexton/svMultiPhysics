@@ -33,7 +33,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <span>
@@ -2186,6 +2188,159 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   EXPECT_EQ(global_left_rules, 1);
   EXPECT_EQ(global_extra_rules, 0);
   EXPECT_EQ(global_right_rules, 1);
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     ConservativePhaseArtifactPublishesOnceAfterCollectivePreflight)
+{
+  int rank = 0;
+  int size = 1;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  ASSERT_EQ(size, 2);
+
+  std::uint64_t unique = 0u;
+  if (rank == 0) {
+    unique = static_cast<std::uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+  }
+  MPI_Bcast(&unique, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+  const auto output_directory =
+      std::filesystem::temp_directory_path() /
+      ("svmp-conservative-phase-mpi-artifact-" +
+       std::to_string(unique));
+
+  Parameters params;
+  params.general_simulation_parameters.save_results_in_folder.set(
+      output_directory.string());
+  std::vector<LevelSetMaintenanceRequest> requests(1u);
+  auto& request = requests.front();
+  request.level_set_field_name = "phi";
+  request.conservative_phase.enabled = true;
+  request.conservative_phase.write_flux_artifacts = true;
+  request.conservative_phase.flux_artifact_cadence_steps = 1;
+  request.conservative_phase.liquid_indicator.field_name = "phase";
+  request.volume_cut_request = ActiveCutVolumeRequest{};
+  request.volume_cut_request->domain_id = "mpi_phase_interface";
+  svmp::FE::level_set::LevelSetP1PhaseTransportGraph graph;
+  graph.success = true;
+  graph.geometry_revision = 2u;
+  graph.topology_revision = 3u;
+  graph.ownership_revision = 4u;
+  graph.numbering_revision = 5u;
+  graph.dof_layout_revision = 6u;
+  request.conservative_phase_graph = std::move(graph);
+
+  const std::array<svmp::FE::Real, 2> volumes{1.0, 1.0};
+  const std::array<svmp::FE::Real, 2> previous{0.75, 0.25};
+  const std::array<svmp::FE::Real, 2> lower{0.0, 0.0};
+  const std::array<svmp::FE::Real, 2> upper{1.0, 1.0};
+  const std::array<svmp::FE::level_set::LevelSetPhaseFluxEdge, 1>
+      flux_edges{
+          svmp::FE::level_set::LevelSetPhaseFluxEdge{
+              0, 1, 0.05, 0.20},
+      };
+  auto correction = svmp::FE::level_set::
+      applyLevelSetConservativePhaseFluxCorrection(
+          svmp::FE::level_set::LevelSetPhaseFluxStageView{
+              .lumped_control_volume = volumes,
+              .previous_liquid_indicator = previous,
+              .lower_liquid_indicator = lower,
+              .upper_liquid_indicator = upper,
+              .interior_edges = flux_edges,
+          });
+  ASSERT_TRUE(correction.success) << correction.diagnostic;
+
+  ConservativePhaseCandidateResult candidate;
+  candidate.maintenance_ledgers.resize(1u);
+  auto& stage = candidate.maintenance_ledgers.front().transport_stage;
+  stage.success = true;
+  stage.courant_satisfied = true;
+  stage.low_order_coefficients_nonnegative = true;
+  stage.strong_form_decomposition_satisfied = true;
+  stage.maximum_courant = 0.25;
+  stage.nodal_courant = {0.25, 0.25};
+  stage.physical_boundary_mass_transfer = {0.0, 0.0};
+  stage.discrete_divergence_mass_source = {0.0, 0.0};
+  stage.flux_edges.assign(flux_edges.begin(), flux_edges.end());
+  stage.correction = std::move(correction);
+
+  auto inconsistent_requests = requests;
+  if (rank == 1) {
+    inconsistent_requests.front().conservative_phase
+        .write_flux_artifacts = false;
+  }
+  EXPECT_THROW(
+      writeAcceptedConservativePhaseArtifacts(
+          params,
+          inconsistent_requests,
+          candidate,
+          12u,
+          svmp::FE::Real{0.6},
+          svmp::FE::Real{0.05},
+          17u,
+          svmp::MeshComm::world()),
+      std::runtime_error);
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (rank == 0) {
+    EXPECT_FALSE(std::filesystem::exists(output_directory));
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+
+  ConservativePhaseCandidateResult locally_invalid_candidate;
+  locally_invalid_candidate.maintenance_ledgers =
+      candidate.maintenance_ledgers;
+  if (rank == 1) {
+    locally_invalid_candidate.maintenance_ledgers.clear();
+  }
+  EXPECT_THROW(
+      writeAcceptedConservativePhaseArtifacts(
+          params,
+          requests,
+          locally_invalid_candidate,
+          12u,
+          svmp::FE::Real{0.6},
+          svmp::FE::Real{0.05},
+          17u,
+          svmp::MeshComm::world()),
+      std::runtime_error);
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (rank == 0) {
+    EXPECT_FALSE(std::filesystem::exists(output_directory));
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+
+  ASSERT_NO_THROW(writeAcceptedConservativePhaseArtifacts(
+      params,
+      requests,
+      candidate,
+      12u,
+      svmp::FE::Real{0.6},
+      svmp::FE::Real{0.05},
+      17u,
+      svmp::MeshComm::world()));
+  MPI_Barrier(MPI_COMM_WORLD);
+  if (rank == 0) {
+    const auto artifact_path =
+        output_directory / "conservative_phase_flux" /
+        "conservative_phase_flux_phase_step_00000012.json";
+    ASSERT_TRUE(std::filesystem::is_regular_file(artifact_path));
+    EXPECT_FALSE(std::filesystem::exists(
+        std::filesystem::path(artifact_path.string() + ".tmp")));
+    std::ifstream input(artifact_path);
+    ASSERT_TRUE(input.is_open());
+    const std::string contents{
+        std::istreambuf_iterator<char>{input},
+        std::istreambuf_iterator<char>{}};
+    EXPECT_NE(contents.find("\"accepted_step\":12"),
+              std::string::npos);
+    EXPECT_NE(contents.find("\"nodes\":[{"),
+              std::string::npos);
+    std::error_code cleanup_error;
+    std::filesystem::remove_all(output_directory, cleanup_error);
+    EXPECT_FALSE(cleanup_error);
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
 }
 
 int main(int argc, char** argv)
