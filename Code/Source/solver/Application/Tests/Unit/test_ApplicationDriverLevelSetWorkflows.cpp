@@ -2783,6 +2783,186 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     ReducedD38MapFailureUsesBoundedRefreshNeutralFallback)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  constexpr double kUpperY = 1.00001;
+  constexpr double kPhysicalVelocityScale = 0.04;
+  const auto mesh = makeWorkflowSkewedExtensionTriangleMesh(kUpperY);
+
+  // This thin tangential stencil is a deterministic reduction of the D38
+  // failure archived under free_surface_review_completion_20260717.  The
+  // earlier unguarded two-point affine evaluation is unique on this stencil:
+  // its weights reproduce constants and the tangent coordinate at the dry
+  // target, but their opposite signs turn O(0.04) data into O(10^3).
+  const auto first_source_point = workflowVertexPoint(*mesh, 0u);
+  const auto dry_target_point = workflowVertexPoint(*mesh, 1u);
+  const auto second_source_point = workflowVertexPoint(*mesh, 2u);
+  const double first_tangent =
+      first_source_point[1] - dry_target_point[1];
+  const double second_tangent =
+      second_source_point[1] - dry_target_point[1];
+  const double tangent_span = second_tangent - first_tangent;
+  ASSERT_GT(std::abs(tangent_span), 0.0);
+  const double old_first_weight = second_tangent / tangent_span;
+  const double old_second_weight = -first_tangent / tangent_span;
+  const double old_row_l1 =
+      std::abs(old_first_weight) + std::abs(old_second_weight);
+  const double old_dry_velocity =
+      old_first_weight * kPhysicalVelocityScale -
+      old_second_weight * kPhysicalVelocityScale;
+  const double old_amplification =
+      std::abs(old_dry_velocity) / kPhysicalVelocityScale;
+  EXPECT_NEAR(old_first_weight + old_second_weight, 1.0, 1.0e-10);
+  EXPECT_LT(old_second_weight, 0.0);
+  EXPECT_GT(old_row_l1, 1.0e5);
+  EXPECT_GT(std::abs(old_dry_velocity), 1.0e2);
+  EXPECT_GT(old_amplification, 1.0e5);
+
+  std::vector<double> phi(mesh->n_vertices(), 0.0);
+  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
+  std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
+  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+    const auto point = workflowVertexPoint(*mesh, vertex);
+    phi[vertex] = point[0] - 0.5;
+    active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
+  }
+  source[0u] = kPhysicalVelocityScale;
+  source[4u] = -kPhysicalVelocityScale;
+
+  const auto revision = application::core::velocityExtensionMapRevision(
+      31u, 32u, 33u, 34u, 35u, phi, active);
+  const auto build_snapshot = [&]() {
+    return application::core::buildVelocityExtensionMapSnapshot(
+        *mesh,
+        svmp::MeshComm::self(),
+        revision,
+        phi,
+        source,
+        /*source_components=*/2u,
+        active,
+        /*target_components=*/2u,
+        /*copy_components=*/2u,
+        /*band_layers=*/1,
+        /*enforce_wall_impermeability=*/false,
+        std::span<const WallVelocityExtensionConstraint>{});
+  };
+  const auto first = build_snapshot();
+  ASSERT_TRUE(first);
+  ASSERT_EQ(first->report().regression_candidate_rows, 1u);
+  EXPECT_EQ(first->report().regression_accepted_rows, 0u);
+  EXPECT_EQ(first->report().bounded_fallback_rows, 1u);
+  EXPECT_EQ(first->report().condition_rejected_rows, 1u);
+  EXPECT_EQ(first->report().coefficient_rejected_rows, 0u);
+  EXPECT_LE(first->report().max_abs_graph_coefficient,
+            1.0 + kVelocityExtensionRowTolerance);
+  EXPECT_LE(first->report().max_graph_row_l1,
+            1.0 + kVelocityExtensionRowTolerance);
+  EXPECT_LE(first->report().max_graph_row_sum_error,
+            kVelocityExtensionRowTolerance);
+  EXPECT_LE(first->report().max_negative_graph_coefficient,
+            kVelocityExtensionCoefficientTolerance);
+  EXPECT_LE(first->wetToDryAmplification(), 1.0 + 1.0e-12);
+  ASSERT_EQ(first->preview().size(), source.size());
+  EXPECT_LE(std::abs(first->preview()[2u]),
+            kPhysicalVelocityScale + 1.0e-12);
+
+  const auto dry_diagnostic = std::find_if(
+      first->rowDiagnostics().begin(),
+      first->rowDiagnostics().end(),
+      [](const auto& diagnostic) {
+        return diagnostic.local_vertex == 1;
+      });
+  ASSERT_NE(dry_diagnostic, first->rowDiagnostics().end());
+  EXPECT_EQ(dry_diagnostic->disposition,
+            application::core::VelocityExtensionRowDisposition::
+                BoundedFallback);
+  EXPECT_TRUE(dry_diagnostic->condition_rejected);
+  EXPECT_TRUE(dry_diagnostic->bounded_fallback_used);
+  EXPECT_EQ(dry_diagnostic->negative_weight_count, 0u);
+  EXPECT_NEAR(dry_diagnostic->coefficient_sum,
+              1.0,
+              kVelocityExtensionRowTolerance);
+  EXPECT_LE(dry_diagnostic->coefficient_l1,
+            1.0 + kVelocityExtensionRowTolerance);
+  EXPECT_LE(dry_diagnostic->preview_amplification, 1.0 + 1.0e-12);
+
+  const auto maximum_map_residual = [&](const auto& snapshot) {
+    double maximum = 0.0;
+    for (const auto& row : snapshot.rows()) {
+      if (row.vertex < 0 || row.component < 0 || row.component >= 2) {
+        ADD_FAILURE() << "Invalid reduced D38 extension row";
+        return std::numeric_limits<double>::infinity();
+      }
+      const auto row_vertex = static_cast<std::size_t>(row.vertex);
+      const auto row_component = static_cast<std::size_t>(row.component);
+      if (row_vertex >= mesh->n_vertices()) {
+        ADD_FAILURE() << "Reduced D38 extension row is outside the mesh";
+        return std::numeric_limits<double>::infinity();
+      }
+      double residual =
+          snapshot.preview()[2u * row_vertex + row_component];
+      for (const auto& dependency : row.dependencies) {
+        if (dependency.vertex < 0 || dependency.component < 0 ||
+            dependency.component >= 2) {
+          ADD_FAILURE() << "Invalid reduced D38 extension dependency";
+          return std::numeric_limits<double>::infinity();
+        }
+        const auto dependency_vertex =
+            static_cast<std::size_t>(dependency.vertex);
+        const auto dependency_component =
+            static_cast<std::size_t>(dependency.component);
+        if (dependency_vertex >= mesh->n_vertices()) {
+          ADD_FAILURE()
+              << "Reduced D38 extension dependency is outside the mesh";
+          return std::numeric_limits<double>::infinity();
+        }
+        const std::span<const double> values =
+            dependency.field == svmp::FE::level_set::
+                                    VelocityExtensionDependencyField::
+                                        SourceVelocity
+                ? std::span<const double>(source)
+                : snapshot.preview();
+        residual -= dependency.coefficient *
+                    values[2u * dependency_vertex + dependency_component];
+      }
+      maximum = std::max(maximum, std::abs(residual));
+    }
+    return maximum;
+  };
+  EXPECT_LE(maximum_map_residual(*first), 1.0e-14);
+
+  const auto refreshed = build_snapshot();
+  ASSERT_TRUE(refreshed);
+  const auto change = application::core::compareVelocityExtensionMapSnapshots(
+      *refreshed, first.get());
+  EXPECT_TRUE(change.previous_available);
+  EXPECT_FALSE(change.revision_changed);
+  EXPECT_EQ(change.changed_owner_rows, 0u);
+  EXPECT_EQ(change.component_assignment_changes, 0u);
+  EXPECT_EQ(change.row_decision_changes, 0u);
+  EXPECT_EQ(change.dependency_row_changes, 0u);
+  EXPECT_EQ(change.maximum_coefficient_change, 0.0);
+  EXPECT_EQ(change.preview_l2_change, 0.0);
+  EXPECT_EQ(change.preview_linf_change, 0.0);
+  EXPECT_LE(maximum_map_residual(*refreshed), 1.0e-14);
+
+  RecordProperty("d38_archived_extension_norm", "135.759");
+  RecordProperty("d38_archived_physical_velocity_norm", "0.0403971");
+  RecordProperty("reduced_unguarded_row_l1",
+                 std::to_string(old_row_l1));
+  RecordProperty("reduced_unguarded_amplification",
+                 std::to_string(old_amplification));
+  RecordProperty("guarded_wet_to_dry_amplification",
+                 std::to_string(first->wetToDryAmplification()));
+  RecordProperty("same_state_refresh_preview_linf_change",
+                 std::to_string(change.preview_linf_change));
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      VelocityExtensionOrientationMakesEitherRetainedSideNegative)
 {
   const std::array<double, 3> level_set{{-0.25, 0.5, 1.25}};
