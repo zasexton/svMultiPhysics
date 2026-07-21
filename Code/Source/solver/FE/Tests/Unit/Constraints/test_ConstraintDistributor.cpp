@@ -255,9 +255,13 @@ TEST(ConstraintDistributorTest, DistributeLocalToGlobal_Periodic) {
 
     distributor.distributeLocalToGlobal(elem_mat, elem_rhs, dofs, global_matrix, global_rhs);
 
-    // Row 0 (constrained): Dropped
-    EXPECT_DOUBLE_EQ(global_matrix(0, 0), 0.0);
+    // Row 0 (constrained): element couplings eliminated, then set to an
+    // identity-like row so the global system stays non-singular. The solve
+    // returns the inhomogeneity (0 here); the true slave value is
+    // reconstructed by the post-solve constraint distribution.
+    EXPECT_DOUBLE_EQ(global_matrix(0, 0), 1.0);
     EXPECT_DOUBLE_EQ(global_matrix(0, 1), 0.0);
+    EXPECT_DOUBLE_EQ(global_rhs[0], 0.0);
 
     // Row 1 (master):
     // Receives contributions from Row 0 and Row 1
@@ -289,8 +293,9 @@ TEST(ConstraintDistributorTest, DistributeLocalToGlobal_PeriodicNonsymmetricStil
     distributor.distributeLocalToGlobal(elem_mat, elem_rhs, dofs, global_matrix, global_rhs);
 
     // General affine elimination must substitute constrained trial columns
-    // even for nonsymmetric operators.
-    EXPECT_DOUBLE_EQ(global_matrix(0, 0), 0.0);
+    // even for nonsymmetric operators. The slave row becomes identity-like
+    // (see DistributeLocalToGlobal above).
+    EXPECT_DOUBLE_EQ(global_matrix(0, 0), 1.0);
     EXPECT_DOUBLE_EQ(global_matrix(0, 1), 0.0);
     EXPECT_DOUBLE_EQ(global_matrix(1, 0), 0.0);
     EXPECT_DOUBLE_EQ(global_matrix(1, 1), 10.0);

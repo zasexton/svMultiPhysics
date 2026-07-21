@@ -94,14 +94,23 @@ TEST(AffineConstraintsTest, AddDirichletDuplicateDifferentValueThrows) {
     EXPECT_THROW(constraints.addDirichlet(5, 2.0), ConstraintException);
 }
 
-TEST(AffineConstraintsTest, AddDirichletOnNonDirichletConstraintThrows) {
+TEST(AffineConstraintsTest, AddDirichletOverridesMasterBearingLine) {
     AffineConstraints constraints;
 
-    // Create a non-Dirichlet constraint line first.
+    // Create a non-Dirichlet (master-bearing) constraint line first.
     constraints.addLine(5);
     constraints.addEntry(5, 10, 1.0);
 
-    EXPECT_THROW(constraints.addDirichlet(5, 0.0), ConstraintException);
+    // Strong Dirichlet data wins over derived master-bearing lines
+    // (small-cut aggregation, hanging nodes): interface-tracking constraints
+    // cannot reliably pre-exclude every strong-BC dof, so the pin replaces
+    // the line instead of throwing.
+    constraints.addDirichlet(5, 3.0);
+    constraints.close();
+    const auto line = constraints.getConstraint(5);
+    ASSERT_TRUE(line.has_value());
+    EXPECT_TRUE(line->isDirichlet());
+    EXPECT_DOUBLE_EQ(line->inhomogeneity, 3.0);
 }
 
 TEST(AffineConstraintsTest, CloseSingleConstraint) {
@@ -302,6 +311,69 @@ TEST(AffineConstraintsTest, DistributeVectorHomogeneousDirichletIsZero) {
     constraints.distributeHomogeneous(vec.data(), static_cast<GlobalIndex>(vec.size()));
 
     EXPECT_DOUBLE_EQ(vec[0], 0.0);
+}
+
+TEST(AffineConstraintsTest, HasMasterBearingLines) {
+    AffineConstraints empty_constraints;
+    empty_constraints.close();
+    EXPECT_FALSE(empty_constraints.hasMasterBearingLines());
+
+    AffineConstraints dirichlet_only;
+    dirichlet_only.addLine(0);
+    dirichlet_only.setInhomogeneity(0, 10.0);
+    dirichlet_only.close();
+    EXPECT_FALSE(dirichlet_only.hasMasterBearingLines());
+
+    AffineConstraints mixed;
+    mixed.addLine(0);
+    mixed.setInhomogeneity(0, 10.0);
+    mixed.addLine(3);
+    mixed.addEntry(3, 1, 0.5);
+    mixed.addEntry(3, 2, 0.5);
+    mixed.close();
+    EXPECT_TRUE(mixed.hasMasterBearingLines());
+}
+
+TEST(AffineConstraintsTest, DistributeMasterBearingSkipsDirichletLines) {
+    AffineConstraints constraints;
+
+    // u_0 = u_1 + 10.0 (master-bearing MPC with inhomogeneity)
+    constraints.addLine(0);
+    constraints.addEntry(0, 1, 1.0);
+    constraints.setInhomogeneity(0, 10.0);
+    // u_2 = 7.0 (plain Dirichlet, no masters)
+    constraints.addLine(2);
+    constraints.setInhomogeneity(2, 7.0);
+    constraints.close();
+
+    std::vector<double> vec = {0.0, 5.0, 123.0};
+    constraints.distributeMasterBearing(vec);
+
+    EXPECT_DOUBLE_EQ(vec[0], 15.0);   // MPC line applied: 5.0 + 10.0
+    EXPECT_DOUBLE_EQ(vec[1], 5.0);    // master untouched
+    EXPECT_DOUBLE_EQ(vec[2], 123.0);  // Dirichlet line untouched
+}
+
+TEST(AffineConstraintsTest, DistributeMasterBearingHomogeneousSkipsDirichletLines) {
+    AffineConstraints constraints;
+
+    // uDot_0 = uDot_1 (rate of an MPC slave with time-constant weights;
+    // the value-constraint inhomogeneity must NOT leak into the rate)
+    constraints.addLine(0);
+    constraints.addEntry(0, 1, 1.0);
+    constraints.setInhomogeneity(0, 10.0);
+    // uDot_2 carries the finite-difference rate of time-dependent Dirichlet
+    // data (g_dot) and must not be zeroed.
+    constraints.addLine(2);
+    constraints.setInhomogeneity(2, 7.0);
+    constraints.close();
+
+    std::vector<double> vec = {0.0, 5.0, 4.5};
+    constraints.distributeMasterBearingHomogeneous(vec);
+
+    EXPECT_DOUBLE_EQ(vec[0], 5.0);  // master combination only
+    EXPECT_DOUBLE_EQ(vec[1], 5.0);
+    EXPECT_DOUBLE_EQ(vec[2], 4.5);  // Dirichlet rate (g_dot) untouched
 }
 
 // ============================================================================

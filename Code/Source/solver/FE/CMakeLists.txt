@@ -797,6 +797,7 @@ set(FE_ASSEMBLY_SOURCES
     Assembly/BatchedProjection.cpp
     Assembly/BatchedStiffness.cpp
     Assembly/StandardAssembler.cpp
+    Constraints/SmallCutAggregationConstraint.cpp
     Assembly/AssemblerFactory.cpp
     Assembly/ParallelAssembler.cpp
     Assembly/GhostContributionManager.cpp
@@ -2438,6 +2439,7 @@ if(FE_BUILD_TESTS)
     if(FE_WITH_MESH)
         list(APPEND FE_CONSTRAINTS_TEST_SOURCES
             Tests/Unit/Constraints/test_LevelSetActiveSideVertexDirichletConstraint.cpp
+            Tests/Unit/Constraints/test_SmallCutAggregationConstraint.cpp
         )
     endif()
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Constraints/test_main.cpp)

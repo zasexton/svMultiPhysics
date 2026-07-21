@@ -774,6 +774,14 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         incrementEntityDofCount(inactive_by_entity, *entity_map, local_dof);
         const GlobalIndex dof = offset + local_dof;
         if (owned.contains(dof)) {
+            // Precedence: a DOF already slaved by another constraint (e.g.
+            // small-cut aggregation to a wet-extension polynomial) is fully
+            // determined by its masters, so this inactive-side pin has no
+            // singular mode left to remove. Later strong Dirichlet callers
+            // may still replace master-bearing lines explicitly.
+            if (constraints.isConstrained(dof)) {
+                continue;
+            }
             constraints.addDirichlet(dof, inactive_value_);
             ++constrained_dofs;
             incrementEntityDofCount(

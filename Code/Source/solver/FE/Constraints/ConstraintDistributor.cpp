@@ -263,11 +263,17 @@ void ConstraintDistributor::distributeElementCoreRectangular(
         }
     }
 
-    // Ensure Dirichlet rows are well-posed (identity-like with RHS inhomogeneity).
+    // Ensure constrained rows are well-posed (identity-like with RHS
+    // inhomogeneity). This covers plain Dirichlet lines AND master-bearing
+    // slave lines (hanging-node/MPC/aggregation): condensation distributes
+    // their physical contributions to the masters and leaves the slave row
+    // empty, which is singular for direct factorizations. The solve then
+    // returns the inhomogeneity for the slave; the true slave value is
+    // reconstructed by the post-solve constraint distribution.
     for (std::size_t i = 0; i < n_rows; ++i) {
         const auto dof = row_dofs[i];
         const auto constraint = constraints_->getConstraint(dof);
-        if (!constraint || !constraint->isDirichlet()) {
+        if (!constraint) {
             continue;
         }
 
@@ -439,16 +445,20 @@ void ConstraintDistributor::distributeElementCore(
 
     // Ensure constrained rows are well-posed.
     //
-    // Dirichlet rows/cols were skipped above (to eliminate couplings) under the
-    // assumption that the constrained rows are set to identity-like form.
-    // Without this post-step, constrained rows can remain entirely zero.
+    // Constrained rows/cols were eliminated above (their couplings were
+    // distributed to masters), so without this post-step they remain entirely
+    // zero — singular for direct factorizations. This applies to plain
+    // Dirichlet lines AND master-bearing slave lines (hanging-node/MPC/
+    // aggregation): the solve returns the inhomogeneity for the slave and the
+    // true slave value is reconstructed by the post-solve constraint
+    // distribution.
     //
     // For matrix-only assembly, setDiagonal is sufficient; for RHS assembly, set
     // constrained entries to the inhomogeneity value (scaled by diagonal).
     for (std::size_t i = 0; i < n_dofs; ++i) {
         const auto dof = cell_dofs[i];
         auto constraint = constraints_->getConstraint(dof);
-        if (!constraint || !constraint->isDirichlet()) {
+        if (!constraint) {
             continue;
         }
 

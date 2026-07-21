@@ -214,9 +214,12 @@ void AffineConstraints::addDirichlet(GlobalIndex dof, double value) {
 
     ConstraintLine& line = it->second;
     if (!line.entries.empty()) {
-        if (!options_.allow_overwrite) {
-            CONSTRAINT_THROW_DOF("Cannot add Dirichlet constraint: DOF already has master entries", dof);
-        }
+        // Strong Dirichlet data wins over derived master-bearing lines
+        // (small-cut aggregation, hanging nodes): the prescribed value is
+        // exact where given, and interface-tracking constraints cannot
+        // reliably pre-exclude every strong-BC dof across band
+        // reapplications (marker coverage, higher-order face nodes, and
+        // field-local index permutations have each produced misses).
         line.entries.clear();
         line.inhomogeneity = value;
         bumpConstraintLayoutRevision();
@@ -746,6 +749,144 @@ void AffineConstraints::distributeHomogeneous(backends::GenericVector& vec) cons
 
         const auto begin_offset = static_cast<std::size_t>(entry_offsets_[i]);
         const auto end_offset = static_cast<std::size_t>(entry_offsets_[i + 1]);
+
+        Real value = 0.0;
+        for (std::size_t j = begin_offset; j < end_offset; ++j) {
+            const GlobalIndex master = entries_[j].master_dof;
+            if (master < 0 || master >= vec.size()) {
+                continue;
+            }
+            value += static_cast<Real>(entries_[j].weight) * view->getVectorEntry(master);
+        }
+
+        view->addVectorEntry(slave, value, assembly::AddMode::Insert);
+    }
+    view->finalizeAssembly();
+}
+
+bool AffineConstraints::hasMasterBearingLines() const noexcept
+{
+    for (std::size_t i = 0; i + 1 < entry_offsets_.size() && i < slave_dofs_.size(); ++i) {
+        if (entry_offsets_[i + 1] > entry_offsets_[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void AffineConstraints::distributeMasterBearing(double* vec, GlobalIndex vec_size) const
+{
+    if (!is_closed_) {
+        CONSTRAINT_THROW("Cannot distributeMasterBearing: constraints not closed");
+    }
+
+    for (std::size_t i = 0; i < slave_dofs_.size(); ++i) {
+        const GlobalIndex slave = slave_dofs_[i];
+        if (slave >= vec_size) continue;
+
+        const auto begin_offset = static_cast<std::size_t>(entry_offsets_[i]);
+        const auto end_offset = static_cast<std::size_t>(entry_offsets_[i + 1]);
+        if (begin_offset == end_offset) {
+            continue;  // Dirichlet line: no masters, leave untouched.
+        }
+
+        double value = inhomogeneities_[i];
+        for (std::size_t j = begin_offset; j < end_offset; ++j) {
+            const GlobalIndex master = entries_[j].master_dof;
+            if (master < vec_size) {
+                value += entries_[j].weight * vec[master];
+            }
+        }
+        vec[slave] = value;
+    }
+}
+
+void AffineConstraints::distributeMasterBearing(backends::GenericVector& vec) const
+{
+    if (!is_closed_) {
+        CONSTRAINT_THROW("Cannot distributeMasterBearing: constraints not closed");
+    }
+
+    auto view = vec.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "AffineConstraints::distributeMasterBearing: vector view");
+
+    view->beginAssemblyPhase();
+    for (std::size_t i = 0; i < slave_dofs_.size(); ++i) {
+        const GlobalIndex slave = slave_dofs_[i];
+        if (slave < 0 || slave >= vec.size()) {
+            continue;
+        }
+
+        const auto begin_offset = static_cast<std::size_t>(entry_offsets_[i]);
+        const auto end_offset = static_cast<std::size_t>(entry_offsets_[i + 1]);
+        if (begin_offset == end_offset) {
+            continue;  // Dirichlet line: no masters, leave untouched.
+        }
+
+        Real value = static_cast<Real>(inhomogeneities_[i]);
+        for (std::size_t j = begin_offset; j < end_offset; ++j) {
+            const GlobalIndex master = entries_[j].master_dof;
+            if (master < 0 || master >= vec.size()) {
+                continue;
+            }
+            value += static_cast<Real>(entries_[j].weight) * view->getVectorEntry(master);
+        }
+
+        view->addVectorEntry(slave, value, assembly::AddMode::Insert);
+    }
+    view->finalizeAssembly();
+}
+
+void AffineConstraints::distributeMasterBearingHomogeneous(double* vec,
+                                                           GlobalIndex vec_size) const
+{
+    if (!is_closed_) {
+        CONSTRAINT_THROW("Cannot distributeMasterBearingHomogeneous: constraints not closed");
+    }
+
+    for (std::size_t i = 0; i < slave_dofs_.size(); ++i) {
+        const GlobalIndex slave = slave_dofs_[i];
+        if (slave >= vec_size) continue;
+
+        const auto begin_offset = static_cast<std::size_t>(entry_offsets_[i]);
+        const auto end_offset = static_cast<std::size_t>(entry_offsets_[i + 1]);
+        if (begin_offset == end_offset) {
+            continue;  // Dirichlet line: no masters, leave untouched.
+        }
+
+        double value = 0.0;
+        for (std::size_t j = begin_offset; j < end_offset; ++j) {
+            const GlobalIndex master = entries_[j].master_dof;
+            if (master < vec_size) {
+                value += entries_[j].weight * vec[master];
+            }
+        }
+        vec[slave] = value;
+    }
+}
+
+void AffineConstraints::distributeMasterBearingHomogeneous(backends::GenericVector& vec) const
+{
+    if (!is_closed_) {
+        CONSTRAINT_THROW("Cannot distributeMasterBearingHomogeneous: constraints not closed");
+    }
+
+    auto view = vec.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(),
+                      "AffineConstraints::distributeMasterBearingHomogeneous: vector view");
+
+    view->beginAssemblyPhase();
+    for (std::size_t i = 0; i < slave_dofs_.size(); ++i) {
+        const GlobalIndex slave = slave_dofs_[i];
+        if (slave < 0 || slave >= vec.size()) {
+            continue;
+        }
+
+        const auto begin_offset = static_cast<std::size_t>(entry_offsets_[i]);
+        const auto end_offset = static_cast<std::size_t>(entry_offsets_[i + 1]);
+        if (begin_offset == end_offset) {
+            continue;  // Dirichlet line: no masters, leave untouched.
+        }
 
         Real value = 0.0;
         for (std::size_t j = begin_offset; j < end_offset; ++j) {

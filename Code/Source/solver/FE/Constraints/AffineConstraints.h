@@ -517,6 +517,63 @@ public:
     void distributeHomogeneous(backends::GenericVector& vec) const;
 
     /**
+     * @brief Whether any constraint line carries master entries.
+     *
+     * Master-bearing lines are true multi-point constraints
+     * (slave = sum of weighted masters [+ inhomogeneity]); lines without
+     * masters are plain Dirichlet data. Only meaningful after close().
+     */
+    [[nodiscard]] bool hasMasterBearingLines() const noexcept;
+
+    /**
+     * @brief Distribute only master-bearing lines into a vector.
+     *
+     * For each constrained DOF whose line carries at least one master entry,
+     * set vec[slave] = sum(weight_i * vec[master_i]) + inhomogeneity.
+     * Dirichlet lines (no masters) are left untouched, so time-dependent
+     * Dirichlet values and their finite-difference rate history are not
+     * rewritten. Used to re-impose interface-tracking MPC state (e.g.
+     * small-cut aggregation) after the slave set is re-classified.
+     */
+    void distributeMasterBearing(double* vec, GlobalIndex vec_size) const;
+
+    /**
+     * @brief Distribute only master-bearing lines (std::vector overload)
+     */
+    void distributeMasterBearing(std::vector<double>& vec) const {
+        distributeMasterBearing(vec.data(), static_cast<GlobalIndex>(vec.size()));
+    }
+
+    /**
+     * @brief Distribute only master-bearing lines into a backend vector.
+     */
+    void distributeMasterBearing(backends::GenericVector& vec) const;
+
+    /**
+     * @brief Distribute only master-bearing lines, homogeneous form.
+     *
+     * As distributeMasterBearing(), but with inhomogeneities treated as
+     * zero: vec[slave] = sum(weight_i * vec[master_i]). This is the
+     * consistent update for derivative vectors (rates) of MPC slaves whose
+     * constraint coefficients are time-constant: differentiating the
+     * constraint applies the same master combination to the rates.
+     */
+    void distributeMasterBearingHomogeneous(double* vec, GlobalIndex vec_size) const;
+
+    /**
+     * @brief Distribute only master-bearing lines, homogeneous (std::vector)
+     */
+    void distributeMasterBearingHomogeneous(std::vector<double>& vec) const {
+        distributeMasterBearingHomogeneous(vec.data(), static_cast<GlobalIndex>(vec.size()));
+    }
+
+    /**
+     * @brief Distribute only master-bearing lines into a backend vector,
+     *        homogeneous form.
+     */
+    void distributeMasterBearingHomogeneous(backends::GenericVector& vec) const;
+
+    /**
      * @brief Set constrained DOF values in vector (just inhomogeneities)
      *
      * Sets vec[slave] = inhomogeneity for each constrained DOF.
