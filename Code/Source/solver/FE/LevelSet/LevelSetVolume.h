@@ -89,6 +89,16 @@ struct LevelSetGlobalShiftCorrectionOptions {
     Real maximum_interface_displacement_fraction{1.0};
 };
 
+struct LevelSetComponentVolumeTransfer {
+    // The minimum global vertex id in the topology-stable negative-phase
+    // component.  A permitted global shift cannot change vertex signs, so
+    // this identity is unchanged by the correction and across partitions.
+    GlobalIndex component_global_vertex_id{INVALID_GLOBAL_INDEX};
+    Real initial_negative_volume{0.0};
+    Real corrected_negative_volume{0.0};
+    Real volume_transfer{0.0};
+};
+
 struct LevelSetGlobalShiftCorrectionResult {
     // All decision-driving volumes, shifts, and displacement metrics are
     // communicator-global and therefore identical on every participating rank.
@@ -118,6 +128,20 @@ struct LevelSetGlobalShiftCorrectionResult {
     // Retained compatibility/telemetry name for the wall-tangent contact-line
     // displacement estimate.  It equals max_contact_line_displacement.
     Real contact_line_displacement_bound{0.0};
+    // A uniform coefficient shift leaves the P1 gradient, and therefore the
+    // interface/wall angle inside every topology-stable cut simplex,
+    // unchanged.  This metric records that exact geometric consequence.
+    Real max_contact_angle_change_radians{0.0};
+    // Per-component accounting is evaluated on the same physical simplicial
+    // P1 cut measure as the qualified correction.  Records are ordered by the
+    // partition-independent component identity above and are identical on
+    // every participating rank.
+    bool negative_component_topology_preserved{false};
+    std::vector<LevelSetComponentVolumeTransfer>
+        negative_component_volume_transfers{};
+    Real total_component_volume_transfer{0.0};
+    Real total_absolute_component_volume_transfer{0.0};
+    Real maximum_absolute_component_volume_transfer{0.0};
     LevelSetVolumeResult initial_volume{};
     LevelSetVolumeResult corrected_volume{};
     std::string diagnostic{};

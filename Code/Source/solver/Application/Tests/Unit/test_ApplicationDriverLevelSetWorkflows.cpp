@@ -3939,6 +3939,16 @@ TEST_F(ApplicationDriverBoundPreservingCandidatesTest,
   EXPECT_EQ(gatherFeOrderedSolution(history_.uPrev()), previous);
 }
 
+void addValidComponentTransferLedger(
+    svmp::FE::level_set::LevelSetGlobalShiftCorrectionResult& result)
+{
+  result.negative_component_topology_preserved = true;
+  result.negative_component_volume_transfers.push_back(
+      svmp::FE::level_set::LevelSetComponentVolumeTransfer{
+          .component_global_vertex_id = 0,
+      });
+}
+
 TEST(ApplicationDriverLevelSetVolumeCorrection,
      CumulativeDisplacementBudgetRejectsBeforeAccountingExcessEvent)
 {
@@ -3952,6 +3962,7 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
   result.minimum_edge_length = 1.0;
   result.max_interface_displacement = 0.04;
   result.max_contact_line_displacement = 0.03;
+  addValidComponentTransferLedger(result);
 
   ASSERT_NO_THROW(accountAppliedLevelSetVolumeCorrection(request, result));
   ASSERT_NO_THROW(accountAppliedLevelSetVolumeCorrection(request, result));
@@ -3992,6 +4003,7 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
   applied.minimum_edge_length = 1.0;
   applied.max_interface_displacement = 0.04;
   applied.max_contact_line_displacement = 0.02;
+  addValidComponentTransferLedger(applied);
   ASSERT_NO_THROW(accountAppliedLevelSetVolumeCorrection(request, applied));
 
   applied.minimum_edge_length = 0.5;
@@ -4024,6 +4036,7 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
   result.minimum_edge_length = 1.0;
   result.max_interface_displacement = 0.01;
   result.max_contact_line_displacement = 0.03;
+  addValidComponentTransferLedger(result);
 
   const auto reference_edge_before =
       request.volume_correction_reference_minimum_edge_length;
@@ -4128,6 +4141,30 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
       .maximum_cumulative_interface_displacement_fraction = 1.0;
   first_request.volume_target_initialized = true;
   first_request.volume_target = 0.36;
+
+  std::vector<LevelSetMaintenanceRequest> successful_requests{
+      first_request};
+  testing::internal::CaptureStdout();
+  const bool successful_change =
+      applyLevelSetMaintenance(sim, history, successful_requests);
+  const auto successful_output = testing::internal::GetCapturedStdout();
+  ASSERT_TRUE(successful_change);
+  EXPECT_NE(successful_output.find(
+                "max_contact_angle_change_radians=0"),
+            std::string::npos);
+  EXPECT_NE(successful_output.find(
+                "negative_component_topology_preserved=true"),
+            std::string::npos);
+  EXPECT_NE(successful_output.find("negative_component_count=1"),
+            std::string::npos);
+  EXPECT_NE(successful_output.find("component_global_vertex_id="),
+            std::string::npos);
+  EXPECT_NE(successful_output.find("component_volume_transfer="),
+            std::string::npos);
+  scatterFeOrderedSolution(history.u(), initial);
+  scatterFeOrderedSolution(history.uPrev(), initial);
+  scatterFeOrderedSolution(history.uPrev2(), initial);
+  scatterFeOrderedSolution(history.uDot(), rates);
 
   auto rejecting_request = first_request;
   rejecting_request.volume_correction.target_negative_volume = 0.35;

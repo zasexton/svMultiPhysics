@@ -950,10 +950,134 @@ TEST(LevelSetVolume, GlobalShiftCorrectionMatchesTargetVolume)
                 correction_opts.target_negative_volume,
                 correction_opts.volume_tolerance);
     EXPECT_NEAR(result.volume_error, 0.0, correction_opts.volume_tolerance);
+    EXPECT_DOUBLE_EQ(result.max_contact_angle_change_radians, 0.0);
+    EXPECT_TRUE(result.negative_component_topology_preserved);
+    ASSERT_EQ(result.negative_component_volume_transfers.size(), 1u);
+    EXPECT_EQ(result.negative_component_volume_transfers.front()
+                  .component_global_vertex_id,
+              0);
+    EXPECT_NEAR(result.negative_component_volume_transfers.front()
+                    .initial_negative_volume,
+                result.initial_negative_volume,
+                1.0e-12);
+    EXPECT_NEAR(result.negative_component_volume_transfers.front()
+                    .corrected_negative_volume,
+                result.corrected_negative_volume,
+                1.0e-12);
+    EXPECT_NEAR(result.total_component_volume_transfer,
+                result.corrected_negative_volume -
+                    result.initial_negative_volume,
+                1.0e-12);
+    EXPECT_NEAR(result.total_absolute_component_volume_transfer,
+                std::abs(result.total_component_volume_transfer),
+                1.0e-12);
+    EXPECT_NEAR(result.maximum_absolute_component_volume_transfer,
+                result.total_absolute_component_volume_transfer,
+                1.0e-12);
     ASSERT_EQ(corrected.size(), coefficients.size());
     for (std::size_t i = 0; i < coefficients.size(); ++i) {
         EXPECT_NEAR(corrected[i], coefficients[i] + result.applied_shift, 1.0e-12);
     }
+}
+
+TEST(LevelSetVolume,
+     GlobalShiftReportsTopologyStableDisconnectedComponentTransfers)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = buildFourTriangleStripMesh();
+    auto phi_space =
+        std::make_shared<FE::spaces::H1Space>(FE::ElementType::Triangle3,
+                                              /*order=*/1);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup());
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    std::vector<FE::Real> coefficients(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), FE::Real{0.0});
+    const std::array<FE::Real, 6> vertex_values{{
+        FE::Real{-1.0},
+        FE::Real{1.0},
+        FE::Real{-1.0},
+        FE::Real{-1.0},
+        FE::Real{1.0},
+        FE::Real{-1.0},
+    }};
+    for (FE::GlobalIndex vertex = 0; vertex < 6; ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        coefficients[static_cast<std::size_t>(dofs.front())] =
+            vertex_values[static_cast<std::size_t>(vertex)];
+    }
+    auto target_coefficients = coefficients;
+    for (auto& value : target_coefficients) {
+        value += FE::Real{0.2};
+    }
+    const level_set::LevelSetVolumeOptions volume_options{};
+    const auto target = level_set::computeLevelSetCutCellVolume(
+        system.meshAccess(),
+        field_dofs,
+        volume_options,
+        target_coefficients);
+    ASSERT_TRUE(target.success) << target.diagnostic;
+
+    level_set::LevelSetGlobalShiftCorrectionOptions correction_options{};
+    correction_options.target_negative_volume = target.negative_volume;
+    correction_options.volume_tolerance = FE::Real{1.0e-12};
+    correction_options.max_iterations = 80;
+    std::vector<FE::Real> corrected;
+    const auto result = level_set::applyGlobalLevelSetShiftCorrection(
+        system.meshAccess(),
+        field_dofs,
+        volume_options,
+        correction_options,
+        coefficients,
+        corrected);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_TRUE(result.correction_applied);
+    EXPECT_NEAR(result.applied_shift, 0.2, 1.0e-10);
+    EXPECT_DOUBLE_EQ(result.max_contact_angle_change_radians, 0.0);
+    EXPECT_TRUE(result.negative_component_topology_preserved);
+    ASSERT_EQ(result.negative_component_volume_transfers.size(), 2u);
+    EXPECT_EQ(result.negative_component_volume_transfers[0]
+                  .component_global_vertex_id,
+              0);
+    EXPECT_EQ(result.negative_component_volume_transfers[1]
+                  .component_global_vertex_id,
+              2);
+    FE::Real summed_initial = 0.0;
+    FE::Real summed_corrected = 0.0;
+    FE::Real summed_transfer = 0.0;
+    for (const auto& component :
+         result.negative_component_volume_transfers) {
+        EXPECT_LT(component.volume_transfer, 0.0);
+        summed_initial += component.initial_negative_volume;
+        summed_corrected += component.corrected_negative_volume;
+        summed_transfer += component.volume_transfer;
+    }
+    EXPECT_NEAR(summed_initial, result.initial_negative_volume, 1.0e-12);
+    EXPECT_NEAR(summed_corrected,
+                result.corrected_negative_volume,
+                1.0e-12);
+    EXPECT_NEAR(summed_transfer,
+                result.total_component_volume_transfer,
+                1.0e-12);
+    EXPECT_NEAR(result.total_absolute_component_volume_transfer,
+                -result.total_component_volume_transfer,
+                1.0e-12);
+    EXPECT_NEAR(result.maximum_absolute_component_volume_transfer,
+                FE::Real{0.5} *
+                    result.total_absolute_component_volume_transfer,
+                1.0e-12);
+#endif
 }
 
 TEST(LevelSetVolume, CutCellVolumeHandlesTinyTetraFragmentWithoutActivePatch)

@@ -10,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <memory>
 #include <set>
 #include <span>
@@ -126,6 +127,61 @@ struct CollectiveContext {
     (void)context;
 #endif
     return local;
+}
+
+[[nodiscard]] std::vector<unsigned long long> allGatherUnsignedValues(
+    const CollectiveContext& context,
+    std::span<const unsigned long long> local)
+{
+#if FE_HAS_MPI
+    if (context.active) {
+        const bool local_count_valid =
+            local.size() <=
+            static_cast<std::size_t>(std::numeric_limits<int>::max());
+        if (!allReduceLogicalAnd(context, local_count_valid)) {
+            throw std::overflow_error(
+                "level-set component ledger exceeds MPI count range");
+        }
+        int communicator_size = 1;
+        MPI_Comm_size(context.communicator, &communicator_size);
+        const int local_count = static_cast<int>(local.size());
+        std::vector<int> counts(
+            static_cast<std::size_t>(communicator_size), 0);
+        MPI_Allgather(&local_count,
+                      1,
+                      MPI_INT,
+                      counts.data(),
+                      1,
+                      MPI_INT,
+                      context.communicator);
+        std::vector<int> displacements(counts.size(), 0);
+        std::size_t total = 0u;
+        for (std::size_t rank = 0; rank < counts.size(); ++rank) {
+            if (counts[rank] < 0 ||
+                total > static_cast<std::size_t>(
+                            std::numeric_limits<int>::max()) -
+                            static_cast<std::size_t>(counts[rank])) {
+                throw std::overflow_error(
+                    "level-set component ledger aggregate exceeds MPI count range");
+            }
+            displacements[rank] = static_cast<int>(total);
+            total += static_cast<std::size_t>(counts[rank]);
+        }
+        std::vector<unsigned long long> gathered(total, 0u);
+        MPI_Allgatherv(local.data(),
+                       local_count,
+                       MPI_UNSIGNED_LONG_LONG,
+                       gathered.data(),
+                       counts.data(),
+                       displacements.data(),
+                       MPI_UNSIGNED_LONG_LONG,
+                       context.communicator);
+        return gathered;
+    }
+#else
+    (void)context;
+#endif
+    return std::vector<unsigned long long>(local.begin(), local.end());
 }
 
 void globalizeVolumeResult(LevelSetVolumeResult& result,
@@ -1084,6 +1140,394 @@ struct TopologyStableShiftMetrics {
     return active->negative_volume_fraction * measure;
 }
 
+[[nodiscard]] Real negativeVolumeForQualifiedSimplex(
+    const CutInterfaceDomainRequest& request,
+    ElementType type,
+    GlobalIndex parent_cell,
+    const std::vector<std::array<Real, 3>>& coordinates,
+    std::span<const Real> signed_values,
+    Real tolerance)
+{
+    const Real measure = parentMeasure(type, coordinates);
+    const Real simple_fraction =
+        negativeFractionFromValues(signed_values, tolerance);
+    if (simple_fraction >= Real{0.0}) {
+        return simple_fraction * measure;
+    }
+    if (type == ElementType::Triangle3 && coordinates.size() == 3u &&
+        signed_values.size() == 3u) {
+        LevelSetCellCutInput input{};
+        input.parent_cell = parent_cell;
+        input.element_type = type;
+        input.node_coordinates.assign(coordinates.begin(), coordinates.end());
+        input.level_set_values.reserve(signed_values.size());
+        for (const auto value : signed_values) {
+            input.level_set_values.push_back(value + request.isovalue);
+        }
+        auto cut_result = interfaces::cutLinearLevelSetCell2D(request, input);
+        const auto active = std::find_if(
+            cut_result.fragments.begin(),
+            cut_result.fragments.end(),
+            [](const auto& fragment) { return fragment.active(); });
+        if (active == cut_result.fragments.end()) {
+            throw std::runtime_error(
+                "level-set component ledger found a cut triangle without an active interface fragment");
+        }
+        return active->negative_volume_fraction * measure;
+    }
+    if (type == ElementType::Tetra4 && coordinates.size() == 4u &&
+        signed_values.size() == 4u) {
+        return negativeVolumeForLinearTetra(
+            request,
+            parent_cell,
+            std::span<const std::array<Real, 3>, 4>(coordinates.data(), 4u),
+            std::span<const Real, 4>(signed_values.data(), 4u),
+            tolerance);
+    }
+    throw std::invalid_argument(
+        "level-set component ledger requires linear triangles or tetrahedra");
+}
+
+struct ComponentVolumeTransferLedger {
+    bool topology_preserved{false};
+    std::vector<LevelSetComponentVolumeTransfer> transfers{};
+    Real total_transfer{0.0};
+    Real total_absolute_transfer{0.0};
+    Real maximum_absolute_transfer{0.0};
+};
+
+[[nodiscard]] ComponentVolumeTransferLedger componentVolumeTransferLedger(
+    const assembly::IMeshAccess& mesh,
+    const dofs::EntityDofMap& entity_map,
+    const LevelSetVolumeOptions& options,
+    std::span<const Real> coefficients,
+    Real shift,
+    Real expected_initial_negative_volume,
+    Real expected_corrected_negative_volume,
+    const CollectiveContext& collective)
+{
+    using EncodedIndex = unsigned long long;
+    bool local_topology_valid = true;
+    std::vector<EncodedIndex> local_negative_vertices;
+    std::vector<EncodedIndex> local_negative_edges;
+    std::vector<GlobalIndex> nodes;
+    mesh.forEachOwnedCell([&](GlobalIndex cell) {
+        if (!local_topology_valid) {
+            return;
+        }
+        try {
+            const auto count = cornerCount(mesh.getCellType(cell));
+            mesh.getCellNodes(cell, nodes);
+            if (count == 0u || nodes.size() < count) {
+                local_topology_valid = false;
+                return;
+            }
+            std::vector<EncodedIndex> negative_vertices;
+            for (std::size_t corner = 0; corner < count; ++corner) {
+                const auto node = nodes[corner];
+                const auto vertex_dofs = entity_map.getVertexDofs(node);
+                if (node < 0 || vertex_dofs.size() != 1u ||
+                    vertex_dofs.front() < 0 ||
+                    static_cast<std::size_t>(vertex_dofs.front()) >=
+                        coefficients.size()) {
+                    local_topology_valid = false;
+                    return;
+                }
+                const Real initial =
+                    coefficients[static_cast<std::size_t>(
+                        vertex_dofs.front())] -
+                    options.isovalue;
+                const Real corrected = initial + shift;
+                if (!std::isfinite(initial) || !std::isfinite(corrected) ||
+                    !(std::abs(initial) > options.tolerance) ||
+                    !(std::abs(corrected) > options.tolerance) ||
+                    ((initial < Real{0.0}) != (corrected < Real{0.0}))) {
+                    local_topology_valid = false;
+                    return;
+                }
+                if (initial < Real{0.0}) {
+                    const auto encoded = static_cast<EncodedIndex>(node);
+                    negative_vertices.push_back(encoded);
+                    local_negative_vertices.push_back(encoded);
+                }
+            }
+            for (std::size_t i = 0; i < negative_vertices.size(); ++i) {
+                for (std::size_t j = i + 1u;
+                     j < negative_vertices.size();
+                     ++j) {
+                    local_negative_edges.push_back(negative_vertices[i]);
+                    local_negative_edges.push_back(negative_vertices[j]);
+                }
+            }
+        } catch (const std::exception&) {
+            local_topology_valid = false;
+        }
+    });
+    if (!allReduceLogicalAnd(collective, local_topology_valid)) {
+        throw std::runtime_error(
+            "level-set global shift changed or could not classify component topology");
+    }
+
+    auto negative_vertices = allGatherUnsignedValues(
+        collective, local_negative_vertices);
+    auto negative_edges = allGatherUnsignedValues(
+        collective, local_negative_edges);
+    if (negative_edges.size() % 2u != 0u) {
+        throw std::runtime_error(
+            "level-set component ledger received an incomplete distributed edge");
+    }
+    std::sort(negative_vertices.begin(), negative_vertices.end());
+    negative_vertices.erase(
+        std::unique(negative_vertices.begin(), negative_vertices.end()),
+        negative_vertices.end());
+    if (negative_vertices.empty()) {
+        throw std::runtime_error(
+            "level-set component ledger found no negative-phase vertex");
+    }
+
+    std::map<EncodedIndex, EncodedIndex> parent;
+    for (const auto vertex : negative_vertices) {
+        parent.emplace(vertex, vertex);
+    }
+    const auto find_root = [&parent](EncodedIndex vertex) {
+        auto found = parent.find(vertex);
+        if (found == parent.end()) {
+            throw std::runtime_error(
+                "level-set component ledger edge references an unknown vertex");
+        }
+        EncodedIndex root = vertex;
+        while (parent.at(root) != root) {
+            root = parent.at(root);
+        }
+        while (parent.at(vertex) != vertex) {
+            const auto next = parent.at(vertex);
+            parent[vertex] = root;
+            vertex = next;
+        }
+        return root;
+    };
+    for (std::size_t edge = 0; edge < negative_edges.size(); edge += 2u) {
+        const auto first = negative_edges[edge];
+        const auto second = negative_edges[edge + 1u];
+        const auto first_root = find_root(first);
+        const auto second_root = find_root(second);
+        if (first_root != second_root) {
+            const auto minimum = std::min(first_root, second_root);
+            const auto maximum = std::max(first_root, second_root);
+            parent[maximum] = minimum;
+        }
+    }
+    for (const auto vertex : negative_vertices) {
+        (void)find_root(vertex);
+    }
+
+    std::vector<EncodedIndex> component_ids;
+    component_ids.reserve(negative_vertices.size());
+    for (const auto vertex : negative_vertices) {
+        component_ids.push_back(find_root(vertex));
+    }
+    std::sort(component_ids.begin(), component_ids.end());
+    component_ids.erase(
+        std::unique(component_ids.begin(), component_ids.end()),
+        component_ids.end());
+    std::map<EncodedIndex, std::size_t> component_index;
+    for (std::size_t index = 0; index < component_ids.size(); ++index) {
+        component_index.emplace(component_ids[index], index);
+    }
+
+    std::vector<Real> component_volumes(component_ids.size() * 2u, Real{0.0});
+    CutInterfaceDomainRequest request{};
+    request.source = LevelSetInterfaceSource::fromField(FieldId{0});
+    request.interface_marker = 0;
+    request.isovalue = options.isovalue;
+    request.tolerance = options.tolerance;
+    request.quadrature_order = 1;
+    std::vector<std::array<Real, 3>> coordinates;
+    bool local_measurement_valid = true;
+    mesh.forEachOwnedCell([&](GlobalIndex cell) {
+        if (!local_measurement_valid) {
+            return;
+        }
+        try {
+            const auto type = mesh.getCellType(cell);
+            const auto count = cornerCount(type);
+            mesh.getCellNodes(cell, nodes);
+            mesh.getCellCoordinates(cell, coordinates);
+            if (count == 0u || nodes.size() < count ||
+                coordinates.size() < count) {
+                local_measurement_valid = false;
+                return;
+            }
+            std::vector<Real> initial_values;
+            std::vector<Real> corrected_values;
+            initial_values.reserve(count);
+            corrected_values.reserve(count);
+            std::optional<EncodedIndex> component;
+            for (std::size_t corner = 0; corner < count; ++corner) {
+                const auto vertex_dofs =
+                    entity_map.getVertexDofs(nodes[corner]);
+                if (vertex_dofs.size() != 1u ||
+                    vertex_dofs.front() < 0 ||
+                    static_cast<std::size_t>(vertex_dofs.front()) >=
+                        coefficients.size()) {
+                    local_measurement_valid = false;
+                    return;
+                }
+                const Real initial =
+                    coefficients[static_cast<std::size_t>(
+                        vertex_dofs.front())] -
+                    options.isovalue;
+                initial_values.push_back(initial);
+                corrected_values.push_back(initial + shift);
+                if (initial < Real{0.0}) {
+                    const auto root = find_root(
+                        static_cast<EncodedIndex>(nodes[corner]));
+                    if (component.has_value() && *component != root) {
+                        local_measurement_valid = false;
+                        return;
+                    }
+                    component = root;
+                }
+            }
+            if (!component.has_value()) {
+                return;
+            }
+            const auto index = component_index.at(*component);
+            component_volumes[2u * index] +=
+                negativeVolumeForQualifiedSimplex(
+                    request,
+                    type,
+                    cell,
+                    coordinates,
+                    initial_values,
+                    options.tolerance);
+            component_volumes[2u * index + 1u] +=
+                negativeVolumeForQualifiedSimplex(
+                    request,
+                    type,
+                    cell,
+                    coordinates,
+                    corrected_values,
+                    options.tolerance);
+        } catch (const std::exception&) {
+            local_measurement_valid = false;
+        }
+    });
+    if (!allReduceLogicalAnd(collective, local_measurement_valid)) {
+        throw std::runtime_error(
+            "level-set component ledger could not measure every owned simplex");
+    }
+#if FE_HAS_MPI
+    if (collective.active) {
+        if (component_volumes.size() >
+            static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+            throw std::overflow_error(
+                "level-set component volume ledger exceeds MPI count range");
+        }
+        std::vector<Real> global_component_volumes(
+            component_volumes.size(), Real{0.0});
+        MPI_Allreduce(component_volumes.data(),
+                      global_component_volumes.data(),
+                      static_cast<int>(component_volumes.size()),
+                      mpiRealType(),
+                      MPI_SUM,
+                      collective.communicator);
+        component_volumes = std::move(global_component_volumes);
+    }
+#endif
+
+    ComponentVolumeTransferLedger ledger;
+    Real summed_initial = Real{0.0};
+    Real summed_corrected = Real{0.0};
+    ledger.transfers.reserve(component_ids.size());
+    for (std::size_t index = 0; index < component_ids.size(); ++index) {
+        const Real initial = component_volumes[2u * index];
+        const Real corrected = component_volumes[2u * index + 1u];
+        const Real transfer = corrected - initial;
+        ledger.transfers.push_back(LevelSetComponentVolumeTransfer{
+            .component_global_vertex_id =
+                static_cast<GlobalIndex>(component_ids[index]),
+            .initial_negative_volume = initial,
+            .corrected_negative_volume = corrected,
+            .volume_transfer = transfer,
+        });
+        summed_initial += initial;
+        summed_corrected += corrected;
+        ledger.total_transfer += transfer;
+        ledger.total_absolute_transfer += std::abs(transfer);
+        ledger.maximum_absolute_transfer = std::max(
+            ledger.maximum_absolute_transfer, std::abs(transfer));
+    }
+    const Real comparison_scale = std::max(
+        {Real{1.0},
+         std::abs(expected_initial_negative_volume),
+         std::abs(expected_corrected_negative_volume)});
+    const Real comparison_tolerance =
+        Real{8192.0} * std::numeric_limits<Real>::epsilon() *
+        comparison_scale;
+    ledger.topology_preserved =
+        std::abs(summed_initial - expected_initial_negative_volume) <=
+            comparison_tolerance &&
+        std::abs(summed_corrected - expected_corrected_negative_volume) <=
+            comparison_tolerance &&
+        std::abs(ledger.total_transfer -
+                 (expected_corrected_negative_volume -
+                  expected_initial_negative_volume)) <=
+            comparison_tolerance;
+    if (!ledger.topology_preserved) {
+        throw std::runtime_error(
+            "level-set component volume ledger does not reconcile with the corrected global phase measure");
+    }
+    return ledger;
+}
+
+void finalizeGlobalShiftGeometryDiagnostics(
+    const assembly::IMeshAccess& mesh,
+    const dofs::EntityDofMap& entity_map,
+    const LevelSetVolumeOptions& options,
+    std::span<const Real> coefficients,
+    const CollectiveContext& collective,
+    LevelSetGlobalShiftCorrectionResult& result)
+{
+    const auto displacement = shiftDisplacementMetrics(
+        mesh,
+        entity_map,
+        options,
+        coefficients,
+        result.applied_shift,
+        collective);
+    result.max_interface_displacement = displacement.max_interface_displacement;
+    result.max_contact_line_displacement =
+        displacement.max_contact_line_displacement;
+    result.contact_line_displacement_bound =
+        result.max_contact_line_displacement;
+    // The correction is an additive scalar shift on a topology-stable P1
+    // field.  Its cell gradients and wall-relative interface normals are
+    // therefore exactly unchanged.
+    result.max_contact_angle_change_radians = Real{0.0};
+    if (!result.correction_applied) {
+        return;
+    }
+    auto ledger = componentVolumeTransferLedger(
+        mesh,
+        entity_map,
+        options,
+        coefficients,
+        result.applied_shift,
+        result.initial_negative_volume,
+        result.corrected_negative_volume,
+        collective);
+    result.negative_component_topology_preserved =
+        ledger.topology_preserved;
+    result.negative_component_volume_transfers =
+        std::move(ledger.transfers);
+    result.total_component_volume_transfer = ledger.total_transfer;
+    result.total_absolute_component_volume_transfer =
+        ledger.total_absolute_transfer;
+    result.maximum_absolute_component_volume_transfer =
+        ledger.maximum_absolute_transfer;
+}
+
 [[nodiscard]] LevelSetGeneratedInterfaceOptions generatedInterfaceOptionsForVolume(
     const systems::FESystem& system,
     FieldId level_set_field,
@@ -1741,19 +2185,13 @@ LevelSetGlobalShiftCorrectionResult applyGlobalLevelSetShiftCorrection(
             result.corrected_negative_volume = volume.negative_volume;
             result.volume_error = signed_error;
             result.corrected_volume = volume;
-            const auto displacement = shiftDisplacementMetrics(
+            finalizeGlobalShiftGeometryDiagnostics(
                 mesh,
                 *entity_map,
                 volume_options,
                 coefficients,
-                shift,
-                collective);
-            result.max_interface_displacement =
-                displacement.max_interface_displacement;
-            result.max_contact_line_displacement =
-                displacement.max_contact_line_displacement;
-            result.contact_line_displacement_bound =
-                result.max_contact_line_displacement;
+                collective,
+                result);
             corrected_coefficients = std::move(best_coefficients);
             return result;
         }
@@ -1777,18 +2215,13 @@ LevelSetGlobalShiftCorrectionResult applyGlobalLevelSetShiftCorrection(
     result.corrected_negative_volume = best_volume.negative_volume;
     result.volume_error = best_volume.negative_volume - target;
     result.corrected_volume = best_volume;
-    const auto displacement = shiftDisplacementMetrics(
+    finalizeGlobalShiftGeometryDiagnostics(
         mesh,
         *entity_map,
         volume_options,
         coefficients,
-        best_shift,
-        collective);
-    result.max_interface_displacement = displacement.max_interface_displacement;
-    result.max_contact_line_displacement =
-        displacement.max_contact_line_displacement;
-    result.contact_line_displacement_bound =
-        result.max_contact_line_displacement;
+        collective,
+        result);
     result.diagnostic = result.target_reached
                             ? std::string{}
                             : (result.limited_by_displacement_bound
@@ -2044,19 +2477,13 @@ LevelSetGlobalShiftCorrectionResult applyGlobalLevelSetShiftCorrection(
                 result.corrected_negative_volume = best_volume.negative_volume;
                 result.volume_error = best_volume.negative_volume - target;
                 result.corrected_volume = best_volume;
-                const auto displacement = shiftDisplacementMetrics(
+                finalizeGlobalShiftGeometryDiagnostics(
                     system.meshAccess(),
                     *entity_map,
                     volume_options,
                     field_coefficients,
-                    best_shift,
-                    collective);
-                result.max_interface_displacement =
-                    displacement.max_interface_displacement;
-                result.max_contact_line_displacement =
-                    displacement.max_contact_line_displacement;
-                result.contact_line_displacement_bound =
-                    result.max_contact_line_displacement;
+                    collective,
+                    result);
                 corrected_solution = std::move(best_solution);
                 return result;
             }
@@ -2077,19 +2504,13 @@ LevelSetGlobalShiftCorrectionResult applyGlobalLevelSetShiftCorrection(
         result.corrected_negative_volume = best_volume.negative_volume;
         result.volume_error = best_volume.negative_volume - target;
         result.corrected_volume = best_volume;
-        const auto displacement = shiftDisplacementMetrics(
+        finalizeGlobalShiftGeometryDiagnostics(
             system.meshAccess(),
             *entity_map,
             volume_options,
             field_coefficients,
-            best_shift,
-            collective);
-        result.max_interface_displacement =
-            displacement.max_interface_displacement;
-        result.max_contact_line_displacement =
-            displacement.max_contact_line_displacement;
-        result.contact_line_displacement_bound =
-            result.max_contact_line_displacement;
+            collective,
+            result);
         result.diagnostic =
             result.target_reached
                 ? std::string{}

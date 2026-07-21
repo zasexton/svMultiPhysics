@@ -5086,10 +5086,18 @@ void accountAppliedLevelSetVolumeCorrection(
   if (!(result.minimum_edge_length > svmp::FE::Real{0.0}) ||
       !std::isfinite(result.minimum_edge_length) ||
       !finite_nonnegative(result.max_interface_displacement) ||
-      !finite_nonnegative(result.max_contact_line_displacement)) {
+      !finite_nonnegative(result.max_contact_line_displacement) ||
+      !finite_nonnegative(result.max_contact_angle_change_radians) ||
+      !result.negative_component_topology_preserved ||
+      result.negative_component_volume_transfers.empty() ||
+      !std::isfinite(result.total_component_volume_transfer) ||
+      !finite_nonnegative(
+          result.total_absolute_component_volume_transfer) ||
+      !finite_nonnegative(
+          result.maximum_absolute_component_volume_transfer)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Applied level-set volume correction "
-        "reported invalid cumulative-displacement metrics.");
+        "reported invalid geometry or component-transfer metrics.");
   }
 
   auto reference_edge_length =
@@ -6026,6 +6034,19 @@ bool applyLevelSetMaintenance(
           << result.max_contact_line_displacement
           << " contact_line_displacement_bound="
           << result.contact_line_displacement_bound
+          << " max_contact_angle_change_radians="
+          << result.max_contact_angle_change_radians
+          << " negative_component_topology_preserved="
+          << (result.negative_component_topology_preserved ? "true"
+                                                          : "false")
+          << " negative_component_count="
+          << result.negative_component_volume_transfers.size()
+          << " total_component_volume_transfer="
+          << result.total_component_volume_transfer
+          << " total_absolute_component_volume_transfer="
+          << result.total_absolute_component_volume_transfer
+          << " maximum_absolute_component_volume_transfer="
+          << result.maximum_absolute_component_volume_transfer
           << " maximum_allowed_interface_displacement="
           << result.maximum_allowed_interface_displacement
           << " maximum_topology_stable_shift="
@@ -6056,6 +6077,17 @@ bool applyLevelSetMaintenance(
           << (volume_options.use_generated_interface_quadrature
                   ? "generated_interface_quadrature"
                   : "corner_linearized");
+      for (const auto& transfer :
+           result.negative_component_volume_transfers) {
+        log << " component_global_vertex_id="
+            << transfer.component_global_vertex_id
+            << " component_initial_negative_volume="
+            << transfer.initial_negative_volume
+            << " component_corrected_negative_volume="
+            << transfer.corrected_negative_volume
+            << " component_volume_transfer="
+            << transfer.volume_transfer;
+      }
       staged_commit_logs.push_back(log.str());
     }
   }
