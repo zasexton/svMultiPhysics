@@ -25,8 +25,10 @@ authoritative retained cut geometry, advances it on accepted time-step
 candidates, reconciles the signed-distance geometry to its nodal liquid
 moments, and commits the two fields together. Graph assembly, transport, and
 maintenance support the replicated global numbering used by the current MPI
-level-set state. The multi-resolution transport benchmark matrix and explicit
-film/sheet/rim/satellite morphology classification remain qualification work.
+level-set state. The release-scale multi-resolution transport matrix and
+explicit moving-crown morphology extraction remain qualification work; fixed
+region observers and opt-in resolved-satellite classification are available as
+described below.
 When conservative phase transport is disabled, the independent signed-distance
 transport remains nonconservative and must continue to report that limitation.
 
@@ -135,6 +137,17 @@ part of this sequence. The retained maintenance ledger distinguishes raw
 post-transport, post-limit, post-reinitialization, post-correction, and retained
 assembly measures, together with nodal mismatch and interface/contact
 displacement measures.
+
+Application tests exercise the production sequence as distinct transport-only,
+local-reconciliation-only, and reinitialization-plus-reconciliation modes. A
+separate negative case verifies full rollback after a nonconverged repair. The
+transport velocity extension is swept over 1, 2, 4, and 16 graph layers on a
+regular curved interface while checking row, partition-of-unity, and
+wet-to-dry amplification bounds. A deliberately skewed triangle makes the
+tangential regression extrapolative and verifies that its rejected row is
+replaced by the positive bounded fallback. These are CI-level isolation gates;
+they do not replace the required independent release-scale space/time,
+maintenance, and extension matrices.
 
 ## Fully discrete edge update
 

@@ -58,6 +58,37 @@ std::shared_ptr<svmp::Mesh> makeWorkflowTriangleMesh()
   return svmp::create_mesh(std::move(base));
 }
 
+std::shared_ptr<svmp::Mesh> makeWorkflowSkewedExtensionTriangleMesh(
+    double upper_y = 2.0)
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+
+  // The dry vertex is outside the tangential span of both wet neighbors.
+  // An affine tangential regression therefore requires a negative weight,
+  // while the bounded fallback remains a positive partition of unity.
+  const std::vector<svmp::real_t> x_ref = {
+      0.0, 1.0,
+      1.0, 0.0,
+      0.0, upper_y,
+  };
+  const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 3};
+  const std::vector<svmp::index_t> cell2vertex = {0, 1, 2};
+
+  svmp::CellShape shape{};
+  shape.family = svmp::CellFamily::Triangle;
+  shape.num_corners = 3;
+  shape.order = 1;
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      x_ref,
+      cell2vertex_offsets,
+      cell2vertex,
+      {shape});
+  base->finalize();
+
+  return svmp::create_mesh(std::move(base));
+}
+
 std::shared_ptr<svmp::Mesh> makeWorkflowBiquadraticQuadMesh()
 {
   auto base = std::make_shared<svmp::MeshBase>();
@@ -3389,6 +3420,206 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     NormalBandVelocityExtensionBandSweepKeepsFallbackRowsBounded)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  constexpr int subdivisions = 8;
+  constexpr double tangential_velocity = 0.2;
+  constexpr double normal_velocity = -0.1;
+  const auto mesh = makeWorkflowStructuredQuadMesh(subdivisions);
+  std::vector<double> phi(mesh->n_vertices(), 0.0);
+  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
+  std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
+  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+    const auto point = workflowVertexPoint(*mesh, vertex);
+    const double dx = point[0] - 0.35;
+    const double dy = point[1] - 0.50;
+    phi[vertex] = std::sqrt(dx * dx + dy * dy) - 0.22;
+    active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
+    source[2u * vertex] = tangential_velocity;
+    source[2u * vertex + 1u] = normal_velocity;
+  }
+
+  std::vector<std::size_t> vertices_outside_band;
+  for (const int band_layers : {1, 2, 4, 16}) {
+    SCOPED_TRACE("band_layers=" + std::to_string(band_layers));
+    std::vector<double> extended;
+    const auto report = extendVelocityInLevelSetNormalBand(
+        *mesh,
+        svmp::MeshComm::self(),
+        phi,
+        source,
+        /*source_components=*/2u,
+        active,
+        /*target_components=*/2u,
+        /*copy_components=*/2u,
+        band_layers,
+        /*enforce_wall_impermeability=*/false,
+        std::span<const WallVelocityExtensionConstraint>{},
+        extended);
+    vertices_outside_band.push_back(report.vertices_outside_band);
+    EXPECT_EQ(report.bounded_fallback_rows, 0u);
+    EXPECT_LE(report.max_abs_graph_coefficient,
+              1.0 + kVelocityExtensionRowTolerance);
+    EXPECT_LE(report.max_graph_row_l1,
+              1.0 + kVelocityExtensionRowTolerance);
+    EXPECT_LE(report.max_graph_row_sum_error,
+              kVelocityExtensionRowTolerance);
+    EXPECT_LE(report.max_negative_graph_coefficient,
+              kVelocityExtensionCoefficientTolerance);
+    EXPECT_LE(report.max_constant_reproduction_error,
+              kVelocityExtensionRowTolerance);
+    EXPECT_LE(report.max_extended_speed,
+              report.max_seed_speed + 1.0e-12);
+
+    std::size_t observed_outside = 0u;
+    for (std::size_t vertex = 0u;
+         vertex < mesh->n_vertices(); ++vertex) {
+      const bool outside =
+          extended[2u * vertex] == 0.0 &&
+          extended[2u * vertex + 1u] == 0.0;
+      if (outside) {
+        ++observed_outside;
+        continue;
+      }
+      EXPECT_NEAR(extended[2u * vertex],
+                  tangential_velocity,
+                  1.0e-12);
+      EXPECT_NEAR(extended[2u * vertex + 1u],
+                  normal_velocity,
+                  1.0e-12);
+    }
+    EXPECT_EQ(observed_outside, report.vertices_outside_band);
+    RecordProperty(
+        "extension_band_" + std::to_string(band_layers) +
+            "_outside_vertices",
+        std::to_string(report.vertices_outside_band));
+    RecordProperty(
+        "extension_band_" + std::to_string(band_layers) +
+            "_bounded_fallback_rows",
+        std::to_string(report.bounded_fallback_rows));
+    RecordProperty(
+        "extension_band_" + std::to_string(band_layers) +
+            "_wet_to_dry_speed_ratio",
+        std::to_string(
+            report.max_extended_speed / report.max_seed_speed));
+  }
+
+  ASSERT_EQ(vertices_outside_band.size(), 4u);
+  EXPECT_GT(vertices_outside_band[0], vertices_outside_band[1]);
+  EXPECT_GT(vertices_outside_band[1], vertices_outside_band[2]);
+  EXPECT_GT(vertices_outside_band[2], vertices_outside_band[3]);
+  EXPECT_EQ(vertices_outside_band.back(), 0u);
+
+  const auto fallback_mesh = makeWorkflowSkewedExtensionTriangleMesh();
+  std::vector<double> fallback_phi(fallback_mesh->n_vertices(), 0.0);
+  std::vector<double> fallback_source(
+      fallback_mesh->n_vertices() * 2u, 0.0);
+  std::vector<std::uint8_t> fallback_active(
+      fallback_mesh->n_vertices(), 0u);
+  for (std::size_t vertex = 0u;
+       vertex < fallback_mesh->n_vertices(); ++vertex) {
+    const auto point = workflowVertexPoint(*fallback_mesh, vertex);
+    fallback_phi[vertex] = point[0] - 0.5;
+    fallback_active[vertex] =
+        fallback_phi[vertex] <= 0.0 ? 1u : 0u;
+    fallback_source[2u * vertex] = tangential_velocity;
+    fallback_source[2u * vertex + 1u] = normal_velocity;
+  }
+  std::vector<double> fallback_extension;
+  const auto fallback_report = extendVelocityInLevelSetNormalBand(
+      *fallback_mesh,
+      svmp::MeshComm::self(),
+      fallback_phi,
+      fallback_source,
+      /*source_components=*/2u,
+      fallback_active,
+      /*target_components=*/2u,
+      /*copy_components=*/2u,
+      /*band_layers=*/1,
+      /*enforce_wall_impermeability=*/false,
+      std::span<const WallVelocityExtensionConstraint>{},
+      fallback_extension);
+  EXPECT_EQ(fallback_report.vertices_outside_band, 0u);
+  EXPECT_EQ(fallback_report.regression_candidate_rows, 1u);
+  EXPECT_EQ(fallback_report.regression_accepted_rows, 0u);
+  EXPECT_EQ(fallback_report.bounded_fallback_rows, 1u);
+  EXPECT_EQ(fallback_report.condition_rejected_rows, 0u);
+  EXPECT_EQ(fallback_report.coefficient_rejected_rows, 1u);
+  EXPECT_LE(fallback_report.max_abs_graph_coefficient,
+            1.0 + kVelocityExtensionRowTolerance);
+  EXPECT_LE(fallback_report.max_graph_row_l1,
+            1.0 + kVelocityExtensionRowTolerance);
+  EXPECT_LE(fallback_report.max_graph_row_sum_error,
+            kVelocityExtensionRowTolerance);
+  EXPECT_LE(fallback_report.max_negative_graph_coefficient,
+            kVelocityExtensionCoefficientTolerance);
+  EXPECT_LE(fallback_report.max_extended_speed,
+            fallback_report.max_seed_speed + 1.0e-12);
+  ASSERT_EQ(fallback_extension.size(), fallback_source.size());
+  for (std::size_t index = 0u;
+       index < fallback_extension.size(); index += 2u) {
+    EXPECT_NEAR(fallback_extension[index],
+                tangential_velocity,
+                1.0e-12);
+    EXPECT_NEAR(fallback_extension[index + 1u],
+                normal_velocity,
+                1.0e-12);
+  }
+  RecordProperty("extension_forced_bounded_fallback_rows",
+                 std::to_string(fallback_report.bounded_fallback_rows));
+
+  const auto ill_conditioned_mesh =
+      makeWorkflowSkewedExtensionTriangleMesh(1.00001);
+  std::vector<double> ill_conditioned_phi(
+      ill_conditioned_mesh->n_vertices(), 0.0);
+  std::vector<double> ill_conditioned_source(
+      ill_conditioned_mesh->n_vertices() * 2u, 0.0);
+  std::vector<std::uint8_t> ill_conditioned_active(
+      ill_conditioned_mesh->n_vertices(), 0u);
+  for (std::size_t vertex = 0u;
+       vertex < ill_conditioned_mesh->n_vertices(); ++vertex) {
+    const auto point = workflowVertexPoint(*ill_conditioned_mesh, vertex);
+    ill_conditioned_phi[vertex] = point[0] - 0.5;
+    ill_conditioned_active[vertex] =
+        ill_conditioned_phi[vertex] <= 0.0 ? 1u : 0u;
+    ill_conditioned_source[2u * vertex] = tangential_velocity;
+    ill_conditioned_source[2u * vertex + 1u] = normal_velocity;
+  }
+  std::vector<double> ill_conditioned_extension;
+  const auto ill_conditioned_report = extendVelocityInLevelSetNormalBand(
+      *ill_conditioned_mesh,
+      svmp::MeshComm::self(),
+      ill_conditioned_phi,
+      ill_conditioned_source,
+      /*source_components=*/2u,
+      ill_conditioned_active,
+      /*target_components=*/2u,
+      /*copy_components=*/2u,
+      /*band_layers=*/1,
+      /*enforce_wall_impermeability=*/false,
+      std::span<const WallVelocityExtensionConstraint>{},
+      ill_conditioned_extension);
+  EXPECT_EQ(ill_conditioned_report.regression_candidate_rows, 1u);
+  EXPECT_EQ(ill_conditioned_report.regression_accepted_rows, 0u);
+  EXPECT_EQ(ill_conditioned_report.bounded_fallback_rows, 1u);
+  EXPECT_EQ(ill_conditioned_report.condition_rejected_rows, 1u);
+  EXPECT_EQ(ill_conditioned_report.coefficient_rejected_rows, 0u);
+  EXPECT_LE(ill_conditioned_report.max_graph_row_l1,
+            1.0 + kVelocityExtensionRowTolerance);
+  EXPECT_LE(ill_conditioned_report.max_graph_row_sum_error,
+            kVelocityExtensionRowTolerance);
+  EXPECT_LE(ill_conditioned_report.max_extended_speed,
+            ill_conditioned_report.max_seed_speed + 1.0e-12);
+  RecordProperty("extension_condition_fallback_rows",
+                 std::to_string(
+                     ill_conditioned_report.condition_rejected_rows));
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      NormalBandVelocityExtensionDoesNotSwitchDisconnectedComponents)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -4014,6 +4245,78 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   EXPECT_NEAR(projection.retained_liquid_measure,
               accepted_measure,
               1.0e-10);
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       TransportOnlyKeepsAnAlreadyConsistentGeometryUnchanged)
+{
+  requests_.front().reinitialization.enabled = false;
+  requests_.front().conservative_phase.reconcile_geometry = false;
+
+  auto result = applyConservativePhaseCandidates(
+      sim_,
+      history(),
+      requests_,
+      *params_,
+      lifecycle_,
+      refresh_cache_,
+      active_requests_);
+  ASSERT_TRUE(result.accept_step);
+  EXPECT_FALSE(result.changed);
+  ASSERT_EQ(result.maintenance_ledgers.size(), 1u);
+  const auto& ledger = result.maintenance_ledgers.front();
+  EXPECT_TRUE(ledger.transport_stage.success);
+  EXPECT_FALSE(ledger.reinitialization_due);
+  EXPECT_FALSE(ledger.reinitialization_applied);
+  EXPECT_EQ(ledger.reconciliation.iterations, 0);
+  EXPECT_LE(ledger.post_correction_mismatch.maximum_nodal_residual,
+            svmp::FE::Real{1.0e-10});
+  ASSERT_NE(result.geometry_transaction, nullptr);
+  ASSERT_NO_THROW(result.geometry_transaction->commit());
+  result.geometry_transaction.reset();
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       ReconciliationOnlyRepairsTransportedGeometryLocally)
+{
+  auto raw_candidate = initialized_solution_;
+  const auto phi_offset = fieldOffset(phi_);
+  for (std::size_t i = 0u; i < fieldCount(phi_); ++i) {
+    raw_candidate[phi_offset + i] *= svmp::FE::Real{1.5};
+  }
+  raw_candidate[phi_offset] += svmp::FE::Real{0.01};
+  scatterFeOrderedSolution(history().u(), raw_candidate);
+  refreshCurrentCandidate(
+      "application-driver-conservative-phase-reconciliation-only-raw");
+  requests_.front().reinitialization.enabled = false;
+  requests_.front().conservative_phase.reconcile_geometry = true;
+
+  auto result = applyConservativePhaseCandidates(
+      sim_,
+      history(),
+      requests_,
+      *params_,
+      lifecycle_,
+      refresh_cache_,
+      active_requests_);
+  ASSERT_TRUE(result.accept_step);
+  EXPECT_TRUE(result.changed);
+  ASSERT_EQ(result.maintenance_ledgers.size(), 1u);
+  const auto& ledger = result.maintenance_ledgers.front();
+  EXPECT_TRUE(ledger.transport_stage.success);
+  EXPECT_FALSE(ledger.reinitialization_due);
+  EXPECT_FALSE(ledger.reinitialization_applied);
+  EXPECT_DOUBLE_EQ(ledger.raw_post_transport_geometry_measure,
+                   ledger.post_reinitialization_geometry_measure);
+  EXPECT_GT(ledger.post_reinitialization_mismatch.maximum_nodal_residual,
+            ledger.post_correction_mismatch.maximum_nodal_residual +
+                svmp::FE::Real{1.0e-8});
+  EXPECT_GT(ledger.reconciliation.iterations, 0);
+  EXPECT_LE(ledger.post_correction_mismatch.maximum_nodal_residual,
+            svmp::FE::Real{1.0e-10});
+  ASSERT_NE(result.geometry_transaction, nullptr);
+  ASSERT_NO_THROW(result.geometry_transaction->commit());
+  result.geometry_transaction.reset();
 }
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
