@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <numbers>
 #include <set>
 #include <stdexcept>
 #include <tuple>
@@ -395,11 +396,21 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
              FreeSurfaceGeometryRuleRole role,
              const assembly::IMeshAccess& mesh,
              const FreeSurfaceGeometrySnapshotPolicy& policy,
+             int physical_boundary_marker = -1,
              std::vector<std::uint64_t> source_ids = {})
 {
     completeAndValidateRuleIdentity(rule, mesh, ledger);
     FreeSurfaceGeometryRuleRecord record;
     record.role = roleFor(rule, role);
+    const bool boundary_rule =
+        record.role == FreeSurfaceGeometryRuleRole::Contact ||
+        record.role == FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary ||
+        record.role == FreeSurfaceGeometryRuleRole::PositiveExteriorBoundary;
+    if (boundary_rule != (physical_boundary_marker >= 0)) {
+        throw std::invalid_argument(
+            "free-surface rule has invalid physical-boundary provenance");
+    }
+    record.physical_boundary_marker = physical_boundary_marker;
     record.retention =
         volumeRole(record.role) && !rule.full_cell_equivalent &&
                 std::isfinite(rule.volume_fraction) &&
@@ -691,6 +702,8 @@ void validateVolumePartition(
     for (const auto& record : records) {
         mix(hash, static_cast<std::uint64_t>(record.role));
         mix(hash, static_cast<std::uint64_t>(record.retention));
+        mix(hash, static_cast<std::uint64_t>(
+                      record.physical_boundary_marker + 1));
         mix(hash, static_cast<std::uint64_t>(record.locally_owned));
         mix(hash, record.reference_rule.provenance.cut_topology_revision);
         mix(hash, static_cast<std::uint64_t>(
@@ -829,6 +842,121 @@ const FreeSurfaceGeometryValidationLedger&
 FreeSurfaceGeometrySnapshot::ledger() const noexcept
 {
     return ledger_;
+}
+
+FreeSurfaceDiscreteFunctionalState evaluateFreeSurfaceDiscreteFunctional(
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    const FreeSurfaceDiscreteFunctionalParameters& parameters)
+{
+    if (!snapshot.revision().complete()) {
+        throw std::invalid_argument(
+            "free-surface functional requires a revision-complete snapshot");
+    }
+    if (!std::isfinite(parameters.surface_tension) ||
+        parameters.surface_tension < Real{0.0}) {
+        throw std::invalid_argument(
+            "free-surface functional requires finite nonnegative surface tension");
+    }
+    if (!std::isfinite(parameters.volume_multiplier)) {
+        throw std::invalid_argument(
+            "free-surface functional requires a finite volume multiplier");
+    }
+    std::map<int, FreeSurfaceDiscreteWallFunctionalState> walls;
+    for (const auto& coefficient : parameters.young_wall_coefficients) {
+        if (coefficient.boundary_marker < 0 ||
+            !std::isfinite(
+                coefficient.equilibrium_contact_angle_radians) ||
+            !(coefficient.equilibrium_contact_angle_radians > Real{0.0}) ||
+            !(coefficient.equilibrium_contact_angle_radians <
+              std::numbers::pi_v<Real>)) {
+            throw std::invalid_argument(
+                "free-surface functional wall coefficient requires a nonnegative marker and an angle strictly between zero and pi");
+        }
+        FreeSurfaceDiscreteWallFunctionalState wall;
+        wall.boundary_marker = coefficient.boundary_marker;
+        wall.equilibrium_contact_angle_radians =
+            coefficient.equilibrium_contact_angle_radians;
+        if (!walls.emplace(coefficient.boundary_marker, wall).second) {
+            throw std::invalid_argument(
+                "free-surface functional has duplicate coefficients for one physical boundary");
+        }
+    }
+
+    const auto volume_role =
+        parameters.liquid_side == geometry::CutIntegrationSide::Negative
+            ? FreeSurfaceGeometryRuleRole::NegativeVolume
+            : FreeSurfaceGeometryRuleRole::PositiveVolume;
+    const auto wall_role =
+        parameters.liquid_side == geometry::CutIntegrationSide::Negative
+            ? FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary
+            : FreeSurfaceGeometryRuleRole::PositiveExteriorBoundary;
+
+    FreeSurfaceDiscreteFunctionalState state;
+    state.snapshot_revision_key =
+        snapshot.revision().snapshot_revision_key;
+    state.liquid_side = parameters.liquid_side;
+    state.surface_tension = parameters.surface_tension;
+    state.volume_multiplier = parameters.volume_multiplier;
+
+    for (const auto& record : snapshot.rules()) {
+        if (!record.locally_owned ||
+            record.retention != FreeSurfaceGeometryRetention::Retained) {
+            continue;
+        }
+        const Real measure = record.physical_rule.physical_measure;
+        if (!std::isfinite(measure) || measure < Real{0.0}) {
+            throw std::invalid_argument(
+                "free-surface functional encountered an invalid owned physical measure");
+        }
+        if (record.role == volume_role) {
+            state.owned_liquid_volume += measure;
+        } else if (record.role == FreeSurfaceGeometryRuleRole::Interface) {
+            state.owned_liquid_gas_area += measure;
+        } else if (record.role == wall_role) {
+            if (record.physical_boundary_marker < 0) {
+                throw std::invalid_argument(
+                    "free-surface functional encountered exterior-boundary geometry without a physical marker");
+            }
+            state.owned_wetted_wall_area += measure;
+            auto& wall = walls[record.physical_boundary_marker];
+            wall.boundary_marker = record.physical_boundary_marker;
+            wall.owned_wetted_wall_area += measure;
+        } else if (record.role == FreeSurfaceGeometryRuleRole::Contact) {
+            if (record.physical_boundary_marker < 0) {
+                throw std::invalid_argument(
+                    "free-surface functional encountered contact geometry without a physical marker");
+            }
+            state.owned_contact_measure += measure;
+            auto& wall = walls[record.physical_boundary_marker];
+            wall.boundary_marker = record.physical_boundary_marker;
+            wall.owned_contact_measure += measure;
+        }
+    }
+
+    state.liquid_gas_surface_energy =
+        parameters.surface_tension * state.owned_liquid_gas_area;
+    state.walls.reserve(walls.size());
+    for (auto& [boundary_marker, wall] : walls) {
+        (void)boundary_marker;
+        if (wall.equilibrium_contact_angle_radians.has_value()) {
+            wall.young_wall_energy =
+                -parameters.surface_tension *
+                std::cos(*wall.equilibrium_contact_angle_radians) *
+                wall.owned_wetted_wall_area;
+            state.young_wall_energy += wall.young_wall_energy;
+        }
+        state.walls.push_back(wall);
+    }
+    state.volume_constraint_potential =
+        parameters.volume_multiplier * state.owned_liquid_volume;
+    state.total_potential = state.liquid_gas_surface_energy +
+                            state.young_wall_energy +
+                            state.volume_constraint_potential;
+    if (!std::isfinite(state.total_potential)) {
+        throw std::invalid_argument(
+            "free-surface functional produced a non-finite potential");
+    }
+    return state;
 }
 
 std::vector<const FreeSurfaceGeometryRuleRecord*>
@@ -1038,7 +1166,8 @@ buildFreeSurfaceGeometrySnapshot(
                     std::move(rule),
                     FreeSurfaceGeometryRuleRole::Contact,
                     mesh,
-                    policy);
+                    policy,
+                    contact.boundaryMarker());
         }
     }
     if (ledger.orphan_contact_fragment_count != 0u ||
@@ -1079,6 +1208,7 @@ buildFreeSurfaceGeometrySnapshot(
                     role,
                     mesh,
                     policy,
+                    active.request().boundary_marker,
                     sourceIdsForActiveRule(active, stable_id));
         }
     }

@@ -71,6 +71,7 @@ struct FreeSurfaceGeometryRuleRecord {
     FreeSurfaceGeometryRuleRole role{FreeSurfaceGeometryRuleRole::Interface};
     FreeSurfaceGeometryRetention retention{
         FreeSurfaceGeometryRetention::Retained};
+    int physical_boundary_marker{-1};
     geometry::CutQuadratureRule reference_rule{};
     geometry::MappedCutQuadratureRule physical_rule{};
     bool locally_owned{false};
@@ -151,6 +152,60 @@ struct FreeSurfaceGeometryValidationLedger {
     Real maximum_boundary_partition_error{0.0};
 };
 
+/**
+ * Coefficients for the snapshot-owned capillary functional
+ *
+ *   F_h = gamma A_lg,h
+ *         - sum_w gamma cos(theta_e,w) A_sl,h,w + lambda V_h.
+ *
+ * A boundary has no Young contribution when it has no coefficient entry.
+ * The volume multiplier uses the displayed plus-sign convention; callers
+ * are responsible for mapping their pressure sign convention to lambda.
+ */
+struct FreeSurfaceYoungWallCoefficient {
+    int boundary_marker{-1};
+    Real equilibrium_contact_angle_radians{0.0};
+};
+
+struct FreeSurfaceDiscreteFunctionalParameters {
+    geometry::CutIntegrationSide liquid_side{
+        geometry::CutIntegrationSide::Negative};
+    Real surface_tension{0.0};
+    std::vector<FreeSurfaceYoungWallCoefficient> young_wall_coefficients{};
+    Real volume_multiplier{0.0};
+};
+
+struct FreeSurfaceDiscreteWallFunctionalState {
+    int boundary_marker{-1};
+    std::optional<Real> equilibrium_contact_angle_radians{};
+    Real owned_wetted_wall_area{0.0};
+    Real owned_contact_measure{0.0};
+    Real young_wall_energy{0.0};
+};
+
+/**
+ * Rank-owned contribution to one immutable snapshot's capillary functional.
+ *
+ * Ghost rules are deliberately excluded.  Distributed callers sum each
+ * scalar across the snapshot communicator exactly once.
+ */
+struct FreeSurfaceDiscreteFunctionalState {
+    std::uint64_t snapshot_revision_key{0};
+    geometry::CutIntegrationSide liquid_side{
+        geometry::CutIntegrationSide::Negative};
+    Real surface_tension{0.0};
+    Real volume_multiplier{0.0};
+    std::vector<FreeSurfaceDiscreteWallFunctionalState> walls{};
+    Real owned_liquid_volume{0.0};
+    Real owned_liquid_gas_area{0.0};
+    Real owned_wetted_wall_area{0.0};
+    Real owned_contact_measure{0.0};
+    Real liquid_gas_surface_energy{0.0};
+    Real young_wall_energy{0.0};
+    Real volume_constraint_potential{0.0};
+    Real total_potential{0.0};
+};
+
 class FreeSurfaceGeometrySnapshot {
 public:
     FreeSurfaceGeometrySnapshot(const FreeSurfaceGeometrySnapshot&) = delete;
@@ -201,6 +256,11 @@ private:
     std::vector<FreeSurfaceGeometryRuleRecord> rules_{};
     FreeSurfaceGeometryValidationLedger ledger_{};
 };
+
+[[nodiscard]] FreeSurfaceDiscreteFunctionalState
+evaluateFreeSurfaceDiscreteFunctional(
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    const FreeSurfaceDiscreteFunctionalParameters& parameters);
 
 [[nodiscard]] std::shared_ptr<const FreeSurfaceGeometrySnapshot>
 buildFreeSurfaceGeometrySnapshot(

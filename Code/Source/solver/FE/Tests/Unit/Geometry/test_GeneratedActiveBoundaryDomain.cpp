@@ -797,15 +797,116 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_NEAR(snapshot->ledger().maximum_boundary_partition_error,
                 0.0,
                 1.0e-14);
+
+    FE::Real expected_negative_wall_area{0.0};
+    FE::Real expected_contact_measure{0.0};
     for (const auto& record : snapshot->rules()) {
         ASSERT_EQ(record.reference_rule.points.size(),
                   record.physical_rule.points.size());
         EXPECT_GT(record.physical_rule.physical_measure, 0.0);
+        if (record.locally_owned &&
+            record.retention ==
+                interfaces::FreeSurfaceGeometryRetention::Retained) {
+            if (record.role == interfaces::FreeSurfaceGeometryRuleRole::
+                                   NegativeExteriorBoundary) {
+                EXPECT_EQ(record.physical_boundary_marker, 10);
+                expected_negative_wall_area +=
+                    record.physical_rule.physical_measure;
+            } else if (record.role ==
+                       interfaces::FreeSurfaceGeometryRuleRole::Contact) {
+                EXPECT_EQ(record.physical_boundary_marker, 10);
+                expected_contact_measure +=
+                    record.physical_rule.physical_measure;
+            } else if (record.role == interfaces::FreeSurfaceGeometryRuleRole::
+                                          PositiveExteriorBoundary) {
+                EXPECT_EQ(record.physical_boundary_marker, 10);
+            } else {
+                EXPECT_EQ(record.physical_boundary_marker, -1);
+            }
+        }
         for (const auto& point : record.physical_rule.points) {
             EXPECT_GT(point.physical_weight, 0.0);
             EXPECT_GT(point.absolute_jacobian_determinant, 0.0);
         }
     }
+
+    interfaces::FreeSurfaceDiscreteFunctionalParameters functional_parameters;
+    functional_parameters.liquid_side =
+        FE::geometry::CutIntegrationSide::Negative;
+    functional_parameters.surface_tension = 2.0;
+    functional_parameters.young_wall_coefficients.push_back(
+        {10, std::acos(FE::Real{0.5})});
+    functional_parameters.volume_multiplier = 3.0;
+    const auto functional =
+        interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            *snapshot, functional_parameters);
+    EXPECT_EQ(functional.snapshot_revision_key,
+              snapshot->revision().snapshot_revision_key);
+    EXPECT_NEAR(functional.owned_liquid_volume,
+                snapshot->ledger().owned_retained_negative_physical_volume,
+                1.0e-14);
+    EXPECT_NEAR(functional.owned_liquid_gas_area,
+                snapshot->ledger().interface_physical_measure,
+                1.0e-14);
+    EXPECT_NEAR(functional.owned_wetted_wall_area,
+                expected_negative_wall_area,
+                1.0e-14);
+    EXPECT_NEAR(functional.owned_contact_measure,
+                expected_contact_measure,
+                1.0e-14);
+    EXPECT_NEAR(functional.liquid_gas_surface_energy,
+                2.0 * functional.owned_liquid_gas_area,
+                1.0e-14);
+    EXPECT_NEAR(functional.young_wall_energy,
+                -functional.owned_wetted_wall_area,
+                1.0e-14);
+    ASSERT_EQ(functional.walls.size(), 1u);
+    EXPECT_EQ(functional.walls.front().boundary_marker, 10);
+    ASSERT_TRUE(functional.walls.front()
+                    .equilibrium_contact_angle_radians.has_value());
+    EXPECT_NEAR(*functional.walls.front()
+                     .equilibrium_contact_angle_radians,
+                std::acos(FE::Real{0.5}),
+                1.0e-14);
+    EXPECT_NEAR(functional.walls.front().owned_wetted_wall_area,
+                functional.owned_wetted_wall_area,
+                1.0e-14);
+    EXPECT_NEAR(functional.walls.front().owned_contact_measure,
+                functional.owned_contact_measure,
+                1.0e-14);
+    EXPECT_NEAR(functional.walls.front().young_wall_energy,
+                functional.young_wall_energy,
+                1.0e-14);
+    EXPECT_NEAR(functional.volume_constraint_potential,
+                3.0 * functional.owned_liquid_volume,
+                1.0e-14);
+    EXPECT_NEAR(functional.total_potential,
+                functional.liquid_gas_surface_energy +
+                    functional.young_wall_energy +
+                    functional.volume_constraint_potential,
+                1.0e-14);
+
+    auto invalid_parameters = functional_parameters;
+    invalid_parameters.surface_tension = -1.0;
+    EXPECT_THROW(
+        (void)interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            *snapshot, invalid_parameters),
+        std::invalid_argument);
+    invalid_parameters = functional_parameters;
+    invalid_parameters.young_wall_coefficients.front()
+        .equilibrium_contact_angle_radians = 0.0;
+    EXPECT_THROW(
+        (void)interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            *snapshot, invalid_parameters),
+        std::invalid_argument);
+    invalid_parameters = functional_parameters;
+    invalid_parameters.young_wall_coefficients.push_back(
+        invalid_parameters.young_wall_coefficients.front());
+    EXPECT_THROW(
+        (void)interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            *snapshot, invalid_parameters),
+        std::invalid_argument);
+
     FE::assembly::CutIntegrationContext context;
     context.addFreeSurfaceGeometrySnapshot(snapshot);
     EXPECT_EQ(context.freeSurfaceGeometrySnapshots().size(), 1u);
@@ -931,6 +1032,79 @@ TEST(FreeSurfaceGeometrySnapshot,
         };
     EXPECT_THROW((void)build(std::move(missing), "missing_distributed_owner"),
                  std::invalid_argument);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
+     DiscreteFunctionalExcludesGhostRuleContributions)
+{
+    constexpr int interface_marker = 117;
+    const SingleQuadBoundaryMesh owner_mesh(
+        /*marker=*/7,
+        /*rank=*/0,
+        /*size=*/2,
+        /*owner_rank=*/0,
+        /*owned=*/true);
+    std::vector<std::uint64_t> owned_identities;
+    interfaces::FreeSurfaceGeometryOwnershipCollective owner_collective;
+    owner_collective.rank = 0;
+    owner_collective.size = 2;
+    owner_collective.all_gather_owned_rule_identity_values =
+        [&owned_identities](std::span<const std::uint64_t> local) {
+            owned_identities.assign(local.begin(), local.end());
+            return owned_identities;
+        };
+    const auto owner_snapshot =
+        interfaces::buildFreeSurfaceGeometrySnapshot(
+            distributedVerticalInterfaceWithVolumes(interface_marker),
+            {},
+            {},
+            owner_mesh,
+            snapshotPolicyWithoutBoundary(),
+            verticalScalar(),
+            "functional_owner",
+            std::move(owner_collective));
+    ASSERT_FALSE(owned_identities.empty());
+
+    interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+    parameters.surface_tension = 2.0;
+    const auto owner_state =
+        interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            *owner_snapshot, parameters);
+    EXPECT_GT(owner_state.owned_liquid_volume, 0.0);
+    EXPECT_GT(owner_state.owned_liquid_gas_area, 0.0);
+
+    const SingleQuadBoundaryMesh ghost_mesh(
+        /*marker=*/7,
+        /*rank=*/1,
+        /*size=*/2,
+        /*owner_rank=*/0,
+        /*owned=*/false);
+    interfaces::FreeSurfaceGeometryOwnershipCollective ghost_collective;
+    ghost_collective.rank = 1;
+    ghost_collective.size = 2;
+    ghost_collective.all_gather_owned_rule_identity_values =
+        [&owned_identities](std::span<const std::uint64_t> local) {
+            EXPECT_TRUE(local.empty());
+            return owned_identities;
+        };
+    const auto ghost_snapshot =
+        interfaces::buildFreeSurfaceGeometrySnapshot(
+            distributedVerticalInterfaceWithVolumes(interface_marker),
+            {},
+            {},
+            ghost_mesh,
+            snapshotPolicyWithoutBoundary(),
+            verticalScalar(),
+            "functional_owner",
+            std::move(ghost_collective));
+    const auto ghost_state =
+        interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            *ghost_snapshot, parameters);
+    EXPECT_EQ(ghost_state.owned_liquid_volume, 0.0);
+    EXPECT_EQ(ghost_state.owned_liquid_gas_area, 0.0);
+    EXPECT_EQ(ghost_state.owned_wetted_wall_area, 0.0);
+    EXPECT_EQ(ghost_state.owned_contact_measure, 0.0);
+    EXPECT_EQ(ghost_state.total_potential, 0.0);
 }
 
 TEST(FreeSurfaceGeometrySnapshot, RejectsPointOutsideParentReferenceCell)
