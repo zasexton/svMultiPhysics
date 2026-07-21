@@ -2137,7 +2137,8 @@ void validateGeneratedFreeSurfaceMarkerUniqueness(
 
 void declareFreeSurfaceDiscreteFunctionals(
     const std::vector<FreeSurfaceBoundary>& free_surfaces,
-    FE::systems::FESystem& system)
+    FE::systems::FESystem& system,
+    FE::FieldId velocity_field)
 {
     for (const auto& bc : free_surfaces) {
         if (!isUnfittedLevelSet(bc) || !usesSurfaceStress(bc) ||
@@ -2172,11 +2173,31 @@ void declareFreeSurfaceDiscreteFunctionals(
                             "free-surface discrete-functional equilibrium "
                             "contact angle"),
                 });
+            if (kind == ContactLineKind::DynamicRenE) {
+                parameters.dynamic_contact_coefficients.push_back(
+                    FE::interfaces::FreeSurfaceDynamicContactCoefficient{
+                        .boundary_marker =
+                            contactLineWallBoundaryMarker(contact_line),
+                        .equilibrium_contact_angle_radians =
+                            constantScalarValueOrThrow(
+                                contactLineAngleRadians(contact_line),
+                                "free-surface discrete-functional dynamic "
+                                "contact equilibrium angle"),
+                        .mobility = constantScalarValueOrThrow(
+                            contactLineMobility(contact_line),
+                            "free-surface discrete-functional dynamic "
+                            "contact mobility"),
+                    });
+            }
         }
         system.declareFreeSurfaceDiscreteFunctional(
             FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
                 .interface_marker = bc.interface_marker,
                 .level_set_field = resolveLevelSetFieldId(bc, system),
+                .velocity_field =
+                    parameters.dynamic_contact_coefficients.empty()
+                        ? FE::INVALID_FIELD_ID
+                        : velocity_field,
                 .geometry_domain_id = bc.generated_interface_domain_id,
                 .parameters = std::move(parameters),
                 .owner_component =
@@ -7021,7 +7042,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     }
 
     declareFreeSurfaceDiscreteFunctionals(
-        effective_free_surfaces, system);
+        effective_free_surfaces, system, u_id);
 
     const auto generated_active_boundary_for =
         [&system, &effective_free_surfaces](int physical_boundary_marker)

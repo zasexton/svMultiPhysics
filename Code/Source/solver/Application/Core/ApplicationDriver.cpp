@@ -4090,19 +4090,344 @@ bool globalAnyBool(bool local, const svmp::MeshComm& comm)
   return local;
 }
 
+std::uint64_t acceptedContactStageRevision(
+    std::uint64_t previous_state_revision,
+    std::uint64_t endpoint_state_revision,
+    std::uint64_t snapshot_revision,
+    svmp::FE::Real stage_time,
+    svmp::FE::Real stage_alpha_f)
+{
+  constexpr std::uint64_t offset = 1469598103934665603ull;
+  constexpr std::uint64_t prime = 1099511628211ull;
+  std::uint64_t hash = offset;
+  const auto mix = [&hash](std::uint64_t value) {
+    hash ^= value;
+    hash *= prime;
+  };
+  const auto real_bits = [](svmp::FE::Real value) {
+    if (value == svmp::FE::Real{0.0}) {
+      value = svmp::FE::Real{0.0};
+    }
+    std::uint64_t bits = 0u;
+    static_assert(sizeof(value) <= sizeof(bits));
+    std::memcpy(&bits, &value, sizeof(value));
+    return bits;
+  };
+  mix(previous_state_revision);
+  mix(endpoint_state_revision);
+  mix(snapshot_revision);
+  mix(real_bits(stage_time));
+  mix(real_bits(stage_alpha_f));
+  return hash == 0u ? 1u : hash;
+}
+
+std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+evaluateAcceptedFreeSurfaceContactStages(
+    application::core::SimulationComponents& sim,
+    svmp::FE::Real stage_time,
+    svmp::FE::Real stage_alpha_f,
+    std::uint64_t previous_state_revision,
+    std::uint64_t endpoint_state_revision,
+    std::span<const svmp::FE::Real> stage_solution)
+{
+  const auto declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+  const auto dynamic_count = std::count_if(
+      declarations.begin(), declarations.end(), [](const auto& declaration) {
+        return !declaration.parameters.dynamic_contact_coefficients.empty();
+      });
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const double local_dynamic_count =
+      static_cast<double>(dynamic_count);
+  if (globalMinDouble(local_dynamic_count, comm) !=
+      globalMaxDouble(local_dynamic_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Dynamic contact-stage declarations differ across the FE communicator.");
+  }
+  if (dynamic_count == 0) {
+    return {};
+  }
+  if (!std::isfinite(stage_time) || !std::isfinite(stage_alpha_f) ||
+      !(stage_alpha_f > svmp::FE::Real{0.0}) ||
+      stage_alpha_f > svmp::FE::Real{1.0} ||
+      previous_state_revision == 0u || endpoint_state_revision == 0u) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact-stage provenance is incomplete.");
+  }
+  const double local_solution_size =
+      static_cast<double>(stage_solution.size());
+  if (globalMinDouble(local_solution_size, comm) !=
+      globalMaxDouble(local_solution_size, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Contact-stage solution layouts differ across the FE communicator.");
+  }
+  const auto* context = sim.fe_system->cutIntegrationContext();
+  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact-stage recording requires an authoritative geometry snapshot on every rank.");
+  }
+
+  std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+      stages;
+  stages.reserve(static_cast<std::size_t>(dynamic_count));
+  for (const auto& declaration : declarations) {
+    if (declaration.parameters.dynamic_contact_coefficients.empty()) {
+      continue;
+    }
+    const double local_marker =
+        static_cast<double>(declaration.interface_marker);
+    const double local_velocity_field =
+        static_cast<double>(declaration.velocity_field);
+    const double local_contact_count = static_cast<double>(
+        declaration.parameters.dynamic_contact_coefficients.size());
+    if (globalMinDouble(local_marker, comm) !=
+            globalMaxDouble(local_marker, comm) ||
+        globalMinDouble(local_velocity_field, comm) !=
+            globalMaxDouble(local_velocity_field, comm) ||
+        globalMinDouble(local_contact_count, comm) !=
+            globalMaxDouble(local_contact_count, comm)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Dynamic contact-stage declaration ordering differs across the FE communicator.");
+    }
+    for (const auto& coefficient :
+         declaration.parameters.dynamic_contact_coefficients) {
+      const double boundary_marker =
+          static_cast<double>(coefficient.boundary_marker);
+      const double equilibrium_angle =
+          static_cast<double>(
+              coefficient.equilibrium_contact_angle_radians);
+      const double mobility = static_cast<double>(coefficient.mobility);
+      if (globalMinDouble(boundary_marker, comm) !=
+              globalMaxDouble(boundary_marker, comm) ||
+          globalMinDouble(equilibrium_angle, comm) !=
+              globalMaxDouble(equilibrium_angle, comm) ||
+          globalMinDouble(mobility, comm) !=
+              globalMaxDouble(mobility, comm)) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Dynamic contact-stage wall coefficients differ across the FE communicator for marker " +
+            std::to_string(declaration.interface_marker) + ".");
+      }
+    }
+    const bool local_marker_available =
+        context->hasFreeSurfaceGeometrySnapshotForMarker(
+            declaration.interface_marker);
+    if (globalMinDouble(local_marker_available ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage marker " +
+          std::to_string(declaration.interface_marker) +
+          " is missing an authoritative geometry snapshot on at least one rank.");
+    }
+    const auto snapshot_revision =
+        context->freeSurfaceGeometrySnapshotRevisionForMarker(
+            declaration.interface_marker);
+    const auto [minimum_revision, maximum_revision] =
+        globalMinMaxUint64(snapshot_revision, comm);
+    if (minimum_revision != maximum_revision) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage geometry revision differs across the FE communicator for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto found = std::find_if(
+        snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+          return candidate &&
+                 candidate->revision().snapshot_revision_key ==
+                     snapshot_revision;
+        });
+    if (globalMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
+        1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage snapshot storage is incomplete across the FE communicator for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    bool local_snapshot_current = true;
+    try {
+      context->assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+          declaration.interface_marker);
+    } catch (const std::exception&) {
+      local_snapshot_current = false;
+    }
+    if (globalMinDouble(local_snapshot_current ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage snapshot is stale or incomplete on at least one rank for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    const auto& snapshot = **found;
+    const auto& velocity_record =
+        sim.fe_system->fieldRecord(declaration.velocity_field);
+    const auto velocity_offset =
+        sim.fe_system->fieldDofOffset(declaration.velocity_field);
+    const int dimension = sim.fe_system->meshAccess().dimension();
+    if (!velocity_record.space || velocity_offset < 0 ||
+        velocity_record.components < dimension) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage velocity field is incompatible with the free-surface declaration.");
+    }
+    svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
+        velocity;
+    velocity.value =
+        [&sim,
+         &velocity_record,
+         velocity_offset,
+         velocity_field = declaration.velocity_field,
+         stage_solution](
+            svmp::FE::GlobalIndex cell,
+            const std::array<svmp::FE::Real, 3>& reference_point,
+            const svmp::FE::geometry::CutQuadratureProvenance&) {
+          const auto cell_dofs =
+              sim.fe_system->fieldDofHandler(velocity_field).getCellDofs(cell);
+          std::vector<svmp::FE::Real> coefficients;
+          coefficients.reserve(cell_dofs.size());
+          for (const auto dof : cell_dofs) {
+            if (dof < 0) {
+              throw std::runtime_error(
+                  "[svMultiPhysics::Application] Accepted contact-stage velocity cell has a negative DOF.");
+            }
+            const auto index = static_cast<std::size_t>(
+                velocity_offset + dof);
+            if (index >= stage_solution.size()) {
+              throw std::runtime_error(
+                  "[svMultiPhysics::Application] Accepted contact-stage solution is too small for the velocity field.");
+            }
+            coefficients.push_back(stage_solution[index]);
+          }
+          const svmp::FE::spaces::FunctionSpace::Value reference_value{
+              reference_point[0], reference_point[1], reference_point[2]};
+          const auto value = velocity_record.space->evaluate(
+              reference_value, coefficients);
+          return std::array<svmp::FE::Real, 3>{
+              value[0], value[1], value[2]};
+        };
+    std::optional<
+        svmp::FE::interfaces::FreeSurfaceDynamicContactState>
+        local_state;
+    try {
+      local_state =
+          svmp::FE::interfaces::evaluateFreeSurfaceDynamicContactState(
+              snapshot, declaration.parameters, velocity);
+    } catch (const std::exception&) {
+      local_state.reset();
+    }
+    if (globalMinDouble(local_state.has_value() ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Dynamic contact-stage evaluation failed on at least one rank for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    auto state = std::move(*local_state);
+    const double local_wall_count =
+        static_cast<double>(state.walls.size());
+    if (globalMinDouble(local_wall_count, comm) !=
+        globalMaxDouble(local_wall_count, comm)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Dynamic contact-stage wall ordering differs across the FE communicator for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+
+    const auto global_sum = [&comm](svmp::FE::Real local) {
+      return static_cast<svmp::FE::Real>(
+          globalSumDouble(static_cast<double>(local), comm));
+    };
+    for (auto& wall : state.walls) {
+      wall.owned_quadrature_point_count = globalSumSize(
+          wall.owned_quadrature_point_count, comm);
+      wall.owned_advancing_point_count = globalSumSize(
+          wall.owned_advancing_point_count, comm);
+      wall.owned_receding_point_count = globalSumSize(
+          wall.owned_receding_point_count, comm);
+      wall.owned_stationary_point_count = globalSumSize(
+          wall.owned_stationary_point_count, comm);
+      wall.owned_contact_measure =
+          global_sum(wall.owned_contact_measure);
+      wall.dynamic_angle_integral =
+          global_sum(wall.dynamic_angle_integral);
+      wall.dynamic_cosine_integral =
+          global_sum(wall.dynamic_cosine_integral);
+      wall.contact_speed_integral =
+          global_sum(wall.contact_speed_integral);
+      wall.contact_speed_squared_integral =
+          global_sum(wall.contact_speed_squared_integral);
+      wall.constitutive_residual_integral =
+          global_sum(wall.constitutive_residual_integral);
+      wall.absolute_constitutive_residual_integral =
+          global_sum(wall.absolute_constitutive_residual_integral);
+      wall.line_friction_dissipation =
+          global_sum(wall.line_friction_dissipation);
+      for (std::size_t component = 0; component < 3u; ++component) {
+        wall.contact_position_integral[component] =
+            global_sum(wall.contact_position_integral[component]);
+        wall.wall_normal_integral[component] =
+            global_sum(wall.wall_normal_integral[component]);
+        wall.footprint_direction_integral[component] =
+            global_sum(wall.footprint_direction_integral[component]);
+      }
+    }
+    svmp::FE::interfaces::finalizeFreeSurfaceDynamicContactState(state);
+    stages.push_back(
+        svmp::FE::systems::FreeSurfaceAcceptedContactStageState{
+            .stage_time = stage_time,
+            .stage_alpha_f = stage_alpha_f,
+            .previous_state_revision = previous_state_revision,
+            .endpoint_state_revision = endpoint_state_revision,
+            .stage_state_revision = acceptedContactStageRevision(
+                previous_state_revision,
+                endpoint_state_revision,
+                snapshot_revision,
+                stage_time,
+                stage_alpha_f),
+            .geometry_revision = snapshot.revision(),
+            .state = std::move(state),
+        });
+  }
+  return stages;
+}
+
 void recordAcceptedFreeSurfaceDiscreteFunctionals(
     application::core::SimulationComponents& sim,
     std::uint64_t accepted_step,
     svmp::FE::Real accepted_time,
     svmp::FE::Real dt,
-    std::uint64_t state_revision)
+    std::uint64_t state_revision,
+    std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+        contact_stages = {})
 {
   const auto declarations =
       sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
   if (declarations.empty()) {
+    if (!contact_stages.empty()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Contact-stage states were supplied without free-surface functional declarations.");
+    }
     return;
   }
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const double local_contact_stage_count =
+      static_cast<double>(contact_stages.size());
+  if (globalMinDouble(local_contact_stage_count, comm) !=
+      globalMaxDouble(local_contact_stage_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact-stage coverage differs across the FE communicator.");
+  }
+  std::map<
+      int,
+      const svmp::FE::systems::FreeSurfaceAcceptedContactStageState*>
+      contact_stage_by_marker;
+  bool local_contact_stages_valid = true;
+  for (const auto& stage : contact_stages) {
+    const int marker = stage.geometry_revision.interface_marker;
+    const double local_marker = static_cast<double>(marker);
+    if (globalMinDouble(local_marker, comm) !=
+        globalMaxDouble(local_marker, comm)) {
+      local_contact_stages_valid = false;
+    }
+    local_contact_stages_valid =
+        marker >= 0 &&
+        contact_stage_by_marker.emplace(marker, &stage).second &&
+        local_contact_stages_valid;
+  }
+  if (globalMinDouble(local_contact_stages_valid ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact-stage states must have communicator-consistent unique nonnegative interface markers.");
+  }
   const auto local_declaration_count =
       static_cast<double>(declarations.size());
   if (globalMinDouble(local_declaration_count, comm) !=
@@ -4238,12 +4563,38 @@ void recordAcceptedFreeSurfaceDiscreteFunctionals(
           global_sum(wall.owned_contact_measure);
       wall.young_wall_energy = global_sum(wall.young_wall_energy);
     }
+    const auto contact_stage =
+        contact_stage_by_marker.find(declaration.interface_marker);
+    const bool dynamic_contact_declared =
+        !declaration.parameters.dynamic_contact_coefficients.empty();
+    if (dynamic_contact_declared !=
+        (contact_stage != contact_stage_by_marker.end())) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage coverage does not match the free-surface declaration for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
     accepted_states.push_back(
         svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState{
             .interface_marker = declaration.interface_marker,
             .geometry_revision = snapshot.revision(),
             .state = std::move(global_state),
+            .contact_stage =
+                contact_stage != contact_stage_by_marker.end()
+                    ? std::optional<svmp::FE::systems::
+                          FreeSurfaceAcceptedContactStageState>{
+                          *contact_stage->second}
+                    : std::nullopt,
         });
+  }
+
+  const auto declared_dynamic_count = std::count_if(
+      declarations.begin(), declarations.end(), [](const auto& declaration) {
+        return !declaration.parameters.dynamic_contact_coefficients.empty();
+      });
+  if (contact_stage_by_marker.size() !=
+      static_cast<std::size_t>(declared_dynamic_count)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact-stage states include an undeclared interface marker.");
   }
 
   sim.fe_system->recordAcceptedFreeSurfaceDiscreteFunctionals(
@@ -9428,12 +9779,24 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       /*reuse_cached_on_projection_failure=*/false);
   (void)updateLevelSetAdvectionVelocities(
       sim, *sim.time_history, steady_level_set_advection_velocity);
+  const auto steady_solution =
+      gatherFeOrderedSolution(sim.time_history->u());
+  const auto steady_contact_stages =
+      evaluateAcceptedFreeSurfaceContactStages(
+          sim,
+          static_cast<svmp::FE::Real>(solve_time),
+          svmp::FE::Real{1.0},
+          sim.time_history->u().valueRevision(),
+          sim.time_history->u().valueRevision(),
+          std::span<const svmp::FE::Real>(steady_solution.data(),
+                                          steady_solution.size()));
   recordAcceptedFreeSurfaceDiscreteFunctionals(
       sim,
       /*accepted_step=*/1u,
       solve_time,
       sim.time_history->dt(),
-      sim.time_history->u().valueRevision());
+      sim.time_history->u().valueRevision(),
+      steady_contact_stages);
   sim.fe_system->recordAcceptedMeshTangentialBoundaryPolicies(
       /*accepted_step=*/1u,
       solve_time,
@@ -9870,10 +10233,27 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   const auto generalized_alpha_first_order =
       svmp::FE::timestepping::utils::generalizedAlphaFirstOrderFromRhoInf(
           opts.generalized_alpha_rho_inf);
+  const bool has_dynamic_contact_stage = std::any_of(
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations().begin(),
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations().end(),
+      [](const auto& declaration) {
+        return !declaration.parameters.dynamic_contact_coefficients.empty();
+      });
+  if (has_dynamic_contact_stage &&
+      opts.scheme != svmp::FE::timestepping::SchemeKind::BackwardEuler &&
+      opts.scheme != svmp::FE::timestepping::SchemeKind::BDF2 &&
+      opts.scheme != svmp::FE::timestepping::SchemeKind::VSVO_BDF &&
+      opts.scheme != svmp::FE::timestepping::SchemeKind::GeneralizedAlpha) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Dynamic contact-stage provenance currently supports backward Euler, BDF2, VSVO BDF, and generalized-alpha time integration only.");
+  }
+  std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+      pending_contact_stages;
   callbacks.on_before_step_accept =
       [&](svmp::FE::timestepping::TimeHistory& h,
           const svmp::FE::timestepping::NewtonReport& nr) {
         (void)nr;
+        pending_contact_stages.clear();
         if (activePressureUpdateRejectOnTriggerEnabled() &&
             acceptedPressureUpdateDiagnosticEnabled() &&
             !accepted_pressure_update_previous_solution.empty()) {
@@ -9895,6 +10275,37 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           if (triggered) {
             return false;
           }
+        }
+        if (has_dynamic_contact_stage) {
+          const svmp::FE::Real alpha_f =
+              opts.scheme ==
+                      svmp::FE::timestepping::SchemeKind::GeneralizedAlpha
+                  ? static_cast<svmp::FE::Real>(
+                        generalized_alpha_first_order.alpha_f)
+                  : svmp::FE::Real{1.0};
+          const auto endpoint_solution = gatherFeOrderedSolution(h.u());
+          const auto previous_solution = gatherFeOrderedSolution(h.uPrev());
+          if (endpoint_solution.size() != previous_solution.size()) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Contact-stage reconstruction requires equal endpoint and previous solution layouts.");
+          }
+          std::vector<svmp::FE::Real> stage_solution(
+              endpoint_solution.size(), svmp::FE::Real{0.0});
+          for (std::size_t i = 0; i < stage_solution.size(); ++i) {
+            stage_solution[i] =
+                (svmp::FE::Real{1.0} - alpha_f) * previous_solution[i] +
+                alpha_f * endpoint_solution[i];
+          }
+          pending_contact_stages =
+              evaluateAcceptedFreeSurfaceContactStages(
+                  sim,
+                  static_cast<svmp::FE::Real>(h.time()) +
+                      alpha_f * static_cast<svmp::FE::Real>(h.dt()),
+                  alpha_f,
+                  h.uPrev().valueRevision(),
+                  h.u().valueRevision(),
+                  std::span<const svmp::FE::Real>(stage_solution.data(),
+                                                  stage_solution.size()));
         }
         const auto bound_result = applyLevelSetBoundPreservingCandidates(
             sim,
@@ -9949,7 +10360,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         static_cast<std::uint64_t>(h.stepIndex()),
         h.time(),
         h.dt(),
-        h.u().valueRevision());
+        h.u().valueRevision(),
+        pending_contact_stages);
+    pending_contact_stages.clear();
     sim.fe_system->recordAcceptedMeshTangentialBoundaryPolicies(
         static_cast<std::uint64_t>(h.stepIndex()),
         h.time(),

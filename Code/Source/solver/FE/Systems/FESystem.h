@@ -224,15 +224,27 @@ struct MeshTangentialBoundaryPolicyHistoryRecord {
 struct FreeSurfaceDiscreteFunctionalDeclaration {
     int interface_marker{-1};
     FieldId level_set_field{INVALID_FIELD_ID};
+    FieldId velocity_field{INVALID_FIELD_ID};
     std::string geometry_domain_id{};
     interfaces::FreeSurfaceDiscreteFunctionalParameters parameters{};
     std::string owner_component{};
+};
+
+struct FreeSurfaceAcceptedContactStageState {
+    Real stage_time{0.0};
+    Real stage_alpha_f{1.0};
+    std::uint64_t previous_state_revision{0};
+    std::uint64_t endpoint_state_revision{0};
+    std::uint64_t stage_state_revision{0};
+    interfaces::FreeSurfaceGeometryRevision geometry_revision{};
+    interfaces::FreeSurfaceDynamicContactState state{};
 };
 
 struct AcceptedFreeSurfaceDiscreteFunctionalState {
     int interface_marker{-1};
     interfaces::FreeSurfaceGeometryRevision geometry_revision{};
     interfaces::FreeSurfaceDiscreteFunctionalState state{};
+    std::optional<FreeSurfaceAcceptedContactStageState> contact_stage{};
 };
 
 struct FreeSurfaceDiscreteFunctionalHistoryRecord {
@@ -243,6 +255,7 @@ struct FreeSurfaceDiscreteFunctionalHistoryRecord {
     FreeSurfaceDiscreteFunctionalDeclaration declaration{};
     interfaces::FreeSurfaceGeometryRevision geometry_revision{};
     interfaces::FreeSurfaceDiscreteFunctionalState state{};
+    std::optional<FreeSurfaceAcceptedContactStageState> contact_stage{};
 };
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH

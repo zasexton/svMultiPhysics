@@ -4064,6 +4064,257 @@ TEST(MovingDomainPhysics,
         FE::InvalidArgumentException);
 }
 
+TEST(MovingDomainPhysics,
+     FreeSurfaceDynamicContactStageHistoryPreservesLawAndFrameProvenance)
+{
+    constexpr int interface_marker = 92;
+    constexpr int wall_marker = 18;
+    constexpr FE::Real gamma = FE::Real{0.8};
+    constexpr FE::Real theta =
+        FE::Real{1.04719755119659774615421446109316763};
+    constexpr FE::Real mobility = FE::Real{0.5};
+    auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+    auto velocity_space = makeVelocitySpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi_dynamic_contact_history",
+        .space = scalar_space,
+        .components = 1,
+    });
+    const auto velocity = system.addField(FE::systems::FieldSpec{
+        .name = "velocity_dynamic_contact_history",
+        .space = velocity_space,
+        .components = 3,
+    });
+    system.addOperator("equations");
+    const auto phi_state =
+        FE::forms::StateField(phi, *scalar_space, "phi_contact_history");
+    const auto eta =
+        FE::forms::TestField(phi, *scalar_space, "eta_contact_history");
+    const auto velocity_state = FE::forms::StateField(
+        velocity, *velocity_space, "velocity_contact_history");
+    const auto velocity_test = FE::forms::TestField(
+        velocity, *velocity_space, "velocity_test_contact_history");
+    (void)FE::systems::installFormulation(
+        system,
+        "equations",
+        {phi, velocity},
+        (FE::forms::dt(phi_state) * eta).dx() +
+            FE::forms::inner(FE::forms::dt(velocity_state), velocity_test)
+                .dx());
+
+    FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+    parameters.liquid_side =
+        FE::geometry::CutIntegrationSide::Negative;
+    parameters.surface_tension = gamma;
+    parameters.young_wall_coefficients.push_back(
+        FE::interfaces::FreeSurfaceYoungWallCoefficient{
+            .boundary_marker = wall_marker,
+            .equilibrium_contact_angle_radians = theta,
+        });
+    parameters.dynamic_contact_coefficients.push_back(
+        FE::interfaces::FreeSurfaceDynamicContactCoefficient{
+            .boundary_marker = wall_marker,
+            .equilibrium_contact_angle_radians = theta,
+            .mobility = mobility,
+        });
+    auto incomplete_parameters = parameters;
+    incomplete_parameters.young_wall_coefficients.clear();
+    EXPECT_THROW(
+        system.declareFreeSurfaceDiscreteFunctional(
+            FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+                .interface_marker = interface_marker,
+                .level_set_field = phi,
+                .velocity_field = velocity,
+                .geometry_domain_id =
+                    "dynamic_contact_history_surface",
+                .parameters = incomplete_parameters,
+                .owner_component =
+                    "MovingDomainPhysics.IncompleteDynamicContactFixture",
+            }),
+        FE::InvalidArgumentException);
+    EXPECT_THROW(
+        system.declareFreeSurfaceDiscreteFunctional(
+            FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+                .interface_marker = interface_marker,
+                .level_set_field = phi,
+                .geometry_domain_id =
+                    "dynamic_contact_history_surface",
+                .parameters = parameters,
+                .owner_component =
+                    "MovingDomainPhysics.MissingVelocityFixture",
+            }),
+        FE::InvalidArgumentException);
+    ASSERT_NO_THROW(system.declareFreeSurfaceDiscreteFunctional(
+        FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+            .interface_marker = interface_marker,
+            .level_set_field = phi,
+            .velocity_field = velocity,
+            .geometry_domain_id = "dynamic_contact_history_surface",
+            .parameters = parameters,
+            .owner_component =
+                "MovingDomainPhysics.DynamicContactHistoryFixture",
+        }));
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    FE::interfaces::FreeSurfaceGeometryRevision geometry_revision{
+        .source_id = "field:" + std::to_string(phi),
+        .domain_id = "dynamic_contact_history_surface",
+        .interface_marker = interface_marker,
+        .isovalue = FE::Real{0.0},
+        .source_layout_revision = 3u,
+        .source_value_revision = 9u,
+        .mesh_geometry_revision = 4u,
+        .mesh_topology_revision = 5u,
+        .ownership_revision = 6u,
+        .numbering_revision = 7u,
+        .quadrature_policy_key = 8u,
+        .snapshot_revision_key = 102u,
+    };
+    FE::interfaces::FreeSurfaceDiscreteFunctionalState functional_state{
+        .snapshot_revision_key = 102u,
+        .liquid_side = FE::geometry::CutIntegrationSide::Negative,
+        .surface_tension = gamma,
+        .volume_multiplier = FE::Real{0.0},
+        .walls = {FE::interfaces::FreeSurfaceDiscreteWallFunctionalState{
+            .boundary_marker = wall_marker,
+            .equilibrium_contact_angle_radians = theta,
+            .owned_wetted_wall_area = FE::Real{0.3},
+            .owned_contact_measure = FE::Real{0.1},
+            .young_wall_energy =
+                -gamma * std::cos(theta) * FE::Real{0.3},
+        }},
+        .owned_liquid_volume = FE::Real{0.25},
+        .owned_liquid_gas_area = FE::Real{0.4},
+        .owned_wetted_wall_area = FE::Real{0.3},
+        .owned_contact_measure = FE::Real{0.1},
+        .liquid_gas_surface_energy = gamma * FE::Real{0.4},
+        .young_wall_energy =
+            -gamma * std::cos(theta) * FE::Real{0.3},
+        .volume_constraint_potential = FE::Real{0.0},
+        .total_potential = gamma * FE::Real{0.4} -
+                           gamma * std::cos(theta) * FE::Real{0.3},
+    };
+    FE::interfaces::FreeSurfaceDynamicContactState contact_state;
+    contact_state.snapshot_revision_key = 102u;
+    contact_state.liquid_side =
+        FE::geometry::CutIntegrationSide::Negative;
+    contact_state.surface_tension = gamma;
+    contact_state.walls.push_back(
+        FE::interfaces::FreeSurfaceDynamicContactWallState{
+            .boundary_marker = wall_marker,
+            .equilibrium_contact_angle_radians = theta,
+            .mobility = mobility,
+            .owned_quadrature_point_count = 1u,
+            .owned_advancing_point_count = 0u,
+            .owned_receding_point_count = 0u,
+            .owned_stationary_point_count = 1u,
+            .owned_contact_measure = FE::Real{0.1},
+            .dynamic_angle_integral = theta * FE::Real{0.1},
+            .dynamic_cosine_integral =
+                std::cos(theta) * FE::Real{0.1},
+            .contact_speed_integral = FE::Real{0.0},
+            .contact_speed_squared_integral = FE::Real{0.0},
+            .constitutive_residual_integral = FE::Real{0.0},
+            .absolute_constitutive_residual_integral = FE::Real{0.0},
+            .line_friction_dissipation = FE::Real{0.0},
+            .contact_position_integral = {{0.02, 0.03, 0.04}},
+            .wall_normal_integral = {{0.0, 0.0, -0.1}},
+            .footprint_direction_integral = {{0.1, 0.0, 0.0}},
+        });
+    FE::interfaces::finalizeFreeSurfaceDynamicContactState(contact_state);
+
+    std::vector<FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+        accepted_states{
+            FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState{
+                .interface_marker = interface_marker,
+                .geometry_revision = geometry_revision,
+                .state = functional_state,
+                .contact_stage =
+                    FE::systems::FreeSurfaceAcceptedContactStageState{
+                        .stage_time = FE::Real{0.325},
+                        .stage_alpha_f = FE::Real{0.5},
+                        .previous_state_revision = 12u,
+                        .endpoint_state_revision = 13u,
+                        .stage_state_revision = 201u,
+                        .geometry_revision = geometry_revision,
+                        .state = contact_state,
+                    },
+            }};
+    ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        7u, FE::Real{0.35}, FE::Real{0.05}, 13u, accepted_states));
+    const auto history = system.freeSurfaceDiscreteFunctionalHistory();
+    ASSERT_EQ(history.size(), 1u);
+    ASSERT_TRUE(history.front().contact_stage.has_value());
+    const auto& stage = *history.front().contact_stage;
+    EXPECT_DOUBLE_EQ(stage.stage_time, FE::Real{0.325});
+    EXPECT_DOUBLE_EQ(stage.stage_alpha_f, FE::Real{0.5});
+    ASSERT_EQ(stage.state.walls.size(), 1u);
+    ASSERT_TRUE(
+        stage.state.walls.front().mean_dynamic_angle_radians.has_value());
+    EXPECT_NEAR(
+        *stage.state.walls.front().mean_dynamic_angle_radians,
+        theta,
+        1.0e-14);
+    EXPECT_EQ(stage.state.walls.front().motion,
+              FE::interfaces::FreeSurfaceContactMotion::Stationary);
+    EXPECT_NEAR(stage.state.walls.front().mean_contact_position[0],
+                FE::Real{0.2},
+                1.0e-14);
+    ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        7u, FE::Real{0.35}, FE::Real{0.05}, 13u, accepted_states));
+
+    auto invalid = accepted_states;
+    invalid.front().contact_stage.reset();
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            7u,
+            FE::Real{0.35},
+            FE::Real{0.05},
+            13u,
+            invalid),
+        FE::InvalidArgumentException);
+    invalid = accepted_states;
+    invalid.front()
+        .contact_stage->state.walls.front()
+        .constitutive_residual_integral = FE::Real{0.01};
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            7u,
+            FE::Real{0.35},
+            FE::Real{0.05},
+            13u,
+            invalid),
+        FE::InvalidArgumentException);
+    invalid = accepted_states;
+    invalid.front()
+        .contact_stage->state.walls.front()
+        .mean_contact_speed.reset();
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            7u,
+            FE::Real{0.35},
+            FE::Real{0.05},
+            13u,
+            invalid),
+        FE::InvalidArgumentException);
+    invalid = accepted_states;
+    invalid.front()
+        .contact_stage->state.walls.front()
+        .line_friction_dissipation = FE::Real{0.01};
+    invalid.front().contact_stage->state.line_friction_dissipation =
+        FE::Real{0.01};
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            7u,
+            FE::Real{0.35},
+            FE::Real{0.05},
+            13u,
+            invalid),
+        FE::InvalidArgumentException);
+}
+
 TEST(MovingDomainPhysics, FreeSurfaceContactLineOptionsAreExplicit)
 {
     using FreeSurfaceBoundary = ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary;
@@ -7186,6 +7437,7 @@ TEST(MovingDomainPhysics,
             result.discrete_functional_declarations.front();
         EXPECT_EQ(declaration.interface_marker, interface_marker);
         EXPECT_EQ(declaration.level_set_field, result.level_set_field);
+        EXPECT_EQ(declaration.velocity_field, result.velocity_field);
         EXPECT_EQ(declaration.geometry_domain_id, "free_surface");
         EXPECT_EQ(
             declaration.parameters.liquid_side,
@@ -7204,6 +7456,21 @@ TEST(MovingDomainPhysics,
             declaration.parameters.young_wall_coefficients.front()
                 .equilibrium_contact_angle_radians,
             theta);
+        ASSERT_EQ(
+            declaration.parameters.dynamic_contact_coefficients.size(),
+            1u);
+        EXPECT_EQ(
+            declaration.parameters.dynamic_contact_coefficients.front()
+                .boundary_marker,
+            wall_marker);
+        EXPECT_DOUBLE_EQ(
+            declaration.parameters.dynamic_contact_coefficients.front()
+                .equilibrium_contact_angle_radians,
+            theta);
+        EXPECT_DOUBLE_EQ(
+            declaration.parameters.dynamic_contact_coefficients.front()
+                .mobility,
+            0.5);
         EXPECT_FALSE(declaration.owner_component.empty());
     }
 }

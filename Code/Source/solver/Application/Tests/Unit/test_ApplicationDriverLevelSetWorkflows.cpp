@@ -1321,11 +1321,46 @@ TEST(ApplicationDriverLevelSetWorkflows,
   auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
       svmp::FE::ElementType::Quad4,
       /*order=*/2);
+  auto velocity_space =
+      std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
   auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
   const auto phi = system->addField(svmp::FE::systems::FieldSpec{
       .name = "phi",
       .space = scalar_space,
       .components = 1});
+  const auto velocity = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "velocity",
+      .space = velocity_space,
+      .components = 2});
+
+  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
+      functional_parameters;
+  functional_parameters.liquid_side =
+      svmp::FE::geometry::CutIntegrationSide::Negative;
+  functional_parameters.surface_tension = svmp::FE::Real{0.8};
+  functional_parameters.young_wall_coefficients.push_back(
+      svmp::FE::interfaces::FreeSurfaceYoungWallCoefficient{
+          .boundary_marker = wall_marker,
+          .equilibrium_contact_angle_radians =
+              svmp::FE::Real{1.04719755119659774615421446109316763},
+      });
+  functional_parameters.dynamic_contact_coefficients.push_back(
+      svmp::FE::interfaces::FreeSurfaceDynamicContactCoefficient{
+          .boundary_marker = wall_marker,
+          .equilibrium_contact_angle_radians =
+              svmp::FE::Real{1.04719755119659774615421446109316763},
+          .mobility = svmp::FE::Real{0.5},
+      });
+  system->declareFreeSurfaceDiscreteFunctional(
+      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+          .interface_marker = interface_marker,
+          .level_set_field = phi,
+          .velocity_field = velocity,
+          .geometry_domain_id = "degenerate_contact",
+          .parameters = functional_parameters,
+          .owner_component =
+              "ApplicationDriverLevelSetWorkflows.ContactStageFixture",
+      });
 
   svmp::FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey key{};
   key.source =
@@ -1359,6 +1394,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
   std::vector<svmp::FE::Real> solution(
       static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
   writeWorkflowFieldSlice(*system, phi, coefficients, solution);
+  const auto velocity_dofs = static_cast<std::size_t>(
+      system->fieldDofHandler(velocity).getNumDofs());
+  std::vector<svmp::FE::Real> velocity_coefficients(
+      velocity_dofs, svmp::FE::Real{0.2});
+  writeWorkflowFieldSlice(
+      *system, velocity, velocity_coefficients, solution);
 
   application::core::SimulationComponents sim;
   sim.primary_mesh = mesh;
@@ -1402,6 +1443,36 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(summary.skipped_fragment_count, 0u);
   EXPECT_EQ(snapshot->ledger().orphan_contact_fragment_count, 0u);
   EXPECT_EQ(snapshot->ledger().stale_revision_count, 0u);
+
+  const auto contact_stages = evaluateAcceptedFreeSurfaceContactStages(
+      sim,
+      svmp::FE::Real{0.075},
+      svmp::FE::Real{0.5},
+      /*previous_state_revision=*/11u,
+      /*endpoint_state_revision=*/12u,
+      std::span<const svmp::FE::Real>(solution.data(), solution.size()));
+  ASSERT_EQ(contact_stages.size(), 1u);
+  ASSERT_EQ(contact_stages.front().state.walls.size(), 1u);
+  EXPECT_GT(contact_stages.front().state.owned_contact_measure, 0.0);
+  EXPECT_GT(contact_stages.front().state.line_friction_dissipation, 0.0);
+  ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
+      sim,
+      /*accepted_step=*/2u,
+      svmp::FE::Real{0.10},
+      svmp::FE::Real{0.05},
+      /*state_revision=*/13u,
+      contact_stages));
+  const auto history =
+      sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+  ASSERT_EQ(history.size(), 1u);
+  ASSERT_TRUE(history.front().contact_stage.has_value());
+  EXPECT_DOUBLE_EQ(history.front().contact_stage->stage_time,
+                   svmp::FE::Real{0.075});
+  EXPECT_DOUBLE_EQ(history.front().contact_stage->stage_alpha_f,
+                   svmp::FE::Real{0.5});
+  EXPECT_EQ(history.front().contact_stage->geometry_revision
+                .snapshot_revision_key,
+            snapshot->revision().snapshot_revision_key);
 #endif
 }
 

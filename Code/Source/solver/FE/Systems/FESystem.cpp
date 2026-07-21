@@ -6467,7 +6467,9 @@ bool sameFreeSurfaceFunctionalParameters(
         lhs.surface_tension != rhs.surface_tension ||
         lhs.volume_multiplier != rhs.volume_multiplier ||
         lhs.young_wall_coefficients.size() !=
-            rhs.young_wall_coefficients.size()) {
+            rhs.young_wall_coefficients.size() ||
+        lhs.dynamic_contact_coefficients.size() !=
+            rhs.dynamic_contact_coefficients.size()) {
         return false;
     }
     for (std::size_t i = 0; i < lhs.young_wall_coefficients.size(); ++i) {
@@ -6476,6 +6478,17 @@ bool sameFreeSurfaceFunctionalParameters(
         if (left.boundary_marker != right.boundary_marker ||
             left.equilibrium_contact_angle_radians !=
                 right.equilibrium_contact_angle_radians) {
+            return false;
+        }
+    }
+    for (std::size_t i = 0; i < lhs.dynamic_contact_coefficients.size();
+         ++i) {
+        const auto& left = lhs.dynamic_contact_coefficients[i];
+        const auto& right = rhs.dynamic_contact_coefficients[i];
+        if (left.boundary_marker != right.boundary_marker ||
+            left.equilibrium_contact_angle_radians !=
+                right.equilibrium_contact_angle_radians ||
+            left.mobility != right.mobility) {
             return false;
         }
     }
@@ -6512,6 +6525,85 @@ bool sameFreeSurfaceFunctionalState(
                 right.owned_wetted_wall_area ||
             left.owned_contact_measure != right.owned_contact_measure ||
             left.young_wall_energy != right.young_wall_energy) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool sameFreeSurfaceDynamicContactWallState(
+    const interfaces::FreeSurfaceDynamicContactWallState& lhs,
+    const interfaces::FreeSurfaceDynamicContactWallState& rhs) noexcept
+{
+    return lhs.boundary_marker == rhs.boundary_marker &&
+           lhs.equilibrium_contact_angle_radians ==
+               rhs.equilibrium_contact_angle_radians &&
+           lhs.mobility == rhs.mobility &&
+           lhs.owned_quadrature_point_count ==
+               rhs.owned_quadrature_point_count &&
+           lhs.owned_advancing_point_count ==
+               rhs.owned_advancing_point_count &&
+           lhs.owned_receding_point_count ==
+               rhs.owned_receding_point_count &&
+           lhs.owned_stationary_point_count ==
+               rhs.owned_stationary_point_count &&
+           lhs.owned_contact_measure == rhs.owned_contact_measure &&
+           lhs.dynamic_angle_integral == rhs.dynamic_angle_integral &&
+           lhs.dynamic_cosine_integral == rhs.dynamic_cosine_integral &&
+           lhs.contact_speed_integral == rhs.contact_speed_integral &&
+           lhs.contact_speed_squared_integral ==
+               rhs.contact_speed_squared_integral &&
+           lhs.constitutive_residual_integral ==
+               rhs.constitutive_residual_integral &&
+           lhs.absolute_constitutive_residual_integral ==
+               rhs.absolute_constitutive_residual_integral &&
+           lhs.line_friction_dissipation ==
+               rhs.line_friction_dissipation &&
+           lhs.contact_position_integral ==
+               rhs.contact_position_integral &&
+           lhs.wall_normal_integral == rhs.wall_normal_integral &&
+           lhs.footprint_direction_integral ==
+               rhs.footprint_direction_integral &&
+           lhs.mean_dynamic_angle_radians ==
+               rhs.mean_dynamic_angle_radians &&
+           lhs.mean_dynamic_cosine == rhs.mean_dynamic_cosine &&
+           lhs.mean_contact_speed == rhs.mean_contact_speed &&
+           lhs.mean_constitutive_residual ==
+               rhs.mean_constitutive_residual &&
+           lhs.mean_absolute_constitutive_residual ==
+               rhs.mean_absolute_constitutive_residual &&
+           lhs.mean_contact_position == rhs.mean_contact_position &&
+           lhs.mean_wall_normal == rhs.mean_wall_normal &&
+           lhs.mean_footprint_direction ==
+               rhs.mean_footprint_direction &&
+           lhs.motion == rhs.motion;
+}
+
+bool sameFreeSurfaceAcceptedContactStageState(
+    const FreeSurfaceAcceptedContactStageState& lhs,
+    const FreeSurfaceAcceptedContactStageState& rhs) noexcept
+{
+    if (lhs.stage_time != rhs.stage_time ||
+        lhs.stage_alpha_f != rhs.stage_alpha_f ||
+        lhs.previous_state_revision != rhs.previous_state_revision ||
+        lhs.endpoint_state_revision != rhs.endpoint_state_revision ||
+        lhs.stage_state_revision != rhs.stage_state_revision ||
+        !sameFreeSurfaceGeometryRevision(lhs.geometry_revision,
+                                         rhs.geometry_revision) ||
+        lhs.state.snapshot_revision_key !=
+            rhs.state.snapshot_revision_key ||
+        lhs.state.liquid_side != rhs.state.liquid_side ||
+        lhs.state.surface_tension != rhs.state.surface_tension ||
+        lhs.state.owned_contact_measure !=
+            rhs.state.owned_contact_measure ||
+        lhs.state.line_friction_dissipation !=
+            rhs.state.line_friction_dissipation ||
+        lhs.state.walls.size() != rhs.state.walls.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < lhs.state.walls.size(); ++i) {
+        if (!sameFreeSurfaceDynamicContactWallState(
+                lhs.state.walls[i], rhs.state.walls[i])) {
             return false;
         }
     }
@@ -6805,6 +6897,71 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
             "FESystem::declareFreeSurfaceDiscreteFunctional: duplicate "
             "Young wall coefficient marker");
     }
+    std::sort(
+        parameters.dynamic_contact_coefficients.begin(),
+        parameters.dynamic_contact_coefficients.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return lhs.boundary_marker < rhs.boundary_marker;
+        });
+    for (std::size_t i = 0;
+         i < parameters.dynamic_contact_coefficients.size(); ++i) {
+        const auto& coefficient =
+            parameters.dynamic_contact_coefficients[i];
+        FE_THROW_IF(
+            coefficient.boundary_marker < 0 ||
+                !std::isfinite(
+                    coefficient.equilibrium_contact_angle_radians) ||
+                !(coefficient.equilibrium_contact_angle_radians >
+                  Real{0.0}) ||
+                !(coefficient.equilibrium_contact_angle_radians < pi) ||
+                !std::isfinite(coefficient.mobility) ||
+                !(coefficient.mobility > Real{0.0}),
+            InvalidArgumentException,
+            "FESystem::declareFreeSurfaceDiscreteFunctional: every dynamic "
+            "contact coefficient requires a nonnegative marker, a finite "
+            "angle strictly in (0, pi), and finite positive mobility");
+        FE_THROW_IF(
+            i != 0u &&
+                parameters.dynamic_contact_coefficients[i - 1u]
+                        .boundary_marker == coefficient.boundary_marker,
+            InvalidArgumentException,
+            "FESystem::declareFreeSurfaceDiscreteFunctional: duplicate "
+            "dynamic contact coefficient marker");
+        const auto young = std::lower_bound(
+            parameters.young_wall_coefficients.begin(),
+            parameters.young_wall_coefficients.end(),
+            coefficient.boundary_marker,
+            [](const auto& candidate, int marker) {
+                return candidate.boundary_marker < marker;
+            });
+        FE_THROW_IF(
+            young == parameters.young_wall_coefficients.end() ||
+                young->boundary_marker != coefficient.boundary_marker ||
+                young->equilibrium_contact_angle_radians !=
+                    coefficient.equilibrium_contact_angle_radians,
+            InvalidArgumentException,
+            "FESystem::declareFreeSurfaceDiscreteFunctional: dynamic "
+            "contact coefficients require matching Young wall coefficients");
+    }
+    if (!parameters.dynamic_contact_coefficients.empty()) {
+        FE_THROW_IF(
+            !field_registry_.has(declaration.velocity_field),
+            InvalidArgumentException,
+            "FESystem::declareFreeSurfaceDiscreteFunctional: dynamic "
+            "contact telemetry requires a registered velocity field");
+        const auto& velocity =
+            field_registry_.get(declaration.velocity_field);
+        const int dimension = mesh_access_ ? mesh_access_->dimension() : 0;
+        FE_THROW_IF(
+            velocity.scope != FieldScope::VolumeCell ||
+                velocity.space == nullptr ||
+                velocity.components < dimension ||
+                !fieldParticipatesInUnknownVector(
+                    declaration.velocity_field),
+            InvalidArgumentException,
+            "FESystem::declareFreeSurfaceDiscreteFunctional: dynamic "
+            "contact telemetry requires an unknown vector volume field");
+    }
     const auto conflict = std::find_if(
         free_surface_discrete_functional_declarations_.begin(),
         free_surface_discrete_functional_declarations_.end(),
@@ -6842,6 +6999,7 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
             << " diagnostic=free_surface_discrete_functional_declaration"
             << " interface_marker=" << stored.interface_marker
             << " level_set_field=" << stored.level_set_field
+            << " velocity_field=" << stored.velocity_field
             << " geometry_domain_id='" << stored.geometry_domain_id << "'"
             << " liquid_side="
             << (stored.parameters.liquid_side ==
@@ -6852,11 +7010,20 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
             << " volume_multiplier=" << stored.parameters.volume_multiplier
             << " young_wall_count="
             << stored.parameters.young_wall_coefficients.size()
+            << " dynamic_contact_count="
+            << stored.parameters.dynamic_contact_coefficients.size()
             << " owner='" << stored.owner_component << "'";
     for (const auto& wall : stored.parameters.young_wall_coefficients) {
         message << " young_wall_marker=" << wall.boundary_marker
                 << " equilibrium_contact_angle_radians="
                 << wall.equilibrium_contact_angle_radians;
+    }
+    for (const auto& contact :
+         stored.parameters.dynamic_contact_coefficients) {
+        message << " dynamic_contact_marker=" << contact.boundary_marker
+                << " dynamic_contact_equilibrium_angle_radians="
+                << contact.equilibrium_contact_angle_radians
+                << " dynamic_contact_mobility=" << contact.mobility;
     }
     FE_LOG_INFO(message.str());
 }
@@ -6904,6 +7071,8 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
             "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: " +
                 std::string(quantity) + " is inconsistent");
     };
+    constexpr Real contact_pi =
+        Real{3.141592653589793238462643383279502884};
     for (std::size_t i = 0; i < states.size(); ++i) {
         const auto& accepted = states[i];
         const auto& declaration =
@@ -7041,6 +7210,292 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                          state.young_wall_energy +
                          state.volume_constraint_potential,
                      "total potential");
+
+        const bool dynamic_contact_declared =
+            !declaration.parameters.dynamic_contact_coefficients.empty();
+        FE_THROW_IF(
+            accepted.contact_stage.has_value() !=
+                dynamic_contact_declared,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+            "contact-stage state presence does not match the declaration");
+        if (accepted.contact_stage.has_value()) {
+            const auto& contact_stage = *accepted.contact_stage;
+            const auto& contact_revision =
+                contact_stage.geometry_revision;
+            const auto& contact_state = contact_stage.state;
+            FE_THROW_IF(
+                !std::isfinite(contact_stage.stage_time) ||
+                    !std::isfinite(contact_stage.stage_alpha_f) ||
+                    !(contact_stage.stage_alpha_f > Real{0.0}) ||
+                    contact_stage.stage_alpha_f > Real{1.0} ||
+                    contact_stage.previous_state_revision == 0u ||
+                    contact_stage.endpoint_state_revision == 0u ||
+                    contact_stage.stage_state_revision == 0u,
+                InvalidArgumentException,
+                "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                "contact-stage provenance is incomplete");
+            require_near(
+                contact_stage.stage_time,
+                accepted_time -
+                    (Real{1.0} - contact_stage.stage_alpha_f) * dt,
+                "contact-stage time");
+            FE_THROW_IF(
+                !contact_revision.complete() ||
+                    contact_revision.interface_marker !=
+                        declaration.interface_marker ||
+                    contact_revision.source_id != expected_source ||
+                    contact_revision.domain_id !=
+                        declaration.geometry_domain_id ||
+                    contact_revision.snapshot_revision_key !=
+                        contact_state.snapshot_revision_key,
+                InvalidArgumentException,
+                "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                "contact-stage geometry provenance does not match the "
+                "declaration and state");
+            FE_THROW_IF(
+                contact_state.liquid_side !=
+                        declaration.parameters.liquid_side ||
+                    contact_state.surface_tension !=
+                        declaration.parameters.surface_tension ||
+                    contact_state.walls.size() !=
+                        declaration.parameters.dynamic_contact_coefficients
+                            .size(),
+                InvalidArgumentException,
+                "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                "contact-stage coefficients do not match the declaration");
+
+            Real dynamic_contact_measure_sum = Real{0.0};
+            Real line_dissipation_sum = Real{0.0};
+            for (std::size_t contact_index = 0;
+                 contact_index < contact_state.walls.size();
+                 ++contact_index) {
+                const auto& wall = contact_state.walls[contact_index];
+                const auto& coefficient =
+                    declaration.parameters.dynamic_contact_coefficients
+                        [contact_index];
+                const auto point_count =
+                    wall.owned_advancing_point_count +
+                    wall.owned_receding_point_count +
+                    wall.owned_stationary_point_count;
+                const auto finite = [](Real value) {
+                    return std::isfinite(value);
+                };
+                FE_THROW_IF(
+                    wall.boundary_marker != coefficient.boundary_marker ||
+                        wall.equilibrium_contact_angle_radians !=
+                            coefficient
+                                .equilibrium_contact_angle_radians ||
+                        wall.mobility != coefficient.mobility ||
+                        point_count !=
+                            wall.owned_quadrature_point_count ||
+                        !finite_nonnegative(
+                            wall.owned_contact_measure) ||
+                        ((wall.owned_contact_measure > Real{0.0}) !=
+                         (wall.owned_quadrature_point_count > 0u)) ||
+                        !finite(wall.dynamic_angle_integral) ||
+                        !finite(wall.dynamic_cosine_integral) ||
+                        !finite(wall.contact_speed_integral) ||
+                        !finite_nonnegative(
+                            wall.contact_speed_squared_integral) ||
+                        !finite(wall.constitutive_residual_integral) ||
+                        !finite(
+                            wall.absolute_constitutive_residual_integral) ||
+                        wall.absolute_constitutive_residual_integral <
+                            Real{0.0} ||
+                        !finite_nonnegative(
+                            wall.line_friction_dissipation) ||
+                        !std::all_of(
+                            wall.contact_position_integral.begin(),
+                            wall.contact_position_integral.end(), finite) ||
+                        !std::all_of(
+                            wall.wall_normal_integral.begin(),
+                            wall.wall_normal_integral.end(), finite) ||
+                        !std::all_of(
+                            wall.footprint_direction_integral.begin(),
+                            wall.footprint_direction_integral.end(), finite),
+                    InvalidArgumentException,
+                    "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                    "contact-stage wall state is inconsistent or non-finite");
+                const Real measure_tolerance =
+                    Real{1024.0} *
+                    std::numeric_limits<Real>::epsilon() *
+                    std::max(Real{1.0}, wall.owned_contact_measure);
+                const Real residual_tolerance =
+                    Real{1024.0} *
+                    std::numeric_limits<Real>::epsilon() *
+                    std::max(
+                        Real{1.0},
+                        std::abs(wall.constitutive_residual_integral));
+                const auto vector_norm = [](const auto& values) {
+                    Real norm_squared = Real{0.0};
+                    for (const auto value : values) {
+                        norm_squared += value * value;
+                    }
+                    return std::sqrt(norm_squared);
+                };
+                const Real speed_cauchy_scale = std::max(
+                    {Real{1.0},
+                     std::abs(wall.contact_speed_squared_integral *
+                              wall.owned_contact_measure),
+                     wall.contact_speed_integral *
+                         wall.contact_speed_integral});
+                FE_THROW_IF(
+                    wall.dynamic_angle_integral < Real{0.0} ||
+                        wall.dynamic_angle_integral >
+                            contact_pi * wall.owned_contact_measure +
+                                measure_tolerance ||
+                        std::abs(wall.dynamic_cosine_integral) >
+                            wall.owned_contact_measure +
+                                measure_tolerance ||
+                        vector_norm(wall.wall_normal_integral) >
+                            wall.owned_contact_measure +
+                                measure_tolerance ||
+                        vector_norm(
+                            wall.footprint_direction_integral) >
+                            wall.owned_contact_measure +
+                                measure_tolerance ||
+                        wall.contact_speed_squared_integral *
+                                    wall.owned_contact_measure -
+                                wall.contact_speed_integral *
+                                    wall.contact_speed_integral <
+                            -Real{1024.0} *
+                                std::numeric_limits<Real>::epsilon() *
+                                speed_cauchy_scale ||
+                        wall.absolute_constitutive_residual_integral +
+                                residual_tolerance <
+                            std::abs(
+                                wall.constitutive_residual_integral),
+                    InvalidArgumentException,
+                    "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                    "contact-stage integral bounds are inconsistent");
+                require_near(
+                    wall.constitutive_residual_integral,
+                    wall.contact_speed_integral / wall.mobility -
+                        contact_state.surface_tension *
+                            (std::cos(
+                                 wall.equilibrium_contact_angle_radians) *
+                                 wall.owned_contact_measure -
+                             wall.dynamic_cosine_integral),
+                    "contact-stage Ren--E residual integral");
+                require_near(
+                    wall.line_friction_dissipation,
+                    wall.contact_speed_squared_integral / wall.mobility,
+                    "contact-stage line-friction dissipation identity");
+
+                const bool has_measure =
+                    wall.owned_contact_measure > Real{0.0};
+                const bool all_means_present =
+                    wall.mean_dynamic_angle_radians.has_value() &&
+                    wall.mean_dynamic_cosine.has_value() &&
+                    wall.mean_contact_speed.has_value() &&
+                    wall.mean_constitutive_residual.has_value() &&
+                    wall.mean_absolute_constitutive_residual.has_value();
+                const bool any_means_present =
+                    wall.mean_dynamic_angle_radians.has_value() ||
+                    wall.mean_dynamic_cosine.has_value() ||
+                    wall.mean_contact_speed.has_value() ||
+                    wall.mean_constitutive_residual.has_value() ||
+                    wall.mean_absolute_constitutive_residual.has_value();
+                FE_THROW_IF(
+                    all_means_present != has_measure ||
+                        any_means_present != has_measure,
+                    InvalidArgumentException,
+                    "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                    "contact-stage mean presence does not match its measure");
+                if (has_measure) {
+                    const Real inverse_measure =
+                        Real{1.0} / wall.owned_contact_measure;
+                    require_near(
+                        *wall.mean_dynamic_angle_radians,
+                        wall.dynamic_angle_integral * inverse_measure,
+                        "mean dynamic contact angle");
+                    require_near(
+                        *wall.mean_dynamic_cosine,
+                        wall.dynamic_cosine_integral * inverse_measure,
+                        "mean dynamic contact cosine");
+                    require_near(
+                        *wall.mean_contact_speed,
+                        wall.contact_speed_integral * inverse_measure,
+                        "mean contact speed");
+                    require_near(
+                        *wall.mean_constitutive_residual,
+                        wall.constitutive_residual_integral *
+                            inverse_measure,
+                        "mean contact constitutive residual");
+                    require_near(
+                        *wall.mean_absolute_constitutive_residual,
+                        wall.absolute_constitutive_residual_integral *
+                            inverse_measure,
+                        "mean absolute contact constitutive residual");
+                    for (std::size_t component = 0; component < 3u;
+                         ++component) {
+                        require_near(
+                            wall.mean_contact_position[component],
+                            wall.contact_position_integral[component] *
+                                inverse_measure,
+                            "mean contact position");
+                        require_near(
+                            wall.mean_wall_normal[component],
+                            wall.wall_normal_integral[component] *
+                                inverse_measure,
+                            "mean contact wall frame");
+                        require_near(
+                            wall.mean_footprint_direction[component],
+                            wall.footprint_direction_integral[component] *
+                                inverse_measure,
+                            "mean contact footprint frame");
+                    }
+                } else {
+                    for (const auto value : wall.mean_contact_position) {
+                        require_near(value, Real{0.0},
+                                     "absent contact position");
+                    }
+                    for (const auto value : wall.mean_wall_normal) {
+                        require_near(value, Real{0.0},
+                                     "absent contact wall frame");
+                    }
+                    for (const auto value :
+                         wall.mean_footprint_direction) {
+                        require_near(value, Real{0.0},
+                                     "absent contact footprint frame");
+                    }
+                }
+                auto expected_motion =
+                    interfaces::FreeSurfaceContactMotion::Absent;
+                if (has_measure) {
+                    if (wall.owned_advancing_point_count != 0u &&
+                        wall.owned_receding_point_count != 0u) {
+                        expected_motion =
+                            interfaces::FreeSurfaceContactMotion::Mixed;
+                    } else if (wall.owned_advancing_point_count != 0u) {
+                        expected_motion =
+                            interfaces::FreeSurfaceContactMotion::Advancing;
+                    } else if (wall.owned_receding_point_count != 0u) {
+                        expected_motion =
+                            interfaces::FreeSurfaceContactMotion::Receding;
+                    } else {
+                        expected_motion = interfaces::
+                            FreeSurfaceContactMotion::Stationary;
+                    }
+                }
+                FE_THROW_IF(
+                    wall.motion != expected_motion,
+                    InvalidArgumentException,
+                    "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                    "contact-stage motion label is inconsistent");
+                dynamic_contact_measure_sum +=
+                    wall.owned_contact_measure;
+                line_dissipation_sum +=
+                    wall.line_friction_dissipation;
+            }
+            require_near(contact_state.owned_contact_measure,
+                         dynamic_contact_measure_sum,
+                         "contact-stage total measure");
+            require_near(contact_state.line_friction_dissipation,
+                         line_dissipation_sum,
+                         "contact-stage line-friction dissipation");
+        }
     }
 
     const auto declaration_count =
@@ -7082,6 +7537,9 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                         record.declaration.level_set_field !=
                             free_surface_discrete_functional_declarations_[i]
                                 .level_set_field ||
+                        record.declaration.velocity_field !=
+                            free_surface_discrete_functional_declarations_[i]
+                                .velocity_field ||
                         record.declaration.geometry_domain_id !=
                             free_surface_discrete_functional_declarations_[i]
                                 .geometry_domain_id ||
@@ -7096,7 +7554,13 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                             record.geometry_revision,
                             states[i].geometry_revision) ||
                         !sameFreeSurfaceFunctionalState(
-                            record.state, states[i].state),
+                            record.state, states[i].state) ||
+                        record.contact_stage.has_value() !=
+                            states[i].contact_stage.has_value() ||
+                        (record.contact_stage.has_value() &&
+                         !sameFreeSurfaceAcceptedContactStageState(
+                             *record.contact_stage,
+                             *states[i].contact_stage)),
                     InvalidArgumentException,
                     "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
                     "an accepted step cannot be replayed with different "
@@ -7121,6 +7585,7 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 .declaration = declaration,
                 .geometry_revision = accepted.geometry_revision,
                 .state = accepted.state,
+                .contact_stage = accepted.contact_stage,
             });
         const auto& revision = accepted.geometry_revision;
         const auto& state = accepted.state;
@@ -7134,6 +7599,7 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 << " state_revision=" << state_revision
                 << " interface_marker=" << declaration.interface_marker
                 << " level_set_field=" << declaration.level_set_field
+                << " velocity_field=" << declaration.velocity_field
                 << " geometry_source_id='" << revision.source_id << "'"
                 << " geometry_domain_id='" << revision.domain_id << "'"
                 << " geometry_isovalue=" << revision.isovalue
@@ -7183,6 +7649,96 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                     << " wall_contact_measure="
                     << wall.owned_contact_measure
                     << " wall_young_energy=" << wall.young_wall_energy;
+        }
+        if (accepted.contact_stage.has_value()) {
+            const auto& contact_stage = *accepted.contact_stage;
+            message
+                << " contact_stage_time=" << contact_stage.stage_time
+                << " contact_stage_alpha_f="
+                << contact_stage.stage_alpha_f
+                << " contact_stage_previous_state_revision="
+                << contact_stage.previous_state_revision
+                << " contact_stage_endpoint_state_revision="
+                << contact_stage.endpoint_state_revision
+                << " contact_stage_state_revision="
+                << contact_stage.stage_state_revision
+                << " contact_stage_snapshot_revision="
+                << contact_stage.geometry_revision.snapshot_revision_key
+                << " contact_stage_source_value_revision="
+                << contact_stage.geometry_revision.source_value_revision
+                << " contact_stage_measure="
+                << contact_stage.state.owned_contact_measure
+                << " contact_stage_line_friction_dissipation="
+                << contact_stage.state.line_friction_dissipation;
+            for (const auto& contact : contact_stage.state.walls) {
+                const char* motion = "Absent";
+                switch (contact.motion) {
+                case interfaces::FreeSurfaceContactMotion::Absent:
+                    break;
+                case interfaces::FreeSurfaceContactMotion::Stationary:
+                    motion = "Stationary";
+                    break;
+                case interfaces::FreeSurfaceContactMotion::Advancing:
+                    motion = "Advancing";
+                    break;
+                case interfaces::FreeSurfaceContactMotion::Receding:
+                    motion = "Receding";
+                    break;
+                case interfaces::FreeSurfaceContactMotion::Mixed:
+                    motion = "Mixed";
+                    break;
+                }
+                message
+                    << " contact_wall_marker=" << contact.boundary_marker
+                    << " contact_equilibrium_angle_radians="
+                    << contact.equilibrium_contact_angle_radians
+                    << " contact_mobility=" << contact.mobility
+                    << " contact_qpoints="
+                    << contact.owned_quadrature_point_count
+                    << " contact_advancing_qpoints="
+                    << contact.owned_advancing_point_count
+                    << " contact_receding_qpoints="
+                    << contact.owned_receding_point_count
+                    << " contact_stationary_qpoints="
+                    << contact.owned_stationary_point_count
+                    << " contact_measure="
+                    << contact.owned_contact_measure
+                    << " contact_motion=" << motion
+                    << " contact_line_friction_dissipation="
+                    << contact.line_friction_dissipation
+                    << " contact_speed_squared_integral="
+                    << contact.contact_speed_squared_integral;
+                if (contact.mean_dynamic_angle_radians.has_value()) {
+                    message
+                        << " contact_mean_dynamic_angle_radians="
+                        << *contact.mean_dynamic_angle_radians
+                        << " contact_mean_dynamic_cosine="
+                        << *contact.mean_dynamic_cosine
+                        << " contact_mean_speed="
+                        << *contact.mean_contact_speed
+                        << " contact_mean_constitutive_residual="
+                        << *contact.mean_constitutive_residual
+                        << " contact_mean_absolute_constitutive_residual="
+                        << *contact.mean_absolute_constitutive_residual;
+                } else {
+                    message << " contact_mean_dynamic_angle_radians=none"
+                            << " contact_mean_dynamic_cosine=none"
+                            << " contact_mean_speed=none"
+                            << " contact_mean_constitutive_residual=none"
+                            << " contact_mean_absolute_constitutive_residual=none";
+                }
+                for (std::size_t component = 0; component < 3u;
+                     ++component) {
+                    message
+                        << " contact_mean_position_" << component << "="
+                        << contact.mean_contact_position[component]
+                        << " contact_mean_wall_normal_" << component << "="
+                        << contact.mean_wall_normal[component]
+                        << " contact_mean_footprint_direction_" << component
+                        << "="
+                        << contact.mean_footprint_direction[component];
+                }
+            }
         }
         FE_LOG_INFO(message.str());
     }

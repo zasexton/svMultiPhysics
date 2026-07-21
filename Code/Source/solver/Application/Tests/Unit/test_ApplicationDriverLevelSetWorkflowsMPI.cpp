@@ -12,6 +12,7 @@
 #include "FE/Forms/Forms.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Spaces/SpaceFactory.h"
+#include "FE/Spaces/ProductSpace.h"
 #include "FE/Systems/FormsInstaller.h"
 #include "Mesh/Mesh.h"
 #include "FE/Spaces/H1Space.h"
@@ -1638,18 +1639,39 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
       svmp::FE::ElementType::Quad4,
       /*order=*/1);
+  auto velocity_space =
+      std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
   auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
   const auto phi = system->addField(svmp::FE::systems::FieldSpec{
       .name = "phi", .space = scalar_space, .components = 1});
+  const auto velocity = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "velocity", .space = velocity_space, .components = 2});
   svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
       functional_parameters;
   functional_parameters.liquid_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = svmp::FE::Real{0.75};
+  const svmp::FE::Real equilibrium_angle =
+      std::acos(svmp::FE::Real{2.0} / svmp::FE::Real{3.0});
+  for (const int marker : {static_cast<int>(kLeftOnlyWall),
+                           static_cast<int>(kRightOnlyWall)}) {
+    functional_parameters.young_wall_coefficients.push_back(
+        svmp::FE::interfaces::FreeSurfaceYoungWallCoefficient{
+            .boundary_marker = marker,
+            .equilibrium_contact_angle_radians = equilibrium_angle,
+        });
+    functional_parameters.dynamic_contact_coefficients.push_back(
+        svmp::FE::interfaces::FreeSurfaceDynamicContactCoefficient{
+            .boundary_marker = marker,
+            .equilibrium_contact_angle_radians = equilibrium_angle,
+            .mobility = svmp::FE::Real{0.5},
+        });
+  }
   system->declareFreeSurfaceDiscreteFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = 721,
           .level_set_field = phi,
+          .velocity_field = velocity,
           .geometry_domain_id = "mpi_disjoint_wall_interface",
           .parameters = functional_parameters,
           .owner_component =
@@ -1705,6 +1727,22 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           svmp::FE::Real{0.5};
     }
   }
+  const auto& velocity_dofs = system->fieldDofHandler(velocity);
+  const auto velocity_offset = system->fieldDofOffset(velocity);
+  ASSERT_GE(velocity_offset, 0);
+  for (svmp::FE::GlobalIndex cell = 0;
+       cell < static_cast<svmp::FE::GlobalIndex>(mesh->n_cells());
+       ++cell) {
+    for (const auto dof : velocity_dofs.getCellDofs(cell)) {
+      ASSERT_GE(dof, 0);
+      if (!velocity_dofs.getDofMap().isOwnedDof(dof)) {
+        continue;
+      }
+      const auto index = static_cast<std::size_t>(velocity_offset + dof);
+      ASSERT_LT(index, local_solution.size());
+      local_solution[index] = svmp::FE::Real{0.25};
+    }
+  }
   MPI_Allreduce(local_solution.data(),
                 solution.data(),
                 static_cast<int>(solution.size()),
@@ -1758,12 +1796,21 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   EXPECT_NEAR(report.negative_physical_volume, 4.0, 1.0e-12);
   EXPECT_NEAR(report.positive_physical_volume, 4.0, 1.0e-12);
 
+  const auto contact_stages = evaluateAcceptedFreeSurfaceContactStages(
+      sim,
+      svmp::FE::Real{0.075},
+      svmp::FE::Real{0.5},
+      /*previous_state_revision=*/29u,
+      /*endpoint_state_revision=*/30u,
+      std::span<const svmp::FE::Real>(solution.data(), solution.size()));
+  ASSERT_EQ(contact_stages.size(), 1u);
   ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
       sim,
       /*accepted_step=*/2u,
       svmp::FE::Real{0.10},
       svmp::FE::Real{0.05},
-      /*state_revision=*/31u));
+      /*state_revision=*/31u,
+      contact_stages));
   const auto functional_history =
       sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
   ASSERT_EQ(functional_history.size(), 1u);
@@ -1775,11 +1822,37 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   EXPECT_NEAR(functional_record.state.liquid_gas_surface_energy,
               6.0,
               1.0e-12);
-  EXPECT_NEAR(functional_record.state.total_potential, 6.0, 1.0e-12);
+  EXPECT_NEAR(functional_record.state.young_wall_energy, -0.5, 1.0e-12);
+  EXPECT_NEAR(functional_record.state.total_potential, 5.5, 1.0e-12);
   ASSERT_EQ(functional_record.state.walls.size(), 3u);
   for (const auto& wall : functional_record.state.walls) {
-    EXPECT_FALSE(wall.equilibrium_contact_angle_radians.has_value());
+    const bool dynamic_wall =
+        wall.boundary_marker == kLeftOnlyWall ||
+        wall.boundary_marker == kRightOnlyWall;
+    EXPECT_EQ(wall.equilibrium_contact_angle_radians.has_value(),
+              dynamic_wall);
   }
+  ASSERT_TRUE(functional_record.contact_stage.has_value());
+  const auto& contact_stage = *functional_record.contact_stage;
+  EXPECT_DOUBLE_EQ(contact_stage.stage_time, svmp::FE::Real{0.075});
+  EXPECT_DOUBLE_EQ(contact_stage.stage_alpha_f, svmp::FE::Real{0.5});
+  EXPECT_NEAR(contact_stage.state.owned_contact_measure, 2.0, 1.0e-12);
+  EXPECT_NEAR(contact_stage.state.line_friction_dissipation,
+              0.25,
+              1.0e-12);
+  ASSERT_EQ(contact_stage.state.walls.size(), 2u);
+  std::size_t contact_qpoints = 0u;
+  for (const auto& wall : contact_stage.state.walls) {
+    contact_qpoints += wall.owned_quadrature_point_count;
+    EXPECT_EQ(wall.motion,
+              svmp::FE::interfaces::FreeSurfaceContactMotion::Advancing);
+    ASSERT_TRUE(wall.mean_contact_speed.has_value());
+    ASSERT_TRUE(wall.mean_constitutive_residual.has_value());
+    EXPECT_NEAR(*wall.mean_contact_speed, 0.25, 1.0e-12);
+    EXPECT_NEAR(*wall.mean_constitutive_residual, 0.0, 1.0e-12);
+    EXPECT_NEAR(wall.contact_speed_squared_integral, 0.0625, 1.0e-12);
+  }
+  EXPECT_EQ(contact_qpoints, 2u);
 
   const auto* cut_context = sim.fe_system->cutIntegrationContext();
   ASSERT_NE(cut_context, nullptr);

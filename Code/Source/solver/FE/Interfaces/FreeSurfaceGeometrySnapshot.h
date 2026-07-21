@@ -18,6 +18,7 @@
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -33,6 +34,8 @@ namespace assembly {
 class IMeshAccess;
 }
 namespace interfaces {
+
+class FreeSurfaceGeometrySnapshot;
 
 enum class FreeSurfaceGeometryRuleRole : std::uint8_t {
     NegativeVolume,
@@ -171,11 +174,19 @@ struct FreeSurfaceYoungWallCoefficient {
     Real equilibrium_contact_angle_radians{0.0};
 };
 
+struct FreeSurfaceDynamicContactCoefficient {
+    int boundary_marker{-1};
+    Real equilibrium_contact_angle_radians{0.0};
+    Real mobility{0.0};
+};
+
 struct FreeSurfaceDiscreteFunctionalParameters {
     geometry::CutIntegrationSide liquid_side{
         geometry::CutIntegrationSide::Negative};
     Real surface_tension{0.0};
     std::vector<FreeSurfaceYoungWallCoefficient> young_wall_coefficients{};
+    std::vector<FreeSurfaceDynamicContactCoefficient>
+        dynamic_contact_coefficients{};
     Real volume_multiplier{0.0};
 };
 
@@ -209,6 +220,84 @@ struct FreeSurfaceDiscreteFunctionalState {
     Real volume_constraint_potential{0.0};
     Real total_potential{0.0};
 };
+
+enum class FreeSurfaceContactMotion : std::uint8_t {
+    Absent,
+    Stationary,
+    Advancing,
+    Receding,
+    Mixed
+};
+
+/**
+ * Rank-owned Ren--E contact-law sample on one wall and one geometry snapshot.
+ *
+ * The integral fields are additive across ranks.  The mean fields are derived
+ * from those integrals and are recomputed after communicator reduction.  The
+ * mean frame vectors retain their magnitude: a value below one records frame
+ * variation instead of disguising it through renormalization.
+ */
+struct FreeSurfaceDynamicContactWallState {
+    int boundary_marker{-1};
+    Real equilibrium_contact_angle_radians{0.0};
+    Real mobility{0.0};
+    std::size_t owned_quadrature_point_count{0u};
+    std::size_t owned_advancing_point_count{0u};
+    std::size_t owned_receding_point_count{0u};
+    std::size_t owned_stationary_point_count{0u};
+    Real owned_contact_measure{0.0};
+    Real dynamic_angle_integral{0.0};
+    Real dynamic_cosine_integral{0.0};
+    Real contact_speed_integral{0.0};
+    Real contact_speed_squared_integral{0.0};
+    Real constitutive_residual_integral{0.0};
+    Real absolute_constitutive_residual_integral{0.0};
+    Real line_friction_dissipation{0.0};
+    std::array<Real, 3> contact_position_integral{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> wall_normal_integral{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> footprint_direction_integral{{0.0, 0.0, 0.0}};
+    std::optional<Real> mean_dynamic_angle_radians{};
+    std::optional<Real> mean_dynamic_cosine{};
+    std::optional<Real> mean_contact_speed{};
+    std::optional<Real> mean_constitutive_residual{};
+    std::optional<Real> mean_absolute_constitutive_residual{};
+    std::array<Real, 3> mean_contact_position{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> mean_wall_normal{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> mean_footprint_direction{{0.0, 0.0, 0.0}};
+    FreeSurfaceContactMotion motion{FreeSurfaceContactMotion::Absent};
+};
+
+struct FreeSurfaceDynamicContactState {
+    std::uint64_t snapshot_revision_key{0};
+    geometry::CutIntegrationSide liquid_side{
+        geometry::CutIntegrationSide::Negative};
+    Real surface_tension{0.0};
+    std::vector<FreeSurfaceDynamicContactWallState> walls{};
+    Real owned_contact_measure{0.0};
+    Real line_friction_dissipation{0.0};
+};
+
+struct FreeSurfaceDiscreteFunctionalVectorEvaluator {
+    std::function<std::array<Real, 3>(
+        GlobalIndex,
+        const std::array<Real, 3>&,
+        const geometry::CutQuadratureProvenance&)>
+        value{};
+
+    [[nodiscard]] bool canEvaluateValue() const noexcept {
+        return static_cast<bool>(value);
+    }
+};
+
+/** Recompute non-additive mean and motion fields after rank reduction. */
+void finalizeFreeSurfaceDynamicContactState(
+    FreeSurfaceDynamicContactState& state);
+
+[[nodiscard]] FreeSurfaceDynamicContactState
+evaluateFreeSurfaceDynamicContactState(
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    const FreeSurfaceDiscreteFunctionalParameters& parameters,
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity);
 
 class FreeSurfaceGeometrySnapshot {
 public:
