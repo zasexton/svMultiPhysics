@@ -18,6 +18,7 @@
 #include "FE/TimeStepping/TimeHistory.h"
 #include "Mesh/Mesh.h"
 #include "Physics/Core/PhysicsModule.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
 #include "Parameters.h"
 
 #include <algorithm>
@@ -27,8 +28,10 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -38,6 +41,123 @@ std::string lower_copy(std::string s)
   std::transform(s.begin(), s.end(), s.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   return s;
+}
+
+std::string trim_copy(std::string value)
+{
+  const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+  value.erase(value.begin(),
+              std::find_if(value.begin(), value.end(), not_space));
+  value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(),
+              value.end());
+  return value;
+}
+
+const svmp::Physics::ParameterValue* find_defined_parameter(
+    const svmp::Physics::ParameterMap& params,
+    std::initializer_list<std::string_view> names)
+{
+  for (const auto name : names) {
+    const auto it = params.find(std::string(name));
+    if (it != params.end() && it->second.defined) {
+      return &it->second;
+    }
+  }
+  return nullptr;
+}
+
+bool parse_bool_relaxed(std::string value)
+{
+  value = lower_copy(trim_copy(std::move(value)));
+  return value == "true" || value == "1" || value == "yes" ||
+         value == "on";
+}
+
+void preRegisterFutureWetExtensionVelocity(
+    const Parameters& params,
+    const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes,
+    svmp::FE::systems::FESystem& system)
+{
+  const EquationParameters* unique_fluid = nullptr;
+  std::size_t fluid_index = 0u;
+  for (std::size_t index = 0u; index < params.equation_parameters.size();
+       ++index) {
+    const auto* equation = params.equation_parameters[index];
+    if (equation == nullptr || !equation->type.defined() ||
+        lower_copy(trim_copy(equation->type.value())) != "fluid") {
+      continue;
+    }
+    if (unique_fluid != nullptr) {
+      // Existing level-set validation rejects an ambiguous/missing physical
+      // source.  Do not manufacture ownership when more than one fluid could
+      // provide the conventional Velocity field.
+      return;
+    }
+    unique_fluid = equation;
+    fluid_index = index;
+  }
+  if (unique_fluid == nullptr) {
+    return;
+  }
+
+  bool needs_future_velocity = false;
+  for (std::size_t index = 0u; index < params.equation_parameters.size();
+       ++index) {
+    const auto* equation = params.equation_parameters[index];
+    if (equation == nullptr || !equation->type.defined()) {
+      continue;
+    }
+    const auto type = lower_copy(trim_copy(equation->type.value()));
+    if (type != "level_set" && type != "levelset" &&
+        type != "level_set_transport") {
+      continue;
+    }
+
+    const auto input =
+        application::translators::EquationTranslator::buildInput(
+            *equation, meshes);
+    const auto* enabled = find_defined_parameter(
+        input.equation_params,
+        {"Use_wet_extension_advection_velocity",
+         "UseWetExtensionAdvectionVelocity",
+         "Update_advection_velocity_from_wet_region",
+         "UpdateAdvectionVelocityFromWetRegion"});
+    const auto* source = find_defined_parameter(
+        input.equation_params,
+        {"Advection_velocity_from_field",
+         "AdvectionVelocityFromField",
+         "Source_velocity_field_name",
+         "SourceVelocityFieldName",
+         "Physical_velocity_field_name",
+         "PhysicalVelocityFieldName"});
+    const bool wet_extension =
+        (enabled != nullptr && parse_bool_relaxed(enabled->value)) ||
+        source != nullptr;
+    if (!wet_extension) {
+      continue;
+    }
+
+    const auto source_name =
+        source == nullptr ? std::string{"Velocity"}
+                          : trim_copy(source->value);
+    if (source_name == "Velocity" && index < fluid_index) {
+      needs_future_velocity = true;
+    }
+  }
+
+  if (!needs_future_velocity) {
+    return;
+  }
+
+  const auto fluid_input =
+      application::translators::EquationTranslator::buildInput(
+          *unique_fluid, meshes);
+  const auto field = svmp::Physics::formulations::navier_stokes::
+      preRegisterPrimaryVelocityField(fluid_input, system);
+  application::core::oopCout()
+      << "[svMultiPhysics::Application] SimulationBuilder: pre-registered "
+         "future wet-extension physical velocity field='Velocity' field_id="
+      << field << std::endl;
 }
 
 bool oopStateTraceEnabled()
@@ -314,6 +434,73 @@ bool firstEquationTypeIs(const Parameters& params, const std::string& equation_t
   return false;
 }
 
+bool groupFsilsVelocityAuxiliaryPressurePrimary(
+    svmp::FE::backends::BlockLayout& layout)
+{
+  // FSILS BlockSchur is a two-way algebraic partition.  When nodal unknowns
+  // such as phi and its algebraic extension sit between the declared
+  // Velocity and Pressure fields, they belong to the computational K block;
+  // Pressure remains the scalar Schur-complement constraint.  Only form that
+  // grouping when the field layout is an exact contiguous partition with no
+  // unknowns after Pressure.  Otherwise leave the original metadata intact so
+  // FsilsLinearSolver's full-coverage guard rejects the unsupported layout.
+  if (layout.blocks.size() < 3u) {
+    return false;
+  }
+
+  std::optional<std::size_t> velocity_index;
+  std::optional<std::size_t> pressure_index;
+  int expected_start = 0;
+  for (std::size_t index = 0; index < layout.blocks.size(); ++index) {
+    const auto& block = layout.blocks[index];
+    if (block.n_components <= 0 || block.start_component != expected_start) {
+      return false;
+    }
+    expected_start += block.n_components;
+
+    if (block.name == "Velocity") {
+      if (velocity_index.has_value()) {
+        return false;
+      }
+      velocity_index = index;
+    } else if (block.name == "Pressure") {
+      if (pressure_index.has_value()) {
+        return false;
+      }
+      pressure_index = index;
+    }
+  }
+
+  if (!velocity_index.has_value() || !pressure_index.has_value() ||
+      *velocity_index != 0u || *pressure_index + 1u != layout.blocks.size()) {
+    return false;
+  }
+
+  const auto& velocity = layout.blocks[*velocity_index];
+  const auto& pressure = layout.blocks[*pressure_index];
+  if (velocity.start_component != 0 || velocity.n_components <= 0 ||
+      pressure.n_components != 1 || pressure.start_component <= 0 ||
+      pressure.start_component + pressure.n_components != expected_start) {
+    return false;
+  }
+
+  svmp::FE::backends::BlockLayout grouped_layout{};
+  grouped_layout.blocks.push_back({
+      "VelocityAuxiliaryComputationalPrimary",
+      0,
+      pressure.start_component,
+      svmp::FE::backends::BlockRole::PrimaryField});
+  grouped_layout.blocks.push_back({
+      pressure.name,
+      pressure.start_component,
+      pressure.n_components,
+      svmp::FE::backends::BlockRole::ConstraintField});
+  grouped_layout.momentum_block = 0;
+  grouped_layout.constraint_block = 1;
+  layout = std::move(grouped_layout);
+  return true;
+}
+
 const EquationParameters* firstEquation(const Parameters& params)
 {
   for (const auto* e : params.equation_parameters) {
@@ -340,6 +527,24 @@ const EquationParameters* selectSolverEquation(const Parameters& params)
   }
 
   return first;
+}
+
+std::vector<const EquationParameters*>
+monolithicLinearControlEquations(const Parameters& params,
+                                 const EquationParameters* selected)
+{
+  std::vector<const EquationParameters*> equations;
+  for (const auto* equation : params.equation_parameters) {
+    if (equation != nullptr && equation->coupled.defined() &&
+        equation->coupled.value() &&
+        equation->linear_solver.type.defined()) {
+      equations.push_back(equation);
+    }
+  }
+  if (equations.empty() && selected != nullptr) {
+    equations.push_back(selected);
+  }
+  return equations;
 }
 
 svmp::FE::geometry::CutIntegrationSide toCutIntegrationSide(
@@ -419,6 +624,29 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
   } else {
     // Match legacy defaults (LinearSolverParameters::Absolute_tolerance) when not explicitly set.
     opts.abs_tol = static_cast<svmp::FE::Real>(1.0e-10);
+  }
+
+  // The selected (usually fluid) solver owns the monolithic method, backend,
+  // preconditioner, and BlockSchur controls.  Its stopping tolerances must,
+  // however, honor every equation assembled into that coupled solve.  Using
+  // only the fluid LS block can otherwise accept a linear update too coarse
+  // for a transported level-set field.
+  for (const auto* control :
+       monolithicLinearControlEquations(params, eq)) {
+    if (control->linear_solver.tolerance.defined()) {
+      const auto value = static_cast<svmp::FE::Real>(
+          control->linear_solver.tolerance.value());
+      if (value > svmp::FE::Real{0.0}) {
+        opts.rel_tol = std::min(opts.rel_tol, value);
+      }
+    }
+    const auto absolute = static_cast<svmp::FE::Real>(
+        control->linear_solver.absolute_tolerance.defined()
+            ? control->linear_solver.absolute_tolerance.value()
+            : 1.0e-10);
+    if (absolute > svmp::FE::Real{0.0}) {
+      opts.abs_tol = std::min(opts.abs_tol, absolute);
+    }
   }
   if (eq->linear_solver.max_iterations.defined()) {
     opts.max_iter = eq->linear_solver.max_iterations.value();
@@ -802,6 +1030,9 @@ void SimulationBuilder::createPhysicsModules()
                                      [](const auto* p) { return p != nullptr; }));
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: equations declared=" << declared << std::endl;
 
+  preRegisterFutureWetExtensionVelocity(
+      params_, components_.meshes, *components_.fe_system);
+
   components_.physics_modules.clear();
   for (const auto* eq_params : params_.equation_parameters) {
     if (!eq_params) {
@@ -1102,6 +1333,13 @@ void SimulationBuilder::createSolvers()
           grouped_layout.constraint_block = 1;
           layout = std::move(grouped_layout);
         }
+      }
+
+      const bool is_fsils_blockschur =
+          backend_kind == svmp::FE::backends::BackendKind::FSILS &&
+          solver_options.method == svmp::FE::backends::SolverMethod::BlockSchur;
+      if (is_fsils_blockschur) {
+        (void)groupFsilsVelocityAuxiliaryPressurePrimary(layout);
       }
 
       // Identify saddle-point block pair when the solver/backend can benefit from

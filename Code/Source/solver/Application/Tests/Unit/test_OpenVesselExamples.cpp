@@ -255,6 +255,17 @@ fs::path writeBuilderRegressionXml(const fs::path& case_dir)
   }
   auto& fluid =
       mutableChildWithAttribute(*root, "Add_equation", "type", "fluid");
+  auto& level_set =
+      mutableChildWithAttribute(*root, "Add_equation", "type", "level_set");
+  auto* level_set_solver = level_set.FirstChildElement("LS");
+  auto* fluid_solver = fluid.FirstChildElement("LS");
+  if (level_set_solver == nullptr || fluid_solver == nullptr) {
+    throw std::runtime_error("builder regression requires both LS blocks");
+  }
+  setOrAppendText(doc, *level_set_solver, "Tolerance", "1.0e-6");
+  setOrAppendText(doc, *level_set_solver, "Absolute_tolerance", "1.0e-10");
+  setOrAppendText(doc, *fluid_solver, "Tolerance", "1.0e-4");
+  setOrAppendText(doc, *fluid_solver, "Absolute_tolerance", "1.0e-4");
   setOrAppendText(doc, fluid, "Enable_level_set_cut_domain", "true");
   setOrAppendText(doc, fluid, "Level_set_field_name", "phi");
   setOrAppendText(doc, fluid, "Generated_interface_domain_id",
@@ -265,6 +276,66 @@ fs::path writeBuilderRegressionXml(const fs::path& case_dir)
 
   const auto xml_path = fs::temp_directory_path() /
                         "svmp_open_vessel_unfitted_builder_cut_domain.xml";
+  const auto status = doc.SaveFile(xml_path.string().c_str());
+  if (status != tinyxml2::XML_SUCCESS) {
+    throw std::runtime_error("failed to write " + xml_path.string() + ": " +
+                             doc.ErrorStr());
+  }
+  return xml_path;
+}
+
+fs::path writeWetExtensionOrderRegressionXml(const fs::path& case_dir,
+                                              bool include_fluid_owner)
+{
+  tinyxml2::XMLDocument doc;
+  loadXml(case_dir / "solver.xml", doc);
+  auto* root = doc.FirstChildElement("svMultiPhysicsFile");
+  if (root == nullptr) {
+    throw std::runtime_error("solver.xml has no svMultiPhysicsFile root");
+  }
+  auto& level_set =
+      mutableChildWithAttribute(*root, "Add_equation", "type", "level_set");
+  auto& fluid =
+      mutableChildWithAttribute(*root, "Add_equation", "type", "fluid");
+  auto* fluid_solver = fluid.FirstChildElement("LS");
+  if (fluid_solver == nullptr) {
+    throw std::runtime_error(
+        "wet-extension order regression requires a fluid LS block");
+  }
+  fluid_solver->SetAttribute("type", "ns");
+
+  setOrAppendText(doc, level_set, "Velocity_source", "prescribed_data");
+  if (auto* constant = level_set.FirstChildElement("Constant_velocity")) {
+    level_set.DeleteChild(constant);
+  }
+  setOrAppendText(doc,
+                  level_set,
+                  "Velocity_field_name",
+                  "LevelSetAdvectionVelocity");
+  setOrAppendText(doc, level_set, "Auto_register_velocity_field", "true");
+  setOrAppendText(doc,
+                  level_set,
+                  "Use_wet_extension_advection_velocity",
+                  "true");
+  setOrAppendText(doc, level_set, "Source_velocity_field_name", "Velocity");
+  setOrAppendText(doc,
+                  level_set,
+                  "Wet_extension_advection_velocity_method",
+                  "wall_compatible_normal");
+  setOrAppendText(doc, level_set, "Enable_curvature_projection", "true");
+  setOrAppendText(doc,
+                  level_set,
+                  "Projected_curvature_field",
+                  "kappa_projected");
+
+  if (!include_fluid_owner) {
+    root->DeleteChild(&fluid);
+  }
+
+  const auto suffix = include_fluid_owner ? "future_fluid" : "missing_fluid";
+  const auto xml_path =
+      fs::temp_directory_path() /
+      (std::string{"svmp_wet_extension_equation_order_"} + suffix + ".xml");
   const auto status = doc.SaveFile(xml_path.string().c_str());
   if (status != tinyxml2::XML_SUCCESS) {
     throw std::runtime_error("failed to write " + xml_path.string() + ": " +
@@ -719,7 +790,108 @@ TEST(OpenVesselExamples, SimulationBuilderRegistersEquationCutDomainWithUnfitted
     ASSERT_NE(phi, svmp::FE::INVALID_FIELD_ID);
     EXPECT_TRUE(components.fe_system->fieldParticipatesInUnknownVector(phi));
     EXPECT_TRUE(components.time_history);
-    EXPECT_TRUE(components.linear_solver);
+    ASSERT_TRUE(components.linear_solver);
+    EXPECT_DOUBLE_EQ(components.linear_solver->getOptions().rel_tol, 1.0e-6);
+    EXPECT_DOUBLE_EQ(components.linear_solver->getOptions().abs_tol, 1.0e-10);
+  }
+
+  std::error_code ec;
+  fs::remove(xml_path, ec);
+#endif
+}
+
+TEST(OpenVesselExamples,
+     SimulationBuilderResolvesWetExtensionVelocityOwnedByLaterFluidEquation)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+
+  const auto case_dir = openVesselCaseDir("unfitted_level_set");
+  const auto xml_path =
+      writeWetExtensionOrderRegressionXml(case_dir, /*include_fluid_owner=*/true);
+
+  Parameters params;
+  {
+    const ScopedCurrentPath cwd(case_dir);
+    ASSERT_NO_THROW(params.read_xml(xml_path.string()));
+    application::core::SimulationBuilder builder(params);
+    auto components = builder.build();
+
+    ASSERT_TRUE(components.fe_system);
+    ASSERT_EQ(components.physics_modules.size(), 2u);
+    const auto physical_velocity =
+        components.fe_system->findFieldByName("Velocity");
+    const auto extension_velocity =
+        components.fe_system->findFieldByName("LevelSetAdvectionVelocity");
+    ASSERT_NE(physical_velocity, svmp::FE::INVALID_FIELD_ID);
+    ASSERT_NE(extension_velocity, svmp::FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(components.fe_system->fieldParticipatesInUnknownVector(
+        physical_velocity));
+    EXPECT_TRUE(components.fe_system->fieldParticipatesInUnknownVector(
+        extension_velocity));
+    EXPECT_EQ(components.fe_system->fieldRecord(physical_velocity).components,
+              components.fe_system->fieldRecord(extension_velocity).components);
+    EXPECT_TRUE(components.fe_system->hasOperator("equations"));
+
+    ASSERT_TRUE(components.linear_solver);
+    const auto& solver_options = components.linear_solver->getOptions();
+    ASSERT_TRUE(solver_options.block_layout.has_value());
+    const auto& layout = *solver_options.block_layout;
+    ASSERT_EQ(layout.blocks.size(), 2u);
+    EXPECT_EQ(layout.blocks[0].name,
+              "VelocityAuxiliaryComputationalPrimary");
+    EXPECT_EQ(layout.blocks[0].start_component, 0);
+    const int expected_primary_components =
+        static_cast<int>(
+            components.fe_system->fieldRecord(physical_velocity).components +
+            components.fe_system->fieldRecord(extension_velocity).components +
+            1u);
+    EXPECT_EQ(layout.blocks[0].n_components, expected_primary_components);
+    EXPECT_EQ(layout.blocks[0].role,
+              svmp::FE::backends::BlockRole::PrimaryField);
+    EXPECT_EQ(layout.blocks[1].name, "Pressure");
+    EXPECT_EQ(layout.blocks[1].start_component,
+              expected_primary_components);
+    EXPECT_EQ(layout.blocks[1].n_components, 1);
+    EXPECT_EQ(layout.blocks[1].role,
+              svmp::FE::backends::BlockRole::ConstraintField);
+    ASSERT_TRUE(layout.momentum_block.has_value());
+    ASSERT_TRUE(layout.constraint_block.has_value());
+    EXPECT_EQ(*layout.momentum_block, 0);
+    EXPECT_EQ(*layout.constraint_block, 1);
+  }
+
+  std::error_code ec;
+  fs::remove(xml_path, ec);
+#endif
+}
+
+TEST(OpenVesselExamples,
+     SimulationBuilderWetExtensionStillRejectsGenuinelyMissingVelocityOwner)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+
+  const auto case_dir = openVesselCaseDir("unfitted_level_set");
+  const auto xml_path = writeWetExtensionOrderRegressionXml(
+      case_dir, /*include_fluid_owner=*/false);
+
+  Parameters params;
+  const ScopedCurrentPath cwd(case_dir);
+  ASSERT_NO_THROW(params.read_xml(xml_path.string()));
+  application::core::SimulationBuilder builder(params);
+  try {
+    (void)builder.build();
+    FAIL() << "Expected missing physical velocity owner to be rejected";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_NE(std::string(error.what()).find(
+                  "references unknown physical velocity field 'Velocity'"),
+              std::string::npos)
+        << error.what();
   }
 
   std::error_code ec;
