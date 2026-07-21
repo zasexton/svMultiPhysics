@@ -136,9 +136,6 @@ TEST(DenseLinearAlgebra, HighConditionInverseUsesSvdFallback) {
 }
 
 TEST(DenseLinearAlgebra, DiagnosticValidationRejectsUnsupportedCondition) {
-#if !(defined(FE_HAS_EIGEN) && FE_HAS_EIGEN)
-    GTEST_SKIP() << "condition rejection requires FE_ENABLE_EIGEN diagnostics";
-#endif
     DenseInverseResult result;
     result.diagnostics.rank = 2u;
     result.diagnostics.condition_estimate =
@@ -193,13 +190,9 @@ TEST(DenseLinearAlgebra, DiagnosticsReportRankAndConditionEstimate) {
     const auto full =
         dense_matrix_diagnostics(diagonal, 2u, 2u, "diagonal 2x2");
     EXPECT_EQ(full.rank, 2u);
-#if defined(FE_HAS_EIGEN) && FE_HAS_EIGEN
     EXPECT_NEAR(full.largest_singular_value, Real(4), Real(1.0e-14));
     EXPECT_NEAR(full.smallest_retained_singular_value, Real(0.5), Real(1.0e-14));
     EXPECT_NEAR(full.condition_estimate, Real(8), Real(1.0e-14));
-#else
-    EXPECT_TRUE(std::isinf(full.condition_estimate));
-#endif
 
     const std::vector<Real> rank_one{
         Real(1), Real(2),
@@ -209,6 +202,31 @@ TEST(DenseLinearAlgebra, DiagnosticsReportRankAndConditionEstimate) {
         dense_matrix_diagnostics(rank_one, 2u, 2u, "rank-one 2x2");
     EXPECT_EQ(deficient.rank, 1u);
     EXPECT_TRUE(std::isinf(deficient.condition_estimate));
+}
+
+TEST(DenseLinearAlgebra, SymmetricEigenvalueBoundsDoNotRequireOptionalBackend) {
+    const std::vector<Real> matrix{
+        Real(2), Real(1), Real(0),
+        Real(1), Real(2), Real(0),
+        Real(0), Real(0), Real(0.25),
+    };
+    const auto bounds = dense_symmetric_eigenvalue_bounds(
+        matrix, 3u, "known symmetric spectrum");
+    EXPECT_TRUE(bounds.converged);
+    EXPECT_NEAR(bounds.smallest_eigenvalue, Real(0.25), Real(1.0e-13));
+    EXPECT_NEAR(bounds.largest_eigenvalue, Real(3.0), Real(1.0e-13));
+    EXPECT_LE(bounds.maximum_off_diagonal, bounds.tolerance);
+}
+
+TEST(DenseLinearAlgebra, SymmetricEigenvalueBoundsRejectAsymmetricInput) {
+    const std::vector<Real> matrix{
+        Real(1), Real(0.1),
+        Real(0), Real(1),
+    };
+    EXPECT_THROW(
+        (void)dense_symmetric_eigenvalue_bounds(
+            matrix, 2u, "asymmetric matrix"),
+        FEException);
 }
 
 TEST(DenseLinearAlgebra, PseudoInverseHandlesSingularMatrixWithoutNormalEquations) {

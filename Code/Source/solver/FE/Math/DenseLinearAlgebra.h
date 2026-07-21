@@ -51,6 +51,15 @@ struct DenseMatrixDiagnostics {
     Real condition_estimate{std::numeric_limits<Real>::infinity()};
 };
 
+struct DenseSymmetricEigenvalueBounds {
+    Real smallest_eigenvalue{0};
+    Real largest_eigenvalue{0};
+    Real maximum_off_diagonal{0};
+    Real tolerance{0};
+    std::size_t sweeps{0};
+    bool converged{false};
+};
+
 struct DenseInverseResult {
     std::vector<Real> inverse;
     DenseMatrixDiagnostics diagnostics;
@@ -82,6 +91,15 @@ struct DenseLUSolver {
     std::size_t rows,
     std::size_t cols,
     std::string_view label = "dense matrix");
+
+/** Deterministic cyclic-Jacobi eigenvalue bounds for a real symmetric matrix.
+ * This path is available independently of optional dense-linear-algebra
+ * backends and is intended for small certification matrices. */
+[[nodiscard]] DenseSymmetricEigenvalueBounds
+dense_symmetric_eigenvalue_bounds(
+    std::span<const Real> matrix,
+    std::size_t n,
+    std::string_view label = "dense symmetric matrix");
 
 [[nodiscard]] DenseLUSolver factor_dense_matrix(std::vector<Real> matrix,
                                                 std::size_t n,

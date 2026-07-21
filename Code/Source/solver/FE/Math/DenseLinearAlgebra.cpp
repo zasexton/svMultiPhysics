@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <string>
 #include <utility>
@@ -29,6 +30,105 @@ namespace math {
 namespace {
 
 constexpr std::size_t kDenseSolveRhsBlock = 32u;
+
+std::vector<Real> jacobi_singular_values(
+    std::span<const Real> matrix,
+    std::size_t rows,
+    std::size_t cols,
+    std::string_view label) {
+    const std::size_t work_rows = std::max(rows, cols);
+    const std::size_t work_cols = std::min(rows, cols);
+    std::vector<Real> work(work_rows * work_cols, Real(0));
+    const Real input_scale = dense_matrix_max_abs(matrix);
+    if (!(input_scale > Real(0))) {
+        return std::vector<Real>(work_cols, Real(0));
+    }
+
+    if (rows >= cols) {
+        for (std::size_t row = 0; row < rows; ++row) {
+            for (std::size_t column = 0; column < cols; ++column) {
+                work[row * work_cols + column] =
+                    matrix[row * cols + column] / input_scale;
+            }
+        }
+    } else {
+        for (std::size_t row = 0; row < rows; ++row) {
+            for (std::size_t column = 0; column < cols; ++column) {
+                work[column * work_cols + row] =
+                    matrix[row * cols + column] / input_scale;
+            }
+        }
+    }
+
+    const long double correlation_tolerance =
+        64.0L * static_cast<long double>(std::numeric_limits<Real>::epsilon()) *
+        static_cast<long double>(std::max(work_rows, work_cols));
+    constexpr std::size_t maximum_sweeps = 64u;
+    bool converged = work_cols < 2u;
+    for (std::size_t sweep = 0; sweep < maximum_sweeps && !converged; ++sweep) {
+        bool rotated = false;
+        for (std::size_t p = 0; p < work_cols; ++p) {
+            for (std::size_t q = p + 1u; q < work_cols; ++q) {
+                long double alpha = 0.0L;
+                long double beta = 0.0L;
+                long double gamma = 0.0L;
+                for (std::size_t row = 0; row < work_rows; ++row) {
+                    const long double value_p = static_cast<long double>(
+                        work[row * work_cols + p]);
+                    const long double value_q = static_cast<long double>(
+                        work[row * work_cols + q]);
+                    alpha += value_p * value_p;
+                    beta += value_q * value_q;
+                    gamma += value_p * value_q;
+                }
+                if (!(alpha > 0.0L) || !(beta > 0.0L)) {
+                    continue;
+                }
+                const long double correlation =
+                    std::abs(gamma) / std::sqrt(alpha * beta);
+                if (correlation <= correlation_tolerance) {
+                    continue;
+                }
+
+                const long double tau = (beta - alpha) / (2.0L * gamma);
+                const long double tangent = std::copysign(
+                    1.0L / (std::abs(tau) + std::hypot(1.0L, tau)), tau);
+                const long double cosine = 1.0L / std::hypot(1.0L, tangent);
+                const long double sine = tangent * cosine;
+                for (std::size_t row = 0; row < work_rows; ++row) {
+                    const long double value_p = static_cast<long double>(
+                        work[row * work_cols + p]);
+                    const long double value_q = static_cast<long double>(
+                        work[row * work_cols + q]);
+                    work[row * work_cols + p] = static_cast<Real>(
+                        cosine * value_p - sine * value_q);
+                    work[row * work_cols + q] = static_cast<Real>(
+                        sine * value_p + cosine * value_q);
+                }
+                rotated = true;
+            }
+        }
+        converged = !rotated;
+    }
+    DENSE_LINALG_CHECK(
+        converged,
+        std::string(label) +
+            ": one-sided Jacobi singular-value iteration did not converge");
+
+    std::vector<Real> singular_values(work_cols, Real(0));
+    for (std::size_t column = 0; column < work_cols; ++column) {
+        long double norm_squared = 0.0L;
+        for (std::size_t row = 0; row < work_rows; ++row) {
+            const long double value = static_cast<long double>(
+                work[row * work_cols + column]);
+            norm_squared += value * value;
+        }
+        singular_values[column] =
+            input_scale * static_cast<Real>(std::sqrt(norm_squared));
+    }
+    std::sort(singular_values.begin(), singular_values.end(), std::greater<>());
+    return singular_values;
+}
 
 void materialize_inverse_from_solver(const DenseLUSolver& solver,
                                      std::vector<Real>& inverse) {
@@ -195,20 +295,134 @@ DenseMatrixDiagnostics dense_matrix_diagnostics(
     return diagnostics;
 #else
     DenseMatrixDiagnostics diagnostics;
-    diagnostics.largest_singular_value = dense_matrix_max_abs(matrix);
+    const auto singular_values =
+        jacobi_singular_values(matrix, rows, cols, label);
+    diagnostics.largest_singular_value =
+        singular_values.empty() ? Real(0) : singular_values.front();
     diagnostics.tolerance =
-        dense_matrix_pivot_tolerance(rows, cols, diagnostics.largest_singular_value);
-    diagnostics.rank =
-        dense_matrix_rank(std::vector<Real>(matrix.begin(), matrix.end()), rows, cols);
-    const std::size_t full_rank = std::min(rows, cols);
-    if (diagnostics.rank == full_rank) {
-        diagnostics.smallest_retained_singular_value = diagnostics.tolerance;
+        dense_matrix_singular_value_tolerance(
+            rows, cols, diagnostics.largest_singular_value);
+    for (const Real sigma : singular_values) {
+        if (sigma <= diagnostics.tolerance) {
+            continue;
+        }
+        ++diagnostics.rank;
+        diagnostics.smallest_retained_singular_value = sigma;
     }
-    // Exact condition estimates require SVD diagnostics. In Eigen-disabled
-    // builds this stays explicit instead of relying on a misleading estimate.
-    diagnostics.condition_estimate = std::numeric_limits<Real>::infinity();
+    const std::size_t full_rank = std::min(rows, cols);
+    if (diagnostics.rank == full_rank &&
+        diagnostics.smallest_retained_singular_value > Real(0)) {
+        diagnostics.condition_estimate =
+            diagnostics.largest_singular_value /
+            diagnostics.smallest_retained_singular_value;
+    }
     return diagnostics;
 #endif
+}
+
+DenseSymmetricEigenvalueBounds dense_symmetric_eigenvalue_bounds(
+    std::span<const Real> matrix,
+    std::size_t n,
+    std::string_view label) {
+    DENSE_LINALG_CHECK(matrix.size() == n * n,
+                       std::string(label) + ": eigenvalue size mismatch");
+    DENSE_LINALG_CHECK(n > 0,
+                       std::string(label) + ": eigenvalues require a nonempty matrix");
+
+    const Real scale = dense_matrix_max_abs(matrix);
+    const Real tolerance = Real(64) * std::numeric_limits<Real>::epsilon() *
+                           static_cast<Real>(std::max<std::size_t>(n, 1u)) *
+                           std::max(Real(1), scale);
+    Real maximum_skew = Real(0);
+    std::vector<Real> work(matrix.begin(), matrix.end());
+    for (std::size_t row = 0; row < n; ++row) {
+        DENSE_LINALG_CHECK(std::isfinite(work[row * n + row]),
+                           std::string(label) + ": nonfinite diagonal entry");
+        for (std::size_t column = row + 1u; column < n; ++column) {
+            const Real upper = work[row * n + column];
+            const Real lower = work[column * n + row];
+            DENSE_LINALG_CHECK(std::isfinite(upper) && std::isfinite(lower),
+                               std::string(label) + ": nonfinite off-diagonal entry");
+            maximum_skew = std::max(maximum_skew, std::abs(upper - lower));
+            const Real average = Real(0.5) * (upper + lower);
+            work[row * n + column] = average;
+            work[column * n + row] = average;
+        }
+    }
+    DENSE_LINALG_CHECK(maximum_skew <= Real(4) * tolerance,
+                       std::string(label) + ": matrix is not numerically symmetric");
+
+    DenseSymmetricEigenvalueBounds result;
+    result.tolerance = tolerance;
+    const std::size_t maximum_sweeps =
+        std::max<std::size_t>(16u, 12u * n * n);
+    for (std::size_t sweep = 0; sweep < maximum_sweeps; ++sweep) {
+        Real maximum_off_diagonal = Real(0);
+        for (std::size_t p = 0; p < n; ++p) {
+            for (std::size_t q = p + 1u; q < n; ++q) {
+                maximum_off_diagonal = std::max(
+                    maximum_off_diagonal, std::abs(work[p * n + q]));
+            }
+        }
+        result.maximum_off_diagonal = maximum_off_diagonal;
+        result.sweeps = sweep;
+        if (maximum_off_diagonal <= tolerance) {
+            result.converged = true;
+            break;
+        }
+
+        for (std::size_t p = 0; p < n; ++p) {
+            for (std::size_t q = p + 1u; q < n; ++q) {
+                const Real off_diagonal = work[p * n + q];
+                if (std::abs(off_diagonal) <= tolerance) {
+                    continue;
+                }
+                const Real diagonal_p = work[p * n + p];
+                const Real diagonal_q = work[q * n + q];
+                const Real tau =
+                    (diagonal_q - diagonal_p) / (Real(2) * off_diagonal);
+                const Real tangent = std::copysign(
+                    Real(1) /
+                        (std::abs(tau) + std::hypot(Real(1), tau)),
+                    tau);
+                const Real cosine =
+                    Real(1) / std::hypot(Real(1), tangent);
+                const Real sine = tangent * cosine;
+
+                work[p * n + p] = diagonal_p - tangent * off_diagonal;
+                work[q * n + q] = diagonal_q + tangent * off_diagonal;
+                work[p * n + q] = Real(0);
+                work[q * n + p] = Real(0);
+                for (std::size_t k = 0; k < n; ++k) {
+                    if (k == p || k == q) {
+                        continue;
+                    }
+                    const Real value_p = work[k * n + p];
+                    const Real value_q = work[k * n + q];
+                    const Real rotated_p = cosine * value_p - sine * value_q;
+                    const Real rotated_q = sine * value_p + cosine * value_q;
+                    work[k * n + p] = rotated_p;
+                    work[p * n + k] = rotated_p;
+                    work[k * n + q] = rotated_q;
+                    work[q * n + k] = rotated_q;
+                }
+            }
+        }
+        result.sweeps = sweep + 1u;
+    }
+    DENSE_LINALG_CHECK(result.converged,
+                       std::string(label) + ": cyclic Jacobi iteration did not converge");
+
+    result.smallest_eigenvalue = work.front();
+    result.largest_eigenvalue = work.front();
+    for (std::size_t diagonal = 1; diagonal < n; ++diagonal) {
+        const Real value = work[diagonal * n + diagonal];
+        result.smallest_eigenvalue =
+            std::min(result.smallest_eigenvalue, value);
+        result.largest_eigenvalue =
+            std::max(result.largest_eigenvalue, value);
+    }
+    return result;
 }
 
 DenseLUSolver factor_dense_matrix(std::vector<Real> matrix,
