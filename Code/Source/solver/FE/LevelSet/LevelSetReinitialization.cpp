@@ -12,8 +12,10 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -661,6 +663,185 @@ void appendDeserializedPrimitiveSet(std::span<const std::byte> bytes,
     return local;
 }
 
+[[nodiscard]] auto wallContactConstraintKey(
+    const LevelSetWallContactConstraint& constraint) noexcept
+{
+    return std::tuple{constraint.parent_cell_global_id,
+                      constraint.interface_marker,
+                      constraint.boundary_marker,
+                      static_cast<std::uint8_t>(constraint.kind)};
+}
+
+void validateWallContactConstraint(
+    const LevelSetWallContactConstraint& constraint)
+{
+    const bool known_kind =
+        constraint.kind ==
+            LevelSetWallContactConstraintKind::PrescribedAngle ||
+        constraint.kind ==
+            LevelSetWallContactConstraintKind::AcceptedDynamicAngle;
+    if (!known_kind || constraint.interface_marker < 0 ||
+        constraint.boundary_marker < 0 ||
+        constraint.parent_cell_global_id == INVALID_GLOBAL_INDEX ||
+        constraint.geometry_revision == 0u) {
+        throw std::invalid_argument(
+            "level-set wall-contact constraint requires a known kind, nonnegative markers, a valid global parent cell, and a nonzero geometry revision");
+    }
+}
+
+[[nodiscard]] std::vector<LevelSetWallContactConstraint>
+globalizeWallContactConstraints(
+    const dofs::DofHandler& field_dofs,
+    std::span<const LevelSetWallContactConstraint> local_constraints)
+{
+    std::vector<LevelSetWallContactConstraint> constraints(
+        local_constraints.begin(), local_constraints.end());
+    for (const auto& constraint : constraints) {
+        validateWallContactConstraint(constraint);
+    }
+
+#if FE_HAS_MPI
+    if (usesMultipleRanks(field_dofs)) {
+        std::vector<std::byte> local_bytes;
+        appendPod(local_bytes,
+                  static_cast<std::uint64_t>(constraints.size()));
+        for (const auto& constraint : constraints) {
+            appendPod(local_bytes,
+                      static_cast<std::uint8_t>(constraint.kind));
+            appendPod(local_bytes,
+                      static_cast<std::int32_t>(constraint.interface_marker));
+            appendPod(local_bytes,
+                      static_cast<std::int32_t>(constraint.boundary_marker));
+            appendPod(local_bytes,
+                      static_cast<std::int64_t>(
+                          constraint.parent_cell_global_id));
+            appendPod(local_bytes, constraint.geometry_revision);
+        }
+        if (local_bytes.size() >
+            static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+            throw std::runtime_error(
+                "distributed level-set wall-contact constraint snapshot exceeds MPI count capacity");
+        }
+
+        int communicator_size = 1;
+        MPI_Comm_size(field_dofs.mpiComm(), &communicator_size);
+        const int local_count = static_cast<int>(local_bytes.size());
+        std::vector<int> counts(static_cast<std::size_t>(communicator_size),
+                                0);
+        MPI_Allgather(&local_count,
+                      1,
+                      MPI_INT,
+                      counts.data(),
+                      1,
+                      MPI_INT,
+                      field_dofs.mpiComm());
+        std::vector<int> displacements(counts.size(), 0);
+        std::size_t total = 0u;
+        for (std::size_t rank = 0; rank < counts.size(); ++rank) {
+            if (counts[rank] < 0 ||
+                total > static_cast<std::size_t>(
+                            std::numeric_limits<int>::max() - counts[rank])) {
+                throw std::runtime_error(
+                    "distributed level-set wall-contact constraint gather exceeds MPI displacement capacity");
+            }
+            displacements[rank] = static_cast<int>(total);
+            total += static_cast<std::size_t>(counts[rank]);
+        }
+        std::vector<std::byte> gathered(total);
+        MPI_Allgatherv(local_bytes.data(),
+                       local_count,
+                       MPI_BYTE,
+                       gathered.data(),
+                       counts.data(),
+                       displacements.data(),
+                       MPI_BYTE,
+                       field_dofs.mpiComm());
+
+        constraints.clear();
+        for (std::size_t rank = 0; rank < counts.size(); ++rank) {
+            const auto begin = static_cast<std::size_t>(displacements[rank]);
+            const auto count = static_cast<std::size_t>(counts[rank]);
+            const std::span<const std::byte> bytes(
+                gathered.data() + begin, count);
+            std::size_t offset = 0u;
+            const auto constraint_count =
+                readPod<std::uint64_t>(bytes, offset);
+            for (std::uint64_t index = 0u; index < constraint_count;
+                 ++index) {
+                LevelSetWallContactConstraint constraint;
+                constraint.kind =
+                    static_cast<LevelSetWallContactConstraintKind>(
+                        readPod<std::uint8_t>(bytes, offset));
+                constraint.interface_marker =
+                    readPod<std::int32_t>(bytes, offset);
+                constraint.boundary_marker =
+                    readPod<std::int32_t>(bytes, offset);
+                constraint.parent_cell_global_id =
+                    static_cast<GlobalIndex>(
+                        readPod<std::int64_t>(bytes, offset));
+                constraint.geometry_revision =
+                    readPod<std::uint64_t>(bytes, offset);
+                validateWallContactConstraint(constraint);
+                constraints.push_back(constraint);
+            }
+            if (offset != bytes.size()) {
+                throw std::runtime_error(
+                    "distributed level-set wall-contact constraint snapshot has trailing bytes");
+            }
+        }
+    }
+#else
+    (void)field_dofs;
+#endif
+
+    std::sort(constraints.begin(),
+              constraints.end(),
+              [](const auto& left, const auto& right) {
+                  return wallContactConstraintKey(left) <
+                         wallContactConstraintKey(right);
+              });
+    std::vector<LevelSetWallContactConstraint> unique;
+    unique.reserve(constraints.size());
+    std::map<int, std::uint64_t> geometry_revision_by_interface;
+    std::map<std::tuple<GlobalIndex, int, int>,
+             LevelSetWallContactConstraintKind>
+        kind_by_parent_and_wall;
+    for (const auto& constraint : constraints) {
+        const auto [revision, inserted_revision] =
+            geometry_revision_by_interface.emplace(
+                constraint.interface_marker,
+                constraint.geometry_revision);
+        if (!inserted_revision &&
+            revision->second != constraint.geometry_revision) {
+            throw std::invalid_argument(
+                "distributed level-set wall-contact constraints mix geometry revisions for one interface");
+        }
+        const auto parent_wall_key = std::tuple{
+            constraint.parent_cell_global_id,
+            constraint.interface_marker,
+            constraint.boundary_marker};
+        const auto [kind, inserted_kind] =
+            kind_by_parent_and_wall.emplace(parent_wall_key,
+                                            constraint.kind);
+        if (!inserted_kind && kind->second != constraint.kind) {
+            throw std::invalid_argument(
+                "distributed level-set wall-contact constraint assigns multiple contact laws to one parent wall");
+        }
+        if (!unique.empty() &&
+            wallContactConstraintKey(unique.back()) ==
+                wallContactConstraintKey(constraint)) {
+            if (unique.back().geometry_revision !=
+                constraint.geometry_revision) {
+                throw std::invalid_argument(
+                    "distributed level-set wall-contact constraint has conflicting geometry revisions");
+            }
+            continue;
+        }
+        unique.push_back(constraint);
+    }
+    return unique;
+}
+
 [[nodiscard]] std::vector<Real> ownerSynchronizedCoefficients(
     const dofs::DofHandler& field_dofs,
     std::span<const Real> coefficients)
@@ -911,12 +1092,17 @@ template <typename ForEachDofPoint>
     std::span<const Real> input_coefficients,
     std::vector<Real>& repaired_coefficients,
     const LinearInterfacePrimitiveSet& primitive_set,
+    std::span<const LevelSetWallContactConstraint>
+        wall_contact_constraints,
     ForEachDofPoint&& for_each_dof_point)
 {
     LevelSetSignedDistanceRepairResult result;
     result.method = LevelSetReinitializationMethod::Projection;
     result.interface_fragments = primitive_set.primitives.size();
     result.cut_cells = primitive_set.cut_cells.size();
+    result.wall_contact_constraints = wall_contact_constraints.size();
+    result.wall_contact_constraints_satisfied =
+        wall_contact_constraints.empty();
     if (primitive_set.primitives.empty()) {
         result.success = false;
         result.diagnostic = "level-set signed-distance repair found no active interface fragments";
@@ -955,6 +1141,26 @@ template <typename ForEachDofPoint>
             " coefficient(s) without an entity-aware mesh-node binding";
         return result;
     }
+
+    std::set<GlobalIndex> constrained_parent_cells;
+    for (const auto& constraint : wall_contact_constraints) {
+        constrained_parent_cells.insert(
+            constraint.parent_cell_global_id);
+    }
+    std::set<GlobalIndex> matched_constrained_parent_cells;
+    for (const auto& cell : primitive_set.cut_cells) {
+        if (constrained_parent_cells.contains(cell.parent_cell)) {
+            matched_constrained_parent_cells.insert(cell.parent_cell);
+        }
+    }
+    if (matched_constrained_parent_cells != constrained_parent_cells) {
+        result.success = false;
+        result.diagnostic =
+            "level-set wall-contact constraint does not match the accepted cut-cell snapshot";
+        return result;
+    }
+    result.wall_contact_cells =
+        matched_constrained_parent_cells.size();
 
     // In cut cells, use the supporting line/plane of the local interface
     // fragment.  Extending that geometry past the clipped cell/wall endpoint
@@ -1010,9 +1216,14 @@ template <typename ForEachDofPoint>
     // preserves the complete polynomial zero set, including roots that are not
     // visible on corner edges.
     DisjointSet components(expected);
+    DisjointSet wall_contact_components(expected);
     std::vector<unsigned char> in_cut_patch(expected, 0u);
+    std::vector<unsigned char> in_wall_contact_patch(expected, 0u);
     for (const auto& cell : primitive_set.cut_cells) {
         std::optional<std::size_t> first;
+        std::optional<std::size_t> first_wall_contact;
+        const bool wall_contact_cell =
+            constrained_parent_cells.contains(cell.parent_cell);
         for (const auto dof : cell.dofs) {
             if (dof < 0 || static_cast<std::size_t>(dof) >= expected) {
                 throw std::invalid_argument(
@@ -1025,8 +1236,21 @@ template <typename ForEachDofPoint>
             } else {
                 first = index;
             }
+            if (wall_contact_cell) {
+                in_wall_contact_patch[index] = 1u;
+                if (first_wall_contact.has_value()) {
+                    wall_contact_components.unite(*first_wall_contact,
+                                                  index);
+                } else {
+                    first_wall_contact = index;
+                }
+            }
         }
     }
+    result.wall_contact_dofs = static_cast<std::size_t>(std::count(
+        in_wall_contact_patch.begin(),
+        in_wall_contact_patch.end(),
+        static_cast<unsigned char>(1u)));
 
     std::map<std::size_t, bool> component_requires_common_scale;
     for (std::size_t i = 0; i < expected; ++i) {
@@ -1068,15 +1292,44 @@ template <typename ForEachDofPoint>
         component_target_scale[root] = fitted;
     }
 
+    std::map<std::size_t, std::pair<Real, Real>> wall_contact_scale_sums;
+    for (std::size_t i = 0; i < expected; ++i) {
+        if (in_wall_contact_patch[i] == 0u) {
+            continue;
+        }
+        auto& sums = wall_contact_scale_sums[
+            wall_contact_components.find(i)];
+        sums.first += input_coefficients[i] * signed_distance_target[i];
+        sums.second += input_coefficients[i] * input_coefficients[i];
+    }
+    std::map<std::size_t, Real> wall_contact_target_scale;
+    for (const auto& [root, sums] : wall_contact_scale_sums) {
+        Real fitted = Real{1.0};
+        if (sums.second > options.signed_distance_tolerance *
+                              options.signed_distance_tolerance) {
+            fitted = sums.first / sums.second;
+        }
+        if (!std::isfinite(fitted) || fitted <= Real{0.0}) {
+            fitted = Real{1.0};
+        }
+        wall_contact_target_scale[root] = fitted;
+    }
+
     std::vector<Real> target(expected, 0.0);
     std::vector<unsigned char> update_enabled(expected, 1u);
     for (std::size_t i = 0; i < expected; ++i) {
         if (in_cut_patch[i] != 0u) {
             const auto root = components.find(i);
-            target[i] = component_requires_common_scale.at(root)
-                            ? component_target_scale.at(root) *
-                                  input_coefficients[i]
-                            : signed_distance_target[i];
+            if (component_requires_common_scale.at(root)) {
+                target[i] = component_target_scale.at(root) *
+                            input_coefficients[i];
+            } else if (in_wall_contact_patch[i] != 0u) {
+                target[i] = wall_contact_target_scale.at(
+                                wall_contact_components.find(i)) *
+                            input_coefficients[i];
+            } else {
+                target[i] = signed_distance_target[i];
+            }
         } else {
             target[i] = signed_distance_target[i];
             if (options.interface_band_width > Real{0.0} &&
@@ -1168,13 +1421,89 @@ template <typename ForEachDofPoint>
         const Real abs_update =
             std::abs(repaired_coefficients[i] - input_coefficients[i]);
         result.max_abs_update = std::max(result.max_abs_update, abs_update);
+        const Real signed_distance_error =
+            std::abs(repaired_coefficients[i] - signed_distance_target[i]);
         result.max_signed_distance_error = std::max(
             result.max_signed_distance_error,
-            std::abs(repaired_coefficients[i] - signed_distance_target[i]));
+            signed_distance_error);
+        if (in_wall_contact_patch[i] != 0u) {
+            result.max_wall_constrained_signed_distance_error = std::max(
+                result.max_wall_constrained_signed_distance_error,
+                signed_distance_error);
+        } else {
+            result.max_unconstrained_signed_distance_error = std::max(
+                result.max_unconstrained_signed_distance_error,
+                signed_distance_error);
+        }
         result.max_iteration_residual = std::max(
             result.max_iteration_residual,
             std::abs(repaired_coefficients[i] - target[i]));
         ++result.repaired_dofs;
+    }
+
+    if (!wall_contact_constraints.empty()) {
+        std::map<std::size_t, std::pair<Real, Real>> repaired_scale_sums;
+        Real constraint_scale = Real{1.0};
+        for (std::size_t i = 0; i < expected; ++i) {
+            if (in_wall_contact_patch[i] == 0u) {
+                continue;
+            }
+            auto& sums = repaired_scale_sums[
+                wall_contact_components.find(i)];
+            sums.first += input_coefficients[i] * repaired_coefficients[i];
+            sums.second += input_coefficients[i] * input_coefficients[i];
+            constraint_scale = std::max(
+                {constraint_scale,
+                 std::abs(input_coefficients[i]),
+                 std::abs(repaired_coefficients[i])});
+        }
+        std::map<std::size_t, Real> repaired_scales;
+        bool positive_scales = true;
+        for (const auto& [root, sums] : repaired_scale_sums) {
+            if (!(sums.second > options.signed_distance_tolerance *
+                                   options.signed_distance_tolerance)) {
+                positive_scales = false;
+                continue;
+            }
+            const Real fitted = sums.first / sums.second;
+            if (!std::isfinite(fitted) || !(fitted > Real{0.0})) {
+                positive_scales = false;
+                continue;
+            }
+            repaired_scales[root] = fitted;
+        }
+        for (std::size_t i = 0; i < expected; ++i) {
+            if (in_wall_contact_patch[i] == 0u) {
+                continue;
+            }
+            const auto found = repaired_scales.find(
+                wall_contact_components.find(i));
+            if (found == repaired_scales.end()) {
+                positive_scales = false;
+                continue;
+            }
+            result.max_wall_contact_scale_residual = std::max(
+                result.max_wall_contact_scale_residual,
+                std::abs(repaired_coefficients[i] -
+                         found->second * input_coefficients[i]));
+        }
+        const Real constraint_tolerance =
+            Real{4096.0} * std::numeric_limits<Real>::epsilon() *
+            constraint_scale;
+        result.wall_contact_constraints_satisfied =
+            positive_scales &&
+            result.max_wall_contact_scale_residual <=
+                constraint_tolerance;
+        if (!result.wall_contact_constraints_satisfied) {
+            result.success = false;
+            result.diagnostic =
+                "level-set signed-distance repair violated an accepted wall-contact scale constraint";
+            return result;
+        }
+        // A positive common scale leaves the finite-element zero set and its
+        // unit normal unchanged on every constrained contact cell.
+        result.max_contact_line_displacement = Real{0.0};
+        result.max_contact_angle_change_radians = Real{0.0};
     }
 
     if (!displacement.topology_preserved) {
@@ -1196,7 +1525,9 @@ template <typename ForEachDofPoint>
     }
     result.converged =
         result.max_iteration_residual <= options.signed_distance_tolerance &&
-        result.max_signed_distance_error <= options.signed_distance_tolerance;
+        result.max_unconstrained_signed_distance_error <=
+            options.signed_distance_tolerance &&
+        result.wall_contact_constraints_satisfied;
     result.success = true;
     if (!result.converged) {
         result.diagnostic =
@@ -1606,7 +1937,9 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
     const dofs::DofHandler& level_set_dofs,
     const LevelSetReinitializationOptions& options,
     std::span<const Real> input_coefficients,
-    std::vector<Real>& repaired_coefficients)
+    std::vector<Real>& repaired_coefficients,
+    std::span<const LevelSetWallContactConstraint>
+        wall_contact_constraints)
 {
     const auto expected = static_cast<std::size_t>(level_set_dofs.getNumDofs());
     if (!(options.signed_distance_tolerance > 0.0) ||
@@ -1658,6 +1991,9 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
                                        *entity_map,
                                        options.signed_distance_tolerance,
                                        synchronized));
+    const auto global_wall_contact_constraints =
+        globalizeWallContactConstraints(level_set_dofs,
+                                        wall_contact_constraints);
     std::vector<Real> candidate(synchronized.begin(), synchronized.end());
     auto result = repairSignedDistanceCoefficientsFromPrimitives(
         mesh,
@@ -1666,6 +2002,7 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
         synchronized,
         candidate,
         primitive_set,
+        global_wall_contact_constraints,
         [&](const auto& repair_dof_at_point) {
             for (GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
                 const auto vertex_dofs =
@@ -1686,7 +2023,9 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
     FieldId level_set_field,
     const LevelSetReinitializationOptions& options,
     std::span<const Real> input_solution,
-    std::vector<Real>& repaired_solution)
+    std::vector<Real>& repaired_solution,
+    std::span<const LevelSetWallContactConstraint>
+        wall_contact_constraints)
 {
     if (!(options.signed_distance_tolerance > 0.0) ||
         !std::isfinite(options.signed_distance_tolerance) ||
@@ -1732,6 +2071,9 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
                                        *entity_map,
                                        options.signed_distance_tolerance,
                                        field_coefficients));
+    const auto global_wall_contact_constraints =
+        globalizeWallContactConstraints(field_dofs,
+                                        wall_contact_constraints);
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     const auto* native_mesh = system.mesh();
@@ -1744,6 +2086,7 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
                                   field_coefficients.size()),
             repaired_field,
             primitive_set,
+            global_wall_contact_constraints,
             [&](const auto& repair_dof_at_point) {
                 for (GlobalIndex vertex = 0;
                      vertex < mesh_access.numVertices();
@@ -1775,6 +2118,7 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
                               field_coefficients.size()),
         repaired_field,
         primitive_set,
+        global_wall_contact_constraints,
         [&](const auto& repair_dof_at_point) {
             // Isoparametric nodal Lagrange fields pair getCellDofs(cell)[i]
             // with the cell's i-th mesh node — the same convention used to
@@ -1806,6 +2150,7 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
                               field_coefficients.size()),
         repaired_field,
         primitive_set,
+        global_wall_contact_constraints,
         [&](const auto& repair_dof_at_point) {
             for (GlobalIndex vertex = 0;
                  vertex < mesh_access.numVertices();

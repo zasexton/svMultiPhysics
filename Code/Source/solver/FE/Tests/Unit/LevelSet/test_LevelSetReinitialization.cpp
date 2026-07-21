@@ -938,6 +938,92 @@ TEST(LevelSetReinitialization,
 }
 
 TEST(LevelSetReinitialization,
+     WallConstraintPreservesAcceptedCrossingAndAngleByPositiveScale)
+{
+    const QuadScalarFieldFixture fixture;
+    const auto& field_dofs = fixture.system.fieldDofHandler(fixture.phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    std::vector<FE::Real> distorted(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0;
+         vertex < entity_map->numVertices();
+         ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        const auto point = fixture.mesh->getNodeCoordinates(vertex);
+        const FE::Real multiplier = FE::Real{2.0} +
+                                    FE::Real{2.0} * point[1];
+        distorted[static_cast<std::size_t>(dofs.front())] =
+            multiplier * (point[0] - FE::Real{0.25});
+    }
+
+    level_set::LevelSetReinitializationOptions options{};
+    options.signed_distance_tolerance = 1.0e-12;
+    options.interface_band_width = 2.0;
+    options.max_iterations = 100;
+    options.pseudo_time_step_scale = 0.5;
+    options.max_zero_set_displacement = 1.0e-12;
+    const std::array constraints{
+        level_set::LevelSetWallContactConstraint{
+            .kind = level_set::LevelSetWallContactConstraintKind::
+                PrescribedAngle,
+            .interface_marker = 77,
+            .boundary_marker = 5,
+            .parent_cell_global_id = 0,
+            .geometry_revision = 19u,
+        }};
+
+    std::vector<FE::Real> repaired;
+    const auto result = level_set::repairLevelSetSignedDistanceByProjection(
+        *fixture.mesh,
+        field_dofs,
+        options,
+        distorted,
+        repaired,
+        constraints);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_TRUE(result.converged) << result.diagnostic;
+    EXPECT_TRUE(result.wall_contact_constraints_satisfied);
+    EXPECT_EQ(result.wall_contact_constraints, 1u);
+    EXPECT_EQ(result.wall_contact_cells, 1u);
+    EXPECT_EQ(result.wall_contact_dofs, 4u);
+    EXPECT_DOUBLE_EQ(result.max_contact_line_displacement, 0.0);
+    EXPECT_DOUBLE_EQ(result.max_contact_angle_change_radians, 0.0);
+    EXPECT_LE(result.max_wall_contact_scale_residual, 1.0e-14);
+    EXPECT_GT(result.max_wall_constrained_signed_distance_error,
+              options.signed_distance_tolerance);
+    EXPECT_DOUBLE_EQ(result.max_unconstrained_signed_distance_error, 0.0);
+
+    std::optional<FE::Real> common_scale;
+    for (std::size_t index = 0; index < distorted.size(); ++index) {
+        ASSERT_GT(std::abs(distorted[index]), 0.0);
+        const FE::Real scale = repaired[index] / distorted[index];
+        if (!common_scale.has_value()) {
+            common_scale = scale;
+        }
+        EXPECT_NEAR(scale, *common_scale, 1.0e-13);
+    }
+    ASSERT_TRUE(common_scale.has_value());
+    EXPECT_GT(*common_scale, 0.0);
+
+    auto stale_constraint = constraints;
+    stale_constraint.front().parent_cell_global_id = 41;
+    const auto stale = level_set::repairLevelSetSignedDistanceByProjection(
+        *fixture.mesh,
+        field_dofs,
+        options,
+        distorted,
+        repaired,
+        stale_constraint);
+    EXPECT_FALSE(stale.success);
+    EXPECT_NE(stale.diagnostic.find("accepted cut-cell snapshot"),
+              std::string::npos);
+}
+
+TEST(LevelSetReinitialization,
      ProjectionManufacturedPlanarRefinementConvergesWithoutMovingWallContacts)
 {
     constexpr FE::Real interface_x = FE::Real{0.37};

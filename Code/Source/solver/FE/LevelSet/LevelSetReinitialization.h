@@ -13,11 +13,33 @@
 #include "Systems/FESystem.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string>
 #include <vector>
 
 namespace svmp::FE::level_set {
+
+enum class LevelSetWallContactConstraintKind : std::uint8_t {
+    PrescribedAngle,
+    AcceptedDynamicAngle
+};
+
+/**
+ * Accepted wall-contact geometry that a redistance projection must preserve.
+ *
+ * The parent identity is partition independent.  A caller may provide only
+ * the locally owned records; the distributed projection forms one sorted,
+ * duplicate-free communicator snapshot before changing any coefficient.
+ */
+struct LevelSetWallContactConstraint {
+    LevelSetWallContactConstraintKind kind{
+        LevelSetWallContactConstraintKind::PrescribedAngle};
+    int interface_marker{-1};
+    int boundary_marker{-1};
+    GlobalIndex parent_cell_global_id{INVALID_GLOBAL_INDEX};
+    std::uint64_t geometry_revision{0u};
+};
 
 struct LevelSetSignedDistanceRepairResult {
     bool success{false};
@@ -36,8 +58,19 @@ struct LevelSetSignedDistanceRepairResult {
     bool zero_set_bound_satisfied{false};
     Real max_iteration_residual{0.0};
     // Maximum nodal discrepancy from the nearest-interface signed-distance
-    // target after the zero-set-preserving constraint is applied.
+    // target after all geometric constraints are applied.  The two following
+    // fields separate the freely repairable error from the irreducible error
+    // of the accepted wall-contact constrained optimum.
     Real max_signed_distance_error{0.0};
+    Real max_unconstrained_signed_distance_error{0.0};
+    Real max_wall_constrained_signed_distance_error{0.0};
+    std::size_t wall_contact_constraints{0u};
+    std::size_t wall_contact_cells{0u};
+    std::size_t wall_contact_dofs{0u};
+    bool wall_contact_constraints_satisfied{false};
+    Real max_wall_contact_scale_residual{0.0};
+    Real max_contact_line_displacement{0.0};
+    Real max_contact_angle_change_radians{0.0};
     // Retained for output compatibility.  The corrected algorithm no longer
     // freezes a preservation band, so this is always zero.
     Real preserve_band_width{0.0};
@@ -72,8 +105,15 @@ struct LevelSetSignedDistanceRepairResult {
  * On a distributed DOF layout, accepted coefficients and DOF coordinates are
  * taken from their unique owners, cut primitives and zero-crossing guards are
  * gathered from owned cells, and every rank evaluates the same immutable
- * global projection snapshot.  The output candidate is assigned only after
- * all collective validation and projection work completes.
+ * global projection snapshot.  Locally owned wall-contact constraints are
+ * gathered and canonicalized the same way.  Every constrained contact patch
+ * is projected onto a positive common coefficient scale, which leaves its
+ * finite-element crossing and unit normal unchanged while minimizing its
+ * signed-distance discrepancy.  Consequently, convergence applies to the
+ * unconstrained signed-distance error and the constrained optimum; the total
+ * discrepancy remains visible in the result.  The output candidate is
+ * assigned only after all collective validation and projection work
+ * completes.
  */
 [[nodiscard]] LevelSetSignedDistanceRepairResult
 repairLevelSetSignedDistanceByProjection(
@@ -81,7 +121,9 @@ repairLevelSetSignedDistanceByProjection(
     const dofs::DofHandler& level_set_dofs,
     const LevelSetReinitializationOptions& options,
     std::span<const Real> input_coefficients,
-    std::vector<Real>& repaired_coefficients);
+    std::vector<Real>& repaired_coefficients,
+    std::span<const LevelSetWallContactConstraint>
+        wall_contact_constraints = {});
 
 [[nodiscard]] LevelSetSignedDistanceRepairResult
 repairLevelSetSignedDistanceByProjection(
@@ -89,6 +131,8 @@ repairLevelSetSignedDistanceByProjection(
     FieldId level_set_field,
     const LevelSetReinitializationOptions& options,
     std::span<const Real> input_solution,
-    std::vector<Real>& repaired_solution);
+    std::vector<Real>& repaired_solution,
+    std::span<const LevelSetWallContactConstraint>
+        wall_contact_constraints = {});
 
 } // namespace svmp::FE::level_set

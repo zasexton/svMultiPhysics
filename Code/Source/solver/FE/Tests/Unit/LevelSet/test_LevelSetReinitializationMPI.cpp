@@ -139,14 +139,38 @@ TEST(LevelSetReinitializationMPI,
     options.interface_band_width = 4.0;
     options.signed_distance_tolerance = 1.0e-12;
     options.max_zero_set_displacement = 1.0e-12;
+    std::vector<level_set::LevelSetWallContactConstraint>
+        local_wall_constraints;
+    if (rank == 0) {
+        local_wall_constraints.push_back(
+            level_set::LevelSetWallContactConstraint{
+                .kind = level_set::LevelSetWallContactConstraintKind::
+                    AcceptedDynamicAngle,
+                .interface_marker = 81,
+                .boundary_marker = 6,
+                .parent_cell_global_id = 10,
+                .geometry_revision = 27u,
+            });
+    }
     const auto result = level_set::repairLevelSetSignedDistanceByProjection(
-        system, phi, options, accepted_state, candidate);
+        system,
+        phi,
+        options,
+        accepted_state,
+        candidate,
+        local_wall_constraints);
 
     EXPECT_TRUE(result.success) << result.diagnostic;
     EXPECT_TRUE(result.converged) << result.diagnostic;
     EXPECT_TRUE(result.zero_set_bound_satisfied);
     EXPECT_EQ(result.cut_cells, 1u);
     EXPECT_EQ(result.interface_fragments, 1u);
+    EXPECT_EQ(result.wall_contact_constraints, 1u);
+    EXPECT_EQ(result.wall_contact_cells, 1u);
+    EXPECT_EQ(result.wall_contact_dofs, 4u);
+    EXPECT_TRUE(result.wall_contact_constraints_satisfied);
+    EXPECT_DOUBLE_EQ(result.max_contact_line_displacement, 0.0);
+    EXPECT_DOUBLE_EQ(result.max_contact_angle_change_radians, 0.0);
     EXPECT_EQ(accepted_state, accepted_state_before);
     ASSERT_EQ(candidate.size(), expected_distance.size());
     for (std::size_t i = 0; i < candidate.size(); ++i) {
