@@ -15,8 +15,12 @@
 #include "FE/Backends/Interfaces/BackendKind.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Assembly/Assembler.h"
+#include "FE/Assembly/CutIntegrationContext.h"
+#include "FE/Assembly/GlobalSystemView.h"
+#include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/TimeIntegrator.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #  include "Mesh/Core/MeshBase.h"
@@ -25,9 +29,12 @@
 #  include "Mesh/Topology/CellShape.h"
 #endif
 
+#include <algorithm>
 #include <array>
 #include <functional>
+#include <limits>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -264,6 +271,134 @@ std::size_t countConstrainedPressureDofs(const FE::systems::FESystem& system, co
     return constrained;
 }
 
+constexpr int pressure_anchor_interface_marker = 27015;
+constexpr const char* pressure_anchor_domain_id =
+    "pressure_anchor_measure_guard";
+
+[[nodiscard]] formulations::navier_stokes::
+    IncompressibleNavierStokesVMSOptions pressureAnchorOptions()
+{
+    namespace ns = formulations::navier_stokes;
+    ns::IncompressibleNavierStokesVMSOptions options;
+    options.velocity_field_name = "u";
+    options.pressure_field_name = "p";
+    options.enable_convection = false;
+    options.enable_vms = false;
+    options.density = 1.0;
+    options.viscosity = 0.001;
+    options.velocity_dirichlet = {
+        {.boundary_marker = 1},
+        {.boundary_marker = 2},
+        {.boundary_marker = 3},
+        {.boundary_marker = 4},
+    };
+    options.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = pressure_anchor_interface_marker,
+            .level_set_field_name = "phi",
+            .generated_interface_domain_id = pressure_anchor_domain_id,
+            .level_set_isovalue = 0.0,
+            .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            .active_domain_method = ns::FreeSurfaceActiveDomainMethod::CutVolume,
+            .external_pressure = 0.0,
+            .surface_tension = 0.0,
+            .use_level_set_curvature = false,
+            .small_cut_aggregation = false,
+        });
+    return options;
+}
+
+[[nodiscard]] FE::FieldId registerPressureAnchorProblem(
+    FE::systems::FESystem& system,
+    const std::shared_ptr<FE::spaces::FunctionSpace>& velocity_space,
+    const std::shared_ptr<FE::spaces::FunctionSpace>& pressure_space)
+{
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = pressure_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::Unknown,
+    });
+    if (phi == FE::INVALID_FIELD_ID) {
+        throw std::runtime_error(
+            "failed to register pressure-anchor level-set field");
+    }
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
+        velocity_space, pressure_space, pressureAnchorOptions());
+    module.registerOn(system);
+    return phi;
+}
+
+void setPressureAnchorLevelSet(
+    std::vector<FE::Real>& solution,
+    const FE::systems::FESystem& system,
+    FE::FieldId phi,
+    const std::function<FE::Real(const std::array<FE::Real, 3>&)>& value)
+{
+    const auto* entity_map =
+        system.fieldDofHandler(phi).getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::runtime_error(
+            "pressure-anchor level-set field has no entity DOF map");
+    }
+    const auto offset = system.fieldDofOffset(phi);
+    for (FE::GlobalIndex vertex = 0;
+         vertex < system.meshAccess().numVertices();
+         ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        if (dofs.size() != 1u) {
+            throw std::runtime_error(
+                "pressure-anchor level-set field is not scalar P1");
+        }
+        solution.at(static_cast<std::size_t>(offset + dofs.front())) =
+            value(system.meshAccess().getNodeCoordinates(vertex));
+    }
+}
+
+[[nodiscard]] std::shared_ptr<FE::assembly::CutIntegrationContext>
+makePressureAnchorCutContext(
+    const FE::systems::FESystem& system,
+    std::span<const FE::Real> solution,
+    FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle)
+{
+    FE::level_set::LevelSetGeneratedInterfaceOptions options;
+    options.level_set_field_name = "phi";
+    options.domain_id = pressure_anchor_domain_id;
+    options.requested_interface_marker = pressure_anchor_interface_marker;
+    options.tolerance = 1.0e-12;
+    options.quadrature_order = 2;
+    options.interface_quadrature_order = 1;
+    options.volume_quadrature_order = 2;
+    const auto generated = lifecycle.build(system, options, solution);
+    if (!generated.success) {
+        throw std::runtime_error(generated.diagnostic);
+    }
+
+    auto context = std::make_shared<FE::assembly::CutIntegrationContext>();
+    context->addGeneratedInterfaceDomain(
+        generated.domain, FE::geometry::CutIntegrationSide::Negative);
+    return context;
+}
+
+template <typename Action>
+[[nodiscard]] std::string captureRuntimeError(Action&& action)
+{
+    try {
+        std::forward<Action>(action)();
+    } catch (const std::runtime_error& error) {
+        return error.what();
+    } catch (const std::exception& error) {
+        ADD_FAILURE() << "expected std::runtime_error, got: " << error.what();
+        return error.what();
+    } catch (...) {
+        ADD_FAILURE() << "expected std::runtime_error, got a non-standard exception";
+        return {};
+    }
+    ADD_FAILURE() << "expected std::runtime_error, but no exception was thrown";
+    return {};
+}
+
 } // namespace
 
 TEST(NavierStokesPressureGauge, PressureNotPinnedWhenUnconstrainedBoundaryExists)
@@ -297,6 +432,272 @@ TEST(NavierStokesPressureGauge, PressureNotPinnedWhenUnconstrainedBoundaryExists
     system.setup({}, inputs);
 
     EXPECT_EQ(countConstrainedPressureDofs(system, /*pressure_field_name=*/"p"), 0u);
+}
+
+TEST(NavierStokesPressureGauge,
+     ActiveCutVolumeFreeSurfaceAnchorsAbsolutePressureWithoutInteriorPin)
+{
+    auto mesh = std::make_shared<TwoQuadStripMeshAccess>();
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/2);
+    auto p_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    ASSERT_NE(system.addField(FE::systems::FieldSpec{
+                  .name = "phi",
+                  .space = p_space,
+                  .components = 1,
+                  .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+              }),
+              FE::INVALID_FIELD_ID);
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSOptions opts;
+    opts.velocity_field_name = "u";
+    opts.pressure_field_name = "p";
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.density = 1.0;
+    opts.viscosity = 0.001;
+    opts.velocity_dirichlet = {
+        {.boundary_marker = 1},
+        {.boundary_marker = 2},
+        {.boundary_marker = 3},
+        {.boundary_marker = 4},
+    };
+    opts.free_surface.push_back(
+        formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::
+            FreeSurfaceBoundary{
+                .implementation = formulations::navier_stokes::
+                    FreeSurfaceImplementation::UnfittedLevelSet,
+                .interface_marker = 7,
+                .level_set_field_name = "phi",
+                .active_domain = formulations::navier_stokes::
+                    FreeSurfaceActiveDomain::LevelSetNegative,
+                .active_domain_method = formulations::navier_stokes::
+                    FreeSurfaceActiveDomainMethod::CutVolume,
+                .small_cut_aggregation = false,
+            });
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, opts);
+    module.registerOn(system);
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = makeTwoQuadStripTopology();
+    ASSERT_NO_THROW(system.setup({}, inputs));
+
+    const auto p_id = system.findFieldByName("p");
+    ASSERT_NE(p_id, FE::INVALID_FIELD_ID);
+    EXPECT_EQ(countConstrainedPressureDofs(system, "p"), 0u);
+
+    const auto* registry = system.gaugeRegistryIfPresent();
+    ASSERT_NE(registry, nullptr);
+    const auto evidence = std::find_if(
+        registry->anchoring().begin(),
+        registry->anchoring().end(),
+        [&](const FE::gauge::AnchoringEvidence& entry) {
+            return entry.field == p_id &&
+                   entry.family ==
+                       FE::gauge::NullspaceModeFamily::ScalarConstant &&
+                   entry.verdict == FE::gauge::AnchoringVerdict::Anchored &&
+                   entry.source.find("embedded free-surface natural traction") !=
+                       std::string::npos;
+        });
+    EXPECT_NE(evidence, registry->anchoring().end());
+
+    const auto resolved = std::find_if(
+        registry->resolvedModes().begin(),
+        registry->resolvedModes().end(),
+        [&](const FE::gauge::ResolvedMode& mode) {
+            return mode.candidate.field == p_id &&
+                   mode.candidate.family ==
+                       FE::gauge::NullspaceModeFamily::ScalarConstant;
+        });
+    ASSERT_NE(resolved, registry->resolvedModes().end());
+    EXPECT_EQ(resolved->status, FE::gauge::GaugeStatus::Anchored);
+    EXPECT_EQ(resolved->policy, FE::gauge::EnforcementPolicy::None);
+}
+
+TEST(NavierStokesPressureGauge,
+     CutVolumePressureAnchorRejectsInitialAllWetAndAllDryContexts)
+{
+    for (const FE::Real level_set_value : {FE::Real{-1.0}, FE::Real{1.0}}) {
+        SCOPED_TRACE(level_set_value < 0.0 ? "all wet" : "all dry");
+        auto mesh = std::make_shared<TwoQuadStripMeshAccess>();
+        auto velocity_space = FE::spaces::VectorSpace(
+            FE::spaces::SpaceType::H1, mesh, /*order=*/1,
+            /*components=*/2);
+        auto pressure_space = FE::spaces::Space(
+            FE::spaces::SpaceType::H1, mesh, /*order=*/1,
+            /*components=*/1);
+        FE::systems::FESystem system(mesh);
+        const auto phi = registerPressureAnchorProblem(
+            system, velocity_space, pressure_space);
+
+        FE::systems::SetupInputs inputs;
+        inputs.topology_override = makeTwoQuadStripTopology();
+        ASSERT_NO_THROW(system.setup({}, inputs));
+
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+        setPressureAnchorLevelSet(
+            solution, system, phi,
+            [level_set_value](const auto&) { return level_set_value; });
+        FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+        auto context =
+            makePressureAnchorCutContext(system, solution, lifecycle);
+        ASSERT_TRUE(context->interfaceRulesForMarker(
+                                pressure_anchor_interface_marker)
+                            .empty());
+
+        const auto diagnostic = captureRuntimeError(
+            [&] { system.setCutIntegrationContext(context); });
+        EXPECT_NE(diagnostic.find("positive generated interface measure"),
+                  std::string::npos);
+        EXPECT_NE(diagnostic.find("validation_stage=cut_context_update"),
+                  std::string::npos);
+        EXPECT_NE(diagnostic.find("global_interface_rules=0"),
+                  std::string::npos);
+        EXPECT_NE(diagnostic.find(
+                      "gauge_policy=reject_zero_interface_no_dynamic_gauge_insertion"),
+                  std::string::npos);
+    }
+}
+
+TEST(NavierStokesPressureGauge,
+     CutVolumePressureAnchorRejectsEvolvedInterfaceDisappearance)
+{
+    auto mesh = std::make_shared<TwoQuadStripMeshAccess>();
+    auto velocity_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/2);
+    auto pressure_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+    FE::systems::FESystem system(mesh);
+    const auto phi = registerPressureAnchorProblem(
+        system, velocity_space, pressure_space);
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = makeTwoQuadStripTopology();
+    ASSERT_NO_THROW(system.setup({}, inputs));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    setPressureAnchorLevelSet(
+        solution, system, phi,
+        [](const auto& x) { return x[1] - FE::Real{0.25}; });
+    auto initial_context =
+        makePressureAnchorCutContext(system, solution, lifecycle);
+    ASSERT_FALSE(initial_context
+                     ->interfaceRulesForMarker(pressure_anchor_interface_marker)
+                     .empty());
+    ASSERT_NO_THROW(system.setCutIntegrationContext(initial_context));
+
+    setPressureAnchorLevelSet(
+        solution, system, phi,
+        [](const auto&) { return FE::Real{-1.0}; });
+    auto disappeared_context =
+        makePressureAnchorCutContext(system, solution, lifecycle);
+    ASSERT_TRUE(disappeared_context
+                    ->interfaceRulesForMarker(pressure_anchor_interface_marker)
+                    .empty());
+    const auto diagnostic = captureRuntimeError(
+        [&] { system.setCutIntegrationContext(disappeared_context); });
+    EXPECT_NE(diagnostic.find("validation_stage=cut_context_update"),
+              std::string::npos);
+    EXPECT_NE(diagnostic.find("global_interface_rules=0"),
+              std::string::npos);
+    EXPECT_NE(diagnostic.find(
+                  "gauge_policy=reject_zero_interface_no_dynamic_gauge_insertion"),
+              std::string::npos);
+}
+
+TEST(NavierStokesPressureGauge,
+     CutVolumePressureAnchorRejectsPreloadedZeroMeasureContextDuringSetup)
+{
+    auto mesh = std::make_shared<TwoQuadStripMeshAccess>();
+    auto velocity_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/2);
+    auto pressure_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+    FE::systems::FESystem system(mesh);
+    system.setCutIntegrationContext(
+        std::make_shared<FE::assembly::CutIntegrationContext>());
+    (void)registerPressureAnchorProblem(
+        system, velocity_space, pressure_space);
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = makeTwoQuadStripTopology();
+    const auto diagnostic =
+        captureRuntimeError([&] { system.setup({}, inputs); });
+    EXPECT_NE(diagnostic.find("validation_stage=setup"), std::string::npos);
+    EXPECT_NE(diagnostic.find("cut_context=present"), std::string::npos);
+    EXPECT_NE(diagnostic.find("global_interface_rules=0"),
+              std::string::npos);
+}
+
+TEST(NavierStokesPressureGauge,
+     CutVolumePressureAnchorRevalidatesMeasureAtAssembly)
+{
+    auto mesh = std::make_shared<TwoQuadStripMeshAccess>();
+    auto velocity_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/2);
+    auto pressure_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+    FE::systems::FESystem system(mesh);
+    const auto phi = registerPressureAnchorProblem(
+        system, velocity_space, pressure_space);
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = makeTwoQuadStripTopology();
+    ASSERT_NO_THROW(system.setup({}, inputs));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    setPressureAnchorLevelSet(
+        solution, system, phi,
+        [](const auto& x) { return x[1] - FE::Real{0.25}; });
+    FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    auto context =
+        makePressureAnchorCutContext(system, solution, lifecycle);
+    ASSERT_NO_THROW(system.setCutIntegrationContext(context));
+
+    // Simulate stale/corrupted generated-interface measure after a previously
+    // valid refresh.  The solve-time guard must not rely only on the callback.
+    const auto interface_rules =
+        context->interfaceRulesForMarker(pressure_anchor_interface_marker);
+    ASSERT_FALSE(interface_rules.empty());
+    for (const auto* const_rule : interface_rules) {
+        ASSERT_NE(const_rule, nullptr);
+        auto* rule = const_cast<FE::geometry::CutQuadratureRule*>(const_rule);
+        rule->measure = 0.0;
+        for (auto& point : rule->points) {
+            point.weight = 0.0;
+        }
+    }
+
+    std::vector<FE::Real> previous = solution;
+    FE::systems::SystemStateView state;
+    state.dt = 0.1;
+    state.u = solution;
+    state.u_prev = previous;
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    FE::assembly::DenseMatrixView matrix(
+        system.dofHandler().getNumDofs());
+    FE::systems::AssemblyRequest request;
+    request.op = "equations";
+    request.want_matrix = true;
+    const auto diagnostic = captureRuntimeError(
+        [&] { (void)system.assemble(request, state, &matrix, nullptr); });
+    EXPECT_NE(diagnostic.find("validation_stage=assembly"),
+              std::string::npos);
+    EXPECT_NE(diagnostic.find("global_stored_measure=0"),
+              std::string::npos);
 }
 
 TEST(NavierStokesFieldRegistration, ReusesCompatiblePredeclaredVelocityField)
@@ -492,6 +893,20 @@ TEST(NavierStokesInitialConditions, ActiveDomainHydrostaticPressureInitializesAc
     GTEST_SKIP() << "Active-domain hydrostatic initialization test requires native mesh support.";
 #else
     auto mesh = makeTwoQuadStripNativeMeshWithPhi();
+    auto& local_mesh = mesh->local_mesh();
+    const auto pressure_handle = MeshFields::attach_field(
+        local_mesh,
+        EntityKind::Vertex,
+        "HydrostaticPressure",
+        FieldScalarType::Float64,
+        1);
+    auto* prescribed_pressure =
+        MeshFields::field_data_as<real_t>(local_mesh, pressure_handle);
+    ASSERT_NE(prescribed_pressure, nullptr);
+    for (index_t vertex = 0; vertex < local_mesh.n_vertices(); ++vertex) {
+        prescribed_pressure[static_cast<std::size_t>(vertex)] =
+            250.0 + 7.0 * static_cast<double>(vertex);
+    }
 
     auto u_space = FE::spaces::VectorSpace(
         FE::spaces::SpaceType::H1,
@@ -525,6 +940,8 @@ TEST(NavierStokesInitialConditions, ActiveDomainHydrostaticPressureInitializesAc
     opts.hydrostatic_pressure_initialization.enabled = true;
     opts.hydrostatic_pressure_initialization.reference_point = {0.0, 1.0, 0.0};
     opts.hydrostatic_pressure_initialization.reference_pressure = 100.0;
+    opts.hydrostatic_pressure_initialization.field_name =
+        "HydrostaticPressure";
     opts.free_surface.push_back(
         formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::
             FreeSurfaceBoundary{
@@ -557,10 +974,9 @@ TEST(NavierStokesInitialConditions, ActiveDomainHydrostaticPressureInitializesAc
     for (FE::GlobalIndex vertex = 0; vertex < mesh_access.numVertices(); ++vertex) {
         const auto vertex_dofs = entity_map->getVertexDofs(vertex);
         ASSERT_EQ(vertex_dofs.size(), 1u);
-        const auto x = mesh_access.getNodeCoordinates(vertex);
         const bool active_pressure_support = vertex <= 3;
         const auto expected = active_pressure_support
-            ? 100.0 + 2.0 * (-9.81) * (x[1] - 1.0)
+            ? prescribed_pressure[static_cast<std::size_t>(vertex)]
             : 100.0;
         const auto dof = pressure_offset + vertex_dofs.front();
         ASSERT_GE(dof, 0);
@@ -604,6 +1020,8 @@ TEST(NavierStokesInitialConditions, SmoothedIndicatorHydrostaticPressureInitiali
     opts.pressure_field_name = "p";
     opts.enable_convection = false;
     opts.enable_vms = false;
+    opts.input_configuration_schema_version = 1;
+    opts.explicit_legacy_configuration = true;
     opts.density = 2.0;
     opts.viscosity = 0.001;
     opts.body_force = {0.0, -9.81, 0.0};
@@ -655,6 +1073,131 @@ TEST(NavierStokesInitialConditions, SmoothedIndicatorHydrostaticPressureInitiali
         EXPECT_NEAR(values[static_cast<std::size_t>(dof)], expected, 1.0e-12)
             << "vertex " << vertex;
     }
+#endif
+}
+
+TEST(NavierStokesInitialConditions,
+     CutVolumeHydrostaticPressureRequiresLevelSetAwareField)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Active-domain hydrostatic initialization test requires native mesh support.";
+#else
+    auto mesh = makeTwoQuadStripNativeMeshWithPhi();
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1, FE::ElementType::Quad4, 1, 2);
+    auto p_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1, FE::ElementType::Quad4, 1, 1);
+
+    FE::systems::FESystem system(mesh);
+    ASSERT_NE(system.addField(FE::systems::FieldSpec{
+                  .name = "p",
+                  .space = p_space,
+                  .components = 1,
+                  .source_kind = FE::systems::FieldSourceKind::Unknown,
+              }),
+              FE::INVALID_FIELD_ID);
+    ASSERT_NO_THROW(system.setup({}));
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSOptions opts;
+    opts.velocity_field_name = "u";
+    opts.pressure_field_name = "p";
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.density = 2.0;
+    opts.viscosity = 0.001;
+    opts.body_force = {0.0, -9.81, 0.0};
+    opts.hydrostatic_pressure_initialization.enabled = true;
+    opts.free_surface.push_back(
+        formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::
+            FreeSurfaceBoundary{
+                .implementation = formulations::navier_stokes::
+                    FreeSurfaceImplementation::UnfittedLevelSet,
+                .interface_marker = 7,
+                .level_set_field_name = "phi",
+                .active_domain = formulations::navier_stokes::
+                    FreeSurfaceActiveDomain::LevelSetNegative,
+                .active_domain_method = formulations::navier_stokes::
+                    FreeSurfaceActiveDomainMethod::CutVolume,
+            });
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, opts);
+    auto factory =
+        FE::backends::BackendFactory::create(FE::backends::BackendKind::FSILS);
+    auto state = factory->createVector(system.dofHandler().getNumDofs());
+    state->zero();
+
+    EXPECT_THROW(module.applyInitialConditions(system, *state),
+                 std::invalid_argument);
+#endif
+}
+
+TEST(NavierStokesInitialConditions,
+     CutVolumeHydrostaticPressureRejectsNonfiniteFieldValue)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Active-domain hydrostatic initialization test requires native mesh support.";
+#else
+    auto mesh = makeTwoQuadStripNativeMeshWithPhi();
+    auto& local_mesh = mesh->local_mesh();
+    const auto pressure_handle = MeshFields::attach_field(
+        local_mesh,
+        EntityKind::Vertex,
+        "HydrostaticPressure",
+        FieldScalarType::Float64,
+        1);
+    auto* prescribed_pressure =
+        MeshFields::field_data_as<real_t>(local_mesh, pressure_handle);
+    ASSERT_NE(prescribed_pressure, nullptr);
+    for (index_t vertex = 0; vertex < local_mesh.n_vertices(); ++vertex) {
+        prescribed_pressure[static_cast<std::size_t>(vertex)] = 100.0;
+    }
+    prescribed_pressure[0] = std::numeric_limits<real_t>::quiet_NaN();
+
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1, FE::ElementType::Quad4, 1, 2);
+    auto p_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1, FE::ElementType::Quad4, 1, 1);
+    FE::systems::FESystem system(mesh);
+    ASSERT_NE(system.addField(FE::systems::FieldSpec{
+                  .name = "p",
+                  .space = p_space,
+                  .components = 1,
+                  .source_kind = FE::systems::FieldSourceKind::Unknown,
+              }),
+              FE::INVALID_FIELD_ID);
+    ASSERT_NO_THROW(system.setup({}));
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSOptions opts;
+    opts.velocity_field_name = "u";
+    opts.pressure_field_name = "p";
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.density = 2.0;
+    opts.viscosity = 0.001;
+    opts.hydrostatic_pressure_initialization.enabled = true;
+    opts.hydrostatic_pressure_initialization.field_name =
+        "HydrostaticPressure";
+    opts.free_surface.push_back(
+        formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::
+            FreeSurfaceBoundary{
+                .implementation = formulations::navier_stokes::
+                    FreeSurfaceImplementation::UnfittedLevelSet,
+                .interface_marker = 7,
+                .level_set_field_name = "phi",
+                .active_domain = formulations::navier_stokes::
+                    FreeSurfaceActiveDomain::LevelSetNegative,
+            });
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, opts);
+    auto factory =
+        FE::backends::BackendFactory::create(FE::backends::BackendKind::FSILS);
+    auto state = factory->createVector(system.dofHandler().getNumDofs());
+    state->zero();
+
+    EXPECT_THROW(module.applyInitialConditions(system, *state),
+                 std::runtime_error);
 #endif
 }
 

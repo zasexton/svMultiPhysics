@@ -1,4 +1,5 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
 
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/JITRuntimePolicy.h"
@@ -9,6 +10,7 @@
 #include "FE/Core/Logger.h"
 #include "FE/Forms/FormExpr.h"
 #include "FE/Spaces/SpaceFactory.h"
+#include "FE/Systems/FESystem.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Topology/CellTopology.h"
 
@@ -1316,6 +1318,50 @@ void apply_fluid_moving_domain_options(
   }
 }
 
+void apply_free_surface_schema_options(
+    const svmp::Physics::ParameterMap& params,
+    svmp::Physics::formulations::navier_stokes::
+        IncompressibleNavierStokesVMSOptions& options)
+{
+  constexpr std::array<std::string_view, 3> version_keys = {
+      "Free_surface_configuration_schema_version",
+      "FreeSurfaceConfigurationSchemaVersion",
+      "Free_surface_schema_version",
+  };
+  std::optional<int> version;
+  for (const auto key : version_keys) {
+    if (const auto value = get_defined_int(params, key)) {
+      if (version.has_value()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] Free-surface configuration schema version was provided through more than one alias.");
+      }
+      version = *value;
+    }
+  }
+  if (version.has_value()) {
+    options.input_configuration_schema_version = *version;
+  }
+
+  constexpr std::array<std::string_view, 3> legacy_keys = {
+      "Enable_explicit_legacy_free_surface_configuration",
+      "EnableExplicitLegacyFreeSurfaceConfiguration",
+      "Free_surface_legacy_behavior",
+  };
+  std::optional<bool> legacy;
+  for (const auto key : legacy_keys) {
+    if (const auto value = get_defined_bool(params, key)) {
+      if (legacy.has_value()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] Explicit legacy free-surface behavior was provided through more than one alias.");
+      }
+      legacy = *value;
+    }
+  }
+  if (legacy.has_value()) {
+    options.explicit_legacy_configuration = *legacy;
+  }
+}
+
 std::vector<int> parse_int_list(std::string_view raw)
 {
   std::string normalized;
@@ -1417,7 +1463,26 @@ MarkerGeometry local_marker_geometry(const svmp::MeshBase& mesh, int boundary_ma
   return out;
 }
 
-MarkerGeometry global_marker_geometry(const svmp::MeshBase& mesh, int boundary_marker);
+#if FE_HAS_MPI
+using MarkerCommunicator = MPI_Comm;
+#else
+using MarkerCommunicator = int;
+#endif
+
+[[nodiscard]] MarkerCommunicator markerCommunicator(
+    const svmp::FE::systems::FESystem& system) noexcept
+{
+#if FE_HAS_MPI
+  return system.activeMpiCommunicator();
+#else
+  (void)system;
+  return 0;
+#endif
+}
+
+MarkerGeometry global_marker_geometry(const svmp::MeshBase& mesh,
+                                      int boundary_marker,
+                                      MarkerCommunicator comm);
 
 struct ParabolicProfileData {
   Vec3d center{};
@@ -1447,7 +1512,7 @@ struct GidSequenceHash {
   }
 };
 
-[[nodiscard]] bool mpiMultiRankActive() noexcept
+[[nodiscard]] bool mpiMultiRankActive(MarkerCommunicator comm) noexcept
 {
 #if FE_HAS_MPI
   int mpi_initialized = 0;
@@ -1456,10 +1521,11 @@ struct GidSequenceHash {
     return false;
   }
 
-  int world_size = 1;
-  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
-  return world_size > 1;
+  int comm_size = 1;
+  MPI_Comm_size(comm, &comm_size);
+  return comm_size > 1;
 #else
+  (void)comm;
   return false;
 #endif
 }
@@ -1474,9 +1540,10 @@ template <std::size_t N, class PayloadBuilder>
 std::vector<MarkerFacePayload<N>> gather_unique_marker_face_payloads(
     const svmp::MeshBase& mesh,
     int boundary_marker,
+    MarkerCommunicator comm,
     PayloadBuilder&& payload_builder)
 {
-  const bool mpi_active = mpiMultiRankActive();
+  const bool mpi_active = mpiMultiRankActive(comm);
   const auto& vgids = mesh.vertex_gids();
   if (mpi_active && vgids.size() != mesh.n_vertices()) {
     throw std::runtime_error(
@@ -1538,16 +1605,16 @@ std::vector<MarkerFacePayload<N>> gather_unique_marker_face_payloads(
   }
 
 #if FE_HAS_MPI
-  int world_size = 1;
-  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  int comm_size = 1;
+  MPI_Comm_size(comm, &comm_size);
 
   const int local_face_count = static_cast<int>(local_payloads.size());
-  std::vector<int> face_counts(static_cast<std::size_t>(world_size), 0);
-  MPI_Allgather(&local_face_count, 1, MPI_INT, face_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+  std::vector<int> face_counts(static_cast<std::size_t>(comm_size), 0);
+  MPI_Allgather(&local_face_count, 1, MPI_INT, face_counts.data(), 1, MPI_INT, comm);
 
-  std::vector<int> face_displs(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> face_displs(static_cast<std::size_t>(comm_size), 0);
   int total_faces = 0;
-  for (int r = 0; r < world_size; ++r) {
+  for (int r = 0; r < comm_size; ++r) {
     face_displs[static_cast<std::size_t>(r)] = total_faces;
     total_faces += face_counts[static_cast<std::size_t>(r)];
   }
@@ -1563,12 +1630,12 @@ std::vector<MarkerFacePayload<N>> gather_unique_marker_face_payloads(
   }
 
   const int local_gid_count = static_cast<int>(local_gid_data.size());
-  std::vector<int> gid_counts(static_cast<std::size_t>(world_size), 0);
-  MPI_Allgather(&local_gid_count, 1, MPI_INT, gid_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+  std::vector<int> gid_counts(static_cast<std::size_t>(comm_size), 0);
+  MPI_Allgather(&local_gid_count, 1, MPI_INT, gid_counts.data(), 1, MPI_INT, comm);
 
-  std::vector<int> gid_displs(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> gid_displs(static_cast<std::size_t>(comm_size), 0);
   int total_gid_count = 0;
-  for (int r = 0; r < world_size; ++r) {
+  for (int r = 0; r < comm_size; ++r) {
     gid_displs[static_cast<std::size_t>(r)] = total_gid_count;
     total_gid_count += gid_counts[static_cast<std::size_t>(r)];
   }
@@ -1581,7 +1648,7 @@ std::vector<MarkerFacePayload<N>> gather_unique_marker_face_payloads(
                  face_counts.data(),
                  face_displs.data(),
                  MPI_INT,
-                 MPI_COMM_WORLD);
+                 comm);
 
   std::vector<svmp::gid_t> all_gid_data(static_cast<std::size_t>(total_gid_count), svmp::gid_t{0});
   MPI_Allgatherv(local_gid_data.data(),
@@ -1591,7 +1658,7 @@ std::vector<MarkerFacePayload<N>> gather_unique_marker_face_payloads(
                  gid_counts.data(),
                  gid_displs.data(),
                  MPI_INT64_T,
-                 MPI_COMM_WORLD);
+                 comm);
 
   std::vector<double> local_values;
   local_values.reserve(local_payloads.size() * N);
@@ -1599,10 +1666,10 @@ std::vector<MarkerFacePayload<N>> gather_unique_marker_face_payloads(
     local_values.insert(local_values.end(), payload.values.begin(), payload.values.end());
   }
 
-  std::vector<int> value_counts(static_cast<std::size_t>(world_size), 0);
-  std::vector<int> value_displs(static_cast<std::size_t>(world_size), 0);
+  std::vector<int> value_counts(static_cast<std::size_t>(comm_size), 0);
+  std::vector<int> value_displs(static_cast<std::size_t>(comm_size), 0);
   int total_value_count = 0;
-  for (int r = 0; r < world_size; ++r) {
+  for (int r = 0; r < comm_size; ++r) {
     value_displs[static_cast<std::size_t>(r)] = total_value_count;
     value_counts[static_cast<std::size_t>(r)] = face_counts[static_cast<std::size_t>(r)] * static_cast<int>(N);
     total_value_count += value_counts[static_cast<std::size_t>(r)];
@@ -1616,7 +1683,7 @@ std::vector<MarkerFacePayload<N>> gather_unique_marker_face_payloads(
                  value_counts.data(),
                  value_displs.data(),
                  MPI_DOUBLE,
-                 MPI_COMM_WORLD);
+                 comm);
 
   std::vector<MarkerFacePayload<N>> gathered;
   gathered.reserve(static_cast<std::size_t>(total_faces));
@@ -1649,11 +1716,13 @@ std::vector<MarkerFacePayload<N>> gather_unique_marker_face_payloads(
 #endif
 }
 
-MarkerGeometry global_marker_geometry(const svmp::MeshBase& mesh, int boundary_marker)
+MarkerGeometry global_marker_geometry(const svmp::MeshBase& mesh,
+                                      int boundary_marker,
+                                      MarkerCommunicator comm)
 {
   MarkerGeometry out{};
   const auto payloads = gather_unique_marker_face_payloads<7>(
-      mesh, boundary_marker,
+      mesh, boundary_marker, comm,
       [&](svmp::index_t f, std::array<double, 7>& values) {
         const double a = static_cast<double>(mesh.face_area(f));
         const auto c = to_vec3(mesh.face_center(f));
@@ -1675,7 +1744,8 @@ MarkerGeometry global_marker_geometry(const svmp::MeshBase& mesh, int boundary_m
 }
 
 std::vector<std::pair<svmp::gid_t, Vec3d>> gather_perimeter_vertex_coords(const svmp::MeshBase& mesh,
-                                                                          int boundary_marker)
+                                                                          int boundary_marker,
+                                                                          MarkerCommunicator comm)
 {
   const auto& vgids = mesh.vertex_gids();
   if (vgids.size() != mesh.n_vertices()) {
@@ -1685,7 +1755,7 @@ std::vector<std::pair<svmp::gid_t, Vec3d>> gather_perimeter_vertex_coords(const 
   // Determine the perimeter of the marker surface as the set of boundary edges of the
   // marker patch itself (edges that appear only once among unique marker faces).
   const auto marker_faces = gather_unique_marker_face_payloads<1>(
-      mesh, boundary_marker,
+      mesh, boundary_marker, comm,
       [](svmp::index_t /*face*/, std::array<double, 1>& values) {
         values[0] = 0.0;
       });
@@ -1752,17 +1822,17 @@ std::vector<std::pair<svmp::gid_t, Vec3d>> gather_perimeter_vertex_coords(const 
   std::vector<double> all_xyz = local_xyz;
 
 #if FE_HAS_MPI
-  if (mpiMultiRankActive()) {
-    int world_size = 1;
-    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  if (mpiMultiRankActive(comm)) {
+    int comm_size = 1;
+    MPI_Comm_size(comm, &comm_size);
 
     const int local_gid_count = static_cast<int>(local_gids.size());
-    std::vector<int> gid_counts(static_cast<std::size_t>(world_size), 0);
-    MPI_Allgather(&local_gid_count, 1, MPI_INT, gid_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    std::vector<int> gid_counts(static_cast<std::size_t>(comm_size), 0);
+    MPI_Allgather(&local_gid_count, 1, MPI_INT, gid_counts.data(), 1, MPI_INT, comm);
 
-    std::vector<int> gid_displs(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> gid_displs(static_cast<std::size_t>(comm_size), 0);
     int total_gid_count = 0;
-    for (int r = 0; r < world_size; ++r) {
+    for (int r = 0; r < comm_size; ++r) {
       gid_displs[static_cast<std::size_t>(r)] = total_gid_count;
       total_gid_count += gid_counts[static_cast<std::size_t>(r)];
     }
@@ -1775,12 +1845,12 @@ std::vector<std::pair<svmp::gid_t, Vec3d>> gather_perimeter_vertex_coords(const 
                    gid_counts.data(),
                    gid_displs.data(),
                    MPI_INT64_T,
-                   MPI_COMM_WORLD);
+                   comm);
 
-    std::vector<int> xyz_counts(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> xyz_displs(static_cast<std::size_t>(world_size), 0);
+    std::vector<int> xyz_counts(static_cast<std::size_t>(comm_size), 0);
+    std::vector<int> xyz_displs(static_cast<std::size_t>(comm_size), 0);
     int total_xyz_count = 0;
-    for (int r = 0; r < world_size; ++r) {
+    for (int r = 0; r < comm_size; ++r) {
       xyz_displs[static_cast<std::size_t>(r)] = total_xyz_count;
       xyz_counts[static_cast<std::size_t>(r)] = gid_counts[static_cast<std::size_t>(r)] * 3;
       total_xyz_count += xyz_counts[static_cast<std::size_t>(r)];
@@ -1794,7 +1864,7 @@ std::vector<std::pair<svmp::gid_t, Vec3d>> gather_perimeter_vertex_coords(const 
                    xyz_counts.data(),
                    xyz_displs.data(),
                    MPI_DOUBLE,
-                   MPI_COMM_WORLD);
+                   comm);
   }
 #endif
 
@@ -1811,9 +1881,10 @@ std::vector<std::pair<svmp::gid_t, Vec3d>> gather_perimeter_vertex_coords(const 
 }
 
 ParabolicProfileData build_parabolic_profile_data(const svmp::MeshBase& mesh,
-                                                  int boundary_marker)
+                                                  int boundary_marker,
+                                                  MarkerCommunicator comm)
 {
-  const auto g = global_marker_geometry(mesh, boundary_marker);
+  const auto g = global_marker_geometry(mesh, boundary_marker, comm);
   if (!(g.area > 0.0)) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Boundary marker " + std::to_string(boundary_marker) +
@@ -1822,7 +1893,8 @@ ParabolicProfileData build_parabolic_profile_data(const svmp::MeshBase& mesh,
   ParabolicProfileData out{};
   out.center = (1.0 / g.area) * g.center_sum;
 
-  const auto all_perim = gather_perimeter_vertex_coords(mesh, boundary_marker);
+  const auto all_perim =
+      gather_perimeter_vertex_coords(mesh, boundary_marker, comm);
   std::unordered_map<svmp::gid_t, Vec3d> unique;
   unique.reserve(all_perim.size());
   for (const auto& [gid, p] : all_perim) {
@@ -1885,7 +1957,8 @@ double parabolic_weight(const ParabolicProfileData& data, const Vec3d& x)
 
 double integrate_parabolic_weight_over_marker(const svmp::MeshBase& mesh,
                                               int boundary_marker,
-                                              const ParabolicProfileData& data)
+                                              const ParabolicProfileData& data,
+                                              MarkerCommunicator comm)
 {
   auto tri_area = [](const Vec3d& a, const Vec3d& b, const Vec3d& c) {
     const Vec3d ab = b - a;
@@ -1936,7 +2009,7 @@ double integrate_parabolic_weight_over_marker(const svmp::MeshBase& mesh,
 
   double sum = 0.0;
   const auto payloads = gather_unique_marker_face_payloads<1>(
-      mesh, boundary_marker,
+      mesh, boundary_marker, comm,
       [&](svmp::index_t f, std::array<double, 1>& values) {
         values[0] = face_integral(mesh.face_vertices(f));
       });
@@ -2058,13 +2131,16 @@ parse_free_surface_active_domain(std::string_view raw, std::string_view context)
 {
   using svmp::Physics::formulations::navier_stokes::FreeSurfaceActiveDomain;
   const auto token = normalized_token(raw);
-  if (token.empty() || token == "none" || token == "disabled" || token == "off") {
+  if (token.empty() || token == "none" || token == "disabled" ||
+      token == "off" || token == "inactive") {
     return FreeSurfaceActiveDomain::None;
   }
-  if (token == "levelsetnegative" || token == "negative" || token == "negativelevelset") {
+  if (token == "levelsetnegative" || token == "negative" ||
+      token == "negativelevelset" || token == "phinegative") {
     return FreeSurfaceActiveDomain::LevelSetNegative;
   }
-  if (token == "levelsetpositive" || token == "positive" || token == "positivelevelset") {
+  if (token == "levelsetpositive" || token == "positive" ||
+      token == "positivelevelset" || token == "phipositive") {
     return FreeSurfaceActiveDomain::LevelSetPositive;
   }
   throw std::runtime_error(
@@ -2088,6 +2164,28 @@ parse_free_surface_active_domain_method(std::string_view raw, std::string_view c
   throw std::runtime_error(
       "[svMultiPhysics::Physics] " + std::string(context) +
       " must be one of CutVolume or SmoothedIndicator.");
+}
+
+svmp::Physics::formulations::navier_stokes::FreeSurfaceSurfaceTensionForm
+parse_free_surface_surface_tension_form(std::string_view raw,
+                                       std::string_view context)
+{
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceSurfaceTensionForm;
+  const auto token = normalized_token(raw);
+  if (token.empty() || token == "automatic" || token == "auto") {
+    return FreeSurfaceSurfaceTensionForm::Automatic;
+  }
+  if (token == "curvaturetraction" || token == "explicitcurvature" ||
+      token == "younglaplacetraction") {
+    return FreeSurfaceSurfaceTensionForm::CurvatureTraction;
+  }
+  if (token == "surfacestress" || token == "surfaceenergy" ||
+      token == "laplacebeltrami" || token == "variational") {
+    return FreeSurfaceSurfaceTensionForm::SurfaceStress;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] " + std::string(context) +
+      " must be one of Automatic, CurvatureTraction, or SurfaceStress.");
 }
 
 svmp::Physics::formulations::navier_stokes::FreeSurfaceNormalKinematicPolicy
@@ -2128,37 +2226,51 @@ parse_free_surface_tangential_mesh_policy(std::string_view raw, std::string_view
       " must be one of Free, SmoothingOnly, or Prescribed.");
 }
 
-svmp::Physics::formulations::navier_stokes::FreeSurfaceContactLineModel
+enum class ParsedFreeSurfaceContactModel : std::uint8_t {
+  None,
+  Pinned,
+  PrescribedAngle,
+  DynamicRenE
+};
+
+ParsedFreeSurfaceContactModel
 parse_free_surface_contact_line_model(std::string_view raw, std::string_view context)
 {
-  using svmp::Physics::formulations::navier_stokes::FreeSurfaceContactLineModel;
   const auto token = normalized_token(raw);
   if (token.empty() || token == "none" || token == "disabled" || token == "off") {
-    return FreeSurfaceContactLineModel::None;
+    return ParsedFreeSurfaceContactModel::None;
   }
   if (token == "pinned" || token == "fixed" || token == "fixedposition") {
-    return FreeSurfaceContactLineModel::Pinned;
+    return ParsedFreeSurfaceContactModel::Pinned;
   }
   if (token == "prescribedcontactangle" || token == "contactangle" ||
       token == "prescribedangle") {
-    return FreeSurfaceContactLineModel::PrescribedContactAngle;
+    return ParsedFreeSurfaceContactModel::PrescribedAngle;
+  }
+  if (token == "dynamiccontactangle" || token == "dynamicangle" ||
+      token == "dynamicrene" || token == "rene") {
+    return ParsedFreeSurfaceContactModel::DynamicRenE;
   }
   throw std::runtime_error(
       "[svMultiPhysics::Physics] " + std::string(context) +
-      " must be one of None, Pinned, or PrescribedContactAngle.");
+      " must be one of None, Pinned, PrescribedAngle, or DynamicRenE.");
 }
 
-svmp::Physics::formulations::navier_stokes::FreeSurfaceWallSlipModel
+enum class ParsedFreeSurfaceWallSlipModel : std::uint8_t {
+  None,
+  Navier
+};
+
+ParsedFreeSurfaceWallSlipModel
 parse_free_surface_wall_slip_model(std::string_view raw, std::string_view context)
 {
-  using svmp::Physics::formulations::navier_stokes::FreeSurfaceWallSlipModel;
   const auto token = normalized_token(raw);
   if (token.empty() || token == "none" || token == "noslip" ||
       token == "disabled" || token == "off") {
-    return FreeSurfaceWallSlipModel::None;
+    return ParsedFreeSurfaceWallSlipModel::None;
   }
   if (token == "navier" || token == "navierslip" || token == "slip") {
-    return FreeSurfaceWallSlipModel::Navier;
+    return ParsedFreeSurfaceWallSlipModel::Navier;
   }
   throw std::runtime_error(
       "[svMultiPhysics::Physics] " + std::string(context) +
@@ -2259,6 +2371,113 @@ std::optional<int> first_defined_int(const svmp::Physics::ParameterMap& params,
   for (const auto key : keys) {
     if (const auto value = get_defined_int(params, key)) {
       return value;
+    }
+  }
+  return std::nullopt;
+}
+
+std::size_t defined_parameter_count(
+    const svmp::Physics::ParameterMap& params,
+    std::initializer_list<std::string_view> keys)
+{
+  return static_cast<std::size_t>(std::count_if(
+      keys.begin(), keys.end(), [&](std::string_view key) {
+        const auto* value = find_param(params, key);
+        return value != nullptr && value->defined;
+      }));
+}
+
+bool any_parameter_defined(
+    const svmp::Physics::ParameterMap& params,
+    std::initializer_list<std::string_view> keys)
+{
+  return defined_parameter_count(params, keys) != 0u;
+}
+
+void reject_duplicate_aliases(
+    const svmp::Physics::ParameterMap& params,
+    std::initializer_list<std::string_view> keys,
+    std::string_view property)
+{
+  if (defined_parameter_count(params, keys) > 1u) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Free-surface contact configuration defines multiple aliases for " +
+        std::string(property) + ". Specify exactly one spelling.");
+  }
+}
+
+std::vector<std::string> split_semicolon_entries(std::string_view raw)
+{
+  std::vector<std::string> entries;
+  std::string current;
+  for (const char ch : raw) {
+    if (ch == ';') {
+      auto entry = trim_copy(std::move(current));
+      if (!entry.empty()) {
+        entries.push_back(std::move(entry));
+      }
+      current.clear();
+      continue;
+    }
+    current.push_back(ch);
+  }
+  auto entry = trim_copy(std::move(current));
+  if (!entry.empty()) {
+    entries.push_back(std::move(entry));
+  }
+  return entries;
+}
+
+std::optional<std::vector<int>> first_defined_int_entries(
+    const svmp::Physics::ParameterMap& params,
+    std::initializer_list<std::string_view> keys,
+    std::string_view context)
+{
+  for (const auto key : keys) {
+    if (const auto value = get_defined_string(params, key)) {
+      std::vector<int> parsed;
+      for (const auto& entry : split_semicolon_entries(*value)) {
+        try {
+          size_t pos = 0;
+          const int marker = std::stoi(entry, &pos);
+          if (pos != entry.size()) {
+            throw std::runtime_error("");
+          }
+          parsed.push_back(marker);
+        } catch (...) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Physics] Failed to parse integer value '" +
+              entry + "' for " + std::string(context) + ".");
+        }
+      }
+      if (parsed.empty()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] " + std::string(context) +
+            " must contain at least one integer marker.");
+      }
+      return parsed;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<std::vector<std::array<svmp::FE::Real, 3>>>
+first_defined_vector3_entries(const svmp::Physics::ParameterMap& params,
+                              std::initializer_list<std::string_view> keys,
+                              std::string_view context)
+{
+  for (const auto key : keys) {
+    if (const auto value = get_defined_string(params, key)) {
+      std::vector<std::array<svmp::FE::Real, 3>> parsed;
+      for (const auto& entry : split_semicolon_entries(*value)) {
+        parsed.push_back(parse_real_vector3(entry, context));
+      }
+      if (parsed.empty()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] " + std::string(context) +
+            " must contain at least one vector entry.");
+      }
+      return parsed;
     }
   }
   return std::nullopt;
@@ -2417,8 +2636,142 @@ void append_free_surface_contact_line(
     const svmp::Physics::ParameterMap& params,
     svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary& fs)
 {
-  using svmp::Physics::formulations::navier_stokes::FreeSurfaceContactLineModel;
   using svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions;
+  using ContactLine = IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine;
+
+  constexpr std::string_view contact_keys[]{
+      "Contact_line_model", "ContactLineModel",
+      "Free_surface_contact_line_model", "FreeSurfaceContactLineModel",
+      "Contact_angle_radians", "ContactAngleRadians",
+      "Prescribed_contact_angle_radians", "PrescribedContactAngleRadians",
+      "Contact_angle_degrees", "ContactAngleDegrees",
+      "Prescribed_contact_angle_degrees", "PrescribedContactAngleDegrees",
+      "Contact_line_wall_markers", "ContactLineWallMarkers",
+      "Wall_boundary_markers", "WallBoundaryMarkers",
+      "Contact_line_wall_marker", "ContactLineWallMarker",
+      "Wall_boundary_marker", "WallBoundaryMarker",
+      "Contact_line_wall_faces", "ContactLineWallFaces",
+      "Wall_boundary_faces", "WallBoundaryFaces",
+      "Contact_line_wall_face", "ContactLineWallFace",
+      "Wall_boundary_face", "WallBoundaryFace",
+      "Contact_line_marker", "ContactLineMarker",
+      "Contact_line_wall_normals", "ContactLineWallNormals",
+      "Contact_angle_wall_normals", "ContactAngleWallNormals",
+      "Wall_normals", "WallNormals",
+      "Contact_line_wall_normal", "ContactLineWallNormal",
+      "Contact_angle_wall_normal", "ContactAngleWallNormal",
+      "Wall_normal", "WallNormal",
+      "Contact_angle_penalty", "ContactAnglePenalty",
+      "Contact_line_angle_penalty", "ContactLineAnglePenalty",
+      "Contact_line_mobility", "ContactLineMobility", "Mobility",
+      "Wall_slip_model", "WallSlipModel",
+      "Contact_line_wall_slip_model", "ContactLineWallSlipModel",
+      "Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength"};
+
+  const auto is_known_contact_key = [&](std::string_view key) {
+    return std::find(std::begin(contact_keys), std::end(contact_keys), key) !=
+           std::end(contact_keys);
+  };
+  const auto looks_like_contact_key = [](std::string_view key) {
+    const auto token = normalized_token(key);
+    const auto starts_with = [&](std::string_view prefix) {
+      return token.rfind(prefix, 0) == 0;
+    };
+    return starts_with("contact") || starts_with("freesurfacecontact") ||
+           starts_with("prescribedcontact") ||
+           starts_with("wallboundarymarker") ||
+           starts_with("wallboundaryface") || starts_with("wallnormal") ||
+           starts_with("wallslip") || token == "mobility" ||
+           token == "sliplength";
+  };
+  for (const auto& [key, value] : params) {
+    if (value.defined && looks_like_contact_key(key) &&
+        !is_known_contact_key(key)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Unknown free-surface contact key '" +
+          key + "'. Contact configuration is fail-closed.");
+    }
+  }
+
+  const bool contact_requested = std::any_of(
+      std::begin(contact_keys), std::end(contact_keys), [&](std::string_view key) {
+        const auto* value = find_param(params, key);
+        return value != nullptr && value->defined;
+      });
+  if (!contact_requested) {
+    return;
+  }
+
+  reject_duplicate_aliases(
+      params,
+      {"Contact_line_model", "ContactLineModel",
+       "Free_surface_contact_line_model", "FreeSurfaceContactLineModel"},
+      "contact-line model");
+  reject_duplicate_aliases(
+      params,
+      {"Contact_angle_radians", "ContactAngleRadians",
+       "Prescribed_contact_angle_radians", "PrescribedContactAngleRadians"},
+      "contact angle in radians");
+  reject_duplicate_aliases(
+      params,
+      {"Contact_angle_degrees", "ContactAngleDegrees",
+       "Prescribed_contact_angle_degrees", "PrescribedContactAngleDegrees"},
+      "contact angle in degrees");
+  reject_duplicate_aliases(
+      params,
+      {"Contact_line_wall_markers", "ContactLineWallMarkers",
+       "Wall_boundary_markers", "WallBoundaryMarkers",
+       "Contact_line_wall_marker", "ContactLineWallMarker",
+       "Wall_boundary_marker", "WallBoundaryMarker"},
+      "contact wall marker(s)");
+  reject_duplicate_aliases(
+      params,
+      {"Contact_line_wall_faces", "ContactLineWallFaces",
+       "Wall_boundary_faces", "WallBoundaryFaces",
+       "Contact_line_wall_face", "ContactLineWallFace",
+       "Wall_boundary_face", "WallBoundaryFace"},
+      "contact wall face name(s)");
+  reject_duplicate_aliases(
+      params,
+      {"Contact_line_marker", "ContactLineMarker"},
+      "contact-line marker");
+  reject_duplicate_aliases(
+      params,
+      {"Contact_line_wall_normals", "ContactLineWallNormals",
+       "Contact_angle_wall_normals", "ContactAngleWallNormals",
+       "Wall_normals", "WallNormals",
+       "Contact_line_wall_normal", "ContactLineWallNormal",
+       "Contact_angle_wall_normal", "ContactAngleWallNormal",
+       "Wall_normal", "WallNormal"},
+      "contact wall normal(s)");
+  reject_duplicate_aliases(
+      params,
+      {"Contact_angle_penalty", "ContactAnglePenalty",
+       "Contact_line_angle_penalty", "ContactLineAnglePenalty"},
+      "contact-angle penalty");
+  reject_duplicate_aliases(
+      params,
+      {"Contact_line_mobility", "ContactLineMobility", "Mobility"},
+      "contact-line mobility");
+  reject_duplicate_aliases(
+      params,
+      {"Wall_slip_model", "WallSlipModel",
+       "Contact_line_wall_slip_model", "ContactLineWallSlipModel"},
+      "contact wall-slip model");
+  reject_duplicate_aliases(
+      params,
+      {"Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength"},
+      "contact wall-slip length");
+
+  if (any_parameter_defined(
+          params,
+          {"Contact_line_wall_faces", "ContactLineWallFaces",
+           "Wall_boundary_faces", "WallBoundaryFaces",
+           "Contact_line_wall_face", "ContactLineWallFace",
+           "Wall_boundary_face", "WallBoundaryFace"})) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Contact wall face names are not supported by the typed free-surface contact configuration; provide explicit wall marker ids.");
+  }
 
   const auto model = first_defined_string(
       params,
@@ -2433,79 +2786,221 @@ void append_free_surface_contact_line(
       {"Contact_angle_degrees", "ContactAngleDegrees",
        "Prescribed_contact_angle_degrees", "PrescribedContactAngleDegrees"});
 
-  if (!model.has_value() && !angle_radians.has_value() && !angle_degrees.has_value()) {
+  if (!model.has_value()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Free-surface contact configuration requires an explicit Contact_line_model (None, Pinned, PrescribedAngle, or DynamicRenE).");
+  }
+  if (angle_radians.has_value() && angle_degrees.has_value()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Free-surface contact configuration must specify the contact angle in either radians or degrees, not both.");
+  }
+
+  const auto parsed_model = parse_free_surface_contact_line_model(
+      *model, "Free-surface Contact_line_model");
+
+  const bool has_angle = angle_radians.has_value() || angle_degrees.has_value();
+  const bool has_wall_marker = any_parameter_defined(
+      params,
+      {"Contact_line_wall_markers", "ContactLineWallMarkers",
+       "Wall_boundary_markers", "WallBoundaryMarkers",
+       "Contact_line_wall_marker", "ContactLineWallMarker",
+       "Wall_boundary_marker", "WallBoundaryMarker"});
+  const bool has_wall_normal = any_parameter_defined(
+      params,
+      {"Contact_line_wall_normals", "ContactLineWallNormals",
+       "Contact_angle_wall_normals", "ContactAngleWallNormals",
+       "Wall_normals", "WallNormals",
+       "Contact_line_wall_normal", "ContactLineWallNormal",
+       "Contact_angle_wall_normal", "ContactAngleWallNormal",
+       "Wall_normal", "WallNormal"});
+  const bool has_penalty = any_parameter_defined(
+      params,
+      {"Contact_angle_penalty", "ContactAnglePenalty",
+       "Contact_line_angle_penalty", "ContactLineAnglePenalty"});
+  const bool has_mobility = any_parameter_defined(
+      params,
+      {"Contact_line_mobility", "ContactLineMobility", "Mobility"});
+  const bool has_slip_model = any_parameter_defined(
+      params,
+      {"Wall_slip_model", "WallSlipModel",
+       "Contact_line_wall_slip_model", "ContactLineWallSlipModel"});
+  const bool has_slip_length = any_parameter_defined(
+      params,
+      {"Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength"});
+  const bool has_contact_marker = any_parameter_defined(
+      params, {"Contact_line_marker", "ContactLineMarker"});
+
+  if (parsed_model == ParsedFreeSurfaceContactModel::None) {
+    if (has_angle || has_wall_marker || has_wall_normal || has_penalty ||
+        has_mobility || has_slip_model || has_slip_length ||
+        has_contact_marker) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Contact_line_model=None does not accept contact-angle, wall, mobility, slip, penalty, or contact-marker parameters.");
+    }
+    fs.contact_lines.push_back(ContactLine{
+        .configuration = ContactLine::None{},
+    });
     return;
   }
-
-  IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine contact_line{};
-  contact_line.model = model.has_value()
-      ? parse_free_surface_contact_line_model(*model, "Free-surface Contact_line_model")
-      : FreeSurfaceContactLineModel::PrescribedContactAngle;
-
-  if (const auto marker = first_defined_int(
-          params,
-          {"Contact_line_wall_marker", "ContactLineWallMarker",
-           "Wall_boundary_marker", "WallBoundaryMarker"})) {
-    contact_line.wall_boundary_marker = *marker;
+  if (parsed_model == ParsedFreeSurfaceContactModel::Pinned) {
+    if (!has_wall_marker && !has_contact_marker) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Contact_line_model=Pinned requires Contact_line_marker or a contact wall marker.");
+    }
+    if (has_angle || has_wall_normal || has_penalty || has_mobility ||
+        has_slip_model || has_slip_length) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Contact_line_model=Pinned accepts only its contact-line or wall marker.");
+    }
+  } else {
+    if (!has_angle || !has_wall_marker || !has_wall_normal) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] PrescribedAngle and DynamicRenE require an explicit angle, wall marker(s), and wall normal(s).");
+    }
+    if (parsed_model == ParsedFreeSurfaceContactModel::PrescribedAngle) {
+      if (has_mobility || has_slip_model || has_slip_length) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] PrescribedAngle does not accept mobility or wall-slip parameters.");
+      }
+    } else if (!has_mobility || !has_slip_model || !has_slip_length) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] DynamicRenE requires explicit mobility, wall-slip model, and wall-slip length parameters.");
+    } else if (has_penalty) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] DynamicRenE does not use Contact_angle_penalty.");
+    }
   }
-  if (const auto marker = first_defined_int(
-          params,
-          {"Contact_line_marker", "ContactLineMarker"})) {
-    contact_line.contact_line_marker = *marker;
-  }
+
+  const auto wall_markers = first_defined_int_entries(
+      params,
+      {"Contact_line_wall_markers", "ContactLineWallMarkers",
+       "Wall_boundary_markers", "WallBoundaryMarkers",
+       "Contact_line_wall_marker", "ContactLineWallMarker",
+       "Wall_boundary_marker", "WallBoundaryMarker"},
+      "Free-surface Contact_line_wall_marker");
+  const int contact_marker = first_defined_int(
+      params, {"Contact_line_marker", "ContactLineMarker"})
+                                 .value_or(-1);
+
+  IncompressibleNavierStokesVMSOptions::ScalarValue contact_angle{
+      svmp::FE::Real{1.57079632679489661923}};
   if (angle_radians.has_value()) {
-    contact_line.contact_angle_radians =
-        IncompressibleNavierStokesVMSOptions::ScalarValue{
-            static_cast<svmp::FE::Real>(*angle_radians)};
+    contact_angle = static_cast<svmp::FE::Real>(*angle_radians);
   } else if (angle_degrees.has_value()) {
     constexpr double pi = 3.14159265358979323846;
-    contact_line.contact_angle_radians =
-        IncompressibleNavierStokesVMSOptions::ScalarValue{
-            static_cast<svmp::FE::Real>((*angle_degrees) * pi / 180.0)};
+    contact_angle =
+        static_cast<svmp::FE::Real>((*angle_degrees) * pi / 180.0);
   }
-  if (const auto wall_normal = first_defined_string(
-          params,
-          {"Contact_line_wall_normal", "ContactLineWallNormal",
-           "Contact_angle_wall_normal", "ContactAngleWallNormal",
-           "Wall_normal", "WallNormal"})) {
-    const auto normal =
-        parse_real_vector3(*wall_normal, "Free-surface Contact_line_wall_normal");
-    contact_line.wall_normal = {
-        IncompressibleNavierStokesVMSOptions::ScalarValue{normal[0]},
-        IncompressibleNavierStokesVMSOptions::ScalarValue{normal[1]},
-        IncompressibleNavierStokesVMSOptions::ScalarValue{normal[2]}};
-  }
+
+  const auto wall_normals = first_defined_vector3_entries(
+      params,
+      {"Contact_line_wall_normals", "ContactLineWallNormals",
+       "Contact_angle_wall_normals", "ContactAngleWallNormals",
+       "Wall_normals", "WallNormals",
+       "Contact_line_wall_normal", "ContactLineWallNormal",
+       "Contact_angle_wall_normal", "ContactAngleWallNormal",
+       "Wall_normal", "WallNormal"},
+      "Free-surface Contact_line_wall_normal");
+
+  IncompressibleNavierStokesVMSOptions::ScalarValue contact_angle_penalty{
+      svmp::FE::Real{1.0}};
   if (const auto penalty = first_defined_double(
           params,
           {"Contact_angle_penalty", "ContactAnglePenalty",
            "Contact_line_angle_penalty", "ContactLineAnglePenalty"})) {
-    contact_line.contact_angle_penalty =
-        IncompressibleNavierStokesVMSOptions::ScalarValue{
-            static_cast<svmp::FE::Real>(*penalty)};
-  }
-  if (const auto mobility = first_defined_double(
-          params,
-          {"Contact_line_mobility", "ContactLineMobility", "Mobility"})) {
-    contact_line.mobility =
-        IncompressibleNavierStokesVMSOptions::ScalarValue{
-            static_cast<svmp::FE::Real>(*mobility)};
-  }
-  if (const auto slip_model = first_defined_string(
-          params,
-          {"Wall_slip_model", "WallSlipModel", "Contact_line_wall_slip_model",
-           "ContactLineWallSlipModel"})) {
-    contact_line.wall_slip_model =
-        parse_free_surface_wall_slip_model(*slip_model, "Free-surface Wall_slip_model");
-  }
-  if (const auto slip_length = first_defined_double(
-          params,
-          {"Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength"})) {
-    contact_line.slip_length =
-        IncompressibleNavierStokesVMSOptions::ScalarValue{
-            static_cast<svmp::FE::Real>(*slip_length)};
+    contact_angle_penalty = static_cast<svmp::FE::Real>(*penalty);
   }
 
-  fs.contact_lines.push_back(std::move(contact_line));
+  IncompressibleNavierStokesVMSOptions::ScalarValue mobility{
+      svmp::FE::Real{0.0}};
+  if (const auto parsed_mobility = first_defined_double(
+          params,
+          {"Contact_line_mobility", "ContactLineMobility", "Mobility"})) {
+    mobility = static_cast<svmp::FE::Real>(*parsed_mobility);
+  }
+
+  const auto slip_model = first_defined_string(
+          params,
+          {"Wall_slip_model", "WallSlipModel", "Contact_line_wall_slip_model",
+           "ContactLineWallSlipModel"});
+  if (parsed_model == ParsedFreeSurfaceContactModel::DynamicRenE &&
+      (!slip_model.has_value() ||
+       parse_free_surface_wall_slip_model(
+           *slip_model, "Free-surface Wall_slip_model") !=
+           ParsedFreeSurfaceWallSlipModel::Navier)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] DynamicRenE requires Wall_slip_model=Navier.");
+  }
+
+  IncompressibleNavierStokesVMSOptions::ScalarValue slip_length{
+      svmp::FE::Real{0.0}};
+  if (const auto parsed_slip_length = first_defined_double(
+          params,
+          {"Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength"})) {
+    slip_length = static_cast<svmp::FE::Real>(*parsed_slip_length);
+  }
+
+  const std::size_t contact_line_count =
+      wall_markers.has_value() ? wall_markers->size() : 1u;
+  if (contact_line_count > 1u && has_contact_marker) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] A single Contact_line_marker cannot be shared by multiple contact walls; omit it to use generated markers.");
+  }
+  if (wall_normals.has_value() && wall_normals->size() != 1u &&
+      wall_normals->size() != contact_line_count) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Free-surface Contact_line_wall_normals must contain either one vector or one vector per wall marker.");
+  }
+  for (std::size_t i = 0; i < contact_line_count; ++i) {
+    const int wall_marker = wall_markers.has_value()
+                                ? (*wall_markers)[i]
+                                : -1;
+    std::array<IncompressibleNavierStokesVMSOptions::ScalarValue, 3>
+        wall_normal{svmp::FE::Real{0.0},
+                    svmp::FE::Real{0.0},
+                    svmp::FE::Real{0.0}};
+    if (wall_normals.has_value()) {
+      const auto& normal =
+          wall_normals->size() == 1u ? (*wall_normals)[0] : (*wall_normals)[i];
+      wall_normal = {normal[0], normal[1], normal[2]};
+    }
+
+    switch (parsed_model) {
+    case ParsedFreeSurfaceContactModel::None:
+      throw std::logic_error("None contact configuration expanded unexpectedly");
+    case ParsedFreeSurfaceContactModel::Pinned:
+      fs.contact_lines.push_back(ContactLine{
+          .configuration = ContactLine::Pinned{
+              .wall_boundary_marker = wall_marker,
+              .contact_line_marker = contact_marker,
+          },
+      });
+      break;
+    case ParsedFreeSurfaceContactModel::PrescribedAngle:
+      fs.contact_lines.push_back(ContactLine{
+          .configuration = ContactLine::PrescribedAngle{
+              .wall_boundary_marker = wall_marker,
+              .contact_line_marker = contact_marker,
+              .contact_angle_radians = contact_angle,
+              .wall_normal = wall_normal,
+              .contact_angle_penalty = contact_angle_penalty,
+          },
+      });
+      break;
+    case ParsedFreeSurfaceContactModel::DynamicRenE:
+      fs.contact_lines.push_back(ContactLine{
+          .configuration = ContactLine::DynamicRenE{
+              .wall_boundary_marker = wall_marker,
+              .contact_line_marker = contact_marker,
+              .equilibrium_contact_angle_radians = contact_angle,
+              .wall_normal = wall_normal,
+              .mobility = mobility,
+              .slip_length = slip_length,
+          },
+      });
+      break;
+    }
+  }
 }
 
 void append_free_surface_bc(
@@ -2532,6 +3027,9 @@ void append_free_surface_bc(
   }
 
   IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary fs{};
+  const bool explicit_legacy_configuration =
+      options.input_configuration_schema_version == 1 &&
+      options.explicit_legacy_configuration;
   fs.implementation = free_surface_implementation_from_params(bc.params);
   if (const auto active_domain = first_defined_string(
           bc.params,
@@ -2621,6 +3119,15 @@ void append_free_surface_bc(
     fs.surface_tension = IncompressibleNavierStokesVMSOptions::ScalarValue{
         static_cast<svmp::FE::Real>(*surface_tension)};
   }
+  if (const auto surface_tension_form = first_defined_string(
+          bc.params,
+          {"Surface_tension_form", "SurfaceTensionForm",
+           "Free_surface_surface_tension_form",
+           "FreeSurfaceSurfaceTensionForm",
+           "Capillary_force_form", "CapillaryForceForm"})) {
+    fs.surface_tension_form = parse_free_surface_surface_tension_form(
+        *surface_tension_form, "Free-surface Surface_tension_form");
+  }
   if (const auto curvature = first_defined_double(bc.params, {"Curvature"})) {
     fs.curvature = IncompressibleNavierStokesVMSOptions::ScalarValue{
         static_cast<svmp::FE::Real>(*curvature)};
@@ -2688,24 +3195,43 @@ void append_free_surface_bc(
       fs.kinematic_enforcement = FreeSurfaceKinematicEnforcement::Penalty;
     }
   }
-  if (const auto gamma = first_defined_double(
+  const auto kinematic_nitsche_gamma = first_defined_double(
           bc.params,
           {"Kinematic_nitsche_gamma", "KinematicNitscheGamma",
            "Free_surface_nitsche_gamma", "FreeSurfaceNitscheGamma",
-           "Nitsche_gamma", "NitscheGamma"})) {
-    fs.kinematic_nitsche_gamma = static_cast<svmp::FE::Real>(*gamma);
+           "Nitsche_gamma", "NitscheGamma"});
+  if (kinematic_nitsche_gamma.has_value()) {
+    fs.kinematic_nitsche_gamma =
+        static_cast<svmp::FE::Real>(*kinematic_nitsche_gamma);
   }
-  if (const auto symmetric = first_defined_bool(
+  const auto kinematic_nitsche_symmetric = first_defined_bool(
           bc.params,
           {"Kinematic_nitsche_symmetric", "KinematicNitscheSymmetric",
-           "Nitsche_symmetric", "NitscheSymmetric"})) {
-    fs.kinematic_nitsche_symmetric = *symmetric;
+           "Nitsche_symmetric", "NitscheSymmetric"});
+  if (kinematic_nitsche_symmetric.has_value()) {
+    fs.kinematic_nitsche_symmetric = *kinematic_nitsche_symmetric;
   }
-  if (const auto scale_with_p = first_defined_bool(
+  const auto kinematic_nitsche_scale_with_p = first_defined_bool(
           bc.params,
           {"Kinematic_nitsche_scale_with_p", "KinematicNitscheScaleWithP",
-           "Nitsche_scale_with_p", "NitscheScaleWithP"})) {
-    fs.kinematic_nitsche_scale_with_p = *scale_with_p;
+           "Nitsche_scale_with_p", "NitscheScaleWithP"});
+  if (kinematic_nitsche_scale_with_p.has_value()) {
+    fs.kinematic_nitsche_scale_with_p = *kinematic_nitsche_scale_with_p;
+  }
+  if ((kinematic_nitsche_gamma.has_value() ||
+       kinematic_nitsche_symmetric.has_value() ||
+       kinematic_nitsche_scale_with_p.has_value()) &&
+      fs.kinematic_enforcement != FreeSurfaceKinematicEnforcement::Nitsche &&
+      !explicit_legacy_configuration) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Boundary-local free-surface Nitsche settings require Kinematic_enforcement=Nitsche; unused Nitsche settings are accepted only by the explicit schema-1 legacy mode.");
+  }
+
+  if (const auto small_cut_aggregation = first_defined_bool(
+          bc.params,
+          {"Small_cut_aggregation", "SmallCutAggregation",
+           "Enable_small_cut_aggregation", "EnableSmallCutAggregation"})) {
+    fs.small_cut_aggregation = *small_cut_aggregation;
   }
 
   const auto cut_cell_stabilization_enabled = first_defined_bool(
@@ -2715,24 +3241,28 @@ void append_free_surface_bc(
   const bool cut_cell_stabilization_explicitly_disabled =
       cut_cell_stabilization_enabled.has_value() &&
       !*cut_cell_stabilization_enabled;
+  bool cut_cell_suboption_present = false;
   if (cut_cell_stabilization_enabled.has_value()) {
     fs.cut_cell_stabilization.enabled = *cut_cell_stabilization_enabled;
   }
-  if (const auto velocity_penalty = first_defined_double(
+  if (first_defined_double(
           bc.params,
           {"Cut_cell_velocity_gradient_penalty", "CutCellVelocityGradientPenalty",
            "Velocity_gradient_ghost_penalty", "VelocityGradientGhostPenalty"})) {
-    fs.cut_cell_stabilization.velocity_gradient_penalty =
-        IncompressibleNavierStokesVMSOptions::ScalarValue{
-            static_cast<svmp::FE::Real>(*velocity_penalty)};
-    if (!cut_cell_stabilization_explicitly_disabled) {
-      fs.cut_cell_stabilization.enabled = true;
+    if (!explicit_legacy_configuration) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Cut-cell velocity ghost-penalty settings are retired; small-cut aggregation replaces them. Only explicit schema-1 legacy input may retain an ignored archived value.");
     }
+    std::cerr << "[svMultiPhysics::Physics] WARNING: "
+                 "Cut_cell_velocity_gradient_penalty is deprecated and "
+                 "ignored by explicit schema-1 legacy mode; small-cut aggregation replaces the velocity "
+                 "ghost penalty." << std::endl;
   }
   if (const auto pressure_penalty = first_defined_double(
           bc.params,
           {"Cut_cell_pressure_gradient_penalty", "CutCellPressureGradientPenalty",
            "Pressure_gradient_ghost_penalty", "PressureGradientGhostPenalty"})) {
+    cut_cell_suboption_present = true;
     fs.cut_cell_stabilization.pressure_gradient_penalty =
         IncompressibleNavierStokesVMSOptions::ScalarValue{
             static_cast<svmp::FE::Real>(*pressure_penalty)};
@@ -2746,6 +3276,7 @@ void append_free_surface_bc(
            "CutCellPressureStabilizationPolicy",
            "Pressure_ghost_penalty_policy",
            "PressureGhostPenaltyPolicy"})) {
+    cut_cell_suboption_present = true;
     fs.cut_cell_stabilization.pressure_policy =
         parse_free_surface_pressure_stabilization_policy(
             *pressure_policy,
@@ -2755,6 +3286,7 @@ void append_free_surface_bc(
           bc.params,
           {"Use_cut_metadata_scale", "UseCutMetadataScale",
            "Use_cut_stabilization_scale", "UseCutStabilizationScale"})) {
+    cut_cell_suboption_present = true;
     fs.cut_cell_stabilization.use_cut_metadata_scale = *use_cut_scale;
   }
   if (const auto cut_scale_cap = first_defined_double(
@@ -2762,6 +3294,7 @@ void append_free_surface_bc(
           {"Cut_cell_metadata_scale_cap", "CutCellMetadataScaleCap",
            "Cut_cell_stabilization_scale_cap", "CutCellStabilizationScaleCap",
            "Cut_metadata_scale_cap", "CutMetadataScaleCap"})) {
+    cut_cell_suboption_present = true;
     if (!std::isfinite(*cut_scale_cap) || *cut_scale_cap < 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] Free-surface "
@@ -2770,7 +3303,16 @@ void append_free_surface_bc(
     fs.cut_cell_stabilization.cut_metadata_scale_cap =
         static_cast<svmp::FE::Real>(*cut_scale_cap);
   }
-  if (const auto velocity_max_derivative_order = first_defined_int(
+  if (cut_cell_stabilization_explicitly_disabled &&
+      cut_cell_suboption_present && !explicit_legacy_configuration) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Enable_cut_cell_stabilization=false cannot be combined with cut-cell stabilization suboptions; unused stabilization settings are accepted only by the explicit schema-1 legacy mode.");
+  }
+  if (!cut_cell_stabilization_enabled.has_value() &&
+      cut_cell_suboption_present) {
+    fs.cut_cell_stabilization.enabled = true;
+  }
+  if (first_defined_int(
           bc.params,
           {"Cut_cell_velocity_max_derivative_order",
            "CutCellVelocityMaxDerivativeOrder",
@@ -2778,14 +3320,13 @@ void append_free_surface_bc(
            "VelocityGhostPenaltyMaxDerivativeOrder",
            "Velocity_gradient_ghost_penalty_max_derivative_order",
            "VelocityGradientGhostPenaltyMaxDerivativeOrder"})) {
-    if (*velocity_max_derivative_order < 1 ||
-        *velocity_max_derivative_order > 2) {
+    if (!explicit_legacy_configuration) {
       throw std::runtime_error(
-          "[svMultiPhysics::Physics] Free-surface "
-          "Cut_cell_velocity_max_derivative_order must be 1 or 2.");
+          "[svMultiPhysics::Physics] Cut-cell velocity derivative-order settings are retired with the velocity ghost penalty. Only explicit schema-1 legacy input may retain an ignored archived value.");
     }
-    fs.cut_cell_stabilization.velocity_max_derivative_order =
-        *velocity_max_derivative_order;
+    std::cerr << "[svMultiPhysics::Physics] WARNING: "
+                 "Cut_cell_velocity_max_derivative_order is deprecated and "
+                 "ignored by explicit schema-1 legacy mode (velocity ghost penalty retired)." << std::endl;
   }
 
   const auto velocity_extension_enabled = first_defined_bool(
@@ -2793,7 +3334,9 @@ void append_free_surface_bc(
       {"Enable_velocity_extension", "EnableVelocityExtension",
        "Velocity_extension", "VelocityExtension",
        "Extend_velocity_to_inactive_domain",
-       "ExtendVelocityToInactiveDomain"});
+       "ExtendVelocityToInactiveDomain",
+       "Free_surface_velocity_extension",
+       "FreeSurfaceVelocityExtension"});
   if (velocity_extension_enabled.has_value()) {
     fs.velocity_extension.enabled = *velocity_extension_enabled;
   }
@@ -2805,6 +3348,11 @@ void append_free_surface_bc(
           {"Velocity_extension_diffusivity", "VelocityExtensionDiffusivity",
            "Inactive_velocity_extension_diffusivity",
            "InactiveVelocityExtensionDiffusivity"})) {
+    if (velocity_extension_explicitly_disabled &&
+        !explicit_legacy_configuration) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Velocity_extension_diffusivity cannot accompany an explicitly disabled velocity extension; unused extension settings are accepted only by the explicit schema-1 legacy mode.");
+    }
     fs.velocity_extension.diffusivity =
         IncompressibleNavierStokesVMSOptions::ScalarValue{
             static_cast<svmp::FE::Real>(*velocity_extension_diffusivity)};
@@ -2819,6 +3367,7 @@ void append_free_surface_bc(
 
 void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
                      const svmp::Physics::DomainInput& domain,
+                     MarkerCommunicator comm,
                      svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
 {
   using svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions;
@@ -3010,7 +3559,8 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
         ctx_u->use_normal_direction = use_normal_u;
         ctx_u->active_components = active_u;
 
-        const auto g_u = global_marker_geometry(*input.mesh, bc.boundary_marker);
+        const auto g_u =
+            global_marker_geometry(*input.mesh, bc.boundary_marker, comm);
         if (!(g_u.area > 0.0)) {
           throw std::runtime_error(
               "[svMultiPhysics::Physics] Boundary marker " + std::to_string(bc.boundary_marker) +
@@ -3028,7 +3578,8 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
         }
 
         if (profile_u == InletProfileType::Parabolic) {
-          ctx_u->parabolic = build_parabolic_profile_data(*input.mesh, bc.boundary_marker);
+          ctx_u->parabolic = build_parabolic_profile_data(
+              *input.mesh, bc.boundary_marker, comm);
         }
 
       double normalization_u = 1.0;
@@ -3036,7 +3587,8 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
         if (profile_u == InletProfileType::Flat) {
           normalization_u = g_u.area;
         } else {
-            normalization_u = integrate_parabolic_weight_over_marker(*input.mesh, bc.boundary_marker, *ctx_u->parabolic);
+            normalization_u = integrate_parabolic_weight_over_marker(
+                *input.mesh, bc.boundary_marker, *ctx_u->parabolic, comm);
           }
           if (!(normalization_u > 0.0)) {
             throw std::runtime_error(
@@ -3168,7 +3720,8 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
       ctx->active_components = active;
 
       // Compute normal/area/center and profile normalization as needed.
-      const auto g = global_marker_geometry(*input.mesh, bc.boundary_marker);
+      const auto g =
+          global_marker_geometry(*input.mesh, bc.boundary_marker, comm);
       if (!(g.area > 0.0)) {
         throw std::runtime_error(
             "[svMultiPhysics::Physics] Boundary marker " + std::to_string(bc.boundary_marker) +
@@ -3186,7 +3739,8 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
       }
 
       if (profile == InletProfileType::Parabolic) {
-        ctx->parabolic = build_parabolic_profile_data(*input.mesh, bc.boundary_marker);
+        ctx->parabolic = build_parabolic_profile_data(
+            *input.mesh, bc.boundary_marker, comm);
       }
 
       double normalization = 1.0;
@@ -3194,7 +3748,8 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
         if (profile == InletProfileType::Flat) {
           normalization = g.area;
         } else {
-          normalization = integrate_parabolic_weight_over_marker(*input.mesh, bc.boundary_marker, *ctx->parabolic);
+          normalization = integrate_parabolic_weight_over_marker(
+              *input.mesh, bc.boundary_marker, *ctx->parabolic, comm);
         }
         if (!(normalization > 0.0)) {
           const auto local_faces = input.mesh->faces_with_label(static_cast<svmp::label_t>(bc.boundary_marker));
@@ -3444,16 +3999,21 @@ create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
   svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions options{};
   options.velocity_field_name = "Velocity";
   options.pressure_field_name = "Pressure";
+  if (const auto operator_tag = get_defined_string(
+          input.equation_params, {"Operator_tag", "OperatorTag"})) {
+    options.operator_tag = *operator_tag;
+  }
   options.enable_convection = (input.equation_type != "stokes");
   options.jit_policy = svmp::Physics::core::resolveOopJitPolicy(input, options.jit_policy);
 
+  apply_free_surface_schema_options(input.equation_params, options);
   apply_fluid_moving_domain_options(input, domain, options);
   apply_fluid_momentum_source_params(input.equation_params, options);
   apply_fluid_properties(domain, options);
   apply_fluid_momentum_source_spacetime_file(input, domain, dim, options);
   apply_fluid_rotating_frame_coriolis(input, domain, dim, options);
   apply_node_pressure_constraints(input, options);
-  apply_fluid_bcs(input, domain, options);
+  apply_fluid_bcs(input, domain, markerCommunicator(system), options);
 
   auto module = std::make_unique<svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSModule>(
       std::move(velocity_space), std::move(pressure_space), std::move(options));
@@ -3467,6 +4027,63 @@ SVMP_REGISTER_EQUATION("fluid", &create_navier_stokes_from_input);
 SVMP_REGISTER_EQUATION("stokes", &create_navier_stokes_from_input);
 
 namespace svmp::Physics::formulations::navier_stokes {
+
+FE::FieldId preRegisterPrimaryVelocityField(
+    const svmp::Physics::EquationModuleInput& input,
+    FE::systems::FESystem& system)
+{
+  if (input.equation_type != "fluid" && input.equation_type != "stokes") {
+    throw std::invalid_argument(
+        "preRegisterPrimaryVelocityField requires a fluid or stokes equation input");
+  }
+  if (!input.mesh) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Navier-Stokes velocity pre-registration received null mesh.");
+  }
+
+  const int dim = input.mesh->dim();
+  if (dim < 1 || dim > 3) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Unsupported mesh dimension for Navier-Stokes velocity pre-registration: " +
+        std::to_string(dim));
+  }
+
+  const auto element_type = infer_base_element_type(*input.mesh);
+  const int velocity_order =
+      resolve_element_order(input, infer_polynomial_order(*input.mesh));
+  auto velocity_space = svmp::FE::spaces::VectorSpace(
+      svmp::FE::spaces::SpaceType::H1,
+      element_type,
+      velocity_order,
+      dim);
+
+  FE::systems::FieldSpec velocity_spec;
+  velocity_spec.name = "Velocity";
+  velocity_spec.space = std::move(velocity_space);
+  velocity_spec.components = dim;
+  const auto existing = system.findFieldByName(velocity_spec.name);
+  if (existing == FE::INVALID_FIELD_ID) {
+    return system.addField(std::move(velocity_spec));
+  }
+
+  const auto& record = system.fieldRecord(existing);
+  if (record.source_kind != FE::systems::FieldSourceKind::Unknown ||
+      record.components != velocity_spec.components || !record.space ||
+      !velocity_spec.space ||
+      record.space->space_type() != velocity_spec.space->space_type() ||
+      record.space->field_type() != velocity_spec.space->field_type() ||
+      record.space->value_dimension() !=
+          velocity_spec.space->value_dimension() ||
+      record.space->topological_dimension() !=
+          velocity_spec.space->topological_dimension() ||
+      record.space->polynomial_order() !=
+          velocity_spec.space->polynomial_order() ||
+      record.space->element_type() != velocity_spec.space->element_type()) {
+    throw std::invalid_argument(
+        "Navier-Stokes future velocity pre-registration found an incompatible existing field 'Velocity'");
+  }
+  return existing;
+}
 
 void forceLink_NavierStokesRegister() {}
 

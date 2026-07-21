@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 namespace svmp {
@@ -215,11 +216,12 @@ TEST(JitRuntimePolicy, EnvironmentOverridesDefaultWhenNoEquationOverrideExists)
     EXPECT_FALSE(core::resolveOopJitEnable(input, true));
 }
 
-TEST(JitRuntimePolicy, PolicyDefaultsToLLVMAvailability)
+TEST(JitRuntimePolicy, PolicyDefaultsToImplicitJITRequest)
 {
     const core::PhysicsJITPolicy policy{};
 
-    EXPECT_EQ(policy.enable, FE::forms::jit::llvmJITEnabled());
+    EXPECT_TRUE(policy.enable);
+    EXPECT_FALSE(policy.enable_was_explicitly_set);
     EXPECT_TRUE(policy.specialization);
     EXPECT_EQ(policy.optimization_level, 3);
     EXPECT_TRUE(policy.specialize_n_qpts);
@@ -236,6 +238,7 @@ TEST(JitRuntimePolicy, PolicyModuleOptionsOverrideEnvironment)
 
     const auto policy = core::resolveOopJitPolicy(input);
     EXPECT_FALSE(policy.enable);
+    EXPECT_TRUE(policy.enable_was_explicitly_set);
     EXPECT_FALSE(policy.specialization);
 }
 
@@ -250,6 +253,7 @@ TEST(JitRuntimePolicy, PolicyEquationParamsOverrideEnvironment)
 
     const auto policy = core::resolveOopJitPolicy(input);
     EXPECT_FALSE(policy.enable);
+    EXPECT_TRUE(policy.enable_was_explicitly_set);
     EXPECT_FALSE(policy.specialization);
 }
 
@@ -264,7 +268,32 @@ TEST(JitRuntimePolicy, PolicyEnvironmentOverridesDefault)
                                                             .enable = true,
                                                             .specialization = true});
     EXPECT_FALSE(policy.enable);
+    EXPECT_TRUE(policy.enable_was_explicitly_set);
     EXPECT_FALSE(policy.specialization);
+}
+
+TEST(JitRuntimePolicy, PolicyWithoutOverrideRemainsImplicit)
+{
+    ScopedEnvVar env("SVMP_OOP_JIT_ENABLE", std::nullopt);
+    ScopedEnvVar fe_env("SVMP_FE_JIT_ENABLE", std::nullopt);
+
+    EquationModuleInput input;
+    const auto policy = core::resolveOopJitPolicy(input);
+
+    EXPECT_TRUE(policy.enable);
+    EXPECT_FALSE(policy.enable_was_explicitly_set);
+}
+
+TEST(JitRuntimePolicy, ExplicitTrueIsRecordedFromModuleOptions)
+{
+    ScopedEnvVar env("SVMP_OOP_JIT_ENABLE", std::string("0"));
+
+    EquationModuleInput input;
+    input.module_options = "jit = true";
+    const auto policy = core::resolveOopJitPolicy(input);
+
+    EXPECT_TRUE(policy.enable);
+    EXPECT_TRUE(policy.enable_was_explicitly_set);
 }
 
 TEST(JitRuntimePolicy, SpecializationModuleOptionsOverrideEnvironment)
@@ -309,6 +338,52 @@ TEST(PhysicsModuleJITOptions, CompilerOptionsMaskJITWhenUnavailable)
     EXPECT_TRUE(options.jit.specialization.enable);
     EXPECT_TRUE(options.jit.specialization.specialize_n_qpts);
     EXPECT_TRUE(options.jit.specialization.specialize_dofs);
+}
+
+TEST(PhysicsModuleJITOptions, ImplicitUnavailableJITFallsBack)
+{
+    ExposedPhysicsModule module;
+    const core::PhysicsJITPolicy policy{};
+
+    EXPECT_NO_THROW({
+        const auto options = module.physicsCompilerOptions(policy);
+        EXPECT_EQ(options.jit.enable, FE::forms::jit::llvmJITEnabled());
+    });
+}
+
+TEST(PhysicsModuleJITOptions, ExplicitUnavailableJITFailsClosed)
+{
+    ExposedPhysicsModule module;
+    core::PhysicsJITPolicy policy{};
+    policy.enable = true;
+    policy.enable_was_explicitly_set = true;
+
+    if (FE::forms::jit::llvmJITEnabled()) {
+        EXPECT_TRUE(module.physicsCompilerOptions(policy).jit.enable);
+        return;
+    }
+
+    try {
+        (void)module.physicsCompilerOptions(policy);
+        FAIL() << "explicit jit=true unexpectedly fell back to the interpreter";
+    } catch (const std::runtime_error& error) {
+        const std::string diagnostic = error.what();
+        EXPECT_NE(diagnostic.find("jit=true was explicitly requested"),
+                  std::string::npos);
+        EXPECT_NE(diagnostic.find("FE_ENABLE_LLVM_JIT"),
+                  std::string::npos);
+        EXPECT_NE(diagnostic.find("set jit=false"), std::string::npos);
+    }
+}
+
+TEST(PhysicsModuleJITOptions, ExplicitFalseRemainsDisabled)
+{
+    ExposedPhysicsModule module;
+    core::PhysicsJITPolicy policy{};
+    policy.enable = false;
+    policy.enable_was_explicitly_set = true;
+
+    EXPECT_FALSE(module.physicsCompilerOptions(policy).jit.enable);
 }
 
 TEST(PhysicsModuleJITOptions, CompilerOptionsHonorDisabledPolicy)

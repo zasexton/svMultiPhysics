@@ -19,7 +19,9 @@
 #include "FE/Auxiliary/AuxiliaryModelDSL.h"
 #include "FE/Systems/FESystem.h"
 
+#include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -121,18 +123,23 @@ namespace detail {
 
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toTractionBC(
     const IncompressibleNavierStokesVMSOptions::TractionNeumannBC& bc,
-    int dim)
+    int dim,
+    std::optional<int> generated_active_boundary_marker = std::nullopt)
 {
     const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toTractionBC");
 
     auto t_comp = FE::forms::bc::toVectorExpr(
         bc.traction, dim, "ns_traction_neumann", marker, FE::forms::bc::ComponentValueNameStyle::Component);
-    return std::make_unique<FE::forms::bc::NaturalBC>(marker, FE::forms::FormExpr::asVector(std::move(t_comp)));
+    return std::make_unique<FE::forms::bc::NaturalBC>(
+        marker,
+        FE::forms::FormExpr::asVector(std::move(t_comp)),
+        generated_active_boundary_marker);
 }
 
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toTractionRobinBC(
     const IncompressibleNavierStokesVMSOptions::TractionRobinBC& bc,
-    int dim)
+    int dim,
+    std::optional<int> generated_active_boundary_marker = std::nullopt)
 {
     const int marker =
         FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toTractionRobinBC");
@@ -144,7 +151,10 @@ namespace detail {
         bc.rhs, dim, "ns_traction_robin_rhs", marker, FE::forms::bc::ComponentValueNameStyle::Component);
 
     return std::make_unique<FE::forms::bc::RobinBC>(
-        marker, alpha, FE::forms::FormExpr::asVector(std::move(r_comp)));
+        marker,
+        alpha,
+        FE::forms::FormExpr::asVector(std::move(r_comp)),
+        generated_active_boundary_marker);
 }
 
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toVelocityEssentialBC(
@@ -191,7 +201,8 @@ namespace detail {
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toOutflowBC(
     const IncompressibleNavierStokesVMSOptions::PressureOutflowBC& bc,
     const FE::forms::FormExpr& u,
-    const FE::forms::FormExpr& rho)
+    const FE::forms::FormExpr& rho,
+    std::optional<int> generated_active_boundary_marker = std::nullopt)
 {
     const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toOutflowBC");
 
@@ -206,7 +217,8 @@ namespace detail {
         FE::forms::bc::toScalarExpr(bc.backflow_beta, FE::forms::bc::markerValueName("ns_backflow_beta", marker));
 
     const auto flux = -p_out * n - beta * rho * max_backflow * u;
-    return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
+    return std::make_unique<FE::forms::bc::NaturalBC>(
+        marker, flux, generated_active_boundary_marker);
 }
 
 /**
@@ -364,7 +376,9 @@ inline void applyVelocityNitscheBCs(
     const FE::forms::FormExpr& p,
     const FE::forms::FormExpr& v,
     const FE::forms::FormExpr& q,
-    const FE::forms::FormExpr& mu)
+    const FE::forms::FormExpr& mu,
+    const std::function<std::optional<int>(int)>&
+        generated_active_boundary_marker = {})
 {
     if (options.velocity_dirichlet_weak.empty()) {
         return;
@@ -386,6 +400,15 @@ inline void applyVelocityNitscheBCs(
 
     const auto stress_u = FE::forms::FormExpr::constant(2.0) * mu * FE::forms::sym(FE::forms::grad(u));
     const auto stress_v = FE::forms::FormExpr::constant(2.0) * mu * FE::forms::sym(FE::forms::grad(v));
+    const auto integrate =
+        [&](const FE::forms::FormExpr& integrand, int marker) {
+            const auto generated_marker = generated_active_boundary_marker
+                                              ? generated_active_boundary_marker(marker)
+                                              : std::nullopt;
+            return generated_marker.has_value()
+                       ? integrand.dI(*generated_marker)
+                       : integrand.ds(marker);
+        };
 
     for (const auto& bc : options.velocity_dirichlet_weak) {
         const int marker =
@@ -404,18 +427,24 @@ inline void applyVelocityNitscheBCs(
         const auto diff = u - uD;
 
         // Consistency: add the missing stress boundary term -<σ(u,p)n, v>.
-        momentum_form = momentum_form + (p * FE::forms::inner(n, v)).ds(marker) -
-                        FE::forms::inner(stress_u * n, v).ds(marker);
+        momentum_form =
+            momentum_form + integrate(p * FE::forms::inner(n, v), marker) -
+            integrate(FE::forms::inner(stress_u * n, v), marker);
 
         // Adjoint consistency (variant-dependent) + penalty.
         if (options.nitsche_symmetric) {
-            momentum_form = momentum_form - FE::forms::inner(stress_v * n, diff).ds(marker);
-            continuity_form = continuity_form + (q * FE::forms::inner(n, diff)).ds(marker);
+            momentum_form = momentum_form -
+                            integrate(FE::forms::inner(stress_v * n, diff), marker);
+            continuity_form = continuity_form +
+                              integrate(q * FE::forms::inner(n, diff), marker);
         } else {
-            momentum_form = momentum_form + FE::forms::inner(stress_v * n, diff).ds(marker);
-            continuity_form = continuity_form - (q * FE::forms::inner(n, diff)).ds(marker);
+            momentum_form = momentum_form +
+                            integrate(FE::forms::inner(stress_v * n, diff), marker);
+            continuity_form = continuity_form -
+                              integrate(q * FE::forms::inner(n, diff), marker);
         }
-        momentum_form = momentum_form + (penalty * FE::forms::inner(diff, v)).ds(marker);
+        momentum_form = momentum_form +
+                        integrate(penalty * FE::forms::inner(diff, v), marker);
     }
 }
 
