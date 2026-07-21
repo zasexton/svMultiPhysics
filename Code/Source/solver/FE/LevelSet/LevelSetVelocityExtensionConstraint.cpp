@@ -7,6 +7,7 @@
 #include "Backends/Interfaces/GenericVector.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
+#include "Elements/ReferenceElement.h"
 #include "Sparsity/SparsityPattern.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemState.h"
@@ -145,18 +146,45 @@ void LevelSetVelocityExtensionConstraintKernel::addSparsityCouplings(
     sparsity::SparsityPattern& pattern) const
 {
     // The active set can change between time steps.  Its direct graph equation
-    // always couples an extension vertex to itself, all one-ring extension
-    // neighbors (including cross-components after wall projection), and the
-    // same-vertex physical velocity.  Register that conservative fixed graph
-    // before setup so later coefficient refreshes never mutate sparsity.
+    // always couples an extension vertex to itself, its mesh-edge neighbors
+    // (including cross-components after wall projection), and the same-vertex
+    // physical velocity.  Register that conservative fixed graph before setup
+    // so later coefficient refreshes never mutate sparsity.  In particular,
+    // do not use the cell clique: that admits quad/hex face and body diagonals
+    // that the extension-map builder is forbidden to use.
     const auto& mesh = system.meshAccess();
     std::map<GlobalIndex, std::set<GlobalIndex>> neighbors;
     mesh.forEachCell([&](GlobalIndex cell) {
         std::vector<GlobalIndex> vertices;
         mesh.getCellNodes(cell, vertices);
+        const auto reference =
+            elements::ReferenceElement::create(mesh.getCellType(cell));
+        if (reference.num_edges() == 0u && vertices.size() > 1u) {
+            throw std::runtime_error(
+                "LevelSetVelocityExtensionConstraintKernel requires explicit reference-element edges");
+        }
         for (const auto vertex : vertices) {
-            auto& adjacent = neighbors[vertex];
-            adjacent.insert(vertices.begin(), vertices.end());
+            neighbors.try_emplace(vertex);
+        }
+        for (std::size_t edge = 0; edge < reference.num_edges(); ++edge) {
+            const auto& local_nodes = reference.edge_nodes(edge);
+            if (local_nodes.size() != 2u || local_nodes[0] < 0 ||
+                local_nodes[1] < 0 ||
+                static_cast<std::size_t>(local_nodes[0]) >= vertices.size() ||
+                static_cast<std::size_t>(local_nodes[1]) >= vertices.size()) {
+                throw std::runtime_error(
+                    "LevelSetVelocityExtensionConstraintKernel found invalid reference-element edge topology");
+            }
+            const auto first =
+                vertices[static_cast<std::size_t>(local_nodes[0])];
+            const auto second =
+                vertices[static_cast<std::size_t>(local_nodes[1])];
+            if (first == second) {
+                throw std::runtime_error(
+                    "LevelSetVelocityExtensionConstraintKernel found a degenerate mesh edge");
+            }
+            neighbors[first].insert(second);
+            neighbors[second].insert(first);
         }
     });
 

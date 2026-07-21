@@ -24,6 +24,7 @@ add_executable(test_application
   ../Core/LevelSetCutConfiguration.cpp
   ../Core/LevelSetCurvatureSamples.cpp
   ../Core/LevelSetMaintenanceHistory.cpp
+  ../Core/LevelSetVelocityExtensionMap.cpp
   ../Core/MeshCollection.cpp
   ../Core/SimulationBuilder.cpp
   ../Translators/EquationTranslator.cpp
@@ -59,3 +60,68 @@ else()
 endif()
 
 add_test(NAME Application_Tests COMMAND test_application)
+
+if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
+  add_executable(test_application_mpi
+    Unit/test_ApplicationDriverLevelSetWorkflowsMPI.cpp
+    Unit/test_LegacyParameterStubs.cpp
+    ../Core/ActiveDomainOutput.cpp
+    ../Core/LevelSetCutConfiguration.cpp
+    ../Core/LevelSetCurvatureSamples.cpp
+    ../Core/LevelSetMaintenanceHistory.cpp
+    ../Core/LevelSetVelocityExtensionMap.cpp
+    ../Core/MeshCollection.cpp
+    ../Core/SimulationBuilder.cpp
+    ../Translators/EquationTranslator.cpp
+    ../Translators/LevelSetEquationTranslator.cpp
+    ../Translators/MeshTranslator.cpp
+    ../../Parameters.cpp
+    ../../consts.cpp
+  )
+
+  set_target_properties(test_application_mpi PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+  )
+
+  target_link_libraries(test_application_mpi
+    PRIVATE
+      svphysics
+      ${TINYXML_LIBRARY_NAME}
+  )
+  if(TARGET MPI::MPI_CXX)
+    target_link_libraries(test_application_mpi PRIVATE MPI::MPI_CXX)
+  endif()
+
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(test_application_mpi PRIVATE
+      -ffunction-sections
+      -fdata-sections
+    )
+    target_link_options(test_application_mpi PRIVATE -Wl,--gc-sections)
+  endif()
+
+  # The MPI test owns MPI_Init/MPI_Finalize, so intentionally omit gtest_main.
+  if(TARGET GTest::gtest)
+    target_link_libraries(test_application_mpi PRIVATE GTest::gtest)
+  else()
+    set(_application_mpi_gtest_libs ${GTEST_LIBRARIES})
+    list(REMOVE_ITEM _application_mpi_gtest_libs gtest_main GTest::gtest_main)
+    target_link_libraries(test_application_mpi PRIVATE
+      ${_application_mpi_gtest_libs}
+    )
+  endif()
+
+  add_test(
+    NAME Application_MPI_2
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+            ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_application_mpi>
+            ${MPIEXEC_POSTFLAGS}
+  )
+  set_tests_properties(Application_MPI_2 PROPERTIES
+    PROCESSORS 2
+    ENVIRONMENT
+      "OMPI_ALLOW_RUN_AS_ROOT=1;OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1"
+  )
+endif()

@@ -10,6 +10,7 @@ add_library(svapplication STATIC
   Core/LevelSetCutConfiguration.cpp
   Core/LevelSetCurvatureSamples.cpp
   Core/LevelSetMaintenanceHistory.cpp
+  Core/LevelSetVelocityExtensionMap.cpp
   Core/MeshCollection.cpp
   Core/SimulationBuilder.cpp
   Translators/MeshTranslator.cpp

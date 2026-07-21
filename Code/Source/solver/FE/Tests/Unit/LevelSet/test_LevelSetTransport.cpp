@@ -6,6 +6,7 @@
 #include "Forms/FormExpr.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Spaces/SpaceFactory.h"
+#include "Sparsity/SparsityPattern.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemSetup.h"
 #include "Systems/TimeIntegrator.h"
@@ -1455,6 +1456,70 @@ TEST(LevelSetTransport,
               FE::INVALID_FIELD_ID);
     EXPECT_FALSE(system.hasOperator("equations"));
     EXPECT_TRUE(system.formulationRecords().empty());
+}
+
+TEST(LevelSetTransport,
+     AlgebraicExtensionSparsityUsesQuadEdgesWithoutCellDiagonals)
+{
+    const auto mesh =
+        std::make_shared<StructuredQuadTransportMeshAccess>(1);
+    auto velocity_space = vectorSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto source = system.addField(FE::systems::FieldSpec{
+        .name = "physical_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+    const auto extension = system.addField(FE::systems::FieldSpec{
+        .name = "extension_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+    ASSERT_NO_THROW(
+        system.setup({}, makeStructuredQuadTransportSetupInputs(*mesh)));
+
+    level_set::LevelSetVelocityExtensionConstraintKernel kernel({
+        .extension_field = extension,
+        .source_velocity_field = source,
+        .components = 3,
+        .operator_tag = "equations",
+    });
+    FE::sparsity::SparsityPattern pattern(
+        system.dofHandler().getNumDofs());
+    ASSERT_NO_THROW(kernel.addSparsityCouplings(system, pattern));
+    pattern.finalize();
+
+    const auto vertex_dof = [&](FE::FieldId field,
+                                FE::GlobalIndex vertex,
+                                int component) {
+        const auto* entity_map =
+            system.fieldDofHandler(field).getEntityDofMap();
+        if (entity_map == nullptr) {
+            throw std::runtime_error("test field has no vertex DOF map");
+        }
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        if (component < 0 ||
+            static_cast<std::size_t>(component) >= dofs.size()) {
+            throw std::runtime_error("test field component is out of range");
+        }
+        return system.fieldDofOffset(field) +
+               dofs[static_cast<std::size_t>(component)];
+    };
+
+    const auto row = vertex_dof(extension, 0, 0);
+    for (int component = 0; component < 3; ++component) {
+        EXPECT_TRUE(pattern.hasEntry(
+            row, vertex_dof(extension, 0, component)));
+        EXPECT_TRUE(pattern.hasEntry(
+            row, vertex_dof(extension, 1, component)));
+        EXPECT_TRUE(pattern.hasEntry(
+            row, vertex_dof(extension, 2, component)));
+        EXPECT_FALSE(pattern.hasEntry(
+            row, vertex_dof(extension, 3, component)));
+    }
+    EXPECT_TRUE(pattern.hasEntry(row, vertex_dof(source, 0, 0)));
+    EXPECT_FALSE(pattern.hasEntry(row, vertex_dof(source, 1, 0)));
 }
 
 TEST(LevelSetTransport,

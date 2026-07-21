@@ -4,6 +4,7 @@
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/LevelSetCurvatureSamples.h"
 #include "Application/Core/LevelSetMaintenanceHistory.h"
+#include "Application/Core/LevelSetVelocityExtensionMap.h"
 #include "Application/Core/NearestPointIndex.h"
 #include "Application/Core/OopMpiLog.h"
 #include "Application/Core/SimulationBuilder.h"
@@ -16,11 +17,17 @@
 #include "FE/Backends/Interfaces/GenericVector.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/LevelSet/LevelSetCurvatureProjection.h"
+#include "FE/LevelSet/LevelSetCellEvaluator.h"
 #include "FE/LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "FE/LevelSet/LevelSetReinitialization.h"
+#include "FE/LevelSet/LevelSetTransport.h"
+#include "FE/LevelSet/LevelSetVelocityExtensionConstraint.h"
 #include "FE/LevelSet/LevelSetVolume.h"
 #include "FE/Geometry/MappingFactory.h"
+#include "FE/Interfaces/GeneratedActiveBoundaryDomain.h"
+#include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "FE/Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "FE/PostProcessing/DerivedResultTypes.h"
 #include "FE/PostProcessing/DerivedResultEvaluator.h"
 #include "FE/Systems/CutIntegrationInvalidation.h"
@@ -29,9 +36,12 @@
 #include "FE/TimeStepping/NewtonSolver.h"
 #include "FE/TimeStepping/TimeHistory.h"
 #include "FE/TimeStepping/TimeLoop.h"
+#include "FE/TimeStepping/TimeSteppingUtils.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Core/MeshComm.h"
 #include "Mesh/Topology/CellTopology.h"
+#include "Mesh/Topology/DistributedTopology.h"
+#include "Physics/Core/PhysicsModule.h"
 #include "Parameters.h"
 #include "tinyxml2.h"
 
@@ -57,6 +67,8 @@
 #include <span>
 #include <string_view>
 #include <thread>
+#include <tuple>
+#include <unordered_map>
 #include <vector>
 #include <sstream>
 #include <stdexcept>
@@ -88,6 +100,90 @@ double secondsSince(Clock::time_point start)
   return std::chrono::duration<double>(Clock::now() - start).count();
 }
 
+void writeEffectiveConfigurationArtifact(
+    const application::core::SimulationComponents& sim,
+    const Parameters& params,
+    const svmp::MeshComm& comm)
+{
+  if (comm.rank() != 0) {
+    return;
+  }
+
+  std::vector<svmp::Physics::EffectiveConfigurationArtifact> artifacts;
+  artifacts.reserve(sim.physics_modules.size());
+  for (const auto& module : sim.physics_modules) {
+    if (!module) {
+      continue;
+    }
+    if (auto artifact = module->effectiveConfigurationArtifact()) {
+      if (artifact->component.empty() || artifact->json.empty()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] A physics module returned an incomplete effective-configuration artifact.");
+      }
+      artifacts.push_back(std::move(*artifact));
+    }
+  }
+  if (artifacts.empty()) {
+    return;
+  }
+
+  std::sort(artifacts.begin(), artifacts.end(), [](const auto& lhs, const auto& rhs) {
+    return std::tie(lhs.component, lhs.json) < std::tie(rhs.component, rhs.json);
+  });
+
+  std::filesystem::path output_directory = ".";
+  if (params.general_simulation_parameters.save_results_in_folder.defined() &&
+      !params.general_simulation_parameters.save_results_in_folder.value().empty()) {
+    output_directory =
+        params.general_simulation_parameters.save_results_in_folder.value();
+  }
+  std::filesystem::create_directories(output_directory);
+
+  const auto output_path = output_directory / "effective_configuration.json";
+  const auto temporary_path =
+      output_directory / "effective_configuration.json.tmp";
+  {
+    std::ofstream output(temporary_path, std::ios::out | std::ios::trunc);
+    if (!output.is_open()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Failed to open effective-configuration artifact '" +
+          temporary_path.string() + "'.");
+    }
+    output << "{\"artifact_schema_version\":1,\"modules\":[";
+    for (std::size_t i = 0; i < artifacts.size(); ++i) {
+      if (i != 0u) {
+        output << ',';
+      }
+      output << artifacts[i].json;
+    }
+    output << "]}\n";
+    output.flush();
+    if (!output.good()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Failed to write effective-configuration artifact '" +
+          temporary_path.string() + "'.");
+    }
+  }
+
+  std::error_code rename_error;
+  std::filesystem::rename(temporary_path, output_path, rename_error);
+  if (rename_error) {
+    std::error_code remove_error;
+    std::filesystem::remove(output_path, remove_error);
+    rename_error.clear();
+    std::filesystem::rename(temporary_path, output_path, rename_error);
+  }
+  if (rename_error) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Failed to publish effective-configuration artifact '" +
+        output_path.string() + "': " + rename_error.message());
+  }
+
+  application::core::oopCout()
+      << "[svMultiPhysics::Application] Wrote effective configuration: "
+      << output_path.string() << std::endl;
+}
+
 template <typename CoordinateContainer>
 std::array<double, 3> meshVertexPoint(const CoordinateContainer& coords,
                                       int mesh_dim,
@@ -105,14 +201,14 @@ std::array<double, 3> meshVertexPoint(const CoordinateContainer& coords,
 
 std::vector<VelocityExtensionSample>
 gatherVelocityExtensionSamples(std::vector<VelocityExtensionSample> local_samples,
-                               std::size_t component_count)
+                               std::size_t component_count,
+                               const svmp::MeshComm& comm)
 {
   if (component_count == 0u) {
     return local_samples;
   }
 
 #ifdef MESH_HAS_MPI
-  const auto comm = svmp::MeshComm::world();
   if (!comm.is_parallel()) {
     return local_samples;
   }
@@ -196,6 +292,189 @@ gatherVelocityExtensionSamples(std::vector<VelocityExtensionSample> local_sample
   return local_samples;
 #endif
 }
+
+svmp::MeshComm activeFESystemCommunicator(
+    const svmp::FE::systems::FESystem& system)
+{
+#if defined(MESH_HAS_MPI) && FE_HAS_MPI
+  return svmp::MeshComm(system.activeMpiCommunicator());
+#else
+  (void)system;
+  return svmp::MeshComm::self();
+#endif
+}
+
+std::vector<int> communicatorWideBoundaryMarkers(
+    const svmp::FE::assembly::IMeshAccess& mesh,
+    const svmp::MeshComm& comm)
+{
+  auto markers = svmp::FE::interfaces::boundaryMarkers(mesh);
+
+#ifdef MESH_HAS_MPI
+  if (!comm.is_parallel()) {
+    return markers;
+  }
+  if (markers.size() >
+      static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Too many local boundary markers for "
+        "MPI active-cut refresh.");
+  }
+
+  const int local_count = static_cast<int>(markers.size());
+  std::vector<int> counts(static_cast<std::size_t>(comm.size()), 0);
+  MPI_Allgather(&local_count,
+                1,
+                MPI_INT,
+                counts.data(),
+                1,
+                MPI_INT,
+                comm.native());
+
+  std::vector<int> displacements(counts.size(), 0);
+  std::size_t total_count = 0u;
+  for (std::size_t rank = 0; rank < counts.size(); ++rank) {
+    if (counts[rank] < 0 ||
+        total_count >
+            static_cast<std::size_t>(std::numeric_limits<int>::max()) -
+                static_cast<std::size_t>(counts[rank])) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Communicator-wide boundary-marker "
+          "union exceeds MPI count limits.");
+    }
+    displacements[rank] = static_cast<int>(total_count);
+    total_count += static_cast<std::size_t>(counts[rank]);
+  }
+
+  std::vector<int> gathered(total_count, 0);
+  MPI_Allgatherv(markers.empty() ? nullptr : markers.data(),
+                 local_count,
+                 MPI_INT,
+                 gathered.empty() ? nullptr : gathered.data(),
+                 counts.data(),
+                 displacements.data(),
+                 MPI_INT,
+                 comm.native());
+  std::sort(gathered.begin(), gathered.end());
+  gathered.erase(std::unique(gathered.begin(), gathered.end()),
+                 gathered.end());
+  return gathered;
+#else
+  (void)comm;
+  return markers;
+#endif
+}
+
+svmp::FE::interfaces::FreeSurfaceGeometryOwnershipCollective
+snapshotOwnershipCollective(
+    const svmp::MeshComm& comm)
+{
+  svmp::FE::interfaces::FreeSurfaceGeometryOwnershipCollective collective;
+  collective.rank = comm.rank();
+  collective.size = comm.size();
+  collective.all_gather_owned_rule_identity_values =
+      [&comm](std::span<const std::uint64_t> local_values) {
+        std::vector<std::uint64_t> gathered(local_values.begin(),
+                                            local_values.end());
+#ifdef MESH_HAS_MPI
+        if (!comm.is_parallel()) {
+          return gathered;
+        }
+        if (local_values.size() >
+            static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+          throw std::runtime_error(
+              "Free-surface snapshot ownership stream exceeds MPI limits.");
+        }
+        const int local_count = static_cast<int>(local_values.size());
+        std::vector<int> counts(static_cast<std::size_t>(comm.size()), 0);
+        MPI_Allgather(&local_count,
+                      1,
+                      MPI_INT,
+                      counts.data(),
+                      1,
+                      MPI_INT,
+                      comm.native());
+        std::vector<int> displacements(counts.size(), 0);
+        int total_values = 0;
+        for (std::size_t rank = 0; rank < counts.size(); ++rank) {
+          if (counts[rank] < 0 ||
+              counts[rank] >
+                  std::numeric_limits<int>::max() - total_values) {
+            throw std::runtime_error(
+                "Free-surface snapshot ownership gather exceeds MPI limits.");
+          }
+          displacements[rank] = total_values;
+          total_values += counts[rank];
+        }
+        gathered.assign(static_cast<std::size_t>(total_values), 0u);
+#ifdef MPI_UINT64_T
+        const MPI_Datatype identity_type = MPI_UINT64_T;
+#else
+        const MPI_Datatype identity_type = MPI_UNSIGNED_LONG_LONG;
+#endif
+        MPI_Allgatherv(local_values.empty() ? nullptr : local_values.data(),
+                       local_count,
+                       identity_type,
+                       gathered.empty() ? nullptr : gathered.data(),
+                       counts.data(),
+                       displacements.data(),
+                       identity_type,
+                       comm.native());
+#else
+        if (comm.is_parallel()) {
+          throw std::runtime_error(
+              "Free-surface snapshot ownership validation requires MPI in a parallel run.");
+        }
+#endif
+        return gathered;
+      };
+  return collective;
+}
+
+svmp::FE::interfaces::GeneratedInterfaceBoundaryIntersectionSummary
+ownedBoundaryIntersectionSummary(
+    const svmp::FE::interfaces::GeneratedInterfaceBoundaryIntersectionDomain&
+        domain,
+    const svmp::FE::assembly::IMeshAccess& mesh)
+{
+  svmp::FE::interfaces::GeneratedInterfaceBoundaryIntersectionSummary summary;
+  summary.interface_marker = domain.request().interface_marker;
+  summary.boundary_marker = domain.request().boundary_marker;
+  summary.intersection_marker = domain.marker();
+  for (const auto& fragment : domain.fragments()) {
+    const auto parent_cell =
+        static_cast<svmp::FE::GlobalIndex>(fragment.parent_cell);
+    if (parent_cell < 0 || parent_cell >= mesh.numCells() ||
+        !mesh.isOwnedCell(parent_cell)) {
+      continue;
+    }
+    ++summary.fragment_count;
+    if (!fragment.active()) {
+      ++summary.skipped_fragment_count;
+      continue;
+    }
+    ++summary.active_fragment_count;
+    summary.quadrature_point_count += fragment.quadrature_points.size();
+    summary.measure += fragment.measure;
+  }
+  return summary;
+}
+
+using application::core::WallCompatibleVelocityExtensionResult;
+using application::core::WallVelocityExtensionConstraint;
+using application::core::estimateSymmetricConditionNumber;
+using application::core::extendVelocityInLevelSetNormalBand;
+using application::core::globalOwnedVelocityExtensionMaskCount;
+using application::core::globalVelocityExtensionGeometrySampleCount;
+using application::core::kVelocityExtensionCoefficientTolerance;
+using application::core::kVelocityExtensionMaxRegressionCondition;
+using application::core::kVelocityExtensionMaxWetToDryAmplification;
+using application::core::kVelocityExtensionRowTolerance;
+using application::core::markVelocityExtensionTraceSupportCells;
+using application::core::nodalVelocityExtensionInterfaceCells;
+using application::core::synchronizeVelocityExtensionTraceSupportMask;
+using application::core::velocityExtensionEdgeAdjacency;
+
 
 struct OutputTimingStats {
   double local{0.0};
@@ -339,7 +618,7 @@ void configureOpenMPThreads(const svmp::MeshComm& comm)
   MPI_Initialized(&mpi_initialized);
   if (mpi_initialized) {
     MPI_Comm node_comm = MPI_COMM_NULL;
-    MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, comm.rank(),
+    MPI_Comm_split_type(comm.native(), MPI_COMM_TYPE_SHARED, comm.rank(),
                         MPI_INFO_NULL, &node_comm);
     if (node_comm != MPI_COMM_NULL) {
       MPI_Comm_size(node_comm, &ranks_on_node);
@@ -382,6 +661,19 @@ bool parseBoolEnv(const char* name, bool default_value)
     return false;
   }
   return default_value;
+}
+
+bool generalizedAlphaPdeRateInitializationRequested(
+    bool active_cut_domain_present)
+{
+  // Active-cut systems used to default this solve off because their dt-only
+  // operator contains exact zero rows outside the retained physical domain.
+  // TimeLoop now regularizes precisely those rows, so an active cut is not a
+  // reason to replace the PDE-consistent initial rate with zero.  Keep the
+  // argument explicit so this policy remains covered at the application
+  // boundary if active-cut startup handling changes again.
+  (void)active_cut_domain_present;
+  return parseBoolEnv("SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT", true);
 }
 
 double parseDoubleEnv(const char* name, double default_value)
@@ -671,6 +963,53 @@ parseLevelSetTransportForm(const std::string& raw)
       "'advective' or 'conservative_divergence'.");
 }
 
+svmp::FE::level_set::LevelSetVelocitySource
+parseLevelSetVelocitySource(const std::string& raw)
+{
+  const auto value = normalized_token(raw);
+  using Source = svmp::FE::level_set::LevelSetVelocitySource;
+  if (value.empty() || value == "coupled" || value == "coupledfield" ||
+      value == "unknown") {
+    return Source::CoupledField;
+  }
+  if (value == "prescribed" || value == "prescribeddata" ||
+      value == "data") {
+    return Source::PrescribedData;
+  }
+  if (value == "constant" || value == "constantvector") {
+    return Source::ConstantVector;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Level-set Velocity_source must be one of "
+      "'coupled_field', 'prescribed_data', or 'constant_vector'.");
+}
+
+std::array<svmp::FE::Real, 3> parseLevelSetVector3(
+    const std::string& raw,
+    const char* parameter_name)
+{
+  std::string normalized = raw;
+  std::replace(normalized.begin(), normalized.end(), ',', ' ');
+  std::istringstream input(normalized);
+  std::array<svmp::FE::Real, 3> result{};
+  for (auto& value : result) {
+    double parsed = 0.0;
+    if (!(input >> parsed) || !std::isfinite(parsed)) {
+      throw std::runtime_error(
+          std::string("[svMultiPhysics::Application] ") + parameter_name +
+          " must contain exactly three finite numeric components.");
+    }
+    value = static_cast<svmp::FE::Real>(parsed);
+  }
+  std::string trailing;
+  if (input >> trailing) {
+    throw std::runtime_error(
+        std::string("[svMultiPhysics::Application] ") + parameter_name +
+        " must contain exactly three finite numeric components.");
+  }
+  return result;
+}
+
 std::string step_reject_reason_to_string(svmp::FE::timestepping::StepRejectReason r)
 {
   using svmp::FE::timestepping::StepRejectReason;
@@ -711,11 +1050,102 @@ const EquationParameters* primary_solver_equation(const Parameters& params)
   return first;
 }
 
+std::vector<const EquationParameters*>
+monolithic_solver_control_equations(const Parameters& params)
+{
+  std::vector<const EquationParameters*> coupled;
+  for (auto* equation : params.equation_parameters) {
+    if (equation != nullptr && equation->coupled.defined() &&
+        equation->coupled.value()) {
+      coupled.push_back(equation);
+    }
+  }
+  if (!coupled.empty()) {
+    return coupled;
+  }
+
+  if (const auto* primary = primary_solver_equation(params)) {
+    return {primary};
+  }
+  return {};
+}
+
+void applyMonolithicEquationNewtonControls(
+    const Parameters& params,
+    svmp::FE::timestepping::NewtonOptions& options)
+{
+  const auto equations = monolithic_solver_control_equations(params);
+  std::optional<int> maximum_iterations;
+  std::optional<int> minimum_iterations;
+  std::optional<double> strictest_tolerance;
+  std::optional<double> strictest_non_level_set_tolerance;
+
+  for (const auto* equation : equations) {
+    if (equation->max_iterations.defined()) {
+      maximum_iterations = maximum_iterations.has_value()
+          ? std::max(*maximum_iterations, equation->max_iterations.value())
+          : equation->max_iterations.value();
+    }
+    if (equation->min_iterations.defined()) {
+      const int value = std::max(0, equation->min_iterations.value());
+      minimum_iterations = minimum_iterations.has_value()
+          ? std::max(*minimum_iterations, value)
+          : value;
+    }
+    if (equation->tolerance.defined()) {
+      const double value = equation->tolerance.value();
+      if (value > 0.0) {
+        strictest_tolerance = strictest_tolerance.has_value()
+            ? std::min(*strictest_tolerance, value)
+            : value;
+        const auto type = equation->type.defined()
+            ? normalized_token(equation->type.value())
+            : std::string{};
+        if (type != "levelset" && type != "levelsettransport") {
+          strictest_non_level_set_tolerance =
+              strictest_non_level_set_tolerance.has_value()
+              ? std::min(*strictest_non_level_set_tolerance, value)
+              : value;
+        }
+      }
+    }
+  }
+
+  if (maximum_iterations.has_value()) {
+    options.max_iterations = *maximum_iterations;
+  }
+  if (minimum_iterations.has_value()) {
+    options.min_iterations = *minimum_iterations;
+  }
+  if (strictest_tolerance.has_value()) {
+    // Coupled level-set equations receive an owned/global named-field gate
+    // below.  Apply the monolithic relative criterion to the remaining
+    // equations so a dimensionally smaller transport block cannot force an
+    // unrelated momentum/pressure block to its tolerance (or be masked by
+    // it).  If the solve contains only level-set equations, retain their
+    // strictest tolerance as the monolithic fallback.
+    options.rel_tolerance = strictest_non_level_set_tolerance.value_or(
+        *strictest_tolerance);
+    // Equation <Tolerance> is a relative nonlinear target, not a raw-residual
+    // absolute tolerance.  Preserve Newton's configured absolute tolerance;
+    // callers may override it explicitly through the Newton options/env path.
+  }
+}
+
 struct LevelSetMaintenanceRequest {
+  struct OpenBoundary {
+    std::string face_name{};
+    bool inflow{false};
+    std::optional<svmp::FE::Real> literal_inflow_value{};
+  };
+
   std::string level_set_field_name{"level_set"};
   double isovalue{0.0};
   svmp::FE::level_set::LevelSetTransportForm transport_form{
       svmp::FE::level_set::LevelSetTransportForm::Advective};
+  svmp::FE::level_set::LevelSetVelocityOptions velocity{};
+  svmp::FE::level_set::LevelSetBoundPreservingOptions bound_preserving{};
+  std::vector<OpenBoundary> open_boundaries{};
   svmp::FE::level_set::LevelSetReinitializationOptions reinitialization{};
   svmp::FE::level_set::LevelSetVolumeCorrectionOptions volume_correction{};
   std::optional<ActiveCutVolumeRequest> volume_cut_request{};
@@ -725,6 +1155,9 @@ struct LevelSetMaintenanceRequest {
   svmp::FE::level_set::LevelSetCurvatureProjectionOptions curvature_projection{};
   bool volume_target_initialized{false};
   svmp::FE::Real volume_target{0.0};
+  svmp::FE::Real volume_correction_reference_minimum_edge_length{0.0};
+  svmp::FE::Real cumulative_volume_correction_interface_displacement{0.0};
+  svmp::FE::Real cumulative_volume_correction_contact_line_displacement{0.0};
 };
 
 struct CurvatureProjectionCacheEntry {
@@ -751,16 +1184,84 @@ struct CurvatureProjectionCache {
 };
 
 struct LevelSetAdvectionVelocityRequest {
+  struct WallConstraint {
+    std::string face_name{};
+    // Preserve the raw Navier--Stokes Effective_direction metadata until the
+    // mesh dimension is known.  Empty (and all-zero/all-active) directions
+    // have the same all-component semantics as the production NS translator
+    // for a homogeneous Dirichlet condition.
+    std::vector<int> effective_direction{};
+  };
+
   std::string level_set_field_name{"level_set"};
   std::string domain_id{"free_surface"};
   std::string source_velocity_field_name{"Velocity"};
   std::string target_velocity_field_name{"LevelSetAdvectionVelocity"};
-  std::string extension_method{"nearest_active_vertex"};
+  std::string operator_tag{"level_set"};
+  std::string extension_method{"wall_compatible_normal"};
+  int extension_band_layers{4};
+  bool enforce_wall_impermeability{true};
+  std::vector<std::string> wall_face_names{};
+  std::vector<WallConstraint> wall_constraints{};
   double isovalue{0.0};
   int requested_interface_marker{-1};
   std::optional<std::size_t> active_cut_request_index{};
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
 };
+
+std::vector<std::string> splitFaceNameList(std::string_view raw)
+{
+  std::vector<std::string> names;
+  std::string token;
+  const auto append = [&]() {
+    const auto value = trim_copy(token);
+    if (!value.empty() &&
+        std::find(names.begin(), names.end(), value) == names.end()) {
+      names.push_back(value);
+    }
+    token.clear();
+  };
+  for (const char character : raw) {
+    if (character == ';' || character == ',') {
+      append();
+    } else {
+      token.push_back(character);
+    }
+  }
+  append();
+  return names;
+}
+
+std::array<bool, 3> strongZeroVelocityComponentMask(
+    std::span<const int> effective_direction,
+    int dimension)
+{
+  if (dimension <= 0 || dimension > 3) {
+    throw std::invalid_argument(
+        "strong zero-velocity component mask requires dimension 1, 2, or 3");
+  }
+  std::array<bool, 3> mask{true, true, true};
+  if (effective_direction.empty()) {
+    return mask;
+  }
+
+  std::array<bool, 3> requested{false, false, false};
+  int active_count = 0;
+  for (int d = 0; d < dimension; ++d) {
+    const auto component = static_cast<std::size_t>(d);
+    requested[component] =
+        component < effective_direction.size() &&
+        effective_direction[component] != 0;
+    active_count += requested[component] ? 1 : 0;
+  }
+  // Match NavierStokesRegister.cpp exactly for a zero-valued steady
+  // Dirichlet BC: only a nonempty proper subset changes the default
+  // all-component constraint.
+  if (active_count > 0 && active_count < dimension) {
+    mask = requested;
+  }
+  return mask;
+}
 
 struct ActiveCutContextRefreshReport {
   bool refreshed{false};
@@ -780,6 +1281,9 @@ struct ActiveCutContextRefreshReport {
   std::size_t backend_interface_quadrature_point_count{0};
   std::size_t cut_adjacent_facets{0};
   std::size_t basis_cache_entries{0};
+  // Cache/refresh counters and backend elapsed time are summed rank-local work
+  // telemetry and deliberately include generated ghost-cell work.  Physical
+  // domain counts and measures above are owned-cell global totals.
   std::size_t generated_cell_cache_hits{0};
   std::size_t generated_cell_cache_misses{0};
   std::size_t generated_cell_cache_unchanged_dof_hits{0};
@@ -837,6 +1341,10 @@ struct ActiveSideRegionSummary {
   svmp::FE::Real min_volume_fraction{std::numeric_limits<svmp::FE::Real>::infinity()};
   svmp::FE::Real max_volume_fraction{-std::numeric_limits<svmp::FE::Real>::infinity()};
 };
+
+double globalSumDouble(double local, const svmp::MeshComm& comm);
+std::size_t globalSumSize(std::size_t local, const svmp::MeshComm& comm);
+bool globalAnyBool(bool local, const svmp::MeshComm& comm);
 
 struct CutAdjacentFacetScaleSummary {
   std::size_t metadata_count{0};
@@ -907,6 +1415,17 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
     if (request.target_velocity_field_name.empty()) {
       request.target_velocity_field_name = "LevelSetAdvectionVelocity";
     }
+    if (const auto operator_tag = first_defined_parameter(
+            eq_params, {"Operator_tag", "OperatorTag"})) {
+      request.operator_tag = trim_copy(*operator_tag);
+    } else if (first_defined_bool_parameter(eq_params, {"Coupled"})
+                   .value_or(false)) {
+      request.operator_tag = "equations";
+    }
+    if (request.operator_tag.empty()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Wet-extension operator tag must be non-empty.");
+    }
     if (request.target_velocity_field_name == request.source_velocity_field_name) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Wet-extension level-set advection requires "
@@ -935,19 +1454,177 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
           token != "nearestinterfacepoint" &&
           token != "nearestinterfacevertex" &&
           token != "nearestinterface" &&
-          token != "closestinterfacepoint") {
+          token != "closestinterfacepoint" &&
+          token != "wallcompatiblenormal" &&
+          token != "normalextension" &&
+          token != "graphnormalextension") {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Unsupported wet-extension level-set "
             "advection velocity method '" + trim_copy(*extension_method) +
-            "'. Implemented methods are nearest_active_vertex and nearest_interface_point.");
+            "'. The supported method is wall_compatible_normal; legacy nearest-* "
+            "names are accepted as aliases for the corrected method.");
       }
-      if (token == "nearestinterfacepoint" ||
-          token == "nearestinterfacevertex" ||
-          token == "nearestinterface" ||
-          token == "closestinterfacepoint") {
-        request.extension_method = "nearest_interface_point";
-      } else {
-        request.extension_method = "nearest_active_vertex";
+      request.extension_method = "wall_compatible_normal";
+    }
+    if (const auto band_layers = first_defined_int_parameter(
+            eq_params,
+            {"Wet_extension_band_layers", "WetExtensionBandLayers",
+             "Advection_velocity_extension_band_layers",
+             "AdvectionVelocityExtensionBandLayers"})) {
+      if (*band_layers <= 0) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Wet-extension band layers must be positive.");
+      }
+      request.extension_band_layers = *band_layers;
+    }
+    if (const auto wall_compatible = first_defined_bool_parameter(
+            eq_params,
+            {"Wet_extension_enforce_wall_impermeability",
+             "WetExtensionEnforceWallImpermeability"})) {
+      request.enforce_wall_impermeability = *wall_compatible;
+    }
+    bool explicit_wall_faces = false;
+    if (const auto wall_faces = first_defined_parameter(
+            eq_params,
+            {"Wet_extension_wall_faces", "WetExtensionWallFaces",
+             "Advection_velocity_extension_wall_faces",
+             "AdvectionVelocityExtensionWallFaces"})) {
+      request.wall_face_names = splitFaceNameList(*wall_faces);
+      explicit_wall_faces = true;
+      if (request.enforce_wall_impermeability &&
+          request.wall_face_names.empty()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Wet-extension wall-face list is empty.");
+      }
+    }
+    if (request.enforce_wall_impermeability) {
+      const auto append_wall_faces = [&](std::string_view raw) {
+        for (auto name : splitFaceNameList(raw)) {
+          if (std::find(request.wall_face_names.begin(),
+                        request.wall_face_names.end(),
+                        name) == request.wall_face_names.end()) {
+            request.wall_face_names.push_back(std::move(name));
+          }
+        }
+      };
+      const auto incompatibility = [](
+          const BoundaryConditionParameters& boundary)
+          -> std::optional<std::string> {
+        if (!boundary.type.defined()) {
+          return std::string{"has no boundary-condition type"};
+        }
+        const auto boundary_type = normalized_token(boundary.type.value());
+        if (boundary_type != "dir" && boundary_type != "dirichlet") {
+          return std::string{"is not a velocity Dirichlet condition"};
+        }
+        if (boundary.weakly_applied.value()) {
+          return std::string{"is weakly applied, not a strong constraint"};
+        }
+        const auto time_dependence =
+            normalized_token(boundary.time_dependence.value());
+        if (!time_dependence.empty() && time_dependence != "steady") {
+          return std::string{"is time/spatially varying and cannot be proven homogeneous"};
+        }
+        const auto value = boundary.value.value();
+        if (!std::isfinite(value) || std::abs(value) > 1.0e-14) {
+          return std::string{"prescribes a nonzero or non-finite velocity"};
+        }
+        if ((boundary.temporal_and_spatial_values_file_path.defined() &&
+             !trim_copy(boundary.temporal_and_spatial_values_file_path.value())
+                  .empty()) ||
+            (boundary.temporal_values_file_path.defined() &&
+             !trim_copy(boundary.temporal_values_file_path.value()).empty()) ||
+            (boundary.spatial_values_file_path.defined() &&
+             !trim_copy(boundary.spatial_values_file_path.value()).empty()) ||
+            (boundary.bct_file_path.defined() &&
+             !trim_copy(boundary.bct_file_path.value()).empty())) {
+          return std::string{"uses prescribed data whose zero component mask is not statically known"};
+        }
+        return std::nullopt;
+      };
+
+      const EquationParameters* velocity_equation = nullptr;
+      for (const auto* candidate_equation : params.equation_parameters) {
+        if (candidate_equation == nullptr ||
+            !candidate_equation->type.defined() ||
+            lower_copy(candidate_equation->type.value()) != "fluid") {
+          continue;
+        }
+        if (velocity_equation != nullptr) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Wet-extension wall constraint "
+              "discovery found multiple fluid equations. The owner of source "
+              "velocity field '" + request.source_velocity_field_name +
+              "' is ambiguous.");
+        }
+        velocity_equation = candidate_equation;
+      }
+      if (velocity_equation == nullptr) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Wet-extension wall constraint "
+            "discovery requires exactly one fluid equation owning source "
+            "velocity field '" + request.source_velocity_field_name + "'.");
+      }
+
+      for (auto* boundary : velocity_equation->boundary_conditions) {
+        if (boundary == nullptr) {
+          continue;
+        }
+        if (!explicit_wall_faces && boundary->name.defined() &&
+            !incompatibility(*boundary).has_value()) {
+            append_wall_faces(boundary->name.value());
+        }
+        if (!explicit_wall_faces) {
+          const auto boundary_params = boundary->get_parameter_list();
+          if (const auto contact_walls = first_defined_parameter(
+                  boundary_params,
+                  {"Contact_line_wall_faces", "ContactLineWallFaces",
+                   "Wall_boundary_faces", "WallBoundaryFaces"})) {
+            append_wall_faces(*contact_walls);
+          }
+        }
+      }
+
+      for (const auto& wall_face_name : request.wall_face_names) {
+        const BoundaryConditionParameters* matching_dirichlet = nullptr;
+        for (auto* boundary : velocity_equation->boundary_conditions) {
+          if (boundary == nullptr || !boundary->name.defined() ||
+              trim_copy(boundary->name.value()) != wall_face_name ||
+              !boundary->type.defined()) {
+            continue;
+          }
+          const auto boundary_type = normalized_token(boundary->type.value());
+          if (boundary_type != "dir" && boundary_type != "dirichlet") {
+            continue;
+          }
+          if (matching_dirichlet != nullptr) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Wet-extension wall face '" +
+                wall_face_name +
+                "' has multiple velocity Dirichlet records in its owning "
+                "fluid equation; its strong zero-component mask is ambiguous.");
+          }
+          matching_dirichlet = boundary;
+        }
+        if (matching_dirichlet == nullptr) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Wet-extension wall face '" +
+              wall_face_name +
+              "' has no matching velocity Dirichlet condition. Wall-compatible "
+              "extension requires an actual strong homogeneous velocity constraint.");
+        }
+        if (const auto reason = incompatibility(*matching_dirichlet)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Wet-extension wall face '" +
+              wall_face_name + "' " + *reason + ".");
+        }
+        request.wall_constraints.push_back(
+            LevelSetAdvectionVelocityRequest::WallConstraint{
+                .face_name = wall_face_name,
+                .effective_direction =
+                    matching_dirichlet->effective_direction.defined()
+                        ? matching_dirichlet->effective_direction.value()
+                        : std::vector<int>{}});
       }
     }
 
@@ -1062,6 +1739,53 @@ const char* retainedVolumeSidesName(
              : "active_only";
 }
 
+// Moving-quadrature consistency probe (SVMP_CUT_RULE_DUMP=1): emit every
+// retained generated volume rule with its physical quadrature points and
+// weights so an offline tool can integrate known monomials over the active
+// domain and compare against the analytic moving-domain integrals (exact in
+// the MMS family). One block per accepted step.
+void dumpActiveCutVolumeRulesForProbe(const svmp::FE::systems::FESystem& system,
+                                      int step)
+{
+  const auto* context = system.cutIntegrationContext();
+  if (context == nullptr) {
+    return;
+  }
+  const auto& rules = context->volumeRules();
+  const auto& metadata = context->metadata();
+  std::ostringstream oss;
+  oss << std::setprecision(17);
+  oss << "CUT_RULE_DUMP step=" << step << " n_rules=" << rules.size() << "\n";
+  for (std::size_t i = 0; i < rules.size() && i < metadata.size(); ++i) {
+    const auto& rule = rules[i];
+    if (rule.kind != svmp::FE::geometry::CutQuadratureKind::Volume) {
+      continue;
+    }
+    const auto& meta = metadata[i];
+    const auto cell = meta.cell >= 0 ? meta.cell : meta.parent_entity;
+    const auto side_name = [](svmp::FE::geometry::CutIntegrationSide s) {
+      return s == svmp::FE::geometry::CutIntegrationSide::Negative   ? "neg"
+             : s == svmp::FE::geometry::CutIntegrationSide::Positive ? "pos"
+                                                                     : "ifc";
+    };
+    const char* side = side_name(rule.side);
+    oss << "CUT_RULE step=" << step << " idx=" << i << " cell=" << cell
+        << " side=" << side << " mside=" << side_name(meta.side)
+        << " full=" << (rule.full_cell_equivalent ? 1 : 0)
+        << " measure=" << rule.measure
+        << " parent_measure=" << rule.parent_measure
+        << " vf=" << rule.volume_fraction
+        << " mvf=" << meta.volume_fraction
+        << " n_qp=" << rule.points.size() << "\n";
+    for (const auto& q : rule.points) {
+      oss << "CUT_QP step=" << step << " cell=" << cell << " side=" << side
+          << " x=" << q.point[0] << " y=" << q.point[1] << " z=" << q.point[2]
+          << " w=" << q.weight << "\n";
+    }
+  }
+  application::core::oopCout() << oss.str() << std::flush;
+}
+
 std::vector<const svmp::FE::geometry::CutQuadratureRule*>
 retainedVolumeRulePointersForSide(
     const std::vector<svmp::FE::geometry::CutQuadratureRule>& rules,
@@ -1087,13 +1811,18 @@ retainedVolumeRulePointersForSide(
 ActiveSideRegionSummary summarizeActiveSideRegions(
     const svmp::FE::interfaces::LevelSetInterfaceDomain& domain,
     LevelSetActiveSide active_side,
-    std::size_t n_cells)
+    const svmp::FE::assembly::IMeshAccess& mesh)
 {
   ActiveSideRegionSummary summary;
+  const auto n_cells = static_cast<std::size_t>(
+      std::max<svmp::FE::GlobalIndex>(0, mesh.numCells()));
   std::vector<double> wet_fraction(n_cells, 0.0);
   const auto side = cutIntegrationSide(active_side);
   for (const auto& region : domain.volumeRegions()) {
-    if (!region.active() || region.side != side) {
+    const auto parent_cell =
+        static_cast<svmp::FE::GlobalIndex>(region.parent_cell);
+    if (!region.active() || region.side != side || parent_cell < 0 ||
+        parent_cell >= mesh.numCells() || !mesh.isOwnedCell(parent_cell)) {
       continue;
     }
     if (!region.full_cell_equivalent &&
@@ -1140,7 +1869,11 @@ ActiveSideRegionSummary summarizeActiveSideRegions(
   }
 
   constexpr double fraction_tol = 1.0e-12;
-  for (const auto fraction : wet_fraction) {
+  for (std::size_t cell = 0; cell < wet_fraction.size(); ++cell) {
+    if (!mesh.isOwnedCell(static_cast<svmp::FE::GlobalIndex>(cell))) {
+      continue;
+    }
+    const auto fraction = wet_fraction[cell];
     if (fraction <= fraction_tol) {
       ++summary.full_dry_cell_count;
     } else if (fraction >= 1.0 - fraction_tol) {
@@ -1298,6 +2031,57 @@ std::vector<svmp::FE::MeshIndex> activeCutCellsForMarkerAndSide(
   return cells;
 }
 
+std::optional<int> configuredInterfaceVelocityMarker(
+    const svmp::FE::systems::FESystem& system,
+    const LevelSetAdvectionVelocityRequest& request)
+{
+  const auto* cut_context = system.cutIntegrationContext();
+  if (request.requested_interface_marker >= 0) {
+    return request.requested_interface_marker;
+  }
+
+  // Reconstruct the lifecycle's stable marker for the usual no-explicit-
+  // marker configuration only when this request has keyed active-cut
+  // provenance.  Integer-only system/context registration is insufficient:
+  // an unregistered nodal request could otherwise match an unrelated marker.
+  // The lifecycle registry rejects hash collisions rather than probing them.
+  const auto phi_field = system.findFieldByName(request.level_set_field_name);
+  if (request.active_cut_request_index.has_value() &&
+      phi_field != svmp::FE::INVALID_FIELD_ID) {
+    svmp::FE::interfaces::GeneratedInterfaceMarkerKey key{};
+    key.source = svmp::FE::interfaces::LevelSetInterfaceSource::fromField(
+        phi_field);
+    key.domain_id = request.domain_id;
+    key.isovalue = request.isovalue;
+    key.requested_marker = -1;
+    const int stable_marker =
+        svmp::FE::interfaces::stableGeneratedInterfaceMarker(key);
+    if (system.isGeneratedEmbeddedInterfaceMarkerRegistered(stable_marker) ||
+        (cut_context != nullptr &&
+         (cut_context->hasExpectedGeneratedSourceValueRevision(stable_marker) ||
+          cut_context->hasGeneratedVolumeMarker(stable_marker) ||
+          cut_context->hasGeneratedInterfaceMarker(stable_marker)))) {
+      return stable_marker;
+    }
+  }
+
+  if (cut_context != nullptr &&
+      request.active_cut_request_index.has_value()) {
+    const auto& markers = cut_context->generatedVolumeMarkers();
+    const auto index = *request.active_cut_request_index;
+    if (index < markers.size()) {
+      return markers[index];
+    } else {
+      const auto& interface_markers =
+          cut_context->generatedInterfaceMarkers();
+      if (index < interface_markers.size()) {
+        return interface_markers[index];
+      }
+    }
+  }
+  return std::nullopt;
+}
+
 std::optional<int> interfaceVelocitySampleMarker(
     const svmp::FE::systems::FESystem& system,
     const LevelSetAdvectionVelocityRequest& request)
@@ -1306,24 +2090,7 @@ std::optional<int> interfaceVelocitySampleMarker(
   if (cut_context == nullptr) {
     return std::nullopt;
   }
-
-  std::optional<int> marker;
-  if (request.active_cut_request_index.has_value()) {
-    const auto& markers = cut_context->generatedVolumeMarkers();
-    const auto index = *request.active_cut_request_index;
-    if (index < markers.size()) {
-      marker = markers[index];
-    } else {
-      const auto& interface_markers =
-          cut_context->generatedInterfaceMarkers();
-      if (index < interface_markers.size()) {
-        marker = interface_markers[index];
-      }
-    }
-  }
-  if (!marker.has_value() && request.requested_interface_marker >= 0) {
-    marker = request.requested_interface_marker;
-  }
+  const auto marker = configuredInterfaceVelocityMarker(system, request);
   if (!marker.has_value() ||
       (!cut_context->hasGeneratedVolumeMarker(*marker) &&
        !cut_context->hasGeneratedInterfaceMarker(*marker))) {
@@ -1332,19 +2099,56 @@ std::optional<int> interfaceVelocitySampleMarker(
   return marker;
 }
 
+bool hasAuthoritativeInterfaceVelocityContext(
+    const svmp::FE::systems::FESystem& system,
+    const LevelSetAdvectionVelocityRequest& request)
+{
+  const auto marker = configuredInterfaceVelocityMarker(system, request);
+  const auto* cut_context = system.cutIntegrationContext();
+  if (!marker.has_value()) {
+    return false;
+  }
+
+  // The expected-source revision is registered even when this rank has no
+  // retained rules for the generated interface.  Likewise, the FESystem
+  // marker registration survives a locally empty cut context.  Either is an
+  // authoritative declaration: a rank-local empty candidate set must remain
+  // empty and must not be replaced by a nodal crossing search.
+  return system.isGeneratedEmbeddedInterfaceMarkerRegistered(*marker) ||
+         (cut_context != nullptr &&
+          (cut_context->hasExpectedGeneratedSourceValueRevision(*marker) ||
+           cut_context->hasGeneratedVolumeMarker(*marker) ||
+           cut_context->hasGeneratedInterfaceMarker(*marker)));
+}
+
 std::vector<svmp::FE::MeshIndex> interfaceVelocitySampleCandidateCells(
     const svmp::FE::systems::FESystem& system,
     const LevelSetAdvectionVelocityRequest& request)
 {
   const auto* cut_context = system.cutIntegrationContext();
   const auto marker = interfaceVelocitySampleMarker(system, request);
-  if (cut_context == nullptr || !marker.has_value() ||
-      !cut_context->hasGeneratedVolumeMarker(*marker)) {
+  if (cut_context == nullptr || !marker.has_value()) {
     return {};
   }
 
-  return activeCutCellsForMarkerAndSide(
-      *cut_context, *marker, request.active_side);
+  std::vector<svmp::FE::MeshIndex> cells;
+  if (cut_context->hasGeneratedVolumeMarker(*marker)) {
+    cells = activeCutCellsForMarkerAndSide(
+        *cut_context, *marker, request.active_side);
+  }
+  if (cut_context->hasGeneratedInterfaceMarker(*marker)) {
+    for (const auto* rule : cut_context->interfaceRulesForMarker(*marker)) {
+      if (rule == nullptr ||
+          rule->kind != svmp::FE::geometry::CutQuadratureKind::Interface ||
+          rule->provenance.parent_entity < 0) {
+        continue;
+      }
+      cells.push_back(rule->provenance.parent_entity);
+    }
+  }
+  std::sort(cells.begin(), cells.end());
+  cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
+  return cells;
 }
 
 std::vector<svmp::FE::MeshIndex> activeSupportCellsForMarkerAndSide(
@@ -1484,6 +2288,14 @@ const char* stateSyncPointName(
 {
   using Point = svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
   switch (point) {
+  case Point::OuterFixedPointState:
+    return "outer_fixed_point";
+  case Point::ProjectedOuterFixedPointState:
+    return "projected_outer_fixed_point";
+  case Point::EndpointCandidateState:
+    return "endpoint_candidate";
+  case Point::ProjectedEndpointCandidateState:
+    return "projected_endpoint_candidate";
   case Point::AcceptedNonlinearState:
     return "accepted";
   case Point::ResidualAssembly:
@@ -1496,6 +2308,14 @@ const char* stateSyncPointName(
     return "line_search_trial";
   case Point::RestoredNonlinearState:
     return "restored";
+  case Point::RestoredOuterFixedPointState:
+    return "restored_outer_fixed_point";
+  case Point::RestoredProjectedOuterFixedPointState:
+    return "restored_projected_outer_fixed_point";
+  case Point::RestoredTimeStepState:
+    return "restored_time_step";
+  case Point::RestoredProjectedTimeStepState:
+    return "restored_projected_time_step";
   case Point::FinalResidualAssembly:
     return "final_residual";
   }
@@ -1510,15 +2330,25 @@ bool allowCachedCurvatureAfterProjectionFailure(
          parseBoolEnv("SVMP_CURVATURE_REUSE_CACHE_ON_TRIAL_FAILURE", false);
 }
 
-std::string highOrderGeometryTangentPolicySummary(
+bool synchronizeTransientLineSearchTrials(
+    bool residual_defining_state_changes)
+{
+  // R(u, G(u)) is the nonlinear residual when generated cuts, projected
+  // curvature, velocity extension, or state-dependent constraints are part of
+  // the problem definition.  Backtracking must evaluate that deterministic
+  // residual at each trial.  Freezing G at the previous iterate instead
+  // globalizes a different Picard surrogate and can accept a step that
+  // increases the actual residual.  Keep an explicit opt-out for controlled
+  // legacy comparisons.
+  return parseBoolEnv("SVMP_SYNC_LINE_SEARCH_TRIALS",
+                      residual_defining_state_changes);
+}
+
+std::string geometryTangentPolicySummary(
     const std::vector<ActiveCutVolumeRequest>& requests)
 {
   std::set<std::string> policies;
   for (const auto& request : requests) {
-    if (request.geometry_mode !=
-        svmp::FE::level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit) {
-      continue;
-    }
     policies.insert(svmp::FE::level_set::geometryTangentPolicyName(
         request.geometry_tangent_policy));
   }
@@ -1535,6 +2365,40 @@ std::string highOrderGeometryTangentPolicySummary(
     oss << policy;
   }
   return oss.str();
+}
+
+void applyJacobianCheckGeometryProvenance(
+    svmp::FE::timestepping::NewtonOptions& options,
+    const std::vector<ActiveCutVolumeRequest>& requests,
+    bool refresh_generated_geometry_within_solve,
+    bool has_frozen_algebraic_level_set_extension = false,
+    bool use_external_state_fixed_point = false)
+{
+  if (use_external_state_fixed_point && !requests.empty()) {
+    options.jacobian_check_geometry_mode =
+        svmp::FE::timestepping::JacobianCheckGeometryMode::FixedGeometry;
+    const auto policy = geometryTangentPolicySummary(requests);
+    options.jacobian_check_geometry_tangent_policy =
+        "outer-fixed-point frozen geometry";
+    if (!policy.empty()) {
+      options.jacobian_check_geometry_tangent_policy += " (" + policy + ")";
+    }
+  } else if (refresh_generated_geometry_within_solve && !requests.empty()) {
+    // A finite-difference perturbation traverses R(u, G(u)) whenever the
+    // synchronization callback regenerates any active cut geometry.  This is
+    // true for LinearCorner as well as HighOrderImplicit requests; describing
+    // the former as fixed geometry hides the same omitted dG/du terms from the
+    // Jacobian diagnostic.
+    options.jacobian_check_geometry_mode =
+        svmp::FE::timestepping::JacobianCheckGeometryMode::RefreshedGeometry;
+    options.jacobian_check_geometry_tangent_policy =
+        geometryTangentPolicySummary(requests);
+  } else if (has_frozen_algebraic_level_set_extension) {
+    options.jacobian_check_geometry_mode =
+        svmp::FE::timestepping::JacobianCheckGeometryMode::FixedGeometry;
+    options.jacobian_check_geometry_tangent_policy =
+        "fixed-topology algebraic wet-extension solve";
+  }
 }
 
 void logCutTopologyChange(
@@ -1582,6 +2446,7 @@ void logCutTopologyChange(
         << (report.backend_volume_quadrature_point_count +
             report.backend_interface_quadrature_point_count)
         << " backend_elapsed_seconds=" << report.backend_elapsed_seconds
+        << " generated_cell_work_scope=summed_rank_local_including_ghost_cells"
         << " generated_cell_cache_hits="
         << report.generated_cell_cache_hits
         << " generated_cell_cache_misses="
@@ -1601,6 +2466,7 @@ void logCutTopologyChange(
         << " process_vm_kb=" << report.process_vm_kb
         << " process_rss_kb=" << report.process_rss_kb
         << " basis_cache_entries=" << report.basis_cache_entries
+        << " cut_adjacent_scope=summed_rank_local_including_ghost_cells"
         << " cut_adjacent_facets=" << report.cut_adjacent_facets
         << " negative_volume=" << report.negative_volume
         << " negative_reference_volume=" << report.negative_volume
@@ -1615,9 +2481,11 @@ void logCutTopologyChange(
 
 void logCornerLinearizedCutWarningOnce(
     const ActiveCutVolumeRequest& request,
-    const svmp::FE::level_set::LevelSetGeneratedInterfaceResult& result)
+    const svmp::FE::level_set::LevelSetGeneratedInterfaceResult& result,
+    std::size_t global_corner_linearized_cell_count,
+    std::size_t global_cell_count)
 {
-  if (result.corner_linearized_cell_count == 0u) {
+  if (global_corner_linearized_cell_count == 0u) {
     return;
   }
 
@@ -1636,8 +2504,8 @@ void logCornerLinearizedCutWarningOnce(
       << " field='" << request.level_set_field_name << "'"
       << " domain_id='" << request.domain_id << "'"
       << " corner_linearized_cells="
-      << result.corner_linearized_cell_count
-      << " cell_count=" << result.cell_count
+      << global_corner_linearized_cell_count
+      << " cell_count=" << global_cell_count
       << " max_cell_node_count=" << result.max_cell_node_count
       << " max_corner_node_count=" << result.max_corner_node_count
       << " diagnostic=high_order_level_set_cut_uses_corners"
@@ -1683,7 +2551,8 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
     const std::vector<ActiveCutVolumeRequest>& requests,
     const svmp::FE::assembly::CutIntegrationContext* cut_context,
     const svmp::FE::assembly::IMeshAccess& mesh,
-    std::size_t n_cells)
+    std::size_t n_cells,
+    const svmp::MeshComm& comm)
 {
   std::vector<WetVolumeDiagnostic> diagnostics;
   if (requests.empty() || cut_context == nullptr) {
@@ -1713,8 +2582,23 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
     diagnostic.marker = *marker;
     diagnostic.active_side = request.active_side;
     diagnostic.isovalue = request.isovalue;
-    const auto measure_summary =
+    const auto local_measure_summary =
         application::core::collectCutVolumeMeasures(mesh, rules);
+    application::core::CutVolumeMeasureSummary measure_summary;
+    measure_summary.reference_measure = static_cast<svmp::FE::Real>(
+        globalSumDouble(
+            static_cast<double>(local_measure_summary.reference_measure),
+            comm));
+    measure_summary.physical_measure = static_cast<svmp::FE::Real>(
+        globalSumDouble(
+            static_cast<double>(local_measure_summary.physical_measure),
+            comm));
+    measure_summary.rule_count =
+        globalSumSize(local_measure_summary.rule_count, comm);
+    measure_summary.physical_rule_count =
+        globalSumSize(local_measure_summary.physical_rule_count, comm);
+    measure_summary.skipped_physical_rule_count =
+        globalSumSize(local_measure_summary.skipped_physical_rule_count, comm);
     diagnostic.reference_wet_volume = measure_summary.reference_measure;
     diagnostic.physical_wet_volume = measure_summary.physical_measure;
     diagnostic.volume_rule_count = measure_summary.rule_count;
@@ -1729,7 +2613,8 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
     for (const auto* rule : rules) {
       if (rule != nullptr) {
         const auto cell = rule->provenance.parent_entity;
-        if (cell >= 0 && static_cast<std::size_t>(cell) < wet_fraction.size()) {
+        if (cell >= 0 && static_cast<std::size_t>(cell) < wet_fraction.size() &&
+            mesh.isOwnedCell(cell)) {
           wet_fraction[static_cast<std::size_t>(cell)] = std::clamp(
               wet_fraction[static_cast<std::size_t>(cell)] +
                   static_cast<double>(rule->volume_fraction),
@@ -1739,7 +2624,11 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
       }
     }
     constexpr double fraction_tol = 1.0e-12;
-    for (const auto fraction : wet_fraction) {
+    for (std::size_t cell = 0; cell < wet_fraction.size(); ++cell) {
+      if (!mesh.isOwnedCell(static_cast<svmp::FE::GlobalIndex>(cell))) {
+        continue;
+      }
+      const auto fraction = wet_fraction[cell];
       if (fraction <= fraction_tol) {
         ++diagnostic.full_dry_cell_count;
       } else if (fraction >= 1.0 - fraction_tol) {
@@ -1748,6 +2637,12 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
         ++diagnostic.cut_cell_count;
       }
     }
+    diagnostic.cut_cell_count =
+        globalSumSize(diagnostic.cut_cell_count, comm);
+    diagnostic.full_wet_cell_count =
+        globalSumSize(diagnostic.full_wet_cell_count, comm);
+    diagnostic.full_dry_cell_count =
+        globalSumSize(diagnostic.full_dry_cell_count, comm);
     diagnostics.push_back(std::move(diagnostic));
   }
 
@@ -1955,13 +2850,15 @@ void logWetVolumeDiagnostics(
     const svmp::FE::assembly::CutIntegrationContext* cut_context,
     const svmp::FE::assembly::IMeshAccess& mesh,
     std::size_t n_cells,
+    const svmp::MeshComm& comm,
     int step,
     double time,
     std::map<std::string, svmp::FE::Real>& initial_wet_volume_by_key)
 {
   logActiveCutVolumeAvailabilityWarnings(requests, cut_context, step, time);
   const auto diagnostics =
-      collectWetVolumeDiagnostics(requests, cut_context, mesh, n_cells);
+      collectWetVolumeDiagnostics(
+          requests, cut_context, mesh, n_cells, comm);
   const double drift_warning_threshold =
       parseDoubleEnv("SVMP_WET_VOLUME_DRIFT_WARNING", 1.0e-3);
   for (const auto& diagnostic : diagnostics) {
@@ -2119,6 +3016,133 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
       request.transport_form = parseLevelSetTransportForm(*form);
     }
 
+    if (const auto velocity_field = first_defined_parameter(
+            eq_params,
+            {"Velocity_field_name", "VelocityFieldName",
+             "Advection_velocity_field", "AdvectionVelocityField"})) {
+      request.velocity.field_name = trim_copy(*velocity_field);
+    }
+    if (const auto velocity_source = first_defined_parameter(
+            eq_params, {"Velocity_source", "VelocitySource"})) {
+      request.velocity.source = parseLevelSetVelocitySource(*velocity_source);
+    }
+    const bool wet_extension_enabled =
+        first_defined_bool_parameter(
+            eq_params,
+            {"Use_wet_extension_advection_velocity",
+             "UseWetExtensionAdvectionVelocity",
+             "Update_advection_velocity_from_wet_region",
+             "UpdateAdvectionVelocityFromWetRegion"})
+            .value_or(false) ||
+        first_defined_parameter(
+            eq_params,
+            {"Advection_velocity_from_field",
+             "AdvectionVelocityFromField",
+             "Source_velocity_field_name",
+             "SourceVelocityFieldName",
+             "Physical_velocity_field_name",
+             "PhysicalVelocityFieldName"})
+            .has_value();
+    if (wet_extension_enabled) {
+      // The translator promotes the generated coefficient to an algebraic
+      // unknown.  Maintenance/safety checks must read that solved field from
+      // the coupled state rather than looking for a prescribed buffer.
+      request.velocity.source =
+          svmp::FE::level_set::LevelSetVelocitySource::CoupledField;
+    }
+    if (const auto constant_velocity = first_defined_parameter(
+            eq_params,
+            {"Constant_velocity", "ConstantVelocity",
+             "Velocity_value", "VelocityValue"})) {
+      request.velocity.source =
+          svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
+      request.velocity.constant_value = parseLevelSetVector3(
+          *constant_velocity, "Constant_velocity");
+    }
+
+    if (const auto enabled = first_defined_bool_parameter(
+            eq_params,
+            {"Enable_bound_preserving_limiter",
+             "EnableBoundPreservingLimiter",
+             "Bound_preserving_limiter", "BoundPreservingLimiter"})) {
+      request.bound_preserving.enabled = *enabled;
+    }
+    if (const auto tolerance = first_defined_double_parameter(
+            eq_params,
+            {"Bound_preserving_bound_tolerance",
+             "BoundPreservingBoundTolerance"})) {
+      request.bound_preserving.bound_tolerance =
+          static_cast<svmp::FE::Real>(*tolerance);
+    }
+    if (const auto tolerance = first_defined_double_parameter(
+            eq_params,
+            {"Bound_preserving_sign_tolerance",
+             "BoundPreservingSignTolerance"})) {
+      request.bound_preserving.sign_tolerance =
+          static_cast<svmp::FE::Real>(*tolerance);
+    }
+    if (const auto tolerance = first_defined_double_parameter(
+            eq_params,
+            {"Bound_preserving_courant_tolerance",
+             "BoundPreservingCourantTolerance"})) {
+      request.bound_preserving.courant_tolerance =
+          static_cast<svmp::FE::Real>(*tolerance);
+    }
+    if (const auto maximum_courant = first_defined_double_parameter(
+            eq_params,
+            {"Bound_preserving_maximum_courant",
+             "BoundPreservingMaximumCourant"})) {
+      request.bound_preserving.maximum_courant =
+          static_cast<svmp::FE::Real>(*maximum_courant);
+    }
+    if (const auto enabled = first_defined_bool_parameter(
+            eq_params,
+            {"Bound_preserving_enforce_courant_limit",
+             "BoundPreservingEnforceCourantLimit"})) {
+      request.bound_preserving.enforce_courant_limit = *enabled;
+    }
+    if (const auto enabled = first_defined_bool_parameter(
+            eq_params,
+            {"Bound_preserving_enforce_impermeable_boundaries",
+             "BoundPreservingEnforceImpermeableBoundaries"})) {
+      request.bound_preserving.enforce_impermeable_boundaries = *enabled;
+    }
+    if (const auto tolerance = first_defined_double_parameter(
+            eq_params,
+            {"Bound_preserving_impermeable_normal_velocity_tolerance",
+             "BoundPreservingImpermeableNormalVelocityTolerance"})) {
+      request.bound_preserving.impermeable_normal_velocity_tolerance =
+          static_cast<svmp::FE::Real>(*tolerance);
+    }
+
+    for (auto* boundary : eq->boundary_conditions) {
+      if (boundary == nullptr || !boundary->type.defined() ||
+          !boundary->name.defined()) {
+        continue;
+      }
+      const auto boundary_type = normalized_token(boundary->type.value());
+      const bool inflow =
+          boundary_type == "levelsetinflow" || boundary_type == "inflow" ||
+          boundary_type == "levelsetdirichlet";
+      const bool outflow =
+          boundary_type == "levelsetoutflow" || boundary_type == "outflow";
+      if (!inflow && !outflow) {
+        continue;
+      }
+      LevelSetMaintenanceRequest::OpenBoundary open_boundary;
+      open_boundary.face_name = trim_copy(boundary->name.value());
+      open_boundary.inflow = inflow;
+      if (inflow) {
+        const auto boundary_params = boundary->get_parameter_list();
+        if (const auto value = first_defined_double_parameter(
+                boundary_params, {"Value", "Level_set_value"})) {
+          open_boundary.literal_inflow_value =
+              static_cast<svmp::FE::Real>(*value);
+        }
+      }
+      request.open_boundaries.push_back(std::move(open_boundary));
+    }
+
     if (const auto enabled =
             first_defined_bool_parameter(eq_params, {"Enable_reinitialization",
                                                     "Enable_level_set_reinitialization",
@@ -2165,6 +3189,13 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
       request.reinitialization.signed_distance_tolerance =
           static_cast<svmp::FE::Real>(*tol);
     }
+    if (const auto displacement = first_defined_double_parameter(
+            eq_params,
+            {"Reinitialization_max_zero_set_displacement",
+             "ReinitializationMaxZeroSetDisplacement"})) {
+      request.reinitialization.max_zero_set_displacement =
+          static_cast<svmp::FE::Real>(*displacement);
+    }
 
     if (const auto enabled =
             first_defined_bool_parameter(eq_params, {"Enable_volume_correction",
@@ -2208,6 +3239,30 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
             first_defined_int_parameter(eq_params, {"Volume_correction_max_iterations",
                                                    "VolumeCorrectionMaxIterations"})) {
       request.volume_correction.max_iterations = *max_it;
+    }
+    if (const auto relative_error = first_defined_double_parameter(
+            eq_params,
+            {"Volume_correction_minimum_relative_error",
+             "VolumeCorrectionMinimumRelativeError"})) {
+      request.volume_correction.minimum_relative_volume_error =
+          static_cast<svmp::FE::Real>(*relative_error);
+    }
+    if (const auto displacement_fraction = first_defined_double_parameter(
+            eq_params,
+            {"Volume_correction_maximum_interface_displacement_fraction",
+             "VolumeCorrectionMaximumInterfaceDisplacementFraction"})) {
+      request.volume_correction.maximum_interface_displacement_fraction =
+          static_cast<svmp::FE::Real>(*displacement_fraction);
+    }
+    if (const auto cumulative_displacement_fraction =
+            first_defined_double_parameter(
+                eq_params,
+                {"Volume_correction_maximum_cumulative_interface_displacement_fraction",
+                 "VolumeCorrectionMaximumCumulativeInterfaceDisplacementFraction"})) {
+      request.volume_correction
+          .maximum_cumulative_interface_displacement_fraction =
+          static_cast<svmp::FE::Real>(
+              *cumulative_displacement_fraction);
     }
 
     if (const auto enabled =
@@ -2254,7 +3309,9 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
     if (const auto tol =
             first_defined_double_parameter(
                 eq_params,
-                {"Curvature_projection_normal_equation_tolerance",
+                {"Curvature_projection_least_squares_rank_tolerance",
+                 "CurvatureProjectionLeastSquaresRankTolerance",
+                 "Curvature_projection_normal_equation_tolerance",
                  "CurvatureProjectionNormalEquationTolerance"})) {
       request.curvature_projection.normal_equation_tolerance =
           static_cast<svmp::FE::Real>(*tol);
@@ -2357,13 +3414,98 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
         request.level_set_field_name,
         request.isovalue);
 
-    if (request.reinitialization.enabled ||
+    if (request.bound_preserving.enabled ||
+        request.reinitialization.enabled ||
         request.volume_correction.enabled ||
         request.curvature_projection_enabled) {
       requests.push_back(std::move(request));
     }
   }
   return requests;
+}
+
+void applyCoupledLevelSetFieldResidualCriteria(
+    const svmp::FE::systems::FESystem& system,
+    const Parameters& params,
+    svmp::FE::timestepping::NewtonOptions& options)
+{
+  for (auto* equation : params.equation_parameters) {
+    if (equation == nullptr || !equation->type.defined() ||
+        !equation->coupled.defined() || !equation->coupled.value() ||
+        !equation->tolerance.defined() ||
+        !(equation->tolerance.value() > 0.0)) {
+      continue;
+    }
+    const auto type = normalized_token(equation->type.value());
+    if (type != "levelset" && type != "levelsettransport") {
+      continue;
+    }
+
+    std::string field_name{"level_set"};
+    const auto equation_parameters = equation->get_parameter_list();
+    if (const auto configured_name = first_defined_parameter(
+            equation_parameters,
+            {"Level_set_field_name", "LevelSetFieldName",
+             "Level_set_field", "LevelSetField", "Field_name"})) {
+      field_name = trim_copy(*configured_name);
+    }
+
+    const auto field = system.findFieldByName(field_name);
+    if (field == svmp::FE::INVALID_FIELD_ID) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Coupled level-set nonlinear "
+          "convergence could not find field '" +
+          field_name + "'.");
+    }
+    if (!system.fieldParticipatesInUnknownVector(field)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Coupled level-set nonlinear "
+          "convergence requires unknown field '" +
+          field_name + "'.");
+    }
+
+    const double tolerance = equation->tolerance.value();
+    // Preserve the equation-local residual floor.  The monolithic linear
+    // solve separately uses the strictest requested coupled tolerance, but a
+    // stricter tolerance on an unrelated equation must not silently tighten
+    // this named nonlinear block.  SimulationBuilder uses the same 1e-10
+    // legacy default when Absolute_tolerance is omitted.
+    const double absolute_tolerance =
+        equation->linear_solver.absolute_tolerance.defined()
+            ? equation->linear_solver.absolute_tolerance.value()
+            : 1.0e-10;
+    const double equation_absolute_tolerance =
+        absolute_tolerance > 0.0 && std::isfinite(absolute_tolerance)
+            ? absolute_tolerance
+            : 0.0;
+    const double effective_absolute_tolerance =
+        equation_absolute_tolerance;
+    const auto existing = std::find_if(
+        options.field_residual_criteria.begin(),
+        options.field_residual_criteria.end(),
+        [field](const auto& criterion) { return criterion.field == field; });
+    if (existing == options.field_residual_criteria.end()) {
+      options.field_residual_criteria.push_back(
+          svmp::FE::timestepping::NewtonOptions::FieldResidualCriterion{
+              .field = field,
+              .abs_tolerance = effective_absolute_tolerance,
+              .rel_tolerance = tolerance});
+    } else {
+      // Multiple equation declarations for the same transported field share
+      // one residual block.  Retain the strictest enabled absolute and
+      // relative targets instead of creating duplicate criteria that Newton
+      // rejects.
+      if (effective_absolute_tolerance > 0.0 &&
+          (!(existing->abs_tolerance > 0.0) ||
+           effective_absolute_tolerance < existing->abs_tolerance)) {
+        existing->abs_tolerance = effective_absolute_tolerance;
+      }
+      if (!(existing->rel_tolerance > 0.0) ||
+          tolerance < existing->rel_tolerance) {
+        existing->rel_tolerance = tolerance;
+      }
+    }
+  }
 }
 
 void logLevelSetMaintenanceCoverageDiagnostics(
@@ -2384,6 +3526,8 @@ void logLevelSetMaintenanceCoverageDiagnostics(
         << " field='" << request.level_set_field_name << "'"
         << " reinitialization="
         << (request.reinitialization.enabled ? "enabled" : "disabled")
+        << " bound_preserving="
+        << (request.bound_preserving.enabled ? "enabled" : "disabled")
         << " volume_correction="
         << (request.volume_correction.enabled ? "enabled" : "disabled")
         << " curvature_projection="
@@ -2400,6 +3544,11 @@ void logLevelSetMaintenanceCoverageDiagnostics(
         << request.reinitialization.cadence_steps
         << " volume_correction_cadence="
         << request.volume_correction.cadence_steps
+        << " volume_correction_maximum_interface_displacement_fraction="
+        << request.volume_correction.maximum_interface_displacement_fraction
+        << " volume_correction_maximum_cumulative_interface_displacement_fraction="
+        << request.volume_correction
+               .maximum_cumulative_interface_displacement_fraction
         << " curvature_projection_cadence="
         << request.curvature_projection_cadence_steps
         << std::endl;
@@ -2694,7 +3843,7 @@ bool logAcceptedPressureUpdateDiagnostic(
     }
   }
 
-  const auto comm = svmp::MeshComm::world();
+  const auto comm = activeFESystemCommunicator(system);
   const auto global_supported_vertices = globalSumSize(supported_vertices, comm);
   const auto global_compared_vertices = globalSumSize(compared_vertices, comm);
   const auto global_skipped_vertices =
@@ -3037,7 +4186,7 @@ std::array<std::size_t, 3> localImplicitCutBackendQualificationCounts(
     svmp::FE::level_set::ImplicitCutFallbackPolicy fallback_policy)
 {
   std::array<std::size_t, 3> counts{};
-  mesh.forEachCell([&](svmp::FE::GlobalIndex cell_id) {
+  mesh.forEachOwnedCell([&](svmp::FE::GlobalIndex cell_id) {
     const auto element_type = mesh.getCellType(cell_id);
     const auto selected_backend =
         selectedImplicitCutBackendForCell(
@@ -3159,6 +4308,300 @@ void initializeLevelSetMaintenanceTargets(
   }
 }
 
+svmp::FE::level_set::LevelSetBoundaryOptions
+resolveLevelSetOpenBoundaries(
+    const application::core::SimulationComponents& sim,
+    const LevelSetMaintenanceRequest& request)
+{
+  svmp::FE::level_set::LevelSetBoundaryOptions boundaries;
+  if (request.open_boundaries.empty()) {
+    return boundaries;
+  }
+  if (!sim.primary_mesh) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Bound-preserving level-set transport "
+        "cannot resolve open boundary names without the active mesh.");
+  }
+  for (const auto& open : request.open_boundaries) {
+    const auto marker = sim.primary_mesh->label_from_name(open.face_name);
+    if (marker == svmp::INVALID_LABEL) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Bound-preserving level-set transport "
+          "could not resolve open boundary face '" + open.face_name + "'.");
+    }
+    if (open.inflow) {
+      if (!open.literal_inflow_value.has_value() ||
+          !std::isfinite(*open.literal_inflow_value)) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Bound-preserving level-set transport "
+            "currently supports finite literal LevelSetInflow data only; face='" +
+            open.face_name + "'.");
+      }
+      boundaries.inflow.push_back(
+          svmp::FE::level_set::LevelSetInflowBoundary{
+              .boundary_marker = marker,
+              .value = *open.literal_inflow_value});
+    } else {
+      boundaries.outflow.push_back(
+          svmp::FE::level_set::LevelSetOutflowBoundary{
+              .boundary_marker = marker});
+    }
+  }
+  return boundaries;
+}
+
+struct LevelSetBoundPreservingApplicationResult {
+  bool accept_step{true};
+  bool changed{false};
+};
+
+LevelSetBoundPreservingApplicationResult
+applyLevelSetBoundPreservingCandidates(
+    application::core::SimulationComponents& sim,
+    svmp::FE::timestepping::TimeHistory& history,
+    const std::vector<LevelSetMaintenanceRequest>& requests,
+    double /*generalized_alpha_gamma*/)
+{
+  LevelSetBoundPreservingApplicationResult application_result;
+  if (!sim.fe_system || requests.empty()) {
+    return application_result;
+  }
+
+  const bool any_enabled = std::any_of(
+      requests.begin(), requests.end(), [](const auto& request) {
+        return request.bound_preserving.enabled;
+      });
+  if (!any_enabled) {
+    return application_result;
+  }
+  if (!(history.dt() > 0.0) || !std::isfinite(history.dt())) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Bound-preserving level-set transport "
+        "requires a positive finite candidate time step.");
+  }
+
+  const auto previous_solution = gatherFeOrderedSolution(history.uPrev());
+  const auto raw_candidate = gatherFeOrderedSolution(history.u());
+  auto candidate = raw_candidate;
+
+  for (const auto& request : requests) {
+    if (!request.bound_preserving.enabled) {
+      continue;
+    }
+    const auto field =
+        sim.fe_system->findFieldByName(request.level_set_field_name);
+    if (field == svmp::FE::INVALID_FIELD_ID) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Bound-preserving level-set transport "
+          "could not find field '" + request.level_set_field_name + "'.");
+    }
+    const auto boundaries = resolveLevelSetOpenBoundaries(sim, request);
+    svmp::FE::systems::SystemStateView state;
+    state.time = history.time() + history.dt();
+    state.dt = history.dt();
+    state.dt_prev = history.dtPrev();
+    state.u = std::span<const svmp::FE::Real>(candidate);
+    state.u_prev = std::span<const svmp::FE::Real>(previous_solution);
+
+    const auto safety =
+        svmp::FE::level_set::evaluateLevelSetTransportSafety(
+            *sim.fe_system,
+            request.velocity,
+            boundaries,
+            request.bound_preserving,
+            state,
+            static_cast<svmp::FE::Real>(history.dt()));
+    const bool wall_violation =
+        request.bound_preserving.enforce_impermeable_boundaries &&
+        safety.maximum_boundary_normal_velocity_ratio >
+            request.bound_preserving.impermeable_normal_velocity_tolerance;
+    const bool courant_violation =
+        request.bound_preserving.enforce_courant_limit &&
+        safety.maximum_courant >
+            request.bound_preserving.maximum_courant +
+                request.bound_preserving.courant_tolerance;
+    if (wall_violation) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Bound-preserving level-set transport "
+          "rejected an incompatible impermeable-wall velocity for field '" +
+          request.level_set_field_name + "': marker=" +
+          std::to_string(safety.worst_boundary_marker) +
+          " normal_velocity=" +
+          std::to_string(safety.maximum_boundary_normal_velocity) +
+          " normalized_flux=" +
+          std::to_string(safety.maximum_boundary_normal_velocity_ratio) +
+          ". " + safety.diagnostic);
+    }
+    if (courant_violation) {
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] Level-set candidate rejected"
+          << " field='" << request.level_set_field_name << "'"
+          << " reason=bound_preserving_courant_contract"
+          << " courant=" << safety.maximum_courant
+          << " maximum_courant="
+          << request.bound_preserving.maximum_courant
+          << " minimum_cell_length=" << safety.minimum_cell_length
+          << " maximum_speed=" << safety.maximum_speed
+          << " dt=" << history.dt() << std::endl;
+      application_result.accept_step = false;
+      return application_result;
+    }
+    if (!safety.success) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set transport safety check "
+          "failed for field '" + request.level_set_field_name + "': " +
+          safety.diagnostic);
+    }
+
+    std::vector<svmp::FE::Real> limited;
+    const auto limiter =
+        svmp::FE::level_set::applyLevelSetBoundPreservingLimiter(
+            *sim.fe_system,
+            field,
+            boundaries,
+            request.bound_preserving,
+            std::span<const svmp::FE::Real>(previous_solution),
+            std::span<const svmp::FE::Real>(candidate),
+            safety.maximum_courant,
+            limited);
+    if (!limiter.success) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Bound-preserving level-set limiter "
+          "failed for field '" + request.level_set_field_name + "': " +
+          limiter.diagnostic);
+    }
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] Level-set bound-preserving gate"
+        << " field='" << request.level_set_field_name << "'"
+        << " step=" << history.stepIndex() + 1
+        << " courant=" << safety.maximum_courant
+        << " wall_normal_ratio="
+        << safety.maximum_boundary_normal_velocity_ratio
+        << " limited_dofs=" << limiter.limited_dofs
+        << " max_unrelaxed_violation="
+        << limiter.maximum_unrelaxed_bound_violation
+        << " max_correction=" << limiter.maximum_correction
+        << " positive_sign_flips_prevented="
+        << limiter.positive_patch_sign_flips_prevented
+        << " negative_sign_flips_prevented="
+        << limiter.negative_patch_sign_flips_prevented
+        << " conservative=false" << std::endl;
+    if (limiter.applied) {
+      // Mutating a converged Newton candidate after its final residual check
+      // would accept a state that was never a solution of the coupled
+      // transport/capillary operator.  Reject without touching history so an
+      // adaptive TimeLoop can reduce dt and solve again.  Fixed-step runs fail
+      // closed if they cannot produce an in-bounds nonlinear solution.
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] Level-set candidate rejected"
+          << " field='" << request.level_set_field_name << "'"
+          << " reason=bound_preserving_limiter_requires_nonlinear_retry"
+          << " limited_dofs=" << limiter.limited_dofs
+          << " max_unrelaxed_violation="
+          << limiter.maximum_unrelaxed_bound_violation
+          << " max_correction=" << limiter.maximum_correction
+          << " dt=" << history.dt() << std::endl;
+      application_result.accept_step = false;
+      application_result.changed = true;
+      return application_result;
+    }
+  }
+  return application_result;
+}
+
+void accountAppliedLevelSetVolumeCorrection(
+    LevelSetMaintenanceRequest& request,
+    const svmp::FE::level_set::LevelSetGlobalShiftCorrectionResult& result)
+{
+  if (!result.correction_applied) {
+    return;
+  }
+  const auto finite_nonnegative = [](svmp::FE::Real value) {
+    return std::isfinite(value) && value >= svmp::FE::Real{0.0};
+  };
+  if (!(result.minimum_edge_length > svmp::FE::Real{0.0}) ||
+      !std::isfinite(result.minimum_edge_length) ||
+      !finite_nonnegative(result.max_interface_displacement) ||
+      !finite_nonnegative(result.max_contact_line_displacement)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Applied level-set volume correction "
+        "reported invalid cumulative-displacement metrics.");
+  }
+
+  auto reference_edge_length =
+      request.volume_correction_reference_minimum_edge_length;
+  if (!(reference_edge_length > svmp::FE::Real{0.0}) ||
+      !std::isfinite(reference_edge_length)) {
+    reference_edge_length = result.minimum_edge_length;
+  } else {
+    reference_edge_length =
+        std::min(reference_edge_length, result.minimum_edge_length);
+  }
+  const auto allowed_cumulative_displacement =
+      request.volume_correction
+          .maximum_cumulative_interface_displacement_fraction *
+      reference_edge_length;
+  const auto next_interface_displacement =
+      request.cumulative_volume_correction_interface_displacement +
+      result.max_interface_displacement;
+  const auto next_contact_line_displacement =
+      request.cumulative_volume_correction_contact_line_displacement +
+      result.max_contact_line_displacement;
+  const auto prospective_budget_consumption =
+      std::max(next_interface_displacement, next_contact_line_displacement);
+  if (!finite_nonnegative(allowed_cumulative_displacement) ||
+      !finite_nonnegative(next_interface_displacement) ||
+      !finite_nonnegative(next_contact_line_displacement) ||
+      !finite_nonnegative(prospective_budget_consumption)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Level-set volume correction "
+        "cumulative-displacement budget is invalid or overflowed.");
+  }
+  const auto comparison_tolerance =
+      svmp::FE::Real{64.0} * std::numeric_limits<svmp::FE::Real>::epsilon() *
+      std::max({allowed_cumulative_displacement,
+                prospective_budget_consumption,
+                reference_edge_length});
+  if (prospective_budget_consumption >
+      allowed_cumulative_displacement + comparison_tolerance) {
+    const auto* limiting_path =
+        next_contact_line_displacement > next_interface_displacement
+            ? "contact_line"
+            : "interface";
+    std::ostringstream message;
+    message << std::setprecision(17)
+            << "[svMultiPhysics::Application] Level-set volume correction "
+               "would exceed the cumulative interface/contact-line "
+               "displacement budget for field '"
+            << request.level_set_field_name
+            << "': previous_interface="
+            << request.cumulative_volume_correction_interface_displacement
+            << " event_interface=" << result.max_interface_displacement
+            << " prospective_interface=" << next_interface_displacement
+            << " previous_contact_line="
+            << request.cumulative_volume_correction_contact_line_displacement
+            << " event_contact_line=" << result.max_contact_line_displacement
+            << " prospective_contact_line="
+            << next_contact_line_displacement
+            << " limiting_path=" << limiting_path
+            << " prospective_budget_consumption="
+            << prospective_budget_consumption
+            << " allowed=" << allowed_cumulative_displacement
+            << " reference_minimum_edge_length=" << reference_edge_length
+            << " maximum_cumulative_fraction="
+            << request.volume_correction
+                   .maximum_cumulative_interface_displacement_fraction;
+    throw std::runtime_error(message.str());
+  }
+
+  request.volume_correction_reference_minimum_edge_length =
+      reference_edge_length;
+  request.cumulative_volume_correction_interface_displacement =
+      next_interface_displacement;
+  request.cumulative_volume_correction_contact_line_displacement =
+      next_contact_line_displacement;
+}
+
 bool applyLevelSetMaintenance(
     application::core::SimulationComponents& sim,
     svmp::FE::timestepping::TimeHistory& history,
@@ -3168,10 +4611,17 @@ bool applyLevelSetMaintenance(
     return false;
   }
 
+  // Treat maintenance across every configured level-set field as one
+  // transaction.  A later request can fail after an earlier correction has
+  // been computed, but no accounting/target state may advance unless every
+  // request succeeds and the common FE history update is complete.
+  auto staged_requests = requests;
+  std::vector<std::string> staged_commit_logs;
   bool changed = false;
   auto fe_solution = gatherFeOrderedSolution(history.u());
+  const auto accepted_solution_before_maintenance = fe_solution;
   std::set<svmp::FE::FieldId> modified_level_set_fields;
-  for (auto& request : requests) {
+  for (auto& request : staged_requests) {
     const int completed_step = history.stepIndex();
     const bool do_reinit =
         svmp::FE::level_set::shouldReinitializeLevelSet(
@@ -3212,10 +4662,31 @@ bool applyLevelSetMaintenance(
             "[svMultiPhysics::Application] Level-set reinitialization failed for field '" +
             request.level_set_field_name + "': " + result.diagnostic);
       }
-      fe_solution = std::move(repaired);
-      changed = true;
-      modified_level_set_fields.insert(field);
-      application::core::oopCout()
+      if (!result.converged) {
+        // A geometrically bounded partial candidate is useful diagnostics, but
+        // applying it would silently turn max_iterations into an uncontrolled
+        // change of the production interface.  Retain the accepted solution
+        // and make the skipped repair explicit.
+        std::ostringstream log;
+        log
+            << "[svMultiPhysics::Application] Level-set reinitialization skipped field='"
+            << request.level_set_field_name << "' step=" << completed_step
+            << " reason=nonconverged"
+            << " iterations=" << result.iterations
+            << " max_iteration_residual="
+            << result.max_iteration_residual
+            << " max_signed_distance_error="
+            << result.max_signed_distance_error
+            << " max_interface_displacement="
+            << result.max_interface_displacement
+            << " diagnostic='" << result.diagnostic << "'";
+        staged_commit_logs.push_back(log.str());
+      } else {
+        fe_solution = std::move(repaired);
+        changed = true;
+        modified_level_set_fields.insert(field);
+        std::ostringstream log;
+        log
           << "[svMultiPhysics::Application] Level-set reinitialized field='"
           << request.level_set_field_name << "' step=" << completed_step
           << " repaired_dofs=" << result.repaired_dofs
@@ -3228,7 +4699,17 @@ bool applyLevelSetMaintenance(
           << result.max_interface_displacement
           << " l2_interface_displacement="
           << result.l2_interface_displacement
-          << " max_abs_update=" << result.max_abs_update << std::endl;
+          << " zero_set_bound_satisfied="
+          << (result.zero_set_bound_satisfied ? "true" : "false")
+          << " iterations=" << result.iterations
+          << " converged=" << (result.converged ? "true" : "false")
+          << " max_iteration_residual="
+          << result.max_iteration_residual
+          << " max_signed_distance_error="
+          << result.max_signed_distance_error
+          << " max_abs_update=" << result.max_abs_update;
+        staged_commit_logs.push_back(log.str());
+      }
     }
 
     if (do_volume) {
@@ -3245,6 +4726,10 @@ bool applyLevelSetMaintenance(
           request.volume_correction.volume_tolerance;
       correction_options.max_iterations =
           request.volume_correction.max_iterations;
+      correction_options.minimum_relative_volume_error =
+          request.volume_correction.minimum_relative_volume_error;
+      correction_options.maximum_interface_displacement_fraction =
+          request.volume_correction.maximum_interface_displacement_fraction;
 
       std::vector<svmp::FE::Real> corrected;
       auto result =
@@ -3260,10 +4745,17 @@ bool applyLevelSetMaintenance(
             "[svMultiPhysics::Application] Level-set volume correction failed for field '" +
             request.level_set_field_name + "': " + result.diagnostic);
       }
-      fe_solution = std::move(corrected);
-      changed = true;
-      modified_level_set_fields.insert(field);
-      application::core::oopCout()
+      if (result.correction_applied) {
+        // The low-level correction has not mutated the accepted coefficients;
+        // reject before applying its returned vector if repeated global shifts
+        // would exceed the application-level cumulative path-length budget.
+        accountAppliedLevelSetVolumeCorrection(request, result);
+        fe_solution = std::move(corrected);
+        changed = true;
+        modified_level_set_fields.insert(field);
+      }
+      std::ostringstream log;
+      log << std::setprecision(17)
           << "[svMultiPhysics::Application] Level-set volume corrected field='"
           << request.level_set_field_name << "' step=" << completed_step
           << " target_negative_volume=" << result.target_negative_volume
@@ -3275,59 +4767,129 @@ bool applyLevelSetMaintenance(
           << " achieved_volume_error=" << result.volume_error
           << " applied_shift=" << result.applied_shift
           << " applied_shift_magnitude=" << std::abs(result.applied_shift)
+          << " correction_triggered="
+          << (result.correction_triggered ? "true" : "false")
+          << " correction_applied="
+          << (result.correction_applied ? "true" : "false")
+          << " target_reached="
+          << (result.target_reached ? "true" : "false")
+          << " trigger_volume_error=" << result.trigger_volume_error
+          << " limited_by_displacement_bound="
+          << (result.limited_by_displacement_bound ? "true" : "false")
+          << " max_interface_displacement="
+          << result.max_interface_displacement
+          << " max_contact_line_displacement="
+          << result.max_contact_line_displacement
+          << " contact_line_displacement_bound="
+          << result.contact_line_displacement_bound
+          << " maximum_allowed_interface_displacement="
+          << result.maximum_allowed_interface_displacement
+          << " maximum_topology_stable_shift="
+          << result.maximum_topology_stable_shift
+          << " minimum_edge_length=" << result.minimum_edge_length
+          << " cumulative_interface_displacement="
+          << request.cumulative_volume_correction_interface_displacement
+          << " cumulative_contact_line_displacement="
+          << request.cumulative_volume_correction_contact_line_displacement
+          << " cumulative_displacement_budget_consumption="
+          << std::max(
+                 request.cumulative_volume_correction_interface_displacement,
+                 request.cumulative_volume_correction_contact_line_displacement)
+          << " cumulative_displacement_limiting_path="
+          << (request.cumulative_volume_correction_contact_line_displacement >
+                      request.cumulative_volume_correction_interface_displacement
+                  ? "contact_line"
+                  : "interface")
+          << " cumulative_displacement_reference_minimum_edge_length="
+          << request.volume_correction_reference_minimum_edge_length
+          << " maximum_cumulative_interface_displacement="
+          << (request.volume_correction_reference_minimum_edge_length *
+              request.volume_correction
+                  .maximum_cumulative_interface_displacement_fraction)
+          << " status='" << result.diagnostic << "'"
           << " iterations=" << result.iterations
           << " volume_measure_source="
           << (volume_options.use_generated_interface_quadrature
                   ? "generated_interface_quadrature"
-                  : "corner_linearized")
-          << std::endl;
+                  : "corner_linearized");
+      staged_commit_logs.push_back(log.str());
     }
   }
 
   if (changed) {
-    std::vector<std::vector<svmp::FE::Real>> older_history_before;
-    older_history_before.reserve(
-        static_cast<std::size_t>(std::max(0, history.historyDepth() - 1)));
-    for (int k = 2; k <= history.historyDepth(); ++k) {
-      older_history_before.push_back(gatherFeOrderedSolution(history.uPrevK(k)));
-    }
+    // Reinitialization and a global shift change the level-set
+    // representation after the physical step.  Apply the identical FE
+    // coefficient delta to every stored history level.  This preserves every
+    // BDF/generalized-alpha temporal difference exactly and therefore keeps
+    // the already stored rate state consistent.  Copying the repaired current
+    // field into uPrev (the former behavior) erased the accepted increment,
+    // left older BDF history in another representation, and disagreed with
+    // uDot.
+    const auto apply_representation_delta =
+        [&](std::vector<svmp::FE::Real>& target) {
+          if (target.size() != fe_solution.size() ||
+              accepted_solution_before_maintenance.size() !=
+                  fe_solution.size()) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Level-set maintenance history "
+                "synchronization encountered incompatible FE vector sizes.");
+          }
+          std::size_t updated = 0u;
+          for (const auto field : modified_level_set_fields) {
+            const auto offset = static_cast<std::size_t>(
+                sim.fe_system->fieldDofOffset(field));
+            const auto count = static_cast<std::size_t>(
+                sim.fe_system->fieldDofHandler(field).getNumDofs());
+            if (offset + count > target.size()) {
+              throw std::runtime_error(
+                  "[svMultiPhysics::Application] Level-set maintenance field "
+                  "slice exceeds the FE history vector.");
+            }
+            for (std::size_t i = 0; i < count; ++i) {
+              const auto index = offset + i;
+              target[index] +=
+                  fe_solution[index] -
+                  accepted_solution_before_maintenance[index];
+            }
+            updated += count;
+          }
+          return updated;
+        };
 
-    std::size_t synchronized_dofs = 0u;
     auto current_solution = gatherFeOrderedSolution(history.u());
-    for (const auto field : modified_level_set_fields) {
-      synchronized_dofs += application::core::copyFieldDofsIntoFeOrderedSolution(
-          *sim.fe_system, field, fe_solution, current_solution);
-    }
+    const auto synchronized_dofs =
+        apply_representation_delta(current_solution);
     scatterFeOrderedSolution(history.u(), current_solution);
 
     auto previous_solution = gatherFeOrderedSolution(history.uPrev());
-    for (const auto field : modified_level_set_fields) {
-      (void)application::core::copyFieldDofsIntoFeOrderedSolution(
-          *sim.fe_system, field, fe_solution, previous_solution);
-    }
+    (void)apply_representation_delta(previous_solution);
     scatterFeOrderedSolution(history.uPrev(), previous_solution);
+    for (int k = 2; k <= history.historyDepth(); ++k) {
+      auto older_solution = gatherFeOrderedSolution(history.uPrevK(k));
+      (void)apply_representation_delta(older_solution);
+      scatterFeOrderedSolution(history.uPrevK(k), older_solution);
+    }
     history.updateGhosts();
     const auto current_previous_delta = globalMaxAbsDifference(
-        history.uSpan(), history.uPrevSpan(), svmp::MeshComm::world());
-    double older_history_delta = 0.0;
-    for (int k = 2; k <= history.historyDepth(); ++k) {
-      const auto after = gatherFeOrderedSolution(history.uPrevK(k));
-      older_history_delta = std::max(
-          older_history_delta,
-          maxAbsDifference(
-              older_history_before[static_cast<std::size_t>(k - 2)],
-              after));
-    }
-    application::core::oopCout()
+        history.uSpan(),
+        history.uPrevSpan(),
+        activeFESystemCommunicator(*sim.fe_system));
+    std::ostringstream log;
+    log
         << "[svMultiPhysics::Application] Level-set maintenance synchronized"
         << " step=" << history.stepIndex()
-        << " accepted_solution=modified_level_set_fields"
-        << " previous_state=modified_level_set_fields"
+        << " representation_delta=all_history_levels"
+        << " temporal_increments=preserved"
+        << " rate_state=unchanged_consistently"
         << " synchronized_fields=" << modified_level_set_fields.size()
         << " synchronized_dofs=" << synchronized_dofs
         << " current_previous_max_abs_delta=" << current_previous_delta
-        << " older_history_max_abs_delta=" << older_history_delta
-        << " history_depth=" << history.historyDepth() << std::endl;
+        << " history_depth=" << history.historyDepth();
+    staged_commit_logs.push_back(log.str());
+  }
+  requests = std::move(staged_requests);
+  for (const auto& log : staged_commit_logs) {
+    application::core::oopCout() << log << std::endl;
   }
   return changed;
 }
@@ -4686,7 +6248,8 @@ std::size_t syncActiveLevelSetVertexFieldsFromSolution(
 bool updateLevelSetAdvectionVelocitiesFromState(
     application::core::SimulationComponents& sim,
     const svmp::FE::systems::SystemStateView& state,
-    const std::vector<LevelSetAdvectionVelocityRequest>& requests)
+    const std::vector<LevelSetAdvectionVelocityRequest>& requests,
+    bool refresh_frozen_algebraic_map = true)
 {
   if (!sim.fe_system || !sim.primary_mesh || requests.empty()) {
     return false;
@@ -4694,6 +6257,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
 
   auto& system = *sim.fe_system;
   const auto& mesh = *sim.primary_mesh;
+  const auto extension_comm = activeFESystemCommunicator(system);
   const auto n_vertices = mesh.n_vertices();
   const int mesh_dim = mesh.dim();
   const auto& coords = mesh.X_ref();
@@ -4715,24 +6279,125 @@ bool updateLevelSetAdvectionVelocitiesFromState(
           "[svMultiPhysics::Application] Could not find fields needed for wet-extension level-set advection velocity update.");
     }
 
+    const auto& phi_rec = system.fieldRecord(phi_field);
     const auto& target_rec = system.fieldRecord(target_field);
+    auto extension_constraint =
+        svmp::FE::level_set::
+            findLevelSetVelocityExtensionConstraintKernel(
+                system, request.operator_tag, target_field);
+    const bool algebraic_extension =
+        target_rec.source_kind ==
+            svmp::FE::systems::FieldSourceKind::Unknown &&
+        static_cast<bool>(extension_constraint);
     if (target_rec.source_kind !=
-        svmp::FE::systems::FieldSourceKind::PrescribedData) {
+            svmp::FE::systems::FieldSourceKind::PrescribedData &&
+        !algebraic_extension) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set advection velocity field '" +
-          target_rec.name + "' must be registered as PrescribedData.");
+          target_rec.name +
+          "' must be either PrescribedData or an algebraic extension unknown with a registered exact constraint kernel.");
+    }
+    if (algebraic_extension &&
+        extension_constraint->sourceVelocityField() != source_field) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Algebraic level-set velocity extension source does not match the registered physical velocity field.");
+    }
+    if (algebraic_extension && !refresh_frozen_algebraic_map) {
+      // The map contains nonsmooth active-set/BFS choices and phi-dependent
+      // regression weights.  Freeze all of them throughout one nonlinear
+      // solve; only E and the physical source velocity remain monolithic.
+      continue;
+    }
+    if (algebraic_extension) {
+      // Rebuilding the cut/graph map is fail-closed.  Any exception below,
+      // including disappearance of the interface, must not leave the previous
+      // accepted interface map available to a later assembly.
+      extension_constraint->invalidateFrozenMap();
     }
 
     const auto& source_rec = system.fieldRecord(source_field);
-    const auto source_components =
-        static_cast<std::size_t>(std::max(1, source_rec.components));
-    const auto target_components =
-        static_cast<std::size_t>(std::max(1, target_rec.components));
-    const auto copy_components =
-        std::min(source_components, target_components);
-    if (copy_components == 0u) {
+    if (source_rec.components <= 0 || target_rec.components <= 0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set advection velocity update found an empty velocity field.");
+    }
+    const auto source_components =
+        static_cast<std::size_t>(source_rec.components);
+    const auto target_components =
+        static_cast<std::size_t>(target_rec.components);
+    const auto copy_components =
+        std::min(source_components, target_components);
+    if (request.extension_method == "wall_compatible_normal" ||
+        request.extension_method == "nearest_interface_point") {
+      const auto require_p1_field = [](const auto& record,
+                                       std::string_view role) {
+        if (!record.space || record.space->is_variable_order() ||
+            record.space->polynomial_order() != 1) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] wall_compatible_normal "
+              "wet-extension requires a fixed P1 " +
+              std::string(role) + " field; field '" + record.name +
+              "' is higher-order, variable-order, or has no FE space.");
+        }
+      };
+      if (phi_rec.components != 1) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] wall_compatible_normal "
+            "wet-extension requires a scalar P1 level-set field.");
+      }
+      require_p1_field(phi_rec, "level-set");
+      require_p1_field(source_rec, "source-velocity");
+      require_p1_field(target_rec, "target-velocity");
+      if (source_components != target_components ||
+          source_rec.space->value_dimension() !=
+              target_rec.space->value_dimension()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] wall_compatible_normal wet-extension requires source and target P1 fields with identical component layouts.");
+      }
+      const auto& phi_dofs = system.fieldDofHandler(phi_field);
+      const auto& source_dofs = system.fieldDofHandler(source_field);
+      const auto& target_dofs = system.fieldDofHandler(target_field);
+      const auto* phi_entity_map = phi_dofs.getEntityDofMap();
+      const auto* source_entity_map = source_dofs.getEntityDofMap();
+      const auto* target_entity_map = target_dofs.getEntityDofMap();
+      if (phi_entity_map == nullptr || source_entity_map == nullptr ||
+          target_entity_map == nullptr) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] wall_compatible_normal wet-extension requires matching vertex-nodal level-set, source, and target layouts.");
+      }
+      for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+        const auto phi_vertex_dofs = phi_entity_map->getVertexDofs(
+            static_cast<svmp::FE::GlobalIndex>(vertex));
+        const auto source_vertex_dofs = source_entity_map->getVertexDofs(
+            static_cast<svmp::FE::GlobalIndex>(vertex));
+        const auto target_vertex_dofs = target_entity_map->getVertexDofs(
+            static_cast<svmp::FE::GlobalIndex>(vertex));
+        if (phi_vertex_dofs.size() != 1u ||
+            source_vertex_dofs.size() != source_components ||
+            target_vertex_dofs.size() != target_components) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] wall_compatible_normal wet-extension requires exactly one level-set, source, and target P1 vertex DOF per component.");
+        }
+      }
+      const auto& local_mesh = mesh.local_mesh();
+      for (svmp::index_t cell = 0; cell < local_mesh.n_cells(); ++cell) {
+        if (local_mesh.cell_shape(cell).order != 1) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] wall_compatible_normal "
+              "wet-extension requires linear mesh topology; high-order "
+              "geometry is not qualified for the vertex graph algorithm.");
+        }
+        auto [cell_vertices, cell_vertex_count] =
+            local_mesh.cell_vertices_span(cell);
+        const auto expected_cell_dofs =
+            cell_vertex_count * source_components;
+        if (cell_vertices == nullptr || cell_vertex_count == 0u ||
+            phi_rec.space->dofs_per_element(cell) != cell_vertex_count ||
+            source_rec.space->dofs_per_element(cell) != expected_cell_dofs ||
+            target_rec.space->dofs_per_element(cell) != expected_cell_dofs) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] wall_compatible_normal wet-extension requires identical nodal P1 source/target cell layouts on every retained mesh cell.");
+        }
+      }
     }
 
     const auto phi_values =
@@ -4768,6 +6433,15 @@ bool updateLevelSetAdvectionVelocitiesFromState(
     std::size_t interface_sample_candidate_cell_count = 0u;
     std::size_t interface_sample_count = 0u;
     std::size_t interface_sample_context_rule_count = 0u;
+    std::size_t trace_support_vertex_count = 0u;
+    std::size_t dry_trace_support_vertex_count = 0u;
+    std::size_t trace_seed_vertex_count = 0u;
+    std::size_t wall_boundary_label_count = 0u;
+    WallCompatibleVelocityExtensionResult wall_extension_report{};
+    std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>
+        algebraic_rows;
+    std::shared_ptr<const application::core::VelocityExtensionMapSnapshot>
+        algebraic_map_snapshot;
 
     auto record_speed = [&](std::size_t v) {
       double speed2 = 0.0;
@@ -4783,55 +6457,91 @@ bool updateLevelSetAdvectionVelocitiesFromState(
       }
     };
 
-    if (request.extension_method == "nearest_interface_point") {
+    if (request.extension_method == "wall_compatible_normal" ||
+        request.extension_method == "nearest_interface_point") {
       if (mesh_dim < 1 || mesh_dim > 3) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] nearest_interface_point level-set "
             "advection velocity extension requires mesh dimension in [1, 3].");
       }
 
-      std::vector<VelocityExtensionSample> samples;
+      // For fixed nodal P1/Q1 fields, equality at every vertex supporting a
+      // retained interface cell is both necessary and sufficient for the
+      // finite-element traces to agree pointwise on that cell:
+      //
+      //     E_h|_K = u_h|_K  =>  E_h|_(Gamma cap K) = u_h|_(Gamma cap K).
+      //
+      // The older sign-only seed marked wet vertices but graph-extrapolated
+      // the dry vertices of cut cells, so E_h and u_h differed on Gamma even
+      // though all wet nodal values agreed.  Prefer the generated cut context
+      // (the geometry used by assembly), with a nodal P1 crossing search only
+      // when no authoritative generated-interface context exists anywhere on
+      // the active communicator.  A locally empty retained-rule set is
+      // authoritative and must not resurrect an omitted cell through a nodal
+      // fallback on that rank.
+      const bool authoritative_interface_context = globalAnyBool(
+          hasAuthoritativeInterfaceVelocityContext(system, request),
+          extension_comm);
+      auto candidate_cells = authoritative_interface_context
+                                 ? interfaceVelocitySampleCandidateCells(
+                                       system, request)
+                                 : std::vector<svmp::FE::MeshIndex>{};
+      if (!authoritative_interface_context) {
+        candidate_cells = nodalVelocityExtensionInterfaceCells(
+            mesh,
+            std::span<const double>(phi_values.data(), phi_values.size()),
+            request.isovalue);
+      }
+      interface_sample_used_cut_context = authoritative_interface_context;
+      const auto local_owned_candidate_cells =
+          static_cast<std::size_t>(std::count_if(
+              candidate_cells.begin(),
+              candidate_cells.end(),
+              [&](svmp::FE::MeshIndex cell) {
+                return cell >= 0 && mesh.is_owned_cell(
+                                        static_cast<svmp::index_t>(cell));
+              }));
+      interface_sample_candidate_cell_count = globalSumSize(
+          local_owned_candidate_cells, extension_comm);
 
-      auto add_interface_sample_value =
-          [&](const std::array<double, 3>& point,
-              const std::vector<double>& value) {
-        VelocityExtensionSample sample;
-        sample.point = point;
-        sample.value.assign(target_components, 0.0);
-        for (std::size_t c = 0; c < copy_components; ++c) {
-          const auto component_value =
-              c < value.size() ? value[c] : 0.0;
-          sample.value[c] =
-              std::isfinite(component_value) ? component_value : 0.0;
+      std::vector<std::uint8_t> trace_support(n_vertices, 0u);
+      markVelocityExtensionTraceSupportCells(
+          mesh,
+          std::span<const svmp::FE::MeshIndex>(candidate_cells.data(),
+                                               candidate_cells.size()),
+          trace_support);
+      trace_support_vertex_count =
+          synchronizeVelocityExtensionTraceSupportMask(
+              mesh, extension_comm, trace_support);
+      std::vector<std::uint8_t> trace_seed(active);
+      std::vector<std::uint8_t> dry_trace_support(n_vertices, 0u);
+      for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+        if (trace_support[vertex] != 0u) {
+          trace_seed[vertex] = 1u;
+          if (active[vertex] == 0u) {
+            dry_trace_support[vertex] = 1u;
+          }
         }
-        samples.push_back(std::move(sample));
-      };
+      }
+      dry_trace_support_vertex_count =
+          globalOwnedVelocityExtensionMaskCount(
+              mesh, extension_comm, dry_trace_support);
+      trace_seed_vertex_count = globalOwnedVelocityExtensionMaskCount(
+          mesh, extension_comm, trace_seed);
+
+      std::size_t local_interface_geometry_sample_count = 0u;
 
       auto add_interface_sample = [&](std::size_t va,
                                       std::size_t vb,
                                       double edge_t) {
+        if (va >= n_vertices || vb >= n_vertices ||
+            !std::isfinite(edge_t)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] wall_compatible_normal wet-extension found an invalid nodal interface geometry sample.");
+        }
         edge_t = std::clamp(edge_t, 0.0, 1.0);
-        std::array<double, 3> sample_point{0.0, 0.0, 0.0};
-        std::vector<double> sample_value(target_components, 0.0);
-        for (int d = 0; d < mesh_dim; ++d) {
-          const auto oa =
-              va * static_cast<std::size_t>(mesh_dim) +
-              static_cast<std::size_t>(d);
-          const auto ob =
-              vb * static_cast<std::size_t>(mesh_dim) +
-              static_cast<std::size_t>(d);
-          sample_point[static_cast<std::size_t>(d)] =
-              (1.0 - edge_t) * coords[oa] + edge_t * coords[ob];
-        }
-        for (std::size_t c = 0; c < copy_components; ++c) {
-          const auto a =
-              source_values[va * source_components + c];
-          const auto b =
-              source_values[vb * source_components + c];
-          const auto value = (1.0 - edge_t) * a + edge_t * b;
-          sample_value[c] = std::isfinite(value) ? value : 0.0;
-        }
-        add_interface_sample_value(sample_point, sample_value);
+        (void)edge_t;
+        ++local_interface_geometry_sample_count;
       };
 
       auto add_cut_context_interface_samples = [&]() -> bool {
@@ -4841,110 +6551,6 @@ bool updateLevelSetAdvectionVelocitiesFromState(
             !cut_context->hasGeneratedInterfaceMarker(*marker)) {
           return false;
         }
-        if (!source_rec.space) {
-          return false;
-        }
-        if (copy_components > 3u) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] nearest_interface_point level-set "
-              "advection velocity extension supports at most three source velocity components "
-              "when sampling generated cut-interface quadrature.");
-        }
-
-        const auto source_field_offset = system.fieldDofOffset(source_field);
-        const auto& source_dofs = system.fieldDofHandler(source_field);
-        const bool source_use_prescribed =
-            source_rec.source_kind ==
-            svmp::FE::systems::FieldSourceKind::PrescribedData;
-        const auto source_prescribed_coefficients =
-            source_use_prescribed
-                ? system.prescribedFieldCoefficients(source_field)
-                : std::span<const svmp::FE::Real>{};
-
-        std::unique_ptr<svmp::FE::assembly::GlobalSystemView>
-            source_solution_view;
-        if (!source_use_prescribed && state.u_vector != nullptr) {
-          auto* vec =
-              const_cast<svmp::FE::backends::GenericVector*>(state.u_vector);
-          source_solution_view = vec->createAssemblyView();
-        }
-
-        auto read_source_coefficient =
-            [&](svmp::FE::GlobalIndex local_dof) -> svmp::FE::Real {
-          const auto dof =
-              source_use_prescribed
-                  ? local_dof
-                  : local_dof + source_field_offset;
-          if (dof < 0) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] nearest_interface_point level-set "
-                "advection velocity extension found a negative source velocity DOF.");
-          }
-          if (source_use_prescribed) {
-            const auto idx = static_cast<std::size_t>(dof);
-            if (idx >= source_prescribed_coefficients.size()) {
-              throw std::runtime_error(
-                  "[svMultiPhysics::Application] nearest_interface_point level-set "
-                  "advection velocity extension found prescribed source coefficients "
-                  "that are too small.");
-            }
-            return source_prescribed_coefficients[idx];
-          }
-          if (source_solution_view) {
-            return source_solution_view->getVectorEntry(dof);
-          }
-          const auto idx = static_cast<std::size_t>(dof);
-          if (idx >= state.u.size()) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] nearest_interface_point level-set "
-                "advection velocity extension found a source velocity DOF outside "
-                "the current state vector.");
-          }
-          return state.u[idx];
-        };
-
-        std::map<svmp::FE::GlobalIndex, std::vector<svmp::FE::Real>>
-            source_cell_coefficients;
-        std::map<svmp::FE::GlobalIndex,
-                 std::shared_ptr<svmp::FE::geometry::GeometryMapping>>
-            mapping_cache;
-        auto coefficients_for_cell =
-            [&](svmp::FE::GlobalIndex parent_cell)
-                -> const std::vector<svmp::FE::Real>& {
-          auto [it, inserted] =
-              source_cell_coefficients.emplace(parent_cell,
-                                               std::vector<svmp::FE::Real>{});
-          if (!inserted) {
-            return it->second;
-          }
-          const auto cell_dofs = source_dofs.getCellDofs(parent_cell);
-          const auto expected =
-              source_rec.space->dofs_per_element(parent_cell);
-          if (cell_dofs.size() != expected) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] nearest_interface_point level-set "
-                "advection velocity extension found source velocity cell DOFs "
-                "incompatible with the source function space.");
-          }
-          it->second.reserve(cell_dofs.size());
-          for (const auto local_dof : cell_dofs) {
-            it->second.push_back(read_source_coefficient(local_dof));
-          }
-          return it->second;
-        };
-        auto mapping_for_cell =
-            [&](svmp::FE::GlobalIndex parent_cell)
-                -> std::shared_ptr<svmp::FE::geometry::GeometryMapping> {
-          auto it = mapping_cache.find(parent_cell);
-          if (it != mapping_cache.end()) {
-            return it->second;
-          }
-          auto mapping = createCellGeometryMapping(system.meshAccess(),
-                                                   parent_cell);
-          mapping_cache.emplace(parent_cell, mapping);
-          return mapping;
-        };
-
         bool added = false;
         for (const auto* rule :
              cut_context->interfaceRulesForMarker(*marker)) {
@@ -4954,8 +6560,6 @@ bool updateLevelSetAdvectionVelocitiesFromState(
             continue;
           }
           ++interface_sample_context_rule_count;
-          const auto parent_cell = rule->provenance.parent_entity;
-          const auto& coefficients = coefficients_for_cell(parent_cell);
           for (const auto& qp : rule->points) {
             if (!std::isfinite(qp.weight) ||
                 !(std::abs(qp.weight) > 0.0)) {
@@ -4968,31 +6572,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
                 "[svMultiPhysics::Application] nearest_interface_point level-set "
                 "advection velocity extension received a non-finite cut-interface sample.");
             }
-            std::array<double, 3> sample_point{point[0], point[1], point[2]};
-            if (rule->frame == svmp::FE::geometry::CutGeometryFrame::Reference) {
-              const auto mapping = mapping_for_cell(parent_cell);
-              if (mapping == nullptr) {
-                continue;
-              }
-              const auto physical_point =
-                  physicalCellPointAtReference(*mapping, point);
-              if (!physical_point.has_value()) {
-                continue;
-              }
-              sample_point = {{(*physical_point)[0],
-                               (*physical_point)[1],
-                               (*physical_point)[2]}};
-            }
-            svmp::FE::spaces::FunctionSpace::Value xi{};
-            xi[0] = qp.parent_coordinate[0];
-            xi[1] = qp.parent_coordinate[1];
-            xi[2] = qp.parent_coordinate[2];
-            const auto value = source_rec.space->evaluate(xi, coefficients);
-            std::vector<double> sample_value(target_components, 0.0);
-            for (std::size_t c = 0; c < copy_components; ++c) {
-              sample_value[c] = static_cast<double>(value[c]);
-            }
-            add_interface_sample_value(sample_point, sample_value);
+            ++local_interface_geometry_sample_count;
             added = true;
           }
         }
@@ -5020,15 +6600,10 @@ bool updateLevelSetAdvectionVelocitiesFromState(
           add_interface_sample(va, vb, phia / (phia - phib));
         }
       };
-      const auto candidate_cells =
-          interfaceVelocitySampleCandidateCells(system, request);
-      const bool using_cut_context_candidates = !candidate_cells.empty();
-      interface_sample_used_cut_context = using_cut_context_candidates;
-      interface_sample_candidate_cell_count = candidate_cells.size();
       const bool used_cut_context_samples =
           add_cut_context_interface_samples();
-      interface_sample_used_cut_context =
-          used_cut_context_samples || using_cut_context_candidates;
+      interface_sample_context_rule_count = globalSumSize(
+          interface_sample_context_rule_count, extension_comm);
 
       auto visit_cell_edges = [&](svmp::index_t cell) {
         if (cell < 0 || cell >= local_mesh.n_cells()) {
@@ -5106,7 +6681,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
         }
       };
       if (!used_cut_context_samples && mesh_dim == 2) {
-        if (using_cut_context_candidates) {
+        if (authoritative_interface_context) {
           for (const auto cell : candidate_cells) {
             visit_cell_edges(static_cast<svmp::index_t>(cell));
           }
@@ -5117,65 +6692,131 @@ bool updateLevelSetAdvectionVelocitiesFromState(
         }
       }
 
-      samples = gatherVelocityExtensionSamples(std::move(samples),
-                                               target_components);
-      if (samples.empty()) {
-        if (mesh_dim != 2) {
+      interface_sample_count = globalVelocityExtensionGeometrySampleCount(
+          local_interface_geometry_sample_count, extension_comm);
+      if (interface_sample_count == 0u) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] wall_compatible_normal wet-extension found no resolved interface geometry samples on any communicator rank; refusing to retain or install a stale extension map.");
+      }
+      if (trace_support_vertex_count == 0u) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] wall_compatible_normal wet-extension resolved interface geometry but no P1 trace-support vertices.");
+      }
+
+      std::vector<WallVelocityExtensionConstraint> wall_constraints;
+      wall_constraints.reserve(request.wall_constraints.size());
+      if (request.enforce_wall_impermeability) {
+        if (request.wall_constraints.empty()) {
           throw std::runtime_error(
-              "[svMultiPhysics::Application] nearest_interface_point level-set "
-              "advection velocity extension for non-2D meshes requires generated "
-              "cut-interface quadrature samples from the active cut context.");
+              "[svMultiPhysics::Application] Wet-extension wall "
+              "impermeability is enabled, but no strong homogeneous "
+              "velocity Dirichlet component masks were resolved. Specify "
+              "compatible wall BCs or disable "
+              "Wet_extension_enforce_wall_impermeability.");
         }
-        if (trace_updates) {
-          const auto [min_it, max_it] =
-              std::minmax_element(phi_values.begin(), phi_values.end());
-          application::core::oopCout()
-              << "[svMultiPhysics::Application] Skipped level-set advection velocity update"
-              << " field='" << request.target_velocity_field_name << "'"
-              << " source='" << request.source_velocity_field_name << "'"
-              << " extension_method=" << request.extension_method
-              << " reason=no_interface_crossings"
-              << " phi_min=" << (min_it != phi_values.end() ? *min_it : 0.0)
-              << " phi_max=" << (max_it != phi_values.end() ? *max_it : 0.0)
-              << std::endl;
-        }
-        continue;
-      }
-      interface_sample_count = samples.size();
-
-      std::vector<NearestPointRecord> sample_records;
-      sample_records.reserve(samples.size());
-      for (std::size_t s = 0; s < samples.size(); ++s) {
-        sample_records.push_back(NearestPointRecord{samples[s].point, s});
-      }
-      const NearestPointIndex sample_index(mesh_dim, std::move(sample_records));
-
-      for (std::size_t v = 0; v < n_vertices; ++v) {
-        if (active[v]) {
-          for (std::size_t c = 0; c < copy_components; ++c) {
-            const auto value =
-                source_values[v * source_components + c];
-            extended[v * target_components + c] =
-                std::isfinite(value) ? value : 0.0;
+        for (const auto& wall : request.wall_constraints) {
+          const auto label = mesh.label_from_name(wall.face_name);
+          if (label == svmp::INVALID_LABEL) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Wet-extension wall face '" +
+                wall.face_name + "' is not registered on the active mesh.");
           }
-          record_speed(v);
+          wall_constraints.push_back(WallVelocityExtensionConstraint{
+              .boundary_label = label,
+              .constrained_components = strongZeroVelocityComponentMask(
+                  wall.effective_direction, mesh_dim)});
+        }
+      }
+      wall_boundary_label_count = wall_constraints.size();
+
+      if (algebraic_extension) {
+        std::uint64_t free_surface_geometry_revision = 0u;
+        if (const auto* cut_context = system.cutIntegrationContext()) {
+          free_surface_geometry_revision = cut_context->contentRevision();
+          if (const auto marker = interfaceVelocitySampleMarker(system, request);
+              marker.has_value() &&
+              cut_context->hasFreeSurfaceGeometrySnapshotForMarker(*marker)) {
+            free_surface_geometry_revision =
+                cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(
+                    *marker);
+          }
+        }
+        const auto& mesh_access = system.meshAccess();
+        const auto map_revision =
+            application::core::velocityExtensionMapRevision(
+                mesh_access.geometryRevision(),
+                mesh_access.topologyRevision(),
+                mesh_access.ownershipRevision(),
+                mesh_access.numberingRevision(),
+                free_surface_geometry_revision,
+                std::span<const double>(phi_values.data(), phi_values.size()),
+                std::span<const std::uint8_t>(trace_seed.data(),
+                                              trace_seed.size()));
+        algebraic_map_snapshot =
+            application::core::buildVelocityExtensionMapSnapshot(
+                mesh,
+                extension_comm,
+                map_revision,
+                std::span<const double>(phi_values.data(), phi_values.size()),
+                std::span<const double>(source_values.data(),
+                                        source_values.size()),
+                source_components,
+                std::span<const std::uint8_t>(trace_seed.data(),
+                                              trace_seed.size()),
+                target_components,
+                copy_components,
+                request.extension_band_layers,
+                request.enforce_wall_impermeability,
+                std::span<const WallVelocityExtensionConstraint>(
+                    wall_constraints));
+        wall_extension_report = algebraic_map_snapshot->report();
+        extended.assign(algebraic_map_snapshot->preview().begin(),
+                        algebraic_map_snapshot->preview().end());
+        algebraic_rows = algebraic_map_snapshot->copyRows();
+      } else {
+        wall_extension_report = extendVelocityInLevelSetNormalBand(
+            mesh,
+            extension_comm,
+            std::span<const double>(phi_values.data(), phi_values.size()),
+            std::span<const double>(source_values.data(), source_values.size()),
+            source_components,
+            std::span<const std::uint8_t>(trace_seed.data(), trace_seed.size()),
+            target_components,
+            copy_components,
+            request.extension_band_layers,
+            request.enforce_wall_impermeability,
+            std::span<const WallVelocityExtensionConstraint>(wall_constraints),
+            extended);
+      }
+      constexpr double trace_equality_factor = 64.0;
+      for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+        if (trace_support[vertex] == 0u) {
           continue;
         }
-
-        const auto nearest =
-            sample_index.nearest(meshVertexPoint(coords, mesh_dim, v));
-        if (!nearest.found || nearest.payload >= samples.size()) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Level-set advection velocity extension failed to find a nearest interface sample.");
+        for (std::size_t component = 0; component < copy_components;
+             ++component) {
+          const double source =
+              source_values[vertex * source_components + component];
+          const double extension =
+              extended[vertex * target_components + component];
+          const double tolerance =
+              trace_equality_factor * std::numeric_limits<double>::epsilon() *
+              std::max({1.0, std::abs(source), std::abs(extension)});
+          if (!std::isfinite(source) || !std::isfinite(extension) ||
+              std::abs(extension - source) > tolerance) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] wall_compatible_normal wet-extension failed the exact P1 trace-support equality invariant.");
+          }
         }
-        const auto best_sample = nearest.payload;
-        for (std::size_t c = 0; c < copy_components; ++c) {
-          extended[v * target_components + c] =
-              samples[best_sample].value[c];
-        }
+      }
+      for (std::size_t v = 0; v < n_vertices; ++v) {
         record_speed(v);
       }
     } else {
+      if (algebraic_extension) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Algebraic wet-extension tangents are implemented only for wall_compatible_normal; a state-dependent prescribed fallback is not permitted.");
+      }
       std::vector<VelocityExtensionSample> active_samples;
       active_samples.reserve(active_vertices.size());
       for (const auto candidate : active_vertices) {
@@ -5191,7 +6832,8 @@ bool updateLevelSetAdvectionVelocitiesFromState(
       }
       active_samples =
           gatherVelocityExtensionSamples(std::move(active_samples),
-                                         target_components);
+                                         target_components,
+                                         extension_comm);
       if (active_samples.empty()) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Level-set advection velocity "
@@ -5223,62 +6865,235 @@ bool updateLevelSetAdvectionVelocitiesFromState(
       }
     }
 
+    max_active_speed = globalMaxDouble(max_active_speed, extension_comm);
+    max_dry_extended_speed =
+        globalMaxDouble(max_dry_extended_speed, extension_comm);
+    const double velocity_scale_floor = 1.0e-12;
+    const double wet_to_dry_amplification =
+        max_dry_extended_speed /
+        std::max(max_active_speed, velocity_scale_floor);
+    if (algebraic_extension &&
+        wet_to_dry_amplification >
+            kVelocityExtensionMaxWetToDryAmplification) {
+      std::ostringstream message;
+      message
+          << "[svMultiPhysics::Application] Algebraic wet-extension refused "
+             "to install a frozen map because the dry-band preview "
+             "amplification exceeded its fixed guard: max_active_speed="
+          << max_active_speed
+          << " max_dry_extended_speed=" << max_dry_extended_speed
+          << " amplification=" << wet_to_dry_amplification
+          << " guard=" << kVelocityExtensionMaxWetToDryAmplification;
+      throw std::runtime_error(message.str());
+    }
+
     const auto& target_dofs = system.fieldDofHandler(target_field);
     const auto* entity_map = target_dofs.getEntityDofMap();
     if (entity_map == nullptr) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set advection velocity update requires vertex DOFs.");
     }
-    std::vector<svmp::FE::Real> coefficients(
-        static_cast<std::size_t>(target_dofs.getNumDofs()),
-        svmp::FE::Real{0.0});
-    std::vector<std::uint8_t> assigned(coefficients.size(), 0u);
-
-    const auto projection =
-        system.projectMeshVertexValuesToFieldCoefficients(
-            target_field,
-            std::span<const svmp::FE::Real>(
-                extended.data(),
-                extended.size()),
-            target_components,
-            std::span<svmp::FE::Real>(coefficients.data(),
-                                      coefficients.size()),
-            std::span<std::uint8_t>(assigned.data(), assigned.size()),
-            "ApplicationDriver::updateLevelSetAdvectionVelocities");
-    if (projection.unassigned_dofs != 0u) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Level-set advection velocity update "
-          "could not safely project " +
-          std::to_string(projection.unassigned_dofs) +
-          " target coefficient(s) from mesh vertices.");
-    }
-
     std::size_t unassigned = 0u;
-    for (const auto flag : assigned) {
-      unassigned += flag ? 0u : 1u;
+    if (algebraic_extension) {
+      if (!algebraic_map_snapshot || algebraic_rows.empty()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Algebraic wet-extension refresh produced no immutable map snapshot or owned constraint rows.");
+      }
+
+      std::vector<svmp::FE::Real> projected_coefficients(
+          static_cast<std::size_t>(target_dofs.getNumDofs()),
+          svmp::FE::Real{0.0});
+      std::vector<std::uint8_t> projected_assignment(
+          projected_coefficients.size(), 0u);
+      const auto projection =
+          system.projectMeshVertexValuesToFieldCoefficients(
+              target_field,
+              std::span<const svmp::FE::Real>(extended.data(),
+                                              extended.size()),
+              target_components,
+              std::span<svmp::FE::Real>(projected_coefficients.data(),
+                                        projected_coefficients.size()),
+              std::span<std::uint8_t>(projected_assignment.data(),
+                                      projected_assignment.size()),
+              "ApplicationDriver::refreshAlgebraicVelocityExtension");
+      if (projection.unassigned_dofs != 0u || state.u_vector == nullptr) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Algebraic wet-extension map refresh requires a mutable state vector and a complete P1 preview projection.");
+      }
+      const auto owned_field_dofs =
+          target_dofs.getPartition().locallyOwned().toVector();
+      std::vector<svmp::FE::GlobalIndex> state_dofs;
+      std::vector<svmp::FE::Real> state_values;
+      state_dofs.reserve(owned_field_dofs.size());
+      state_values.reserve(owned_field_dofs.size());
+      const auto target_offset = system.fieldDofOffset(target_field);
+      for (const auto local_dof : owned_field_dofs) {
+        if (local_dof < 0 ||
+            static_cast<std::size_t>(local_dof) >=
+                projected_coefficients.size() ||
+            projected_assignment[static_cast<std::size_t>(local_dof)] == 0u) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Algebraic wet-extension preview omitted an owned extension DOF.");
+        }
+        state_dofs.push_back(target_offset + local_dof);
+        state_values.push_back(
+            projected_coefficients[static_cast<std::size_t>(local_dof)]);
+      }
+      auto* mutable_state =
+          const_cast<svmp::FE::backends::GenericVector*>(state.u_vector);
+      auto state_view = mutable_state->createAssemblyView();
+      if (!state_view) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Algebraic wet-extension map refresh could not create a mutable state view.");
+      }
+      const bool map_changed =
+          !extension_constraint->hasFrozenMap() ||
+          extension_constraint->frozenMapRevision() !=
+              algebraic_map_snapshot->revision().key();
+      extension_constraint->setFrozenRows(
+          std::move(algebraic_rows),
+          algebraic_map_snapshot->revision().key());
+      state_view->beginAssemblyPhase();
+      state_view->setVectorEntries(
+          std::span<const svmp::FE::GlobalIndex>(state_dofs.data(),
+                                                 state_dofs.size()),
+          std::span<const svmp::FE::Real>(state_values.data(),
+                                          state_values.size()));
+      state_view->endAssemblyPhase();
+      state_view->finalizeAssembly();
+      mutable_state->markModified();
+      mutable_state->updateGhosts();
+      if (trace_updates) {
+        application::core::oopCout()
+            << "[svMultiPhysics::Application] Accepted algebraic wet-extension map refresh"
+            << " map_revision="
+            << algebraic_map_snapshot->revision().key()
+            << " map_changed=" << (map_changed ? 1 : 0)
+            << " reprojected_owned_dofs=" << state_dofs.size()
+            << std::endl;
+      }
+    } else {
+      std::vector<svmp::FE::Real> coefficients(
+          static_cast<std::size_t>(target_dofs.getNumDofs()),
+          svmp::FE::Real{0.0});
+      std::vector<std::uint8_t> assigned(coefficients.size(), 0u);
+
+      const auto projection =
+          system.projectMeshVertexValuesToFieldCoefficients(
+              target_field,
+              std::span<const svmp::FE::Real>(extended.data(),
+                                              extended.size()),
+              target_components,
+              std::span<svmp::FE::Real>(coefficients.data(),
+                                        coefficients.size()),
+              std::span<std::uint8_t>(assigned.data(), assigned.size()),
+              "ApplicationDriver::updateLevelSetAdvectionVelocities");
+      if (projection.unassigned_dofs != 0u) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set advection velocity update "
+            "could not safely project " +
+            std::to_string(projection.unassigned_dofs) +
+            " target coefficient(s) from mesh vertices.");
+      }
+      for (const auto flag : assigned) {
+        unassigned += flag ? 0u : 1u;
+      }
+      system.setPrescribedFieldCoefficients(
+          target_field,
+          std::span<const svmp::FE::Real>(coefficients.data(),
+                                          coefficients.size()));
     }
-    system.setPrescribedFieldCoefficients(
-        target_field,
-        std::span<const svmp::FE::Real>(coefficients.data(),
-                                        coefficients.size()));
     updated = true;
     if (trace_updates) {
       application::core::oopCout()
           << "[svMultiPhysics::Application] Updated level-set advection velocity field='"
           << request.target_velocity_field_name << "' from source='"
           << request.source_velocity_field_name << "' extension_method="
-          << request.extension_method << " active_vertices="
-          << active_vertices.size() << " dry_vertices="
+          << request.extension_method << " linearization="
+          << (algebraic_extension ? "frozen_sparse_algebraic" :
+                                    "prescribed_legacy")
+          << " active_vertices=" << active_vertices.size() << " dry_vertices="
           << (n_vertices - active_vertices.size())
           << " interface_sample_candidates="
           << interface_sample_candidate_cell_count
           << " interface_sample_context_rules="
           << interface_sample_context_rule_count
           << " interface_samples=" << interface_sample_count
+          << " interface_geometry_samples=" << interface_sample_count
+          << " interface_geometry_sample_scope=summed_rank_local"
+          << " interface_geometry_sample_exchange=checked_scalar_allreduce"
+          << " interface_samples_used_for_constraints=0"
           << " interface_sample_source="
           << (interface_sample_used_cut_context ? "cut_context" : "all_cells")
+          << " trace_constraint_source=cut_cell_p1_support"
+          << " trace_support_vertices=" << trace_support_vertex_count
+          << " dry_trace_support_vertices="
+          << dry_trace_support_vertex_count
+          << " trace_seed_vertices=" << trace_seed_vertex_count
+          << " extension_band_layers=" << request.extension_band_layers
+          << " extended_vertices="
+          << wall_extension_report.extended_vertices
+          << " vertices_outside_extension_band="
+          << wall_extension_report.vertices_outside_band
+          << " wall_projected_vertices="
+          << wall_extension_report.wall_projected_vertices
+          << " component_collision_vertices="
+          << wall_extension_report.component_collision_vertices
+          << " regression_candidate_rows="
+          << wall_extension_report.regression_candidate_rows
+          << " regression_accepted_rows="
+          << wall_extension_report.regression_accepted_rows
+          << " bounded_fallback_rows="
+          << wall_extension_report.bounded_fallback_rows
+          << " condition_rejected_rows="
+          << wall_extension_report.condition_rejected_rows
+          << " coefficient_rejected_rows="
+          << wall_extension_report.coefficient_rejected_rows
+          << " map_revision="
+          << (algebraic_map_snapshot
+                  ? algebraic_map_snapshot->revision().key()
+                  : 0u)
+          << " regression_condition_guard="
+          << kVelocityExtensionMaxRegressionCondition
+          << " max_regression_condition="
+          << wall_extension_report.max_regression_condition
+          << " graph_coefficient_guard="
+          << (1.0 + kVelocityExtensionRowTolerance)
+          << " max_abs_graph_coefficient="
+          << wall_extension_report.max_abs_graph_coefficient
+          << " graph_row_l1_guard="
+          << (1.0 + kVelocityExtensionRowTolerance)
+          << " max_graph_row_l1="
+          << wall_extension_report.max_graph_row_l1
+          << " graph_row_sum_tolerance="
+          << kVelocityExtensionRowTolerance
+          << " max_graph_row_sum_error="
+          << wall_extension_report.max_graph_row_sum_error
+          << " max_negative_graph_coefficient="
+          << wall_extension_report.max_negative_graph_coefficient
+          << " max_constant_reproduction_error="
+          << wall_extension_report.max_constant_reproduction_error
+          << " max_tangential_linear_reproduction_error="
+          << wall_extension_report.max_linear_reproduction_error
+          << " max_extrapolation_distance="
+          << wall_extension_report.max_extrapolation_distance
+          << " map_max_seed_speed="
+          << wall_extension_report.max_seed_speed
+          << " map_max_extended_speed="
+          << wall_extension_report.max_extended_speed
+          << " wall_boundary_labels=" << wall_boundary_label_count
+          << " max_wall_normal_velocity="
+          << wall_extension_report.max_wall_normal_velocity
+          << " wall_normal_scope=graph_extended_vertices_outside_trace_seed"
           << " max_active_speed=" << max_active_speed
           << " max_dry_extended_speed=" << max_dry_extended_speed
+          << " wet_to_dry_amplification=" << wet_to_dry_amplification
+          << " wet_to_dry_amplification_guard="
+          << kVelocityExtensionMaxWetToDryAmplification
+          << " target_value_semantics="
+          << (algebraic_extension ? "generalized_alpha_stage_unknown" :
+                                    "prescribed_current_coefficients")
+          << " computed_extension_semantics=current_state_constraint_preview"
           << " unassigned_dofs=" << unassigned << std::endl;
     }
   }
@@ -5321,7 +7136,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
       std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
   report.refreshed = true;
   report.topology_key = kCutContextHashOffset;
-  const auto comm = svmp::MeshComm::world();
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto& mesh_access = sim.fe_system->meshAccess();
 
   for (const auto& request : requests) {
@@ -5378,13 +7193,14 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     application::core::validateEquationLevelCutVolumeConsumer(
         *sim.fe_system, request, result.interface_marker);
 
-    const auto summary = result.summary;
-    logCornerLinearizedCutWarningOnce(request, result);
+    // The lifecycle retains ghost-cell rules in result.domain/result.summary
+    // for distributed assembly.  Only the owned view may enter global
+    // physical and topology totals.
+    const auto summary = result.owned_summary;
     const auto active_summary = summarizeActiveSideRegions(
         result.domain,
         request.active_side,
-        static_cast<std::size_t>(std::max<svmp::FE::GlobalIndex>(
-            0, mesh_access.numCells())));
+        mesh_access);
     const auto raw_active_volume =
         request.active_side == LevelSetActiveSide::Negative
             ? summary.negative_volume_measure
@@ -5430,15 +7246,18 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     const auto global_positive_volume = static_cast<svmp::FE::Real>(
         globalSumDouble(static_cast<double>(summary.positive_volume_measure), comm));
     const auto global_cell_count =
-        globalSumSize(result.cell_count, comm);
+        globalSumSize(result.owned_cell_count, comm);
     const auto global_corner_linearized_cells =
-        globalSumSize(result.corner_linearized_cell_count, comm);
+        globalSumSize(result.owned_corner_linearized_cell_count, comm);
     const auto global_implicit_cut_fallback_cells =
-        globalSumSize(result.implicit_cut_fallback_cell_count, comm);
+        globalSumSize(result.owned_implicit_cut_fallback_cell_count, comm);
+    logCornerLinearizedCutWarningOnce(
+        request, result, global_corner_linearized_cells, global_cell_count);
     const auto global_backend_volume_quadrature_points =
-        globalSumSize(result.backend_volume_quadrature_point_count, comm);
+        globalSumSize(result.owned_backend_volume_quadrature_point_count, comm);
     const auto global_backend_interface_quadrature_points =
-        globalSumSize(result.backend_interface_quadrature_point_count, comm);
+        globalSumSize(result.owned_backend_interface_quadrature_point_count,
+                      comm);
     const auto global_backend_elapsed_seconds =
         globalSumDouble(result.backend_elapsed_seconds, comm);
     const auto global_generated_cell_cache_hits =
@@ -5456,11 +7275,12 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     const auto global_generated_domain_cache_hits =
         globalSumSize(result.domain_cache_hits, comm);
     const auto global_linear_full_cell_fast_path_cells =
-        globalSumSize(result.linear_full_cell_fast_path_count, comm);
+        globalSumSize(result.owned_linear_full_cell_fast_path_count, comm);
     std::array<std::size_t, 5> global_selected_backend_counts{};
     for (std::size_t i = 0; i < global_selected_backend_counts.size(); ++i) {
       global_selected_backend_counts[i] = globalSumSize(
-          result.selected_implicit_cut_quadrature_backend_counts[i], comm);
+          result.owned_selected_implicit_cut_quadrature_backend_counts[i],
+          comm);
     }
     const auto local_backend_qualification_counts =
         localImplicitCutBackendQualificationCounts(
@@ -5524,7 +7344,419 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         retainedVolumeRulePointersForSide(
             domain_volume_rules,
             svmp::FE::geometry::CutIntegrationSide::Positive);
-    context->addGeneratedInterfaceDomain(result.domain, retained_volume_sides);
+    std::size_t local_boundary_intersection_fragments = 0u;
+    std::size_t local_active_boundary_intersection_fragments = 0u;
+    std::size_t local_skipped_boundary_intersection_fragments = 0u;
+    std::size_t local_boundary_intersection_qpoints = 0u;
+    svmp::FE::Real local_boundary_intersection_measure{0.0};
+    // Boundary-face ownership is rank-local.  Every rank must nevertheless
+    // enter the per-marker reductions below in the same order, including
+    // ranks with no local faces for a marker.  The intersection builder
+    // returns an empty domain for that case.
+    const auto boundary_markers =
+        communicatorWideBoundaryMarkers(mesh_access, comm);
+    std::vector<svmp::FE::interfaces::
+                    GeneratedInterfaceBoundaryIntersectionDomain>
+        snapshot_contact_domains;
+    std::vector<svmp::FE::interfaces::GeneratedActiveBoundaryDomain>
+        snapshot_active_boundary_domains;
+    snapshot_contact_domains.reserve(boundary_markers.size());
+    snapshot_active_boundary_domains.reserve(2u * boundary_markers.size());
+    for (const int boundary_marker : boundary_markers) {
+      svmp::FE::interfaces::
+          GeneratedInterfaceBoundaryIntersectionRequest intersection_request;
+      intersection_request.source = domain_request.source;
+      intersection_request.generated_domain_id = request.domain_id;
+      intersection_request.isovalue = domain_request.isovalue;
+      intersection_request.interface_marker = result.interface_marker;
+      intersection_request.boundary_marker = boundary_marker;
+      intersection_request.tolerance = domain_request.tolerance;
+      intersection_request.quadrature_order =
+          domain_request.resolvedInterfaceQuadratureOrder();
+      intersection_request.frame = domain_request.frame;
+      intersection_request.mesh_geometry_revision =
+          domain_request.mesh_geometry_revision;
+      intersection_request.mesh_topology_revision =
+          domain_request.mesh_topology_revision;
+      intersection_request.ownership_revision =
+          domain_request.ownership_revision;
+      intersection_request.quadrature_policy_key =
+          domain_request.quadrature_policy_key;
+      intersection_request.source_value_revision = result.value_revision;
+
+      auto intersection_domain = svmp::FE::interfaces::
+          buildGeneratedInterfaceBoundaryIntersectionDomain(
+              std::move(intersection_request),
+              result.domain,
+              mesh_access);
+      const auto intersection_provenance =
+          svmp::FE::interfaces::
+              validateGeneratedInterfaceBoundaryProvenance(
+                  intersection_domain, result.domain);
+      // Keep ghost contact rules in the local context, but reduce only the
+      // owning parent cell's contribution to global validation/measure data.
+      const auto intersection_summary =
+          ownedBoundaryIntersectionSummary(intersection_domain, mesh_access);
+      local_boundary_intersection_fragments +=
+          intersection_summary.fragment_count;
+      local_active_boundary_intersection_fragments +=
+          intersection_summary.active_fragment_count;
+      local_skipped_boundary_intersection_fragments +=
+          intersection_summary.skipped_fragment_count;
+      local_boundary_intersection_qpoints +=
+          intersection_summary.quadrature_point_count;
+      local_boundary_intersection_measure +=
+          intersection_summary.measure;
+      const auto global_marker_fragments =
+          globalSumSize(intersection_summary.fragment_count, comm);
+      const auto global_marker_active_fragments =
+          globalSumSize(intersection_summary.active_fragment_count, comm);
+      const auto global_marker_skipped_fragments =
+          globalSumSize(intersection_summary.skipped_fragment_count, comm);
+      const auto global_marker_qpoints =
+          globalSumSize(intersection_summary.quadrature_point_count, comm);
+      const auto global_marker_measure =
+          static_cast<svmp::FE::Real>(globalSumDouble(
+              static_cast<double>(intersection_summary.measure), comm));
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] Generated interface-boundary "
+             "intersection"
+          << " diagnostic=generated_interface_boundary_intersection_marker"
+          << " marker=" << intersection_domain.marker()
+          << " interface_marker=" << result.interface_marker
+          << " boundary_marker=" << boundary_marker
+          << " field='" << request.level_set_field_name << "'"
+          << " domain_id='" << request.domain_id << "'"
+          << " source='" << domain_request.source.identifier() << "'"
+          << " fragments=" << global_marker_fragments
+          << " active_fragments=" << global_marker_active_fragments
+          << " skipped_fragments=" << global_marker_skipped_fragments
+          << " qpoints=" << global_marker_qpoints
+          << " measure=" << global_marker_measure
+          << " source_surface_fragments="
+          << intersection_provenance.source_surface_fragment_count
+          << " referenced_source_surface_fragments="
+          << intersection_provenance
+                 .referenced_source_surface_fragment_count
+          << " orphan_contact_fragments="
+          << intersection_provenance.orphan_contact_fragment_count
+          << " stale_revision_count="
+          << intersection_provenance.stale_revision_count
+          << " max_level_set_residual="
+          << intersection_provenance.max_level_set_residual
+          << std::endl;
+      const bool contact_marker_is_consumed =
+          sim.fe_system->isGeneratedEmbeddedInterfaceMarkerRegistered(
+              intersection_domain.marker());
+      if (global_marker_skipped_fragments > 0u) {
+        throw std::runtime_error(
+            std::string("[svMultiPhysics::Application] Generated "
+                        "interface-boundary intersection validation rejected "
+                        "a degenerate contact fragment") +
+            " marker=" + std::to_string(intersection_domain.marker()) +
+            " interface_marker=" + std::to_string(result.interface_marker) +
+            " boundary_marker=" + std::to_string(boundary_marker) +
+            " field='" + request.level_set_field_name + "'" +
+            " domain_id='" + request.domain_id + "'" +
+            " fragments=" + std::to_string(global_marker_fragments) +
+            " active_fragments=" +
+            std::to_string(global_marker_active_fragments) +
+            " skipped_fragments=" +
+            std::to_string(global_marker_skipped_fragments) +
+            " qpoints=" + std::to_string(global_marker_qpoints) +
+            " contact_marker_consumed=" +
+            (contact_marker_is_consumed ? "true" : "false"));
+      }
+      mixCutContextHash(report.topology_key,
+                        static_cast<std::uint64_t>(
+                            std::max(0, intersection_domain.marker())));
+      mixCutContextHash(report.topology_key,
+                        static_cast<std::uint64_t>(
+                            intersection_summary.active_fragment_count));
+      const auto make_active_boundary_request =
+          [&](svmp::FE::geometry::CutIntegrationSide side) {
+            svmp::FE::interfaces::GeneratedActiveBoundaryRequest active_request;
+            active_request.source = domain_request.source;
+            active_request.generated_domain_id = request.domain_id;
+            active_request.isovalue = domain_request.isovalue;
+            active_request.interface_marker = result.interface_marker;
+            active_request.boundary_marker = boundary_marker;
+            active_request.side = side;
+            active_request.tolerance = domain_request.tolerance;
+            active_request.quadrature_order =
+                domain_request.resolvedInterfaceQuadratureOrder();
+            active_request.frame = domain_request.frame;
+            active_request.mesh_geometry_revision =
+                domain_request.mesh_geometry_revision;
+            active_request.mesh_topology_revision =
+                domain_request.mesh_topology_revision;
+            active_request.ownership_revision =
+                domain_request.ownership_revision;
+            active_request.quadrature_policy_key =
+                domain_request.quadrature_policy_key;
+            active_request.source_value_revision = result.value_revision;
+            return active_request;
+          };
+      auto negative_boundary_request = make_active_boundary_request(
+          svmp::FE::geometry::CutIntegrationSide::Negative);
+      auto positive_boundary_request = make_active_boundary_request(
+          svmp::FE::geometry::CutIntegrationSide::Positive);
+      if (!sim.primary_mesh ||
+            !sim.primary_mesh->has_field(
+                svmp::EntityKind::Vertex,
+                request.level_set_field_name)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Sharp active-boundary construction requires the synchronized scalar level-set mesh field '" +
+              request.level_set_field_name + "'.");
+        }
+        const auto level_set_handle = sim.primary_mesh->field_handle(
+            svmp::EntityKind::Vertex, request.level_set_field_name);
+        if (sim.primary_mesh->field_type(level_set_handle) !=
+                svmp::FieldScalarType::Float64 ||
+            sim.primary_mesh->field_components(level_set_handle) < 1u) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Sharp active-boundary construction requires a scalar Float64 level-set mesh field.");
+        }
+        const auto* level_set_values = static_cast<const double*>(
+            sim.primary_mesh->field_data(level_set_handle));
+        const auto level_set_components =
+            sim.primary_mesh->field_components(level_set_handle);
+        const auto level_set_entities =
+            sim.primary_mesh->field_entity_count(level_set_handle);
+        if (level_set_values == nullptr) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Sharp active-boundary construction found an empty level-set mesh field.");
+        }
+        svmp::FE::interfaces::GeneratedActiveBoundaryScalarField scalar_field;
+        scalar_field.value_at_node =
+            [level_set_values,
+             level_set_components,
+             level_set_entities](svmp::FE::GlobalIndex node) {
+              if (node < 0 ||
+                  static_cast<std::size_t>(node) >= level_set_entities) {
+                throw std::out_of_range(
+                    "sharp active-boundary node is outside the synchronized level-set field");
+              }
+              return static_cast<svmp::FE::Real>(
+                  level_set_values[static_cast<std::size_t>(node) *
+                                   level_set_components]);
+            };
+        auto negative_boundary =
+            svmp::FE::interfaces::buildGeneratedActiveBoundaryDomain(
+                std::move(negative_boundary_request),
+                result.domain,
+                intersection_domain,
+                mesh_access,
+                scalar_field);
+        auto positive_boundary =
+            svmp::FE::interfaces::buildGeneratedActiveBoundaryDomain(
+                std::move(positive_boundary_request),
+                result.domain,
+                intersection_domain,
+                mesh_access,
+                scalar_field);
+        const auto partition =
+            svmp::FE::interfaces::validateGeneratedActiveBoundaryPartition(
+                negative_boundary,
+                positive_boundary,
+                result.domain,
+                intersection_domain,
+                mesh_access);
+        application::core::oopCout()
+            << "[svMultiPhysics::Application] Generated sharp active boundary"
+            << " diagnostic=generated_active_boundary_partition"
+            << " interface_marker=" << result.interface_marker
+            << " boundary_marker=" << boundary_marker
+            << " negative_marker=" << negative_boundary.marker()
+            << " positive_marker=" << positive_boundary.marker()
+            << " boundary_faces=" << partition.boundary_face_count
+            << " cut_boundary_faces=" << partition.cut_boundary_face_count
+            << " contact_fragments="
+            << partition.source_contact_fragment_count
+            << " referenced_contact_fragments="
+            << partition.referenced_contact_fragment_count
+            << " orphan_source_references="
+            << partition.orphan_source_reference_count
+            << " stale_revision_count=" << partition.stale_revision_count
+            << " reference_parent_measure="
+            << partition.total_boundary_measure
+            << " reference_negative_measure="
+            << partition.negative_boundary_measure
+            << " reference_positive_measure="
+            << partition.positive_boundary_measure
+            << " max_reference_partition_error="
+            << partition.max_partition_error
+            << std::endl;
+        snapshot_active_boundary_domains.push_back(
+            std::move(negative_boundary));
+        snapshot_active_boundary_domains.push_back(
+            std::move(positive_boundary));
+        snapshot_contact_domains.push_back(std::move(intersection_domain));
+    }
+    if (domain_request.source.kind !=
+            svmp::FE::interfaces::CutInterfaceSourceKind::Field ||
+        domain_request.source.field_id == svmp::FE::INVALID_FIELD_ID) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Authoritative free-surface geometry snapshots currently require a registered scalar level-set field source.");
+    }
+    auto snapshot_cell_evaluator = std::make_shared<
+        svmp::FE::level_set::LevelSetCellEvaluator>(
+        svmp::FE::level_set::makeLevelSetCellEvaluator(
+            *sim.fe_system,
+            domain_request.source.field_id,
+            fe_solution));
+    svmp::FE::interfaces::FreeSurfaceGeometryScalarEvaluator
+        snapshot_scalar_evaluator;
+    snapshot_scalar_evaluator.value =
+        [snapshot_cell_evaluator](
+            svmp::FE::GlobalIndex cell,
+            const std::array<svmp::FE::Real, 3>& parent_coordinate,
+            const svmp::FE::geometry::CutQuadratureProvenance& provenance) {
+          const bool linear_corner =
+              provenance.selected_implicit_quadrature_backend ==
+                  "LinearCorner";
+          const bool high_order_implicit =
+              provenance.selected_implicit_quadrature_backend ==
+                  "SayeHyperrectangle" ||
+              provenance.selected_implicit_quadrature_backend ==
+                  "HighOrderSubcell";
+          if (!linear_corner && !high_order_implicit) {
+            throw std::runtime_error(
+                "Authoritative free-surface geometry rule has an unsupported represented implicit backend '" +
+                provenance.selected_implicit_quadrature_backend + "'.");
+          }
+          const auto evaluation = linear_corner
+              ? snapshot_cell_evaluator->evaluateLinearCorner(
+                    cell, parent_coordinate)
+              : snapshot_cell_evaluator->evaluate(cell, parent_coordinate);
+          return evaluation.value;
+        };
+    snapshot_scalar_evaluator.reference_gradient =
+        [snapshot_cell_evaluator](
+            svmp::FE::GlobalIndex cell,
+            const std::array<svmp::FE::Real, 3>& parent_coordinate,
+            const svmp::FE::geometry::CutQuadratureProvenance& provenance) {
+          const bool linear_corner =
+              provenance.selected_implicit_quadrature_backend ==
+                  "LinearCorner";
+          const bool high_order_implicit =
+              provenance.selected_implicit_quadrature_backend ==
+                  "SayeHyperrectangle" ||
+              provenance.selected_implicit_quadrature_backend ==
+                  "HighOrderSubcell";
+          if (!linear_corner && !high_order_implicit) {
+            throw std::runtime_error(
+                "Authoritative free-surface geometry rule has an unsupported represented implicit backend '" +
+                provenance.selected_implicit_quadrature_backend + "'.");
+          }
+          const auto evaluation = linear_corner
+              ? snapshot_cell_evaluator->evaluateLinearCorner(
+                    cell, parent_coordinate)
+              : snapshot_cell_evaluator->evaluate(cell, parent_coordinate);
+          return evaluation.reference_gradient;
+        };
+    svmp::FE::interfaces::FreeSurfaceGeometrySnapshotPolicy snapshot_policy;
+    snapshot_policy.tolerance = domain_request.tolerance;
+    snapshot_policy.minimum_retained_volume_fraction =
+        svmp::FE::assembly::CutIntegrationContext::
+            minGeneratedCutVolumeFraction();
+    snapshot_policy.minimum_achieved_quadrature_order = 0;
+    snapshot_policy.require_complete_exterior_boundary_partition = true;
+    auto geometry_snapshot =
+        svmp::FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+            result.domain,
+            std::move(snapshot_contact_domains),
+            std::move(snapshot_active_boundary_domains),
+            mesh_access,
+            snapshot_policy,
+            std::move(snapshot_scalar_evaluator),
+            request.domain_id,
+            snapshotOwnershipCollective(comm));
+    if (!sim.free_surface_geometry_snapshot_cache) {
+      sim.free_surface_geometry_snapshot_cache = std::make_unique<
+          svmp::FE::interfaces::FreeSurfaceGeometrySnapshotCache>();
+    }
+    const auto snapshot_revision_key =
+        geometry_snapshot->revision().snapshot_revision_key;
+    if (auto cached = sim.free_surface_geometry_snapshot_cache->find(
+            snapshot_revision_key)) {
+      geometry_snapshot = std::move(cached);
+    } else {
+      sim.free_surface_geometry_snapshot_cache->insert(geometry_snapshot);
+    }
+    const auto geometry_cache_statistics =
+        sim.free_surface_geometry_snapshot_cache->statistics();
+    const auto& geometry_ledger = geometry_snapshot->ledger();
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] Authoritative free-surface geometry"
+        << " diagnostic=free_surface_geometry_snapshot"
+        << " domain_id='" << request.domain_id << "'"
+        << " interface_marker=" << result.interface_marker
+        << " snapshot_revision="
+        << geometry_snapshot->revision().snapshot_revision_key
+        << " snapshot_resident_bytes="
+        << geometry_snapshot->residentBytes()
+        << " cache_live_snapshots="
+        << geometry_cache_statistics.live_snapshot_count
+        << " cache_live_resident_bytes="
+        << geometry_cache_statistics.live_resident_bytes
+        << " cache_peak_live_snapshots="
+        << geometry_cache_statistics.peak_live_snapshot_count
+        << " cache_peak_live_resident_bytes="
+        << geometry_cache_statistics.peak_live_resident_bytes
+        << " cache_hits=" << geometry_cache_statistics.hit_count
+        << " cache_misses=" << geometry_cache_statistics.miss_count
+        << " cache_expired_evictions="
+        << geometry_cache_statistics.expired_eviction_count
+        << " source_value_revision="
+        << geometry_snapshot->revision().source_value_revision
+        << " rules=" << geometry_ledger.rule_count
+        << " retained_rules=" << geometry_ledger.retained_rule_count
+        << " pruned_rules=" << geometry_ledger.pruned_rule_count
+        << " qpoints=" << geometry_ledger.quadrature_point_count
+        << " owned_rules=" << geometry_ledger.owned_rule_count
+        << " global_owned_rules="
+        << geometry_ledger.global_owned_rule_count
+        << " invalid_global_identities="
+        << geometry_ledger.invalid_global_identity_count
+        << " duplicate_rule_identities="
+        << geometry_ledger.duplicate_rule_identity_count
+        << " contact_fragments=" << geometry_ledger.contact_fragment_count
+        << " orphan_contact_fragments="
+        << geometry_ledger.orphan_contact_fragment_count
+        << " stale_revisions=" << geometry_ledger.stale_revision_count
+        << " max_root_residual=" << geometry_ledger.maximum_root_residual
+        << " max_normal_angle_error="
+        << geometry_ledger.maximum_normal_angular_error
+        << " max_constant_moment_error="
+        << geometry_ledger.maximum_constant_moment_error
+        << " max_volume_partition_error="
+        << geometry_ledger.maximum_volume_partition_error
+        << " max_boundary_partition_error="
+        << geometry_ledger.maximum_boundary_partition_error
+        << " negative_reference_volume="
+        << geometry_ledger.retained_negative_reference_volume
+        << " positive_reference_volume="
+        << geometry_ledger.retained_positive_reference_volume
+        << " negative_physical_volume="
+        << geometry_ledger.retained_negative_physical_volume
+        << " positive_physical_volume="
+        << geometry_ledger.retained_positive_physical_volume
+        << " resident_bytes=" << geometry_snapshot->residentBytes()
+        << std::endl;
+    context->addFreeSurfaceGeometrySnapshot(
+        geometry_snapshot, retained_volume_sides);
+    const auto global_boundary_intersection_fragments =
+        globalSumSize(local_boundary_intersection_fragments, comm);
+    const auto global_active_boundary_intersection_fragments =
+        globalSumSize(local_active_boundary_intersection_fragments, comm);
+    const auto global_skipped_boundary_intersection_fragments =
+        globalSumSize(local_skipped_boundary_intersection_fragments, comm);
+    const auto global_boundary_intersection_qpoints =
+        globalSumSize(local_boundary_intersection_qpoints, comm);
+    const auto global_boundary_intersection_measure =
+        static_cast<svmp::FE::Real>(globalSumDouble(
+            static_cast<double>(local_boundary_intersection_measure), comm));
     const auto active_measure_summary =
         application::core::collectCutVolumeMeasures(
             mesh_access,
@@ -5571,26 +7803,62 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         globalSumSize(negative_measure_summary.skipped_physical_rule_count, comm);
     const auto global_positive_skipped_physical_volume_rules =
         globalSumSize(positive_measure_summary.skipped_physical_rule_count, comm);
+    const auto global_snapshot_negative_physical_volume =
+        static_cast<svmp::FE::Real>(globalSumDouble(
+            static_cast<double>(
+                geometry_ledger.owned_retained_negative_physical_volume),
+            comm));
+    const auto global_snapshot_positive_physical_volume =
+        static_cast<svmp::FE::Real>(globalSumDouble(
+            static_cast<double>(
+                geometry_ledger.owned_retained_positive_physical_volume),
+            comm));
+    const auto global_snapshot_active_physical_volume =
+        active_volume_side ==
+                svmp::FE::geometry::CutIntegrationSide::Negative
+            ? global_snapshot_negative_physical_volume
+            : global_snapshot_positive_physical_volume;
+    const auto global_snapshot_inactive_physical_volume =
+        inactive_volume_side ==
+                svmp::FE::geometry::CutIntegrationSide::Negative
+            ? global_snapshot_negative_physical_volume
+            : global_snapshot_positive_physical_volume;
+    const auto active_constant_one_error = std::abs(
+        global_snapshot_active_physical_volume -
+        global_active_physical_volume);
+    const auto inactive_constant_one_error = std::abs(
+        global_snapshot_inactive_physical_volume -
+        global_inactive_physical_volume);
+    const auto constant_one_tolerance =
+        svmp::FE::Real{1024.0} *
+            std::numeric_limits<svmp::FE::Real>::epsilon() *
+            std::max({svmp::FE::Real{1.0},
+                      std::abs(global_snapshot_negative_physical_volume),
+                      std::abs(global_snapshot_positive_physical_volume)}) +
+        snapshot_policy.tolerance;
+    const bool retains_inactive_volume = !retained_volume_sides.has_value();
+    if (global_active_skipped_physical_volume_rules != 0u ||
+        active_constant_one_error > constant_one_tolerance ||
+        (retains_inactive_volume &&
+         (global_inactive_skipped_physical_volume_rules != 0u ||
+          inactive_constant_one_error > constant_one_tolerance))) {
+      throw std::runtime_error(
+          "Authoritative free-surface snapshot and constant-one cut-volume assembly measures disagree.");
+    }
     report.negative_physical_volume += global_negative_physical_volume;
     report.positive_physical_volume += global_positive_physical_volume;
     const auto local_active_available_cut_volume_rules =
         active_volume_side == svmp::FE::geometry::CutIntegrationSide::Negative
-            ? negative_domain_volume_rules.size()
-            : positive_domain_volume_rules.size();
+            ? negative_measure_summary.rule_count
+            : positive_measure_summary.rule_count;
     const auto local_inactive_available_cut_volume_rules =
         inactive_volume_side == svmp::FE::geometry::CutIntegrationSide::Negative
-            ? negative_domain_volume_rules.size()
-            : positive_domain_volume_rules.size();
+            ? negative_measure_summary.rule_count
+            : positive_measure_summary.rule_count;
     const auto local_active_retained_cut_volume_rules =
-        context
-            ->generatedVolumeRuleIndexSpanForMarkerAndSide(
-                result.interface_marker, active_volume_side)
-            .size();
+        active_measure_summary.rule_count;
     const auto local_inactive_retained_cut_volume_rules =
-        context
-            ->generatedVolumeRuleIndexSpanForMarkerAndSide(
-                result.interface_marker, inactive_volume_side)
-            .size();
+        inactive_measure_summary.rule_count;
     const auto global_active_available_cut_volume_rules =
         globalSumSize(local_active_available_cut_volume_rules, comm);
     const auto global_inactive_available_cut_volume_rules =
@@ -5762,6 +8030,16 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " retained_volume_sides="
         << retainedVolumeSidesName(request.volume_retention)
         << " interface_contract=one_sided_embedded"
+        << " generated_interface_boundary_intersection_fragments="
+        << global_boundary_intersection_fragments
+        << " generated_interface_boundary_intersection_active_fragments="
+        << global_active_boundary_intersection_fragments
+        << " generated_interface_boundary_intersection_skipped_fragments="
+        << global_skipped_boundary_intersection_fragments
+        << " generated_interface_boundary_intersection_qpoints="
+        << global_boundary_intersection_qpoints
+        << " generated_interface_boundary_intersection_measure="
+        << global_boundary_intersection_measure
         << " generated_interface_geometry="
         << svmp::FE::level_set::generatedInterfaceGeometryModeName(
                options.geometry_mode)
@@ -5785,6 +8063,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << result.backend_elapsed_seconds
         << " implicit_cut_backend_internal_seconds_total="
         << global_backend_elapsed_seconds
+        << " generated_cell_work_scope=summed_rank_local_including_ghost_cells"
         << " generated_cell_cache_hits="
         << global_generated_cell_cache_hits
         << " generated_cell_cache_misses="
@@ -5867,6 +8146,12 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " active_side_volume_local=" << active_volume
         << " active_side_physical_volume="
         << global_active_physical_volume
+        << " snapshot_active_side_physical_volume="
+        << global_snapshot_active_physical_volume
+        << " active_constant_one_measure_error="
+        << active_constant_one_error
+        << " constant_one_measure_tolerance="
+        << constant_one_tolerance
         << " active_side_physical_rule_count="
         << global_active_physical_volume_rules
         << " active_side_skipped_physical_rule_count="
@@ -5879,6 +8164,10 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << active_cut_volume_consumer_count
         << " inactive_side_physical_volume="
         << global_inactive_physical_volume
+        << " snapshot_inactive_side_physical_volume="
+        << global_snapshot_inactive_physical_volume
+        << " inactive_constant_one_measure_error="
+        << inactive_constant_one_error
         << " inactive_side_physical_rule_count="
         << global_inactive_physical_volume_rules
         << " inactive_side_skipped_physical_rule_count="
@@ -5914,6 +8203,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " generated_volume_prune_min_fraction="
         << svmp::FE::assembly::CutIntegrationContext::
                minGeneratedCutVolumeFraction()
+        << " generated_pruned_volume_scope=summed_rank_local_including_ghost_cells"
         << " generated_pruned_volume_rules="
         << global_generated_pruned_volume_rules
         << " generated_pruned_volume=" << global_generated_pruned_volume
@@ -5935,6 +8225,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << global_min_volume_fraction
         << " active_max_volume_fraction="
         << global_max_volume_fraction
+        << " cut_adjacent_scope=summed_rank_local_including_ghost_cells"
         << " cut_adjacent_facets=" << global_cut_adjacent_facets
         << " cut_adjacent_metadata="
         << global_cut_adjacent_metadata
@@ -6102,8 +8393,7 @@ void logActiveCutContextRefreshSkipped(
       << " system_dof_layout_revision="
       << signature.system_dof_layout_revision
       << " system_block_layout_revision="
-      << signature.system_block_layout_revision
-      << std::endl;
+      << signature.system_block_layout_revision << std::endl;
 }
 
 bool activeCutLevelSetFieldLayoutIsAvailable(
@@ -6271,7 +8561,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolutionCach
     return skipped_report;
   }
   skipped_report.request_policy_key = activeCutVolumeRequestPolicyKey(requests);
-  const auto comm = svmp::MeshComm::world();
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto signature =
       activeCutContextRefreshSignature(sim, requests, fe_solution);
   const bool local_can_skip =
@@ -6341,7 +8631,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector
     return skipped_report;
   }
   skipped_report.request_policy_key = activeCutVolumeRequestPolicyKey(requests);
-  const auto comm = svmp::MeshComm::world();
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto vector_signature =
       activeCutContextRefreshSignature(sim, requests, solution);
   const bool disable_refresh_cache =
@@ -6656,6 +8946,7 @@ void ApplicationDriver::runWithParameters(const Parameters& params)
 
   SimulationBuilder builder(params);
   auto sim = builder.build();
+  writeEffectiveConfigurationArtifact(sim, params, comm);
 
   if (sim.primary_mesh) {
     const auto global_verts = sim.primary_mesh->global_n_vertices();
@@ -6764,25 +9055,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   }
 
   svmp::FE::timestepping::NewtonOptions newton_opts{};
-  if (const auto* eq = primary_solver_equation(params)) {
-    if (eq->max_iterations.defined()) {
-      newton_opts.max_iterations = eq->max_iterations.value();
-    }
-    if (eq->min_iterations.defined()) {
-      newton_opts.min_iterations = std::max(0, eq->min_iterations.value());
-    }
-    if (eq->tolerance.defined()) {
-      const double tol = eq->tolerance.value();
-      if (tol > 0.0) {
-        // Legacy semantics: <Add_equation><Tolerance> is a *relative* tolerance.
-        newton_opts.rel_tolerance = tol;
-        // Preserve legacy convergence behavior for warm-started cases by
-        // allowing the same XML tolerance to satisfy either absolute or
-        // relative convergence.
-        newton_opts.abs_tolerance = tol;
-      }
-    }
-  }
+  applyMonolithicEquationNewtonControls(params, newton_opts);
 
   // Use the unified "equations" operator tag (same as transient).
   newton_opts.residual_op = "equations";
@@ -6812,15 +9085,38 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   auto cut_refresh_cache =
       std::make_shared<ActiveCutContextRefreshCache>();
   auto level_set_maintenance = levelSetMaintenanceRequests(params);
+  const auto steady_level_set_advection_velocity =
+      levelSetAdvectionVelocityRequests(params);
+  applyCoupledLevelSetFieldResidualCriteria(
+      *sim.fe_system, params, newton_opts);
+  const bool steady_has_generated_state =
+      !steady_active_cut_requests.empty() || !level_set_maintenance.empty() ||
+      !steady_level_set_advection_velocity.empty();
+  const bool use_steady_external_state_fixed_point =
+      steady_has_generated_state &&
+      parseBoolEnv("SVMP_GENERATED_STATE_OUTER_FIXED_POINT", true);
+  newton_opts.external_state_fixed_point.enabled =
+      use_steady_external_state_fixed_point;
+  newton_opts.external_state_fixed_point.max_iterations = std::max(
+      1,
+      parseIntEnv("SVMP_GENERATED_STATE_OUTER_MAX_ITERATIONS", 12));
+  // Legacy refreshed/quasi-Newton mode remains available for controlled
+  // comparisons.  Production generated geometry uses an outer Picard loop so
+  // each inner Newton residual and Jacobian share exactly one frozen G.
+  newton_opts.accepted_state_sync_invalidates_residual =
+      steady_has_generated_state &&
+      !use_steady_external_state_fixed_point;
   auto curvature_projection_cache =
       std::make_shared<CurvatureProjectionCache>();
   auto cut_topology_key = std::make_shared<std::optional<std::uint64_t>>();
-  if (hasHighOrderGeneratedInterfaceGeometry(steady_active_cut_requests)) {
-    newton_opts.jacobian_check_geometry_mode =
-        svmp::FE::timestepping::JacobianCheckGeometryMode::RefreshedGeometry;
-    newton_opts.jacobian_check_geometry_tangent_policy =
-        highOrderGeometryTangentPolicySummary(steady_active_cut_requests);
-  }
+  applyJacobianCheckGeometryProvenance(
+      newton_opts,
+      steady_active_cut_requests,
+      /*refresh_generated_geometry_within_solve=*/
+          !use_steady_external_state_fixed_point,
+      /*has_frozen_algebraic_level_set_extension=*/false,
+      /*use_external_state_fixed_point=*/
+          use_steady_external_state_fixed_point);
   using StateSyncPoint =
       svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
   newton_opts.synchronize_state =
@@ -6828,10 +9124,30 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
        curvature_projection_cache](
           const svmp::FE::systems::SystemStateView& state,
           StateSyncPoint point) {
+        if (use_steady_external_state_fixed_point &&
+            point != StateSyncPoint::OuterFixedPointState &&
+            point != StateSyncPoint::ProjectedOuterFixedPointState &&
+            point != StateSyncPoint::RestoredOuterFixedPointState &&
+            point !=
+                StateSyncPoint::RestoredProjectedOuterFixedPointState) {
+          return;
+        }
+        if (point == StateSyncPoint::RestoredOuterFixedPointState) {
+          cut_refresh_cache->last_signature.reset();
+          cut_refresh_cache->last_vector_signature.reset();
+          curvature_projection_cache->entries.clear();
+        }
         const auto report = refreshActiveCutIntegrationContextCached(
             sim, params, state, *cut_lifecycle, *cut_refresh_cache,
             stateSyncPointName(point));
         logCutTopologyChange(report, point, *cut_topology_key, "steady");
+        const bool outer_constraint_construction_pass =
+            use_steady_external_state_fixed_point &&
+            (point == StateSyncPoint::OuterFixedPointState ||
+             point == StateSyncPoint::RestoredOuterFixedPointState);
+        if (outer_constraint_construction_pass) {
+          return;
+        }
         (void)projectLevelSetCurvatureFieldsFromState(
             sim,
             state,
@@ -6842,6 +9158,12 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
             curvature_projection_cache.get(),
             /*reuse_cached_on_projection_failure=*/
             allowCachedCurvatureAfterProjectionFailure(point));
+        (void)updateLevelSetAdvectionVelocitiesFromState(
+            sim,
+            state,
+            steady_level_set_advection_velocity,
+            /*refresh_frozen_algebraic_map=*/
+                use_steady_external_state_fixed_point);
       };
 
   const auto integrator = std::make_shared<const ZeroTimeDerivativeIntegrator>();
@@ -6872,6 +9194,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       /*honor_cadence=*/false,
       curvature_projection_cache.get(),
       /*reuse_cached_on_projection_failure=*/false);
+  (void)updateLevelSetAdvectionVelocities(
+      sim, *sim.time_history, steady_level_set_advection_velocity);
   logLevelSetMaintenanceCoverageDiagnostics(
       steady_active_cut_requests,
       level_set_maintenance);
@@ -6885,6 +9209,9 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   const auto report = newton.solveStep(transient, *sim.linear_solver, solve_time, *sim.time_history, workspace);
   oopCout() << "[svMultiPhysics::Application] Steady Newton: converged=" << report.converged
             << " iterations=" << report.iterations << " residual_norm=" << report.residual_norm
+            << " outer_iterations=" << report.outer_iterations
+            << " inner_iterations_total=" << report.inner_iterations_total
+            << " outer_state_change_norm=" << report.outer_state_change_norm
             << " field_residual_norm=" << report.field_residual_norm
             << " auxiliary_residual_norm=" << report.auxiliary_residual_norm << std::endl;
 
@@ -6907,6 +9234,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       /*honor_cadence=*/false,
       curvature_projection_cache.get(),
       /*reuse_cached_on_projection_failure=*/false);
+  (void)updateLevelSetAdvectionVelocities(
+      sim, *sim.time_history, steady_level_set_advection_velocity);
   outputResults(sim, params, /*step=*/1, solve_time, pvd);
 
   const auto comm = svmp::MeshComm::world();
@@ -6959,25 +9288,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     opts.generalized_alpha_rho_inf = params.general_simulation_parameters.spectral_radius_of_infinite_time_step.value();
   }
 
-  if (const auto* eq = primary_solver_equation(params)) {
-    if (eq->max_iterations.defined()) {
-      opts.newton.max_iterations = eq->max_iterations.value();
-    }
-    if (eq->min_iterations.defined()) {
-      opts.newton.min_iterations = std::max(0, eq->min_iterations.value());
-    }
-    if (eq->tolerance.defined()) {
-      const double tol = eq->tolerance.value();
-      if (tol > 0.0) {
-        // Legacy semantics: <Add_equation><Tolerance> is a *relative* tolerance.
-        opts.newton.rel_tolerance = tol;
-        // Preserve legacy convergence behavior for warm-started cases by
-        // allowing the same XML tolerance to satisfy either absolute or
-        // relative convergence.
-        opts.newton.abs_tolerance = tol;
-      }
-    }
-  }
+  applyMonolithicEquationNewtonControls(params, opts.newton);
   // NOTE: Newton update scaling for dt(·) fields is available in the FE library
   // (NewtonOptions::scale_dt_increments), but enabling it globally can severely
   // slow convergence for linear problems (e.g., Stokes). Keep it off by default.
@@ -6991,9 +9302,17 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   opts.newton.jacobian_op = "equations";
 
   const auto transient_active_cut_requests = activeCutVolumeRequests(params);
+  // A first-order generalized-alpha state is (u_n, uDot_n).  Starting an
+  // active-cut free-surface problem with uDot_n=0 is generally inconsistent
+  // with gravity, pressure, and capillary forces and excites the algorithmic
+  // startup mode (the capillary-wave benchmark lost roughly half its apparent
+  // stiffness this way).  TimeLoop regularizes only exact zero-mass rows
+  // outside a retained cut domain, so the PDE-consistent solve is also the
+  // correctness default for active-cut systems.  Keep the environment switch
+  // as an explicit legacy/performance comparison opt-out.
   opts.initialize_first_order_rate_from_pde =
-      parseBoolEnv("SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT",
-                   transient_active_cut_requests.empty());
+      generalizedAlphaPdeRateInitializationRequested(
+          !transient_active_cut_requests.empty());
   const auto level_set_advection_velocity =
       levelSetAdvectionVelocityRequests(params);
   // Generated level-set active domains need line search to reject trial states
@@ -7099,16 +9418,86 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   auto bdf1 = std::make_shared<const svmp::FE::systems::BDFIntegrator>(1);
   svmp::FE::systems::TransientSystem transient(*sim.fe_system, std::move(bdf1));
   auto level_set_maintenance = levelSetMaintenanceRequests(params);
+  applyCoupledLevelSetFieldResidualCriteria(
+      *sim.fe_system, params, opts.newton);
+  const bool has_frozen_algebraic_level_set_extension =
+      std::any_of(
+          level_set_advection_velocity.begin(),
+          level_set_advection_velocity.end(),
+          [&](const LevelSetAdvectionVelocityRequest& request) {
+            const auto target = sim.fe_system->findFieldByName(
+                request.target_velocity_field_name);
+            return target != svmp::FE::INVALID_FIELD_ID &&
+                   sim.fe_system->fieldRecord(target).source_kind ==
+                       svmp::FE::systems::FieldSourceKind::Unknown &&
+                   static_cast<bool>(svmp::FE::level_set::
+                       findLevelSetVelocityExtensionConstraintKernel(
+                           *sim.fe_system, request.operator_tag, target));
+          });
+  // Generated cut rules, projected curvature, active-set constraints, and the
+  // wet-extension map form one residual-defining package G(u).  The assembled
+  // tangent differentiates R(u,G) at fixed G; it does not contain every shape,
+  // projection, or active-set derivative.  Solve the consistent nested
+  // problem with outer regeneration and inner frozen-geometry Newton solves.
+  const bool has_transient_generated_state =
+      !transient_active_cut_requests.empty() ||
+      !level_set_maintenance.empty() ||
+      !level_set_advection_velocity.empty();
+  const bool per_step_only_generated_state =
+      parseBoolEnv("SVMP_CUT_REFRESH_PER_STEP_ONLY", false);
+  const bool use_transient_external_state_fixed_point =
+      has_transient_generated_state &&
+      !per_step_only_generated_state &&
+      parseBoolEnv("SVMP_GENERATED_STATE_OUTER_FIXED_POINT", true);
+  opts.newton.external_state_fixed_point.enabled =
+      use_transient_external_state_fixed_point;
+  opts.newton.external_state_fixed_point.max_iterations = std::max(
+      1,
+      parseIntEnv("SVMP_GENERATED_STATE_OUTER_MAX_ITERATIONS", 12));
+  const bool refresh_generated_geometry_within_solve =
+      has_transient_generated_state &&
+      !use_transient_external_state_fixed_point &&
+      !has_frozen_algebraic_level_set_extension;
+  if (use_transient_external_state_fixed_point) {
+    oopCout()
+        << "[svMultiPhysics::Application] Level-set nonlinear geometry policy: "
+           "outer_fixed_point (regenerate cuts, curvature, constraints, and "
+           "wet-extension map; solve each inner Newton problem with frozen "
+           "generated state), max_outer_iterations="
+        << opts.newton.external_state_fixed_point.max_iterations
+        << std::endl;
+  } else if (has_frozen_algebraic_level_set_extension) {
+    oopCout()
+        << "[svMultiPhysics::Application] Level-set nonlinear geometry policy: "
+           "legacy fixed_topology comparison mode."
+        << std::endl;
+  }
+  // When generated data is refreshed at accepted iterates, reassemble the
+  // residual after that refresh before deciding that Newton has converged.
+  opts.newton.accepted_state_sync_invalidates_residual =
+      refresh_generated_geometry_within_solve &&
+      has_transient_generated_state;
+  const bool synchronize_line_search_trials =
+      synchronizeTransientLineSearchTrials(
+          opts.newton.accepted_state_sync_invalidates_residual);
   auto curvature_projection_cache =
       std::make_shared<CurvatureProjectionCache>();
   auto cut_lifecycle =
       std::make_shared<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>();
   auto cut_refresh_cache =
       std::make_shared<ActiveCutContextRefreshCache>();
+  // Seed wet-volume drift diagnostics from the actual initialized level-set
+  // state.  Waiting until the first accepted step silently made that state
+  // the reference and hid all first-step volume loss.
+  std::map<std::string, svmp::FE::Real> initial_wet_volume_by_key;
   initializeLevelSetMaintenanceTargets(sim, level_set_maintenance);
   (void)refreshActiveCutIntegrationContextCached(
       sim, params, sim.time_history->u(), *cut_lifecycle, *cut_refresh_cache,
       "initial");
+  if (parseBoolEnv("SVMP_CUT_RULE_DUMP", false)) {
+    dumpActiveCutVolumeRulesForProbe(*sim.fe_system,
+                                     sim.time_history->stepIndex());
+  }
   (void)projectLevelSetCurvatureFieldsFromState(
       sim,
       stateViewForHistory(*sim.time_history),
@@ -7121,6 +9510,15 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   logLevelSetMaintenanceCoverageDiagnostics(
       activeCutVolumeRequests(params),
       level_set_maintenance);
+  logWetVolumeDiagnostics(
+      activeCutVolumeRequests(params),
+      sim.fe_system->cutIntegrationContext(),
+      sim.fe_system->meshAccess(),
+      sim.primary_mesh ? sim.primary_mesh->n_cells() : 0u,
+      activeFESystemCommunicator(*sim.fe_system),
+      sim.time_history->stepIndex(),
+      sim.time_history->time(),
+      initial_wet_volume_by_key);
 
   svmp::FE::timestepping::TimeLoopCallbacks callbacks{};
   std::vector<svmp::FE::Real> accepted_pressure_update_previous_solution;
@@ -7129,15 +9527,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
   };
   auto cut_topology_key = std::make_shared<std::optional<std::uint64_t>>();
-  std::map<std::string, svmp::FE::Real> initial_wet_volume_by_key;
-  const bool high_order_cut_geometry =
-      hasHighOrderGeneratedInterfaceGeometry(transient_active_cut_requests);
-  if (high_order_cut_geometry) {
-    opts.newton.jacobian_check_geometry_mode =
-        svmp::FE::timestepping::JacobianCheckGeometryMode::RefreshedGeometry;
-    opts.newton.jacobian_check_geometry_tangent_policy =
-        highOrderGeometryTangentPolicySummary(transient_active_cut_requests);
-  }
+  applyJacobianCheckGeometryProvenance(
+      opts.newton,
+      transient_active_cut_requests,
+      refresh_generated_geometry_within_solve,
+      has_frozen_algebraic_level_set_extension,
+      use_transient_external_state_fixed_point);
   const auto expected_cut_request_policy_key =
       activeCutVolumeRequestPolicyKey(transient_active_cut_requests);
   using TransientStateSyncPoint =
@@ -7147,17 +9542,51 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
        curvature_projection_cache](
           const svmp::FE::systems::SystemStateView& state,
           TransientStateSyncPoint point) {
-        // Keep the cut geometry, constraints, curvature, and advection
-        // velocity frozen during line-search trial evaluations so trial
-        // residuals are measured against the same state the Jacobian was
-        // built from. The refreshed-frozen quadrature policy omits geometry
-        // sensitivities from the Jacobian; refreshing per trial turns the
-        // backtracking objective into a moving target, which can livelock
-        // Newton after large level-set updates (e.g. reinitialization).
-        // Accepted/residual/Jacobian sync points still refresh, so geometry
-        // follows the iterates Picard-style between iterations.
-        if (point == TransientStateSyncPoint::LineSearchTrialResidual &&
-            !parseBoolEnv("SVMP_SYNC_LINE_SEARCH_TRIALS", false)) {
+        if (use_transient_external_state_fixed_point &&
+            point != TransientStateSyncPoint::OuterFixedPointState &&
+            point !=
+                TransientStateSyncPoint::ProjectedOuterFixedPointState &&
+            point != TransientStateSyncPoint::EndpointCandidateState &&
+            point !=
+                TransientStateSyncPoint::ProjectedEndpointCandidateState &&
+            point != TransientStateSyncPoint::RestoredOuterFixedPointState &&
+            point != TransientStateSyncPoint::
+                         RestoredProjectedOuterFixedPointState &&
+            point != TransientStateSyncPoint::RestoredTimeStepState &&
+            point != TransientStateSyncPoint::
+                         RestoredProjectedTimeStepState) {
+          return;
+        }
+        if (point ==
+                TransientStateSyncPoint::RestoredOuterFixedPointState ||
+            point == TransientStateSyncPoint::RestoredTimeStepState) {
+          cut_refresh_cache->last_signature.reset();
+          cut_refresh_cache->last_vector_signature.reset();
+          curvature_projection_cache->entries.clear();
+        }
+        // The Jacobian may remain a refreshed-frozen/quasi-Newton tangent, but
+        // line search globalizes the actual residual R(u,G(u)).  An explicit
+        // environment override can freeze trials for a controlled legacy
+        // comparison; it is not the production default when G changes the
+        // residual.
+        if (!use_transient_external_state_fixed_point &&
+            point == TransientStateSyncPoint::LineSearchTrialResidual &&
+            !synchronize_line_search_trials) {
+          return;
+        }
+        if (!use_transient_external_state_fixed_point &&
+            !refresh_generated_geometry_within_solve) {
+          return;
+        }
+        // Refresh-cadence experiment knob: freeze the cut geometry (and the
+        // φ-derived curvature/advection data) across ALL within-solve sync
+        // points, so the integration domains move once per accepted STEP
+        // (before_physics_solve + accepted_step callbacks) instead of after
+        // every accepted Newton iterate. CAUTION: this changes Newton's
+        // fixed point — the converged quadrature lags the converged φ by
+        // one solve.
+        if (!use_transient_external_state_fixed_point &&
+            per_step_only_generated_state) {
           return;
         }
         const auto report = refreshActiveCutIntegrationContextCached(
@@ -7169,6 +9598,16 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               "[svMultiPhysics::Application] Active cut request policy changed during transient Newton synchronization.");
         }
         logCutTopologyChange(report, point, *cut_topology_key, "transient");
+        const bool outer_constraint_construction_pass =
+            (use_transient_external_state_fixed_point &&
+             (point == TransientStateSyncPoint::OuterFixedPointState ||
+              point ==
+                  TransientStateSyncPoint::RestoredOuterFixedPointState)) ||
+            point == TransientStateSyncPoint::EndpointCandidateState ||
+            point == TransientStateSyncPoint::RestoredTimeStepState;
+        if (outer_constraint_construction_pass) {
+          return;
+        }
         (void)projectLevelSetCurvatureFieldsFromState(
             sim,
             state,
@@ -7180,7 +9619,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             /*reuse_cached_on_projection_failure=*/
             allowCachedCurvatureAfterProjectionFailure(point));
         (void)updateLevelSetAdvectionVelocitiesFromState(
-            sim, state, level_set_advection_velocity);
+            sim,
+            state,
+            level_set_advection_velocity,
+            /*refresh_frozen_algebraic_map=*/
+                use_transient_external_state_fixed_point);
       };
   callbacks.on_before_physics_solve =
       [&](svmp::FE::timestepping::TimeHistory& h, double /*solve_time*/, double /*dt*/) {
@@ -7211,21 +9654,26 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     oopCout() << "[svMultiPhysics::Application] TimeLoop: nonlinear_done step=" << h.stepIndex()
               << " time=" << h.time() << " converged=" << nr.converged
               << " iters=" << nr.iterations << " ||r||=" << nr.residual_norm
+              << " outer_iters=" << nr.outer_iterations
+              << " inner_iters_total=" << nr.inner_iterations_total
+              << " outer_state_change_norm="
+              << nr.outer_state_change_norm
               << " ||r_field||=" << nr.field_residual_norm
               << " ||r_aux||=" << nr.auxiliary_residual_norm
               << " (linear: converged=" << nr.linear.converged
               << " iters=" << nr.linear.iterations
               << " rel=" << nr.linear.relative_residual << ")" << std::endl;
   };
-  if (activePressureUpdateRejectOnTriggerEnabled()) {
-    callbacks.on_before_step_accept =
-        [&](svmp::FE::timestepping::TimeHistory& h,
-            const svmp::FE::timestepping::NewtonReport& nr) {
-          (void)nr;
-          if (!acceptedPressureUpdateDiagnosticEnabled() ||
-              accepted_pressure_update_previous_solution.empty()) {
-            return true;
-          }
+  const auto generalized_alpha_first_order =
+      svmp::FE::timestepping::utils::generalizedAlphaFirstOrderFromRhoInf(
+          opts.generalized_alpha_rho_inf);
+  callbacks.on_before_step_accept =
+      [&](svmp::FE::timestepping::TimeHistory& h,
+          const svmp::FE::timestepping::NewtonReport& nr) {
+        (void)nr;
+        if (activePressureUpdateRejectOnTriggerEnabled() &&
+            acceptedPressureUpdateDiagnosticEnabled() &&
+            !accepted_pressure_update_previous_solution.empty()) {
           const auto current_solution = gatherFeOrderedSolution(h.u());
           const bool triggered = logAcceptedPressureUpdateDiagnostic(
               *sim.fe_system,
@@ -7241,9 +9689,17 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               h.dt(),
               "pre_commit",
               /*honor_fail_on_trigger=*/false);
-          return !triggered;
-        };
-  }
+          if (triggered) {
+            return false;
+          }
+        }
+        const auto bound_result = applyLevelSetBoundPreservingCandidates(
+            sim,
+            h,
+            level_set_maintenance,
+            generalized_alpha_first_order.gamma);
+        return bound_result.accept_step;
+      };
   double vtk_total_time = 0.0;
   callbacks.on_step_accepted = [&](svmp::FE::timestepping::TimeHistory& h) {
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_accepted step=" << h.stepIndex()
@@ -7271,6 +9727,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     const auto cut_report = refreshActiveCutIntegrationContextCached(
         sim, params, h.u(), *cut_lifecycle, *cut_refresh_cache,
         "accepted_step");
+    if (parseBoolEnv("SVMP_CUT_RULE_DUMP", false)) {
+      dumpActiveCutVolumeRulesForProbe(*sim.fe_system, h.stepIndex());
+    }
     (void)projectLevelSetCurvatureFieldsFromState(
         sim,
         stateViewForHistory(h),
@@ -7341,6 +9800,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         sim.fe_system->cutIntegrationContext(),
         sim.fe_system->meshAccess(),
         sim.primary_mesh ? sim.primary_mesh->n_cells() : 0u,
+        activeFESystemCommunicator(*sim.fe_system),
         h.stepIndex(),
         h.time(),
         initial_wet_volume_by_key);
@@ -7354,6 +9814,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_rejected step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << " reason=" << step_reject_reason_to_string(reason)
               << " (newton: converged=" << nr.converged << " iters=" << nr.iterations
+              << " outer_iters=" << nr.outer_iterations
+              << " inner_iters_total=" << nr.inner_iterations_total
               << " ||r||=" << nr.residual_norm
               << " ||r_field||=" << nr.field_residual_norm
               << " ||r_aux||=" << nr.auxiliary_residual_norm << ")" << std::endl;

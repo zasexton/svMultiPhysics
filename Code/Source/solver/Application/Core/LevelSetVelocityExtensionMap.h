@@ -1,0 +1,222 @@
+#pragma once
+
+#include "FE/Core/Types.h"
+#include "FE/LevelSet/LevelSetVelocityExtensionConstraint.h"
+#include "Mesh/Core/MeshComm.h"
+#include "Mesh/Core/MeshTypes.h"
+#include "Mesh/Mesh.h"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <vector>
+
+namespace application::core {
+
+inline constexpr double kVelocityExtensionMaxRegressionCondition = 1.0e8;
+inline constexpr double kVelocityExtensionCoefficientTolerance = 1.0e-12;
+inline constexpr double kVelocityExtensionRowTolerance = 1.0e-10;
+inline constexpr double kVelocityExtensionMaxWetToDryAmplification = 16.0;
+
+struct WallVelocityExtensionConstraint {
+  svmp::label_t boundary_label{svmp::INVALID_LABEL};
+  std::array<bool, 3> constrained_components{false, false, false};
+  bool project_boundary_normal{false};
+};
+
+struct WallCompatibleVelocityExtensionResult {
+  std::size_t extended_vertices{0u};
+  std::size_t vertices_outside_band{0u};
+  std::size_t wall_projected_vertices{0u};
+  std::size_t component_collision_vertices{0u};
+  std::size_t regression_candidate_rows{0u};
+  std::size_t regression_accepted_rows{0u};
+  std::size_t bounded_fallback_rows{0u};
+  std::size_t condition_rejected_rows{0u};
+  std::size_t coefficient_rejected_rows{0u};
+  double max_wall_normal_velocity{0.0};
+  double max_regression_condition{0.0};
+  double max_abs_graph_coefficient{0.0};
+  double max_graph_row_l1{0.0};
+  double max_graph_row_sum_error{0.0};
+  double max_negative_graph_coefficient{0.0};
+  double max_constant_reproduction_error{0.0};
+  double max_linear_reproduction_error{0.0};
+  double max_extrapolation_distance{0.0};
+  double max_seed_speed{0.0};
+  double max_extended_speed{0.0};
+};
+
+struct VelocityExtensionMapRevision {
+  std::uint64_t mesh_geometry{0u};
+  std::uint64_t mesh_topology{0u};
+  std::uint64_t mesh_ownership{0u};
+  std::uint64_t mesh_numbering{0u};
+  std::uint64_t free_surface_geometry{0u};
+  std::uint64_t level_set_values{0u};
+  std::uint64_t active_set{0u};
+
+  [[nodiscard]] std::uint64_t key() const noexcept;
+  [[nodiscard]] bool complete() const noexcept;
+  bool operator==(const VelocityExtensionMapRevision&) const = default;
+};
+
+class VelocityExtensionMapSnapshot final {
+public:
+  VelocityExtensionMapSnapshot(
+      VelocityExtensionMapRevision revision,
+      std::size_t components,
+      std::vector<double> preview,
+      std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows,
+      std::vector<std::int64_t> component_assignment,
+      WallCompatibleVelocityExtensionResult report,
+      double wet_to_dry_amplification);
+
+  [[nodiscard]] const VelocityExtensionMapRevision& revision() const noexcept
+  {
+    return revision_;
+  }
+  [[nodiscard]] std::size_t components() const noexcept { return components_; }
+  [[nodiscard]] std::span<const double> preview() const noexcept
+  {
+    return preview_;
+  }
+  [[nodiscard]] std::span<const svmp::FE::level_set::VelocityExtensionConstraintRow>
+  rows() const noexcept
+  {
+    return rows_;
+  }
+  [[nodiscard]] std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>
+  copyRows() const
+  {
+    return rows_;
+  }
+  [[nodiscard]] std::span<const std::int64_t> componentAssignment() const noexcept
+  {
+    return component_assignment_;
+  }
+  [[nodiscard]] const WallCompatibleVelocityExtensionResult& report() const noexcept
+  {
+    return report_;
+  }
+  [[nodiscard]] double wetToDryAmplification() const noexcept
+  {
+    return wet_to_dry_amplification_;
+  }
+
+private:
+  VelocityExtensionMapRevision revision_{};
+  std::size_t components_{0u};
+  std::vector<double> preview_{};
+  std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows_{};
+  std::vector<std::int64_t> component_assignment_{};
+  WallCompatibleVelocityExtensionResult report_{};
+  double wet_to_dry_amplification_{0.0};
+};
+
+[[nodiscard]] VelocityExtensionMapRevision velocityExtensionMapRevision(
+    std::uint64_t mesh_geometry,
+    std::uint64_t mesh_topology,
+    std::uint64_t mesh_ownership,
+    std::uint64_t mesh_numbering,
+    std::uint64_t free_surface_geometry,
+    std::span<const double> level_set_values,
+    std::span<const std::uint8_t> active_set);
+
+[[nodiscard]] std::shared_ptr<const VelocityExtensionMapSnapshot>
+buildVelocityExtensionMapSnapshot(
+    const svmp::Mesh& mesh,
+    const svmp::MeshComm& comm,
+    VelocityExtensionMapRevision revision,
+    std::span<const double> phi,
+    std::span<const double> source_velocity,
+    std::size_t source_components,
+    std::span<const std::uint8_t> active,
+    std::size_t target_components,
+    std::size_t copy_components,
+    int band_layers,
+    bool enforce_wall_impermeability,
+    std::span<const WallVelocityExtensionConstraint> wall_constraints);
+
+[[nodiscard]] double estimateSymmetricConditionNumber(
+    const std::array<std::array<double, 4>, 4>& matrix,
+    int size);
+
+[[nodiscard]] std::size_t globalOwnedVelocityExtensionMaskCount(
+    const svmp::Mesh& mesh,
+    const svmp::MeshComm& comm,
+    std::span<const std::uint8_t> mask);
+
+[[nodiscard]] std::size_t globalVelocityExtensionGeometrySampleCount(
+    std::size_t local_count,
+    const svmp::MeshComm& comm);
+
+[[nodiscard]] std::size_t markVelocityExtensionTraceSupportCells(
+    const svmp::Mesh& mesh,
+    std::span<const svmp::FE::MeshIndex> cells,
+    std::vector<std::uint8_t>& trace_support);
+
+[[nodiscard]] std::vector<svmp::FE::MeshIndex>
+nodalVelocityExtensionInterfaceCells(
+    const svmp::Mesh& mesh,
+    std::span<const double> phi,
+    double isovalue);
+
+[[nodiscard]] std::size_t synchronizeVelocityExtensionTraceSupportMask(
+    const svmp::Mesh& mesh,
+    const svmp::MeshComm& comm,
+    std::vector<std::uint8_t>& trace_support);
+
+[[nodiscard]] std::vector<std::vector<std::size_t>>
+velocityExtensionEdgeAdjacency(const svmp::Mesh& mesh);
+
+[[nodiscard]] WallCompatibleVelocityExtensionResult
+extendVelocityInLevelSetNormalBand(
+    const svmp::Mesh& mesh,
+    const svmp::MeshComm& comm,
+    std::span<const double> phi,
+    std::span<const double> source_velocity,
+    std::size_t source_components,
+    std::span<const std::uint8_t> active,
+    std::size_t target_components,
+    std::size_t copy_components,
+    int band_layers,
+    bool enforce_wall_impermeability,
+    std::span<const WallVelocityExtensionConstraint> wall_constraints,
+    std::vector<double>& extended,
+    std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>*
+        constraint_rows = nullptr,
+    std::vector<std::int64_t>* component_assignment = nullptr);
+
+[[nodiscard]] WallCompatibleVelocityExtensionResult
+extendVelocityInLevelSetNormalBand(
+    const svmp::Mesh& mesh,
+    const svmp::MeshComm& comm,
+    std::span<const double> phi,
+    std::span<const double> source_velocity,
+    std::size_t source_components,
+    std::span<const std::uint8_t> active,
+    std::size_t target_components,
+    std::size_t copy_components,
+    int band_layers,
+    bool enforce_wall_impermeability,
+    std::span<const svmp::label_t> wall_boundary_labels,
+    std::vector<double>& extended);
+
+[[nodiscard]] WallCompatibleVelocityExtensionResult
+extendVelocityInLevelSetNormalBand(
+    const svmp::Mesh& mesh,
+    std::span<const double> phi,
+    std::span<const double> source_velocity,
+    std::size_t source_components,
+    std::span<const std::uint8_t> active,
+    std::size_t target_components,
+    std::size_t copy_components,
+    int band_layers,
+    bool enforce_wall_impermeability,
+    std::span<const svmp::label_t> wall_boundary_labels,
+    std::vector<double>& extended);
+
+} // namespace application::core
