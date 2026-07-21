@@ -200,11 +200,12 @@ std::shared_ptr<svmp::Mesh> makeWorkflowThreeQuadStripMesh()
   return svmp::create_mesh(std::move(base));
 }
 
-std::shared_ptr<svmp::Mesh> makeWorkflowFourQuadStripMesh()
+std::shared_ptr<svmp::Mesh> makeWorkflowFourQuadStripMesh(
+    bool reverse_vertex_numbering = false)
 {
   auto base = std::make_shared<svmp::MeshBase>();
 
-  const std::vector<svmp::real_t> x_ref = {
+  std::vector<svmp::real_t> x_ref = {
       0.0, 0.0,
       1.0, 0.0,
       2.0, 0.0,
@@ -218,12 +219,28 @@ std::shared_ptr<svmp::Mesh> makeWorkflowFourQuadStripMesh()
   };
   const std::vector<svmp::offset_t> cell2vertex_offsets = {
       0, 4, 8, 12, 16};
-  const std::vector<svmp::index_t> cell2vertex = {
+  std::vector<svmp::index_t> cell2vertex = {
       0, 1, 6, 5,
       1, 2, 7, 6,
       2, 3, 8, 7,
       3, 4, 9, 8,
   };
+  if (reverse_vertex_numbering) {
+    constexpr std::size_t vertex_count = 10u;
+    std::vector<svmp::real_t> reversed(x_ref.size(), 0.0);
+    for (std::size_t old_vertex = 0u;
+         old_vertex < vertex_count;
+         ++old_vertex) {
+      const std::size_t new_vertex = vertex_count - 1u - old_vertex;
+      reversed[2u * new_vertex] = x_ref[2u * old_vertex];
+      reversed[2u * new_vertex + 1u] = x_ref[2u * old_vertex + 1u];
+    }
+    x_ref = std::move(reversed);
+    for (auto& vertex : cell2vertex) {
+      vertex = static_cast<svmp::index_t>(
+          vertex_count - 1u - static_cast<std::size_t>(vertex));
+    }
+  }
 
   svmp::CellShape shape{};
   shape.family = svmp::CellFamily::Quad;
@@ -3837,7 +3854,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   }
 
   std::vector<std::size_t> vertices_outside_band;
-  for (const int band_layers : {1, 2, 4, 16}) {
+  for (const int band_layers : {1, 2, 4, 8}) {
     SCOPED_TRACE("band_layers=" + std::to_string(band_layers));
     std::vector<double> extended;
     const auto report = extendVelocityInLevelSetNormalBand(
@@ -4112,6 +4129,117 @@ TEST(ApplicationDriverLevelSetWorkflows,
                 1.0e-12)
         << "vertex " << vertex;
   }
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     NormalBandVelocityExtensionIgnoresReversedComponentNumbering)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  struct ExtensionResult {
+    WallCompatibleVelocityExtensionResult report{};
+    std::vector<std::array<double, 4>> samples{};
+    std::int64_t left_component{-1};
+    std::int64_t right_component{-1};
+  };
+  const auto run = [](const std::shared_ptr<svmp::Mesh>& mesh) {
+    std::vector<double> phi(mesh->n_vertices(), 0.0);
+    std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
+    std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
+    for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+      const auto point = workflowVertexPoint(*mesh, vertex);
+      phi[vertex] = std::min(point[0] - 0.25,
+                             4.0 - point[0] - 0.35);
+      active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
+      const bool left = point[0] <= 2.0;
+      source[2u * vertex] =
+          left ? 2.0 + 3.0 * point[1] : -7.0 + 2.0 * point[1];
+      source[2u * vertex + 1u] =
+          left ? -1.0 + 0.5 * point[1] : 11.0 - 4.0 * point[1];
+    }
+
+    std::vector<double> extended;
+    std::vector<std::int64_t> component_assignment;
+    ExtensionResult result;
+    result.report = extendVelocityInLevelSetNormalBand(
+        *mesh,
+        svmp::MeshComm::self(),
+        phi,
+        source,
+        /*source_components=*/2u,
+        active,
+        /*target_components=*/2u,
+        /*copy_components=*/2u,
+        /*band_layers=*/4,
+        /*enforce_wall_impermeability=*/false,
+        std::span<const WallVelocityExtensionConstraint>{},
+        extended,
+        nullptr,
+        &component_assignment,
+        nullptr);
+    for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
+      const auto point = workflowVertexPoint(*mesh, vertex);
+      result.samples.push_back({{
+          point[0],
+          point[1],
+          extended[2u * vertex],
+          extended[2u * vertex + 1u],
+      }});
+      if (point[0] == 0.0 && result.left_component < 0) {
+        result.left_component = component_assignment[vertex];
+      }
+      if (point[0] == 4.0 && result.right_component < 0) {
+        result.right_component = component_assignment[vertex];
+      }
+    }
+    std::sort(result.samples.begin(), result.samples.end());
+    return result;
+  };
+
+  const auto forward = run(makeWorkflowFourQuadStripMesh());
+  const auto reversed = run(makeWorkflowFourQuadStripMesh(true));
+  ASSERT_EQ(forward.report.vertices_outside_band, 0u);
+  ASSERT_EQ(reversed.report.vertices_outside_band, 0u);
+  ASSERT_GT(forward.report.component_collision_vertices, 0u);
+  EXPECT_EQ(reversed.report.component_collision_vertices,
+            forward.report.component_collision_vertices);
+  ASSERT_GE(forward.left_component, 0);
+  ASSERT_GE(forward.right_component, 0);
+  ASSERT_GE(reversed.left_component, 0);
+  ASSERT_GE(reversed.right_component, 0);
+  EXPECT_LT(forward.left_component, forward.right_component);
+  EXPECT_GT(reversed.left_component, reversed.right_component);
+  ASSERT_EQ(reversed.samples.size(), forward.samples.size());
+  for (std::size_t sample = 0u; sample < forward.samples.size(); ++sample) {
+    ASSERT_EQ(reversed.samples[sample][0], forward.samples[sample][0]);
+    ASSERT_EQ(reversed.samples[sample][1], forward.samples[sample][1]);
+    EXPECT_NEAR(reversed.samples[sample][2],
+                forward.samples[sample][2],
+                1.0e-12);
+    EXPECT_NEAR(reversed.samples[sample][3],
+                forward.samples[sample][3],
+                1.0e-12);
+
+    const double x = forward.samples[sample][0];
+    const double y = forward.samples[sample][1];
+    const bool left_branch = x < 1.95;
+    EXPECT_NEAR(forward.samples[sample][2],
+                left_branch ? 2.0 + 3.0 * y : -7.0 + 2.0 * y,
+                1.0e-12);
+    EXPECT_NEAR(forward.samples[sample][3],
+                left_branch ? -1.0 + 0.5 * y : 11.0 - 4.0 * y,
+                1.0e-12);
+  }
+  RecordProperty("forward_left_component",
+                 std::to_string(forward.left_component));
+  RecordProperty("forward_right_component",
+                 std::to_string(forward.right_component));
+  RecordProperty("reversed_left_component",
+                 std::to_string(reversed.left_component));
+  RecordProperty("reversed_right_component",
+                 std::to_string(reversed.right_component));
 #endif
 }
 
