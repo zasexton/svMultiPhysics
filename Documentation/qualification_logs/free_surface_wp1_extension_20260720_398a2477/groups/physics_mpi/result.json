@@ -1,0 +1,118 @@
+{
+  "checks": [
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "process_return_code",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": null,
+      "expected": null,
+      "metric": "termination_reason",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "failure_marker_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "stderr_failure_marker_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_run_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_completed_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 1,
+      "expected": 1,
+      "metric": "run_multiplicity:FreeSurfaceCutStabilityMPI.PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 1,
+      "expected": 1,
+      "metric": "pass_multiplicity:FreeSurfaceCutStabilityMPI.PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 1,
+      "expected": 1,
+      "metric": "run_multiplicity:FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 1,
+      "expected": 1,
+      "metric": "pass_multiplicity:FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 1,
+      "expected": 1,
+      "metric": "run_multiplicity:FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 1,
+      "expected": 1,
+      "metric": "pass_multiplicity:FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions",
+      "passed": true,
+      "relation": "equal"
+    }
+  ],
+  "command": [
+    "/usr/bin/orterun",
+    "--oversubscribe",
+    "-n",
+    "2",
+    "/home/zack/Downloads/svMultiPhysics/build-physics-check/test_physics",
+    "--gtest_filter=FreeSurfaceCutStabilityMPI.PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData:FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport:FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions",
+    "--gtest_color=no"
+  ],
+  "execution": {
+    "memory_mib": 6144,
+    "output_mib": 256,
+    "wall_time_seconds": 1800
+  },
+  "expected_tests": [
+    "FreeSurfaceCutStabilityMPI.PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData",
+    "FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport",
+    "FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions"
+  ],
+  "group_id": "physics_mpi",
+  "gtest_output_copies": 1,
+  "mpi_ranks": 2,
+  "outcome": "PASS",
+  "resources": {
+    "final_output_bytes": 249204,
+    "peak_resident_kib_sampled": 27276,
+    "return_code": 0,
+    "termination_reason": null,
+    "wall_time_seconds": 18.00738028396154
+  }
+}

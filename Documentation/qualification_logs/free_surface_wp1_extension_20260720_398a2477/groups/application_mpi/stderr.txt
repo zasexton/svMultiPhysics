@@ -1,0 +1,80 @@
+  === assembleOperator TIMING (rank 0, op='level_set') ===
+    Total:               0.004263 s
+    Cell terms:          0.004212 s  ( 98.8%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000051 s  (  1.2%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000000 s  (  0.0%)
+      Cut volumes:       0.000000 s  (  0.0%)
+      Global terms:      0.000050 s  (  1.2%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.004256 /  0.004260 /  0.004263 s
+    Rank min/mean/max cell:      0.004212 /  0.004214 /  0.004217 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000039 /  0.000045 /  0.000051 s
+    Rank min/mean/max cut-vol:   0.000000 /  0.000000 /  0.000000 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='level_set' process_vm_kb=383424 process_rss_kb=81324
+  === assembleOperator TIMING (rank 0, op='level_set') ===
+    Total:               0.000670 s
+    Cell terms:          0.000653 s  ( 97.5%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000017 s  (  2.5%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000000 s  (  0.0%)
+      Cut volumes:       0.000000 s  (  0.0%)
+      Global terms:      0.000016 s  (  2.4%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000664 /  0.000667 /  0.000670 s
+    Rank min/mean/max cell:      0.000651 /  0.000652 /  0.000653 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000013 /  0.000015 /  0.000017 s
+    Rank min/mean/max cut-vol:   0.000000 /  0.000000 /  0.000000 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='level_set' process_vm_kb=383424 process_rss_kb=81496
+
+--- fsils_solve TIMING (rank 0) ---
+  Solver:                    GMRES
+  Total:                  0.000471 s
+  Alloc+permute in:       0.000000 s  (  0.0%)
+  Preconditioner:         0.000014 s  (  2.9%)
+  Solver kernel:          0.000456 s  ( 96.8%)
+  Unprecond+permute:      0.000001 s  (  0.3%)
+  MPI_Allreduce calls:          72
+  MPI_Allreduce words:         391
+  MPI_Allreduce time:     0.000059 s
+----------------------------------
+
+=== FSILS BACKEND METRICS (rank 0) ===
+  RHS/overlap prep:       0.000002 s
+  Residual validation:    0.000000 s
+  MPI_Allreduce calls:          80
+  MPI_Allreduce words:         399
+  MPI_Allreduce time:     0.000066 s
+=======================================
+  === assembleOperator TIMING (rank 0, op='level_set') ===
+    Total:               0.000357 s
+    Cell terms:          0.000345 s  ( 96.5%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000012 s  (  3.5%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000000 s  (  0.0%)
+      Cut volumes:       0.000000 s  (  0.0%)
+      Global terms:      0.000012 s  (  3.4%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000357 /  0.000394 /  0.000430 s
+    Rank min/mean/max cell:      0.000345 /  0.000382 /  0.000420 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000010 /  0.000011 /  0.000012 s
+    Rank min/mean/max cut-vol:   0.000000 /  0.000000 /  0.000000 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='level_set' process_vm_kb=384252 process_rss_kb=82960
+
++++ NEWTON SOLVER TIMING (rank 0) +++
+  Total Newton time:      0.003994 s  (1 Newton iters, 2 assemblies, 20 linear iters)
+  Assembly (J+r):         0.001603 s  ( 40.1%)
+  Linear solve:           0.000542 s  ( 13.6%)
+  Solution update:        0.000009 s  (  0.2%)
+  Constraint/ghosts:      0.000008 s  (  0.2%)
+  Other (overhead):       0.001831 s  ( 45.8%)
++++++++++++++++++++++++++++++++++++++++

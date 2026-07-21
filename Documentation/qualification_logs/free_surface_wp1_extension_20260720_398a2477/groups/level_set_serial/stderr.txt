@@ -1,0 +1,99 @@
+  === assembleOperator TIMING (rank 0, op='level_set') ===
+    Total:               0.001307 s
+    Cell terms:          0.001298 s  ( 99.3%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000009 s  (  0.7%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000000 s  (  0.0%)
+      Cut volumes:       0.000000 s  (  0.0%)
+      Global terms:      0.000008 s  (  0.6%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='level_set' process_vm_kb=80452 process_rss_kb=44072
+  === assembleOperator TIMING (rank 0, op='level_set') ===
+    Total:               0.000058 s
+    Cell terms:          0.000056 s  ( 95.9%)
+    Boundary terms:      0.000000 s  (  0.1%)
+    Other (DG+global):   0.000002 s  (  4.0%)
+      Interior faces:    0.000000 s  (  0.1%)
+      Interface faces:   0.000000 s  (  0.1%)
+      Cut volumes:       0.000000 s  (  0.1%)
+      Global terms:      0.000002 s  (  3.8%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='level_set' process_vm_kb=80452 process_rss_kb=44136
+  === assembleOperator TIMING (rank 0, op='level_set') ===
+    Total:               0.000030 s
+    Cell terms:          0.000028 s  ( 93.3%)
+    Boundary terms:      0.000000 s  (  0.1%)
+    Other (DG+global):   0.000002 s  (  6.6%)
+      Interior faces:    0.000000 s  (  0.1%)
+      Interface faces:   0.000000 s  (  0.1%)
+      Cut volumes:       0.000000 s  (  0.2%)
+      Global terms:      0.000002 s  (  6.2%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='level_set' process_vm_kb=80452 process_rss_kb=44136
+  === assembleOperator TIMING (rank 0, op='level_set') ===
+    Total:               0.000025 s
+    Cell terms:          0.000023 s  ( 92.4%)
+    Boundary terms:      0.000000 s  (  0.1%)
+    Other (DG+global):   0.000002 s  (  7.5%)
+      Interior faces:    0.000000 s  (  0.2%)
+      Interface faces:   0.000000 s  (  0.1%)
+      Cut volumes:       0.000000 s  (  0.1%)
+      Global terms:      0.000002 s  (  7.2%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='level_set' process_vm_kb=80452 process_rss_kb=44136
+  === assembleOperator TIMING (rank 0, op='level_set') ===
+    Total:               0.000023 s
+    Cell terms:          0.000021 s  ( 91.8%)
+    Boundary terms:      0.000000 s  (  0.1%)
+    Other (DG+global):   0.000002 s  (  8.1%)
+      Interior faces:    0.000000 s  (  0.1%)
+      Interface faces:   0.000000 s  (  0.1%)
+      Cut volumes:       0.000000 s  (  0.1%)
+      Global terms:      0.000002 s  (  7.8%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='level_set' process_vm_kb=80452 process_rss_kb=44136
+  === assembleOperator TIMING (rank 0, op='level_set') ===
+    Total:               0.000023 s
+    Cell terms:          0.000021 s  ( 91.8%)
+    Boundary terms:      0.000000 s  (  0.1%)
+    Other (DG+global):   0.000002 s  (  8.1%)
+      Interior faces:    0.000000 s  (  0.1%)
+      Interface faces:   0.000000 s  (  0.1%)
+      Cut volumes:       0.000000 s  (  0.1%)
+      Global terms:      0.000002 s  (  7.8%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='level_set' process_vm_kb=80452 process_rss_kb=44136
+  === assembleOperator TIMING (rank 0, op='level_set') ===
+    Total:               0.000023 s
+    Cell terms:          0.000021 s  ( 91.5%)
+    Boundary terms:      0.000000 s  (  0.1%)
+    Other (DG+global):   0.000002 s  (  8.4%)
+      Interior faces:    0.000000 s  (  0.1%)
+      Interface faces:   0.000000 s  (  0.1%)
+      Cut volumes:       0.000000 s  (  0.1%)
+      Global terms:      0.000002 s  (  8.0%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='level_set' process_vm_kb=80452 process_rss_kb=44136
+  === assembleOperator TIMING (rank 0, op='level_set') ===
+    Total:               0.000023 s
+    Cell terms:          0.000022 s  ( 92.0%)
+    Boundary terms:      0.000000 s  (  0.1%)
+    Other (DG+global):   0.000002 s  (  7.9%)
+      Interior faces:    0.000000 s  (  0.1%)
+      Interface faces:   0.000000 s  (  0.1%)
+      Cut volumes:       0.000000 s  (  0.1%)
+      Global terms:      0.000002 s  (  7.5%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='level_set' process_vm_kb=80452 process_rss_kb=44136
+  === assembleOperator TIMING (rank 0, op='level_set') ===
+    Total:               0.000023 s
+    Cell terms:          0.000021 s  ( 91.5%)
+    Boundary terms:      0.000000 s  (  0.1%)
+    Other (DG+global):   0.000002 s  (  8.4%)
+      Interior faces:    0.000000 s  (  0.2%)
+      Interface faces:   0.000000 s  (  0.1%)
+      Cut volumes:       0.000000 s  (  0.1%)
+      Global terms:      0.000002 s  (  8.0%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='level_set' process_vm_kb=80452 process_rss_kb=44136

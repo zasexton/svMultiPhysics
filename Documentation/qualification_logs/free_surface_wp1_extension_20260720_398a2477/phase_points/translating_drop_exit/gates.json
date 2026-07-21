@@ -1,0 +1,33 @@
+{
+  "case": {
+    "maximum_interface_l1": 0.12,
+    "maximum_raw_measure_error": 1e-08,
+    "minimum_finest_spatial_order": 0.8,
+    "minimum_finest_temporal_order": 0.5
+  },
+  "common": {
+    "achieved_cfl_excess": 2e-12,
+    "maximum_accounted_balance_error": 2e-11,
+    "maximum_indicator": 1.000000000002,
+    "maximum_local_balance_residual": 2e-12,
+    "minimum_indicator": -2e-12
+  },
+  "qualification_rule": {
+    "release_pass_requires": [
+      "all_18_points_complete",
+      "all_point_gates_pass",
+      "independent_fixed_cfl_space_studies_pass",
+      "independent_fixed_resolution_time_studies_pass",
+      "every_point_has_history_and_final_flux_ledgers"
+    ],
+    "required_points": "cartesian_product_of_each_case_resolutions_and_common_cfl_values",
+    "single_point_release_disposition": "INCONCLUSIVE_RESOLUTION"
+  },
+  "registry_sha256": "69892249dc9ead90ee90ebaf113427506dafe6fb52b8103f1c9497653e35585a",
+  "resource_envelope": {
+    "memory_mib": 2048,
+    "output_mib": 256,
+    "wall_time_seconds": 600
+  },
+  "schema_version": 1
+}

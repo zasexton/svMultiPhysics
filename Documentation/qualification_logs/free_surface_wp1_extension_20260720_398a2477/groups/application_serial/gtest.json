@@ -1,0 +1,270 @@
+{
+  "tests": 27,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-21T13:32:03Z",
+  "time": "0.016s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "ApplicationDriverLevelSetWorkflows",
+      "tests": 27,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-21T13:32:03Z",
+      "time": "0.016s",
+      "testsuite": [
+        {
+          "name": "FrozenExtensionWithoutCutRefreshReportsFixedJacobianCheckGeometry",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "VelocityExtensionProjectsHierarchicalTargetCoefficients",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0.001s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "WallCompatibleNormalVelocityExtensionMatchesGeneratedInterfaceTraceAndProjectsOuterDryWalls",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0.002s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "WallCompatibleNormalVelocityExtensionRejectsHigherOrderFields",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "WallCompatibleNormalVelocityExtensionRejectsMismatchedP1Layouts",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "AlgebraicWallCompatibleExtensionInvalidatesStaleMapWhenInterfaceDisappears",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0.002s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "AuthoritativeEmptyCutContextDoesNotFallBackToNodalCrossings",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "VelocityExtensionGraphUsesCellEdgesWithoutQuadDiagonals",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "AlgebraicExtensionRefreshReprojectsStateAndChangesRevision",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0.001s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "VelocityExtensionRegressionConditionEstimateDetectsNearSingularity",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "ReducedD38MapFailureUsesBoundedRefreshNeutralFallback",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows",
+          "d38_archived_extension_norm": "135.759",
+          "d38_archived_physical_velocity_norm": "0.0403971",
+          "reduced_unguarded_row_l1": "200000.999999",
+          "reduced_unguarded_amplification": "200000.999999",
+          "guarded_wet_to_dry_amplification": "0.000005",
+          "same_state_refresh_preview_linf_change": "0.000000"
+        },
+        {
+          "name": "VelocityExtensionOrientationMakesEitherRetainedSideNegative",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "WetExtensionRequestInfersOnlyZeroDirichletWalls",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "WetExtensionExplicitWallFailsClosedForNonzeroDirichletData",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "WetExtensionWallMasksComeOnlyFromOwningFluidEquation",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "WetExtensionWallDiscoveryFailsWithoutOwningFluidEquation",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "NormalBandVelocityExtensionHonorsStrongNoSlipAndNormalOnlyMasks",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "NormalBandVelocityExtensionUsesSourceRowsOnDryCutCellSupport",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "NormalBandVelocityExtensionReproducesTangentialAffineField",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "VelocityExtensionMapSnapshotTracksEveryRevisionDomain",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "VelocityExtensionMapArtifactRetainsRowsAndRevisionChanges",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0.001s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "NormalBandVelocityExtensionManufacturedRefinementConvergesAndProjectsWalls",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0.002s",
+          "classname": "ApplicationDriverLevelSetWorkflows",
+          "extension_l2_N8": "0.000000",
+          "extension_linf_N8": "0.000000",
+          "extension_l2_N16": "0.000000",
+          "extension_linf_N16": "0.000000",
+          "extension_l2_N32": "0.000000",
+          "extension_linf_N32": "0.000000",
+          "extension_exact_reproduction_level1": "true",
+          "extension_exact_reproduction_level2": "true"
+        },
+        {
+          "name": "NormalBandVelocityExtensionBandSweepKeepsFallbackRowsBounded",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows",
+          "extension_band_1_outside_vertices": "60",
+          "extension_band_1_bounded_fallback_rows": "0",
+          "extension_band_1_wet_to_dry_speed_ratio": "1.000000",
+          "extension_band_2_outside_vertices": "44",
+          "extension_band_2_bounded_fallback_rows": "0",
+          "extension_band_2_wet_to_dry_speed_ratio": "1.000000",
+          "extension_band_4_outside_vertices": "14",
+          "extension_band_4_bounded_fallback_rows": "0",
+          "extension_band_4_wet_to_dry_speed_ratio": "1.000000",
+          "extension_band_8_outside_vertices": "0",
+          "extension_band_8_bounded_fallback_rows": "0",
+          "extension_band_8_wet_to_dry_speed_ratio": "1.000000",
+          "extension_forced_bounded_fallback_rows": "1",
+          "extension_condition_fallback_rows": "1"
+        },
+        {
+          "name": "NormalBandVelocityExtensionDoesNotSwitchDisconnectedComponents",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "NormalBandVelocityExtensionIgnoresReversedComponentNumbering",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows",
+          "forward_left_component": "0",
+          "forward_right_component": "4",
+          "reversed_left_component": "4",
+          "reversed_right_component": "0"
+        },
+        {
+          "name": "NormalBandVelocityExtensionFailsClosedOnEquidistantComponentBands",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "NormalBandVelocityExtensionHonorsGraphLayerCutoff",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:03Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        }
+      ]
+    }
+  ]
+}

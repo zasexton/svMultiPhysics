@@ -1,0 +1,53 @@
+Note: Google Test filter = ApplicationDriverLevelSetWorkflowsMPI.ActiveSystemCommunicatorUsesFESystemCommunicator:ApplicationDriverLevelSetWorkflowsMPI.TraceSupportMaskPromotesRemotelyDiscoveredOwnerSourceRows:ApplicationDriverLevelSetWorkflowsMPI.NormalBandExtensionMatchesSelfAcrossPartitionAndProjectsWalls:ApplicationDriverLevelSetWorkflowsMPI.AlgebraicWetExtensionSolvesOffRankWallProjectedBandWithFsils:ApplicationDriverLevelSetWorkflowsMPI.CollidingComponentBandsMatchSelfAcrossPartitionWithoutBlending:ApplicationDriverLevelSetWorkflowsMPI.VelocityExtensionArtifactsPublishEveryRankOrRollback
+[==========] Running 6 tests from 1 test suite.
+Note: Google Test filter = ApplicationDriverLevelSetWorkflowsMPI.ActiveSystemCommunicatorUsesFESystemCommunicator:ApplicationDriverLevelSetWorkflowsMPI.TraceSupportMaskPromotesRemotelyDiscoveredOwnerSourceRows:ApplicationDriverLevelSetWorkflowsMPI.NormalBandExtensionMatchesSelfAcrossPartitionAndProjectsWalls:ApplicationDriverLevelSetWorkflowsMPI.AlgebraicWetExtensionSolvesOffRankWallProjectedBandWithFsils:ApplicationDriverLevelSetWorkflowsMPI.CollidingComponentBandsMatchSelfAcrossPartitionWithoutBlending:ApplicationDriverLevelSetWorkflowsMPI.VelocityExtensionArtifactsPublishEveryRankOrRollback
+[----------] Global test environment set-up.
+[----------] 6 tests from ApplicationDriverLevelSetWorkflowsMPI
+[ RUN      ] ApplicationDriverLevelSetWorkflowsMPI.ActiveSystemCommunicatorUsesFESystemCommunicator
+[==========] Running 6 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 6 tests from ApplicationDriverLevelSetWorkflowsMPI
+[ RUN      ] ApplicationDriverLevelSetWorkflowsMPI.ActiveSystemCommunicatorUsesFESystemCommunicator
+[       OK ] ApplicationDriverLevelSetWorkflowsMPI.ActiveSystemCommunicatorUsesFESystemCommunicator (2 ms)
+[ RUN      ] ApplicationDriverLevelSetWorkflowsMPI.TraceSupportMaskPromotesRemotelyDiscoveredOwnerSourceRows
+[       OK ] ApplicationDriverLevelSetWorkflowsMPI.ActiveSystemCommunicatorUsesFESystemCommunicator (2 ms)
+[ RUN      ] ApplicationDriverLevelSetWorkflowsMPI.TraceSupportMaskPromotesRemotelyDiscoveredOwnerSourceRows
+[       OK ] ApplicationDriverLevelSetWorkflowsMPI.TraceSupportMaskPromotesRemotelyDiscoveredOwnerSourceRows (1 ms)
+[ RUN      ] ApplicationDriverLevelSetWorkflowsMPI.NormalBandExtensionMatchesSelfAcrossPartitionAndProjectsWalls
+[       OK ] ApplicationDriverLevelSetWorkflowsMPI.TraceSupportMaskPromotesRemotelyDiscoveredOwnerSourceRows (1 ms)
+[ RUN      ] ApplicationDriverLevelSetWorkflowsMPI.NormalBandExtensionMatchesSelfAcrossPartitionAndProjectsWalls
+[       OK ] ApplicationDriverLevelSetWorkflowsMPI.NormalBandExtensionMatchesSelfAcrossPartitionAndProjectsWalls (1 ms)
+[ RUN      ] ApplicationDriverLevelSetWorkflowsMPI.AlgebraicWetExtensionSolvesOffRankWallProjectedBandWithFsils
+[       OK ] ApplicationDriverLevelSetWorkflowsMPI.NormalBandExtensionMatchesSelfAcrossPartitionAndProjectsWalls (1 ms)
+[ RUN      ] ApplicationDriverLevelSetWorkflowsMPI.AlgebraicWetExtensionSolvesOffRankWallProjectedBandWithFsils
+[13:32:05.369] [R0] [INFO] FESystem: sparsity setup diagnostic=constraint_sparsity_setup operator='level_set' master_bearing_lines=0 serial_base_nnz=624 serial_active_nnz=624 distributed_indexing=NodalInterleaved distributed_base_diag_nnz=384 distributed_base_offdiag_nnz=28 distributed_active_diag_nnz=384 distributed_active_offdiag_nnz=28
+[13:32:05.369] [R1] [INFO] FESystem: sparsity setup diagnostic=constraint_sparsity_setup operator='level_set' master_bearing_lines=0 serial_base_nnz=624 serial_active_nnz=624 distributed_indexing=NodalInterleaved distributed_base_diag_nnz=296 distributed_base_offdiag_nnz=28 distributed_active_diag_nnz=296 distributed_active_offdiag_nnz=28
+[13:32:05.376] [R1] [INFO] NewtonSolver: residual block norms diagnostic=residual_block_norms phase='jacobian_and_residual' field=7.29726 aux=0 combined=7.29726
+[13:32:05.376] [R0] [INFO] NewtonSolver: residual block norms diagnostic=residual_block_norms phase='jacobian_and_residual' field=7.29726 aux=0 combined=7.29726
+[13:32:05.376] [R0] [INFO] NewtonSolver: vector component norms diagnostic=vector_component_norms label='residual_block_norms' [Velocity[0] norm=0 mean=0 min=0 max=0] [Velocity[1] norm=0 mean=0 min=0 max=0] [phi norm=0 mean=0 min=0 max=0] [LevelSetAdvectionVelocity[0] norm=2.82843 mean=-0.222222 min=-2 max=0] [LevelSetAdvectionVelocity[1] norm=6.72681 mean=-0.527778 min=-5 max=0]
+[13:32:05.376] [R0] [INFO] NewtonSolver: vector component norms diagnostic=vector_component_norms label='solution_state' [Velocity[0] norm=8.48528 mean=2 min=2 max=2] [Velocity[1] norm=20.1804 mean=4.75 min=4.5 max=5] [phi norm=19.3164 mean=3.75 min=-0.25 max=7.75] [LevelSetAdvectionVelocity[0] norm=0 mean=0 min=0 max=0] [LevelSetAdvectionVelocity[1] norm=0 mean=0 min=0 max=0]
+[13:32:05.379] [R0] [INFO] NewtonSolver: residual block norms diagnostic=residual_block_norms phase='post_update_convergence_check' field=1.88411e-15 aux=0 combined=1.88411e-15
+[13:32:05.379] [R0] [INFO] NewtonSolver: vector component norms diagnostic=vector_component_norms label='residual_block_norms' [Velocity[0] norm=0 mean=0 min=0 max=0] [Velocity[1] norm=0 mean=0 min=0 max=0] [phi norm=0 mean=0 min=0 max=0] [LevelSetAdvectionVelocity[0] norm=1.40433e-15 mean=-4.93432e-17 min=-4.44089e-16 max=4.44089e-16] [LevelSetAdvectionVelocity[1] norm=1.25607e-15 mean=-9.86865e-17 min=-8.88178e-16 max=0]
+[13:32:05.379] [R1] [INFO] NewtonSolver: residual block norms diagnostic=residual_block_norms phase='post_update_convergence_check' field=1.88411e-15 aux=0 combined=1.88411e-15
+[13:32:05.379] [R0] [INFO] NewtonSolver: vector component norms diagnostic=vector_component_norms label='solution_state' [Velocity[0] norm=8.48528 mean=2 min=2 max=2] [Velocity[1] norm=20.1804 mean=4.75 min=4.5 max=5] [phi norm=18.9685 mean=3.65 min=-0.35 max=7.65] [LevelSetAdvectionVelocity[0] norm=8.48528 mean=2 min=2 max=2] [LevelSetAdvectionVelocity[1] norm=6.72681 mean=0.527778 min=0 max=5]
+[       OK ] ApplicationDriverLevelSetWorkflowsMPI.AlgebraicWetExtensionSolvesOffRankWallProjectedBandWithFsils (15 ms)
+[ RUN      ] ApplicationDriverLevelSetWorkflowsMPI.CollidingComponentBandsMatchSelfAcrossPartitionWithoutBlending
+[       OK ] ApplicationDriverLevelSetWorkflowsMPI.AlgebraicWetExtensionSolvesOffRankWallProjectedBandWithFsils (15 ms)
+[ RUN      ] ApplicationDriverLevelSetWorkflowsMPI.CollidingComponentBandsMatchSelfAcrossPartitionWithoutBlending
+[       OK ] ApplicationDriverLevelSetWorkflowsMPI.CollidingComponentBandsMatchSelfAcrossPartitionWithoutBlending (0 ms)
+[ RUN      ] ApplicationDriverLevelSetWorkflowsMPI.VelocityExtensionArtifactsPublishEveryRankOrRollback
+[       OK ] ApplicationDriverLevelSetWorkflowsMPI.CollidingComponentBandsMatchSelfAcrossPartitionWithoutBlending (0 ms)
+[ RUN      ] ApplicationDriverLevelSetWorkflowsMPI.VelocityExtensionArtifactsPublishEveryRankOrRollback
+[svMultiPhysics::Application] Accepted velocity-extension map artifact diagnostic=velocity_extension_map_artifact field='LevelSetAdvectionVelocity' step=2 map_revision=8764129695629626383 ranks=2 owner_rows_rank0=10 constraint_rows_rank0=20 bytes_rank0=16823 path_rank0='/tmp/svmp-velocity-extension-mpi-success-509276718472371/velocity_extension_maps/velocity_extension_map_LevelSetAdvectionVelocity_free_surface_step_00000002_state_42_map_8764129695629626383_rank_000000.json' outcome=written
+[       OK ] ApplicationDriverLevelSetWorkflowsMPI.VelocityExtensionArtifactsPublishEveryRankOrRollback (11 ms)
+[----------] 6 tests from ApplicationDriverLevelSetWorkflowsMPI (31 ms total)
+
+[----------] Global test environment tear-down
+[==========] 6 tests from 1 test suite ran. (31 ms total)
+[  PASSED  ] 6 tests.
+[       OK ] ApplicationDriverLevelSetWorkflowsMPI.VelocityExtensionArtifactsPublishEveryRankOrRollback (11 ms)
+[----------] 6 tests from ApplicationDriverLevelSetWorkflowsMPI (31 ms total)
+
+[----------] Global test environment tear-down
+[==========] 6 tests from 1 test suite ran. (31 ms total)
+[  PASSED  ] 6 tests.

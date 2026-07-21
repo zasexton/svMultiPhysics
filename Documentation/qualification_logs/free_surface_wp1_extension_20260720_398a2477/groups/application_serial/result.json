@@ -1,0 +1,125 @@
+{
+  "checks": [
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "process_return_code",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": null,
+      "expected": null,
+      "metric": "termination_reason",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 27,
+      "expected": 27,
+      "metric": "test_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "failure_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "error_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "disabled_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "missing_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "incomplete_or_skipped_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "tests_with_failure_records",
+      "passed": true,
+      "relation": "equal"
+    }
+  ],
+  "command": [
+    "/home/zack/Downloads/svMultiPhysics/build-levelset-application-check/bin/test_application",
+    "--gtest_filter=ApplicationDriverLevelSetWorkflows.FrozenExtensionWithoutCutRefreshReportsFixedJacobianCheckGeometry:ApplicationDriverLevelSetWorkflows.VelocityExtensionProjectsHierarchicalTargetCoefficients:ApplicationDriverLevelSetWorkflows.WallCompatibleNormalVelocityExtensionMatchesGeneratedInterfaceTraceAndProjectsOuterDryWalls:ApplicationDriverLevelSetWorkflows.WallCompatibleNormalVelocityExtensionRejectsHigherOrderFields:ApplicationDriverLevelSetWorkflows.WallCompatibleNormalVelocityExtensionRejectsMismatchedP1Layouts:ApplicationDriverLevelSetWorkflows.AlgebraicWallCompatibleExtensionInvalidatesStaleMapWhenInterfaceDisappears:ApplicationDriverLevelSetWorkflows.AuthoritativeEmptyCutContextDoesNotFallBackToNodalCrossings:ApplicationDriverLevelSetWorkflows.VelocityExtensionGraphUsesCellEdgesWithoutQuadDiagonals:ApplicationDriverLevelSetWorkflows.AlgebraicExtensionRefreshReprojectsStateAndChangesRevision:ApplicationDriverLevelSetWorkflows.VelocityExtensionRegressionConditionEstimateDetectsNearSingularity:ApplicationDriverLevelSetWorkflows.ReducedD38MapFailureUsesBoundedRefreshNeutralFallback:ApplicationDriverLevelSetWorkflows.VelocityExtensionOrientationMakesEitherRetainedSideNegative:ApplicationDriverLevelSetWorkflows.WetExtensionRequestInfersOnlyZeroDirichletWalls:ApplicationDriverLevelSetWorkflows.WetExtensionExplicitWallFailsClosedForNonzeroDirichletData:ApplicationDriverLevelSetWorkflows.WetExtensionWallMasksComeOnlyFromOwningFluidEquation:ApplicationDriverLevelSetWorkflows.WetExtensionWallDiscoveryFailsWithoutOwningFluidEquation:ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionHonorsStrongNoSlipAndNormalOnlyMasks:ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionUsesSourceRowsOnDryCutCellSupport:ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionReproducesTangentialAffineField:ApplicationDriverLevelSetWorkflows.VelocityExtensionMapSnapshotTracksEveryRevisionDomain:ApplicationDriverLevelSetWorkflows.VelocityExtensionMapArtifactRetainsRowsAndRevisionChanges:ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionManufacturedRefinementConvergesAndProjectsWalls:ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionBandSweepKeepsFallbackRowsBounded:ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionDoesNotSwitchDisconnectedComponents:ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionIgnoresReversedComponentNumbering:ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionFailsClosedOnEquidistantComponentBands:ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionHonorsGraphLayerCutoff",
+    "--gtest_color=no",
+    "--gtest_output=json:/home/zack/Downloads/svMultiPhysics/Documentation/qualification_logs/free_surface_wp1_extension_20260720_398a2477/groups/application_serial/gtest.json"
+  ],
+  "execution": {
+    "memory_mib": 4096,
+    "output_mib": 128,
+    "wall_time_seconds": 900
+  },
+  "expected_tests": [
+    "ApplicationDriverLevelSetWorkflows.FrozenExtensionWithoutCutRefreshReportsFixedJacobianCheckGeometry",
+    "ApplicationDriverLevelSetWorkflows.VelocityExtensionProjectsHierarchicalTargetCoefficients",
+    "ApplicationDriverLevelSetWorkflows.WallCompatibleNormalVelocityExtensionMatchesGeneratedInterfaceTraceAndProjectsOuterDryWalls",
+    "ApplicationDriverLevelSetWorkflows.WallCompatibleNormalVelocityExtensionRejectsHigherOrderFields",
+    "ApplicationDriverLevelSetWorkflows.WallCompatibleNormalVelocityExtensionRejectsMismatchedP1Layouts",
+    "ApplicationDriverLevelSetWorkflows.AlgebraicWallCompatibleExtensionInvalidatesStaleMapWhenInterfaceDisappears",
+    "ApplicationDriverLevelSetWorkflows.AuthoritativeEmptyCutContextDoesNotFallBackToNodalCrossings",
+    "ApplicationDriverLevelSetWorkflows.VelocityExtensionGraphUsesCellEdgesWithoutQuadDiagonals",
+    "ApplicationDriverLevelSetWorkflows.AlgebraicExtensionRefreshReprojectsStateAndChangesRevision",
+    "ApplicationDriverLevelSetWorkflows.VelocityExtensionRegressionConditionEstimateDetectsNearSingularity",
+    "ApplicationDriverLevelSetWorkflows.ReducedD38MapFailureUsesBoundedRefreshNeutralFallback",
+    "ApplicationDriverLevelSetWorkflows.VelocityExtensionOrientationMakesEitherRetainedSideNegative",
+    "ApplicationDriverLevelSetWorkflows.WetExtensionRequestInfersOnlyZeroDirichletWalls",
+    "ApplicationDriverLevelSetWorkflows.WetExtensionExplicitWallFailsClosedForNonzeroDirichletData",
+    "ApplicationDriverLevelSetWorkflows.WetExtensionWallMasksComeOnlyFromOwningFluidEquation",
+    "ApplicationDriverLevelSetWorkflows.WetExtensionWallDiscoveryFailsWithoutOwningFluidEquation",
+    "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionHonorsStrongNoSlipAndNormalOnlyMasks",
+    "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionUsesSourceRowsOnDryCutCellSupport",
+    "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionReproducesTangentialAffineField",
+    "ApplicationDriverLevelSetWorkflows.VelocityExtensionMapSnapshotTracksEveryRevisionDomain",
+    "ApplicationDriverLevelSetWorkflows.VelocityExtensionMapArtifactRetainsRowsAndRevisionChanges",
+    "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionManufacturedRefinementConvergesAndProjectsWalls",
+    "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionBandSweepKeepsFallbackRowsBounded",
+    "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionDoesNotSwitchDisconnectedComponents",
+    "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionIgnoresReversedComponentNumbering",
+    "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionFailsClosedOnEquidistantComponentBands",
+    "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionHonorsGraphLayerCutoff"
+  ],
+  "group_id": "application_serial",
+  "gtest_output_copies": 1,
+  "mpi_ranks": 1,
+  "outcome": "PASS",
+  "resources": {
+    "final_output_bytes": 26857,
+    "peak_resident_kib_sampled": 71104,
+    "return_code": 0,
+    "termination_reason": null,
+    "wall_time_seconds": 0.2542277590255253
+  }
+}

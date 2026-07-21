@@ -1,0 +1,11 @@
+Note: Google Test filter = LevelSetConservativePhaseQualification.RunsOneExplicitReleaseMatrixPoint
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from LevelSetConservativePhaseQualification
+[ RUN      ] LevelSetConservativePhaseQualification.RunsOneExplicitReleaseMatrixPoint
+[       OK ] LevelSetConservativePhaseQualification.RunsOneExplicitReleaseMatrixPoint (57831 ms)
+[----------] 1 test from LevelSetConservativePhaseQualification (57831 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (57831 ms total)
+[  PASSED  ] 1 test.

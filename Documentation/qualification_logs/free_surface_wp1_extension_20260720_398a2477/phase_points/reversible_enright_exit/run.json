@@ -1,0 +1,24 @@
+{
+  "command": [
+    "/home/zack/Downloads/svMultiPhysics/build-fe-check/test_fe_levelset",
+    "--gtest_filter=LevelSetConservativePhaseQualification.RunsOneExplicitReleaseMatrixPoint",
+    "--gtest_output=json:/home/zack/Downloads/svMultiPhysics/Documentation/qualification_logs/free_surface_wp1_extension_20260720_398a2477/phase_points/reversible_enright_exit/test_result.json"
+  ],
+  "outcome": "PASS",
+  "resource_envelope": {
+    "memory_mib": 4096,
+    "output_mib": 4096,
+    "wall_time_seconds": 1800
+  },
+  "resources": {
+    "child_max_resident_kib": 175948,
+    "final_output_bytes": 51581673,
+    "peak_resident_kib_sampled": 176152,
+    "return_code": 0,
+    "system_cpu_seconds": 0.189666,
+    "termination_reason": null,
+    "user_cpu_seconds": 57.846698,
+    "wall_time_seconds": 57.86615895101568
+  },
+  "schema_version": 1
+}

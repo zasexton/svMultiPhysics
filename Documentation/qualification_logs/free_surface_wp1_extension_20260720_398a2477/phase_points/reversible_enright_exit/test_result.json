@@ -1,0 +1,51 @@
+{
+  "tests": 1,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-21T13:38:44Z",
+  "time": "57.831s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "LevelSetConservativePhaseQualification",
+      "tests": 1,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-21T13:38:44Z",
+      "time": "57.831s",
+      "testsuite": [
+        {
+          "name": "RunsOneExplicitReleaseMatrixPoint",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:38:44Z",
+          "time": "57.831s",
+          "classname": "LevelSetConservativePhaseQualification",
+          "matrix_case": "enright_3d",
+          "resolution": "32",
+          "requested_cfl": "0.5",
+          "achieved_graph_cfl": "0.4994672894315299",
+          "time_steps": "426",
+          "graph_nodes": "35937",
+          "graph_edges": "438368",
+          "interface_l1": "0.015844763332021745",
+          "maximum_raw_measure_error": "6.2235632446172584e-10",
+          "maximum_accounted_balance_error": "1.3877787807814457e-17",
+          "cumulative_boundary_transfer": "-1.3653592767482057e-18",
+          "cumulative_discrete_divergence_source": "6.2235632218786703e-10",
+          "minimum_indicator": "-3.9486643121922071e-16",
+          "maximum_indicator": "1.0000000000000002",
+          "maximum_local_balance_residual": "7.7291756436954906e-21",
+          "minimum_components": "1",
+          "maximum_components": "2",
+          "history_points": "426",
+          "detail_control_volumes": "35937",
+          "detail_edges": "438368",
+          "centroid_return_error": "0.049674651682863807"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,126 @@
+{
+  "tests": 8,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-21T13:38:41Z",
+  "time": "2.043s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "LevelSetConservativePhaseBenchmarks",
+      "tests": 5,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-21T13:38:41Z",
+      "time": "2.032s",
+      "testsuite": [
+        {
+          "name": "TranslatingDiskConservesAndRefines",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:38:41Z",
+          "time": "1.236s",
+          "classname": "LevelSetConservativePhaseBenchmarks",
+          "coupled_l1_N16": "0.036235396936237625",
+          "coupled_centroid_error_N16": "0.0031168655630087472",
+          "coupled_measure_error_N16": "4.8303236410696115e-10",
+          "coupled_accounted_balance_error_N16": "2.7755575615628914e-17",
+          "coupled_l1_N32": "0.017198729038738304",
+          "coupled_centroid_error_N32": "0.00062374252906585714",
+          "coupled_measure_error_N32": "1.457167719820518e-16",
+          "coupled_accounted_balance_error_N32": "1.3877787807814457e-17",
+          "coupled_l1_N64": "0.010186028741205088",
+          "coupled_centroid_error_N64": "0.00011420812919968326",
+          "coupled_measure_error_N64": "6.9388939039072284e-18",
+          "coupled_accounted_balance_error_N64": "3.4694469519536142e-17"
+        },
+        {
+          "name": "ThreeDimensionalReversibleDeformationSmoke",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:38:42Z",
+          "time": "0.038s",
+          "classname": "LevelSetConservativePhaseBenchmarks",
+          "three_dimensional_smoke_l1": "0.0099441891878851718",
+          "three_dimensional_smoke_measure_error": "1.5929797453073657e-06",
+          "three_dimensional_smoke_divergence_source": "1.5929797453072923e-06",
+          "three_dimensional_smoke_maximum_courant": "0.38637033051562736",
+          "three_dimensional_smoke_steps": "6"
+        },
+        {
+          "name": "ReversibleDeformationReturnsWithoutMassDrift",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:38:42Z",
+          "time": "0.415s",
+          "classname": "LevelSetConservativePhaseBenchmarks",
+          "deformation_l1": "0.024270909534945709",
+          "deformation_measure_error": "4.8586135115158413e-14",
+          "deformation_accounted_balance_error": "2.7755575615628914e-17"
+        },
+        {
+          "name": "AdvectsAThinWallFilmTangentially",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:38:42Z",
+          "time": "0.162s",
+          "classname": "LevelSetConservativePhaseBenchmarks",
+          "wall_film_l1": "0.0039873998978517417",
+          "wall_film_measure_error": "3.4694469519536142e-18",
+          "wall_film_centroid_x_error": "0.00073329034224083045",
+          "wall_film_centroid_y_error": "0.0010370043008212301"
+        },
+        {
+          "name": "KeepsSeparatedDropsInDistinctFluxComponents",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:38:42Z",
+          "time": "0.179s",
+          "classname": "LevelSetConservativePhaseBenchmarks",
+          "separated_drops_measure_error": "4.3188883629141639e-08",
+          "separated_drops_accounted_balance_error": "1.3877787807814457e-17",
+          "separated_drops_minimum_components": "2",
+          "separated_drops_maximum_components": "2",
+          "separated_drops_centroid_x_error": "0.0017769012649168497"
+        }
+      ]
+    },
+    {
+      "name": "LevelSetTransport",
+      "tests": 3,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-21T13:38:43Z",
+      "time": "0.01s",
+      "testsuite": [
+        {
+          "name": "AlgebraicVelocityExtensionJitRequestUsesCompiledPath",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:38:43Z",
+          "time": "0.003s",
+          "classname": "LevelSetTransport"
+        },
+        {
+          "name": "AlgebraicExtensionSparsityUsesQuadEdgesWithoutCellDiagonals",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:38:43Z",
+          "time": "0s",
+          "classname": "LevelSetTransport"
+        },
+        {
+          "name": "AlgebraicWetExtensionCarriesVelocityYToPhiForDryCutSupportSourceRow",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:38:43Z",
+          "time": "0.006s",
+          "classname": "LevelSetTransport"
+        }
+      ]
+    }
+  ]
+}

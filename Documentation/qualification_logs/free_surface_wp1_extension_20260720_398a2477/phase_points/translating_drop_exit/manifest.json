@@ -1,0 +1,14 @@
+{
+  "case_id": "translating_drop_2d",
+  "dimension": 2,
+  "maintenance_mode": "disabled",
+  "matrix_id": "level_set_phase_transport_release_v1",
+  "model_envelope": "one_phase_conservative_indicator_transport_only",
+  "mpi_ranks": 1,
+  "registry_sha256": "69892249dc9ead90ee90ebaf113427506dafe6fb52b8103f1c9497653e35585a",
+  "requested_cfl": 0.5,
+  "resolution": 64,
+  "schema_version": 1,
+  "source_commit": "398a24773be4c2e757aa642ce642a029f8be1381",
+  "threads": 1
+}

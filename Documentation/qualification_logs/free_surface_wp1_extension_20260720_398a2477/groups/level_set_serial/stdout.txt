@@ -1,0 +1,31 @@
+Note: Google Test filter = LevelSetConservativePhaseBenchmarks.TranslatingDiskConservesAndRefines:LevelSetConservativePhaseBenchmarks.ThreeDimensionalReversibleDeformationSmoke:LevelSetConservativePhaseBenchmarks.ReversibleDeformationReturnsWithoutMassDrift:LevelSetConservativePhaseBenchmarks.AdvectsAThinWallFilmTangentially:LevelSetConservativePhaseBenchmarks.KeepsSeparatedDropsInDistinctFluxComponents:LevelSetTransport.AlgebraicVelocityExtensionJitRequestUsesCompiledPath:LevelSetTransport.AlgebraicExtensionSparsityUsesQuadEdgesWithoutCellDiagonals:LevelSetTransport.AlgebraicWetExtensionCarriesVelocityYToPhiForDryCutSupportSourceRow
+[==========] Running 8 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 5 tests from LevelSetConservativePhaseBenchmarks
+[ RUN      ] LevelSetConservativePhaseBenchmarks.TranslatingDiskConservesAndRefines
+[       OK ] LevelSetConservativePhaseBenchmarks.TranslatingDiskConservesAndRefines (1236 ms)
+[ RUN      ] LevelSetConservativePhaseBenchmarks.ThreeDimensionalReversibleDeformationSmoke
+[       OK ] LevelSetConservativePhaseBenchmarks.ThreeDimensionalReversibleDeformationSmoke (38 ms)
+[ RUN      ] LevelSetConservativePhaseBenchmarks.ReversibleDeformationReturnsWithoutMassDrift
+[       OK ] LevelSetConservativePhaseBenchmarks.ReversibleDeformationReturnsWithoutMassDrift (415 ms)
+[ RUN      ] LevelSetConservativePhaseBenchmarks.AdvectsAThinWallFilmTangentially
+[       OK ] LevelSetConservativePhaseBenchmarks.AdvectsAThinWallFilmTangentially (162 ms)
+[ RUN      ] LevelSetConservativePhaseBenchmarks.KeepsSeparatedDropsInDistinctFluxComponents
+[       OK ] LevelSetConservativePhaseBenchmarks.KeepsSeparatedDropsInDistinctFluxComponents (179 ms)
+[----------] 5 tests from LevelSetConservativePhaseBenchmarks (2032 ms total)
+
+[----------] 3 tests from LevelSetTransport
+[ RUN      ] LevelSetTransport.AlgebraicVelocityExtensionJitRequestUsesCompiledPath
+[13:38:43.159] [INFO] LLVM JIT: OrcJIT initialized (LLVM 14.0.0, triple=x86_64-pc-linux-gnu, opt=2, vectorize=true, fp_regs=16, simd=128b, target_aware=false, max_fused_terms=0)
+[       OK ] LevelSetTransport.AlgebraicVelocityExtensionJitRequestUsesCompiledPath (3 ms)
+[ RUN      ] LevelSetTransport.AlgebraicExtensionSparsityUsesQuadEdgesWithoutCellDiagonals
+[       OK ] LevelSetTransport.AlgebraicExtensionSparsityUsesQuadEdgesWithoutCellDiagonals (0 ms)
+[ RUN      ] LevelSetTransport.AlgebraicWetExtensionCarriesVelocityYToPhiForDryCutSupportSourceRow
+[13:38:43.160] [INFO] FESystem: sparsity setup diagnostic=constraint_sparsity_setup operator='level_set' master_bearing_lines=0 serial_base_nnz=256 serial_active_nnz=256 distributed_indexing=none distributed_base_diag_nnz=0 distributed_base_offdiag_nnz=0 distributed_active_diag_nnz=0 distributed_active_offdiag_nnz=0
+[13:38:43.161] [INFO] LLVM JIT: OrcJIT initialized (LLVM 14.0.0, triple=x86_64-pc-linux-gnu, opt=2, vectorize=false, fp_regs=16, simd=128b, target_aware=false, max_fused_terms=0)
+[       OK ] LevelSetTransport.AlgebraicWetExtensionCarriesVelocityYToPhiForDryCutSupportSourceRow (6 ms)
+[----------] 3 tests from LevelSetTransport (10 ms total)
+
+[----------] Global test environment tear-down
+[==========] 8 tests from 2 test suites ran. (2043 ms total)
+[  PASSED  ] 8 tests.

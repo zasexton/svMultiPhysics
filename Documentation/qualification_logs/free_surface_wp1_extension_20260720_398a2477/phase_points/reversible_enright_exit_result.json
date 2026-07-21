@@ -1,0 +1,201 @@
+{
+  "checks": [
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "driver_return_code",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "comparison_present",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "manifest_present",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "PASS",
+      "expected": "PASS",
+      "metric": "point_outcome",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "INCONCLUSIVE_RESOLUTION",
+      "expected": "INCONCLUSIVE_RESOLUTION",
+      "metric": "release_disposition",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": null,
+      "expected": null,
+      "metric": "failure_reason",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "enright_3d",
+      "expected": "enright_3d",
+      "metric": "case_id",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 32,
+      "expected": 32,
+      "metric": "resolution",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0.5,
+      "expected": 0.5,
+      "metric": "requested_cfl",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "398a24773be4c2e757aa642ce642a029f8be1381",
+      "expected": "398a24773be4c2e757aa642ce642a029f8be1381",
+      "metric": "source_commit",
+      "passed": true,
+      "relation": "equal"
+    }
+  ],
+  "command": [
+    "/home/zack/miniconda3/bin/python3",
+    "/home/zack/Downloads/svMultiPhysics/tests/cases/fluid/run_level_set_phase_transport_release.py",
+    "run",
+    "--registry",
+    "/home/zack/Downloads/svMultiPhysics/tests/cases/fluid/level_set_phase_transport_release_matrix.json",
+    "--test-binary",
+    "/home/zack/Downloads/svMultiPhysics/build-fe-check/test_fe_levelset",
+    "--output-dir",
+    "/home/zack/Downloads/svMultiPhysics/Documentation/qualification_logs/free_surface_wp1_extension_20260720_398a2477/phase_points/reversible_enright_exit",
+    "--case",
+    "enright_3d",
+    "--resolution",
+    "32",
+    "--cfl",
+    "0.5",
+    "--source-root",
+    "/home/zack/Downloads/svMultiPhysics"
+  ],
+  "nested_comparison": {
+    "case_id": "enright_3d",
+    "checks": [
+      {
+        "actual": "enright_3d",
+        "expected": "enright_3d",
+        "metric": "matrix_case",
+        "passed": true,
+        "relation": "equal"
+      },
+      {
+        "actual": "32",
+        "expected": "32",
+        "metric": "resolution",
+        "passed": true,
+        "relation": "equal"
+      },
+      {
+        "actual": "0.5",
+        "expected": "0.5",
+        "metric": "requested_cfl",
+        "passed": true,
+        "relation": "equal"
+      },
+      {
+        "actual": 0.4994672894315299,
+        "limit": 0.500000000002,
+        "metric": "achieved_graph_cfl",
+        "passed": true,
+        "relation": "less_than_or_equal"
+      },
+      {
+        "actual": 1.3877787807814457e-17,
+        "limit": 2e-11,
+        "metric": "maximum_accounted_balance_error",
+        "passed": true,
+        "relation": "less_than_or_equal"
+      },
+      {
+        "actual": -3.948664312192207e-16,
+        "limit": -2e-12,
+        "metric": "minimum_indicator",
+        "passed": true,
+        "relation": "greater_than_or_equal"
+      },
+      {
+        "actual": 1.0000000000000002,
+        "limit": 1.000000000002,
+        "metric": "maximum_indicator",
+        "passed": true,
+        "relation": "less_than_or_equal"
+      },
+      {
+        "actual": 7.72917564369549e-21,
+        "limit": 2e-12,
+        "metric": "maximum_local_balance_residual",
+        "passed": true,
+        "relation": "less_than_or_equal"
+      },
+      {
+        "actual": 6.223563244617258e-10,
+        "limit": 0.0005,
+        "metric": "maximum_raw_measure_error",
+        "passed": true,
+        "relation": "less_than_or_equal"
+      },
+      {
+        "actual": 0.015844763332021745,
+        "limit": 0.35,
+        "metric": "interface_l1",
+        "passed": true,
+        "relation": "less_than_or_equal"
+      },
+      {
+        "actual_bytes": 140750,
+        "metric": "artifact:history.csv",
+        "passed": true,
+        "relation": "greater_than_zero"
+      },
+      {
+        "actual_bytes": 10817247,
+        "metric": "artifact:control_volumes.csv",
+        "passed": true,
+        "relation": "greater_than_zero"
+      },
+      {
+        "actual_bytes": 40615926,
+        "metric": "artifact:edges.csv",
+        "passed": true,
+        "relation": "greater_than_zero"
+      },
+      {
+        "actual_bytes": 899,
+        "metric": "artifact:components.csv",
+        "passed": true,
+        "relation": "greater_than_zero"
+      }
+    ],
+    "failure_reason": null,
+    "note": "A passing point cannot qualify the release matrix by itself.",
+    "point_outcome": "PASS",
+    "release_disposition": "INCONCLUSIVE_RESOLUTION",
+    "requested_cfl": 0.5,
+    "resolution": 32,
+    "schema_version": 1
+  },
+  "outcome": "PASS",
+  "point_id": "reversible_enright_exit"
+}

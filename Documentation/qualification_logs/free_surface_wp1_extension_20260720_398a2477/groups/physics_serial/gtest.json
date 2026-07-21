@@ -1,0 +1,105 @@
+{
+  "tests": 9,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-21T13:32:05Z",
+  "time": "377.534s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "NavierStokesLegacyBCs",
+      "tests": 2,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-21T13:32:05Z",
+      "time": "0.002s",
+      "testsuite": [
+        {
+          "name": "UnfittedFreeSurfaceLegacyVelocityExtensionFailsClosed",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:05Z",
+          "time": "0.001s",
+          "classname": "NavierStokesLegacyBCs"
+        },
+        {
+          "name": "DisabledVelocityExtensionRejectsUnusedDiffusivity",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:05Z",
+          "time": "0s",
+          "classname": "NavierStokesLegacyBCs"
+        }
+      ]
+    },
+    {
+      "name": "FreeSurfaceCutStability",
+      "tests": 7,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-21T13:32:05Z",
+      "time": "377.532s",
+      "testsuite": [
+        {
+          "name": "PhysicalWetBlocksAreInvariantToDryDepthAndState",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:05Z",
+          "time": "0.213s",
+          "classname": "FreeSurfaceCutStability"
+        },
+        {
+          "name": "DisconnectedLiquidIslandsHaveZeroPhysicalCrossCouplingThroughDryStrip",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:05Z",
+          "time": "0.217s",
+          "classname": "FreeSurfaceCutStability"
+        },
+        {
+          "name": "ProductionSmallCutAggregationPreservesPartialWallDirichletPerComponent",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:05Z",
+          "time": "0.007s",
+          "classname": "FreeSurfaceCutStability"
+        },
+        {
+          "name": "ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:05Z",
+          "time": "0.071s",
+          "classname": "FreeSurfaceCutStability"
+        },
+        {
+          "name": "FixedTetraMeshGenericAndNearFeatureSweepHasNoFreePressureNullRows",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:32:05Z",
+          "time": "144.497s",
+          "classname": "FreeSurfaceCutStability"
+        },
+        {
+          "name": "FixedPhysicalCutThreeLevelRefinementBoundsPressureControlAndAggregation",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:34:30Z",
+          "time": "158.928s",
+          "classname": "FreeSurfaceCutStability"
+        },
+        {
+          "name": "PersistentMovingCutRefreshesAggregationAndRetainsMixedRankWithoutPressurePin",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T13:37:09Z",
+          "time": "73.596s",
+          "classname": "FreeSurfaceCutStability"
+        }
+      ]
+    }
+  ]
+}

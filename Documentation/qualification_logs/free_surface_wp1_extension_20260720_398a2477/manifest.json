@@ -1,0 +1,165 @@
+{
+  "artifact_schema_version": 1,
+  "closure_contract": [
+    "physical_momentum_has_no_legacy_dry_diffusion_path",
+    "only_velocity_dofs_without_retained_liquid_support_are_constrained",
+    "physical_wet_blocks_and_solutions_are_dry_geometry_invariant",
+    "disconnected_liquid_islands_have_zero_dry_path_coupling",
+    "extension_rows_are_rank_and_coefficient_guarded",
+    "fallback_rows_are_bounded_and_nonnegative",
+    "component_collisions_are_geometric_and_numbering_invariant",
+    "same_state_refresh_reprojects_without_a_velocity_spike",
+    "accepted_maps_publish_every_owner_row_and_revision_change",
+    "representative_wall_drop_enright_and_two_island_exits_pass",
+    "wp7_cut_conditioning_matrix_passes_at_the_same_source_revision"
+  ],
+  "findings": [
+    "FSR-01",
+    "FSR-02",
+    "FSR-18"
+  ],
+  "groups": [
+    {
+      "binary": "application",
+      "execution": {
+        "memory_mib": 4096,
+        "output_mib": 128,
+        "wall_time_seconds": 900
+      },
+      "gtest_output_copies": 1,
+      "id": "application_serial",
+      "mpi_ranks": 1,
+      "tests": [
+        "ApplicationDriverLevelSetWorkflows.FrozenExtensionWithoutCutRefreshReportsFixedJacobianCheckGeometry",
+        "ApplicationDriverLevelSetWorkflows.VelocityExtensionProjectsHierarchicalTargetCoefficients",
+        "ApplicationDriverLevelSetWorkflows.WallCompatibleNormalVelocityExtensionMatchesGeneratedInterfaceTraceAndProjectsOuterDryWalls",
+        "ApplicationDriverLevelSetWorkflows.WallCompatibleNormalVelocityExtensionRejectsHigherOrderFields",
+        "ApplicationDriverLevelSetWorkflows.WallCompatibleNormalVelocityExtensionRejectsMismatchedP1Layouts",
+        "ApplicationDriverLevelSetWorkflows.AlgebraicWallCompatibleExtensionInvalidatesStaleMapWhenInterfaceDisappears",
+        "ApplicationDriverLevelSetWorkflows.AuthoritativeEmptyCutContextDoesNotFallBackToNodalCrossings",
+        "ApplicationDriverLevelSetWorkflows.VelocityExtensionGraphUsesCellEdgesWithoutQuadDiagonals",
+        "ApplicationDriverLevelSetWorkflows.AlgebraicExtensionRefreshReprojectsStateAndChangesRevision",
+        "ApplicationDriverLevelSetWorkflows.VelocityExtensionRegressionConditionEstimateDetectsNearSingularity",
+        "ApplicationDriverLevelSetWorkflows.ReducedD38MapFailureUsesBoundedRefreshNeutralFallback",
+        "ApplicationDriverLevelSetWorkflows.VelocityExtensionOrientationMakesEitherRetainedSideNegative",
+        "ApplicationDriverLevelSetWorkflows.WetExtensionRequestInfersOnlyZeroDirichletWalls",
+        "ApplicationDriverLevelSetWorkflows.WetExtensionExplicitWallFailsClosedForNonzeroDirichletData",
+        "ApplicationDriverLevelSetWorkflows.WetExtensionWallMasksComeOnlyFromOwningFluidEquation",
+        "ApplicationDriverLevelSetWorkflows.WetExtensionWallDiscoveryFailsWithoutOwningFluidEquation",
+        "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionHonorsStrongNoSlipAndNormalOnlyMasks",
+        "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionUsesSourceRowsOnDryCutCellSupport",
+        "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionReproducesTangentialAffineField",
+        "ApplicationDriverLevelSetWorkflows.VelocityExtensionMapSnapshotTracksEveryRevisionDomain",
+        "ApplicationDriverLevelSetWorkflows.VelocityExtensionMapArtifactRetainsRowsAndRevisionChanges",
+        "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionManufacturedRefinementConvergesAndProjectsWalls",
+        "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionBandSweepKeepsFallbackRowsBounded",
+        "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionDoesNotSwitchDisconnectedComponents",
+        "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionIgnoresReversedComponentNumbering",
+        "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionFailsClosedOnEquidistantComponentBands",
+        "ApplicationDriverLevelSetWorkflows.NormalBandVelocityExtensionHonorsGraphLayerCutoff"
+      ]
+    },
+    {
+      "binary": "application_mpi",
+      "execution": {
+        "memory_mib": 4096,
+        "output_mib": 128,
+        "wall_time_seconds": 900
+      },
+      "gtest_output_copies": 2,
+      "id": "application_mpi",
+      "mpi_ranks": 2,
+      "tests": [
+        "ApplicationDriverLevelSetWorkflowsMPI.ActiveSystemCommunicatorUsesFESystemCommunicator",
+        "ApplicationDriverLevelSetWorkflowsMPI.TraceSupportMaskPromotesRemotelyDiscoveredOwnerSourceRows",
+        "ApplicationDriverLevelSetWorkflowsMPI.NormalBandExtensionMatchesSelfAcrossPartitionAndProjectsWalls",
+        "ApplicationDriverLevelSetWorkflowsMPI.AlgebraicWetExtensionSolvesOffRankWallProjectedBandWithFsils",
+        "ApplicationDriverLevelSetWorkflowsMPI.CollidingComponentBandsMatchSelfAcrossPartitionWithoutBlending",
+        "ApplicationDriverLevelSetWorkflowsMPI.VelocityExtensionArtifactsPublishEveryRankOrRollback"
+      ]
+    },
+    {
+      "binary": "physics",
+      "execution": {
+        "memory_mib": 6144,
+        "output_mib": 256,
+        "wall_time_seconds": 1800
+      },
+      "gtest_output_copies": 1,
+      "id": "physics_serial",
+      "mpi_ranks": 1,
+      "tests": [
+        "NavierStokesLegacyBCs.UnfittedFreeSurfaceLegacyVelocityExtensionFailsClosed",
+        "NavierStokesLegacyBCs.DisabledVelocityExtensionRejectsUnusedDiffusivity",
+        "FreeSurfaceCutStability.PhysicalWetBlocksAreInvariantToDryDepthAndState",
+        "FreeSurfaceCutStability.DisconnectedLiquidIslandsHaveZeroPhysicalCrossCouplingThroughDryStrip",
+        "FreeSurfaceCutStability.ProductionSmallCutAggregationPreservesPartialWallDirichletPerComponent",
+        "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+        "FreeSurfaceCutStability.FixedTetraMeshGenericAndNearFeatureSweepHasNoFreePressureNullRows",
+        "FreeSurfaceCutStability.FixedPhysicalCutThreeLevelRefinementBoundsPressureControlAndAggregation",
+        "FreeSurfaceCutStability.PersistentMovingCutRefreshesAggregationAndRetainsMixedRankWithoutPressurePin"
+      ]
+    },
+    {
+      "binary": "physics",
+      "execution": {
+        "memory_mib": 6144,
+        "output_mib": 256,
+        "wall_time_seconds": 1800
+      },
+      "gtest_output_copies": 1,
+      "id": "physics_mpi",
+      "mpi_ranks": 2,
+      "tests": [
+        "FreeSurfaceCutStabilityMPI.PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData",
+        "FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport",
+        "FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions"
+      ]
+    },
+    {
+      "binary": "level_set",
+      "execution": {
+        "memory_mib": 6144,
+        "output_mib": 256,
+        "wall_time_seconds": 1800
+      },
+      "gtest_output_copies": 1,
+      "id": "level_set_serial",
+      "mpi_ranks": 1,
+      "tests": [
+        "LevelSetConservativePhaseBenchmarks.TranslatingDiskConservesAndRefines",
+        "LevelSetConservativePhaseBenchmarks.ThreeDimensionalReversibleDeformationSmoke",
+        "LevelSetConservativePhaseBenchmarks.ReversibleDeformationReturnsWithoutMassDrift",
+        "LevelSetConservativePhaseBenchmarks.AdvectsAThinWallFilmTangentially",
+        "LevelSetConservativePhaseBenchmarks.KeepsSeparatedDropsInDistinctFluxComponents",
+        "LevelSetTransport.AlgebraicVelocityExtensionJitRequestUsesCompiledPath",
+        "LevelSetTransport.AlgebraicExtensionSparsityUsesQuadEdgesWithoutCellDiagonals",
+        "LevelSetTransport.AlgebraicWetExtensionCarriesVelocityYToPhiForDryCutSupportSourceRow"
+      ]
+    }
+  ],
+  "matrix_id": "free_surface_wp1_extension_v1",
+  "matrix_status_at_execution": "FROZEN_BEFORE_EXECUTION",
+  "model_envelope": "one_phase_liquid_with_bounded_one_way_transport_extension",
+  "phase_points": [
+    {
+      "case": "translating_drop_2d",
+      "cfl": 0.5,
+      "expected_release_disposition": "INCONCLUSIVE_RESOLUTION",
+      "id": "translating_drop_exit",
+      "resolution": 64
+    },
+    {
+      "case": "enright_3d",
+      "cfl": 0.5,
+      "expected_release_disposition": "INCONCLUSIVE_RESOLUTION",
+      "id": "reversible_enright_exit",
+      "resolution": 32
+    }
+  ],
+  "qualification_scope": "WP-1 closure only; the two phase points do not qualify the Q3 refinement matrix or Q5 D18/D38 horizons",
+  "registry_sha256": "90a9be9dda5b9e232e05fc1fb1a95c55a4fb19e3f4e1dcaa7d16a95825b1c15f",
+  "source_commit": "398a24773be4c2e757aa642ce642a029f8be1381",
+  "source_tree": "1255658112ec9f09ad2c85a78ca4c69a7e374873",
+  "work_package": "WP-1"
+}

@@ -1,0 +1,24 @@
+{
+  "gates": {
+    "convex_fallback_maximum_negative_coefficient": 1e-12,
+    "convex_fallback_maximum_row_l1": 1.0000000001,
+    "expected_disabled": 0,
+    "expected_distinct_test_count": 53,
+    "expected_errors": 0,
+    "expected_failures": 0,
+    "expected_group_count": 5,
+    "expected_phase_point_count": 2,
+    "expected_skipped": 0,
+    "maximum_graph_row_l1": 1.0000000001,
+    "maximum_graph_row_sum_error": 1e-10,
+    "maximum_mpi_solved_state_scaled_difference": 1e-08,
+    "maximum_mpi_wet_block_scaled_difference": 1e-09,
+    "maximum_serial_solved_state_scaled_difference": 1e-10,
+    "maximum_serial_wet_block_scaled_difference": 1e-11,
+    "maximum_wet_to_dry_amplification": 16.0,
+    "nondimensional_absolute_floor": 1e-12,
+    "same_state_refresh_maximum_preview_change": 0.0
+  },
+  "matrix_status_at_execution": "FROZEN_BEFORE_EXECUTION",
+  "qualification_scope": "WP-1 closure only; the two phase points do not qualify the Q3 refinement matrix or Q5 D18/D38 horizons"
+}
