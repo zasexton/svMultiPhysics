@@ -349,3 +349,19 @@ TEST(GeometryValidator, NearSingularTriangleReportsHugeConditionNumber) {
     EXPECT_TRUE(std::isfinite(q.condition_number));
     EXPECT_GT(q.condition_number, 1e8);
 }
+
+TEST(GeometryValidator, UniformlyTinyValidTetraHasUnitConditionNumber) {
+    constexpr Real scale = 1e-16;
+    std::vector<math::Vector<Real, 3>> nodes = {
+        {Real(0), Real(0), Real(0)},
+        {scale, Real(0), Real(0)},
+        {Real(0), scale, Real(0)},
+        {Real(0), Real(0), scale}
+    };
+    LinearMapping map(ElementType::Tetra4, nodes);
+    const math::Vector<Real, 3> xi{Real(0.25), Real(0.25), Real(0.25)};
+    const auto q = GeometryValidator::evaluate(map, xi);
+    EXPECT_TRUE(q.positive_jacobian);
+    EXPECT_TRUE(std::isfinite(q.condition_number));
+    EXPECT_NEAR(q.condition_number, 1.0, 1e-12);
+}

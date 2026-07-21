@@ -104,6 +104,17 @@ struct FaceGeometrySensitivity {
 [[nodiscard]] std::vector<math::Vector<Real, 3>>
 toGeometryNodes(std::span<const Point3D> coordinates);
 
+/**
+ * @brief Invert a 3x3 Jacobian after removing its physical column scales.
+ *
+ * The normalized determinant check is invariant under positive rescaling of
+ * the Jacobian columns.  It therefore rejects singular and near-collinear
+ * frames without rejecting a uniformly small, shape-regular physical cell
+ * solely because its determinant is small in the chosen coordinate units.
+ */
+[[nodiscard]] math::Matrix<Real, 3, 3> scaleConditionedJacobianInverse(
+    const math::Matrix<Real, 3, 3>& jacobian);
+
 [[nodiscard]] FrameGeometryData evaluateCellFrame(
     const GeometryMapping& mapping,
     const quadrature::QuadratureRule& quad_rule);

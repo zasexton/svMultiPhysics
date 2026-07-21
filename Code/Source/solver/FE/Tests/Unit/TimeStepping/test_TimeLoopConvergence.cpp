@@ -14,6 +14,9 @@
 
 #include "Core/Types.h"
 
+#include "Constraints/DirichletBC.h"
+#include "Constraints/MultiPointConstraint.h"
+
 #include "Forms/BoundaryConditions.h"
 #include "Forms/Forms.h"
 #include "Forms/FormCompiler.h"
@@ -22,6 +25,7 @@
 #include "Spaces/H1Space.h"
 
 #include "Systems/FESystem.h"
+#include "Systems/FormsInstallerDetail.h"
 #include "Systems/TimeIntegrator.h"
 #include "Systems/TransientSystem.h"
 
@@ -38,6 +42,7 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <span>
 #include <vector>
 
 using svmp::FE::ElementType;
@@ -68,6 +73,247 @@ using ts_test::singleTetraTopology;
     topo.cell_owner_ranks = {0, 0};
     return topo;
 }
+
+class TwoTetraCellDomainMeshAccess final
+    : public svmp::FE::assembly::IMeshAccess {
+public:
+    TwoTetraCellDomainMeshAccess()
+        : nodes_{{{0.0, 0.0, 0.0},
+                  {1.0, 0.0, 0.0},
+                  {0.0, 1.0, 0.0},
+                  {0.0, 0.0, 1.0},
+                  {1.0, 1.0, 1.0}}}
+        , cells_{{{0, 1, 2, 3}, {1, 2, 3, 4}}}
+    {
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 2; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 2; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 1; }
+    [[nodiscard]] int dimension() const override { return 3; }
+    [[nodiscard]] bool isOwnedCell(GlobalIndex) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex) const override
+    {
+        return ElementType::Tetra4;
+    }
+    [[nodiscard]] int getCellDomainId(GlobalIndex cell_id) const override
+    {
+        return static_cast<int>(cell_id);
+    }
+
+    void getCellNodes(GlobalIndex cell_id,
+                      std::vector<GlobalIndex>& nodes) const override
+    {
+        const auto& cell = cells_.at(static_cast<std::size_t>(cell_id));
+        nodes.assign(cell.begin(), cell.end());
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(
+        GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(
+        GlobalIndex cell_id,
+        std::vector<std::array<Real, 3>>& coordinates) const override
+    {
+        const auto& cell = cells_.at(static_cast<std::size_t>(cell_id));
+        coordinates.resize(cell.size());
+        for (std::size_t i = 0; i < cell.size(); ++i) {
+            coordinates[i] = nodes_.at(static_cast<std::size_t>(cell[i]));
+        }
+    }
+
+    [[nodiscard]] bool supportsCoordinateFrame(
+        svmp::FE::assembly::CoordinateFrame frame) const override
+    {
+        return frame == svmp::FE::assembly::CoordinateFrame::Active ||
+               frame == svmp::FE::assembly::CoordinateFrame::Reference ||
+               frame == svmp::FE::assembly::CoordinateFrame::Current;
+    }
+
+    void getCellCoordinates(
+        GlobalIndex cell_id,
+        svmp::FE::assembly::CoordinateFrame,
+        std::vector<std::array<Real, 3>>& coordinates) const override
+    {
+        getCellCoordinates(cell_id, coordinates);
+    }
+
+    [[nodiscard]] svmp::FE::LocalIndex getLocalFaceIndex(
+        GlobalIndex face_id,
+        GlobalIndex cell_id) const override
+    {
+        if (face_id == 0 && cell_id == 0) return 2;
+        if (face_id == 0 && cell_id == 1) return 0;
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex) const override
+    {
+        return -1;
+    }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(
+        GlobalIndex face_id) const override
+    {
+        return face_id == 0 ? std::pair<GlobalIndex, GlobalIndex>{0, 1}
+                            : std::pair<GlobalIndex, GlobalIndex>{0, 0};
+    }
+
+    void forEachCell(
+        std::function<void(GlobalIndex)> callback) const override
+    {
+        callback(0);
+        callback(1);
+    }
+
+    void forEachOwnedCell(
+        std::function<void(GlobalIndex)> callback) const override
+    {
+        forEachCell(std::move(callback));
+    }
+
+    void forEachBoundaryFace(
+        int,
+        std::function<void(GlobalIndex, GlobalIndex)>) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> callback)
+        const override
+    {
+        callback(0, 0, 1);
+    }
+
+private:
+    std::array<std::array<Real, 3>, 5> nodes_{};
+    std::array<std::array<GlobalIndex, 4>, 2> cells_{};
+};
+
+struct RateInitializationSlotObservations {
+    bool saw_non_dt_residual{false};
+    bool saw_dt_only_jacobian{false};
+    Real max_abs_slot2_value{0.0};
+};
+
+struct RateInitializationTimeObservations {
+    std::vector<Real> initialization_times{};
+    std::vector<Real> initialization_constraint_values{};
+    std::vector<Real> injected_stage_rates{};
+    const svmp::FE::constraints::AffineConstraints* constraints{nullptr};
+    GlobalIndex constrained_dof{svmp::FE::INVALID_GLOBAL_INDEX};
+    bool recorded_stage_rate{false};
+};
+
+class RateInitializationSlotRecordingKernel final
+    : public svmp::FE::assembly::AssemblyKernel {
+public:
+    explicit RateInitializationSlotRecordingKernel(
+        RateInitializationSlotObservations& observations)
+        : observations_(observations)
+    {
+    }
+
+    [[nodiscard]] svmp::FE::assembly::RequiredData getRequiredData()
+        const override
+    {
+        return svmp::FE::assembly::RequiredData::SolutionCoefficients;
+    }
+
+    void computeCell(const svmp::FE::assembly::AssemblyContext& ctx,
+                     svmp::FE::assembly::KernelOutput& output) override
+    {
+        (void)output;
+
+        const auto* time_integration = ctx.timeIntegrationContext();
+        if (time_integration == nullptr) {
+            return;
+        }
+        const bool is_non_dt_residual =
+            time_integration->time_derivative_term_weight == Real{0.0} &&
+            time_integration->non_time_derivative_term_weight == Real{1.0};
+        const bool is_dt_only_jacobian =
+            time_integration->time_derivative_term_weight == Real{1.0} &&
+            time_integration->non_time_derivative_term_weight == Real{0.0};
+        if (!is_non_dt_residual && !is_dt_only_jacobian) {
+            return;
+        }
+
+        observations_.saw_non_dt_residual |= is_non_dt_residual;
+        observations_.saw_dt_only_jacobian |= is_dt_only_jacobian;
+        const auto slot2 = ctx.previousSolutionCoefficientsRaw(2);
+        for (const auto value : slot2) {
+            observations_.max_abs_slot2_value = std::max(
+                observations_.max_abs_slot2_value,
+                static_cast<Real>(std::abs(value)));
+        }
+    }
+
+private:
+    RateInitializationSlotObservations& observations_;
+};
+
+class RateInitializationTimeRecordingKernel final
+    : public svmp::FE::assembly::AssemblyKernel {
+public:
+    explicit RateInitializationTimeRecordingKernel(
+        RateInitializationTimeObservations& observations)
+        : observations_(observations)
+    {
+    }
+
+    [[nodiscard]] svmp::FE::assembly::RequiredData getRequiredData()
+        const override
+    {
+        return svmp::FE::assembly::RequiredData::SolutionCoefficients;
+    }
+
+    void computeCell(const svmp::FE::assembly::AssemblyContext& ctx,
+                     svmp::FE::assembly::KernelOutput& output) override
+    {
+        (void)output;
+
+        const auto* time_integration = ctx.timeIntegrationContext();
+        if (time_integration == nullptr) {
+            return;
+        }
+
+        const bool is_non_dt_residual =
+            time_integration->time_derivative_term_weight == Real{0.0} &&
+            time_integration->non_time_derivative_term_weight == Real{1.0};
+        const bool is_dt_only_jacobian =
+            time_integration->time_derivative_term_weight == Real{1.0} &&
+            time_integration->non_time_derivative_term_weight == Real{0.0};
+        if (is_non_dt_residual || is_dt_only_jacobian) {
+            observations_.initialization_times.push_back(ctx.time());
+            if (observations_.constraints != nullptr &&
+                observations_.constrained_dof >= 0) {
+                observations_.initialization_constraint_values.push_back(
+                    static_cast<Real>(
+                        observations_.constraints->getInhomogeneity(
+                            observations_.constrained_dof)));
+            }
+            return;
+        }
+
+        if (!observations_.recorded_stage_rate &&
+            time_integration->time_derivative_term_weight == Real{1.0} &&
+            time_integration->non_time_derivative_term_weight == Real{1.0} &&
+            time_integration->integrator_name ==
+                "GeneralizedAlpha(1stOrder)") {
+            const auto rate = ctx.previousSolutionCoefficientsRaw(2);
+            observations_.injected_stage_rates.assign(rate.begin(), rate.end());
+            observations_.recorded_stage_rate = true;
+        }
+    }
+
+private:
+    RateInitializationTimeObservations& observations_;
+};
 
 [[nodiscard]] std::pair<double, double> coupledReactionExact2x2(double t,
                                                                 double u0,
@@ -123,7 +369,19 @@ std::vector<Real> runReactionProblem(svmp::FE::timestepping::SchemeKind scheme,
                                      std::function<void(
                                          svmp::FE::timestepping::TimeLoopCallbacks&,
                                          svmp::FE::timestepping::TimeHistory&)>
-                                         configure_callbacks = {})
+                                         configure_callbacks = {},
+                                     std::function<void(
+                                         const svmp::FE::timestepping::TimeHistory&,
+                                         const svmp::FE::FEException&)>
+                                         inspect_expected_exception = {},
+                                     std::function<void(
+                                         svmp::FE::timestepping::TimeLoopOptions&,
+                                         svmp::FE::FieldId)>
+                                         configure_options = {},
+                                     std::function<void(
+                                         svmp::FE::systems::FESystem&,
+                                         svmp::FE::FieldId)>
+                                         configure_system = {})
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
     auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
@@ -140,6 +398,10 @@ std::vector<Real> runReactionProblem(svmp::FE::timestepping::SchemeKind scheme,
     auto ir = compiler.compileResidual(form);
     auto kernel = std::make_shared<svmp::FE::forms::NonlinearFormKernel>(std::move(ir), svmp::FE::forms::ADMode::Forward);
     sys.addCellKernel("op", u_field, u_field, kernel);
+
+    if (configure_system) {
+        configure_system(sys, u_field);
+    }
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = ts_test::singleTetraTopology();
@@ -206,6 +468,9 @@ std::vector<Real> runReactionProblem(svmp::FE::timestepping::SchemeKind scheme,
     opts.newton.abs_tolerance = newton_abs_tolerance;
     opts.newton.rel_tolerance = newton_rel_tolerance;
     opts.step_controller = std::move(controller);
+    if (configure_options) {
+        configure_options(opts, u_field);
+    }
 
     svmp::FE::timestepping::TimeLoop loop(opts);
     svmp::FE::timestepping::NewtonReport last_nr;
@@ -221,6 +486,10 @@ std::vector<Real> runReactionProblem(svmp::FE::timestepping::SchemeKind scheme,
     try {
         rep = loop.run(transient, *factory, *linear, history, callbacks);
     } catch (const svmp::FE::FEException& e) {
+        if (inspect_expected_exception) {
+            inspect_expected_exception(history, e);
+            return {};
+        }
         ADD_FAILURE() << e.what()
                       << " (Newton iters=" << last_nr.iterations
                       << " r0=" << last_nr.residual_norm0
@@ -1637,6 +1906,376 @@ TEST(TimeLoopCallbacks, BeforeStepAcceptRejectsConvergedCandidateAndRetries)
     EXPECT_NEAR(retry_dt_updates[1], 0.1, 1e-15);
 }
 
+TEST(TimeLoopCallbacks, GeneralizedAlphaRejectedCandidateRestoresExistingRateState)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using svmp::FE::timestepping::SimpleStepController;
+    using svmp::FE::timestepping::SimpleStepControllerOptions;
+
+    SimpleStepControllerOptions controller_options;
+    controller_options.decrease_factor = 0.5;
+    controller_options.increase_factor = 1.0;
+    controller_options.max_retries = 2;
+    auto controller = std::make_shared<SimpleStepController>(controller_options);
+
+    const std::vector<Real> initial_u_dot = {0.25, -0.5, 0.75, -1.0};
+    const std::vector<Real> initial_u_ddot = {-1.25, 1.5, -1.75, 2.0};
+    auto initial_rate_factory = ts_test::createTestFactory();
+    ASSERT_NE(initial_rate_factory.get(), nullptr);
+    int step_start_calls = 0;
+    int candidate_calls = 0;
+    bool rejected_candidate_changed_rate = false;
+    double generated_state_value = 1.0;
+    int restored_state_callbacks = 0;
+    int restored_projected_state_callbacks = 0;
+    int endpoint_state_callbacks = 0;
+    int projected_endpoint_state_callbacks = 0;
+
+    const auto final_values = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        /*dt=*/0.2,
+        /*t_end=*/0.2,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        controller,
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory& history) {
+            history.ensureSecondOrderState(*initial_rate_factory);
+            setVectorByDof(history.uDot(), initial_u_dot);
+            setVectorByDof(history.uDDot(), initial_u_ddot);
+
+            callbacks.on_step_start = [&](const svmp::FE::timestepping::TimeHistory& h) {
+                ++step_start_calls;
+                if (step_start_calls == 2) {
+                    EXPECT_EQ(
+                        getVectorByDof(const_cast<svmp::FE::backends::GenericVector&>(h.uDot())),
+                        initial_u_dot);
+                    EXPECT_EQ(
+                        getVectorByDof(const_cast<svmp::FE::backends::GenericVector&>(h.uDDot())),
+                        initial_u_ddot);
+                    EXPECT_NEAR(generated_state_value, 1.0, 1.0e-15)
+                        << "Rejected stage-generated state was not rolled back "
+                           "before the retry";
+                }
+            };
+            callbacks.on_before_step_accept =
+                [&](svmp::FE::timestepping::TimeHistory& h,
+                    const svmp::FE::timestepping::NewtonReport&) {
+                    ++candidate_calls;
+                    if (candidate_calls == 1) {
+                        rejected_candidate_changed_rate =
+                            getVectorByDof(h.uDot()) != initial_u_dot;
+                        return false;
+                    }
+                    return true;
+                };
+        },
+        /*inspect_expected_exception=*/{},
+        [&](svmp::FE::timestepping::TimeLoopOptions& options,
+            svmp::FE::FieldId) {
+            using StateSyncPoint = svmp::FE::timestepping::NewtonOptions::
+                StateSynchronizationPoint;
+            options.newton.synchronize_state =
+                [&](const svmp::FE::systems::SystemStateView& state,
+                    StateSyncPoint point) {
+                    ASSERT_FALSE(state.u.empty());
+                    generated_state_value = static_cast<double>(state.u[0]);
+                    if (point == StateSyncPoint::RestoredTimeStepState) {
+                        ++restored_state_callbacks;
+                        EXPECT_NEAR(state.time, 0.0, 1.0e-15);
+                        EXPECT_NEAR(generated_state_value, 1.0, 1.0e-15);
+                    } else if (
+                        point ==
+                        StateSyncPoint::RestoredProjectedTimeStepState) {
+                        ++restored_projected_state_callbacks;
+                        EXPECT_NEAR(state.time, 0.0, 1.0e-15);
+                        EXPECT_NEAR(generated_state_value, 1.0, 1.0e-15);
+                    } else if (point ==
+                               StateSyncPoint::EndpointCandidateState) {
+                        const double expected_time =
+                            0.1 * static_cast<double>(
+                                      endpoint_state_callbacks + 1);
+                        ++endpoint_state_callbacks;
+                        EXPECT_NEAR(state.time, expected_time, 1.0e-15);
+                    } else if (
+                        point ==
+                        StateSyncPoint::ProjectedEndpointCandidateState) {
+                        const double expected_time =
+                            0.1 * static_cast<double>(
+                                      projected_endpoint_state_callbacks + 1);
+                        ++projected_endpoint_state_callbacks;
+                        EXPECT_NEAR(state.time, expected_time, 1.0e-15);
+                    }
+                };
+        });
+
+    ASSERT_EQ(final_values.size(), 4u);
+    EXPECT_TRUE(rejected_candidate_changed_rate);
+    EXPECT_GE(step_start_calls, 2);
+    EXPECT_EQ(restored_state_callbacks, 1);
+    EXPECT_EQ(restored_projected_state_callbacks, 1);
+    EXPECT_EQ(endpoint_state_callbacks, 2);
+    EXPECT_EQ(projected_endpoint_state_callbacks, 2);
+}
+
+TEST(TimeLoopCallbacks, GeneralizedAlphaRetryMatchesDirectAttemptAndRestoresMissingRateState)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using svmp::FE::timestepping::SimpleStepController;
+    using svmp::FE::timestepping::SimpleStepControllerOptions;
+
+    const auto direct = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        /*dt=*/0.1,
+        /*t_end=*/0.2,
+        /*lambda=*/1.0);
+
+    SimpleStepControllerOptions controller_options;
+    controller_options.decrease_factor = 0.5;
+    controller_options.increase_factor = 1.0;
+    controller_options.max_retries = 2;
+    auto controller = std::make_shared<SimpleStepController>(controller_options);
+
+    int step_start_calls = 0;
+    int candidate_calls = 0;
+    bool retry_started_without_rate_state = false;
+    const auto retried = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        /*dt=*/0.2,
+        /*t_end=*/0.2,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        controller,
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_step_start = [&](const svmp::FE::timestepping::TimeHistory& h) {
+                ++step_start_calls;
+                if (step_start_calls == 2) {
+                    retry_started_without_rate_state =
+                        !h.hasUDotState() && !h.hasUDDotState();
+                }
+            };
+            callbacks.on_before_step_accept =
+                [&](svmp::FE::timestepping::TimeHistory&,
+                    const svmp::FE::timestepping::NewtonReport&) {
+                    ++candidate_calls;
+                    return candidate_calls != 1;
+                };
+        });
+
+    ASSERT_EQ(direct.size(), retried.size());
+    EXPECT_TRUE(retry_started_without_rate_state);
+    for (std::size_t i = 0; i < direct.size(); ++i) {
+        EXPECT_NEAR(retried[i], direct[i], 1e-13) << "DOF " << i;
+    }
+}
+
+TEST(TimeLoopCallbacks,
+     GeneralizedAlphaCandidateCallbackExceptionRestoresGeneratedAndRateState)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using StateSyncPoint = svmp::FE::timestepping::NewtonOptions::
+        StateSynchronizationPoint;
+
+    const std::vector<Real> initial_u_dot = {0.25, -0.5, 0.75, -1.0};
+    auto rate_factory = ts_test::createTestFactory();
+    ASSERT_NE(rate_factory.get(), nullptr);
+
+    double generated_state_value = 1.0;
+    int restored_callbacks = 0;
+    int restored_projected_callbacks = 0;
+    int endpoint_callbacks = 0;
+    int projected_endpoint_callbacks = 0;
+    bool inspected_exception = false;
+
+    const auto result = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        /*dt=*/0.1,
+        /*t_end=*/0.1,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/0.5,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1.0e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [rate_factory_ptr = rate_factory.get(), initial_u_dot](
+            svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory& history) {
+            ASSERT_NE(rate_factory_ptr, nullptr);
+            history.ensureSecondOrderState(*rate_factory_ptr);
+            setVectorByDof(history.uDot(), initial_u_dot);
+            history.uDDot().zero();
+            callbacks.on_before_step_accept =
+                [](svmp::FE::timestepping::TimeHistory&,
+                   const svmp::FE::timestepping::NewtonReport&) -> bool {
+                FE_THROW(svmp::FE::FEException,
+                         "expected candidate callback failure");
+            };
+        },
+        [&](const svmp::FE::timestepping::TimeHistory& history,
+            const svmp::FE::FEException& exception) {
+            inspected_exception = true;
+            EXPECT_NE(std::string(exception.what()).find(
+                          "expected candidate callback failure"),
+                      std::string::npos);
+            EXPECT_NEAR(generated_state_value, 1.0, 1.0e-15);
+            EXPECT_EQ(history.stepIndex(), 0);
+            EXPECT_NEAR(history.time(), 0.0, 1.0e-15);
+            EXPECT_EQ(getVectorByDof(const_cast<
+                          svmp::FE::backends::GenericVector&>(history.uDot())),
+                      initial_u_dot);
+            const auto committed = getVectorByDof(const_cast<
+                svmp::FE::backends::GenericVector&>(history.uPrev()));
+            const std::vector<Real> initial_solution = {
+                1.0, -0.5, 0.25, 2.0};
+            ASSERT_EQ(committed.size(), initial_solution.size());
+            for (std::size_t i = 0; i < committed.size(); ++i) {
+                EXPECT_NEAR(committed[i], initial_solution[i], 1.0e-15)
+                    << "DOF " << i;
+            }
+        },
+        [&](svmp::FE::timestepping::TimeLoopOptions& options,
+            svmp::FE::FieldId) {
+            options.initialize_first_order_rate_from_pde = false;
+            options.newton.synchronize_state =
+                [&](const svmp::FE::systems::SystemStateView& state,
+                    StateSyncPoint point) {
+                    ASSERT_FALSE(state.u.empty());
+                    generated_state_value = static_cast<double>(state.u[0]);
+                    if (point == StateSyncPoint::RestoredTimeStepState) {
+                        ++restored_callbacks;
+                        EXPECT_NEAR(state.time, 0.0, 1.0e-15);
+                    } else if (
+                        point ==
+                        StateSyncPoint::RestoredProjectedTimeStepState) {
+                        ++restored_projected_callbacks;
+                        EXPECT_NEAR(state.time, 0.0, 1.0e-15);
+                    } else if (point ==
+                               StateSyncPoint::EndpointCandidateState) {
+                        ++endpoint_callbacks;
+                    } else if (
+                        point ==
+                        StateSyncPoint::ProjectedEndpointCandidateState) {
+                        ++projected_endpoint_callbacks;
+                    }
+                };
+        });
+
+    EXPECT_TRUE(result.empty());
+    EXPECT_TRUE(inspected_exception);
+    EXPECT_EQ(restored_callbacks, 1);
+    EXPECT_EQ(restored_projected_callbacks, 1);
+    EXPECT_EQ(endpoint_callbacks, 0);
+    EXPECT_EQ(projected_endpoint_callbacks, 0);
+}
+
+TEST(TimeLoopCallbacks, AcceptedCallbackExceptionDoesNotRollbackCommittedRateState)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    const std::vector<Real> initial_u_dot = {0.25, -0.5, 0.75, -1.0};
+    const std::vector<Real> initial_u_ddot = {-1.25, 1.5, -1.75, 2.0};
+    auto initial_rate_factory = ts_test::createTestFactory();
+    ASSERT_NE(initial_rate_factory.get(), nullptr);
+
+    std::vector<Real> accepted_u_dot;
+    bool inspected_after_unwind = false;
+    const auto result = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        /*dt=*/0.1,
+        /*t_end=*/0.1,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory& history) {
+            history.ensureSecondOrderState(*initial_rate_factory);
+            setVectorByDof(history.uDot(), initial_u_dot);
+            setVectorByDof(history.uDDot(), initial_u_ddot);
+
+            callbacks.on_before_step_accept =
+                [&](svmp::FE::timestepping::TimeHistory& h,
+                    const svmp::FE::timestepping::NewtonReport&) {
+                    accepted_u_dot = getVectorByDof(h.uDot());
+                    EXPECT_NE(accepted_u_dot, initial_u_dot);
+                    return true;
+                };
+            callbacks.on_step_accepted =
+                [&](svmp::FE::timestepping::TimeHistory& h) {
+                    EXPECT_EQ(h.stepIndex(), 1);
+                    EXPECT_NEAR(h.time(), 0.1, 1e-15);
+                    FE_THROW(svmp::FE::FEException,
+                             "expected accepted-callback exception");
+                };
+        },
+        [&](const svmp::FE::timestepping::TimeHistory& h,
+            const svmp::FE::FEException& e) {
+            inspected_after_unwind = true;
+            EXPECT_NE(std::string(e.what()).find("expected accepted-callback exception"),
+                      std::string::npos);
+            EXPECT_EQ(h.stepIndex(), 1);
+            EXPECT_NEAR(h.time(), 0.1, 1e-15);
+            EXPECT_EQ(getVectorByDof(
+                          const_cast<svmp::FE::backends::GenericVector&>(h.uDot())),
+                      accepted_u_dot);
+            EXPECT_NE(getVectorByDof(
+                          const_cast<svmp::FE::backends::GenericVector&>(h.uDot())),
+                      initial_u_dot);
+        });
+
+    EXPECT_TRUE(result.empty());
+    EXPECT_TRUE(inspected_after_unwind);
+}
+
 TEST(TimeLoopConvergence, Bdf2_IsSecondOrder_ForReactionEquation)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
@@ -2641,6 +3280,1038 @@ TEST(TimeLoopConvergence, GeneralizedAlpha_FirstOrder_IsSecondOrderOnReaction)
     EXPECT_GT(p, 1.6);
 }
 
+TEST(TimeLoopConvergence,
+     GeneralizedAlphaPdeRateInitializationRegularizesExactZeroMassRow)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto mesh = std::make_shared<TwoTetraCellDomainMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, 1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{
+        .name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    // Cell 0 owns the differential equation.  Cell 1 contributes only the
+    // reaction term, leaving its unique vertex (DOF 4) as an exact zero row
+    // in the dt-only startup operator while keeping the full stage system
+    // nonsingular.  This is the algebraic shape of a field-wide dt scan over
+    // a cut-domain mass operator.
+    const auto differential_weight =
+        svmp::FE::forms::FormExpr::constant(1.0) -
+        svmp::FE::forms::FormExpr::cellDomainId();
+    const auto form =
+        (svmp::FE::forms::dt(u) * v * differential_weight + u * v).dx();
+
+    svmp::FE::forms::FormCompiler compiler;
+    auto ir = compiler.compileResidual(form);
+    auto kernel = std::make_shared<svmp::FE::forms::NonlinearFormKernel>(
+        std::move(ir), svmp::FE::forms::ADMode::Forward);
+    sys.addCellKernel("op", u_field, u_field, kernel);
+    RateInitializationSlotObservations slot_observations;
+    auto slot_recording_kernel =
+        std::make_shared<RateInitializationSlotRecordingKernel>(
+            slot_observations);
+    sys.addCellKernel("op", u_field, u_field, slot_recording_kernel);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = twoTetraSharedFaceTopology();
+    sys.setup({}, inputs);
+    ASSERT_TRUE(sys.isSetup());
+    ASSERT_EQ(sys.dofHandler().getNumDofs(), 5);
+
+    auto integrator =
+        std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(sys, integrator);
+    auto factory = createTestFactory();
+    ASSERT_NE(factory.get(), nullptr);
+    auto linear = factory->createLinearSolver(directSolve());
+    ASSERT_NE(linear.get(), nullptr);
+
+    auto history = svmp::FE::timestepping::TimeHistory::allocate(
+        *factory, sys.dofHandler().getNumDofs(), /*history_depth=*/3);
+    const std::vector<Real> initial{1.0, -0.5, 0.25, 2.0, -1.0};
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+        setVectorByDof(history.uPrevK(k), initial);
+    }
+    history.resetCurrentToPrevious();
+    history.setPrevDt(0.1);
+
+    svmp::FE::timestepping::TimeLoopOptions opts;
+    opts.t0 = 0.0;
+    opts.t_end = 0.1;
+    opts.dt = 0.1;
+    opts.max_steps = 1;
+    opts.scheme = svmp::FE::timestepping::SchemeKind::GeneralizedAlpha;
+    opts.generalized_alpha_rho_inf = 0.5;
+    opts.initialize_first_order_rate_from_pde = true;
+    opts.newton.residual_op = "op";
+    opts.newton.jacobian_op = "op";
+    opts.newton.max_iterations = 8;
+    opts.newton.abs_tolerance = 1e-12;
+    opts.newton.rel_tolerance = 0.0;
+
+    svmp::FE::timestepping::TimeLoop loop(opts);
+    svmp::FE::timestepping::TimeLoopReport report;
+    std::string exception_message;
+    testing::internal::CaptureStdout();
+    try {
+        report = loop.run(transient, *factory, *linear, history);
+    } catch (const std::exception& error) {
+        exception_message = error.what();
+    }
+    const auto output = testing::internal::GetCapturedStdout();
+
+    EXPECT_TRUE(exception_message.empty()) << exception_message;
+    EXPECT_TRUE(report.success);
+    EXPECT_NE(output.find(
+                  "diagnostic=timeloop_first_order_rate_initialization"),
+              std::string::npos)
+        << output;
+    EXPECT_NE(output.find("accepted=1"), std::string::npos) << output;
+    EXPECT_NE(output.find(
+                  "exact_zero_mass_owned_rows_regularized=1"),
+              std::string::npos)
+        << output;
+    EXPECT_TRUE(slot_observations.saw_non_dt_residual);
+    EXPECT_TRUE(slot_observations.saw_dt_only_jacobian);
+    // history_rate_order==0 defines slot 2 as the injected uDot^n.  Startup
+    // zeroes that rate before the PDE initialization; the nonzero displacement
+    // history in uPrev2 must not leak into either initialization assembly.
+    EXPECT_DOUBLE_EQ(slot_observations.max_abs_slot2_value, 0.0);
+    ASSERT_TRUE(history.hasUDotState());
+    EXPECT_TRUE(std::isfinite(static_cast<double>(history.uDot().norm())));
+    EXPECT_GT(history.uDot().norm(), 0.0);
+}
+
+TEST(TimeLoopConvergence,
+     GeneralizedAlphaPdeRateInitializationPreservesZeroDiagonalCrossFieldMassRows)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{
+        .name = "u", .space = space, .components = 1});
+    const auto w_field = sys.addField(svmp::FE::systems::FieldSpec{
+        .name = "w", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u = svmp::FE::forms::FormExpr::stateField(
+        u_field, *space, "u");
+    const auto w = svmp::FE::forms::FormExpr::stateField(
+        w_field, *space, "w");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(
+        u_field, *space, "v");
+    const auto q = svmp::FE::forms::FormExpr::testFunction(
+        w_field, *space, "q");
+
+    // The differential operator is [0 M; M 0]. Every diagonal entry is
+    // exactly zero, but every row has a valid cross-field mass coupling.
+    const auto residual =
+        (svmp::FE::forms::dt(w) * v + u * v).dx() +
+        (svmp::FE::forms::dt(u) * q + Real{2.0} * w * q).dx();
+    svmp::FE::systems::FormInstallOptions install;
+    install.compiler_options.use_symbolic_tangent = true;
+    const auto installed = svmp::FE::systems::installFormulation(
+        sys, "op", {u_field, w_field}, residual, install);
+    ASSERT_NE(installed.mixed_plan, nullptr);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+    ASSERT_EQ(sys.dofHandler().getNumDofs(), 8);
+
+    const auto dt_fields = sys.timeDerivativeFields("op");
+    EXPECT_NE(std::find(dt_fields.begin(), dt_fields.end(), u_field),
+              dt_fields.end());
+    EXPECT_NE(std::find(dt_fields.begin(), dt_fields.end(), w_field),
+              dt_fields.end());
+
+    auto factory = createTestFactory();
+    ASSERT_NE(factory.get(), nullptr);
+    auto linear = factory->createLinearSolver(directSolve());
+    ASSERT_NE(linear.get(), nullptr);
+
+    auto integrator =
+        std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(sys, integrator);
+    auto history = svmp::FE::timestepping::TimeHistory::allocate(
+        *factory, sys.dofHandler().getNumDofs(), /*history_depth=*/3);
+
+    std::vector<Real> initial(8u, Real{0.0});
+    const auto u_offset = sys.fieldDofOffset(u_field);
+    const auto w_offset = sys.fieldDofOffset(w_field);
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        initial[static_cast<std::size_t>(u_offset + i)] = Real{1.0};
+        initial[static_cast<std::size_t>(w_offset + i)] = Real{0.25};
+    }
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+        setVectorByDof(history.uPrevK(k), initial);
+    }
+    history.resetCurrentToPrevious();
+    history.setPrevDt(0.05);
+
+    svmp::FE::timestepping::TimeLoopOptions opts;
+    opts.t0 = 0.0;
+    opts.t_end = 0.05;
+    opts.dt = 0.05;
+    opts.max_steps = 1;
+    opts.scheme = svmp::FE::timestepping::SchemeKind::GeneralizedAlpha;
+    opts.generalized_alpha_rho_inf = 0.5;
+    opts.initialize_first_order_rate_from_pde = true;
+    opts.newton.residual_op = "op";
+    opts.newton.jacobian_op = "op";
+    opts.newton.max_iterations = 8;
+    opts.newton.abs_tolerance = 1.0e-12;
+    opts.newton.rel_tolerance = 0.0;
+
+    svmp::FE::timestepping::TimeLoop loop(opts);
+    svmp::FE::timestepping::TimeLoopReport report;
+    std::string exception_message;
+    testing::internal::CaptureStdout();
+    try {
+        report = loop.run(transient, *factory, *linear, history);
+    } catch (const std::exception& error) {
+        exception_message = error.what();
+    }
+    const auto output = testing::internal::GetCapturedStdout();
+
+    EXPECT_TRUE(exception_message.empty()) << exception_message;
+    EXPECT_TRUE(report.success);
+    EXPECT_NE(output.find(
+                  "diagnostic=timeloop_first_order_rate_initialization"),
+              std::string::npos)
+        << output;
+    EXPECT_NE(output.find(
+                  "exact_zero_mass_owned_rows_regularized=0"),
+              std::string::npos)
+        << output;
+    ASSERT_TRUE(history.hasUDotState());
+    EXPECT_TRUE(std::isfinite(static_cast<double>(history.uDot().norm())));
+}
+
+TEST(TimeLoopConvergence,
+     GeneralizedAlphaPdeRateInitializationEvaluatesExplicitForcingAtAcceptedTime)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr double t0 = 2.0;
+    constexpr double dt = 0.1;
+
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{
+        .name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(
+        u_field, *space, "v");
+    const auto form =
+        (svmp::FE::forms::dt(u) * v -
+         svmp::FE::forms::FormExpr::time() * v)
+            .dx();
+    svmp::FE::forms::FormCompiler compiler;
+    auto ir = compiler.compileResidual(form);
+    auto kernel = std::make_shared<svmp::FE::forms::NonlinearFormKernel>(
+        std::move(ir), svmp::FE::forms::ADMode::Forward);
+    sys.addCellKernel("op", u_field, u_field, kernel);
+
+    RateInitializationTimeObservations observations;
+    sys.addCellKernel(
+        "op",
+        u_field,
+        u_field,
+        std::make_shared<RateInitializationTimeRecordingKernel>(observations));
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    auto factory = createTestFactory();
+    ASSERT_NE(factory.get(), nullptr);
+    auto linear = factory->createLinearSolver(directSolve());
+    ASSERT_NE(linear.get(), nullptr);
+    auto integrator =
+        std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(sys, integrator);
+    auto history = svmp::FE::timestepping::TimeHistory::allocate(
+        *factory, sys.dofHandler().getNumDofs(), /*history_depth=*/3);
+    const std::vector<Real> initial(4u, Real{0.0});
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+        setVectorByDof(history.uPrevK(k), initial);
+    }
+    history.resetCurrentToPrevious();
+    history.setPrevDt(dt);
+
+    svmp::FE::timestepping::TimeLoopOptions opts;
+    opts.t0 = t0;
+    opts.t_end = t0 + dt;
+    opts.dt = dt;
+    opts.max_steps = 1;
+    opts.scheme = svmp::FE::timestepping::SchemeKind::GeneralizedAlpha;
+    opts.generalized_alpha_rho_inf = 0.5;
+    opts.initialize_first_order_rate_from_pde = true;
+    opts.newton.residual_op = "op";
+    opts.newton.jacobian_op = "op";
+    opts.newton.max_iterations = 8;
+    opts.newton.abs_tolerance = 1.0e-12;
+    opts.newton.rel_tolerance = 0.0;
+
+    svmp::FE::timestepping::TimeLoop loop(opts);
+    const auto report = loop.run(transient, *factory, *linear, history);
+    ASSERT_TRUE(report.success);
+    ASSERT_GE(observations.initialization_times.size(), 2u);
+    for (const auto observed_time : observations.initialization_times) {
+        EXPECT_NEAR(static_cast<double>(observed_time), t0, 1.0e-15);
+    }
+    ASSERT_TRUE(observations.recorded_stage_rate);
+    ASSERT_EQ(observations.injected_stage_rates.size(), 4u);
+    for (const auto rate : observations.injected_stage_rates) {
+        EXPECT_NEAR(static_cast<double>(rate), t0, 1.0e-12);
+    }
+}
+
+TEST(TimeLoopConvergence,
+     GeneralizedAlphaPdeRateInitializationRefreshesTimeDependentConstraintAtAcceptedTime)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr double t0 = 1.5;
+    constexpr double dt = 0.3;
+    constexpr GlobalIndex constrained_dof = 0;
+
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{
+        .name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(
+        u_field, *space, "v");
+    const auto form = (svmp::FE::forms::dt(u) * v + u * v).dx();
+    svmp::FE::forms::FormCompiler compiler;
+    auto ir = compiler.compileResidual(form);
+    auto kernel = std::make_shared<svmp::FE::forms::NonlinearFormKernel>(
+        std::move(ir), svmp::FE::forms::ADMode::Forward);
+    sys.addCellKernel("op", u_field, u_field, kernel);
+
+    RateInitializationTimeObservations observations;
+    observations.constrained_dof = constrained_dof;
+    sys.addCellKernel(
+        "op",
+        u_field,
+        u_field,
+        std::make_shared<RateInitializationTimeRecordingKernel>(observations));
+
+    std::vector<GlobalIndex> constrained_dofs{constrained_dof};
+    std::vector<std::array<double, 3>> coordinates{{{0.0, 0.0, 0.0}}};
+    sys.addConstraint(
+        std::make_unique<svmp::FE::constraints::DirichletBC>(
+            std::move(constrained_dofs),
+            std::move(coordinates),
+            [](double, double, double, double time) {
+                return 10.0 + time;
+            },
+            /*initial_time=*/t0));
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+    observations.constraints = &sys.constraints();
+
+    auto factory = createTestFactory();
+    ASSERT_NE(factory.get(), nullptr);
+    auto linear = factory->createLinearSolver(directSolve());
+    ASSERT_NE(linear.get(), nullptr);
+    auto integrator =
+        std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(sys, integrator);
+    auto history = svmp::FE::timestepping::TimeHistory::allocate(
+        *factory, sys.dofHandler().getNumDofs(), /*history_depth=*/3);
+    const std::vector<Real> initial(4u, Real{0.0});
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+        setVectorByDof(history.uPrevK(k), initial);
+    }
+    history.resetCurrentToPrevious();
+    history.setPrevDt(dt);
+
+    svmp::FE::timestepping::TimeLoopOptions opts;
+    opts.t0 = t0;
+    opts.t_end = t0 + dt;
+    opts.dt = dt;
+    opts.max_steps = 1;
+    opts.scheme = svmp::FE::timestepping::SchemeKind::GeneralizedAlpha;
+    opts.generalized_alpha_rho_inf = 0.5;
+    opts.initialize_first_order_rate_from_pde = true;
+    opts.newton.residual_op = "op";
+    opts.newton.jacobian_op = "op";
+    opts.newton.max_iterations = 8;
+    opts.newton.abs_tolerance = 1.0e-12;
+    opts.newton.rel_tolerance = 0.0;
+
+    svmp::FE::timestepping::TimeLoop loop(opts);
+    const auto report = loop.run(transient, *factory, *linear, history);
+    ASSERT_TRUE(report.success);
+    ASSERT_GE(observations.initialization_times.size(), 2u);
+    ASSERT_EQ(observations.initialization_constraint_values.size(),
+              observations.initialization_times.size());
+    for (std::size_t i = 0; i < observations.initialization_times.size(); ++i) {
+        EXPECT_NEAR(
+            static_cast<double>(observations.initialization_times[i]),
+            t0,
+            1.0e-15);
+        EXPECT_NEAR(
+            static_cast<double>(
+                observations.initialization_constraint_values[i]),
+            10.0 + t0,
+            1.0e-15);
+    }
+}
+
+TEST(TimeLoopConvergence, GeneralizedAlphaFusedTransientFieldCommitsEndpointNotStage)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto seed_transient = sys.addField(svmp::FE::systems::FieldSpec{
+        .name = "seed_transient", .space = space, .components = 1});
+    const auto phi_field = sys.addField(svmp::FE::systems::FieldSpec{
+        .name = "phi", .space = space, .components = 1});
+    const auto extension_field = sys.addField(svmp::FE::systems::FieldSpec{
+        .name = "extension", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto seed = svmp::FE::forms::FormExpr::stateField(
+        seed_transient, *space, "seed_transient");
+    const auto seed_test = svmp::FE::forms::FormExpr::testFunction(
+        seed_transient, *space, "seed_test");
+    svmp::FE::systems::FormInstallOptions seed_install;
+    seed_install.compiler_options.jit.enable = false;
+    seed_install.compiler_options.use_symbolic_tangent = true;
+    (void)svmp::FE::systems::installFormulation(
+        sys,
+        "op",
+        {seed_transient},
+        (svmp::FE::forms::dt(seed) * seed_test + seed * seed_test).dx(),
+        seed_install);
+
+    const auto phi = svmp::FE::forms::FormExpr::stateField(
+        phi_field, *space, "phi");
+    const auto extension = svmp::FE::forms::FormExpr::stateField(
+        extension_field, *space, "extension");
+    const auto eta = svmp::FE::forms::FormExpr::testFunction(
+        phi_field, *space, "eta");
+    const auto coupled_residual =
+        (svmp::FE::forms::dt(phi) * eta + extension * eta).dx();
+
+    svmp::FE::systems::FormInstallOptions coupled_install;
+    coupled_install.compiler_options.jit.enable = true;
+    coupled_install.compiler_options.use_symbolic_tangent = true;
+    coupled_install.extra_trial_fields.push_back(extension_field);
+    const auto installed = svmp::FE::systems::installFormulation(
+        sys,
+        "op",
+        {phi_field},
+        coupled_residual,
+        coupled_install);
+    ASSERT_NE(installed.mixed_plan, nullptr);
+    ASSERT_TRUE(installed.mixed_plan->usesMonolithicCellKernel());
+
+    const auto dt_fields = sys.timeDerivativeFields("op");
+    ASSERT_EQ(dt_fields.size(), 2u);
+    EXPECT_EQ(dt_fields[0], seed_transient);
+    EXPECT_EQ(dt_fields[1], phi_field);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    const auto extension_offset = sys.fieldDofOffset(extension_field);
+    const auto extension_dofs =
+        static_cast<std::size_t>(sys.fieldDofHandler(extension_field).getNumDofs());
+    std::vector<GlobalIndex> constrained_extension_dofs(extension_dofs);
+    for (std::size_t i = 0; i < extension_dofs; ++i) {
+        constrained_extension_dofs[i] =
+            extension_offset + static_cast<GlobalIndex>(i);
+    }
+    sys.addConstraint(std::make_unique<svmp::FE::constraints::DirichletBC>(
+        std::move(constrained_extension_dofs), 1.0));
+    sys.setup({}, inputs);
+
+    auto factory = createTestFactory();
+    ASSERT_NE(factory.get(), nullptr);
+    auto linear = factory->createLinearSolver(directSolve());
+    ASSERT_NE(linear.get(), nullptr);
+
+    constexpr double dt = 0.1;
+    auto history = svmp::FE::timestepping::TimeHistory::allocate(
+        *factory, sys.dofHandler().getNumDofs(), /*history_depth=*/2);
+    std::vector<Real> initial(
+        static_cast<std::size_t>(sys.dofHandler().getNumDofs()), Real{0.0});
+    for (std::size_t i = 0; i < extension_dofs; ++i) {
+        initial[static_cast<std::size_t>(extension_offset) + i] = Real{1.0};
+    }
+    setVectorByDof(history.uPrev(), initial);
+    setVectorByDof(history.uPrev2(), initial);
+    history.resetCurrentToPrevious();
+    history.setPrevDt(dt);
+
+    auto integrator =
+        std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(sys, integrator);
+
+    svmp::FE::timestepping::TimeLoopOptions opts;
+    opts.t0 = 0.0;
+    opts.t_end = dt;
+    opts.dt = dt;
+    opts.max_steps = 1;
+    opts.scheme = svmp::FE::timestepping::SchemeKind::GeneralizedAlpha;
+    opts.generalized_alpha_rho_inf = 0.5;
+    opts.initialize_first_order_rate_from_pde = false;
+    opts.newton.residual_op = "op";
+    opts.newton.jacobian_op = "op";
+    opts.newton.max_iterations = 8;
+    opts.newton.abs_tolerance = 1.0e-12;
+    opts.newton.rel_tolerance = 0.0;
+
+    svmp::FE::timestepping::TimeLoop loop(opts);
+    svmp::FE::timestepping::TimeLoopCallbacks callbacks;
+    const auto report = loop.run(
+        transient,
+        *factory,
+        *linear,
+        history,
+        callbacks);
+    ASSERT_TRUE(report.success) << report.message;
+
+    const auto accepted = getVectorByDof(history.uPrev());
+    const auto phi_offset = sys.fieldDofOffset(phi_field);
+    const auto phi_dofs =
+        static_cast<std::size_t>(sys.fieldDofHandler(phi_field).getNumDofs());
+    // rho_inf=0.5 gives alpha_m=5/6, alpha_f=gamma=2/3. With
+    // phi_dot(0)=0 and phi_dot + 1 = 0, the first accepted endpoint is
+    // -gamma/alpha_m*dt=-0.08; the intermediate stage is -0.053333... .
+    constexpr double expected_endpoint = -0.08;
+    constexpr double stage_value = -0.053333333333333333;
+    for (std::size_t i = 0; i < phi_dofs; ++i) {
+        const auto value = static_cast<double>(
+            accepted[static_cast<std::size_t>(phi_offset) + i]);
+        EXPECT_NEAR(value, expected_endpoint, 1.0e-12);
+        EXPECT_GT(std::abs(value - stage_value), 1.0e-2);
+    }
+}
+
+TEST(TimeLoopConvergence,
+     GeneralizedAlphaExternalStateFixedPointPreservesStageTransactionAndCommitsEndpointOnce)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using StateSyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+
+    static constexpr double dt = 0.1;
+    static constexpr double stage_time = 1.0 / 15.0;
+    static constexpr double predictor_scale = 14.0 / 15.0;
+    static constexpr double stage_scale = 74.0 / 79.0;
+    static constexpr double endpoint_scale = 143.0 / 158.0;
+    static constexpr double endpoint_rate_scale = -73.0 / 79.0;
+    const std::vector<Real> initial = {1.0, -0.5, 0.25, 2.0};
+    std::vector<Real> initial_rate(initial.size(), Real{0.0});
+    for (std::size_t i = 0; i < initial.size(); ++i) {
+        initial_rate[i] = -initial[i];
+    }
+
+    struct Observations {
+        svmp::FE::timestepping::TimeHistory* history{nullptr};
+        int outer_callbacks{0};
+        int projected_callbacks{0};
+        int endpoint_callbacks{0};
+        int projected_endpoint_callbacks{0};
+        int restored_callbacks{0};
+        int nonlinear_done_callbacks{0};
+        int before_accept_callbacks{0};
+        int accepted_callbacks{0};
+        int reported_outer_iterations{-1};
+        int reported_inner_iterations{-1};
+        int reported_iterations{-1};
+    };
+    auto observations = std::make_shared<Observations>();
+
+    auto expect_scaled = [initial](std::span<const Real> values,
+                                   double scale) {
+        EXPECT_EQ(values.size(), initial.size());
+        if (values.size() != initial.size()) {
+            return;
+        }
+        for (std::size_t i = 0; i < initial.size(); ++i) {
+            EXPECT_NEAR(static_cast<double>(values[i]),
+                        scale * static_cast<double>(initial[i]),
+                        1.0e-12)
+                << "DOF " << i;
+        }
+    };
+
+    auto rate_factory = createTestFactory();
+    ASSERT_NE(rate_factory.get(), nullptr);
+    const auto accepted = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        dt,
+        dt,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/0.5,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1.0e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [observations, rate_factory_ptr = rate_factory.get(), initial_rate,
+         expect_scaled](
+            svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory& history) {
+            observations->history = &history;
+            ASSERT_NE(rate_factory_ptr, nullptr);
+            history.ensureSecondOrderState(*rate_factory_ptr);
+            setVectorByDof(history.uDot(), initial_rate);
+            history.uDDot().zero();
+
+            callbacks.on_nonlinear_done =
+                [observations, expect_scaled](
+                    const svmp::FE::timestepping::TimeHistory& h,
+                    const svmp::FE::timestepping::NewtonReport& report) {
+                    ++observations->nonlinear_done_callbacks;
+                    observations->reported_outer_iterations =
+                        report.outer_iterations;
+                    observations->reported_inner_iterations =
+                        report.inner_iterations_total;
+                    observations->reported_iterations = report.iterations;
+                    EXPECT_TRUE(report.converged);
+                    EXPECT_EQ(report.outer_iterations, 2);
+                    EXPECT_EQ(report.inner_iterations_total, 1);
+                    EXPECT_EQ(report.iterations, 1);
+                    EXPECT_NEAR(report.outer_state_change_norm, 0.0, 1.0e-12);
+                    EXPECT_EQ(h.stepIndex(), 0);
+                    EXPECT_NEAR(h.time(), 0.0, 1.0e-15);
+                    expect_scaled(h.uSpan(), endpoint_scale);
+                    expect_scaled(h.uPrevSpan(), 1.0);
+                    expect_scaled(h.uPrev2Span(), 1.0);
+                    expect_scaled(h.uDotSpan(), endpoint_rate_scale);
+                };
+            callbacks.on_before_step_accept =
+                [observations, expect_scaled](
+                    svmp::FE::timestepping::TimeHistory& h,
+                    const svmp::FE::timestepping::NewtonReport&) {
+                    ++observations->before_accept_callbacks;
+                    EXPECT_EQ(h.stepIndex(), 0);
+                    EXPECT_NEAR(h.time(), 0.0, 1.0e-15);
+                    expect_scaled(h.uSpan(), endpoint_scale);
+                    expect_scaled(h.uPrevSpan(), 1.0);
+                    expect_scaled(h.uPrev2Span(), 1.0);
+                    expect_scaled(h.uDotSpan(), endpoint_rate_scale);
+                    return true;
+                };
+            callbacks.on_step_accepted =
+                [observations, expect_scaled](
+                    svmp::FE::timestepping::TimeHistory& h) {
+                    ++observations->accepted_callbacks;
+                    EXPECT_EQ(h.stepIndex(), 1);
+                    EXPECT_NEAR(h.time(), dt, 1.0e-15);
+                    expect_scaled(h.uSpan(), endpoint_scale);
+                    expect_scaled(h.uPrevSpan(), endpoint_scale);
+                    expect_scaled(h.uPrev2Span(), 1.0);
+                    expect_scaled(h.uDotSpan(), endpoint_rate_scale);
+                };
+        },
+        /*inspect_expected_exception=*/{},
+        [observations, initial_rate, expect_scaled](
+            svmp::FE::timestepping::TimeLoopOptions& options,
+            svmp::FE::FieldId) {
+            options.initialize_first_order_rate_from_pde = false;
+            options.newton.external_state_fixed_point.enabled = true;
+            options.newton.external_state_fixed_point.max_iterations = 4;
+            options.newton.synchronize_state =
+                [observations, initial_rate, expect_scaled](
+                    const svmp::FE::systems::SystemStateView& state,
+                    StateSyncPoint point) {
+                    ASSERT_NE(observations->history, nullptr);
+                    if (point == StateSyncPoint::EndpointCandidateState ||
+                        point ==
+                            StateSyncPoint::ProjectedEndpointCandidateState) {
+                        EXPECT_EQ(observations->history->stepIndex(), 0);
+                        EXPECT_NEAR(observations->history->time(), 0.0, 1.0e-15);
+                        EXPECT_NEAR(state.time, dt, 1.0e-15);
+                        EXPECT_NEAR(state.dt, dt, 1.0e-15);
+                        EXPECT_NEAR(state.effective_dt, dt, 1.0e-15);
+                        EXPECT_EQ(state.time_integration, nullptr);
+                        expect_scaled(state.u, endpoint_scale);
+                        expect_scaled(state.u_prev, 1.0);
+                        expect_scaled(state.u_prev2, 1.0);
+                        expect_scaled(observations->history->uDotSpan(),
+                                      endpoint_rate_scale);
+                        if (point == StateSyncPoint::EndpointCandidateState) {
+                            ++observations->endpoint_callbacks;
+                        } else {
+                            ++observations->projected_endpoint_callbacks;
+                        }
+                        return;
+                    }
+                    if (point == StateSyncPoint::RestoredTimeStepState ||
+                        point ==
+                            StateSyncPoint::RestoredProjectedTimeStepState) {
+                        ++observations->restored_callbacks;
+                        return;
+                    }
+                    ASSERT_TRUE(
+                        point == StateSyncPoint::OuterFixedPointState ||
+                        point ==
+                            StateSyncPoint::ProjectedOuterFixedPointState);
+                    EXPECT_EQ(observations->history->stepIndex(), 0);
+                    EXPECT_NEAR(observations->history->time(), 0.0, 1.0e-15);
+                    EXPECT_NEAR(state.time, stage_time, 1.0e-15);
+                    EXPECT_NEAR(state.dt, dt, 1.0e-15);
+                    EXPECT_NEAR(state.effective_dt, stage_time, 1.0e-15);
+
+                    ASSERT_NE(state.time_integration, nullptr);
+                    EXPECT_EQ(state.time_integration->integrator_name,
+                              "GeneralizedAlpha(1stOrder)");
+                    ASSERT_TRUE(state.time_integration->dt1.has_value());
+                    const auto& stencil = *state.time_integration->dt1;
+                    ASSERT_GE(stencil.a.size(), 3u);
+                    EXPECT_NEAR(static_cast<double>(stencil.a[0]),
+                                18.75,
+                                1.0e-13);
+                    EXPECT_NEAR(static_cast<double>(stencil.a[1]),
+                                -18.75,
+                                1.0e-13);
+                    EXPECT_NEAR(static_cast<double>(stencil.a[2]),
+                                -0.25,
+                                1.0e-13);
+
+                    expect_scaled(state.u_prev, 1.0);
+                    EXPECT_EQ(state.u_prev2.size(), initial_rate.size());
+                    if (state.u_prev2.size() == initial_rate.size()) {
+                        for (std::size_t i = 0; i < initial_rate.size(); ++i) {
+                            EXPECT_NEAR(
+                                static_cast<double>(state.u_prev2[i]),
+                                static_cast<double>(initial_rate[i]),
+                                1.0e-12)
+                                << "DOF " << i;
+                        }
+                    }
+                    const auto rate = observations->history->uDotSpan();
+                    EXPECT_EQ(rate.size(), initial_rate.size());
+                    if (rate.size() == initial_rate.size()) {
+                        for (std::size_t i = 0; i < initial_rate.size(); ++i) {
+                            EXPECT_NEAR(static_cast<double>(rate[i]),
+                                        static_cast<double>(initial_rate[i]),
+                                        1.0e-12)
+                                << "DOF " << i;
+                        }
+                    }
+
+                    if (point == StateSyncPoint::OuterFixedPointState) {
+                        const double expected_scale =
+                            observations->outer_callbacks == 0
+                                ? predictor_scale
+                                : stage_scale;
+                        expect_scaled(state.u, expected_scale);
+                        ++observations->outer_callbacks;
+                    } else {
+                        const double expected_scale =
+                            observations->projected_callbacks == 0
+                                ? predictor_scale
+                                : stage_scale;
+                        expect_scaled(state.u, expected_scale);
+                        ++observations->projected_callbacks;
+                    }
+                };
+        });
+
+    ASSERT_EQ(accepted.size(), initial.size());
+    for (std::size_t i = 0; i < initial.size(); ++i) {
+        EXPECT_NEAR(static_cast<double>(accepted[i]),
+                    endpoint_scale * static_cast<double>(initial[i]),
+                    1.0e-12)
+            << "DOF " << i;
+    }
+    EXPECT_EQ(observations->outer_callbacks, 2);
+    EXPECT_EQ(observations->projected_callbacks, 2);
+    EXPECT_EQ(observations->endpoint_callbacks, 1);
+    EXPECT_EQ(observations->projected_endpoint_callbacks, 1);
+    EXPECT_EQ(observations->restored_callbacks, 0);
+    EXPECT_EQ(observations->nonlinear_done_callbacks, 1);
+    EXPECT_EQ(observations->before_accept_callbacks, 1);
+    EXPECT_EQ(observations->accepted_callbacks, 1);
+    EXPECT_EQ(observations->reported_outer_iterations, 2);
+    EXPECT_EQ(observations->reported_inner_iterations, 1);
+    EXPECT_EQ(observations->reported_iterations, 1);
+}
+
+TEST(TimeLoopConvergence,
+     GeneralizedAlphaExternalStateFixedPointProjectsInjectedMpcRateHomogeneously)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using StateSyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+
+    // The value constraint is u_1 = u_0 - 1.5. Its time derivative is the
+    // homogeneous relation uDot_1 = uDot_0; the -1.5 offset must never be
+    // injected into the generalized-alpha rate slot stored temporarily in
+    // uPrev2.
+    const std::vector<Real> initial_rate = {-1.0, -1.0, -0.25, -2.0};
+    struct Observations {
+        svmp::FE::timestepping::TimeHistory* history{nullptr};
+        int outer_callbacks{0};
+        int projected_callbacks{0};
+        bool outer_rate_was_homogeneous{true};
+        bool projected_rate_was_homogeneous{true};
+        bool explicit_rate_state_was_homogeneous{true};
+    };
+    auto observations = std::make_shared<Observations>();
+    auto rate_factory = createTestFactory();
+    ASSERT_NE(rate_factory.get(), nullptr);
+
+    const auto accepted = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        /*dt=*/0.1,
+        /*t_end=*/0.1,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/0.5,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1.0e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [observations, rate_factory_ptr = rate_factory.get(), initial_rate](
+            svmp::FE::timestepping::TimeLoopCallbacks&,
+            svmp::FE::timestepping::TimeHistory& history) {
+            observations->history = &history;
+            ASSERT_NE(rate_factory_ptr, nullptr);
+            history.ensureSecondOrderState(*rate_factory_ptr);
+            setVectorByDof(history.uDot(), initial_rate);
+            history.uDDot().zero();
+        },
+        /*inspect_expected_exception=*/{},
+        [observations](svmp::FE::timestepping::TimeLoopOptions& options,
+                       svmp::FE::FieldId) {
+            options.initialize_first_order_rate_from_pde = false;
+            options.newton.external_state_fixed_point.enabled = true;
+            options.newton.external_state_fixed_point.max_iterations = 4;
+            options.newton.synchronize_state =
+                [observations](
+                    const svmp::FE::systems::SystemStateView& state,
+                    StateSyncPoint point) {
+                    ASSERT_NE(observations->history, nullptr);
+                    if (point == StateSyncPoint::EndpointCandidateState ||
+                        point ==
+                            StateSyncPoint::ProjectedEndpointCandidateState) {
+                        return;
+                    }
+                    if (point != StateSyncPoint::OuterFixedPointState &&
+                        point !=
+                            StateSyncPoint::ProjectedOuterFixedPointState) {
+                        ADD_FAILURE()
+                            << "Unexpected external-state synchronization point";
+                        return;
+                    }
+                    ASSERT_GE(state.u_prev2.size(), 2u);
+                    const bool injected_rate_is_homogeneous =
+                        std::abs(static_cast<double>(state.u_prev2[0]) + 1.0) <
+                            1.0e-12 &&
+                        std::abs(static_cast<double>(state.u_prev2[1]) + 1.0) <
+                            1.0e-12;
+                    const auto explicit_rate =
+                        observations->history->uDotSpan();
+                    ASSERT_GE(explicit_rate.size(), 2u);
+                    const bool explicit_rate_is_homogeneous =
+                        std::abs(static_cast<double>(explicit_rate[0]) + 1.0) <
+                            1.0e-12 &&
+                        std::abs(static_cast<double>(explicit_rate[1]) + 1.0) <
+                            1.0e-12;
+                    observations->explicit_rate_state_was_homogeneous =
+                        observations->explicit_rate_state_was_homogeneous &&
+                        explicit_rate_is_homogeneous;
+                    if (point == StateSyncPoint::OuterFixedPointState) {
+                        ++observations->outer_callbacks;
+                        observations->outer_rate_was_homogeneous =
+                            observations->outer_rate_was_homogeneous &&
+                            injected_rate_is_homogeneous;
+                    } else {
+                        ++observations->projected_callbacks;
+                        observations->projected_rate_was_homogeneous =
+                            observations->projected_rate_was_homogeneous &&
+                            injected_rate_is_homogeneous;
+                    }
+                };
+        },
+        [](svmp::FE::systems::FESystem& system, svmp::FE::FieldId) {
+            // runReactionProblem has one scalar field, so its four global DOFs
+            // are numbered 0..3 before setup.
+            auto mpc = std::make_unique<
+                svmp::FE::constraints::MultiPointConstraint>();
+            mpc->addConstraint(
+                /*slave_dof=*/1,
+                /*master_dof=*/0,
+                /*weight=*/1.0,
+                /*inhomogeneity=*/-1.5);
+            system.addConstraint(std::move(mpc));
+        });
+
+    ASSERT_EQ(accepted.size(), 4u);
+    EXPECT_GE(observations->outer_callbacks, 1);
+    EXPECT_GE(observations->projected_callbacks, 1);
+    EXPECT_TRUE(observations->outer_rate_was_homogeneous);
+    EXPECT_TRUE(observations->projected_rate_was_homogeneous)
+        << "The nonzero MPC inhomogeneity was added to the generalized-alpha "
+           "uDot_n slot during projected outer synchronization";
+    EXPECT_TRUE(observations->explicit_rate_state_was_homogeneous);
+}
+
+TEST(TimeLoopConvergence,
+     GeneralizedAlphaEndpointGeneratedStateSeesEndpointConstraintProjection)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using StateSyncPoint = svmp::FE::timestepping::NewtonOptions::
+        StateSynchronizationPoint;
+
+    struct Observations {
+        int endpoint_callbacks{0};
+        int projected_endpoint_callbacks{0};
+        double raw_endpoint_value{0.0};
+        double projected_endpoint_value{0.0};
+        double projected_previous_value{0.0};
+        double accepted_previous_value{0.0};
+        double accepted_endpoint_rate{0.0};
+    } observations;
+
+    const auto accepted = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        /*dt=*/0.1,
+        /*t_end=*/0.1,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/0.5,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1.0e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_step_accepted =
+                [&](svmp::FE::timestepping::TimeHistory& history) {
+                    observations.accepted_previous_value =
+                        static_cast<double>(history.uPrev2Span()[0]);
+                    observations.accepted_endpoint_rate =
+                        static_cast<double>(history.uDotSpan()[0]);
+                };
+        },
+        /*inspect_expected_exception=*/{},
+        [&](svmp::FE::timestepping::TimeLoopOptions& options,
+            svmp::FE::FieldId) {
+            options.initialize_first_order_rate_from_pde = false;
+            options.newton.synchronize_state =
+                [&](const svmp::FE::systems::SystemStateView& state,
+                    StateSyncPoint point) {
+                    if (point == StateSyncPoint::EndpointCandidateState) {
+                        ++observations.endpoint_callbacks;
+                        ASSERT_FALSE(state.u.empty());
+                        observations.raw_endpoint_value =
+                            static_cast<double>(state.u[0]);
+                    } else if (
+                        point ==
+                        StateSyncPoint::ProjectedEndpointCandidateState) {
+                        ++observations.projected_endpoint_callbacks;
+                        ASSERT_FALSE(state.u.empty());
+                        ASSERT_FALSE(state.u_prev.empty());
+                        observations.projected_endpoint_value =
+                            static_cast<double>(state.u[0]);
+                        observations.projected_previous_value =
+                            static_cast<double>(state.u_prev[0]);
+                    }
+                };
+        },
+        [](svmp::FE::systems::FESystem& system, svmp::FE::FieldId) {
+            std::vector<GlobalIndex> dofs{0};
+            std::vector<std::array<double, 3>> coordinates{{{0.0, 0.0, 0.0}}};
+            auto endpoint_bc = std::make_unique<
+                svmp::FE::constraints::DirichletBC>(
+                std::move(dofs),
+                std::move(coordinates),
+                [](double, double, double, double time) {
+                    return 1.0 + time * time;
+                },
+                /*initial_time=*/0.0);
+            system.addConstraint(std::move(endpoint_bc));
+        });
+
+    ASSERT_EQ(accepted.size(), 4u);
+    EXPECT_EQ(observations.endpoint_callbacks, 1);
+    EXPECT_EQ(observations.projected_endpoint_callbacks, 1);
+    // At rho_inf=0.5, alpha_f=2/3.  Extrapolating g(t_stage)=
+    // 1+(dt*alpha_f)^2 produces 151/150, while the actual endpoint
+    // constraint is g(dt)=1.01.
+    EXPECT_NEAR(observations.raw_endpoint_value, 151.0 / 150.0, 1.0e-12);
+    EXPECT_NEAR(observations.projected_endpoint_value, 1.01, 1.0e-12);
+    EXPECT_NEAR(observations.projected_previous_value, 1.0, 1.0e-15)
+        << "Endpoint constraint projection modified u_n history";
+    EXPECT_NEAR(static_cast<double>(accepted[0]), 1.01, 1.0e-12);
+    EXPECT_NEAR(observations.accepted_previous_value, 1.0, 1.0e-15);
+    // gamma=2/3 and uDot_n=0, hence uDot_{n+1}=
+    // (1.01-1)/(gamma*dt)=0.15 after endpoint projection.
+    EXPECT_NEAR(observations.accepted_endpoint_rate, 0.15, 1.0e-12);
+}
+
 TEST(TimeLoopConvergence, GeneralizedAlpha_FirstOrder_RhoInfSweep_IsSecondOrderOnReaction)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
@@ -2710,6 +4381,54 @@ TEST(TimeLoopEquivalences, DG0_MatchesBackwardEulerOnReaction)
     for (std::size_t i = 0; i < u_be.size(); ++i) {
         EXPECT_NEAR(u_be[i], u_dg0[i], 1e-12);
     }
+}
+
+TEST(TimeLoopCollocation,
+     MonolithicRejectsFieldResidualCriteriaWithActionableMessage)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    bool saw_expected_exception = false;
+    (void)runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::DG1,
+        /*dt=*/0.1,
+        /*t_end=*/0.1,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1e-12,
+        /*newton_rel_tolerance=*/0.0,
+        /*configure_callbacks=*/{},
+        [&saw_expected_exception](
+            const svmp::FE::timestepping::TimeHistory&,
+            const svmp::FE::FEException& exception) {
+            saw_expected_exception = true;
+            const std::string message = exception.what();
+            EXPECT_NE(message.find("monolithic collocation"),
+                      std::string::npos);
+            EXPECT_NE(message.find("StageGaussSeidel"),
+                      std::string::npos);
+        },
+        [](svmp::FE::timestepping::TimeLoopOptions& options,
+           svmp::FE::FieldId field) {
+            options.newton.field_residual_criteria.push_back({
+                .field = field,
+                .abs_tolerance = 1e-12,
+                .rel_tolerance = 0.0});
+        });
+
+    EXPECT_TRUE(saw_expected_exception);
 }
 
 TEST(TimeLoopEquivalences, CG1_MatchesThetaHalfOnReaction)

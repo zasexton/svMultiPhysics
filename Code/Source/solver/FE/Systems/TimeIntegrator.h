@@ -47,6 +47,20 @@ public:
     [[nodiscard]] virtual int maxSupportedDerivativeOrder() const noexcept = 0;
 
     /**
+     * @brief Whether a one-based history slot carries a rate-like quantity.
+     *
+     * Most integrators store solution values in every history slot.  Some
+     * stage formulations temporarily inject a rate into one of those slots;
+     * affine MPC projection must then use the homogeneous relation (no value
+     * inhomogeneity) for that slot.
+     */
+    [[nodiscard]] virtual bool
+    historySlotStoresRate(int /*one_based_slot*/) const noexcept
+    {
+        return false;
+    }
+
+    /**
      * @brief Build an assembly-time context for lowering symbolic `dt(·,k)`
      *
      * @param max_time_derivative_order Maximum dt order observed in the system

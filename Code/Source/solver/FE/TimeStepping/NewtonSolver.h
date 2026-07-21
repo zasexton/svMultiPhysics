@@ -49,18 +49,68 @@ struct NewtonJacobianCheckDiagnostic {
 };
 
 struct NewtonOptions {
+    /**
+     * @brief Points at which residual-defining external state is synchronized.
+     *
+     * During a line search, AcceptedNonlinearState names the refresh needed to
+     * evaluate the exact state that would be accepted; it is still a
+     * speculative transaction until FESystem commits the geometric trial.
+     * Callbacks at LineSearchTrialResidual and AcceptedNonlinearState must
+     * therefore derive reproducible state from the supplied SystemStateView,
+     * and every side effect must be reversible by RestoredNonlinearState.
+     * Irreversible output, history advancement, or external commits do not
+     * belong in these callbacks. In a distributed solve the callback must also
+     * execute the same collective sequence on every rank of the active system
+     * communicator and convert rank-local failures into a collective failure;
+     * Newton cannot repair peers already blocked inside a callback collective.
+     *
+     * EndpointCandidateState and ProjectedEndpointCandidateState are emitted
+     * by TimeLoop only after every adaptive acceptance decision, but before
+     * the first irreversible time-step commit.  The first point may construct
+     * state-dependent constraints; TimeLoop then applies the endpoint-time
+     * constraints to the candidate before emitting the projected point.  A
+     * rejected attempt or an exception before commit is paired with
+     * RestoredTimeStepState and RestoredProjectedTimeStepState, derived from
+     * the last accepted solution.  Endpoint callbacks therefore obey the same
+     * reversible generated-state contract as nonlinear trial callbacks.
+     */
     enum class StateSynchronizationPoint : std::uint8_t {
+        OuterFixedPointState,
+        ProjectedOuterFixedPointState,
+        EndpointCandidateState,
+        ProjectedEndpointCandidateState,
         AcceptedNonlinearState,
         ResidualAssembly,
         JacobianAssembly,
         JacobianAndResidualAssembly,
         LineSearchTrialResidual,
         RestoredNonlinearState,
+        RestoredOuterFixedPointState,
+        RestoredProjectedOuterFixedPointState,
+        RestoredTimeStepState,
+        RestoredProjectedTimeStepState,
         FinalResidualAssembly
     };
 
     systems::OperatorTag residual_op{"residual"};
     systems::OperatorTag jacobian_op{"jacobian"};
+
+    /**
+     * @brief Additional convergence requirement for one unknown FE field.
+     *
+     * The Newton solver computes an L2 norm from the field's owned residual
+     * entries and reduces it on the FESystem communicator.  A criterion is
+     * satisfied when either its enabled absolute or relative tolerance is met.
+     * Every configured field criterion must be satisfied in addition to the
+     * existing monolithic (and, when present, auxiliary-block) criteria.
+     */
+    struct FieldResidualCriterion {
+        FieldId field{INVALID_FIELD_ID};
+        double abs_tolerance{0.0};
+        double rel_tolerance{0.0};
+    };
+
+    std::vector<FieldResidualCriterion> field_residual_criteria{};
 
     struct PseudoTransientContinuationOptions {
         bool enabled{false};
@@ -87,9 +137,43 @@ struct NewtonOptions {
 
     PseudoTransientContinuationOptions pseudo_transient{};
 
-    // When true, the Newton solver accepts approximate linear solutions even when
-    // the linear solver doesn't converge to tolerance. Keep this off by default:
-    // the new solver should reject inexact linear steps unless a caller opts in.
+    /**
+     * @brief Nested fixed point for residual-defining generated state.
+     *
+     * Some nonlinear operators depend on state-derived data G(u), such as
+     * implicit cut quadrature, projected level-set curvature, active-set
+     * constraints, or an algebraic velocity-extension map.  When the assembled
+     * Jacobian differentiates R(u,G) with G frozen, refreshing G inside a
+     * Newton line search is inconsistent: the residual follows R(u,G(u)) but
+     * the matrix omits dG/du.
+     *
+     * With this option enabled, `synchronize_state` is called first at
+     * OuterFixedPointState to construct constraints and then at
+     * ProjectedOuterFixedPointState so all remaining generated data see the
+     * projected iterate and transient history. A complete inner Newton solve
+     * then holds that generated state fixed. The process is
+     * repeated until a newly refreshed problem satisfies the configured
+     * absolute residual tolerances before taking any inner Newton update.
+     * Relative tolerances are deliberately disabled in the inner solves because
+     * each refresh defines a new residual reference; accepting a per-inner
+     * relative reduction would not prove convergence of R(u,G(u)).
+     *
+     * Callbacks must be reproducible from the supplied SystemStateView and must
+     * not commit irreversible side effects.  On failure the algebraic/history,
+     * optional rate, auxiliary, and bordered states are restored before a
+     * RestoredOuterFixedPointState callback rebuilds the entry generated state.
+     */
+    struct ExternalStateFixedPointOptions {
+        bool enabled{false};
+        int max_iterations{12};
+    };
+
+    ExternalStateFixedPointOptions external_state_fixed_point{};
+
+    // When true, the Newton solver may accept an approximate linear solution
+    // that did not reach tolerance, provided every rank reports finite,
+    // positive-iteration residual reduction and the distributed correction is
+    // finite and globally nonzero. Keep this off by default.
     bool accept_inexact_linear_solutions{false};
 
     int max_iterations{25};
@@ -137,11 +221,23 @@ struct NewtonOptions {
 
     std::function<void(const systems::SystemStateView&, StateSynchronizationPoint)>
         synchronize_state{};
+
+    // Set when synchronize_state can change residual-defining external state
+    // (for example generated cut geometry, projected curvature, affine
+    // constraints, transient MPC histories, or an extended advection
+    // velocity). Newton then reassembles the residual after the prospective
+    // AcceptedNonlinearState synchronization before Armijo and convergence
+    // tests. Without this gate, a frozen-geometry trial norm can be mistaken
+    // for the norm of the refreshed nonlinear problem.
+    bool accepted_state_sync_invalidates_residual{false};
 };
 
 struct NewtonReport {
     bool converged{false};
     int iterations{0};
+    int outer_iterations{0};
+    int inner_iterations_total{0};
+    double outer_state_change_norm{0.0};
     double residual_norm0{0.0};
     double residual_norm{0.0};
     double field_residual_norm0{0.0};
@@ -155,6 +251,28 @@ struct NewtonReport {
 struct NewtonWorkspace {
     std::unique_ptr<backends::GenericMatrix> jacobian{};
     std::unique_ptr<backends::GenericMatrix> diagnostic_jacobian_scratch{};
+    // Optional free-surface pressure-representability workspace.  The matrix
+    // stores the symmetric [0,G;G^T,0] diagnostic pair; the vectors keep LSQR
+    // entirely in GenericMatrix/GenericVector operations (no backend casts,
+    // normal equations, or globally gathered dense matrices).
+    std::unique_ptr<backends::GenericMatrix>
+        pressure_representability_pair_matrix{};
+    std::unique_ptr<backends::GenericVector>
+        pressure_representability_load{};
+    std::unique_ptr<backends::GenericVector>
+        pressure_representability_solution{};
+    std::unique_ptr<backends::GenericVector>
+        pressure_representability_left_basis{};
+    std::unique_ptr<backends::GenericVector>
+        pressure_representability_right_basis{};
+    std::unique_ptr<backends::GenericVector>
+        pressure_representability_direction{};
+    std::unique_ptr<backends::GenericVector>
+        pressure_representability_work{};
+    std::unique_ptr<backends::GenericVector>
+        pressure_representability_residual{};
+    std::unique_ptr<backends::GenericVector>
+        pressure_representability_normal_residual{};
     std::unique_ptr<backends::GenericVector> residual{};
     std::unique_ptr<backends::GenericVector> delta{};
     std::unique_ptr<backends::GenericVector> u_backup{};
@@ -162,7 +280,21 @@ struct NewtonWorkspace {
     std::unique_ptr<backends::GenericVector> residual_base{};
     std::unique_ptr<backends::GenericVector> residual_minus{};
     std::unique_ptr<backends::GenericVector> ptc_mass_lumped{};
+    /// Reusable transactional copies used while a line-search trial may
+    /// install state-dependent MPC semantics. Trial residuals must see the
+    /// history vectors projected with the same constraints as `u`, while every
+    /// rejected alpha must restore the accepted history exactly. Optional rate
+    /// state is preserved separately by TimeHistory::RateStateSnapshot.
+    std::vector<std::unique_ptr<backends::GenericVector>>
+        line_search_history_backup{};
     std::vector<GlobalIndex> dt_field_dofs{};
+    /// Factory used for allocation; retained so solveStep can reallocate the
+    /// Jacobian when the system re-augments its sparsity patterns mid-run
+    /// (interface-tracking constraints changing their slave/master topology).
+    /// Must outlive the workspace's use (TimeLoop::run's factory does).
+    const backends::BackendFactory* factory{nullptr};
+    /// Snapshot of FESystem::sparsityPatternRevision() at last (re)allocation.
+    std::uint64_t sparsity_revision{0};
 
     [[nodiscard]] bool isAllocated() const noexcept
     {
@@ -193,7 +325,22 @@ public:
                                          const backends::GenericVector* residual_addition = nullptr) const;
 
 private:
+    [[nodiscard]] NewtonReport solveStepFrozenExternalState(
+        systems::TransientSystem& transient,
+        backends::LinearSolver& linear,
+        double solve_time,
+        TimeHistory& history,
+        NewtonWorkspace& workspace,
+        const backends::GenericVector* residual_addition) const;
+
     [[nodiscard]] systems::SystemStateView makeStateView(const TimeHistory& history, double solve_time) const;
+
+    /// Reallocate workspace.jacobian (and the diagnostic scratch matrix) when
+    /// the system's sparsity pattern revision moved since the last allocation.
+    /// Vectors are left untouched so mid-step state (u_backup etc.) survives.
+    void maybeReallocateJacobianForSparsity(const systems::FESystem& system,
+                                            NewtonWorkspace& workspace) const;
+
     NewtonOptions options_;
 };
 

@@ -68,9 +68,12 @@ struct TimeLoopOptions {
     // - For systems with temporalOrder()==2: Chung–Hulbert generalized-α for structural dynamics.
     double generalized_alpha_rho_inf{1.0};
     // If uDot storage is missing for a first-order generalized-alpha solve,
-    // initialize it by solving a dt-only linearized system. Expensive or
-    // structurally singular embedded-domain startup solves can disable this and
-    // use the finite-difference history fallback directly.
+    // estimate it from a linear system formed by selectively weighted compiled
+    // time-derivative/non-time-derivative terms. This is the exact consistent-rate
+    // mass solve for separable M*dt(u)+F(u) forms and a linearized startup estimate
+    // for nonlinear terms that nest dt(u). Expensive or structurally singular
+    // embedded-domain startup solves can disable it and use the finite-difference
+    // history fallback directly.
     bool initialize_first_order_rate_from_pde{true};
 
     // Newmark-β family parameters (structural dynamics).

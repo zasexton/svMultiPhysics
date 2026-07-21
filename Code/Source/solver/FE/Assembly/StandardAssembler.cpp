@@ -3129,16 +3129,22 @@ using CutStabilizationCellScales = std::unordered_map<GlobalIndex, Real>;
     return scales;
 }
 
-[[nodiscard]] Real cutStabilizationScaleForInteriorFace(
+struct CutFaceStabilizationConstants {
+    Real scale{0.0};
+};
+
+[[nodiscard]] CutFaceStabilizationConstants cutStabilizationConstantsForInteriorFace(
     const CutStabilizationCellScales& scales,
     const CutFacetSetHandle* facet_set_handle,
     GlobalIndex face_id,
     GlobalIndex cell_minus,
     GlobalIndex cell_plus)
 {
+    CutFaceStabilizationConstants constants;
     if (facet_set_handle != nullptr && facet_set_handle->hasFacetMetadata()) {
-        return facet_set_handle->stabilizationScaleForFacet(
-            static_cast<MeshIndex>(face_id));
+        const auto facet = static_cast<MeshIndex>(face_id);
+        constants.scale = facet_set_handle->stabilizationScaleForFacet(facet);
+        return constants;
     }
 
     Real scale = Real{0.0};
@@ -3148,12 +3154,13 @@ using CutStabilizationCellScales = std::unordered_map<GlobalIndex, Real>;
     if (const auto it = scales.find(cell_plus); it != scales.end()) {
         scale = std::max(scale, it->second);
     }
-    return scale;
+    constants.scale = scale;
+    return constants;
 }
 
 void bindCutStabilizationScaleConstants(AssemblyContext& context,
                                         std::span<const Real> base_constants,
-                                        Real scale,
+                                        const CutFaceStabilizationConstants& constants,
                                         std::vector<Real>& scratch)
 {
     const forms::CutCellParameterSlots slots;
@@ -3162,7 +3169,7 @@ void bindCutStabilizationScaleConstants(AssemblyContext& context,
     if (scratch.size() < required_size) {
         scratch.resize(required_size, Real{0.0});
     }
-    scratch[slots.stabilization_scale] = scale;
+    scratch[slots.stabilization_scale] = constants.scale;
     context.setJITConstants(scratch);
 }
 
@@ -3181,6 +3188,14 @@ void bindCutStabilizationScaleConstants(AssemblyContext& context,
 [[nodiscard]] inline bool monolithicCompiledCompareEnabled() noexcept
 {
     return core::envEnabled("SVMP_FE_COMPARE_MONOLITHIC_COMPILED");
+}
+
+[[nodiscard]] inline bool hasSelectiveTimeIntegrationTermWeights(
+    const TimeIntegrationContext* time_integration) noexcept
+{
+    return time_integration != nullptr &&
+           (time_integration->time_derivative_term_weight != Real{1.0} ||
+            time_integration->non_time_derivative_term_weight != Real{1.0});
 }
 
 [[nodiscard]] inline bool dirichletFastPathEnabled() noexcept
@@ -4135,6 +4150,58 @@ StandardAssembler::StandardAssembler(StandardAssembler&& other) noexcept = defau
 
 StandardAssembler& StandardAssembler::operator=(StandardAssembler&& other) noexcept = default;
 
+void StandardAssembler::clearFusedMatrixResolvedScratch() noexcept
+{
+    scratch_fused_resolved_.clear();
+    scratch_fused_resolved_offsets_.clear();
+    scratch_fused_matrix_layout_handle_ = nullptr;
+    scratch_fused_matrix_layout_revision_ = 0;
+}
+
+void StandardAssembler::clearFusedVectorResolvedScratch() noexcept
+{
+    scratch_fused_vector_resolved_.clear();
+    scratch_fused_vector_resolved_offsets_.clear();
+    scratch_fused_vector_layout_handle_ = nullptr;
+    scratch_fused_vector_layout_revision_ = 0;
+}
+
+void StandardAssembler::clearFusedResolvedScratch() noexcept
+{
+    clearFusedMatrixResolvedScratch();
+    clearFusedVectorResolvedScratch();
+}
+
+void StandardAssembler::ensureFusedMatrixResolvedScratchLayout(
+    const GlobalSystemView* view) noexcept
+{
+    const void* handle = view ? view->matrixLayoutHandle() : nullptr;
+    const auto revision = view ? view->matrixLayoutRevision() : 0u;
+    if (scratch_fused_matrix_layout_handle_ == handle &&
+        scratch_fused_matrix_layout_revision_ == revision) {
+        return;
+    }
+    scratch_fused_resolved_.clear();
+    scratch_fused_resolved_offsets_.clear();
+    scratch_fused_matrix_layout_handle_ = handle;
+    scratch_fused_matrix_layout_revision_ = revision;
+}
+
+void StandardAssembler::ensureFusedVectorResolvedScratchLayout(
+    const GlobalSystemView* view) noexcept
+{
+    const void* handle = view ? view->vectorLayoutHandle() : nullptr;
+    const auto revision = view ? view->vectorLayoutRevision() : 0u;
+    if (scratch_fused_vector_layout_handle_ == handle &&
+        scratch_fused_vector_layout_revision_ == revision) {
+        return;
+    }
+    scratch_fused_vector_resolved_.clear();
+    scratch_fused_vector_resolved_offsets_.clear();
+    scratch_fused_vector_layout_handle_ = handle;
+    scratch_fused_vector_layout_revision_ = revision;
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -4150,10 +4217,7 @@ void StandardAssembler::setDofMap(const dofs::DofMap& dof_map)
     cell_dof_tables_.clear();
     cell_resolved_vector_tables_.clear();
     cell_resolved_matrix_tables_.clear();
-    scratch_fused_resolved_.clear();
-    scratch_fused_resolved_offsets_.clear();
-    scratch_fused_vector_resolved_.clear();
-    scratch_fused_vector_resolved_offsets_.clear();
+    clearFusedResolvedScratch();
     field_access_plans_.clear();
     cell_constrained_flags_valid_ = false;
     coloring_valid_ = false;
@@ -4199,10 +4263,7 @@ void StandardAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
     cell_dof_tables_.clear();
     cell_resolved_vector_tables_.clear();
     cell_resolved_matrix_tables_.clear();
-    scratch_fused_resolved_.clear();
-    scratch_fused_resolved_offsets_.clear();
-    scratch_fused_vector_resolved_.clear();
-    scratch_fused_vector_resolved_offsets_.clear();
+    clearFusedResolvedScratch();
     field_access_plans_.clear();
     cell_constrained_flags_valid_ = false;
     coloring_valid_ = false;
@@ -4908,10 +4969,7 @@ void StandardAssembler::ensureCellDofTables(const IMeshAccess& mesh)
         cell_dof_tables_.clear();
         cell_resolved_vector_tables_.clear();
         cell_resolved_matrix_tables_.clear();
-        scratch_fused_resolved_.clear();
-        scratch_fused_resolved_offsets_.clear();
-        scratch_fused_vector_resolved_.clear();
-        scratch_fused_vector_resolved_offsets_.clear();
+        clearFusedResolvedScratch();
         field_access_plans_.clear();
         cell_constrained_flags_valid_ = false;
         coloring_valid_ = false;
@@ -4947,10 +5005,7 @@ const StandardAssembler::CellDofTable& StandardAssembler::getCellDofTable(
         cell_dof_tables_.clear();
         cell_resolved_vector_tables_.clear();
         cell_resolved_matrix_tables_.clear();
-        scratch_fused_resolved_.clear();
-        scratch_fused_resolved_offsets_.clear();
-        scratch_fused_vector_resolved_.clear();
-        scratch_fused_vector_resolved_offsets_.clear();
+        clearFusedResolvedScratch();
         field_access_plans_.clear();
         cell_constrained_flags_valid_ = false;
         coloring_valid_ = false;
@@ -5793,6 +5848,13 @@ void StandardAssembler::flushCombinedInsertBatch(
         target.assemble_vector && target.vector_view &&
         target.vector_view->insertionCapabilities().resolved_vector_entries;
 
+    if (use_resolved_matrix_insert) {
+        ensureFusedMatrixResolvedScratchLayout(target.matrix_view);
+    }
+    if (use_resolved_vector_insert) {
+        ensureFusedVectorResolvedScratchLayout(target.vector_view);
+    }
+
     std::vector<GlobalIndex> fallback_resolved_matrix;
     std::vector<GlobalIndex> fallback_resolved_vector;
     if (use_resolved_matrix_insert && scratch_fused_resolved_.empty()) {
@@ -6333,11 +6395,90 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
         }
     }
 
-    const auto should_process = [&](GlobalIndex cell_minus, GlobalIndex cell_plus) -> bool {
+    std::vector<GlobalIndex> minus_owner_signature;
+    std::vector<GlobalIndex> plus_owner_signature;
+    std::vector<std::array<Real, 3>> minus_owner_coordinates;
+    std::vector<std::array<Real, 3>> plus_owner_coordinates;
+    const auto should_process = [&](GlobalIndex cell_minus,
+                                    GlobalIndex cell_plus,
+                                    std::span<const GlobalIndex> minus_rows,
+                                    std::span<const GlobalIndex> plus_rows,
+                                    std::span<const GlobalIndex> minus_columns,
+                                    std::span<const GlobalIndex> plus_columns) -> bool {
         if (owned_rows_only) {
-            return mesh.isOwnedCell(cell_minus) || mesh.isOwnedCell(cell_plus);
+            // Owned-row assembly must visit every locally available face.  A
+            // row can be owned by this rank even when neither adjacent cell is
+            // owned here (for example, a shared vertex whose owning cell lies
+            // elsewhere).  OwnedRowOnlyView filters the expanded/condensed
+            // row after constraint distribution, so restricting traversal by
+            // cell ownership here silently drops that row's face contribution
+            // and makes the operator partition dependent.
+            return true;
         }
-        return mesh.isOwnedCell(cell_minus);
+
+        const bool minus_owned = mesh.isOwnedCell(cell_minus);
+        const bool plus_owned = mesh.isOwnedCell(cell_plus);
+        if (minus_owned == plus_owned) {
+            // A same-rank face is assembled once here; a face for which both
+            // cells are ghosts is assembled by the rank selected below.
+            return minus_owned;
+        }
+
+        // Reverse-scatter assembly must select the same adjacent cell on both
+        // ranks.  The local face2cell minus/plus orientation is not a global
+        // orientation and can swap across partitions, so selecting
+        // `cell_minus` double-counts some partition-boundary facets.  Compare
+        // order-independent global DOF signatures first, then geometry for
+        // cell-constant/shared layouts.  The owner of the lexicographically
+        // first physical cell assembles the complete face contribution and
+        // reverse-scatters its off-rank rows.
+        const auto compare_dof_signatures =
+            [&](std::span<const GlobalIndex> minus_dofs,
+                std::span<const GlobalIndex> plus_dofs)
+                -> std::optional<bool> {
+                minus_owner_signature.assign(
+                    minus_dofs.begin(), minus_dofs.end());
+                plus_owner_signature.assign(
+                    plus_dofs.begin(), plus_dofs.end());
+                std::sort(minus_owner_signature.begin(),
+                          minus_owner_signature.end());
+                std::sort(plus_owner_signature.begin(),
+                          plus_owner_signature.end());
+                if (minus_owner_signature == plus_owner_signature) {
+                    return std::nullopt;
+                }
+                return std::lexicographical_compare(
+                    minus_owner_signature.begin(),
+                    minus_owner_signature.end(),
+                    plus_owner_signature.begin(),
+                    plus_owner_signature.end());
+            };
+
+        std::optional<bool> minus_is_canonical =
+            compare_dof_signatures(minus_rows, plus_rows);
+        if (!minus_is_canonical.has_value()) {
+            minus_is_canonical =
+                compare_dof_signatures(minus_columns, plus_columns);
+        }
+        if (!minus_is_canonical.has_value()) {
+            mesh.getCellCoordinates(cell_minus, minus_owner_coordinates);
+            mesh.getCellCoordinates(cell_plus, plus_owner_coordinates);
+            std::sort(minus_owner_coordinates.begin(),
+                      minus_owner_coordinates.end());
+            std::sort(plus_owner_coordinates.begin(),
+                      plus_owner_coordinates.end());
+            FE_THROW_IF(minus_owner_coordinates == plus_owner_coordinates,
+                        FEException,
+                        "StandardAssembler::assembleInteriorFaces: cannot "
+                        "construct a partition-invariant owner for "
+                        "geometrically coincident adjacent cells");
+            minus_is_canonical = std::lexicographical_compare(
+                minus_owner_coordinates.begin(),
+                minus_owner_coordinates.end(),
+                plus_owner_coordinates.begin(),
+                plus_owner_coordinates.end());
+        }
+        return *minus_is_canonical ? minus_owned : plus_owned;
     };
 
     // Create second context for the "plus" side
@@ -6373,10 +6514,6 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                 face_filter_time += face_now() - stage_start;
                 return;
             }
-            if (!should_process(cell_minus, cell_plus)) {
-                face_filter_time += face_now() - stage_start;
-                return;
-            }
             face_filter_time += face_now() - stage_start;
             // Get DOFs for both cells (rows/cols may differ)
             stage_start = face_now();
@@ -6385,6 +6522,18 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             minus_col_dofs = getCellDofsCached(mesh, cell_minus, col_dof_map_, col_dof_offset_);
             plus_col_dofs = getCellDofsCached(mesh, cell_plus, col_dof_map_, col_dof_offset_);
             face_dof_time += face_now() - stage_start;
+
+            stage_start = face_now();
+            if (!should_process(cell_minus,
+                                cell_plus,
+                                minus_row_dofs,
+                                plus_row_dofs,
+                                minus_col_dofs,
+                                plus_col_dofs)) {
+                face_filter_time += face_now() - stage_start;
+                return;
+            }
+            face_filter_time += face_now() - stage_start;
 
             // Prepare contexts for both sides
             stage_start = face_now();
@@ -6480,14 +6629,14 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
 
             if (cut_integration_context_ != nullptr) {
                 stage_start = face_now();
-                const auto cut_scale = cutStabilizationScaleForInteriorFace(
+                const auto cut_constants = cutStabilizationConstantsForInteriorFace(
                     cut_stabilization_cell_scales,
                     facet_set_handle,
                     face_id,
                     cell_minus,
                     cell_plus);
                 bindCutStabilizationScaleConstants(
-                    context_, jit_constants_, cut_scale, cut_face_jit_constants);
+                    context_, jit_constants_, cut_constants, cut_face_jit_constants);
                 context_plus.setJITConstants(cut_face_jit_constants);
                 face_cut_scale_time += face_now() - stage_start;
             }
@@ -6643,28 +6792,61 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             }
             face_orientation_time += face_now() - stage_start;
 
-            // Insert contributions (4 blocks for DG)
-            // Self-coupling: minus-minus
+            // Insert contributions (4 blocks for DG). Face terms must condense
+            // affine constraints like cell terms do: raw insertion at
+            // constrained rows/columns leaves the assembled Jacobian
+            // inconsistent with the (condensed) residual for master-bearing
+            // constraints. Plain Dirichlet lines masked this because the
+            // linear solver eliminates their rows and their increments are
+            // zero.
             stage_start = face_now();
+            const bool face_constrained =
+                options_.use_constraints && constraint_distributor_ && constraints_ &&
+                (constraints_->hasConstrainedDofs(minus_row_dofs) ||
+                 constraints_->hasConstrainedDofs(plus_row_dofs) ||
+                 constraints_->hasConstrainedDofs(minus_col_dofs) ||
+                 constraints_->hasConstrainedDofs(plus_col_dofs));
+
+            // Self-coupling: minus-minus
             if (output_minus.has_matrix || output_minus.has_vector) {
-                insertLocal(output_minus, minus_row_dofs, minus_col_dofs, insert_matrix_view, insert_vector_view);
+                if (face_constrained) {
+                    insertLocalConstrained(output_minus, minus_row_dofs, minus_col_dofs,
+                                           insert_matrix_view, insert_vector_view);
+                } else {
+                    insertLocal(output_minus, minus_row_dofs, minus_col_dofs, insert_matrix_view, insert_vector_view);
+                }
             }
 
             // Self-coupling: plus-plus
             if (output_plus.has_matrix || output_plus.has_vector) {
-                insertLocal(output_plus, plus_row_dofs, plus_col_dofs, insert_matrix_view, insert_vector_view);
+                if (face_constrained) {
+                    insertLocalConstrained(output_plus, plus_row_dofs, plus_col_dofs,
+                                           insert_matrix_view, insert_vector_view);
+                } else {
+                    insertLocal(output_plus, plus_row_dofs, plus_col_dofs, insert_matrix_view, insert_vector_view);
+                }
             }
 
             // Cross-coupling: minus-plus (minus rows, plus cols)
             if (coupling_mp.has_matrix) {
-                insert_matrix_view->addMatrixEntries(minus_row_dofs, plus_col_dofs,
-                                                     coupling_mp.local_matrix);
+                if (face_constrained) {
+                    insertLocalConstrained(coupling_mp, minus_row_dofs, plus_col_dofs,
+                                           insert_matrix_view, nullptr);
+                } else {
+                    insert_matrix_view->addMatrixEntries(minus_row_dofs, plus_col_dofs,
+                                                         coupling_mp.local_matrix);
+                }
             }
 
             // Cross-coupling: plus-minus (plus rows, minus cols)
             if (coupling_pm.has_matrix) {
-                insert_matrix_view->addMatrixEntries(plus_row_dofs, minus_col_dofs,
-                                                     coupling_pm.local_matrix);
+                if (face_constrained) {
+                    insertLocalConstrained(coupling_pm, plus_row_dofs, minus_col_dofs,
+                                           insert_matrix_view, nullptr);
+                } else {
+                    insert_matrix_view->addMatrixEntries(plus_row_dofs, minus_col_dofs,
+                                                         coupling_pm.local_matrix);
+                }
             }
             face_insert_time += face_now() - stage_start;
 
@@ -7335,20 +7517,47 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
             applyVectorBasisOutputOrientation(mesh, cell_plus, test_space, cell_minus, trial_space, coupling_pm);
         }
 
-        // Insert contributions (4 blocks, DG-style)
+        // Insert contributions (4 blocks, DG-style). Same constraint
+        // condensation requirement as the interior-face path above.
+        const bool iface_constrained =
+            options_.use_constraints && constraint_distributor_ && constraints_ &&
+            (constraints_->hasConstrainedDofs(minus_row_dofs) ||
+             constraints_->hasConstrainedDofs(plus_row_dofs) ||
+             constraints_->hasConstrainedDofs(minus_col_dofs) ||
+             constraints_->hasConstrainedDofs(plus_col_dofs));
         if (output_minus.has_matrix || output_minus.has_vector) {
-            insertLocal(output_minus, minus_row_dofs, minus_col_dofs, insert_matrix_view, insert_vector_view);
+            if (iface_constrained) {
+                insertLocalConstrained(output_minus, minus_row_dofs, minus_col_dofs,
+                                       insert_matrix_view, insert_vector_view);
+            } else {
+                insertLocal(output_minus, minus_row_dofs, minus_col_dofs, insert_matrix_view, insert_vector_view);
+            }
         }
         if (output_plus.has_matrix || output_plus.has_vector) {
-            insertLocal(output_plus, plus_row_dofs, plus_col_dofs, insert_matrix_view, insert_vector_view);
+            if (iface_constrained) {
+                insertLocalConstrained(output_plus, plus_row_dofs, plus_col_dofs,
+                                       insert_matrix_view, insert_vector_view);
+            } else {
+                insertLocal(output_plus, plus_row_dofs, plus_col_dofs, insert_matrix_view, insert_vector_view);
+            }
         }
         if (coupling_mp.has_matrix) {
-            insert_matrix_view->addMatrixEntries(minus_row_dofs, plus_col_dofs,
-                                                 coupling_mp.local_matrix);
+            if (iface_constrained) {
+                insertLocalConstrained(coupling_mp, minus_row_dofs, plus_col_dofs,
+                                       insert_matrix_view, nullptr);
+            } else {
+                insert_matrix_view->addMatrixEntries(minus_row_dofs, plus_col_dofs,
+                                                     coupling_mp.local_matrix);
+            }
         }
         if (coupling_pm.has_matrix) {
-            insert_matrix_view->addMatrixEntries(plus_row_dofs, minus_col_dofs,
-                                                 coupling_pm.local_matrix);
+            if (iface_constrained) {
+                insertLocalConstrained(coupling_pm, plus_row_dofs, minus_col_dofs,
+                                       insert_matrix_view, nullptr);
+            } else {
+                insert_matrix_view->addMatrixEntries(plus_row_dofs, minus_col_dofs,
+                                                     coupling_pm.local_matrix);
+            }
         }
 
         result.interface_faces_assembled++;
@@ -8148,17 +8357,15 @@ void StandardAssembler::prepareGeometry(
         } else if (dim == 2) {
             const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
             const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
-            const auto nv = tu.cross(tv);
-            const Real nv_norm = nv.norm();
-            if (nv_norm < geometry::detail::kDegenerateTol) {
+            math::Vector<Real, 3> nv_unit{};
+            if (!geometry::detail::complete_surface_frame(tu, tv, nv_unit)) {
                 J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
             } else {
-                const auto nv_unit = nv / nv_norm;
                 J(0, 2) = nv_unit[0]; J(1, 2) = nv_unit[1]; J(2, 2) = nv_unit[2];
             }
         }
 
-        const auto J_inv = J.inverse();
+        const auto J_inv = geometry::scaleConditionedJacobianInverse(J);
         const Real det_J = J.determinant();
         const Real abs_det_J = std::abs(det_J);
 
@@ -8226,17 +8433,15 @@ void StandardAssembler::prepareGeometry(
             } else if (dim == 2) {
                 const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
                 const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
-                const auto nv = tu.cross(tv);
-                const Real nv_norm = nv.norm();
-                if (nv_norm < geometry::detail::kDegenerateTol) {
+                math::Vector<Real, 3> nv_unit{};
+                if (!geometry::detail::complete_surface_frame(tu, tv, nv_unit)) {
                     J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
                 } else {
-                    const auto nv_unit = nv / nv_norm;
                     J(0, 2) = nv_unit[0]; J(1, 2) = nv_unit[1]; J(2, 2) = nv_unit[2];
                 }
             }
 
-            const auto J_inv = J.inverse();
+            const auto J_inv = geometry::scaleConditionedJacobianInverse(J);
             const Real det_J = J.determinant();
 
             for (int i = 0; i < 3; ++i)
@@ -8373,17 +8578,15 @@ void StandardAssembler::prepareGeometry(
         } else if (dim == 2) {
             const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
             const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
-            const auto nv = tu.cross(tv);
-            const Real nv_norm = nv.norm();
-            if (nv_norm < geometry::detail::kDegenerateTol) {
+            math::Vector<Real, 3> nv_unit{};
+            if (!geometry::detail::complete_surface_frame(tu, tv, nv_unit)) {
                 J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
             } else {
-                const auto nv_unit = nv / nv_norm;
                 J(0, 2) = nv_unit[0]; J(1, 2) = nv_unit[1]; J(2, 2) = nv_unit[2];
             }
         }
 
-        const auto J_inv = J.inverse();
+        const auto J_inv = geometry::scaleConditionedJacobianInverse(J);
         const Real det_J = J.determinant();
         const Real abs_det_J = std::abs(det_J);
 
@@ -8442,16 +8645,14 @@ void StandardAssembler::prepareGeometry(
             } else if (dim == 2) {
                 const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
                 const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
-                const auto nv = tu.cross(tv);
-                const Real nv_norm = nv.norm();
-                if (nv_norm < geometry::detail::kDegenerateTol) {
+                math::Vector<Real, 3> nv_unit{};
+                if (!geometry::detail::complete_surface_frame(tu, tv, nv_unit)) {
                     J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
                 } else {
-                    const auto nv_unit = nv / nv_norm;
                     J(0, 2) = nv_unit[0]; J(1, 2) = nv_unit[1]; J(2, 2) = nv_unit[2];
                 }
             }
-            const auto J_inv = J.inverse();
+            const auto J_inv = geometry::scaleConditionedJacobianInverse(J);
             const Real det_J = J.determinant();
             for (int i = 0; i < 3; ++i)
                 for (int j = 0; j < 3; ++j) {
@@ -11872,13 +12073,29 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
             }
             if (use_two_sided_kernel && coupling_mp.has_matrix &&
                 assemble_matrix && insert_matrix_view != nullptr) {
-                insert_matrix_view->addMatrixEntries(row_dofs, col_dofs,
-                                                     coupling_mp.local_matrix);
+                if (options_.use_constraints && constraint_distributor_ &&
+                    constraints_ &&
+                    (constraints_->hasConstrainedDofs(row_dofs) ||
+                     constraints_->hasConstrainedDofs(col_dofs))) {
+                    insertLocalConstrained(coupling_mp, row_dofs, col_dofs,
+                                           insert_matrix_view, nullptr);
+                } else {
+                    insert_matrix_view->addMatrixEntries(row_dofs, col_dofs,
+                                                         coupling_mp.local_matrix);
+                }
             }
             if (use_two_sided_kernel && coupling_pm.has_matrix &&
                 assemble_matrix && insert_matrix_view != nullptr) {
-                insert_matrix_view->addMatrixEntries(row_dofs, col_dofs,
-                                                     coupling_pm.local_matrix);
+                if (options_.use_constraints && constraint_distributor_ &&
+                    constraints_ &&
+                    (constraints_->hasConstrainedDofs(row_dofs) ||
+                     constraints_->hasConstrainedDofs(col_dofs))) {
+                    insertLocalConstrained(coupling_pm, row_dofs, col_dofs,
+                                           insert_matrix_view, nullptr);
+                } else {
+                    insert_matrix_view->addMatrixEntries(row_dofs, col_dofs,
+                                                         coupling_pm.local_matrix);
+                }
             }
 
             ++result.interface_faces_assembled;
@@ -12410,10 +12627,27 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     : "StandardAssembler::assembleCellsFused: monolithic exact fallback for one-sided request");
         }
 
+        // The generalized-alpha initial-rate solve selects the differential
+        // and algebraic parts of a residual independently.  Per-block LLVM
+        // kernels implement and test those exact-zero term weights directly.
+        // Keep the separately optimized, opt-in monolithic entry point out of
+        // this path until its coupled selective-weight behavior has equivalent
+        // coverage; the exact per-block path below preserves the requested
+        // semantics.
+        const bool selective_term_weights =
+            hasSelectiveTimeIntegrationTermWeights(time_integration_);
         const bool run_compiled_dispatch =
-            (compiled_fn != nullptr) && parent_term.assemble_matrix;
+            (compiled_fn != nullptr) && parent_term.assemble_matrix &&
+            !selective_term_weights;
         const bool compiled_matrix_only_dispatch =
             run_compiled_dispatch && parent_term.assemble_vector;
+        if (compiled_fn != nullptr && selective_term_weights &&
+            core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
+            core::kernelTraceLog(
+                core::KernelTraceChannel::Selection,
+                "StandardAssembler::assembleCellsFused: monolithic compiled "
+                "dispatch disabled for selective time-integration term weights");
+        }
 
         AssemblyContext shared_ctx;
         shared_ctx.reserve(max_dofs, max_qpts, mesh.dimension());
@@ -12910,7 +13144,14 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             fi.col_comps = col_side.comps_per_node;
                         }
 
-                        if (!owned_rows_only) {
+                        // The fused combined insertion writes raw resolved CSR
+                        // slots and cannot condense affine constraints; with
+                        // constraints active, fall back to the per-block path
+                        // whose constrained branch distributes correctly.
+                        const bool fused_constraints_active =
+                            options_.use_constraints && constraint_distributor_ &&
+                            constraints_ && !constraints_->empty();
+                        if (!owned_rows_only && !fused_constraints_active) {
                             resizeCombinedInsertScratch(monolithic_batch_size, fused_combined_n);
                             use_fused_insert = true;
                         }
@@ -12921,6 +13162,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             if (use_fused_insert && parent_term.assemble_matrix && parent_term.matrix_view &&
                 parent_term.matrix_view->insertionCapabilities().contiguous_combined_matrix_insert &&
                 parent_term.matrix_view->insertionCapabilities().resolved_matrix_entries) {
+                ensureFusedMatrixResolvedScratchLayout(parent_term.matrix_view);
                 const auto cn = static_cast<std::size_t>(fused_combined_n);
                 const auto n_cells = mesh.numCells();
                 const auto entries_per_cell = cn * cn;
@@ -12981,6 +13223,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
             if (use_fused_insert && parent_term.assemble_vector && parent_term.vector_view &&
                 parent_term.vector_view->insertionCapabilities().resolved_vector_entries) {
+                ensureFusedVectorResolvedScratchLayout(parent_term.vector_view);
                 const auto cn = static_cast<std::size_t>(fused_combined_n);
                 const auto n_cells = mesh.numCells();
                 const auto total_entries = static_cast<std::size_t>(n_cells) * cn;
@@ -13282,7 +13525,9 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
                                 if (hasFlag(meta.required_data, RequiredData::EntityMeasures)) {
                                     ctx.setEntityMeasures(
-                                        shared.cellDiameter(), shared.cellVolume(), 0.0);
+                                        saved_node_coords[slot].entity_h,
+                                        saved_node_coords[slot].entity_volume,
+                                        0.0);
                                 }
                             } else {
                                 restorePreparedGeometry(slot);
@@ -14733,7 +14978,13 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         fi.col_comps = cs.comps_per_node;
                     }
 
-                    if (!owned_rows_only) {
+                    // Raw resolved-slot insertion cannot condense affine
+                    // constraints; with constraints active use the per-block
+                    // path (constrained branch distributes correctly).
+                    const bool fused_constraints_active =
+                        options_.use_constraints && constraint_distributor_ &&
+                        constraints_ && !constraints_->empty();
+                    if (!owned_rows_only && !fused_constraints_active) {
                         // Allocate scratch
                         resizeCombinedInsertScratch(B, fused_combined_n);
                         use_fused_insert = true;
@@ -14816,6 +15067,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         if (use_fused_insert && parent_term.assemble_matrix && parent_term.matrix_view &&
             parent_term.matrix_view->insertionCapabilities().contiguous_combined_matrix_insert &&
             parent_term.matrix_view->insertionCapabilities().resolved_matrix_entries) {
+            ensureFusedMatrixResolvedScratchLayout(parent_term.matrix_view);
             const auto cn = static_cast<std::size_t>(fused_combined_n);
             const auto n_cells = mesh.numCells();
             if (scratch_fused_resolved_.empty() && cn > 0 && n_cells > 0) {
@@ -14864,6 +15116,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
         if (use_fused_insert && parent_term.assemble_vector && parent_term.vector_view &&
             parent_term.vector_view->insertionCapabilities().resolved_vector_entries) {
+            ensureFusedVectorResolvedScratchLayout(parent_term.vector_view);
             const auto cn = static_cast<std::size_t>(fused_combined_n);
             const auto n_cells = mesh.numCells();
             const auto total_entries = static_cast<std::size_t>(n_cells) * cn;

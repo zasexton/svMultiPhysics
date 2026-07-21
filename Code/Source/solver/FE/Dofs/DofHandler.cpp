@@ -11217,6 +11217,16 @@ std::span<const GlobalIndex> DofHandler::getGhostDofs() const {
 	    world_size_ = world_size;
 	}
 
+#if FE_HAS_MPI
+void DofHandler::setMpiComm(MPI_Comm communicator)
+{
+    checkNotFinalized();
+    FE_THROW_IF(communicator == MPI_COMM_NULL, InvalidArgumentException,
+                "DofHandler::setMpiComm: communicator must not be MPI_COMM_NULL");
+    mpi_comm_ = communicator;
+}
+#endif
+
 // =============================================================================
 // Internal Helpers
 // =============================================================================

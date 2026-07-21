@@ -28,6 +28,32 @@ namespace timestepping {
  */
 class TimeHistory {
 public:
+    /**
+     * @brief Movable snapshot of the optional rate vectors.
+     *
+     * A snapshot preserves both the vector values and whether each optional
+     * rate vector was allocated.  It is intended for transactional time-step
+     * attempts: a rejected attempt can restore the exact committed rate state,
+     * including returning to an unallocated first-step state.
+     */
+    class RateStateSnapshot {
+    public:
+        RateStateSnapshot() = default;
+        RateStateSnapshot(RateStateSnapshot&&) noexcept = default;
+        RateStateSnapshot& operator=(RateStateSnapshot&&) noexcept = default;
+
+        RateStateSnapshot(const RateStateSnapshot&) = delete;
+        RateStateSnapshot& operator=(const RateStateSnapshot&) = delete;
+
+    private:
+        friend class TimeHistory;
+
+        std::unique_ptr<backends::GenericVector> u_dot{};
+        std::unique_ptr<backends::GenericVector> u_ddot{};
+        bool had_u_dot{false};
+        bool had_u_ddot{false};
+    };
+
     TimeHistory() = default;
 
     TimeHistory(std::unique_ptr<backends::GenericVector> u,
@@ -70,6 +96,30 @@ public:
      * update (u̇,ü) alongside displacement history.
      */
     void ensureSecondOrderState(const backends::BackendFactory& factory);
+
+    /**
+     * @brief Copy the optional rate state using vectors created by `factory`.
+     */
+    [[nodiscard]] RateStateSnapshot
+    snapshotRateState(const backends::BackendFactory& factory) const;
+
+    /**
+     * @brief Refresh reusable snapshot storage from the current rate state.
+     *
+     * Existing snapshot vectors are reused when their size matches, avoiding
+     * per-attempt backend-vector allocation in adaptive time loops.
+     */
+    void snapshotRateState(RateStateSnapshot& snapshot,
+                           const backends::BackendFactory& factory) const;
+
+    /**
+     * @brief Replace the optional rate state with a previously captured snapshot.
+     *
+     * This operation is noexcept and swaps vector ownership with the snapshot,
+     * which makes it suitable for rollback guards while retaining reusable
+     * storage. Snapshot entries recorded as absent restore absence.
+     */
+    void restoreRateState(RateStateSnapshot& snapshot) noexcept;
 
     [[nodiscard]] backends::GenericVector& uDot();
     [[nodiscard]] const backends::GenericVector& uDot() const;

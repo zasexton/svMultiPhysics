@@ -18,8 +18,6 @@ namespace geometry {
 
 namespace {
 
-constexpr Real kDegenerateTol = detail::kDegenerateTol;
-
 std::vector<math::Vector<Real, 3>> affine_check_points(ElementType type, int dim)
 {
     using Vec3 = math::Vector<Real, 3>;
@@ -93,9 +91,17 @@ IsoparametricMapping::IsoparametricMapping(std::shared_ptr<basis::BasisFunction>
 math::Vector<Real, 3> IsoparametricMapping::map_to_physical(const math::Vector<Real, 3>& xi) const {
     std::vector<Real> N;
     basis_->evaluate_values(xi, N);
-    math::Vector<Real, 3> x{};
+    if (nodes_.empty()) {
+        return {};
+    }
+
+    // Geometry bases form a partition of unity.  Accumulating relative to an
+    // anchor node preserves that invariant numerically and avoids injecting a
+    // large global-coordinate offset into the interpolation sum.
+    const auto& anchor = nodes_.front();
+    math::Vector<Real, 3> x = anchor;
     for (std::size_t a = 0; a < N.size(); ++a) {
-        x += nodes_[a] * N[a];
+        x += (nodes_[a] - anchor) * N[a];
     }
     return x;
 }
@@ -105,11 +111,13 @@ math::Matrix<Real, 3, 3> IsoparametricMapping::jacobian(const math::Vector<Real,
     basis_->evaluate_gradients(xi, grads);
     math::Matrix<Real, 3, 3> J{};
     const int dim = basis_->dimension();
+    const math::Vector<Real, 3> anchor =
+        nodes_.empty() ? math::Vector<Real, 3>{} : nodes_.front();
     for (std::size_t a = 0; a < grads.size(); ++a) {
         for (int j = 0; j < dim; ++j) {
             const std::size_t sj = static_cast<std::size_t>(j);
             for (std::size_t i = 0; i < 3; ++i) {
-                J(i, sj) += nodes_[a][i] * grads[a][sj];
+                J(i, sj) += (nodes_[a][i] - anchor[i]) * grads[a][sj];
             }
         }
     }
@@ -127,13 +135,11 @@ math::Matrix<Real, 3, 3> IsoparametricMapping::jacobian(const math::Vector<Real,
     } else if (dim == 2) {
         const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
         const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
-        const auto n = tu.cross(tv);
-        const Real n_norm = n.norm();
-        if (n_norm < kDegenerateTol) {
+        math::Vector<Real, 3> n_unit{};
+        if (!detail::complete_surface_frame(tu, tv, n_unit)) {
             // Degenerate surface: keep third column zero so det(J)=0.
             J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
         } else {
-            const auto n_unit = n / n_norm;
             J(0, 2) = n_unit[0]; J(1, 2) = n_unit[1]; J(2, 2) = n_unit[2];
         }
     }
@@ -147,13 +153,16 @@ GeometryMapping::MappingHessian IsoparametricMapping::mapping_hessian(const math
 
     MappingHessian H{};
     const int dim = basis_->dimension();
+    const math::Vector<Real, 3> anchor =
+        nodes_.empty() ? math::Vector<Real, 3>{} : nodes_.front();
 
     for (std::size_t a = 0; a < hessians.size(); ++a) {
         for (int i = 0; i < dim; ++i) {
             for (int j = 0; j < dim; ++j) {
                 const Real d2N = hessians[a](static_cast<std::size_t>(i), static_cast<std::size_t>(j));
                 for (std::size_t m = 0; m < 3; ++m) {
-                    H[m](static_cast<std::size_t>(i), static_cast<std::size_t>(j)) += nodes_[a][m] * d2N;
+                    H[m](static_cast<std::size_t>(i), static_cast<std::size_t>(j)) +=
+                        (nodes_[a][m] - anchor[m]) * d2N;
                 }
             }
         }

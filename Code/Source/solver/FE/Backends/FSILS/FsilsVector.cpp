@@ -630,6 +630,44 @@ void FsilsVector::copyFrom(const GenericVector& other)
     FE_THROW_IF(data_.size() != o->data_.size(),
                 InvalidArgumentException,
                 "FsilsVector::copyFrom: local size mismatch");
+
+    const auto compatible_layout = [](const FsilsShared* lhs,
+                                      const FsilsShared* rhs) noexcept {
+        if (lhs == rhs) {
+            return true;
+        }
+        if (lhs == nullptr || rhs == nullptr) {
+            return false;
+        }
+
+        const auto same_permutation = [](const std::shared_ptr<const DofPermutation>& a,
+                                         const std::shared_ptr<const DofPermutation>& b) noexcept {
+            if (a == b) {
+                return true;
+            }
+            if (!a || !b) {
+                return false;
+            }
+            return a->forward == b->forward && a->inverse == b->inverse;
+        };
+
+        // FsilsVector stores values in the old local-node ordering. Sparsity
+        // and FSILS' internal lhs.map may change when a matrix is rebuilt, but
+        // raw local copies remain valid exactly when this old ordering and the
+        // global DOF permutation agree.
+        return lhs->global_dofs == rhs->global_dofs &&
+               lhs->dof == rhs->dof &&
+               lhs->gnNo == rhs->gnNo &&
+               lhs->owned_node_start == rhs->owned_node_start &&
+               lhs->owned_node_count == rhs->owned_node_count &&
+               lhs->owned_nodes == rhs->owned_nodes &&
+               lhs->ghost_nodes == rhs->ghost_nodes &&
+               same_permutation(lhs->dof_permutation, rhs->dof_permutation);
+    };
+
+    FE_THROW_IF(!compatible_layout(shared_.get(), o->shared_.get()),
+                InvalidArgumentException,
+                "FsilsVector::copyFrom: layout mismatch");
     std::copy(o->data_.begin(), o->data_.end(), data_.begin());
     markModified();
 }

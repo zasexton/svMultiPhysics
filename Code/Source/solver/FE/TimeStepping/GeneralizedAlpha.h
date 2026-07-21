@@ -50,6 +50,11 @@ public:
 
     [[nodiscard]] std::string name() const override { return "GeneralizedAlpha(1stOrder)"; }
     [[nodiscard]] int maxSupportedDerivativeOrder() const noexcept override { return 1; }
+    [[nodiscard]] bool historySlotStoresRate(
+        int one_based_slot) const noexcept override
+    {
+        return options_.history_rate_order == 0 && one_based_slot == 2;
+    }
 
     [[nodiscard]] assembly::TimeIntegrationContext
     buildContext(int max_time_derivative_order, const systems::SystemStateView& state) const override;

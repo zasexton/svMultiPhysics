@@ -21,8 +21,6 @@ bool is_simplex(ElementType type) {
     return type == ElementType::Line2 || type == ElementType::Triangle3 || type == ElementType::Tetra4;
 }
 
-constexpr Real kDegenerateTol = detail::kDegenerateTol;
-
 }
 
 LinearMapping::LinearMapping(ElementType type,
@@ -87,12 +85,10 @@ math::Matrix<Real, 3, 3> LinearMapping::jacobian(const math::Vector<Real, 3>&) c
     } else if (dimension_ == 2) {
         const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
         const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
-        const auto n = tu.cross(tv);
-        const Real n_norm = n.norm();
-        if (n_norm < kDegenerateTol) {
+        math::Vector<Real, 3> n_unit{};
+        if (!detail::complete_surface_frame(tu, tv, n_unit)) {
             J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
         } else {
-            const auto n_unit = n / n_norm;
             J(0, 2) = n_unit[0]; J(1, 2) = n_unit[1]; J(2, 2) = n_unit[2];
         }
     }

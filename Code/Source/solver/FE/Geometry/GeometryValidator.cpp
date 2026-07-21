@@ -6,6 +6,7 @@
  */
 
 #include "GeometryValidator.h"
+#include "FrameGeometry.h"
 #include "MetricTensor.h"
 #include <cmath>
 #include <limits>
@@ -53,7 +54,7 @@ GeometryQuality GeometryValidator::evaluate(const GeometryMapping& mapping,
     }
 
     // Condition number (infinity norm approximation) for 3D volumetric mappings.
-    const auto Jinv = J.inverse();
+    const auto Jinv = scaleConditionedJacobianInverse(J);
     Real normJ = Real(0);
     Real normJinv = Real(0);
     for (std::size_t i = 0; i < 3; ++i) {

@@ -7,8 +7,10 @@
 
 #include "TimeStepping/TimeLoop.h"
 
+#include "Backends/Interfaces/DofPermutation.h"
 #include "Core/FEException.h"
 #include "Math/FiniteDifference.h"
+#include "Sparsity/DistributedSparsityPattern.h"
 #include "Sparsity/SparsityPattern.h"
 #include "Systems/SystemsExceptions.h"
 #include "TimeStepping/GeneralizedAlpha.h"
@@ -26,6 +28,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -110,6 +113,27 @@ std::size_t setLinearDirichletDofs(backends::LinearSolver& linear,
     return enabled;
 }
 
+/// Legacy comparison switch: skip the accepted-step re-distribution of
+/// master-bearing (MPC) constraint state into the committed solution and rate
+/// history (see the accepted-step block in run()). With the switch set, DOFs
+/// that enter or leave interface-tracking MPC sets (e.g. small-cut
+/// aggregation) keep their raw finite-difference rates, which carry the
+/// free-vs-extension value jump scaled by 1/(gamma*dt).
+[[nodiscard]] bool mpcAcceptedStateDistributeDisabled() noexcept
+{
+    static const bool disabled = [] {
+        const char* env = std::getenv("SVMP_NO_MPC_STATE_DISTRIBUTE");
+        if (env == nullptr || env[0] == '\0') {
+            return false;
+        }
+        const std::string value(env);
+        return !(value == "0" || value == "false" || value == "False" ||
+                 value == "off" || value == "OFF" || value == "no" ||
+                 value == "NO");
+    }();
+    return disabled;
+}
+
 void logInitializationSolveDiagnostics(const char* phase,
                                        const constraints::AffineConstraints& constraints,
                                        std::size_t dirichlet_dofs,
@@ -132,6 +156,168 @@ void logInitializationSolveDiagnostics(const char* phase,
     FE_LOG_INFO(oss.str());
 }
 
+std::vector<GlobalIndex> collectOwnedExactZeroMassRows(
+    const systems::FESystem& system,
+    const backends::GenericMatrix& matrix,
+    const systems::OperatorTag& op)
+{
+    std::vector<GlobalIndex> zero_rows;
+    const auto owned_dofs =
+        system.dofHandler().getPartition().locallyOwned().toVector();
+    zero_rows.reserve(owned_dofs.size());
+
+    const auto* distributed = system.distributedSparsityIfAvailable(op);
+    const auto permutation = system.dofPermutation();
+    const bool distributed_is_permuted =
+        distributed != nullptr &&
+        distributed->dofIndexing() ==
+            sparsity::DistributedSparsityPattern::DofIndexing::NodalInterleaved;
+
+    const auto backendToFe = [&](GlobalIndex backend_dof) {
+        if (!distributed_is_permuted) {
+            return backend_dof;
+        }
+        if (!permutation || backend_dof < 0 ||
+            static_cast<std::size_t>(backend_dof) >=
+                permutation->inverse.size()) {
+            return INVALID_GLOBAL_INDEX;
+        }
+        return permutation->inverse[static_cast<std::size_t>(backend_dof)];
+    };
+
+    const auto feToBackend = [&](GlobalIndex fe_dof) {
+        if (!distributed_is_permuted) {
+            return fe_dof;
+        }
+        if (!permutation || fe_dof < 0 ||
+            static_cast<std::size_t>(fe_dof) >=
+                permutation->forward.size()) {
+            return INVALID_GLOBAL_INDEX;
+        }
+        return permutation->forward[static_cast<std::size_t>(fe_dof)];
+    };
+
+    const auto rowHasNonzeroInBackendColumns =
+        [&](GlobalIndex fe_row, std::span<const GlobalIndex> backend_cols) {
+            for (const auto backend_col : backend_cols) {
+                const auto fe_col = backendToFe(backend_col);
+                if (fe_col < 0 || fe_col >= matrix.numCols()) {
+                    continue;
+                }
+                // Exact comparison is intentional. Small-cut mass is physical,
+                // and a non-finite entry is not an empty row to regularize away.
+                if (matrix.getEntry(fe_row, fe_col) != Real{0.0}) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+    const auto rowIsExactlyEmpty = [&](GlobalIndex fe_row) {
+        if (distributed != nullptr && distributed->isFinalized()) {
+            const auto backend_row = feToBackend(fe_row);
+            if (backend_row >= 0) {
+                if (distributed->ownsRow(backend_row)) {
+                    const auto local_row =
+                        backend_row - distributed->ownedRows().first;
+
+                    const auto local_diag_cols =
+                        distributed->getRowDiagCols(local_row);
+                    for (const auto local_col : local_diag_cols) {
+                        const auto backend_col =
+                            distributed->ownedCols().first + local_col;
+                        const auto fe_col = backendToFe(backend_col);
+                        if (fe_col >= 0 && fe_col < matrix.numCols() &&
+                            matrix.getEntry(fe_row, fe_col) != Real{0.0}) {
+                            return false;
+                        }
+                    }
+
+                    const auto local_offdiag_cols =
+                        distributed->getRowOffdiagCols(local_row);
+                    for (const auto local_col : local_offdiag_cols) {
+                        const auto backend_col =
+                            distributed->ghostColToGlobal(local_col);
+                        const auto fe_col = backendToFe(backend_col);
+                        if (fe_col >= 0 && fe_col < matrix.numCols() &&
+                            matrix.getEntry(fe_row, fe_col) != Real{0.0}) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+
+                const auto local_ghost_row =
+                    distributed->globalToGhostRow(backend_row);
+                if (local_ghost_row >= 0) {
+                    return !rowHasNonzeroInBackendColumns(
+                        fe_row,
+                        distributed->getGhostRowCols(local_ghost_row));
+                }
+            }
+        } else {
+            const auto& pattern = system.sparsity(op);
+            if (pattern.isFinalized() && fe_row < pattern.numRows()) {
+                for (const auto col : pattern.getRowSpan(fe_row)) {
+                    if (col >= 0 && col < matrix.numCols() &&
+                        matrix.getEntry(fe_row, col) != Real{0.0}) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+
+        // A distributed pattern may not retain a particular non-owned row.
+        // The startup solve is performed only once, so prefer a complete
+        // numerical scan over guessing from the diagonal in that rare case.
+        for (GlobalIndex col = 0; col < matrix.numCols(); ++col) {
+            if (matrix.getEntry(fe_row, col) != Real{0.0}) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    for (const auto dof : owned_dofs) {
+        if (dof < 0 || dof >= matrix.numRows() || dof >= matrix.numCols()) {
+            continue;
+        }
+        // A zero diagonal alone does not imply an algebraic row: mixed and
+        // cross-field differential operators can have a valid mass equation
+        // entirely in off-diagonal blocks. Regularize only a numerically empty
+        // row, retaining every exact nonzero regardless of magnitude.
+        if (matrix.getEntry(dof, dof) == Real{0.0} &&
+            rowIsExactlyEmpty(dof)) {
+            zero_rows.push_back(dof);
+        }
+    }
+    return zero_rows;
+}
+
+void logFirstOrderRateInitializationResult(
+    const backends::SolverReport& report,
+    bool accepted,
+    std::size_t exact_zero_mass_rows,
+    Real rate_norm,
+    std::string_view fallback_reason)
+{
+    std::ostringstream oss;
+    oss << "TimeLoop: first-order rate initialization"
+        << " diagnostic=timeloop_first_order_rate_initialization"
+        << " method=selective_term_linearized_rate_solve"
+        << " accepted=" << (accepted ? 1 : 0)
+        << " exact_zero_mass_owned_rows_regularized=" << exact_zero_mass_rows
+        << " linear_converged=" << (report.converged ? 1 : 0)
+        << " linear_iterations=" << report.iterations
+        << " initial_residual_norm=" << report.initial_residual_norm
+        << " final_residual_norm=" << report.final_residual_norm
+        << " relative_residual=" << report.relative_residual
+        << " rate_norm=" << rate_norm
+        << " fallback_reason='" << fallback_reason << "'";
+    FE_LOG_INFO(oss.str());
+}
+
 void copyVector(backends::GenericVector& dst, const backends::GenericVector& src)
 {
     auto d = dst.localSpan();
@@ -139,6 +325,44 @@ void copyVector(backends::GenericVector& dst, const backends::GenericVector& src
     FE_CHECK_ARG(d.size() == s.size(), "TimeLoop: vector size mismatch");
     std::copy(s.begin(), s.end(), d.begin());
 }
+
+/**
+ * Roll back optional rate vectors unless the enclosing step attempt commits.
+ *
+ * Generalized-alpha and structural schemes update uDot/uDDot while forming a
+ * converged candidate.  Acceptance callbacks and adaptive controllers run
+ * after that update and can still reject the candidate.  `u()` is reset from
+ * accepted solution history on the next attempt, but rate vectors have no
+ * equivalent history slot, so they require an explicit transaction guard.
+ */
+class AttemptRateStateGuard {
+public:
+    AttemptRateStateGuard(TimeHistory& history,
+                          const backends::BackendFactory& factory,
+                          TimeHistory::RateStateSnapshot& snapshot)
+        : history_(history)
+        , snapshot_(snapshot)
+    {
+        history_.snapshotRateState(snapshot_, factory);
+    }
+
+    AttemptRateStateGuard(const AttemptRateStateGuard&) = delete;
+    AttemptRateStateGuard& operator=(const AttemptRateStateGuard&) = delete;
+
+    ~AttemptRateStateGuard() noexcept
+    {
+        if (!committed_) {
+            history_.restoreRateState(snapshot_);
+        }
+    }
+
+    void commit() noexcept { committed_ = true; }
+
+private:
+    TimeHistory& history_;
+    TimeHistory::RateStateSnapshot& snapshot_;
+    bool committed_{false};
+};
 
 systems::SystemStateView makeAcceptedTimeStepStateView(const TimeHistory& history,
                                                        double solve_time)
@@ -155,6 +379,32 @@ systems::SystemStateView makeAcceptedTimeStepStateView(const TimeHistory& histor
     state.u_prev_vector = &history.uPrev();
     state.u_prev2_vector = &history.uPrev2();
     state.u_history = history.uHistorySpans();
+    state.dt_history = history.dtHistory();
+    return state;
+}
+
+systems::SystemStateView makeRestoredTimeStepStateView(
+    const TimeHistory& history,
+    double accepted_time,
+    double attempted_dt)
+{
+    systems::SystemStateView state;
+    state.time = accepted_time;
+    state.dt = history.dtPrev() > 0.0 ? history.dtPrev() : attempted_dt;
+    state.effective_dt = state.dt;
+    state.dt_prev = history.dtHistory().size() > 1u
+                        ? history.dtHistory()[1]
+                        : state.dt;
+    state.u = history.uPrevSpan();
+    state.u_prev = history.uPrev2Span();
+    state.u_prev2 = history.historyDepth() >= 3
+                        ? history.uPrevKSpan(3)
+                        : history.uPrev2Span();
+    state.u_vector = &history.uPrev();
+    state.u_prev_vector = &history.uPrev2();
+    state.u_prev2_vector = history.historyDepth() >= 3
+                               ? &history.uPrevK(3)
+                               : &history.uPrev2();
     state.dt_history = history.dtHistory();
     return state;
 }
@@ -447,6 +697,21 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     newton.allocateWorkspace(transient.system(), factory, workspace);
     MultiStageSolver stages(newton);
 
+    // Interface-tracking constraints can change their slave/master topology
+    // between steps, which re-augments the system sparsity patterns. The
+    // workspace Jacobian was allocated from the setup-time pattern; backends
+    // with immutable stored patterns (Eigen CSR) silently drop writes outside
+    // it, so the matrix must be reallocated whenever the pattern revision moves.
+    std::uint64_t workspace_sparsity_revision = transient.system().sparsityPatternRevision();
+    auto ensure_workspace_matches_sparsity = [&]() {
+        const auto revision = transient.system().sparsityPatternRevision();
+        if (revision == workspace_sparsity_revision) {
+            return;
+        }
+        newton.allocateWorkspace(transient.system(), factory, workspace);
+        workspace_sparsity_revision = revision;
+    };
+
     // Ensure time-history vectors use the same backend layout as the solver workspace.
     // For backends like FSILS, vectors created before any matrix exists may not share
     // the matrix's internal ordering, which would corrupt updates like u <- u - du.
@@ -484,9 +749,12 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     auto scratch_vec0 = factory.createVector(n_dofs);
     auto scratch_vec1 = factory.createVector(n_dofs);
     auto scratch_vec2 = factory.createVector(n_dofs);
+    auto generalized_alpha_rate_n = factory.createVector(n_dofs);
     FE_CHECK_NOT_NULL(scratch_vec0.get(), "TimeLoop scratch_vec0");
     FE_CHECK_NOT_NULL(scratch_vec1.get(), "TimeLoop scratch_vec1");
     FE_CHECK_NOT_NULL(scratch_vec2.get(), "TimeLoop scratch_vec2");
+    FE_CHECK_NOT_NULL(generalized_alpha_rate_n.get(),
+                      "TimeLoop generalized-alpha rate_n scratch");
 
     auto dt12_nohistory = std::make_shared<const Dt12NoHistoryIntegrator>();
 
@@ -972,6 +1240,12 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
         const bool use_stage_gauss_seidel =
             (options_.collocation_solve == CollocationSolveStrategy::StageGaussSeidel);
+        FE_THROW_IF(!use_stage_gauss_seidel &&
+                        !options_.newton.field_residual_criteria.empty(),
+                    InvalidArgumentException,
+                    "TimeLoop: monolithic collocation does not support "
+                    "Newton field_residual_criteria; use the "
+                    "StageGaussSeidel collocation solve strategy");
 
         ensureCollocationWorkspace(method.stages, /*need_block_system=*/!use_stage_gauss_seidel);
 
@@ -1661,6 +1935,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     const bool adaptive = static_cast<bool>(options_.step_controller);
     const int max_retries = adaptive ? std::max(0, options_.step_controller->maxRetries()) : 0;
     double dt_next = options_.dt;
+    // Reused by every attempt. Once rate state exists, this owns at most one
+    // checkpoint vector per rate, so adaptive runs pay O(n_dofs) copies but no
+    // per-step backend-vector allocation.
+    TimeHistory::RateStateSnapshot attempt_rate_state_snapshot;
 
     auto adjustStepToFinalInterval = [&](double time, double candidate_dt) {
         double dt_adjusted = candidate_dt;
@@ -1739,6 +2017,13 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
         NewtonReport nr;
 
         for (int attempt = 0; attempt <= max_retries; ++attempt) {
+            // Candidate-rate updates are transactional until this attempt
+            // reaches the irreversible system/history acceptance boundary.
+            // Every earlier continue/return/throw path restores both values
+            // and allocation state automatically.
+            AttemptRateStateGuard attempt_rate_state(
+                history, factory, attempt_rate_state_snapshot);
+
             const double remaining = t_end - t;
             if (options_.adjust_last_step) {
                 if (remaining <= time_tol) {
@@ -1766,6 +2051,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 FE_THROW_IF(!moving_domain_ok, FEException,
                             "TimeLoop: before-physics-solve callback rejected the step");
             }
+            ensure_workspace_matches_sparsity();
             transient.system().beginTimeStep();
 
             int scheme_order = 0;
@@ -1776,6 +2062,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             CollocationFamily collocation_family_used = CollocationFamily::Gauss;
             std::optional<double> monolithic_aux_stage_alpha_f{};
             int collocation_stages_used = 0;
+            bool generalized_alpha_first_order_rate_n_saved = false;
 
             bool threw = false;
             std::exception_ptr caught_exception{};
@@ -1895,9 +2182,13 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                        const bool had_u_dot = history.hasUDotState();
 	                        history.ensureSecondOrderState(factory);
                         if (!had_u_dot) {
-                            // Compute a PDE-consistent initial uDot by solving a transient linear system for
-                            // the time-derivative fields at the stage time. This avoids the degenerate uDot=0
-                            // initialization that can remove inertia from the first residual evaluation.
+                            // Compute an optional linearized initial-rate estimate by separating compiled
+                            // terms tagged with a time derivative from terms without one. For a separable
+                            // first-order residual M*dt(u) + F(u), this is the usual consistent-rate mass
+                            // solve. A nonlinear term that nests dt(u) with spatial state remains one tagged
+                            // term, so this construction is deliberately an estimate rather than an exact
+                            // nonlinear DAE consistency solve. It still avoids the degenerate uDot=0 startup
+                            // for supported transient formulations.
                             history.uDot().zero();
 
                             if (!options_.initialize_first_order_rate_from_pde) {
@@ -1908,22 +2199,41 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                     /*overwrite_u_dot=*/true,
                                     /*overwrite_u_ddot=*/false);
                             } else if (!dt_fields.empty()) {
-                                const double stage_time = t + ga1_params->alpha_f * dt;
-                                sys.updateConstraints(stage_time, dt);
+                                // Initial consistency is an equation for
+                                // uDot_n at the accepted state u_n. Explicit
+                                // forcing and time-dependent constraints must
+                                // therefore be evaluated at t_n, not at the
+                                // subsequent generalized-alpha stage time.
+                                const double initialization_time = t;
+                                sys.updateConstraints(initialization_time, dt);
+                                ensure_workspace_matches_sparsity();
                                 sys.beginTimeStep();
                                 const auto init_dirichlet_dofs = setLinearDirichletDofs(linear, constraints);
 
                                 systems::SystemStateView init_state{};
-                                init_state.time = stage_time;
+                                init_state.time = initialization_time;
                                 init_state.dt = dt;
                                 init_state.dt_prev = history.dtPrev();
                                 init_state.u = history.uSpan();
                                 init_state.u_prev = history.uPrevSpan();
-                                init_state.u_prev2 = history.uPrev2Span();
+                                // GeneralizedAlphaFirstOrderIntegrator with
+                                // history_rate_order==0 reserves history slot 2
+                                // for the injected rate uDot^n.  The regular
+                                // displacement history must not be exposed in
+                                // that slot while constructing or assembling
+                                // the initialization operator.
+                                init_state.u_prev2 = history.uDotSpan();
                                 init_state.u_vector = &history.u();
                                 init_state.u_prev_vector = &history.uPrev();
-                                init_state.u_prev2_vector = &history.uPrev2();
-                                init_state.u_history = history.uHistorySpans();
+                                init_state.u_prev2_vector = &history.uDot();
+                                std::vector<std::span<const Real>> init_u_history(
+                                    history.uHistorySpans().begin(),
+                                    history.uHistorySpans().end());
+                                FE_THROW_IF(init_u_history.size() < 2u,
+                                            systems::InvalidStateException,
+                                            "TimeLoop: first-order generalized-alpha rate initialization requires two history slots");
+                                init_u_history[1] = history.uDotSpan();
+                                init_state.u_history = init_u_history;
                                 init_state.dt_history = history.dtHistory();
 
                                 auto ctx_base = generalized_alpha_fo->buildContext(temporal_order, init_state);
@@ -1933,7 +2243,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                 const bool can_solve = (dt1 != nullptr) && std::isfinite(c) && (std::abs(c) > 0.0);
 
                                 if (can_solve) {
-                                    // Assemble non-dt residual r(u) with dt terms disabled.
+                                    // Assemble the residual from compiled terms that contain no dt terminal.
                                     assembly::TimeIntegrationContext ctx_non_dt = ctx_base;
                                     ctx_non_dt.time_derivative_term_weight = 0.0;
                                     ctx_non_dt.non_time_derivative_term_weight = 1.0;
@@ -1952,7 +2262,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                     FE_THROW_IF(!ar_r.success, FEException,
                                                 "TimeLoop: uDot initialization residual assembly failed: " + ar_r.error_message);
 
-                                    // Assemble dt-only Jacobian A with dt terms enabled and dt-free terms disabled.
+                                    // Assemble the Jacobian of compiled terms tagged with a dt terminal, with
+                                    // all untagged terms disabled.
                                     assembly::TimeIntegrationContext ctx_dt_only = ctx_base;
                                     ctx_dt_only.time_derivative_term_weight = 1.0;
                                     ctx_dt_only.non_time_derivative_term_weight = 0.0;
@@ -1971,9 +2282,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                     FE_THROW_IF(!ar_A.success, FEException,
                                                 "TimeLoop: uDot initialization matrix assembly failed: " + ar_A.error_message);
 
-                                    // Build RHS b = -c * r_non_dt so that:
-                                    //   (c*M) * uDot = -c * r_non_dt  =>  M * uDot = -r_non_dt
-                                    // which matches the PDE-consistent initial rate for first-order systems.
+                                    // Build RHS b = -c * r_non_dt. For a separable residual this gives
+                                    //   (c*M) * uDot = -c * F(u)  =>  M * uDot = -F(u).
+                                    // Mixed nonlinear dt terms instead produce the documented linearized
+                                    // startup estimate.
                                     auto& b = *scratch_vec1;
                                     copyVector(b, r_non_dt);
                                     b.scale(static_cast<Real>(-c));
@@ -1989,6 +2301,44 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                         A_mod->beginAssemblyPhase();
                                         A_mod->zeroRows(nondt_dofs, /*set_diagonal=*/true);
                                         A_mod->finalizeAssembly();
+                                    }
+
+                                    // Cut-domain differential fields are
+                                    // field-wide in the symbolic dt scan, but
+                                    // their mass operator is present only on
+                                    // the retained physical side.  Rows on
+                                    // the complementary side are exact zeros
+                                    // in this dt-only initialization problem.
+                                    // They represent no rate equation; make
+                                    // those rates homogeneous instead of
+                                    // passing a singular matrix to the linear
+                                    // backend.  The subsequent monolithic
+                                    // stage still solves their algebraic
+                                    // extension equations normally.
+                                    const auto exact_zero_mass_dofs =
+                                        collectOwnedExactZeroMassRows(
+                                            sys,
+                                            A,
+                                            options_.newton.jacobian_op);
+                                    if (!exact_zero_mass_dofs.empty()) {
+                                        auto b_zero = b.createAssemblyView();
+                                        FE_CHECK_NOT_NULL(
+                                            b_zero.get(),
+                                            "TimeLoop: uDot zero-mass rhs view");
+                                        b_zero->beginAssemblyPhase();
+                                        b_zero->zeroVectorEntries(
+                                            exact_zero_mass_dofs);
+                                        b_zero->finalizeAssembly();
+
+                                        auto A_zero = A.createAssemblyView();
+                                        FE_CHECK_NOT_NULL(
+                                            A_zero.get(),
+                                            "TimeLoop: uDot zero-mass matrix view");
+                                        A_zero->beginAssemblyPhase();
+                                        A_zero->zeroRows(
+                                            exact_zero_mass_dofs,
+                                            /*set_diagonal=*/true);
+                                        A_zero->finalizeAssembly();
                                     }
 
                                     // Solve A * uDot = b.
@@ -2024,9 +2374,14 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                         rep = linear.solve(A, history.uDot(), b);
                                     } catch (const std::exception&) {
                                         rep.converged = false;
+                                        rep.message = "linear_solve_exception";
                                     }
 
-                                    bool accept_udot_init_solve = rep.converged;
+                                    const Real solved_rate_norm = history.uDot().norm();
+                                    bool accept_udot_init_solve =
+                                        rep.converged &&
+                                        std::isfinite(
+                                            static_cast<double>(solved_rate_norm));
                                     if (!accept_udot_init_solve &&
                                         std::isfinite(rep.initial_residual_norm) &&
                                         std::isfinite(rep.final_residual_norm)) {
@@ -2057,7 +2412,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                         }
 
                                         accept_udot_init_solve =
-                                            meets_requested_target || meets_nonlinear_floor;
+                                            std::isfinite(static_cast<double>(
+                                                solved_rate_norm)) &&
+                                            (meets_requested_target ||
+                                             meets_nonlinear_floor);
                                     }
 
                                     if (!accept_udot_init_solve) {
@@ -2071,6 +2429,16 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                     } else {
                                         rep.converged = true;
                                     }
+                                    logFirstOrderRateInitializationResult(
+                                        rep,
+                                        accept_udot_init_solve,
+                                        exact_zero_mass_dofs.size(),
+                                        history.uDot().norm(),
+                                        accept_udot_init_solve
+                                            ? "none"
+                                            : (rep.message.empty()
+                                                   ? "linear_solve_not_accepted"
+                                                   : rep.message));
                                 } else {
                                     (void)utils::initializeSecondOrderStateFromDisplacementHistory(
                                         history,
@@ -2084,7 +2452,24 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                        if (!nondt_dofs.empty()) {
 	                            zeroVectorEntries(nondt_dofs, history.uDot());
 	                        }
-	                        if (!constraints.empty()) {
+	                        // Keep the constraint-consistent rate history at strong-Dirichlet
+	                        // DOFs on stage entry. Zeroing here hands the stage solve an
+	                        // injected wall rate of 0 instead of the discrete g_dot carried by
+	                        // the end-of-step update, so the alpha_m-weighted mass term sees a
+	                        // spurious wall acceleration and pumps a y-alternating velocity
+	                        // error into the first interior cell row for moving-wall data
+	                        // (open-vessel MMS sawtooth; constant Dirichlet data is unaffected
+	                        // because its finite-difference rate is already zero). True MPC
+	                        // slave rates stay consistent without redistribution because the
+	                        // rate update is linear in the values.
+	                        // The one exception is first-rate initialization: the
+	                        // linearized uDot solve writes Dirichlet-row artifacts
+	                        // (~ -c * r at constrained rows, growing as 1/dt) into the
+	                        // constrained entries, which must be sanitized before the first
+	                        // stage solve or Newton stalls (seen on MMS nx16 dt=0.01). Set
+	                        // SVMP_ZERO_CONSTRAINED_RATES=1 to restore zeroing on every step.
+	                        if (!constraints.empty() &&
+	                            (!had_u_dot || zeroConstrainedRatesRequested())) {
 	                            constraints.distributeHomogeneous(history.uDot());
 	                        }
 
@@ -2150,6 +2535,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             const double c_old = (1.0 - gamma) / gamma;
                             auto v = history.uDotSpan();
                             FE_CHECK_ARG(v.size() == cur.size(), "TimeLoop: generalized-alpha uDot size mismatch");
+	                            copyVector(*generalized_alpha_rate_n,
+	                                       history.uDot());
+	                            generalized_alpha_first_order_rate_n_saved =
+	                                true;
 	                            for (std::size_t i = 0; i < cur.size(); ++i) {
 	                                const Real v_n = v[i];
 	                                v[i] = static_cast<Real>(inv_gamma_dt) * (cur[i] - prev[i]) -
@@ -2669,11 +3058,59 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 return info;
             };
 
+            using StateSyncPoint =
+                NewtonOptions::StateSynchronizationPoint;
+            auto restoreAcceptedGeneratedState = [&]() {
+                if (!options_.newton.synchronize_state) {
+                    return;
+                }
+
+                // A nonlinear stage, candidate callback, or adaptive decision
+                // may have left generated quadrature/curvature/active-set data
+                // at a speculative state.  Rebuild it from u_n before retry or
+                // terminal rejection.  The first callback may reconstruct
+                // state-dependent constraints; project the already accepted
+                // state at its own time before regenerating dependent data.
+                auto restored_state = makeRestoredTimeStepStateView(
+                    history, t, dt);
+                options_.newton.synchronize_state(
+                    restored_state,
+                    StateSyncPoint::RestoredTimeStepState);
+
+                const double accepted_dt =
+                    history.dtPrev() > 0.0 ? history.dtPrev() : dt;
+                transient.system().updateConstraints(t, accepted_dt);
+                ensure_workspace_matches_sparsity();
+                history.updateGhosts();
+                if (!transient.system().constraints().empty()) {
+                    transient.system().constraints().updateGhostsAndDistribute(
+                        history.uPrev());
+                }
+
+                restored_state = makeRestoredTimeStepStateView(
+                    history, t, dt);
+                options_.newton.synchronize_state(
+                    restored_state,
+                    StateSyncPoint::RestoredProjectedTimeStepState);
+            };
+
             bool accept_step = nr.converged;
 
             if (accept_step) {
-                if (callbacks.on_before_step_accept &&
-                    !callbacks.on_before_step_accept(history, nr)) {
+                bool before_step_accept = true;
+                if (callbacks.on_before_step_accept) {
+                    try {
+                        before_step_accept =
+                            callbacks.on_before_step_accept(history, nr);
+                    } catch (...) {
+                        const auto callback_failure =
+                            std::current_exception();
+                        restoreAcceptedGeneratedState();
+                        std::rethrow_exception(callback_failure);
+                    }
+                }
+                if (!before_step_accept) {
+                    restoreAcceptedGeneratedState();
                     if (callbacks.on_step_rejected) {
                         callbacks.on_step_rejected(
                             history, StepRejectReason::ErrorTooLarge, nr);
@@ -2729,6 +3166,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
                     const auto decision = options_.step_controller->onAccepted(info);
                     if (!decision.accept) {
+                        restoreAcceptedGeneratedState();
                         if (callbacks.on_step_rejected) {
                             callbacks.on_step_rejected(
                                 history, StepRejectReason::ErrorTooLarge, nr);
@@ -2780,66 +3218,6 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     }
                     if (decision.next_order > 0) {
                         order_next = decision.next_order;
-                    }
-                }
-
-                if (!nr.converged && options_.scheme == SchemeKind::GeneralizedAlpha) {
-                    const int temporal_order = transient.system().temporalOrder();
-                    if (temporal_order <= 1) {
-                        FE_THROW_IF(!ga1_params.has_value(), systems::InvalidStateException,
-                                    "TimeLoop: generalized-alpha parameters not initialized");
-                        history.ensureSecondOrderState(factory);
-
-                        const auto dt_fields =
-                            transient.system().timeDerivativeFields(options_.newton.jacobian_op);
-                        const auto nondt_dofs =
-                            collectNonTimeDerivativeDofs(transient.system(), dt_fields);
-
-                        const double inv_af = 1.0 / ga1_params->alpha_f;
-                        const double c_prev = (ga1_params->alpha_f - 1.0) * inv_af;
-                        if (!nondt_dofs.empty()) {
-                            copyVector(*scratch_vec0, history.u());
-                        }
-                        auto cur = history.uSpan();
-                        const auto prev = history.uPrevSpan();
-                        FE_CHECK_ARG(cur.size() == prev.size(), "TimeLoop: generalized-alpha size mismatch");
-                        for (std::size_t i = 0; i < cur.size(); ++i) {
-                            cur[i] = static_cast<Real>(inv_af) * cur[i] + static_cast<Real>(c_prev) * prev[i];
-                        }
-                        if (!nondt_dofs.empty()) {
-                            copyVectorEntries(nondt_dofs, history.u(), *scratch_vec0);
-                        }
-
-                        const double gamma = ga1_params->gamma;
-                        const double inv_gamma_dt = 1.0 / (gamma * dt);
-                        const double c_old = (1.0 - gamma) / gamma;
-                        auto v = history.uDotSpan();
-                        FE_CHECK_ARG(v.size() == cur.size(), "TimeLoop: generalized-alpha uDot size mismatch");
-                        for (std::size_t i = 0; i < cur.size(); ++i) {
-                            const Real v_n = v[i];
-                            v[i] = static_cast<Real>(inv_gamma_dt) * (cur[i] - prev[i]) -
-                                static_cast<Real>(c_old) * v_n;
-                        }
-                        if (!nondt_dofs.empty()) {
-                            zeroVectorEntries(nondt_dofs, history.uDot());
-                        }
-                        const auto& sys_constraints = transient.system().constraints();
-                        if (!sys_constraints.empty()) {
-                            sys_constraints.distributeHomogeneous(history.uDot());
-                        }
-                        monolithic_aux_stage_alpha_f = ga1_params->alpha_f;
-                    } else if (temporal_order == 2) {
-                        FE_THROW_IF(!ga2_params.has_value(), systems::InvalidStateException,
-                                    "TimeLoop: generalized-alpha parameters not initialized");
-                        const double inv_af = 1.0 / ga2_params->alpha_f;
-                        const double c_prev = (ga2_params->alpha_f - 1.0) * inv_af;
-                        auto cur = history.uSpan();
-                        const auto u_n = history.uPrevSpan();
-                        FE_CHECK_ARG(cur.size() == u_n.size(), "TimeLoop: generalized-alpha(2nd-order) size mismatch");
-                        for (std::size_t i = 0; i < cur.size(); ++i) {
-                            cur[i] = static_cast<Real>(inv_af) * cur[i] + static_cast<Real>(c_prev) * u_n[i];
-                        }
-                        monolithic_aux_stage_alpha_f = ga2_params->alpha_f;
                     }
                 }
 
@@ -2968,156 +3346,188 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     }
                 }
 
-                const bool needs_final_state_commit =
+                const bool needs_endpoint_finalization =
                     (options_.scheme == SchemeKind::GeneralizedAlpha) ||
                     (used_collocation && collocation_family_used == CollocationFamily::Gauss);
 
-                if (needs_final_state_commit) {
-                    // Ensure stateful kernels (MaterialStateProvider / GlobalKernelStateProvider) are committed
-                    // for the accepted end-of-step state at t_{n+1}, even when the scheme's nonlinear solve was
-                    // performed at an intermediate stage time (e.g., generalized-α, Gauss collocation).
-                    updateGhostsAndDistributeHistory(transient.system().constraints(), history);
-
-                    // Save displacement history since we overwrite the first two slots with
-                    // end-state constants for dt(u) and dt(u,2).
-                    copyVector(*scratch_vec1, history.uPrev());
-                    copyVector(*scratch_vec2, history.uPrev2());
-
-                    struct RestoreGuard {
-                        TimeHistory& history;
-                        backends::GenericVector& saved_prev;
-                        backends::GenericVector& saved_prev2;
-                        ~RestoreGuard()
-                        {
-                            copyVector(history.uPrev(), saved_prev);
-                            copyVector(history.uPrev2(), saved_prev2);
-                        }
-                    } restore{history, *scratch_vec1, *scratch_vec2};
-
-                    const auto u_np1 = history.uSpan();
-                    auto u_prev = history.uPrev().localSpan();
-                    auto u_prev2 = history.uPrev2().localSpan();
-
-                    if (temporal_order == 1) {
-                        auto dt_u_dot = scratch_vec0->localSpan();
-                        FE_CHECK_ARG(dt_u_dot.size() == u_np1.size(), "TimeLoop: dt*uDot scratch size mismatch");
-                        std::fill(dt_u_dot.begin(), dt_u_dot.end(), static_cast<Real>(0.0));
-
-                        if (options_.scheme == SchemeKind::GeneralizedAlpha) {
-                            // Use the stored uDot_{n+1} to build a BDF1-consistent end-state history:
-                            // dt(u) = (u_{n+1} - u_prev)/dt  =>  u_prev = u_{n+1} - dt*uDot_{n+1}.
-                            FE_THROW_IF(!history.hasUDotState(), systems::InvalidStateException,
-                                        "TimeLoop: missing uDot for generalized-alpha final-state commit");
-                            const auto v_np1 = history.uDotSpan();
-                            FE_CHECK_ARG(v_np1.size() == dt_u_dot.size(), "TimeLoop: generalized-alpha uDot size mismatch");
-                            for (std::size_t k = 0; k < dt_u_dot.size(); ++k) {
-                                dt_u_dot[k] = static_cast<Real>(dt) * v_np1[k];
-                            }
-                        } else if (used_collocation && collocation_family_used == CollocationFamily::Gauss) {
-                            const auto& method = getCollocationMethod(collocation_family_used, collocation_stages_used);
-                            FE_THROW_IF(method.stages != collocation_stages_used, systems::InvalidStateException,
-                                        "TimeLoop: collocation stages mismatch on final-state commit");
-
-                            std::vector<double> nodes;
-                            nodes.reserve(static_cast<std::size_t>(method.stages + 1));
-                            nodes.push_back(0.0);
-                            for (int j = 0; j < method.stages; ++j) {
-                                nodes.push_back(method.c[static_cast<std::size_t>(j)]);
-                            }
-
-                            const auto w = math::finiteDifferenceWeights(/*derivative_order=*/1, /*x0=*/1.0, nodes);
-                            FE_THROW_IF(static_cast<int>(w.size()) != method.stages + 1, systems::InvalidStateException,
-                                        "TimeLoop: collocation end-derivative weight mismatch");
-
-                            const auto u_n = history.uPrevSpan();
-                            FE_CHECK_ARG(u_n.size() == dt_u_dot.size(), "TimeLoop: collocation u_n size mismatch");
-                            for (std::size_t k = 0; k < dt_u_dot.size(); ++k) {
-                                dt_u_dot[k] += static_cast<Real>(w[0]) * u_n[k];
-                            }
-
-                            const auto U_all = collocation.stage_values->localSpan();
-                            FE_CHECK_ARG(U_all.size() == static_cast<std::size_t>(method.stages) * static_cast<std::size_t>(n_dofs),
-                                         "TimeLoop: collocation stage_values size mismatch on final-state commit");
-                            for (int j = 0; j < method.stages; ++j) {
-                                const double cj = w[static_cast<std::size_t>(j + 1)];
-                                const auto Uj = U_all.subspan(static_cast<std::size_t>(j) * static_cast<std::size_t>(n_dofs),
-                                                              static_cast<std::size_t>(n_dofs));
-                                for (std::size_t k = 0; k < dt_u_dot.size(); ++k) {
-                                    dt_u_dot[k] += static_cast<Real>(cj) * Uj[k];
-                                }
-                            }
-                        } else {
-                            FE_THROW(NotImplementedException, "TimeLoop: missing dt*uDot end-state reconstruction");
-                        }
-
-                        FE_CHECK_ARG(u_prev.size() == u_np1.size(), "TimeLoop: u_prev size mismatch");
-                        for (std::size_t k = 0; k < u_prev.size(); ++k) {
-                            u_prev[k] = u_np1[k] - dt_u_dot[k];
-                        }
-                    } else if (temporal_order == 2) {
-                        FE_THROW_IF(!history.hasSecondOrderState(), systems::InvalidStateException,
-                                    "TimeLoop: missing (uDot,uDDot) for 2nd-order final-state commit");
-                        const auto v_np1 = history.uDotSpan();
-                        const auto a_np1 = history.uDDotSpan();
-                        FE_CHECK_ARG(v_np1.size() == u_np1.size(), "TimeLoop: uDot size mismatch on final-state commit");
-                        FE_CHECK_ARG(a_np1.size() == u_np1.size(), "TimeLoop: uDDot size mismatch on final-state commit");
-                        for (std::size_t k = 0; k < u_prev.size(); ++k) {
-                            u_prev[k] = u_np1[k] - static_cast<Real>(dt) * v_np1[k];
-                            u_prev2[k] = u_np1[k] - static_cast<Real>(2.0 * dt) * v_np1[k] +
-                                static_cast<Real>(dt * dt) * a_np1[k];
+                if (needs_endpoint_finalization) {
+                    // The nonlinear solve for generalized-alpha (and
+                    // non-endpoint Gauss collocation) leaves generated
+                    // state at an intermediate stage.  Refresh endpoint
+                    // topology first, apply its constraints to u_{n+1},
+                    // and only then regenerate curvature/extension data.
+                    // This occurs after all adaptive decisions and before
+                    // the first irreversible commit, so it executes once
+                    // for an accepted attempt and remains transactional.
+                    if (options_.newton.synchronize_state) {
+                        try {
+                            const auto endpoint_state =
+                                makeAcceptedTimeStepStateView(
+                                    history, t + dt);
+                            options_.newton.synchronize_state(
+                                endpoint_state,
+                                StateSyncPoint::EndpointCandidateState);
+                        } catch (...) {
+                            const auto endpoint_failure =
+                                std::current_exception();
+                            restoreAcceptedGeneratedState();
+                            std::rethrow_exception(endpoint_failure);
                         }
                     }
 
+                    transient.system().updateConstraints(t + dt, dt);
+                    ensure_workspace_matches_sparsity();
+                    history.updateGhosts();
+                    if (!transient.system().constraints().empty()) {
+                        // Do not apply endpoint-time inhomogeneities to
+                        // u_n/u_{n-1}; those vectors represent their own
+                        // accepted times.  Only the endpoint candidate is
+                        // projected here.
+                        transient.system().constraints().
+                            updateGhostsAndDistribute(history.u());
+                    }
+
+                    if (generalized_alpha_first_order_rate_n_saved) {
+                        FE_THROW_IF(
+                            !ga1_params.has_value() ||
+                                !history.hasUDotState(),
+                            systems::InvalidStateException,
+                            "TimeLoop: missing first-order generalized-alpha endpoint rate state");
+                        const double gamma = ga1_params->gamma;
+                        const double inv_gamma_dt = 1.0 / (gamma * dt);
+                        const double c_old = (1.0 - gamma) / gamma;
+                        const auto u_np1 = history.uSpan();
+                        const auto u_n = history.uPrevSpan();
+                        const auto rate_n =
+                            generalized_alpha_rate_n->localSpan();
+                        auto rate_np1 = history.uDotSpan();
+                        FE_CHECK_ARG(
+                            u_np1.size() == u_n.size() &&
+                                u_np1.size() == rate_n.size() &&
+                                u_np1.size() == rate_np1.size(),
+                            "TimeLoop: generalized-alpha endpoint rate reconstruction size mismatch");
+                        for (std::size_t i = 0; i < u_np1.size(); ++i) {
+                            rate_np1[i] =
+                                static_cast<Real>(inv_gamma_dt) *
+                                    (u_np1[i] - u_n[i]) -
+                                static_cast<Real>(c_old) * rate_n[i];
+                        }
+                        const auto dt_fields =
+                            transient.system().timeDerivativeFields(
+                                options_.newton.jacobian_op);
+                        const auto nondt_dofs =
+                            collectNonTimeDerivativeDofs(
+                                transient.system(), dt_fields);
+                        if (!nondt_dofs.empty()) {
+                            zeroVectorEntries(nondt_dofs,
+                                              history.uDot());
+                        }
+                    }
+
+                    if (options_.newton.synchronize_state) {
+                        try {
+                            const auto projected_endpoint_state =
+                                makeAcceptedTimeStepStateView(
+                                    history, t + dt);
+                            options_.newton.synchronize_state(
+                                projected_endpoint_state,
+                                StateSyncPoint::
+                                    ProjectedEndpointCandidateState);
+                        } catch (...) {
+                            const auto endpoint_failure =
+                                std::current_exception();
+                            restoreAcceptedGeneratedState();
+                            std::rethrow_exception(endpoint_failure);
+                        }
+                    }
                 }
 
-                    if (needs_final_state_commit) {
-                        transient.system().updateConstraints(t + dt, dt);
-                        updateGhostsAndDistributeHistory(
-                            transient.system().constraints(),
-                            history);
+                if (monolithic_aux_stage_alpha_f.has_value()) {
+                    const Real alpha_f = static_cast<Real>(*monolithic_aux_stage_alpha_f);
+                    const Real gamma =
+                        (ga1_params.has_value())
+                            ? static_cast<Real>(ga1_params->gamma)
+                            : Real(-1.0);
+                    transient.system().finalizeMonolithicAuxiliaryStageState(
+                        alpha_f,
+                        gamma,
+                        static_cast<Real>(dt),
+                        static_cast<Real>(t + dt));
+                }
+                const auto accepted_time_step_state =
+                    makeAcceptedTimeStepStateView(history, solve_time);
+                // acceptGeometricNonlinearityState() is the first
+                // irreversible acceptance operation: moving-mesh state
+                // may be committed, its rollback backup is released, and
+                // transaction callbacks may run.  All retry decisions are
+                // complete at this point.  From this boundary onward a
+                // fatal exception must retain the candidate rate state,
+                // rather than rolling rates back independently of an
+                // accepted or partially accepted system state.
+                attempt_rate_state.commit();
+                transient.system().acceptGeometricNonlinearityState(
+                    accepted_time_step_state,
+                    systems::GeometricNonlinearityUpdatePoint::AcceptedTimeStep);
+                transient.system().commitTimeStep();
+                history.acceptStep(dt);
+                if (temporal_order == 2 && options_.scheme == SchemeKind::VSVO_BDF && history.hasSecondOrderState()) {
+                    (void)utils::initializeSecondOrderStateFromDisplacementHistory(
+                        history,
+                        history.uDot().localSpan(),
+                        history.uDDot().localSpan(),
+                        /*overwrite_u_dot=*/true,
+                        /*overwrite_u_ddot=*/true);
+                    const auto& constraints = transient.system().constraints();
+                    if (!constraints.empty()) {
+                        constraints.distributeHomogeneous(history.uDot());
+                        constraints.distributeHomogeneous(history.uDDot());
                     }
+                }
+                if (callbacks.on_step_accepted) {
+                    callbacks.on_step_accepted(history);
+                }
 
-                    if (monolithic_aux_stage_alpha_f.has_value()) {
-                        const Real alpha_f = static_cast<Real>(*monolithic_aux_stage_alpha_f);
-                        const Real gamma =
-                            (ga1_params.has_value())
-                                ? static_cast<Real>(ga1_params->gamma)
-                                : Real(-1.0);
-                        transient.system().finalizeMonolithicAuxiliaryStageState(
-                            alpha_f,
-                            gamma,
-                            static_cast<Real>(dt),
-                            static_cast<Real>(t + dt));
+                // Interface-tracking MPC constraints (e.g. small-cut
+                // aggregation) re-classify their slave sets in the
+                // accepted-step refresh, which runs inside the
+                // on_step_accepted callback above. A DOF that changed
+                // status during this step carries a finite-difference rate
+                // polluted by the jump between its free trajectory and the
+                // extension trajectory scaled by 1/(gamma*dt); the
+                // alpha_m-weighted mass term broadcasts that pulse into
+                // neighboring momentum rows on the next stage solve, which
+                // shows up as a band-localized velocity-error floor under
+                // h- and dt-refinement (open-vessel MMS). Re-impose the
+                // constraint-consistent state on master-bearing lines
+                // only: values follow the extension, rates follow the
+                // masters' rates (the exact derivative of a constraint
+                // with time-constant coefficients). Dirichlet lines are
+                // untouched so their finite-difference rates keep carrying
+                // g_dot (see zeroConstrainedRatesRequested above).
+                if (!mpcAcceptedStateDistributeDisabled()) {
+                    const auto& accepted_constraints =
+                        transient.system().constraints();
+                    if (!accepted_constraints.empty() &&
+                        accepted_constraints.hasMasterBearingLines()) {
+                        history.updateGhosts();
+                        accepted_constraints.distributeMasterBearing(history.u());
+                        accepted_constraints.distributeMasterBearing(history.uPrev());
+                        if (history.hasUDotState()) {
+                            accepted_constraints.distributeMasterBearingHomogeneous(
+                                history.uDot());
+                        }
+                        if (history.hasUDDotState()) {
+                            accepted_constraints.distributeMasterBearingHomogeneous(
+                                history.uDDot());
+                        }
                     }
-                    const auto accepted_time_step_state =
-                        makeAcceptedTimeStepStateView(history, solve_time);
-                    transient.system().acceptGeometricNonlinearityState(
-                        accepted_time_step_state,
-                        systems::GeometricNonlinearityUpdatePoint::AcceptedTimeStep);
-	                transient.system().commitTimeStep();
-	                history.acceptStep(dt);
-	                if (temporal_order == 2 && options_.scheme == SchemeKind::VSVO_BDF && history.hasSecondOrderState()) {
-	                    (void)utils::initializeSecondOrderStateFromDisplacementHistory(
-	                        history,
-	                        history.uDot().localSpan(),
-	                        history.uDDot().localSpan(),
-	                        /*overwrite_u_dot=*/true,
-	                        /*overwrite_u_ddot=*/true);
-	                    const auto& constraints = transient.system().constraints();
-	                    if (!constraints.empty()) {
-	                        constraints.distributeHomogeneous(history.uDot());
-	                        constraints.distributeHomogeneous(history.uDDot());
-	                    }
-	                }
-	                if (callbacks.on_step_accepted) {
-	                    callbacks.on_step_accepted(history);
-	                }
-
+                }
                 accepted = true;
                 break;
             }
 
             if (!adaptive) {
+                restoreAcceptedGeneratedState();
                 if (threw && caught_exception) {
                     try {
                         std::rethrow_exception(caught_exception);
@@ -3129,6 +3539,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 FE_THROW(FEException, "TimeLoop: nonlinear solve did not converge");
             }
 
+            restoreAcceptedGeneratedState();
             if (callbacks.on_step_rejected) {
                 callbacks.on_step_rejected(history, StepRejectReason::NonlinearSolveFailed, nr);
             }
@@ -3141,6 +3552,22 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 report.steps_taken = step;
                 report.final_time = history.time();
                 report.message = decision.message.empty() ? "TimeLoop: step rejected" : decision.message;
+                // Adaptive retry policy must not erase the exception that made
+                // the nonlinear attempt fail.  Without this, an assembly or
+                // backend exception is reduced to the generic "nonlinear solve
+                // failed" message after the final retry, which makes a
+                // production failure impossible to diagnose from its log.
+                if (threw && caught_exception) {
+                    try {
+                        std::rethrow_exception(caught_exception);
+                    } catch (const std::exception& error) {
+                        report.message += " (exception: ";
+                        report.message += error.what();
+                        report.message += ")";
+                    } catch (...) {
+                        report.message += " (exception: non-standard exception)";
+                    }
+                }
                 return report;
             }
 

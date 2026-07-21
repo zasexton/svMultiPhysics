@@ -18,6 +18,7 @@
 
 #include <mpi.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -617,6 +618,45 @@ TEST(TrilinosBackendMPI, UpdateGhostsCopiesOwnedToGhost)
         ASSERT_LT(local_idx, cvs.size());
         EXPECT_NEAR(cvs[local_idx], owned_value, 1e-14);
     }
+}
+
+TEST(TrilinosBackendMPI, ZeroVectorEntriesIgnoresSynchronizedNonownedDofs)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr GlobalIndex n_global = 2;
+    auto factory = BackendFactory::create(BackendKind::Trilinos);
+    auto vector = factory->createVector(
+        /*local_size=*/1, n_global);
+    ASSERT_NE(vector, nullptr);
+    auto view = vector->createAssemblyView();
+    ASSERT_NE(view, nullptr);
+    view->beginAssemblyPhase();
+    view->addVectorEntry(
+        rank, Real{7.0}, assembly::AddMode::Insert);
+
+    const GlobalIndex nonowned = rank == 0 ? 1 : 0;
+    EXPECT_THROW(
+        view->addVectorEntry(
+            nonowned, Real{1.0}, assembly::AddMode::Insert),
+        NotImplementedException);
+
+    // ParallelConstraints retains both owned and ghost constraint lines on a
+    // rank. Residual cleanup must zero the owned entry and silently ignore the
+    // valid nonowned GID instead of treating cleanup as nonlocal assembly.
+    const std::array<GlobalIndex, 2> synchronized_constraints{0, 1};
+    EXPECT_NO_THROW(view->zeroVectorEntries(synchronized_constraints));
+    view->finalizeAssembly();
+
+    const auto local = vector->localSpan();
+    ASSERT_EQ(local.size(), 1u);
+    EXPECT_NEAR(local.front(), Real{0.0}, Real{1.0e-14});
 }
 
 TEST(TrilinosBackendMPI, DotAndNormMatchManualReduction)

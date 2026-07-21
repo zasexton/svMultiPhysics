@@ -140,6 +140,65 @@ void TimeHistory::ensureSecondOrderState(const backends::BackendFactory& factory
     u_ddot_->zero();
 }
 
+TimeHistory::RateStateSnapshot
+TimeHistory::snapshotRateState(const backends::BackendFactory& factory) const
+{
+    RateStateSnapshot snapshot;
+    snapshotRateState(snapshot, factory);
+    return snapshot;
+}
+
+void TimeHistory::snapshotRateState(RateStateSnapshot& snapshot,
+                                    const backends::BackendFactory& factory) const
+{
+    const auto size = u().size();
+    snapshot.had_u_dot = static_cast<bool>(u_dot_);
+    snapshot.had_u_ddot = static_cast<bool>(u_ddot_);
+
+    if (u_dot_) {
+        FE_THROW_IF(u_dot_->size() != size,
+                    InvalidArgumentException,
+                    "TimeHistory::snapshotRateState: uDot size must match u size");
+        if (!snapshot.u_dot || snapshot.u_dot->size() != size) {
+            snapshot.u_dot = cloneLike(factory, size);
+        }
+        // The time loop repacks history once after the backend matrix has
+        // established its distributed layout. Snapshot vectors come from that
+        // same factory, so backend-native copyFrom preserves the local/overlap
+        // layout and costs O(local_dofs). Do not use repackVector here: its
+        // global-DOF gather/insert path is intended for an actual layout
+        // conversion and is invalid or prohibitively expensive on distributed
+        // PETSc/Trilinos/FSILS vectors.
+        snapshot.u_dot->copyFrom(*u_dot_);
+    }
+    if (u_ddot_) {
+        FE_THROW_IF(u_ddot_->size() != size,
+                    InvalidArgumentException,
+                    "TimeHistory::snapshotRateState: uDDot size must match u size");
+        if (!snapshot.u_ddot || snapshot.u_ddot->size() != size) {
+            snapshot.u_ddot = cloneLike(factory, size);
+        }
+        snapshot.u_ddot->copyFrom(*u_ddot_);
+    }
+}
+
+void TimeHistory::restoreRateState(RateStateSnapshot& snapshot) noexcept
+{
+    u_dot_.swap(snapshot.u_dot);
+    u_ddot_.swap(snapshot.u_ddot);
+
+    // When a first attempt allocated rate vectors from an originally absent
+    // state, keep the candidate buffers in the reusable snapshot but restore
+    // absence in TimeHistory.  The reset may destroy an older snapshot buffer
+    // after the swap, but never allocates or throws.
+    if (!snapshot.had_u_dot) {
+        u_dot_.reset();
+    }
+    if (!snapshot.had_u_ddot) {
+        u_ddot_.reset();
+    }
+}
+
 backends::GenericVector& TimeHistory::u()
 {
     FE_CHECK_NOT_NULL(u_.get(), "TimeHistory::u");

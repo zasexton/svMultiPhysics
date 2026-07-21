@@ -24,6 +24,9 @@
 
 #include "Auxiliary/AuxiliaryModelBuilder.h"
 #include "Auxiliary/AuxiliaryModelDSL.h"
+#include "Auxiliary/AuxiliaryStateManager.h"
+#include "Assembly/CutIntegrationContext.h"
+#include "Constraints/SystemConstraint.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/TimeIntegrator.h"
@@ -35,25 +38,213 @@
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace ts_test = svmp::FE::timestepping::test;
 
 namespace {
 
+// Test-only contract wrapper for mesh fixtures whose coordinates,
+// connectivity, ownership, numbering, fields, and labels are immutable for
+// their entire lifetime.  This makes the revision-domain promise explicit
+// without teaching the generic lightweight mesh fixtures to claim tracking.
+class ImmutableRevisionTrackedMeshAccess final
+    : public svmp::FE::assembly::IMeshAccess {
+public:
+    explicit ImmutableRevisionTrackedMeshAccess(
+        std::shared_ptr<svmp::FE::assembly::IMeshAccess> mesh)
+        : mesh_(std::move(mesh))
+    {
+        if (!mesh_) {
+            throw std::runtime_error(
+                "ImmutableRevisionTrackedMeshAccess: mesh is null");
+        }
+    }
+
+    [[nodiscard]] svmp::FE::GlobalIndex numCells() const override
+    {
+        return mesh_->numCells();
+    }
+    [[nodiscard]] svmp::FE::GlobalIndex numOwnedCells() const override
+    {
+        return mesh_->numOwnedCells();
+    }
+    [[nodiscard]] svmp::FE::GlobalIndex numVertices() const override
+    {
+        return mesh_->numVertices();
+    }
+    [[nodiscard]] svmp::FE::GlobalIndex numOwnedVertices() const override
+    {
+        return mesh_->numOwnedVertices();
+    }
+    [[nodiscard]] svmp::FE::GlobalIndex numBoundaryFaces() const override
+    {
+        return mesh_->numBoundaryFaces();
+    }
+    [[nodiscard]] svmp::FE::GlobalIndex numInteriorFaces() const override
+    {
+        return mesh_->numInteriorFaces();
+    }
+    [[nodiscard]] int dimension() const override
+    {
+        return mesh_->dimension();
+    }
+
+    [[nodiscard]] bool revisionTrackingAvailable() const override
+    {
+        return true;
+    }
+    [[nodiscard]] std::uint64_t geometryRevision() const override { return 1u; }
+    [[nodiscard]] std::uint64_t topologyRevision() const override { return 1u; }
+    [[nodiscard]] std::uint64_t ownershipRevision() const override { return 1u; }
+    [[nodiscard]] std::uint64_t numberingRevision() const override { return 1u; }
+    [[nodiscard]] std::uint64_t fieldLayoutRevision() const override { return 1u; }
+    [[nodiscard]] std::uint64_t labelRevision() const override { return 1u; }
+    [[nodiscard]] std::uint64_t activeConfigurationEpoch() const override
+    {
+        return 0u;
+    }
+    [[nodiscard]] std::uint64_t coordinateConfigurationKey() const override
+    {
+        return 1u;
+    }
+    [[nodiscard]] bool cellIdsAreDense() const override
+    {
+        return mesh_->cellIdsAreDense();
+    }
+
+    [[nodiscard]] bool isOwnedCell(
+        svmp::FE::GlobalIndex cell_id) const override
+    {
+        return mesh_->isOwnedCell(cell_id);
+    }
+    [[nodiscard]] svmp::FE::ElementType getCellType(
+        svmp::FE::GlobalIndex cell_id) const override
+    {
+        return mesh_->getCellType(cell_id);
+    }
+    [[nodiscard]] int getCellGeometryOrder(
+        svmp::FE::GlobalIndex cell_id) const override
+    {
+        return mesh_->getCellGeometryOrder(cell_id);
+    }
+    [[nodiscard]] int getCellDomainId(
+        svmp::FE::GlobalIndex cell_id) const override
+    {
+        return mesh_->getCellDomainId(cell_id);
+    }
+    void getCellNodes(
+        svmp::FE::GlobalIndex cell_id,
+        std::vector<svmp::FE::GlobalIndex>& nodes) const override
+    {
+        mesh_->getCellNodes(cell_id, nodes);
+    }
+    [[nodiscard]] std::array<svmp::FE::Real, 3> getNodeCoordinates(
+        svmp::FE::GlobalIndex node_id) const override
+    {
+        return mesh_->getNodeCoordinates(node_id);
+    }
+    void getCellCoordinates(
+        svmp::FE::GlobalIndex cell_id,
+        std::vector<std::array<svmp::FE::Real, 3>>& coordinates) const override
+    {
+        mesh_->getCellCoordinates(cell_id, coordinates);
+    }
+    [[nodiscard]] bool supportsCoordinateFrame(
+        svmp::FE::assembly::CoordinateFrame frame) const override
+    {
+        return mesh_->supportsCoordinateFrame(frame);
+    }
+    void getCellCoordinates(
+        svmp::FE::GlobalIndex cell_id,
+        svmp::FE::assembly::CoordinateFrame frame,
+        std::vector<std::array<svmp::FE::Real, 3>>& coordinates) const override
+    {
+        mesh_->getCellCoordinates(cell_id, frame, coordinates);
+    }
+    [[nodiscard]] svmp::FE::LocalIndex getLocalFaceIndex(
+        svmp::FE::GlobalIndex face_id,
+        svmp::FE::GlobalIndex cell_id) const override
+    {
+        return mesh_->getLocalFaceIndex(face_id, cell_id);
+    }
+    [[nodiscard]] int getBoundaryFaceMarker(
+        svmp::FE::GlobalIndex face_id) const override
+    {
+        return mesh_->getBoundaryFaceMarker(face_id);
+    }
+    [[nodiscard]] std::pair<svmp::FE::GlobalIndex, svmp::FE::GlobalIndex>
+    getInteriorFaceCells(svmp::FE::GlobalIndex face_id) const override
+    {
+        return mesh_->getInteriorFaceCells(face_id);
+    }
+    void forEachCell(
+        std::function<void(svmp::FE::GlobalIndex)> callback) const override
+    {
+        mesh_->forEachCell(std::move(callback));
+    }
+    void forEachOwnedCell(
+        std::function<void(svmp::FE::GlobalIndex)> callback) const override
+    {
+        mesh_->forEachOwnedCell(std::move(callback));
+    }
+    void forEachBoundaryFace(
+        int marker,
+        std::function<void(svmp::FE::GlobalIndex, svmp::FE::GlobalIndex)>
+            callback) const override
+    {
+        mesh_->forEachBoundaryFace(marker, std::move(callback));
+    }
+    void forEachInteriorFace(
+        std::function<void(svmp::FE::GlobalIndex,
+                           svmp::FE::GlobalIndex,
+                           svmp::FE::GlobalIndex)> callback) const override
+    {
+        mesh_->forEachInteriorFace(std::move(callback));
+    }
+
+private:
+    std::shared_ptr<const svmp::FE::assembly::IMeshAccess> mesh_{};
+};
+
+[[nodiscard]] svmp::FE::dofs::MeshTopologyInfo
+twoTetraSharedFaceTopology()
+{
+    svmp::FE::dofs::MeshTopologyInfo topology;
+    topology.n_cells = 2;
+    topology.n_vertices = 5;
+    topology.dim = 3;
+    topology.cell2vertex_offsets = {0, 4, 8};
+    topology.cell2vertex_data = {0, 1, 2, 3, 1, 2, 3, 4};
+    topology.vertex_gids = {0, 1, 2, 3, 4};
+    topology.cell_gids = {0, 1};
+    topology.cell_owner_ranks = {0, 0};
+    return topology;
+}
+
 struct KernelCallCounts {
     int total{0};
     int matrix_only{0};
     int vector_only{0};
     int matrix_and_vector{0};
+};
+
+struct FreeSurfaceConservativeBalanceKernelCounts {
+    std::array<KernelCallCounts, 3> operators{};
+    KernelCallCounts pressure_representability_pair{};
 };
 
 class CountingKernel final : public svmp::FE::assembly::AssemblyKernel {
@@ -154,6 +345,112 @@ private:
     KernelCallCounts* counts_{nullptr};
 };
 
+class ReplacementOnlyMatrix final
+    : public svmp::FE::backends::GenericMatrix {
+public:
+    explicit ReplacementOnlyMatrix(
+        std::unique_ptr<svmp::FE::backends::GenericMatrix> inner)
+        : inner_(std::move(inner))
+    {
+        if (!inner_) {
+            throw std::runtime_error(
+                "ReplacementOnlyMatrix requires an inner matrix");
+        }
+    }
+
+    [[nodiscard]] svmp::FE::backends::BackendKind backendKind()
+        const noexcept override
+    {
+        return inner_->backendKind();
+    }
+    [[nodiscard]] svmp::FE::GlobalIndex numRows() const noexcept override
+    {
+        return inner_->numRows();
+    }
+    [[nodiscard]] svmp::FE::GlobalIndex numCols() const noexcept override
+    {
+        return inner_->numCols();
+    }
+    void zero() override { inner_->zero(); }
+    void finalizeAssembly() override { inner_->finalizeAssembly(); }
+    void mult(const svmp::FE::backends::GenericVector& x,
+              svmp::FE::backends::GenericVector& y) const override
+    {
+        inner_->mult(x, y);
+    }
+    void multAdd(const svmp::FE::backends::GenericVector& x,
+                 svmp::FE::backends::GenericVector& y) const override
+    {
+        inner_->multAdd(x, y);
+    }
+    [[nodiscard]] std::unique_ptr<svmp::FE::assembly::GlobalSystemView>
+    createAssemblyView() override
+    {
+        return inner_->createAssemblyView();
+    }
+    [[nodiscard]] svmp::FE::Real getEntry(
+        svmp::FE::GlobalIndex row,
+        svmp::FE::GlobalIndex column) const override
+    {
+        return inner_->getEntry(row, column);
+    }
+
+    // Model a backend with immutable matrix storage. Newton must replace the
+    // matrix, then rebuild every vector tied to that matrix's refreshed map.
+    bool reinitFromPattern(
+        const svmp::FE::sparsity::SparsityPattern&) override
+    {
+        return false;
+    }
+
+private:
+    std::unique_ptr<svmp::FE::backends::GenericMatrix> inner_{};
+};
+
+class ReplacementOnlyMatrixFactory final
+    : public svmp::FE::backends::BackendFactory {
+public:
+    ReplacementOnlyMatrixFactory()
+        : inner_(svmp::FE::backends::BackendFactory::create(
+              svmp::FE::backends::BackendKind::Eigen))
+    {
+        if (!inner_) {
+            throw std::runtime_error(
+                "ReplacementOnlyMatrixFactory requires Eigen");
+        }
+    }
+
+    using BackendFactory::createMatrix;
+    using BackendFactory::createVector;
+
+    [[nodiscard]] svmp::FE::backends::BackendKind backendKind()
+        const noexcept override
+    {
+        return inner_->backendKind();
+    }
+    [[nodiscard]] std::unique_ptr<svmp::FE::backends::GenericMatrix>
+    createMatrix(
+        const svmp::FE::sparsity::SparsityPattern& pattern) const override
+    {
+        return std::make_unique<ReplacementOnlyMatrix>(
+            inner_->createMatrix(pattern));
+    }
+    [[nodiscard]] std::unique_ptr<svmp::FE::backends::GenericVector>
+    createVector(svmp::FE::GlobalIndex size) const override
+    {
+        return inner_->createVector(size);
+    }
+    [[nodiscard]] std::unique_ptr<svmp::FE::backends::LinearSolver>
+    createLinearSolver(
+        const svmp::FE::backends::SolverOptions& options) const override
+    {
+        return inner_->createLinearSolver(options);
+    }
+
+private:
+    std::unique_ptr<svmp::FE::backends::BackendFactory> inner_{};
+};
+
 class AffineScalarCellKernel final : public svmp::FE::assembly::AssemblyKernel {
 public:
     explicit AffineScalarCellKernel(svmp::FE::Real target)
@@ -216,6 +513,62 @@ public:
 
 private:
     svmp::FE::Real target_{0.0};
+};
+
+class DiagonalCellMatrixKernel final
+    : public svmp::FE::assembly::AssemblyKernel {
+public:
+    explicit DiagonalCellMatrixKernel(
+        std::array<svmp::FE::Real, 4> diagonal)
+        : diagonal_(std::move(diagonal))
+    {
+    }
+
+    [[nodiscard]] svmp::FE::assembly::RequiredData getRequiredData()
+        const override
+    {
+        return svmp::FE::assembly::RequiredData::None;
+    }
+
+    [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override
+    {
+        return true;
+    }
+
+    void computeCell(const svmp::FE::assembly::AssemblyContext& ctx,
+                     svmp::FE::assembly::KernelOutput& output) override
+    {
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        if (n_test != static_cast<svmp::FE::LocalIndex>(diagonal_.size()) ||
+            n_trial != static_cast<svmp::FE::LocalIndex>(diagonal_.size())) {
+            throw std::runtime_error(
+                "DiagonalCellMatrixKernel requires four test and trial DOFs");
+        }
+
+        bool want_matrix = output.has_matrix || !output.local_matrix.empty();
+        const bool want_vector =
+            output.has_vector || !output.local_vector.empty();
+        if (!want_matrix && !want_vector) {
+            want_matrix = true;
+        }
+        output.reserve(n_test, n_trial, want_matrix, want_vector);
+        output.clear();
+        if (want_matrix) {
+            for (svmp::FE::LocalIndex i = 0; i < n_test; ++i) {
+                output.matrixEntry(i, i) =
+                    diagonal_[static_cast<std::size_t>(i)];
+            }
+        }
+    }
+
+    [[nodiscard]] std::string name() const override
+    {
+        return "DiagonalCellMatrixKernel";
+    }
+
+private:
+    std::array<svmp::FE::Real, 4> diagonal_{};
 };
 
 class RefreshedGeometryMeasureKernel final : public svmp::FE::assembly::AssemblyKernel {
@@ -293,6 +646,88 @@ private:
     svmp::FE::Real target_{0.0};
 };
 
+class RefreshedGeometryRootKernel final : public svmp::FE::assembly::AssemblyKernel {
+public:
+    RefreshedGeometryRootKernel(const double* measure, svmp::FE::Real target)
+        : measure_(measure)
+        , target_(target)
+    {
+        if (!measure_) {
+            throw std::runtime_error("RefreshedGeometryRootKernel: measure is null");
+        }
+    }
+
+    [[nodiscard]] svmp::FE::assembly::RequiredData getRequiredData() const override
+    {
+        using svmp::FE::assembly::RequiredData;
+        return RequiredData::IntegrationWeights |
+               RequiredData::BasisValues |
+               RequiredData::SolutionCoefficients;
+    }
+
+    [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override
+    {
+        return false;
+    }
+
+    void computeCell(const svmp::FE::assembly::AssemblyContext& ctx,
+                     svmp::FE::assembly::KernelOutput& output) override
+    {
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        bool want_matrix = output.has_matrix || !output.local_matrix.empty();
+        bool want_vector = output.has_vector || !output.local_vector.empty();
+        if (!want_matrix && !want_vector) {
+            want_matrix = true;
+            want_vector = true;
+        }
+        output.reserve(n_test, n_trial, want_matrix, want_vector);
+        output.clear();
+
+        const auto coeffs = ctx.solutionCoefficients();
+        if (want_vector &&
+            coeffs.size() < static_cast<std::size_t>(n_trial)) {
+            throw std::runtime_error(
+                "RefreshedGeometryRootKernel: missing solution coefficients");
+        }
+
+        const auto measure = static_cast<svmp::FE::Real>(*measure_);
+        for (svmp::FE::LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+            const auto w = ctx.integrationWeight(q);
+            svmp::FE::Real uh = 0.0;
+            if (want_vector) {
+                for (svmp::FE::LocalIndex j = 0; j < n_trial; ++j) {
+                    uh += ctx.trialBasisValue(j, q) *
+                          coeffs[static_cast<std::size_t>(j)];
+                }
+            }
+            for (svmp::FE::LocalIndex i = 0; i < n_test; ++i) {
+                const auto vi = ctx.basisValue(i, q);
+                if (want_vector) {
+                    output.vectorEntry(i) +=
+                        w * vi * (measure * uh - target_);
+                }
+                if (want_matrix) {
+                    for (svmp::FE::LocalIndex j = 0; j < n_trial; ++j) {
+                        output.matrixEntry(i, j) +=
+                            w * vi * measure *
+                            ctx.trialBasisValue(j, q);
+                    }
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] std::string name() const override
+    {
+        return "RefreshedGeometryRootKernel";
+    }
+
+private:
+    const double* measure_{nullptr};
+    svmp::FE::Real target_{0.0};
+};
+
 class ScalingLinearSolver final : public svmp::FE::backends::LinearSolver {
 public:
     ScalingLinearSolver(svmp::FE::backends::LinearSolver& inner, double scale)
@@ -327,6 +762,57 @@ public:
 
 private:
     svmp::FE::backends::LinearSolver& inner_;
+    double scale_{1.0};
+};
+
+class SelectedDofScalingLinearSolver final
+    : public svmp::FE::backends::LinearSolver {
+public:
+    SelectedDofScalingLinearSolver(
+        svmp::FE::backends::LinearSolver& inner,
+        svmp::FE::GlobalIndex selected_dof,
+        double scale)
+        : inner_(inner)
+        , selected_dof_(selected_dof)
+        , scale_(scale)
+    {
+    }
+
+    [[nodiscard]] svmp::FE::backends::BackendKind backendKind() const noexcept override
+    {
+        return inner_.backendKind();
+    }
+
+    void setOptions(const svmp::FE::backends::SolverOptions& options) override
+    {
+        inner_.setOptions(options);
+    }
+
+    [[nodiscard]] const svmp::FE::backends::SolverOptions& getOptions() const noexcept override
+    {
+        return inner_.getOptions();
+    }
+
+    [[nodiscard]] svmp::FE::backends::SolverReport solve(
+        const svmp::FE::backends::GenericMatrix& A,
+        svmp::FE::backends::GenericVector& x,
+        const svmp::FE::backends::GenericVector& b) override
+    {
+        auto rep = inner_.solve(A, x, b);
+        auto values = x.localSpan();
+        if (selected_dof_ < 0 ||
+            static_cast<std::size_t>(selected_dof_) >= values.size()) {
+            throw std::runtime_error(
+                "SelectedDofScalingLinearSolver: selected DOF is not local");
+        }
+        values[static_cast<std::size_t>(selected_dof_)] *=
+            static_cast<svmp::FE::Real>(scale_);
+        return rep;
+    }
+
+private:
+    svmp::FE::backends::LinearSolver& inner_;
+    svmp::FE::GlobalIndex selected_dof_{0};
     double scale_{1.0};
 };
 
@@ -365,6 +851,216 @@ public:
 
 private:
     svmp::FE::backends::LinearSolver& inner_;
+};
+
+class ScriptedFiniteInexactLinearSolver final
+    : public svmp::FE::backends::LinearSolver {
+public:
+    struct Result {
+        int iterations{1};
+        svmp::FE::Real initial_residual_norm{1.0};
+        svmp::FE::Real final_residual_norm{0.5};
+        svmp::FE::Real relative_residual{0.5};
+        bool zero_correction{false};
+    };
+
+    ScriptedFiniteInexactLinearSolver(
+        svmp::FE::backends::LinearSolver& inner,
+        Result result)
+        : inner_(inner)
+        , result_(result)
+    {
+    }
+
+    [[nodiscard]] svmp::FE::backends::BackendKind backendKind() const noexcept override
+    {
+        return inner_.backendKind();
+    }
+
+    void setOptions(const svmp::FE::backends::SolverOptions& options) override
+    {
+        inner_.setOptions(options);
+    }
+
+    [[nodiscard]] const svmp::FE::backends::SolverOptions& getOptions() const noexcept override
+    {
+        return inner_.getOptions();
+    }
+
+    [[nodiscard]] svmp::FE::backends::SolverReport solve(
+        const svmp::FE::backends::GenericMatrix& A,
+        svmp::FE::backends::GenericVector& x,
+        const svmp::FE::backends::GenericVector& b) override
+    {
+        ++solve_calls;
+        auto report = inner_.solve(A, x, b);
+        if (result_.zero_correction) {
+            x.zero();
+        }
+        report.converged = false;
+        report.numerical_breakdown = false;
+        report.iterations = result_.iterations;
+        report.initial_residual_norm = result_.initial_residual_norm;
+        report.final_residual_norm = result_.final_residual_norm;
+        report.relative_residual = result_.relative_residual;
+        report.message = "scripted finite inexact result";
+        return report;
+    }
+
+    int solve_calls{0};
+
+private:
+    svmp::FE::backends::LinearSolver& inner_;
+    Result result_{};
+};
+
+class InvalidNumericalLinearSolver final
+    : public svmp::FE::backends::LinearSolver {
+public:
+    enum class Mode {
+        NonfiniteReport,
+        NonfiniteCorrection
+    };
+
+    InvalidNumericalLinearSolver(
+        svmp::FE::backends::LinearSolver& inner,
+        Mode mode)
+        : inner_(inner)
+        , mode_(mode)
+    {
+    }
+
+    [[nodiscard]] svmp::FE::backends::BackendKind backendKind() const noexcept override
+    {
+        return inner_.backendKind();
+    }
+
+    void setOptions(const svmp::FE::backends::SolverOptions& options) override
+    {
+        inner_.setOptions(options);
+    }
+
+    [[nodiscard]] const svmp::FE::backends::SolverOptions& getOptions() const noexcept override
+    {
+        return inner_.getOptions();
+    }
+
+    [[nodiscard]] svmp::FE::backends::SolverReport solve(
+        const svmp::FE::backends::GenericMatrix&,
+        svmp::FE::backends::GenericVector& x,
+        const svmp::FE::backends::GenericVector&) override
+    {
+        ++solve_calls;
+        x.zero();
+
+        svmp::FE::backends::SolverReport rep;
+        rep.iterations = 1;
+        rep.initial_residual_norm = 1.0;
+        if (mode_ == Mode::NonfiniteReport) {
+            rep.converged = false;
+            rep.final_residual_norm =
+                std::numeric_limits<svmp::FE::Real>::infinity();
+            rep.relative_residual =
+                std::numeric_limits<svmp::FE::Real>::infinity();
+            rep.message = "injected nonfinite report";
+            return rep;
+        }
+
+        rep.converged = true;
+        rep.final_residual_norm = 0.0;
+        rep.relative_residual = 0.0;
+        rep.message = "injected converged report with nonfinite correction";
+        auto values = x.localSpan();
+        if (!values.empty()) {
+            values.front() =
+                std::numeric_limits<svmp::FE::Real>::quiet_NaN();
+        }
+        return rep;
+    }
+
+    int solve_calls{0};
+
+private:
+    svmp::FE::backends::LinearSolver& inner_;
+    Mode mode_{Mode::NonfiniteReport};
+};
+
+class OverflowingBorderedRecoveryLinearSolver final
+    : public svmp::FE::backends::LinearSolver {
+public:
+    OverflowingBorderedRecoveryLinearSolver(
+        svmp::FE::backends::LinearSolver& inner,
+        svmp::FE::systems::FESystem& system)
+        : inner_(inner)
+        , system_(system)
+    {
+    }
+
+    [[nodiscard]] svmp::FE::backends::BackendKind backendKind() const noexcept override
+    {
+        return inner_.backendKind();
+    }
+
+    void setOptions(const svmp::FE::backends::SolverOptions& options) override
+    {
+        inner_.setOptions(options);
+    }
+
+    [[nodiscard]] const svmp::FE::backends::SolverOptions& getOptions() const noexcept override
+    {
+        return inner_.getOptions();
+    }
+
+    [[nodiscard]] svmp::FE::backends::SolverReport solve(
+        const svmp::FE::backends::GenericMatrix&,
+        svmp::FE::backends::GenericVector& x,
+        const svmp::FE::backends::GenericVector&) override
+    {
+        ++solve_calls;
+        x.zero();
+
+        const auto finite_huge = static_cast<svmp::FE::Real>(2.0) *
+                                 std::sqrt(std::numeric_limits<svmp::FE::Real>::max());
+        if (solve_calls == 1) {
+            // The bordered structure has already selected the explicit
+            // recovery path.  Replace its numerical values with an otherwise
+            // valid finite system.  The scripted K^{-1}B columns and auxiliary
+            // deltas below are each finite, but their product is not.
+            auto& bordered = system_.borderedCoupling();
+            if (!bordered.active || bordered.n_aux <= 0 ||
+                bordered.n_field_dofs != static_cast<std::size_t>(x.size())) {
+                throw std::runtime_error(
+                    "OverflowingBorderedRecoveryLinearSolver: missing bordered system");
+            }
+            const auto na = static_cast<std::size_t>(bordered.n_aux);
+            const auto nf = bordered.n_field_dofs;
+            bordered.B.assign(nf * na, static_cast<svmp::FE::Real>(1.0));
+            bordered.Ct.assign(na * nf, static_cast<svmp::FE::Real>(0.0));
+            bordered.D.assign(na * na, static_cast<svmp::FE::Real>(0.0));
+            bordered.g.assign(na, finite_huge);
+            for (std::size_t i = 0; i < na; ++i) {
+                bordered.D[i * na + i] = static_cast<svmp::FE::Real>(1.0);
+            }
+            bordered.direct_coupling_records.clear();
+        } else {
+            std::fill(x.localSpan().begin(), x.localSpan().end(), finite_huge);
+        }
+
+        svmp::FE::backends::SolverReport report;
+        report.converged = true;
+        report.iterations = 1;
+        report.initial_residual_norm = 1.0;
+        report.final_residual_norm = 0.0;
+        report.relative_residual = 0.0;
+        report.message = "scripted finite bordered recovery solve";
+        return report;
+    }
+
+    int solve_calls{0};
+
+private:
+    svmp::FE::backends::LinearSolver& inner_;
+    svmp::FE::systems::FESystem& system_;
 };
 
 class RecordingEffectiveTimeStepSolver final : public svmp::FE::backends::LinearSolver {
@@ -675,11 +1371,270 @@ private:
     std::string prior_value_{};
 };
 
+struct SharedFieldMpcState {
+    bool reverse{false};
+    double weight{1.0};
+    double inhomogeneity{0.0};
+};
+
+class TimeDependentScalarDirichlet final
+    : public svmp::FE::constraints::ISystemConstraint {
+public:
+    explicit TimeDependentScalarDirichlet(svmp::FE::FieldId field)
+        : field_(field)
+    {
+    }
+
+    void apply(
+        const svmp::FE::systems::FESystem& system,
+        svmp::FE::constraints::AffineConstraints& constraints) override
+    {
+        dof_ = system.fieldDofOffset(field_);
+        constraints.addLine(dof_);
+        constraints.setInhomogeneity(dof_, 0.0);
+    }
+
+    bool updateValues(
+        const svmp::FE::systems::FESystem&,
+        svmp::FE::constraints::AffineConstraints& constraints,
+        double time,
+        double) override
+    {
+        constraints.updateInhomogeneity(
+            dof_, static_cast<svmp::FE::Real>(time));
+        return true;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return true;
+    }
+
+    [[nodiscard]] svmp::FE::systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        return {};
+    }
+
+private:
+    svmp::FE::FieldId field_{svmp::FE::INVALID_FIELD_ID};
+    svmp::FE::GlobalIndex dof_{-1};
+};
+
+class SharedStateFieldMpc final
+    : public svmp::FE::constraints::ISystemConstraint {
+public:
+    SharedStateFieldMpc(svmp::FE::FieldId first_field,
+                        svmp::FE::FieldId second_field,
+                        std::shared_ptr<SharedFieldMpcState> state)
+        : first_field_(first_field)
+        , second_field_(second_field)
+        , state_(std::move(state))
+    {
+        if (!state_) {
+            throw std::runtime_error(
+                "SharedStateFieldMpc requires shared state");
+        }
+    }
+
+    void apply(
+        const svmp::FE::systems::FESystem& system,
+        svmp::FE::constraints::AffineConstraints& constraints) override
+    {
+        const auto slave_field =
+            state_->reverse ? second_field_ : first_field_;
+        const auto master_field =
+            state_->reverse ? first_field_ : second_field_;
+        const auto slave = system.fieldDofOffset(slave_field);
+        const auto master = system.fieldDofOffset(master_field);
+        if (slave < 0 || master < 0 ||
+            system.fieldDofHandler(slave_field).getNumDofs() != 1 ||
+            system.fieldDofHandler(master_field).getNumDofs() != 1) {
+            throw std::runtime_error(
+                "SharedStateFieldMpc requires one DOF per field");
+        }
+        constraints.addLine(slave);
+        constraints.addEntry(slave, master, state_->weight);
+        constraints.setInhomogeneity(slave, state_->inhomogeneity);
+    }
+
+    bool updateValues(
+        const svmp::FE::systems::FESystem&,
+        svmp::FE::constraints::AffineConstraints&,
+        double,
+        double) override
+    {
+        return false;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return false;
+    }
+
+    [[nodiscard]] svmp::FE::systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        return {};
+    }
+
+private:
+    svmp::FE::FieldId first_field_{svmp::FE::INVALID_FIELD_ID};
+    svmp::FE::FieldId second_field_{svmp::FE::INVALID_FIELD_ID};
+    std::shared_ptr<SharedFieldMpcState> state_{};
+};
+
+struct CrossCellPressureMpcState {
+    bool enabled{false};
+};
+
+class CrossCellPressureMpc final
+    : public svmp::FE::constraints::ISystemConstraint {
+public:
+    CrossCellPressureMpc(
+        svmp::FE::FieldId pressure_field,
+        std::shared_ptr<CrossCellPressureMpcState> state)
+        : pressure_field_(pressure_field)
+        , state_(std::move(state))
+    {
+        if (!state_) {
+            throw std::runtime_error(
+                "CrossCellPressureMpc requires shared state");
+        }
+    }
+
+    void apply(
+        const svmp::FE::systems::FESystem& system,
+        svmp::FE::constraints::AffineConstraints& constraints) override
+    {
+        if (!state_->enabled) {
+            return;
+        }
+        const auto count =
+            system.fieldDofHandler(pressure_field_).getNumDofs();
+        if (count != 2) {
+            throw std::runtime_error(
+                "CrossCellPressureMpc requires two pressure DOFs");
+        }
+        const auto first = system.fieldDofOffset(pressure_field_);
+        constraints.addLine(first);
+        constraints.addEntry(first, first + 1, 1.0);
+    }
+
+    bool updateValues(
+        const svmp::FE::systems::FESystem&,
+        svmp::FE::constraints::AffineConstraints&,
+        double,
+        double) override
+    {
+        return false;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return false;
+    }
+
+    [[nodiscard]] svmp::FE::systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        return {};
+    }
+
+private:
+    svmp::FE::FieldId pressure_field_{svmp::FE::INVALID_FIELD_ID};
+    std::shared_ptr<CrossCellPressureMpcState> state_{};
+};
+
+struct FixedPressureDirichletState {
+    svmp::FE::Real value{0.0};
+};
+
+class FixedPressureDirichlet final
+    : public svmp::FE::constraints::ISystemConstraint {
+public:
+    FixedPressureDirichlet(
+        svmp::FE::FieldId pressure_field,
+        std::shared_ptr<FixedPressureDirichletState> state)
+        : pressure_field_(pressure_field)
+        , state_(std::move(state))
+    {
+        if (!state_) {
+            throw std::runtime_error(
+                "FixedPressureDirichlet requires shared state");
+        }
+    }
+
+    void apply(
+        const svmp::FE::systems::FESystem& system,
+        svmp::FE::constraints::AffineConstraints& constraints) override
+    {
+        if (system.fieldDofHandler(pressure_field_).getNumDofs() != 1) {
+            throw std::runtime_error(
+                "FixedPressureDirichlet requires one pressure DOF");
+        }
+        const auto pressure_dof =
+            system.fieldDofOffset(pressure_field_);
+        constraints.addLine(pressure_dof);
+        constraints.setInhomogeneity(pressure_dof, state_->value);
+    }
+
+    bool updateValues(
+        const svmp::FE::systems::FESystem&,
+        svmp::FE::constraints::AffineConstraints&,
+        double,
+        double) override
+    {
+        return false;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return false;
+    }
+
+    [[nodiscard]] svmp::FE::systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        return {};
+    }
+
+private:
+    svmp::FE::FieldId pressure_field_{svmp::FE::INVALID_FIELD_ID};
+    std::shared_ptr<FixedPressureDirichletState> state_{};
+};
+
 struct ScalarProblem {
     std::shared_ptr<svmp::FE::forms::test::SingleTetraMeshAccess> mesh{};
     std::shared_ptr<svmp::FE::spaces::L2Space> space{};
     std::unique_ptr<svmp::FE::systems::FESystem> sys{};
     svmp::FE::FieldId u_field{std::numeric_limits<svmp::FE::FieldId>::max()};
+    std::shared_ptr<const svmp::FE::systems::TimeIntegrator> integrator{};
+    std::unique_ptr<svmp::FE::systems::TransientSystem> transient{};
+    std::unique_ptr<svmp::FE::backends::BackendFactory> factory{};
+    std::unique_ptr<svmp::FE::backends::LinearSolver> linear{};
+    svmp::FE::timestepping::TimeHistory history{};
+};
+
+struct TwoFieldProblem {
+    std::shared_ptr<svmp::FE::forms::test::SingleTetraMeshAccess> mesh{};
+    std::shared_ptr<svmp::FE::spaces::L2Space> space{};
+    std::unique_ptr<svmp::FE::systems::FESystem> sys{};
+    svmp::FE::FieldId selected_field{svmp::FE::INVALID_FIELD_ID};
+    svmp::FE::FieldId dominant_field{svmp::FE::INVALID_FIELD_ID};
+    std::shared_ptr<const svmp::FE::systems::TimeIntegrator> integrator{};
+    std::unique_ptr<svmp::FE::systems::TransientSystem> transient{};
+    std::unique_ptr<svmp::FE::backends::BackendFactory> factory{};
+    std::unique_ptr<svmp::FE::backends::LinearSolver> linear{};
+    svmp::FE::timestepping::TimeHistory history{};
+};
+
+struct PressureRepresentabilityProblem {
+    std::shared_ptr<svmp::FE::assembly::IMeshAccess> mesh{};
+    std::shared_ptr<svmp::FE::spaces::L2Space> space{};
+    std::unique_ptr<svmp::FE::systems::FESystem> sys{};
+    svmp::FE::FieldId velocity_field{svmp::FE::INVALID_FIELD_ID};
+    svmp::FE::FieldId pressure_field{svmp::FE::INVALID_FIELD_ID};
     std::shared_ptr<const svmp::FE::systems::TimeIntegrator> integrator{};
     std::unique_ptr<svmp::FE::systems::TransientSystem> transient{};
     std::unique_ptr<svmp::FE::backends::BackendFactory> factory{};
@@ -703,7 +1658,9 @@ template <typename BuildForm>
 [[nodiscard]] ScalarProblem makeScalarProblem(BuildForm build_form,
                                               double dt,
                                               const std::vector<svmp::FE::Real>& u0,
-                                              KernelCallCounts* counts = nullptr)
+                                              KernelCallCounts* counts = nullptr,
+                                              FreeSurfaceConservativeBalanceKernelCounts*
+                                                  balance_counts = nullptr)
 {
     ScalarProblem p;
     p.mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
@@ -727,6 +1684,34 @@ template <typename BuildForm>
     }
     p.sys->addCellKernel("op", p.u_field, p.u_field, kernel);
 
+    if (balance_counts != nullptr) {
+        constexpr std::array<const char*, 3> diagnostic_ops{
+            "equations_diagnostic_ns_free_surface_pressure_virtual_work",
+            "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
+            "equations_diagnostic_ns_free_surface_conservative_balance",
+        };
+        const std::array<svmp::FE::forms::FormExpr, 3> diagnostic_forms{
+            (svmp::FE::forms::FormExpr::constant(2.0) * u * v).dx(),
+            (svmp::FE::forms::FormExpr::constant(-0.5) * u * v).dx(),
+            (svmp::FE::forms::FormExpr::constant(1.5) * u * v).dx(),
+        };
+        for (std::size_t i = 0; i < diagnostic_ops.size(); ++i) {
+            p.sys->addOperator(diagnostic_ops[i]);
+            auto diagnostic_ir = compiler.compileResidual(diagnostic_forms[i]);
+            auto diagnostic_kernel =
+                std::make_shared<svmp::FE::forms::NonlinearFormKernel>(
+                    std::move(diagnostic_ir),
+                    svmp::FE::forms::ADMode::Forward);
+            p.sys->addCellKernel(
+                diagnostic_ops[i],
+                p.u_field,
+                p.u_field,
+                std::make_shared<CountingKernel>(
+                    std::move(diagnostic_kernel),
+                    &balance_counts->operators[i]));
+        }
+    }
+
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = ts_test::singleTetraTopology();
     p.sys->setup({}, inputs);
@@ -756,10 +1741,263 @@ template <typename BuildForm>
     return p;
 }
 
+[[nodiscard]] PressureRepresentabilityProblem
+makePressureRepresentabilityProblem(
+    FreeSurfaceConservativeBalanceKernelCounts& counts,
+    bool two_cells = false,
+    std::shared_ptr<CrossCellPressureMpcState> pressure_mpc_state = {},
+    std::shared_ptr<FixedPressureDirichletState>
+        pressure_dirichlet_state = {},
+    svmp::FE::Real entry_velocity = svmp::FE::Real{1.0},
+    std::optional<std::array<svmp::FE::Real, 4>>
+        pressure_pair_diagonal = std::nullopt,
+    bool track_immutable_mesh_revisions = false,
+    bool install_symbolic_cut_volume_pair = false)
+{
+    using svmp::FE::forms::FormExpr;
+
+    PressureRepresentabilityProblem p;
+    auto base_mesh = two_cells
+                         ? std::static_pointer_cast<
+                               svmp::FE::assembly::IMeshAccess>(
+                               std::make_shared<
+                                   svmp::FE::forms::test::
+                                       TwoTetraSharedFaceMeshAccess>())
+                         : std::static_pointer_cast<
+                               svmp::FE::assembly::IMeshAccess>(
+                               std::make_shared<
+                                   svmp::FE::forms::test::
+                                       SingleTetraMeshAccess>());
+    p.mesh = track_immutable_mesh_revisions
+                 ? std::static_pointer_cast<svmp::FE::assembly::IMeshAccess>(
+                       std::make_shared<ImmutableRevisionTrackedMeshAccess>(
+                           std::move(base_mesh)))
+                 : std::move(base_mesh);
+    p.space = std::make_shared<svmp::FE::spaces::L2Space>(
+        svmp::FE::ElementType::Tetra4,
+        pressure_pair_diagonal.has_value() ? /*order=*/1 : /*order=*/0);
+    p.sys = std::make_unique<svmp::FE::systems::FESystem>(p.mesh);
+    p.velocity_field = p.sys->addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "synthetic_velocity",
+            .space = p.space,
+            .components = 1});
+    p.pressure_field = p.sys->addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "synthetic_pressure",
+            .space = p.space,
+            .components = 1});
+    if (pressure_mpc_state) {
+        p.sys->addSystemConstraint(
+            std::make_unique<CrossCellPressureMpc>(
+                p.pressure_field, pressure_mpc_state));
+    }
+    if (pressure_dirichlet_state) {
+        p.sys->addSystemConstraint(
+            std::make_unique<FixedPressureDirichlet>(
+                p.pressure_field, pressure_dirichlet_state));
+    }
+
+    const auto u = FormExpr::trialFunction(*p.space, "u");
+    const auto pressure = FormExpr::trialFunction(*p.space, "p");
+    const auto v = FormExpr::testFunction(*p.space, "v");
+    const auto q = FormExpr::testFunction(*p.space, "q");
+    svmp::FE::forms::FormCompiler compiler;
+    const auto make_kernel = [&](const FormExpr& form) {
+        auto ir = compiler.compileResidual(form);
+        return std::make_shared<svmp::FE::forms::NonlinearFormKernel>(
+            std::move(ir), svmp::FE::forms::ADMode::Forward);
+    };
+
+    // A nonsingular, zero-at-entry production system lets the Newton solve
+    // stop after its initial residual while still executing all diagnostics.
+    // The entry velocity is one, which also gives the diagnostic residual
+    // forms a real TrialFunction dependency (the form compiler deliberately
+    // rejects a standalone constant-times-test residual).
+    p.sys->addOperator("op");
+    p.sys->addCellKernel(
+        "op",
+        p.velocity_field,
+        p.velocity_field,
+        make_kernel(
+            ((u - FormExpr::constant(entry_velocity)) * v).dx()));
+    p.sys->addCellKernel(
+        "op",
+        p.pressure_field,
+        p.pressure_field,
+        make_kernel((pressure * q).dx()));
+
+    constexpr std::array<const char*, 3> vector_ops{
+        "equations_diagnostic_ns_free_surface_pressure_virtual_work",
+        "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
+        "equations_diagnostic_ns_free_surface_conservative_balance",
+    };
+    // On the unit tetra, a constant P1 field satisfies int(v_i)=1/24.
+    // The finite-precision LSQR regression therefore uses factors 12, 24,
+    // and 36 so its surface-energy load has four unit coefficients.
+    const std::array<svmp::FE::Real, 3> vector_scales =
+        pressure_pair_diagonal.has_value()
+            ? std::array<svmp::FE::Real, 3>{12.0, 24.0, 36.0}
+            : std::array<svmp::FE::Real, 3>{0.5, 2.0, 2.5};
+    const std::array<FormExpr, 3> vector_forms{
+        (FormExpr::constant(vector_scales[0]) * u * v).dx(),
+        (FormExpr::constant(vector_scales[1]) * u * v).dx(),
+        (FormExpr::constant(vector_scales[2]) * u * v).dx(),
+    };
+    for (std::size_t i = 0; i < vector_ops.size(); ++i) {
+        p.sys->addOperator(vector_ops[i]);
+        p.sys->addCellKernel(
+            vector_ops[i],
+            p.velocity_field,
+            p.velocity_field,
+            std::make_shared<CountingKernel>(
+                make_kernel(vector_forms[i]), &counts.operators[i]));
+    }
+
+    constexpr const char* pair_op =
+        "equations_diagnostic_ns_free_surface_pressure_representability_pair";
+    p.sys->addOperator(pair_op);
+    if (install_symbolic_cut_volume_pair) {
+        // Use the real mixed symbolic installer and cut-volume dispatch used
+        // by the production pressure/velocity adjoint-pair diagnostic.  The
+        // scalar mass analogue keeps this Newton cache fixture compact; the
+        // FormsInstaller regression separately covers the vector-divergence
+        // expression exactly.
+        constexpr int marker = 812;
+        const auto velocity_state = FormExpr::stateField(
+            p.velocity_field, *p.space, "u");
+        const auto pressure_state = FormExpr::stateField(
+            p.pressure_field, *p.space, "p");
+        const auto velocity_test = FormExpr::testFunction(
+            p.velocity_field, *p.space, "v");
+        const auto pressure_test = FormExpr::testFunction(
+            p.pressure_field, *p.space, "q");
+        const auto pair_residual =
+            (-pressure_state * velocity_test)
+                .dCutVolume(
+                    marker,
+                    svmp::FE::forms::CutVolumeSide::Negative) -
+            (pressure_test * velocity_state)
+                .dCutVolume(
+                    marker,
+                    svmp::FE::forms::CutVolumeSide::Negative);
+        svmp::FE::systems::FormInstallOptions install;
+        install.compiler_options.use_symbolic_tangent = true;
+        install.compiler_options.jit.enable = false;
+        (void)svmp::FE::systems::installFormulation(
+            *p.sys,
+            pair_op,
+            {p.velocity_field, p.pressure_field},
+            pair_residual,
+            install);
+
+        auto cut_context =
+            std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+        svmp::FE::geometry::CutQuadratureRule rule;
+        rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+        rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+        rule.parent_measure = svmp::FE::Real{1.0} / svmp::FE::Real{6.0};
+        rule.measure = svmp::FE::Real{1.0} / svmp::FE::Real{12.0};
+        rule.volume_fraction = svmp::FE::Real{0.5};
+        rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+        rule.provenance.parent_entity = 0;
+        rule.provenance.marker = marker;
+        rule.points.push_back(svmp::FE::geometry::CutQuadraturePoint{
+            .point = {{svmp::FE::Real{0.25},
+                       svmp::FE::Real{0.25},
+                       svmp::FE::Real{0.25}}},
+            .weight = rule.measure,
+        });
+        svmp::FE::assembly::CutCellAssemblyMetadata metadata;
+        metadata.parent_entity = 0;
+        metadata.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+        metadata.volume_fraction = rule.volume_fraction;
+        cut_context->addGeneratedVolumeRule(marker, metadata, rule);
+        p.sys->setCutIntegrationContext(std::move(cut_context));
+    } else if (pressure_pair_diagonal.has_value()) {
+        // A symmetric [0,G;G^T,0] pair with prescribed singular values gives
+        // a deterministic ill-conditioned LSQR problem without forming G^T G.
+        p.sys->addCellKernel(
+            pair_op,
+            p.velocity_field,
+            p.pressure_field,
+            std::make_shared<CountingKernel>(
+                std::make_shared<DiagonalCellMatrixKernel>(
+                    *pressure_pair_diagonal),
+                &counts.pressure_representability_pair));
+        p.sys->addCellKernel(
+            pair_op,
+            p.pressure_field,
+            p.velocity_field,
+            std::make_shared<CountingKernel>(
+                std::make_shared<DiagonalCellMatrixKernel>(
+                    *pressure_pair_diagonal),
+                &counts.pressure_representability_pair));
+    } else {
+        // Synthetic analogue of -p div(v) - q div(u).  Both off-diagonal mass
+        // blocks are -M; the exact least-squares pressure for f=2 M is p=2.
+        p.sys->addCellKernel(
+            pair_op,
+            p.velocity_field,
+            p.pressure_field,
+            std::make_shared<CountingKernel>(
+                make_kernel((-pressure * v).dx()),
+                &counts.pressure_representability_pair));
+        p.sys->addCellKernel(
+            pair_op,
+            p.pressure_field,
+            p.velocity_field,
+            std::make_shared<CountingKernel>(
+                make_kernel((-u * q).dx()),
+                &counts.pressure_representability_pair));
+    }
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override =
+        two_cells ? twoTetraSharedFaceTopology()
+                  : ts_test::singleTetraTopology();
+    p.sys->setup({}, inputs);
+
+    p.integrator =
+        std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    p.transient = std::make_unique<svmp::FE::systems::TransientSystem>(
+        *p.sys, p.integrator);
+    p.factory = ts_test::createTestFactory();
+    if (!p.factory) {
+        throw std::runtime_error(
+            "PressureRepresentabilityProblem requires the Eigen backend");
+    }
+    p.linear = p.factory->createLinearSolver(ts_test::directSolve());
+    if (!p.linear) {
+        throw std::runtime_error(
+            "PressureRepresentabilityProblem failed to create LinearSolver");
+    }
+
+    const auto n_dofs = p.sys->dofHandler().getNumDofs();
+    p.history = svmp::FE::timestepping::TimeHistory::allocate(
+        *p.factory, n_dofs);
+    p.history.setDt(0.1);
+    p.history.setPrevDt(0.1);
+    std::vector<svmp::FE::Real> entry_state(
+        static_cast<std::size_t>(n_dofs), svmp::FE::Real{0.0});
+    const auto velocity_begin = p.sys->fieldDofOffset(p.velocity_field);
+    const auto velocity_count =
+        p.sys->fieldDofHandler(p.velocity_field).getNumDofs();
+    for (svmp::FE::GlobalIndex i = 0; i < velocity_count; ++i) {
+        entry_state[static_cast<std::size_t>(velocity_begin + i)] =
+            entry_velocity;
+    }
+    ts_test::setVectorByDof(p.history.uPrev(), entry_state);
+    ts_test::setVectorByDof(p.history.uPrev2(), entry_state);
+    p.history.resetCurrentToPrevious();
+    return p;
+}
+
 [[nodiscard]] ScalarProblem makeAffineScalarProblem(double target,
                                                     double dt,
                                                     const std::vector<svmp::FE::Real>& u0,
-                                                    KernelCallCounts* counts)
+                                                    KernelCallCounts* counts,
+                                                    bool add_time_dependent_dirichlet = false)
 {
     ScalarProblem p;
     p.mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
@@ -775,6 +2013,10 @@ template <typename BuildForm>
         kernel = std::make_shared<CountingKernel>(kernel, counts);
     }
     p.sys->addCellKernel("op", p.u_field, p.u_field, kernel);
+    if (add_time_dependent_dirichlet) {
+        p.sys->addSystemConstraint(
+            std::make_unique<TimeDependentScalarDirichlet>(p.u_field));
+    }
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = ts_test::singleTetraTopology();
@@ -801,6 +2043,229 @@ template <typename BuildForm>
     p.history.setPrevDt(dt);
     ts_test::setVectorByDof(p.history.uPrev(), u0);
     ts_test::setVectorByDof(p.history.uPrev2(), u0);
+    p.history.resetCurrentToPrevious();
+    return p;
+}
+
+[[nodiscard]] TwoFieldProblem makeTwoFieldAffineProblem(
+    double selected_target,
+    double dominant_target,
+    double dt,
+    std::shared_ptr<SharedFieldMpcState> constraint_state = {})
+{
+    TwoFieldProblem p;
+    p.mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    p.space = std::make_shared<svmp::FE::spaces::L2Space>(
+        svmp::FE::ElementType::Tetra4, /*order=*/0);
+
+    p.sys = std::make_unique<svmp::FE::systems::FESystem>(p.mesh);
+    p.selected_field = p.sys->addField(svmp::FE::systems::FieldSpec{
+        .name = "selected", .space = p.space, .components = 1});
+    p.dominant_field = p.sys->addField(svmp::FE::systems::FieldSpec{
+        .name = "dominant", .space = p.space, .components = 1});
+    p.sys->addOperator("op");
+    p.sys->addCellKernel(
+        "op",
+        p.selected_field,
+        p.selected_field,
+        std::make_shared<AffineScalarCellKernel>(
+            static_cast<svmp::FE::Real>(selected_target)));
+    p.sys->addCellKernel(
+        "op",
+        p.dominant_field,
+        p.dominant_field,
+        std::make_shared<AffineScalarCellKernel>(
+            static_cast<svmp::FE::Real>(dominant_target)));
+    if (constraint_state) {
+        p.sys->addSystemConstraint(
+            std::make_unique<SharedStateFieldMpc>(
+                p.selected_field,
+                p.dominant_field,
+                std::move(constraint_state)));
+    }
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = ts_test::singleTetraTopology();
+    p.sys->setup({}, inputs);
+
+    p.integrator =
+        std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    p.transient = std::make_unique<svmp::FE::systems::TransientSystem>(
+        *p.sys, p.integrator);
+    p.factory = ts_test::createTestFactory();
+    if (!p.factory) {
+        throw std::runtime_error(
+            "TwoFieldProblem requires the Eigen backend (enable FE_ENABLE_EIGEN)");
+    }
+    p.linear = p.factory->createLinearSolver(ts_test::directSolve());
+    if (!p.linear) {
+        throw std::runtime_error(
+            "TwoFieldProblem failed to create LinearSolver");
+    }
+
+    const auto n_dofs = p.sys->dofHandler().getNumDofs();
+    p.history =
+        svmp::FE::timestepping::TimeHistory::allocate(*p.factory, n_dofs);
+    p.history.setDt(dt);
+    p.history.setPrevDt(dt);
+    p.history.uPrev().zero();
+    p.history.uPrev2().zero();
+    p.history.resetCurrentToPrevious();
+    return p;
+}
+
+[[nodiscard]] TwoFieldProblem makeTwoFieldHistorySensitiveMpcProblem(
+    double dt,
+    std::shared_ptr<SharedFieldMpcState> constraint_state)
+{
+    TwoFieldProblem p;
+    p.mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    p.space = std::make_shared<svmp::FE::spaces::L2Space>(
+        svmp::FE::ElementType::Tetra4, /*order=*/0);
+
+    p.sys = std::make_unique<svmp::FE::systems::FESystem>(p.mesh);
+    p.selected_field = p.sys->addField(svmp::FE::systems::FieldSpec{
+        .name = "selected", .space = p.space, .components = 1});
+    p.dominant_field = p.sys->addField(svmp::FE::systems::FieldSpec{
+        .name = "dominant", .space = p.space, .components = 1});
+    p.sys->addOperator("op");
+
+    const auto selected =
+        svmp::FE::forms::FormExpr::trialFunction(*p.space, "selected");
+    const auto selected_test =
+        svmp::FE::forms::FormExpr::testFunction(*p.space, "selected_test");
+    const auto dominant =
+        svmp::FE::forms::FormExpr::trialFunction(*p.space, "dominant");
+    const auto dominant_test =
+        svmp::FE::forms::FormExpr::testFunction(*p.space, "dominant_test");
+    const auto selected_form =
+        ((svmp::FE::forms::dt(selected) + selected -
+          svmp::FE::forms::FormExpr::constant(2.0)) *
+         selected_test)
+            .dx();
+    const auto dominant_form =
+        ((dominant - svmp::FE::forms::FormExpr::constant(1.0)) *
+         dominant_test)
+            .dx();
+
+    svmp::FE::forms::FormCompiler compiler;
+    auto selected_ir = compiler.compileResidual(selected_form);
+    auto dominant_ir = compiler.compileResidual(dominant_form);
+    p.sys->addCellKernel(
+        "op",
+        p.selected_field,
+        p.selected_field,
+        std::make_shared<svmp::FE::forms::NonlinearFormKernel>(
+            std::move(selected_ir), svmp::FE::forms::ADMode::Forward));
+    p.sys->addCellKernel(
+        "op",
+        p.dominant_field,
+        p.dominant_field,
+        std::make_shared<svmp::FE::forms::NonlinearFormKernel>(
+            std::move(dominant_ir), svmp::FE::forms::ADMode::Forward));
+    p.sys->addSystemConstraint(
+        std::make_unique<SharedStateFieldMpc>(
+            p.selected_field,
+            p.dominant_field,
+            std::move(constraint_state)));
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = ts_test::singleTetraTopology();
+    p.sys->setup({}, inputs);
+
+    p.integrator =
+        std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    p.transient = std::make_unique<svmp::FE::systems::TransientSystem>(
+        *p.sys, p.integrator);
+    p.factory = ts_test::createTestFactory();
+    if (!p.factory) {
+        throw std::runtime_error(
+            "TwoFieldProblem requires the Eigen backend (enable FE_ENABLE_EIGEN)");
+    }
+    p.linear = p.factory->createLinearSolver(ts_test::directSolve());
+    if (!p.linear) {
+        throw std::runtime_error(
+            "TwoFieldProblem failed to create LinearSolver");
+    }
+
+    p.history = svmp::FE::timestepping::TimeHistory::allocate(
+        *p.factory, p.sys->dofHandler().getNumDofs());
+    p.history.setDt(dt);
+    p.history.setPrevDt(dt);
+    p.history.uPrev().zero();
+    p.history.uPrev2().zero();
+    p.history.resetCurrentToPrevious();
+    return p;
+}
+
+[[nodiscard]] TwoFieldProblem makeTwoFieldRefreshedGeometryProblem(
+    const double* refreshed_measure,
+    double selected_initial,
+    double selected_target,
+    double dominant_target,
+    double dt)
+{
+    if (refreshed_measure == nullptr) {
+        throw std::runtime_error(
+            "TwoFieldProblem refreshed measure must not be null");
+    }
+
+    TwoFieldProblem p;
+    p.mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    p.space = std::make_shared<svmp::FE::spaces::L2Space>(
+        svmp::FE::ElementType::Tetra4, /*order=*/0);
+
+    p.sys = std::make_unique<svmp::FE::systems::FESystem>(p.mesh);
+    p.selected_field = p.sys->addField(svmp::FE::systems::FieldSpec{
+        .name = "selected", .space = p.space, .components = 1});
+    p.dominant_field = p.sys->addField(svmp::FE::systems::FieldSpec{
+        .name = "dominant", .space = p.space, .components = 1});
+    p.sys->addOperator("op");
+    p.sys->addCellKernel(
+        "op",
+        p.selected_field,
+        p.selected_field,
+        std::make_shared<RefreshedGeometryRootKernel>(
+            refreshed_measure,
+            static_cast<svmp::FE::Real>(selected_target)));
+    p.sys->addCellKernel(
+        "op",
+        p.dominant_field,
+        p.dominant_field,
+        std::make_shared<AffineScalarCellKernel>(
+            static_cast<svmp::FE::Real>(dominant_target)));
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = ts_test::singleTetraTopology();
+    p.sys->setup({}, inputs);
+
+    p.integrator =
+        std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    p.transient = std::make_unique<svmp::FE::systems::TransientSystem>(
+        *p.sys, p.integrator);
+    p.factory = ts_test::createTestFactory();
+    if (!p.factory) {
+        throw std::runtime_error(
+            "TwoFieldProblem requires the Eigen backend (enable FE_ENABLE_EIGEN)");
+    }
+    p.linear = p.factory->createLinearSolver(ts_test::directSolve());
+    if (!p.linear) {
+        throw std::runtime_error(
+            "TwoFieldProblem failed to create LinearSolver");
+    }
+
+    const auto selected_dof = p.sys->fieldDofOffset(p.selected_field);
+    const auto n_dofs = p.sys->dofHandler().getNumDofs();
+    p.history =
+        svmp::FE::timestepping::TimeHistory::allocate(*p.factory, n_dofs);
+    p.history.setDt(dt);
+    p.history.setPrevDt(dt);
+    std::vector<svmp::FE::Real> initial_values(
+        static_cast<std::size_t>(n_dofs), svmp::FE::Real{0.0});
+    initial_values[static_cast<std::size_t>(selected_dof)] =
+        static_cast<svmp::FE::Real>(selected_initial);
+    ts_test::setVectorByDof(p.history.uPrev(), initial_values);
+    ts_test::setVectorByDof(p.history.uPrev2(), initial_values);
     p.history.resetCurrentToPrevious();
     return p;
 }
@@ -820,6 +2285,7 @@ template <typename BuildForm>
     p.u_field = p.sys->addField(
         svmp::FE::systems::FieldSpec{.name = "u", .space = p.space, .components = 1});
     p.sys->addOperator("op");
+    p.sys->addOperator("diagnostic_probe");
 
     auto kernel = std::make_shared<RefreshedGeometryMeasureKernel>(
         measure, static_cast<svmp::FE::Real>(target));
@@ -856,6 +2322,63 @@ template <typename BuildForm>
     return p;
 }
 
+[[nodiscard]] ScalarProblem makeRefreshedGeometryRootProblem(
+    double target,
+    double dt,
+    const std::vector<svmp::FE::Real>& u0,
+    const double* measure)
+{
+    ScalarProblem p;
+    p.mesh =
+        std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    p.space = std::make_shared<svmp::FE::spaces::L2Space>(
+        svmp::FE::ElementType::Tetra4, /*order=*/0);
+
+    p.sys = std::make_unique<svmp::FE::systems::FESystem>(p.mesh);
+    p.u_field = p.sys->addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "u", .space = p.space, .components = 1});
+    p.sys->addOperator("op");
+    p.sys->addCellKernel(
+        "op",
+        p.u_field,
+        p.u_field,
+        std::make_shared<RefreshedGeometryRootKernel>(
+            measure, static_cast<svmp::FE::Real>(target)));
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = ts_test::singleTetraTopology();
+    p.sys->setup({}, inputs);
+
+    p.integrator =
+        std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    p.transient = std::make_unique<svmp::FE::systems::TransientSystem>(
+        *p.sys, p.integrator);
+    p.factory = ts_test::createTestFactory();
+    if (!p.factory) {
+        throw std::runtime_error(
+            "ScalarProblem requires the Eigen backend (enable FE_ENABLE_EIGEN)");
+    }
+    p.linear = p.factory->createLinearSolver(ts_test::directSolve());
+    if (!p.linear) {
+        throw std::runtime_error(
+            "ScalarProblem failed to create LinearSolver");
+    }
+
+    const auto n_dofs = p.sys->dofHandler().getNumDofs();
+    if (static_cast<std::size_t>(n_dofs) != u0.size()) {
+        throw std::runtime_error("ScalarProblem u0 size mismatch");
+    }
+    p.history =
+        svmp::FE::timestepping::TimeHistory::allocate(*p.factory, n_dofs);
+    p.history.setDt(dt);
+    p.history.setPrevDt(dt);
+    ts_test::setVectorByDof(p.history.uPrev(), u0);
+    ts_test::setVectorByDof(p.history.uPrev2(), u0);
+    p.history.resetCurrentToPrevious();
+    return p;
+}
+
 [[nodiscard]] double scalarFromDofVector(svmp::FE::backends::GenericVector& vec)
 {
     const auto vals = ts_test::getVectorByDof(vec);
@@ -868,7 +2391,8 @@ template <typename BuildForm>
 [[nodiscard]] DirectCouplingProblem makeDirectCouplingProblem(double dt,
                                                               const std::vector<svmp::FE::Real>& u0,
                                                               std::optional<svmp::FE::systems::AuxiliaryBlockRole>
-                                                                  solver_role = std::nullopt)
+                                                                  solver_role = std::nullopt,
+                                                              bool use_constraints_in_assembly = true)
 {
     DirectCouplingProblem p;
     constexpr int marker = 6;
@@ -912,10 +2436,17 @@ template <typename BuildForm>
         svmp::FE::forms::inner(svmp::FE::forms::grad(u), svmp::FE::forms::grad(v)).dx() -
         (inst.output("P_out") * v).ds(marker);
     (void)svmp::FE::systems::installFormulation(*p.sys, "op", {p.u_field}, residual);
+    (void)svmp::FE::systems::installFormulation(
+        *p.sys,
+        "diagnostic_probe",
+        {p.u_field},
+        (u * v).dx());
 
+    svmp::FE::systems::SetupOptions options;
+    options.use_constraints_in_assembly = use_constraints_in_assembly;
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = ts_test::singleTetraTopology();
-    p.sys->setup({}, inputs);
+    p.sys->setup(options, inputs);
     p.sys->finalizeAuxiliaryLayout();
 
     p.integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
@@ -945,6 +2476,694 @@ template <typename BuildForm>
 }
 
 } // namespace
+
+TEST(SystemAssembly,
+     SuppressedAuxiliaryCouplingKeepsDiagnosticPureAndPreservesRecoveryState)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "SystemAssembly isolation test requires the Eigen backend";
+#endif
+    const std::vector<svmp::FE::Real> coefficients{
+        0.2, -0.4, 0.1, 0.7};
+    auto problem = makeDirectCouplingProblem(
+        /*dt=*/0.1,
+        coefficients,
+        /*solver_role=*/std::nullopt,
+        /*use_constraints_in_assembly=*/false);
+
+    svmp::FE::systems::SystemStateView state;
+    state.time = 0.1;
+    state.dt = 0.1;
+    state.u = problem.history.u().localSpan();
+    state.u_prev = problem.history.uPrev().localSpan();
+    state.u_prev2 = problem.history.uPrev2().localSpan();
+    problem.sys->beginTimeStep();
+
+    const auto n_dofs = problem.sys->dofHandler().getNumDofs();
+    ASSERT_EQ(n_dofs, 4);
+    svmp::FE::assembly::DenseMatrixView production_matrix(n_dofs);
+    svmp::FE::assembly::DenseVectorView production_vector(n_dofs);
+    svmp::FE::systems::AssemblyRequest production_request;
+    production_request.op = "op";
+    production_request.want_matrix = true;
+    production_request.want_vector = true;
+    production_request.is_nonlinear_iteration = true;
+    const auto production = problem.sys->assemble(
+        production_request,
+        state,
+        &production_matrix,
+        &production_vector);
+    ASSERT_TRUE(production.success) << production.error_message;
+
+    const auto entry_auxiliary = problem.sys->checkpointAuxiliaryState();
+    const auto entry_bordered = problem.sys->borderedCoupling();
+    const std::vector<svmp::FE::backends::RankOneUpdate> entry_rank_one(
+        problem.sys->lastRankOneUpdates().begin(),
+        problem.sys->lastRankOneUpdates().end());
+    const std::vector<svmp::FE::backends::ReducedFieldUpdate> entry_reduced(
+        problem.sys->lastReducedFieldUpdates().begin(),
+        problem.sys->lastReducedFieldUpdates().end());
+    const std::vector<svmp::FE::Real> entry_local_condensed_rhs(
+        problem.sys->lastLocalCondensedRhsShift().begin(),
+        problem.sys->lastLocalCondensedRhsShift().end());
+    const bool entry_has_local_condensed_recovery =
+        problem.sys->hasLocalCondensedRecovery();
+    ASSERT_FALSE(entry_auxiliary.empty());
+    ASSERT_TRUE(entry_bordered.active);
+    ASSERT_TRUE(!entry_rank_one.empty() || !entry_reduced.empty());
+
+    svmp::FE::assembly::DenseMatrixView diagnostic_matrix(n_dofs);
+    svmp::FE::assembly::DenseVectorView diagnostic_vector(n_dofs);
+    svmp::FE::systems::AssemblyRequest diagnostic_request;
+    diagnostic_request.op = "diagnostic_probe";
+    diagnostic_request.want_matrix = true;
+    diagnostic_request.want_vector = true;
+    diagnostic_request.is_nonlinear_iteration = true;
+    diagnostic_request.suppress_auxiliary_coupling_assembly = true;
+    const auto diagnostic = problem.sys->assemble(
+        diagnostic_request,
+        state,
+        &diagnostic_matrix,
+        &diagnostic_vector);
+    ASSERT_TRUE(diagnostic.success) << diagnostic.error_message;
+
+    // P1 tetrahedron mass matrix: diagonal V/10=1/60 and off-diagonal
+    // V/20=1/120 for V=1/6. The diagnostic contains only (u,v)_Omega;
+    // any generalized auxiliary injection would violate these values.
+    for (svmp::FE::GlobalIndex row = 0; row < n_dofs; ++row) {
+        svmp::FE::Real expected_residual = 0.0;
+        for (svmp::FE::GlobalIndex column = 0; column < n_dofs; ++column) {
+            const auto expected_matrix =
+                row == column ? svmp::FE::Real{1.0 / 60.0}
+                              : svmp::FE::Real{1.0 / 120.0};
+            EXPECT_NEAR(
+                diagnostic_matrix.getMatrixEntry(row, column),
+                expected_matrix,
+                1.0e-13)
+                << "row=" << row << " column=" << column;
+            expected_residual +=
+                expected_matrix * coefficients[static_cast<std::size_t>(column)];
+        }
+        EXPECT_NEAR(
+            diagnostic_vector.getVectorEntry(row),
+            expected_residual,
+            1.0e-13)
+            << "row=" << row;
+    }
+
+    EXPECT_EQ(problem.sys->checkpointAuxiliaryState(), entry_auxiliary);
+    const auto& after_bordered = problem.sys->borderedCoupling();
+    EXPECT_EQ(after_bordered.active, entry_bordered.active);
+    EXPECT_EQ(after_bordered.globally_reduced,
+              entry_bordered.globally_reduced);
+    EXPECT_EQ(after_bordered.aux_self_terms_replicated,
+              entry_bordered.aux_self_terms_replicated);
+    EXPECT_EQ(after_bordered.n_aux, entry_bordered.n_aux);
+    EXPECT_EQ(after_bordered.n_field_dofs,
+              entry_bordered.n_field_dofs);
+    EXPECT_EQ(after_bordered.D, entry_bordered.D);
+    EXPECT_EQ(after_bordered.g, entry_bordered.g);
+    EXPECT_EQ(after_bordered.B, entry_bordered.B);
+    EXPECT_EQ(after_bordered.Ct, entry_bordered.Ct);
+    EXPECT_EQ(after_bordered.dF_dxdot, entry_bordered.dF_dxdot);
+    EXPECT_EQ(after_bordered.dF_dinputs, entry_bordered.dF_dinputs);
+    EXPECT_EQ(after_bordered.dO_dx, entry_bordered.dO_dx);
+    EXPECT_EQ(after_bordered.dO_dI, entry_bordered.dO_dI);
+    ASSERT_EQ(after_bordered.aux_blocks.size(),
+              entry_bordered.aux_blocks.size());
+    for (std::size_t i = 0; i < after_bordered.aux_blocks.size(); ++i) {
+        EXPECT_EQ(after_bordered.aux_blocks[i].name,
+                  entry_bordered.aux_blocks[i].name);
+        EXPECT_EQ(after_bordered.aux_blocks[i].dim,
+                  entry_bordered.aux_blocks[i].dim);
+    }
+    ASSERT_EQ(after_bordered.direct_coupling_records.size(),
+              entry_bordered.direct_coupling_records.size());
+    for (std::size_t i = 0;
+         i < after_bordered.direct_coupling_records.size();
+         ++i) {
+        const auto& after = after_bordered.direct_coupling_records[i];
+        const auto& before = entry_bordered.direct_coupling_records[i];
+        EXPECT_EQ(after.output_slot, before.output_slot);
+        EXPECT_EQ(after.entity_index, before.entity_index);
+        EXPECT_EQ(after.aux_local_indices, before.aux_local_indices);
+        EXPECT_EQ(after.dF_dinputs, before.dF_dinputs);
+        EXPECT_EQ(after.dO_dx, before.dO_dx);
+        EXPECT_EQ(after.dO_dI, before.dO_dI);
+        EXPECT_EQ(after.input_gradients, before.input_gradients);
+        EXPECT_EQ(after.output_gradient, before.output_gradient);
+    }
+
+    const auto after_rank_one = problem.sys->lastRankOneUpdates();
+    ASSERT_EQ(after_rank_one.size(), entry_rank_one.size());
+    for (std::size_t i = 0; i < after_rank_one.size(); ++i) {
+        EXPECT_EQ(after_rank_one[i].sigma, entry_rank_one[i].sigma);
+        EXPECT_EQ(after_rank_one[i].v, entry_rank_one[i].v);
+        EXPECT_EQ(after_rank_one[i].active_components,
+                  entry_rank_one[i].active_components);
+        EXPECT_EQ(after_rank_one[i].prefer_native_face,
+                  entry_rank_one[i].prefer_native_face);
+    }
+    const auto after_reduced = problem.sys->lastReducedFieldUpdates();
+    ASSERT_EQ(after_reduced.size(), entry_reduced.size());
+    for (std::size_t i = 0; i < after_reduced.size(); ++i) {
+        EXPECT_EQ(after_reduced[i].sigma, entry_reduced[i].sigma);
+        EXPECT_EQ(after_reduced[i].left, entry_reduced[i].left);
+        EXPECT_EQ(after_reduced[i].right, entry_reduced[i].right);
+        EXPECT_EQ(after_reduced[i].active_components,
+                  entry_reduced[i].active_components);
+        EXPECT_EQ(after_reduced[i].grouped_coupling_id,
+                  entry_reduced[i].grouped_coupling_id);
+    }
+    EXPECT_EQ(problem.sys->hasLocalCondensedRecovery(),
+              entry_has_local_condensed_recovery);
+    EXPECT_EQ(
+        std::vector<svmp::FE::Real>(
+            problem.sys->lastLocalCondensedRhsShift().begin(),
+            problem.sys->lastLocalCondensedRhsShift().end()),
+        entry_local_condensed_rhs);
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     RequiresFreshlyRegeneratedResidualBeforeConvergence)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    double generated_measure = 1.0;
+    auto problem = makeRefreshedGeometryRootProblem(
+        /*target=*/1.0,
+        /*dt=*/0.1,
+        /*u0=*/{2.0},
+        &generated_measure);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    std::vector<double> refreshed_states;
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 3;
+    options.abs_tolerance = 1e-13;
+    options.rel_tolerance = 1e-8;
+    options.use_line_search = false;
+    options.external_state_fixed_point.enabled = true;
+    options.external_state_fixed_point.max_iterations = 5;
+    options.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            ASSERT_FALSE(state.u.empty());
+            EXPECT_TRUE(point == SyncPoint::OuterFixedPointState ||
+                        point == SyncPoint::ProjectedOuterFixedPointState ||
+                        point == SyncPoint::RestoredOuterFixedPointState);
+            const auto u = static_cast<double>(state.u.front());
+            // Frozen problem 1: u=1.  Regenerating at that state changes the
+            // problem to 2u-1=0, whose consistent fixed point is u=0.5.
+            generated_measure = u <= 1.0 ? 2.0 : 1.0;
+            if (point == SyncPoint::OuterFixedPointState) {
+                refreshed_states.push_back(u);
+            }
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    EXPECT_TRUE(report.converged);
+    EXPECT_EQ(report.outer_iterations, 3);
+    EXPECT_EQ(report.inner_iterations_total, 2);
+    EXPECT_EQ(report.iterations, 2);
+    EXPECT_NEAR(report.residual_norm, 0.0, 1e-13);
+    EXPECT_NEAR(
+        scalarFromDofVector(problem.history.u()), 0.5, 1e-13);
+    ASSERT_EQ(refreshed_states.size(), 3u);
+    EXPECT_NEAR(refreshed_states[0], 2.0, 1e-13);
+    EXPECT_NEAR(refreshed_states[1], 1.0, 1e-13);
+    EXPECT_NEAR(refreshed_states[2], 0.5, 1e-13);
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     OuterIterationFailureRestoresSolutionHistoryAndRateState)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    double generated_measure = 1.0;
+    auto problem = makeRefreshedGeometryRootProblem(
+        /*target=*/1.0,
+        /*dt=*/0.1,
+        /*u0=*/{2.0},
+        &generated_measure);
+    problem.history.ensureSecondOrderState(*problem.factory);
+    ts_test::setVectorByDof(problem.history.uDot(), {3.0});
+    ts_test::setVectorByDof(problem.history.uDDot(), {-4.0});
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    bool restored_generated_state = false;
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 3;
+    options.abs_tolerance = 1e-13;
+    options.rel_tolerance = 1e-8;
+    options.use_line_search = false;
+    options.external_state_fixed_point.enabled = true;
+    // One inner solve moves u from 2 to 1, but no refreshed zero-update
+    // certificate is available within this deliberately insufficient budget.
+    options.external_state_fixed_point.max_iterations = 1;
+    options.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            ASSERT_FALSE(state.u.empty());
+            const auto u = static_cast<double>(state.u.front());
+            generated_measure = u <= 1.0 ? 2.0 : 1.0;
+            if (point == SyncPoint::OuterFixedPointState) {
+                ts_test::setVectorByDof(problem.history.uPrev(), {7.0});
+                ts_test::setVectorByDof(problem.history.uPrev2(), {-8.0});
+                ts_test::setVectorByDof(problem.history.uDot(), {9.0});
+                ts_test::setVectorByDof(problem.history.uDDot(), {-10.0});
+            }
+            if (point == SyncPoint::RestoredOuterFixedPointState) {
+                restored_generated_state = true;
+                EXPECT_NEAR(u, 2.0, 1e-13);
+                EXPECT_DOUBLE_EQ(generated_measure, 1.0);
+                EXPECT_NEAR(
+                    scalarFromDofVector(problem.history.uPrev()),
+                    2.0,
+                    1e-13);
+                EXPECT_NEAR(
+                    scalarFromDofVector(problem.history.uPrev2()),
+                    2.0,
+                    1e-13);
+                EXPECT_NEAR(
+                    scalarFromDofVector(problem.history.uDot()),
+                    3.0,
+                    1e-13);
+                EXPECT_NEAR(
+                    scalarFromDofVector(problem.history.uDDot()),
+                    -4.0,
+                    1e-13);
+            }
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    EXPECT_FALSE(report.converged);
+    EXPECT_EQ(report.outer_iterations, 1);
+    EXPECT_EQ(report.inner_iterations_total, 1);
+    EXPECT_TRUE(restored_generated_state);
+    EXPECT_NEAR(
+        scalarFromDofVector(problem.history.u()), 2.0, 1e-13);
+    EXPECT_NEAR(
+        scalarFromDofVector(problem.history.uPrev()), 2.0, 1e-13);
+    EXPECT_NEAR(
+        scalarFromDofVector(problem.history.uPrev2()), 2.0, 1e-13);
+    EXPECT_NEAR(
+        scalarFromDofVector(problem.history.uDot()), 3.0, 1e-13);
+    EXPECT_NEAR(
+        scalarFromDofVector(problem.history.uDDot()), -4.0, 1e-13);
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     RefreshFailureRestoresAuxiliaryAndBorderedStateBeforeCallback)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeDirectCouplingProblem(
+        /*dt=*/0.1,
+        /*u0=*/{0.0, 0.0, 0.0, 0.0});
+    auto& block = problem.sys->auxiliaryStateManager().getBlock(
+        "newton_rank_one_snapshot_inst");
+    ASSERT_EQ(block.work().size(), 2u);
+    block.work()[0] = 5.0;
+    block.work()[1] = -6.0;
+    const auto entry_auxiliary = problem.sys->checkpointAuxiliaryState();
+    ASSERT_FALSE(entry_auxiliary.empty());
+
+    auto& bordered = problem.sys->borderedCoupling();
+    bordered.active = true;
+    bordered.n_aux = 1;
+    bordered.n_field_dofs = 4u;
+    bordered.g = {7.0};
+    const auto entry_bordered = bordered;
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    bool restored_callback_saw_entry_state = false;
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.abs_tolerance = 1e-12;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options.external_state_fixed_point.enabled = true;
+    options.external_state_fixed_point.max_iterations = 2;
+    options.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView&, SyncPoint point) {
+            if (point == SyncPoint::OuterFixedPointState) {
+                auto& trial_block =
+                    problem.sys->auxiliaryStateManager().getBlock(
+                        "newton_rank_one_snapshot_inst");
+                trial_block.work()[0] = 90.0;
+                trial_block.work()[1] = 91.0;
+                auto& trial_bordered = problem.sys->borderedCoupling();
+                trial_bordered.active = false;
+                trial_bordered.g = {-99.0};
+                throw std::runtime_error("synthetic outer refresh failure");
+            }
+            if (point == SyncPoint::RestoredOuterFixedPointState) {
+                restored_callback_saw_entry_state =
+                    problem.sys->checkpointAuxiliaryState() ==
+                        entry_auxiliary &&
+                    problem.sys->borderedCoupling().active ==
+                        entry_bordered.active &&
+                    problem.sys->borderedCoupling().n_aux ==
+                        entry_bordered.n_aux &&
+                    problem.sys->borderedCoupling().g == entry_bordered.g;
+            }
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    EXPECT_THROW(
+        (void)newton.solveStep(
+            *problem.transient,
+            *problem.linear,
+            /*solve_time=*/problem.history.dt(),
+            problem.history,
+            workspace),
+        std::runtime_error);
+    EXPECT_TRUE(restored_callback_saw_entry_state);
+    EXPECT_EQ(problem.sys->checkpointAuxiliaryState(), entry_auxiliary);
+    EXPECT_EQ(problem.sys->borderedCoupling().active,
+              entry_bordered.active);
+    EXPECT_EQ(problem.sys->borderedCoupling().n_aux,
+              entry_bordered.n_aux);
+    EXPECT_EQ(problem.sys->borderedCoupling().g, entry_bordered.g);
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     StageTimeConstraintIsEstablishedBeforeSnapshotAndRollback)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeAffineScalarProblem(
+        /*target=*/2.0,
+        /*dt=*/0.1,
+        /*u0=*/{0.0},
+        /*counts=*/nullptr,
+        /*add_time_dependent_dirichlet=*/true);
+    constexpr double stage_time = 0.075;
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    bool outer_saw_stage_value = false;
+    bool restore_saw_stage_value = false;
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.abs_tolerance = 1e-12;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options.external_state_fixed_point.enabled = true;
+    options.external_state_fixed_point.max_iterations = 2;
+    options.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            ASSERT_FALSE(state.u.empty());
+            if (point == SyncPoint::OuterFixedPointState) {
+                outer_saw_stage_value =
+                    std::abs(static_cast<double>(state.u.front()) -
+                             stage_time) < 1e-13;
+                throw std::runtime_error(
+                    "synthetic stage-time outer failure");
+            }
+            if (point == SyncPoint::RestoredOuterFixedPointState) {
+                restore_saw_stage_value =
+                    std::abs(static_cast<double>(state.u.front()) -
+                             stage_time) < 1e-13;
+            }
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    EXPECT_THROW(
+        (void)newton.solveStep(
+            *problem.transient,
+            *problem.linear,
+            stage_time,
+            problem.history,
+            workspace),
+        std::runtime_error);
+    EXPECT_TRUE(outer_saw_stage_value);
+    EXPECT_TRUE(restore_saw_stage_value);
+    EXPECT_NEAR(
+        scalarFromDofVector(problem.history.u()), stage_time, 1e-13);
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     ReallocatesJacobianAfterOuterConstraintSparsityChange)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto constraint_state = std::make_shared<SharedFieldMpcState>();
+    auto problem = makeTwoFieldAffineProblem(
+        /*selected_target=*/1.0,
+        /*dominant_target=*/2.0,
+        /*dt=*/0.1,
+        constraint_state);
+    ts_test::setVectorByDof(problem.history.uPrev(), {3.0, 4.0});
+    ts_test::setVectorByDof(problem.history.uPrev2(), {-3.0, -4.0});
+    problem.history.ensureSecondOrderState(*problem.factory);
+    ts_test::setVectorByDof(problem.history.uDot(), {5.0, 6.0});
+    ts_test::setVectorByDof(problem.history.uDDot(), {-5.0, -6.0});
+    const auto entry_revision = problem.sys->sparsityPatternRevision();
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    int topology_flips = 0;
+    bool projected_callback_saw_restored_entry_history = false;
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 2;
+    options.abs_tolerance = 1e-13;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options.assemble_both_when_possible = false;
+    options.external_state_fixed_point.enabled = true;
+    options.external_state_fixed_point.max_iterations = 4;
+    options.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            if (point != SyncPoint::OuterFixedPointState &&
+                point != SyncPoint::ProjectedOuterFixedPointState) {
+                return;
+            }
+            ASSERT_EQ(state.u.size(), 2u);
+            const bool desired_reverse =
+                std::max(static_cast<double>(state.u[0]),
+                         static_cast<double>(state.u[1])) > 0.5;
+            if (desired_reverse != constraint_state->reverse) {
+                constraint_state->reverse = desired_reverse;
+                problem.sys->rebuildConstraintState();
+                ++topology_flips;
+            }
+            if (point == SyncPoint::ProjectedOuterFixedPointState &&
+                constraint_state->reverse) {
+                const auto u_prev =
+                    ts_test::getVectorByDof(problem.history.uPrev());
+                const auto u_prev2 =
+                    ts_test::getVectorByDof(problem.history.uPrev2());
+                const auto u_dot =
+                    ts_test::getVectorByDof(problem.history.uDot());
+                const auto u_ddot =
+                    ts_test::getVectorByDof(problem.history.uDDot());
+                ASSERT_EQ(u_prev.size(), 2u);
+                ASSERT_EQ(u_prev2.size(), 2u);
+                ASSERT_EQ(u_dot.size(), 2u);
+                ASSERT_EQ(u_ddot.size(), 2u);
+                projected_callback_saw_restored_entry_history =
+                    std::abs(static_cast<double>(u_prev[0]) - 3.0) <
+                        1e-13 &&
+                    std::abs(static_cast<double>(u_prev[1]) - 3.0) <
+                        1e-13 &&
+                    std::abs(static_cast<double>(u_prev2[0]) + 3.0) <
+                        1e-13 &&
+                    std::abs(static_cast<double>(u_prev2[1]) + 3.0) <
+                        1e-13 &&
+                    std::abs(static_cast<double>(u_dot[0]) - 5.0) <
+                        1e-13 &&
+                    std::abs(static_cast<double>(u_dot[1]) - 5.0) <
+                        1e-13 &&
+                    std::abs(static_cast<double>(u_ddot[0]) + 5.0) <
+                        1e-13 &&
+                    std::abs(static_cast<double>(u_ddot[1]) + 5.0) <
+                        1e-13;
+            }
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    EXPECT_TRUE(report.converged);
+    EXPECT_EQ(report.outer_iterations, 2);
+    EXPECT_EQ(report.inner_iterations_total, 1);
+    EXPECT_EQ(topology_flips, 1);
+    EXPECT_TRUE(projected_callback_saw_restored_entry_history);
+    EXPECT_GT(problem.sys->sparsityPatternRevision(), entry_revision);
+    EXPECT_EQ(workspace.sparsity_revision,
+              problem.sys->sparsityPatternRevision());
+    const auto values = ts_test::getVectorByDof(problem.history.u());
+    ASSERT_EQ(values.size(), 2u);
+    // The equality MPC leaves one admissible scalar.  With independent
+    // targets 1 and 2, the constrained Galerkin root is their mean, 1.5;
+    // reversing slave/master orientation must preserve that subspace/root.
+    EXPECT_NEAR(values[0], 1.5, 1e-13);
+    EXPECT_NEAR(values[1], 1.5, 1e-13);
+}
+
+TEST(NewtonSolverExternalStateFixedPoint,
+     FirstGeneratedConstraintRefreshDefinesCanonicalRollbackEntry)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto constraint_state = std::make_shared<SharedFieldMpcState>();
+    auto problem = makeTwoFieldAffineProblem(
+        /*selected_target=*/1.0,
+        /*dominant_target=*/2.0,
+        /*dt=*/0.1,
+        constraint_state);
+
+    // The caller's candidate satisfies the stale/pre-refresh equality
+    // selected=dominant.  The first generated-state refresh replaces that
+    // relation with dominant=2*selected+1, whose projected canonical entry is
+    // [1,3].  A failed outer solve must roll back to that synchronized entry,
+    // not compare it against the stale equality fingerprint captured before
+    // the first refresh.
+    ts_test::setVectorByDof(problem.history.u(), {1.0, 1.0});
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    int generated_constraint_installs = 0;
+    int restored_outer_calls = 0;
+    bool restored_outer_saw_canonical_entry = false;
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 2;
+    options.abs_tolerance = 1e-13;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options.assemble_both_when_possible = false;
+    options.external_state_fixed_point.enabled = true;
+    // The first frozen inner solve takes one Newton update.  With no second
+    // outer refresh available, solveStep must return ordinary nonconvergence
+    // after restoring the canonical synchronized entry.
+    options.external_state_fixed_point.max_iterations = 1;
+    options.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            ASSERT_EQ(state.u.size(), 2u);
+            if (point == SyncPoint::RestoredOuterFixedPointState) {
+                ++restored_outer_calls;
+                restored_outer_saw_canonical_entry =
+                    std::abs(static_cast<double>(state.u[0]) - 1.0) <
+                        1e-13 &&
+                    std::abs(static_cast<double>(state.u[1]) - 3.0) <
+                        1e-13;
+            }
+            if (point != SyncPoint::OuterFixedPointState &&
+                point != SyncPoint::RestoredOuterFixedPointState) {
+                return;
+            }
+            if (!constraint_state->reverse ||
+                constraint_state->weight != 2.0 ||
+                constraint_state->inhomogeneity != 1.0) {
+                constraint_state->reverse = true;
+                constraint_state->weight = 2.0;
+                constraint_state->inhomogeneity = 1.0;
+                problem.sys->rebuildConstraintState();
+                ++generated_constraint_installs;
+            }
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    std::optional<svmp::FE::timestepping::NewtonReport> report;
+    EXPECT_NO_THROW(report.emplace(newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace)));
+    ASSERT_TRUE(report.has_value());
+    EXPECT_FALSE(report->converged);
+    EXPECT_EQ(report->outer_iterations, 1);
+    EXPECT_EQ(report->inner_iterations_total, 1);
+    EXPECT_EQ(generated_constraint_installs, 1);
+    EXPECT_EQ(restored_outer_calls, 1);
+    EXPECT_TRUE(restored_outer_saw_canonical_entry);
+
+    const auto values = ts_test::getVectorByDof(problem.history.u());
+    ASSERT_EQ(values.size(), 2u);
+    EXPECT_NEAR(values[0], 1.0, 1e-13);
+    EXPECT_NEAR(values[1], 3.0, 1e-13);
+}
 
 TEST(NewtonSolverLineSearch, BacktracksWhenFullStepIncreasesResidual)
 {
@@ -981,7 +3200,578 @@ TEST(NewtonSolverLineSearch, BacktracksWhenFullStepIncreasesResidual)
     EXPECT_NEAR(u_after, -0.5, 1e-13);
 }
 
-TEST(NewtonSolverLineSearch, ClampsAlphaToMinWhenShrinkWouldGoBelow)
+TEST(NewtonSolverLineSearch,
+     RefreshedTrialMeritRejectsFrozenGeometryRoot)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    double refreshed_measure = 1.0;
+    auto problem = makeRefreshedGeometryRootProblem(
+        /*target=*/1.0,
+        /*dt=*/0.1,
+        /*u0=*/{2.0},
+        &refreshed_measure);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    struct TrialSample {
+        double u;
+        double measure;
+    };
+    std::vector<TrialSample> trials;
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.assemble_both_when_possible = true;
+    nopt.use_line_search = true;
+    nopt.line_search_max_iterations = 3;
+    nopt.line_search_shrink = 0.5;
+    nopt.line_search_alpha_min = 0.1;
+    nopt.synchronize_state =
+        [&refreshed_measure, &trials](
+            const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            ASSERT_FALSE(state.u.empty());
+            const auto u = static_cast<double>(state.u.front());
+            // The frozen Jacobian at u=2 proposes u=1.  On the actual
+            // refreshed residual that state is not a root: the measure jump
+            // makes |4*u-1| larger than the base |u-1|.  The half step at
+            // u=1.5 retains measure one and is strictly reducing.
+            refreshed_measure = u < 1.25 ? 4.0 : 1.0;
+            if (point == SyncPoint::LineSearchTrialResidual) {
+                trials.push_back(TrialSample{u, refreshed_measure});
+            }
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    const auto rep = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws);
+
+    EXPECT_FALSE(rep.converged);
+    EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 1.5, 1e-13);
+    ASSERT_GE(trials.size(), 2u);
+    EXPECT_NEAR(trials[0].u, 1.0, 1e-13);
+    EXPECT_DOUBLE_EQ(trials[0].measure, 4.0);
+    EXPECT_NEAR(trials[1].u, 1.5, 1e-13);
+    EXPECT_DOUBLE_EQ(trials[1].measure, 1.0);
+}
+
+TEST(NewtonSolverLineSearch,
+     RestoresBaseConstraintTopologyBetweenRejectedAlphas)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto constraint_state = std::make_shared<SharedFieldMpcState>();
+    auto problem = makeTwoFieldAffineProblem(
+        /*selected_target=*/1.0,
+        /*dominant_target=*/2.0,
+        /*dt=*/0.1,
+        constraint_state);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    struct TrialCandidate {
+        double selected;
+        double dominant;
+    };
+    std::vector<TrialCandidate> first_pass_trials;
+    bool trial_constraint_active = false;
+    bool saw_projected_trial_second_pass = false;
+    bool saw_restore_between_alphas = false;
+    int jacobian_sync_count = 0;
+    const auto selected_dof = problem.sys->fieldDofOffset(
+        problem.selected_field);
+    const auto dominant_dof = problem.sys->fieldDofOffset(
+        problem.dominant_field);
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 2;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.assemble_both_when_possible = false;
+    nopt.use_line_search = true;
+    nopt.line_search_max_iterations = 2;
+    nopt.line_search_shrink = 0.5;
+    nopt.line_search_alpha_min = 0.5;
+    nopt.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            ASSERT_NE(state.u_vector, nullptr);
+            ASSERT_GT(state.u.size(),
+                      static_cast<std::size_t>(
+                          std::max(selected_dof, dominant_dof)));
+            const auto selected = static_cast<double>(
+                state.u[static_cast<std::size_t>(selected_dof)]);
+            const auto dominant = static_cast<double>(
+                state.u[static_cast<std::size_t>(dominant_dof)]);
+
+            if (point == SyncPoint::JacobianAssembly) {
+                ++jacobian_sync_count;
+            }
+            if (point == SyncPoint::RestoredNonlinearState) {
+                saw_restore_between_alphas =
+                    saw_restore_between_alphas || trial_constraint_active;
+                constraint_state->reverse = false;
+                constraint_state->weight = 1.0;
+                constraint_state->inhomogeneity = 0.0;
+                trial_constraint_active = false;
+                problem.sys->rebuildConstraintState();
+                return;
+            }
+            if (point != SyncPoint::LineSearchTrialResidual) {
+                return;
+            }
+
+            if (trial_constraint_active) {
+                // The callback is invoked again after Newton projects with
+                // C_trial: dominant = selected + 100.  Residual-defining
+                // derived data therefore sees the projected state.
+                EXPECT_NEAR(dominant, selected + 100.0, 1e-12);
+                saw_projected_trial_second_pass = true;
+                return;
+            }
+
+            first_pass_trials.push_back(
+                TrialCandidate{selected, dominant});
+            if (first_pass_trials.size() == 1u) {
+                // Force the full step onto a different slave topology with a
+                // large offset, making its refreshed merit non-reducing.
+                constraint_state->reverse = true;
+                constraint_state->weight = 1.0;
+                constraint_state->inhomogeneity = 100.0;
+                trial_constraint_active = true;
+                problem.sys->rebuildConstraintState();
+            }
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    ScalingLinearSolver linear(*problem.linear, /*scale=*/3.0);
+    (void)newton.solveStep(
+        *problem.transient,
+        linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws);
+
+    ASSERT_GE(first_pass_trials.size(), 2u);
+    EXPECT_TRUE(saw_projected_trial_second_pass);
+    EXPECT_TRUE(saw_restore_between_alphas);
+    EXPECT_NEAR(first_pass_trials[0].selected,
+                first_pass_trials[0].dominant,
+                1e-12);
+    EXPECT_NEAR(first_pass_trials[1].selected,
+                0.5 * first_pass_trials[0].selected,
+                1e-12);
+    EXPECT_NEAR(first_pass_trials[1].dominant,
+                0.5 * first_pass_trials[0].dominant,
+                1e-12);
+    EXPECT_GE(jacobian_sync_count, 2);
+}
+
+TEST(NewtonSolverLineSearch,
+     ProjectsChangedConstraintCoefficientsBeforeTrialResidual)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto constraint_state = std::make_shared<SharedFieldMpcState>();
+    auto problem = makeTwoFieldAffineProblem(
+        /*selected_target=*/1.0,
+        /*dominant_target=*/2.0,
+        /*dt=*/0.1,
+        constraint_state);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    const auto selected_dof = problem.sys->fieldDofOffset(
+        problem.selected_field);
+    const auto dominant_dof = problem.sys->fieldDofOffset(
+        problem.dominant_field);
+    bool coefficient_trial_active = false;
+    bool saw_projected_second_pass = false;
+    bool saw_restored_base_coefficient = false;
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.assemble_both_when_possible = false;
+    nopt.use_line_search = true;
+    nopt.line_search_max_iterations = 1;
+    nopt.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            const auto selected = static_cast<double>(
+                state.u[static_cast<std::size_t>(selected_dof)]);
+            const auto dominant = static_cast<double>(
+                state.u[static_cast<std::size_t>(dominant_dof)]);
+            if (point == SyncPoint::RestoredNonlinearState) {
+                constraint_state->weight = 1.0;
+                coefficient_trial_active = false;
+                problem.sys->rebuildConstraintState();
+                saw_restored_base_coefficient = true;
+                return;
+            }
+            if (point != SyncPoint::LineSearchTrialResidual) {
+                return;
+            }
+            if (!coefficient_trial_active) {
+                constraint_state->weight = 2.0;
+                coefficient_trial_active = true;
+                problem.sys->rebuildConstraintState();
+                return;
+            }
+            EXPECT_NEAR(selected, 2.0 * dominant, 1e-12);
+            saw_projected_second_pass = true;
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    ScalingLinearSolver linear(*problem.linear, /*scale=*/-1.0);
+    (void)newton.solveStep(
+        *problem.transient,
+        linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws);
+
+    EXPECT_TRUE(saw_projected_second_pass);
+    EXPECT_TRUE(saw_restored_base_coefficient);
+    EXPECT_DOUBLE_EQ(constraint_state->weight, 1.0);
+}
+
+TEST(NewtonSolverLineSearch,
+     FailsClosedWhenRejectedConstraintStateCannotBeRestored)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto constraint_state = std::make_shared<SharedFieldMpcState>();
+    auto problem = makeTwoFieldAffineProblem(
+        /*selected_target=*/1.0,
+        /*dominant_target=*/2.0,
+        /*dt=*/0.1,
+        constraint_state);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    bool trial_constraint_active = false;
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.assemble_both_when_possible = false;
+    nopt.use_line_search = true;
+    nopt.line_search_max_iterations = 1;
+    nopt.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView&,
+            SyncPoint point) {
+            if (point == SyncPoint::LineSearchTrialResidual &&
+                !trial_constraint_active) {
+                constraint_state->reverse = true;
+                constraint_state->inhomogeneity = 100.0;
+                trial_constraint_active = true;
+                problem.sys->rebuildConstraintState();
+            }
+            // Deliberately leave the rejected trial constraint installed at
+            // RestoredNonlinearState.  Newton must fail closed rather than
+            // constructing another trial from contaminated state.
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    ScalingLinearSolver linear(*problem.linear, /*scale=*/-1.0);
+    EXPECT_THROW(
+        (void)newton.solveStep(
+            *problem.transient,
+            linear,
+            /*solve_time=*/problem.history.dt(),
+            problem.history,
+            ws),
+        svmp::FE::systems::InvalidStateException);
+}
+
+TEST(NewtonSolverLineSearch,
+     AcceptedTrialProjectsHistoryBeforeRefreshedResidual)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto constraint_state = std::make_shared<SharedFieldMpcState>();
+    auto problem = makeTwoFieldAffineProblem(
+        /*selected_target=*/2.0,
+        /*dominant_target=*/1.0,
+        /*dt=*/0.1,
+        constraint_state);
+    const auto selected_dof = problem.sys->fieldDofOffset(
+        problem.selected_field);
+    const auto dominant_dof = problem.sys->fieldDofOffset(
+        problem.dominant_field);
+    std::vector<svmp::FE::Real> base_state(
+        static_cast<std::size_t>(problem.history.u().size()),
+        svmp::FE::Real(0.0));
+    base_state[static_cast<std::size_t>(selected_dof)] = 1.0;
+    base_state[static_cast<std::size_t>(dominant_dof)] = 1.0;
+    ts_test::setVectorByDof(problem.history.uPrev(), base_state);
+    ts_test::setVectorByDof(problem.history.uPrev2(), base_state);
+    problem.history.resetCurrentToPrevious();
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    bool trial_constraint_active = false;
+    bool saw_refreshed_projected_history = false;
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 1e-13;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.assemble_both_when_possible = false;
+    nopt.use_line_search = true;
+    nopt.line_search_max_iterations = 1;
+    nopt.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            if (point == SyncPoint::LineSearchTrialResidual &&
+                !trial_constraint_active) {
+                constraint_state->weight = 2.0;
+                trial_constraint_active = true;
+                problem.sys->rebuildConstraintState();
+                return;
+            }
+            if (point == SyncPoint::ResidualAssembly &&
+                trial_constraint_active) {
+                ASSERT_GT(state.u_prev.size(),
+                          static_cast<std::size_t>(std::max(
+                              selected_dof, dominant_dof)));
+                const auto selected_prev = static_cast<double>(
+                    state.u_prev[static_cast<std::size_t>(selected_dof)]);
+                const auto dominant_prev = static_cast<double>(
+                    state.u_prev[static_cast<std::size_t>(dominant_dof)]);
+                EXPECT_NEAR(selected_prev, 2.0 * dominant_prev, 1e-12);
+                saw_refreshed_projected_history = true;
+            }
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    // Keep the raw current-state update at zero.  The trial becomes an exact
+    // root only after its changed MPC coefficient projects both the current
+    // vector and the transient history from selected=dominant to
+    // selected=2*dominant.
+    ScalingLinearSolver linear(*problem.linear, /*scale=*/0.0);
+    const auto rep = newton.solveStep(
+        *problem.transient,
+        linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws);
+
+    EXPECT_TRUE(rep.converged);
+    EXPECT_TRUE(saw_refreshed_projected_history);
+    const auto final_prev = problem.history.uPrevSpan();
+    EXPECT_NEAR(
+        static_cast<double>(
+            final_prev[static_cast<std::size_t>(selected_dof)]),
+        2.0 * static_cast<double>(
+                  final_prev[static_cast<std::size_t>(dominant_dof)]),
+        1e-12);
+}
+
+TEST(NewtonSolverLineSearch,
+     TrialMeritUsesProjectedTransientHistory)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto constraint_state = std::make_shared<SharedFieldMpcState>();
+    auto problem = makeTwoFieldHistorySensitiveMpcProblem(
+        /*dt=*/0.1, constraint_state);
+    const auto selected_dof = problem.sys->fieldDofOffset(
+        problem.selected_field);
+    const auto dominant_dof = problem.sys->fieldDofOffset(
+        problem.dominant_field);
+    std::vector<svmp::FE::Real> base_state(
+        static_cast<std::size_t>(problem.history.u().size()),
+        svmp::FE::Real(0.0));
+    base_state[static_cast<std::size_t>(selected_dof)] = 1.0;
+    base_state[static_cast<std::size_t>(dominant_dof)] = 1.0;
+    ts_test::setVectorByDof(problem.history.uPrev(), base_state);
+    ts_test::setVectorByDof(problem.history.uPrev2(), base_state);
+    problem.history.resetCurrentToPrevious();
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    bool changed_trial_constraint = false;
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 1e-13;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.assemble_both_when_possible = false;
+    nopt.use_line_search = true;
+    nopt.line_search_max_iterations = 1;
+    nopt.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView&,
+            SyncPoint point) {
+            if (point == SyncPoint::LineSearchTrialResidual &&
+                !changed_trial_constraint) {
+                constraint_state->weight = 2.0;
+                changed_trial_constraint = true;
+                problem.sys->rebuildConstraintState();
+            }
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    // With u_prev left under the base selected=dominant relation, the dt term
+    // at the projected candidate selected=2, dominant=1 is O(1/dt) and the
+    // trial is rejected.  A coherent trial projects both u and u_prev under
+    // selected=2*dominant, making dt(selected)=0 and the residual exactly zero.
+    ScalingLinearSolver linear(*problem.linear, /*scale=*/0.0);
+    const auto rep = newton.solveStep(
+        *problem.transient,
+        linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws);
+
+    EXPECT_TRUE(rep.converged);
+    EXPECT_TRUE(changed_trial_constraint);
+    const auto final_state = problem.history.uSpan();
+    const auto final_prev = problem.history.uPrevSpan();
+    EXPECT_NEAR(
+        static_cast<double>(
+            final_state[static_cast<std::size_t>(selected_dof)]),
+        2.0,
+        1e-12);
+    EXPECT_NEAR(
+        static_cast<double>(
+            final_state[static_cast<std::size_t>(dominant_dof)]),
+        1.0,
+        1e-12);
+    EXPECT_NEAR(
+        static_cast<double>(
+            final_prev[static_cast<std::size_t>(selected_dof)]),
+        2.0,
+        1e-12);
+    EXPECT_NEAR(
+        static_cast<double>(
+            final_prev[static_cast<std::size_t>(dominant_dof)]),
+        1.0,
+        1e-12);
+}
+
+TEST(NewtonSolverLineSearch,
+     StepToleranceUsesProjectedConstraintState)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto constraint_state = std::make_shared<SharedFieldMpcState>();
+    auto problem = makeTwoFieldAffineProblem(
+        /*selected_target=*/1.0,
+        /*dominant_target=*/2.0,
+        /*dt=*/0.1,
+        constraint_state);
+    const auto dominant_dof = problem.sys->fieldDofOffset(
+        problem.dominant_field);
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    // The nominal reduced-space Newton update is below this threshold, but
+    // the accepted-state constraint projection adds an O(100) displacement.
+    nopt.step_tolerance = 10.0;
+    nopt.assemble_both_when_possible = false;
+    nopt.use_line_search = false;
+    nopt.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            if (point != SyncPoint::AcceptedNonlinearState) {
+                return;
+            }
+            const auto dominant = static_cast<double>(
+                state.u[static_cast<std::size_t>(dominant_dof)]);
+            if (dominant > 1.0 && !constraint_state->reverse) {
+                constraint_state->reverse = true;
+                constraint_state->inhomogeneity = 100.0;
+                problem.sys->rebuildConstraintState();
+            }
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    const auto rep = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws);
+    EXPECT_FALSE(rep.converged);
+    EXPECT_GT(problem.history.u().norm(), nopt.step_tolerance);
+}
+
+TEST(NewtonSolverLineSearch, RestoresOriginalWhenAlphaMinDoesNotReduce)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
     GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
@@ -1011,16 +3801,17 @@ TEST(NewtonSolverLineSearch, ClampsAlphaToMinWhenShrinkWouldGoBelow)
     newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
     problem.history.repack(*problem.factory);
 
-    // Force an overshoot so alpha=1 fails, and even alpha_min still fails; the solver
-    // must clamp to alpha_min and accept that last trial.
+    // Force an overshoot so alpha=1 fails and even alpha_min still increases
+    // the residual.  A clamped but non-reducing trial is not a valid
+    // globalization step; restore the original iterate.
     ScalingLinearSolver linear(*problem.linear, /*scale=*/4.0);
     (void)newton.solveStep(*problem.transient, linear, /*solve_time=*/problem.history.dt(), problem.history, ws);
 
     const double u_after = scalarFromDofVector(problem.history.u());
-    EXPECT_NEAR(u_after, -1.4, 1e-13);
+    EXPECT_NEAR(u_after, 1.0, 1e-13);
 }
 
-TEST(NewtonSolverLineSearch, StepToleranceUsesLastTriedAlphaWhenMaxIterationsReached)
+TEST(NewtonSolverLineSearch, DoesNotConvergeFromRestoredZeroStep)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
     GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
@@ -1117,14 +3908,12 @@ TEST(NewtonSolverLineSearch, SynchronizesTrialAndRestoredStates)
 
     EXPECT_FALSE(rep.converged);
     auto saw_trial_update = false;
-    auto saw_trial_restore = false;
+    auto saw_zero_alpha_trial = false;
     auto saw_restored_state = false;
     auto saw_trial_cut_topology = false;
-    auto saw_restored_cut_topology = false;
     auto saw_restored_state_cut_topology = false;
     std::optional<std::uint64_t> accepted_revision;
     std::optional<std::uint64_t> trial_revision;
-    std::optional<std::uint64_t> trial_restore_revision;
     std::optional<std::uint64_t> restored_revision;
     for (const auto& rec : sync_records) {
         if (rec.point == SyncPoint::AcceptedNonlinearState &&
@@ -1140,9 +3929,7 @@ TEST(NewtonSolverLineSearch, SynchronizesTrialAndRestoredStates)
         }
         if (rec.point == SyncPoint::LineSearchTrialResidual &&
             std::abs(rec.u - 1.0) < 1e-13) {
-            saw_trial_restore = true;
-            saw_restored_cut_topology = rec.cut_topology_key == std::uint64_t{0x101u};
-            trial_restore_revision = rec.value_revision;
+            saw_zero_alpha_trial = true;
         }
         if (rec.point == SyncPoint::RestoredNonlinearState &&
             std::abs(rec.u - 1.0) < 1e-13) {
@@ -1153,18 +3940,95 @@ TEST(NewtonSolverLineSearch, SynchronizesTrialAndRestoredStates)
         }
     }
     EXPECT_TRUE(saw_trial_update);
-    EXPECT_TRUE(saw_trial_restore);
+    // A rejected update is restored directly; alpha=0 must not be opened as
+    // another geometric trial after the base context has been reconstructed.
+    EXPECT_FALSE(saw_zero_alpha_trial);
     EXPECT_TRUE(saw_restored_state);
     EXPECT_TRUE(saw_trial_cut_topology);
-    EXPECT_TRUE(saw_restored_cut_topology);
     EXPECT_TRUE(saw_restored_state_cut_topology);
     ASSERT_TRUE(accepted_revision.has_value());
     ASSERT_TRUE(trial_revision.has_value());
-    ASSERT_TRUE(trial_restore_revision.has_value());
     ASSERT_TRUE(restored_revision.has_value());
     EXPECT_GT(*trial_revision, *accepted_revision);
-    EXPECT_GT(*trial_restore_revision, *trial_revision);
-    EXPECT_EQ(*restored_revision, *trial_restore_revision);
+    EXPECT_GT(*restored_revision, *trial_revision);
+    EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 1.0, 1e-13);
+}
+
+TEST(NewtonSolverLineSearch,
+     ThrowingTrialRestoresOriginallyAbsentRateState)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeScalarProblem(
+        [](const svmp::FE::forms::FormExpr& u,
+           const svmp::FE::forms::FormExpr& v) { return (u * v).dx(); },
+        /*dt=*/0.1,
+        /*u0=*/{1.0});
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    bool allocated_rates_in_trial = false;
+    bool restored_callback_saw_absent_rates = false;
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.assemble_both_when_possible = false;
+    nopt.use_line_search = true;
+    nopt.line_search_max_iterations = 1;
+    nopt.line_search_alpha_min = 1e-12;
+    nopt.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView&, SyncPoint point) {
+            if (point == SyncPoint::RestoredNonlinearState) {
+                restored_callback_saw_absent_rates =
+                    !problem.history.hasUDotState() &&
+                    !problem.history.hasUDDotState();
+                return;
+            }
+            if (point != SyncPoint::LineSearchTrialResidual ||
+                allocated_rates_in_trial) {
+                return;
+            }
+
+            EXPECT_FALSE(problem.history.hasUDotState());
+            EXPECT_FALSE(problem.history.hasUDDotState());
+            problem.history.ensureSecondOrderState(*problem.factory);
+            ts_test::setVectorByDof(problem.history.uDot(), {17.0});
+            ts_test::setVectorByDof(problem.history.uDDot(), {-23.0});
+            allocated_rates_in_trial = true;
+            throw std::runtime_error(
+                "intentional line-search trial synchronization failure");
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+    ASSERT_FALSE(problem.history.hasUDotState());
+    ASSERT_FALSE(problem.history.hasUDDotState());
+
+    // The scaled direction increases the residual. The callback failure is
+    // treated as a rejected alpha and must roll every speculative rate-state
+    // allocation back before RestoredNonlinearState is invoked.
+    ScalingLinearSolver linear(*problem.linear, /*scale=*/-1.0);
+    const auto rep = newton.solveStep(
+        *problem.transient,
+        linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws);
+
+    EXPECT_FALSE(rep.converged);
+    EXPECT_TRUE(allocated_rates_in_trial);
+    EXPECT_TRUE(restored_callback_saw_absent_rates);
+    EXPECT_FALSE(problem.history.hasUDotState());
+    EXPECT_FALSE(problem.history.hasUDDotState());
     EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 1.0, 1e-13);
 }
 
@@ -1235,7 +4099,7 @@ TEST(NewtonSolverLineSearch, RestoresAcceptedHighOrderCutContextAfterRejectedTri
 
     EXPECT_FALSE(rep.converged);
     bool saw_rejected_trial_context = false;
-    bool saw_trial_restore_context = false;
+    bool saw_zero_alpha_trial_context = false;
     bool saw_restored_context = false;
     bool saw_policy_change = false;
     for (const auto& rec : sync_records) {
@@ -1249,7 +4113,7 @@ TEST(NewtonSolverLineSearch, RestoresAcceptedHighOrderCutContextAfterRejectedTri
         }
         if (rec.point == SyncPoint::LineSearchTrialResidual &&
             std::abs(rec.u - 1.0) < 1e-13) {
-            saw_trial_restore_context =
+            saw_zero_alpha_trial_context =
                 rec.topology_key == kAcceptedTopology &&
                 rec.request_policy_key == kHighOrderPolicy;
         }
@@ -1261,7 +4125,7 @@ TEST(NewtonSolverLineSearch, RestoresAcceptedHighOrderCutContextAfterRejectedTri
         }
     }
     EXPECT_TRUE(saw_rejected_trial_context);
-    EXPECT_TRUE(saw_trial_restore_context);
+    EXPECT_FALSE(saw_zero_alpha_trial_context);
     EXPECT_TRUE(saw_restored_context);
     EXPECT_FALSE(saw_policy_change);
     EXPECT_EQ(installed.topology_key, kAcceptedTopology);
@@ -1347,6 +4211,203 @@ TEST(NewtonSolver, SynchronizesUpdatedCoupledGeometryBeforeResidualAssembly)
     EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 2.0, 1e-13);
 }
 
+TEST(NewtonSolverLineSearch,
+     ReassemblesResidualAfterAcceptedStateRefreshBeforeConvergence)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    double refreshed_measure = 1.0;
+    auto problem = makeRefreshedGeometryRootProblem(
+        /*target=*/1.0,
+        /*dt=*/0.1,
+        /*u0=*/{2.0},
+        &refreshed_measure);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    struct SyncRecord {
+        SyncPoint point;
+        double u;
+        double measure;
+    };
+    std::vector<SyncRecord> sync_records;
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 3;
+    nopt.abs_tolerance = 1e-13;
+    nopt.rel_tolerance = 0.0;
+    // Deliberately larger than the first update.  A solver that applies the
+    // step test to the frozen trial residual would incorrectly stop at u=1.
+    nopt.step_tolerance = 2.0;
+    nopt.use_line_search = true;
+    nopt.assemble_both_when_possible = true;
+    nopt.accepted_state_sync_invalidates_residual = true;
+    nopt.synchronize_state =
+        [&refreshed_measure, &sync_records](
+            const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            ASSERT_FALSE(state.u.empty());
+            const auto u = static_cast<double>(state.u.front());
+            if (point == SyncPoint::AcceptedNonlinearState) {
+                refreshed_measure = u < 1.5 ? 1.5 : 1.0;
+            }
+            sync_records.push_back(
+                SyncRecord{point, u, refreshed_measure});
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    const auto rep = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws);
+
+    EXPECT_TRUE(rep.converged);
+    EXPECT_EQ(rep.iterations, 2);
+    EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 2.0 / 3.0, 1e-13);
+
+    bool saw_refreshed_residual_at_stale_trial_root = false;
+    for (const auto& rec : sync_records) {
+        if (rec.point == SyncPoint::ResidualAssembly &&
+            std::abs(rec.u - 1.0) < 1e-13 &&
+            std::abs(rec.measure - 1.5) < 1e-13) {
+            saw_refreshed_residual_at_stale_trial_root = true;
+        }
+    }
+    EXPECT_TRUE(saw_refreshed_residual_at_stale_trial_root);
+}
+
+TEST(NewtonSolverLineSearch,
+     RejectsCandidateThatOnlyPassesFrozenTrialMerit)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    double refreshed_measure = 1.0;
+    auto problem = makeRefreshedGeometryRootProblem(
+        /*target=*/1.0,
+        /*dt=*/0.1,
+        /*u0=*/{2.0},
+        &refreshed_measure);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    bool saw_nonreducing_accepted_refresh = false;
+    bool saw_restored_base_refresh = false;
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = true;
+    nopt.line_search_max_iterations = 1;
+    nopt.accepted_state_sync_invalidates_residual = true;
+    nopt.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            ASSERT_FALSE(state.u.empty());
+            const auto u = static_cast<double>(state.u.front());
+            if (point == SyncPoint::AcceptedNonlinearState) {
+                refreshed_measure = u < 1.5 ? 2.0 : 1.0;
+                if (std::abs(u - 1.0) < 1e-13) {
+                    saw_nonreducing_accepted_refresh = true;
+                }
+            } else if (point == SyncPoint::RestoredNonlinearState) {
+                refreshed_measure = u < 1.5 ? 2.0 : 1.0;
+                if (std::abs(u - 2.0) < 1e-13 &&
+                    std::abs(refreshed_measure - 1.0) < 1e-13) {
+                    saw_restored_base_refresh = true;
+                }
+            }
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    const auto rep = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws);
+
+    EXPECT_FALSE(rep.converged);
+    EXPECT_TRUE(saw_nonreducing_accepted_refresh);
+    EXPECT_TRUE(saw_restored_base_refresh);
+    EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 2.0, 1e-13);
+    EXPECT_NEAR(refreshed_measure, 1.0, 1e-13);
+}
+
+TEST(NewtonSolver,
+     StepToleranceUsesResidualReassembledAfterAcceptedStateRefresh)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    double refreshed_measure = 1.0;
+    auto problem = makeRefreshedGeometryRootProblem(
+        /*target=*/1.0,
+        /*dt=*/0.1,
+        /*u0=*/{2.0},
+        &refreshed_measure);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 2;
+    nopt.abs_tolerance = 1e-13;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 2.0;
+    nopt.use_line_search = false;
+    nopt.assemble_both_when_possible = true;
+    nopt.accepted_state_sync_invalidates_residual = true;
+    nopt.synchronize_state =
+        [&refreshed_measure](
+            const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            ASSERT_FALSE(state.u.empty());
+            if (point == SyncPoint::AcceptedNonlinearState) {
+                const auto u = static_cast<double>(state.u.front());
+                refreshed_measure = u < 1.5 ? 2.0 : 1.0;
+            }
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    const auto rep = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws);
+
+    EXPECT_TRUE(rep.converged);
+    EXPECT_EQ(rep.iterations, 2);
+    EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 0.5, 1e-13);
+    EXPECT_NEAR(rep.residual_norm, 0.0, 1e-13);
+}
+
 TEST(NewtonSolver, RefreshedGeometryJacobianCheckReportsQuasiNewtonMismatch)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
@@ -1422,6 +4483,259 @@ TEST(NewtonSolver, RefreshedGeometryJacobianCheckReportsQuasiNewtonMismatch)
     EXPECT_EQ(diagnostic.finite_difference_scheme, "forward");
     EXPECT_GT(diagnostic.relative_error,
               nopt.jacobian_check_relative_tolerance);
+}
+
+TEST(NewtonSolver,
+     JacobianCheckRestoresTransientHistoryRatesAndStateDependentMpc)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto constraint_state = std::make_shared<SharedFieldMpcState>();
+    auto problem = makeTwoFieldHistorySensitiveMpcProblem(
+        /*dt=*/0.125, constraint_state);
+    const auto selected_dof =
+        problem.sys->fieldDofOffset(problem.selected_field);
+    const auto dominant_dof =
+        problem.sys->fieldDofOffset(problem.dominant_field);
+
+    auto two_field_state = [&](double selected, double dominant) {
+        std::vector<svmp::FE::Real> values(
+            static_cast<std::size_t>(problem.history.u().size()),
+            svmp::FE::Real(0.0));
+        values[static_cast<std::size_t>(selected_dof)] =
+            static_cast<svmp::FE::Real>(selected);
+        values[static_cast<std::size_t>(dominant_dof)] =
+            static_cast<svmp::FE::Real>(dominant);
+        return values;
+    };
+    const auto current_base = two_field_state(1.0, 1.0);
+    const auto previous_base = two_field_state(1.0, 1.0);
+    const auto previous2_base = two_field_state(2.0, 2.0);
+    const auto u_dot_base = two_field_state(3.0, 3.0);
+    const auto u_ddot_base = two_field_state(4.0, 4.0);
+    ts_test::setVectorByDof(problem.history.uPrev(), previous_base);
+    ts_test::setVectorByDof(problem.history.uPrev2(), previous2_base);
+    problem.history.resetCurrentToPrevious();
+    problem.history.ensureSecondOrderState(*problem.factory);
+    ts_test::setVectorByDof(problem.history.uDot(), u_dot_base);
+    ts_test::setVectorByDof(problem.history.uDDot(), u_ddot_base);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    bool trial_constraint_active = false;
+    bool saw_projected_probe = false;
+    bool saw_restored_probe = false;
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+    nopt.assemble_both_when_possible = true;
+    nopt.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            if (point == SyncPoint::RestoredNonlinearState) {
+                if (trial_constraint_active) {
+                    constraint_state->reverse = false;
+                    constraint_state->weight = 1.0;
+                    constraint_state->inhomogeneity = 0.0;
+                    trial_constraint_active = false;
+                    saw_restored_probe = true;
+                    problem.sys->rebuildConstraintState();
+                }
+                return;
+            }
+            if (point != SyncPoint::ResidualAssembly) {
+                return;
+            }
+            if (trial_constraint_active) {
+                const auto selected = static_cast<double>(
+                    state.u[static_cast<std::size_t>(selected_dof)]);
+                const auto dominant = static_cast<double>(
+                    state.u[static_cast<std::size_t>(dominant_dof)]);
+                saw_projected_probe =
+                    std::abs(dominant -
+                             (2.0 * selected + 100.0)) < 1e-10;
+                return;
+            }
+
+            const auto selected = static_cast<double>(
+                state.u[static_cast<std::size_t>(selected_dof)]);
+            const auto dominant = static_cast<double>(
+                state.u[static_cast<std::size_t>(dominant_dof)]);
+            if (std::abs(selected - 1.0) <= 1e-12 &&
+                std::abs(dominant - 1.0) <= 1e-12) {
+                return;
+            }
+            // Reverse the slave topology and alter both its homogeneous and
+            // inhomogeneous maps.  Reprojecting this trial back with the base
+            // MPC cannot recover any vector without an exact snapshot.
+            constraint_state->reverse = true;
+            constraint_state->weight = 2.0;
+            constraint_state->inhomogeneity = 100.0;
+            trial_constraint_active = true;
+            problem.sys->rebuildConstraintState();
+        };
+
+    ScopedEnvVar jac_check("SVMP_FE_JACOBIAN_CHECK", "1");
+    ScopedEnvVar jac_it("SVMP_FE_JACOBIAN_CHECK_IT", "0");
+    ScopedEnvVar jac_step("SVMP_FE_JACOBIAN_CHECK_STEP", "1e-7");
+    ScopedEnvVar jac_scheme("SVMP_FE_JACOBIAN_CHECK_SCHEME", "forward");
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    // Keep the real Newton update at zero so the post-solve current vector is
+    // also an exact check of the diagnostic transaction.
+    ScalingLinearSolver linear(*problem.linear, /*scale=*/0.0);
+    EXPECT_NO_THROW((void)newton.solveStep(
+        *problem.transient,
+        linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws));
+
+    EXPECT_TRUE(saw_projected_probe);
+    EXPECT_TRUE(saw_restored_probe);
+    EXPECT_FALSE(trial_constraint_active);
+    EXPECT_FALSE(problem.sys->meshCoordinateTransactionActive());
+    EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()), current_base);
+    EXPECT_EQ(
+        ts_test::getVectorByDof(problem.history.uPrev()), previous_base);
+    EXPECT_EQ(
+        ts_test::getVectorByDof(problem.history.uPrev2()), previous2_base);
+    EXPECT_EQ(ts_test::getVectorByDof(problem.history.uDot()), u_dot_base);
+    EXPECT_EQ(
+        ts_test::getVectorByDof(problem.history.uDDot()), u_ddot_base);
+}
+
+TEST(NewtonSolver,
+     JacobianCheckRestoresStateBeforePropagatingProbeException)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto constraint_state = std::make_shared<SharedFieldMpcState>();
+    auto problem = makeTwoFieldHistorySensitiveMpcProblem(
+        /*dt=*/0.125, constraint_state);
+    const auto selected_dof =
+        problem.sys->fieldDofOffset(problem.selected_field);
+    const auto dominant_dof =
+        problem.sys->fieldDofOffset(problem.dominant_field);
+
+    auto two_field_state = [&](double selected, double dominant) {
+        std::vector<svmp::FE::Real> values(
+            static_cast<std::size_t>(problem.history.u().size()),
+            svmp::FE::Real(0.0));
+        values[static_cast<std::size_t>(selected_dof)] =
+            static_cast<svmp::FE::Real>(selected);
+        values[static_cast<std::size_t>(dominant_dof)] =
+            static_cast<svmp::FE::Real>(dominant);
+        return values;
+    };
+    const auto current_base = two_field_state(1.0, 1.0);
+    const auto previous_base = two_field_state(1.0, 1.0);
+    const auto previous2_base = two_field_state(2.0, 2.0);
+    ts_test::setVectorByDof(problem.history.uPrev(), previous_base);
+    ts_test::setVectorByDof(problem.history.uPrev2(), previous2_base);
+    problem.history.resetCurrentToPrevious();
+    ASSERT_FALSE(problem.history.hasUDotState());
+    ASSERT_FALSE(problem.history.hasUDDotState());
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    bool trial_constraint_active = false;
+    bool saw_projected_probe = false;
+    bool saw_restored_probe = false;
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+    nopt.assemble_both_when_possible = true;
+    nopt.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView& state,
+            SyncPoint point) {
+            if (point == SyncPoint::RestoredNonlinearState) {
+                if (trial_constraint_active) {
+                    constraint_state->reverse = false;
+                    constraint_state->weight = 1.0;
+                    constraint_state->inhomogeneity = 0.0;
+                    trial_constraint_active = false;
+                    saw_restored_probe = true;
+                    problem.sys->rebuildConstraintState();
+                }
+                return;
+            }
+            if (point != SyncPoint::ResidualAssembly) {
+                return;
+            }
+            if (trial_constraint_active) {
+                saw_projected_probe = true;
+                // Allocation state is part of the transaction too: a failed
+                // speculative callback must not leave first-step rate slots
+                // installed on the live history.
+                problem.history.ensureSecondOrderState(*problem.factory);
+                throw std::runtime_error(
+                    "intentional Jacobian-check probe failure");
+            }
+
+            const auto selected = static_cast<double>(
+                state.u[static_cast<std::size_t>(selected_dof)]);
+            const auto dominant = static_cast<double>(
+                state.u[static_cast<std::size_t>(dominant_dof)]);
+            if (std::abs(selected - 1.0) <= 1e-12 &&
+                std::abs(dominant - 1.0) <= 1e-12) {
+                return;
+            }
+            constraint_state->reverse = true;
+            constraint_state->weight = 2.0;
+            constraint_state->inhomogeneity = 100.0;
+            trial_constraint_active = true;
+            problem.sys->rebuildConstraintState();
+        };
+
+    ScopedEnvVar jac_check("SVMP_FE_JACOBIAN_CHECK", "1");
+    ScopedEnvVar jac_it("SVMP_FE_JACOBIAN_CHECK_IT", "0");
+    ScopedEnvVar jac_step("SVMP_FE_JACOBIAN_CHECK_STEP", "1e-7");
+    ScopedEnvVar jac_scheme("SVMP_FE_JACOBIAN_CHECK_SCHEME", "forward");
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    EXPECT_THROW(
+        (void)newton.solveStep(
+            *problem.transient,
+            *problem.linear,
+            /*solve_time=*/problem.history.dt(),
+            problem.history,
+            ws),
+        std::runtime_error);
+
+    EXPECT_TRUE(saw_projected_probe);
+    EXPECT_TRUE(saw_restored_probe);
+    EXPECT_FALSE(trial_constraint_active);
+    EXPECT_FALSE(problem.sys->meshCoordinateTransactionActive());
+    EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()), current_base);
+    EXPECT_EQ(
+        ts_test::getVectorByDof(problem.history.uPrev()), previous_base);
+    EXPECT_EQ(
+        ts_test::getVectorByDof(problem.history.uPrev2()), previous2_base);
+    EXPECT_FALSE(problem.history.hasUDotState());
+    EXPECT_FALSE(problem.history.hasUDDotState());
 }
 
 TEST(NewtonSolver, ReusesJacobianWhenRebuildPeriodGreaterThanOne)
@@ -1712,6 +5026,1053 @@ TEST(NewtonSolver, ReportContainsResidualNormsWhenNotConverged)
     EXPECT_TRUE(rep.linear.converged);
 }
 
+TEST(NewtonSolver,
+     FreeSurfaceConservativeBalanceDiagnosticAssemblesAllThreeResidualOperators)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    auto problem = makeScalarProblem(
+        [](const svmp::FE::forms::FormExpr& u,
+           const svmp::FE::forms::FormExpr& v) {
+            return ((u * u - svmp::FE::forms::FormExpr::constant(2.0)) * v)
+                .dx();
+        },
+        /*dt=*/0.1,
+        /*u0=*/{1.5},
+        /*counts=*/nullptr,
+        &diagnostic_counts);
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 1.0e-20;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    (void)newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    const int expected_calls = diagnostic_counts.operators.front().total;
+    EXPECT_GT(expected_calls, 0);
+    for (const auto& counts : diagnostic_counts.operators) {
+        EXPECT_EQ(counts.total, expected_calls);
+        EXPECT_EQ(counts.vector_only, counts.total);
+        EXPECT_EQ(counts.matrix_only, 0);
+        EXPECT_EQ(counts.matrix_and_vector, 0);
+    }
+}
+
+TEST(NewtonSolver,
+     FreeSurfaceDiagnosticCachesRepresentabilityButPreservesAcceptedRefreshSample)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    const std::array<svmp::FE::Real, 4> pressure_pair_diagonal{
+        1.0, 1.0, 1.0, 1.0};
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/1.0,
+        pressure_pair_diagonal,
+        /*track_immutable_mesh_revisions=*/true);
+    // The immutable test mesh explicitly supplies a trustworthy background
+    // revision domain; the cut context independently tracks generated cut
+    // content, as it does in an unfitted production problem.
+    problem.sys->setCutIntegrationContext(
+        std::make_shared<svmp::FE::assembly::CutIntegrationContext>());
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = true;
+    options.line_search_max_iterations = 1;
+    options.accepted_state_sync_invalidates_residual = true;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    // Only pressure changes during the Newton update.  The synchronized cut
+    // geometry, mixed pressure/velocity pair, and surface-energy load remain
+    // exact, so the second distinct state and the accepted refresh can reuse
+    // the LSQR result.  The accepted refresh must nevertheless assemble and
+    // emit its own full diagnostic sample: equality of current u/time/geometry
+    // cannot exclude dependencies on history, parameters, auxiliary inputs,
+    // or user data.
+    const auto n_dofs = problem.sys->dofHandler().getNumDofs();
+    std::vector<svmp::FE::Real> current(
+        static_cast<std::size_t>(n_dofs), svmp::FE::Real{0.0});
+    const auto velocity_begin =
+        problem.sys->fieldDofOffset(problem.velocity_field);
+    const auto velocity_count =
+        problem.sys->fieldDofHandler(problem.velocity_field).getNumDofs();
+    for (svmp::FE::GlobalIndex i = 0; i < velocity_count; ++i) {
+        current[static_cast<std::size_t>(velocity_begin + i)] = 1.0;
+    }
+    const auto pressure_begin =
+        problem.sys->fieldDofOffset(problem.pressure_field);
+    const auto pressure_count =
+        problem.sys->fieldDofHandler(problem.pressure_field).getNumDofs();
+    for (svmp::FE::GlobalIndex i = 0; i < pressure_count; ++i) {
+        current[static_cast<std::size_t>(pressure_begin + i)] = 1.0;
+    }
+    ts_test::setVectorByDof(problem.history.u(), current);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+
+    EXPECT_TRUE(report.converged);
+    for (const auto& counts : diagnostic_counts.operators) {
+        EXPECT_EQ(counts.total, 3);
+    }
+    // One pair assembly executes the two off-diagonal cell kernels.  The
+    // second state and accepted refresh are geometry/exact-load cache hits.
+    EXPECT_EQ(diagnostic_counts.pressure_representability_pair.total, 2);
+    EXPECT_NE(telemetry.find("pressure_representability_cache_hit=1"),
+              std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_representability_pair_matrix_state_independent=1"),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_representability_cache_rejection_reason=no_prior_sample"),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_representability_cache_rejection_reason=none"),
+        std::string::npos);
+    EXPECT_NE(telemetry.find("pressure_representability_pair_every_assembly=0"),
+              std::string::npos);
+    EXPECT_NE(telemetry.find("phase='line_search_accepted_refresh'"),
+              std::string::npos);
+}
+
+TEST(NewtonSolver,
+     FreeSurfaceDiagnosticCachesInstalledMixedSymbolicCutVolumePair)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/1.0,
+        /*pressure_pair_diagonal=*/std::nullopt,
+        /*track_immutable_mesh_revisions=*/true,
+        /*install_symbolic_cut_volume_pair=*/true);
+    constexpr std::string_view pair_op{
+        "equations_diagnostic_ns_free_surface_pressure_representability_pair"};
+    ASSERT_TRUE(problem.sys->meshAccess().revisionTrackingAvailable());
+    ASSERT_NE(problem.sys->cutIntegrationContext(), nullptr);
+    ASSERT_TRUE(problem.sys->operatorMatrixStateIndependent(
+        std::string(pair_op)));
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = true;
+    options.line_search_max_iterations = 1;
+    options.accepted_state_sync_invalidates_residual = true;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    // The Newton update changes only pressure.  The installed cut-volume pair,
+    // generated quadrature, background mesh, constraints, and surface load
+    // remain identical across the two distinct sampled states.
+    const auto n_dofs = problem.sys->dofHandler().getNumDofs();
+    std::vector<svmp::FE::Real> current(
+        static_cast<std::size_t>(n_dofs), svmp::FE::Real{0.0});
+    const auto velocity_begin =
+        problem.sys->fieldDofOffset(problem.velocity_field);
+    const auto velocity_count =
+        problem.sys->fieldDofHandler(problem.velocity_field).getNumDofs();
+    for (svmp::FE::GlobalIndex i = 0; i < velocity_count; ++i) {
+        current[static_cast<std::size_t>(velocity_begin + i)] = 1.0;
+    }
+    const auto pressure_begin =
+        problem.sys->fieldDofOffset(problem.pressure_field);
+    const auto pressure_count =
+        problem.sys->fieldDofHandler(problem.pressure_field).getNumDofs();
+    for (svmp::FE::GlobalIndex i = 0; i < pressure_count; ++i) {
+        current[static_cast<std::size_t>(pressure_begin + i)] = 1.0;
+    }
+    ts_test::setVectorByDof(problem.history.u(), current);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+
+    EXPECT_TRUE(report.converged);
+    for (const auto& counts : diagnostic_counts.operators) {
+        // Initial, line-search trial, and accepted refresh are all retained;
+        // only the exact-load-guarded mixed-pair/LSQR work is reused.
+        EXPECT_EQ(counts.total, 3);
+    }
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_representability_pair_matrix_state_independent=1"),
+        std::string::npos);
+    EXPECT_NE(telemetry.find("pressure_representability_cache_hit=1"),
+              std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_representability_cache_rejection_reason=none"),
+        std::string::npos);
+}
+
+TEST(NewtonSolver,
+     FreeSurfaceDiagnosticDoesNotCacheUntrackedBackgroundMeshWithCutContext)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    const std::array<svmp::FE::Real, 4> pressure_pair_diagonal{
+        1.0, 1.0, 1.0, 1.0};
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/1.0,
+        pressure_pair_diagonal,
+        /*track_immutable_mesh_revisions=*/false);
+    ASSERT_FALSE(problem.sys->meshAccess().revisionTrackingAvailable());
+
+    // A monotone cut-content revision cannot account for an untracked change
+    // to the background coordinates/connectivity on which its quadrature and
+    // every fitted/cut operator depend.
+    problem.sys->setCutIntegrationContext(
+        std::make_shared<svmp::FE::assembly::CutIntegrationContext>());
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = true;
+    options.line_search_max_iterations = 1;
+    options.accepted_state_sync_invalidates_residual = true;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    const auto n_dofs = problem.sys->dofHandler().getNumDofs();
+    std::vector<svmp::FE::Real> current(
+        static_cast<std::size_t>(n_dofs), svmp::FE::Real{0.0});
+    const auto velocity_begin =
+        problem.sys->fieldDofOffset(problem.velocity_field);
+    const auto velocity_count =
+        problem.sys->fieldDofHandler(problem.velocity_field).getNumDofs();
+    for (svmp::FE::GlobalIndex i = 0; i < velocity_count; ++i) {
+        current[static_cast<std::size_t>(velocity_begin + i)] = 1.0;
+    }
+    const auto pressure_begin =
+        problem.sys->fieldDofOffset(problem.pressure_field);
+    const auto pressure_count =
+        problem.sys->fieldDofHandler(problem.pressure_field).getNumDofs();
+    for (svmp::FE::GlobalIndex i = 0; i < pressure_count; ++i) {
+        current[static_cast<std::size_t>(pressure_begin + i)] = 1.0;
+    }
+    ts_test::setVectorByDof(problem.history.u(), current);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+
+    EXPECT_TRUE(report.converged);
+    for (const auto& counts : diagnostic_counts.operators) {
+        EXPECT_EQ(counts.total, 3);
+    }
+    EXPECT_EQ(diagnostic_counts.pressure_representability_pair.total, 6);
+    EXPECT_EQ(telemetry.find("pressure_representability_cache_hit=1"),
+              std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_representability_cache_revision_key_available=0"),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_representability_cache_rejection_reason=revision_key_unavailable"),
+        std::string::npos);
+    EXPECT_NE(telemetry.find("pressure_representability_pair_every_assembly=0"),
+              std::string::npos);
+}
+
+TEST(NewtonSolver,
+     FreeSurfaceDiagnosticEveryAssemblyOverrideForcesRepresentabilityPairAssembly)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    ScopedEnvVar every_assembly(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY",
+        "1");
+    const std::array<svmp::FE::Real, 4> pressure_pair_diagonal{
+        1.0, 1.0, 1.0, 1.0};
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/1.0,
+        pressure_pair_diagonal);
+    problem.sys->setCutIntegrationContext(
+        std::make_shared<svmp::FE::assembly::CutIntegrationContext>());
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = true;
+    options.line_search_max_iterations = 1;
+    options.accepted_state_sync_invalidates_residual = true;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    const auto n_dofs = problem.sys->dofHandler().getNumDofs();
+    std::vector<svmp::FE::Real> current(
+        static_cast<std::size_t>(n_dofs), svmp::FE::Real{0.0});
+    const auto velocity_begin =
+        problem.sys->fieldDofOffset(problem.velocity_field);
+    const auto velocity_count =
+        problem.sys->fieldDofHandler(problem.velocity_field).getNumDofs();
+    for (svmp::FE::GlobalIndex i = 0; i < velocity_count; ++i) {
+        current[static_cast<std::size_t>(velocity_begin + i)] = 1.0;
+    }
+    const auto pressure_begin =
+        problem.sys->fieldDofOffset(problem.pressure_field);
+    const auto pressure_count =
+        problem.sys->fieldDofHandler(problem.pressure_field).getNumDofs();
+    for (svmp::FE::GlobalIndex i = 0; i < pressure_count; ++i) {
+        current[static_cast<std::size_t>(pressure_begin + i)] = 1.0;
+    }
+    ts_test::setVectorByDof(problem.history.u(), current);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+
+    EXPECT_TRUE(report.converged);
+    for (const auto& counts : diagnostic_counts.operators) {
+        EXPECT_EQ(counts.total, 3);
+    }
+    // Initial, line-search trial, and accepted refresh each assemble both
+    // off-diagonal pair kernels when exhaustive qualification is requested.
+    EXPECT_EQ(diagnostic_counts.pressure_representability_pair.total, 6);
+    EXPECT_EQ(telemetry.find("pressure_representability_cache_hit=1"),
+              std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_representability_cache_rejection_reason=every_assembly_policy"),
+        std::string::npos);
+    EXPECT_NE(telemetry.find("pressure_representability_pair_every_assembly=1"),
+              std::string::npos);
+}
+
+TEST(NewtonSolver,
+     FreeSurfacePressureRepresentabilityUsesMixedMatrixOnlyLsqrAndRecoversPressure)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    ScopedEnvVar enable_assembly_diagnostics(
+        "SVMP_NEWTON_ASSEMBLY_DIAGNOSTICS", "1");
+    auto problem =
+        makePressureRepresentabilityProblem(diagnostic_counts);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+    EXPECT_TRUE(report.converged);
+
+    for (const auto& counts : diagnostic_counts.operators) {
+        EXPECT_GT(counts.total, 0);
+        EXPECT_EQ(counts.vector_only, counts.total);
+        EXPECT_EQ(counts.matrix_only, 0);
+        EXPECT_EQ(counts.matrix_and_vector, 0);
+    }
+    EXPECT_GT(
+        diagnostic_counts.pressure_representability_pair.total, 0);
+    EXPECT_EQ(
+        diagnostic_counts.pressure_representability_pair.matrix_only,
+        diagnostic_counts.pressure_representability_pair.total);
+    EXPECT_EQ(
+        diagnostic_counts.pressure_representability_pair.vector_only, 0);
+    EXPECT_EQ(
+        diagnostic_counts.pressure_representability_pair.matrix_and_vector,
+        0);
+
+    ASSERT_NE(workspace.pressure_representability_solution, nullptr);
+    ASSERT_NE(workspace.pressure_representability_residual, nullptr);
+    ASSERT_NE(
+        workspace.pressure_representability_normal_residual, nullptr);
+    const auto solution =
+        workspace.pressure_representability_solution->localSpan();
+    const auto velocity_dof =
+        problem.sys->fieldDofOffset(problem.velocity_field);
+    const auto pressure_dof =
+        problem.sys->fieldDofOffset(problem.pressure_field);
+    ASSERT_GE(velocity_dof, 0);
+    ASSERT_GE(pressure_dof, 0);
+    ASSERT_LT(static_cast<std::size_t>(velocity_dof), solution.size());
+    ASSERT_LT(static_cast<std::size_t>(pressure_dof), solution.size());
+    EXPECT_NEAR(solution[static_cast<std::size_t>(velocity_dof)], 0.0, 1.0e-14);
+    EXPECT_NEAR(solution[static_cast<std::size_t>(pressure_dof)], 2.0, 1.0e-12);
+    EXPECT_NEAR(
+        workspace.pressure_representability_residual->norm(),
+        0.0,
+        1.0e-13);
+    EXPECT_NEAR(
+        workspace.pressure_representability_normal_residual->norm(),
+        0.0,
+        1.0e-13);
+
+    ASSERT_NE(workspace.pressure_representability_pair_matrix, nullptr);
+    const auto& pair =
+        *workspace.pressure_representability_pair_matrix;
+    EXPECT_NEAR(pair.getEntry(velocity_dof, velocity_dof), 0.0, 1.0e-14);
+    EXPECT_NEAR(pair.getEntry(pressure_dof, pressure_dof), 0.0, 1.0e-14);
+    EXPECT_NEAR(pair.getEntry(velocity_dof, pressure_dof),
+                pair.getEntry(pressure_dof, velocity_dof),
+                1.0e-14);
+    EXPECT_GT(std::abs(pair.getEntry(velocity_dof, pressure_dof)), 1.0e-14);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_representability_convergence=normal_equation_stationarity"),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find("pressure_representability_distance_gate_applied=0"),
+        std::string::npos);
+    EXPECT_NE(telemetry.find("pressure_representability_claimed=0"),
+              std::string::npos);
+    EXPECT_NE(
+        telemetry.find("pressure_representability_active_pressure_dofs=1"),
+        std::string::npos);
+    EXPECT_NE(telemetry.find("pressure_representability_iteration_cap=4"),
+              std::string::npos);
+    for (const std::string op : {
+             "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
+             "equations_diagnostic_ns_free_surface_pressure_representability_pair"}) {
+        const auto op_position = telemetry.find("op='" + op + "'");
+        ASSERT_NE(op_position, std::string::npos) << op;
+        const auto record = telemetry.substr(op_position, 700u);
+        EXPECT_NE(
+            record.find("suppress_auxiliary_coupling_assembly=1"),
+            std::string::npos)
+            << op;
+    }
+}
+
+TEST(NewtonSolver,
+     FreeSurfacePressureRepresentabilityFinitePrecisionLsqrCanExceedPressureDimension)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr std::array<svmp::FE::Real, 4> singular_values{
+        1.0,
+        0.0464158883361278,
+        0.0021544346900318843,
+        1.0e-4,
+    };
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/1.0,
+        /*pressure_pair_diagonal=*/singular_values);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+    EXPECT_TRUE(report.converged);
+
+    ASSERT_NE(workspace.pressure_representability_pair_matrix, nullptr);
+    ASSERT_NE(workspace.pressure_representability_load, nullptr);
+    const auto velocity_begin =
+        problem.sys->fieldDofOffset(problem.velocity_field);
+    const auto pressure_begin =
+        problem.sys->fieldDofOffset(problem.pressure_field);
+    ASSERT_EQ(
+        problem.sys->fieldDofHandler(problem.velocity_field).getNumDofs(),
+        4);
+    ASSERT_EQ(
+        problem.sys->fieldDofHandler(problem.pressure_field).getNumDofs(),
+        4);
+    const auto load = workspace.pressure_representability_load->localSpan();
+    const auto& pair = *workspace.pressure_representability_pair_matrix;
+    for (svmp::FE::GlobalIndex i = 0; i < 4; ++i) {
+        ASSERT_LT(static_cast<std::size_t>(velocity_begin + i), load.size());
+        ASSERT_LT(static_cast<std::size_t>(pressure_begin + i), load.size());
+        EXPECT_NEAR(
+            load[static_cast<std::size_t>(velocity_begin + i)], 1.0, 1.0e-13);
+        EXPECT_NEAR(
+            load[static_cast<std::size_t>(pressure_begin + i)], 0.0, 1.0e-14);
+        for (svmp::FE::GlobalIndex j = 0; j < 4; ++j) {
+            const auto expected = i == j
+                                      ? singular_values[static_cast<std::size_t>(i)]
+                                      : 0.0;
+            EXPECT_NEAR(
+                pair.getEntry(velocity_begin + i, pressure_begin + j),
+                expected,
+                1.0e-15);
+            EXPECT_NEAR(
+                pair.getEntry(pressure_begin + i, velocity_begin + j),
+                expected,
+                1.0e-15);
+            EXPECT_NEAR(
+                pair.getEntry(velocity_begin + i, velocity_begin + j),
+                0.0,
+                1.0e-15);
+            EXPECT_NEAR(
+                pair.getEntry(pressure_begin + i, pressure_begin + j),
+                0.0,
+                1.0e-15);
+        }
+    }
+
+    const auto telemetry_value = [&](const std::string& name) {
+        const auto token = name + "=";
+        const auto token_position = telemetry.find(token);
+        if (token_position == std::string::npos) {
+            ADD_FAILURE() << "Missing telemetry field '" << name << "'";
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        const auto value_begin = token_position + token.size();
+        const auto value_end = telemetry.find_first_of(" \r\n", value_begin);
+        return std::stod(
+            telemetry.substr(value_begin, value_end - value_begin));
+    };
+
+    EXPECT_EQ(
+        telemetry_value("pressure_representability_active_pressure_dofs"),
+        4.0);
+    EXPECT_EQ(
+        telemetry_value("pressure_representability_iteration_cap"), 16.0);
+    const double iterations =
+        telemetry_value("pressure_representability_iterations");
+    EXPECT_GT(iterations, 4.0);
+    EXPECT_LE(iterations, 16.0);
+    EXPECT_EQ(
+        telemetry_value("pressure_representability_converged"), 1.0);
+    EXPECT_EQ(
+        telemetry_value("pressure_representability_breakdown"), 0.0);
+    const double relative_normal_residual = telemetry_value(
+        "pressure_representability_relative_normal_residual");
+    EXPECT_TRUE(std::isfinite(relative_normal_residual));
+    EXPECT_LE(relative_normal_residual, 1.0e-10);
+}
+
+TEST(NewtonSolver,
+     FreeSurfacePressureRepresentabilityRemovesArtificialConstrainedPressureRow)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    auto pressure_dirichlet =
+        std::make_shared<FixedPressureDirichletState>();
+    pressure_dirichlet->value = 0.0;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        pressure_dirichlet);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+    EXPECT_TRUE(report.converged);
+    ASSERT_NE(workspace.pressure_representability_pair_matrix, nullptr);
+    ASSERT_NE(workspace.pressure_representability_load, nullptr);
+    ASSERT_NE(workspace.pressure_representability_residual, nullptr);
+    const auto velocity_dof =
+        problem.sys->fieldDofOffset(problem.velocity_field);
+    const auto pressure_dof =
+        problem.sys->fieldDofOffset(problem.pressure_field);
+    const auto& pair =
+        *workspace.pressure_representability_pair_matrix;
+
+    // Without explicit zeroRows(..., false), constrained assembly leaves an
+    // artificial unit pressure row and LSQR would incorrectly cancel f using
+    // a constrained coefficient. The physical reduced operator is zero here:
+    // p remains fixed at zero and the nonzero surface load is irreducible.
+    EXPECT_NEAR(pair.getEntry(pressure_dof, pressure_dof), 0.0, 1.0e-14);
+    EXPECT_NEAR(pair.getEntry(velocity_dof, pressure_dof), 0.0, 1.0e-14);
+    EXPECT_NEAR(pair.getEntry(pressure_dof, velocity_dof), 0.0, 1.0e-14);
+    EXPECT_GT(workspace.pressure_representability_load->norm(), 1.0e-12);
+    EXPECT_NEAR(
+        workspace.pressure_representability_residual->norm(),
+        workspace.pressure_representability_load->norm(),
+        1.0e-13);
+    EXPECT_NEAR(
+        workspace.pressure_representability_normal_residual->norm(),
+        0.0,
+        1.0e-14);
+    EXPECT_NEAR(
+        workspace.pressure_representability_solution->norm(),
+        0.0,
+        1.0e-14);
+    // A zero reduced operator makes the load range-orthogonal: LSQR reaches
+    // normal-equation stationarity immediately even though the entire load is
+    // irreducible.  Telemetry must therefore make explicit that no physical
+    // distance gate or representability claim has been applied.
+    EXPECT_NE(telemetry.find("pressure_representability_relative_residual=1"),
+              std::string::npos);
+    EXPECT_NE(telemetry.find("pressure_representability_iterations=0"),
+              std::string::npos);
+    EXPECT_NE(telemetry.find("pressure_representability_converged=1"),
+              std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_representability_convergence=normal_equation_stationarity"),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find("pressure_representability_distance_gate_applied=0"),
+        std::string::npos);
+    EXPECT_NE(telemetry.find("pressure_representability_claimed=0"),
+              std::string::npos);
+}
+
+TEST(NewtonSolver,
+     FreeSurfacePressureRepresentabilityRejectsNonzeroPressureConstraintInhomogeneity)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    auto pressure_dirichlet =
+        std::make_shared<FixedPressureDirichletState>();
+    pressure_dirichlet->value = 1.0;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        pressure_dirichlet);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    EXPECT_TRUE(report.converged);
+    EXPECT_EQ(diagnostic_counts.pressure_representability_pair.total, 0);
+    EXPECT_NE(
+        (stdout_text + stderr_text).find(
+            "pressure_representability_reason=nonzero_pressure_constraint_inhomogeneity"),
+        std::string::npos);
+    EXPECT_NE(
+        (stdout_text + stderr_text).find(
+            "pressure_representability_convergence=normal_equation_stationarity"),
+        std::string::npos);
+    EXPECT_NE(
+        (stdout_text + stderr_text).find(
+            "pressure_representability_distance_gate_applied=0"),
+        std::string::npos);
+    EXPECT_NE(
+        (stdout_text + stderr_text).find(
+            "pressure_representability_claimed=0"),
+        std::string::npos);
+}
+
+TEST(NewtonSolver,
+     FreeSurfacePressureRepresentabilityZeroLoadIsStationaryWithoutIterations)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/0.0);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+    EXPECT_TRUE(report.converged);
+    EXPECT_GT(diagnostic_counts.pressure_representability_pair.total, 0);
+    EXPECT_NE(telemetry.find("pressure_representability_iterations=0"),
+              std::string::npos);
+    EXPECT_NE(telemetry.find("pressure_representability_converged=1"),
+              std::string::npos);
+    EXPECT_NE(telemetry.find("pressure_representability_breakdown=0"),
+              std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_representability_convergence=normal_equation_stationarity"),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find("pressure_representability_distance_gate_applied=0"),
+        std::string::npos);
+    EXPECT_NE(telemetry.find("pressure_representability_claimed=0"),
+              std::string::npos);
+    EXPECT_NEAR(
+        workspace.pressure_representability_load->norm(), 0.0, 1.0e-14);
+    EXPECT_NEAR(
+        workspace.pressure_representability_solution->norm(), 0.0, 1.0e-14);
+    EXPECT_NEAR(
+        workspace.pressure_representability_residual->norm(), 0.0, 1.0e-14);
+    EXPECT_NEAR(
+        workspace.pressure_representability_normal_residual->norm(),
+        0.0,
+        1.0e-14);
+}
+
+TEST(NewtonSolver,
+     FreeSurfacePressureRepresentabilityFailsClosedOnPairVectorLayoutMismatch)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem =
+        makePressureRepresentabilityProblem(diagnostic_counts);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    const auto n_dofs = problem.sys->dofHandler().getNumDofs();
+    workspace.pressure_representability_work =
+        problem.factory->createVector(n_dofs + 1);
+    ASSERT_NE(workspace.pressure_representability_work, nullptr);
+    problem.history.repack(*problem.factory);
+
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    EXPECT_TRUE(report.converged);
+
+    // The three conservative-balance vectors remain useful, but the mixed
+    // matrix is never assembled or multiplied after the layout invariant
+    // fails.  Runtime telemetry reports pair_matrix_vector_layout_mismatch.
+    for (const auto& counts : diagnostic_counts.operators) {
+        EXPECT_GT(counts.total, 0);
+        EXPECT_EQ(counts.vector_only, counts.total);
+    }
+    EXPECT_EQ(diagnostic_counts.pressure_representability_pair.total, 0);
+}
+
+TEST(NewtonSolver,
+     FreeSurfacePressureRepresentabilityRecreatesPairVectorsAfterReplacementSparsityRefresh)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    auto constraint_state =
+        std::make_shared<CrossCellPressureMpcState>();
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/true,
+        constraint_state);
+    problem.factory =
+        std::make_unique<ReplacementOnlyMatrixFactory>();
+    problem.linear =
+        problem.factory->createLinearSolver(ts_test::directSolve());
+    ASSERT_NE(problem.linear, nullptr);
+    problem.history.repack(*problem.factory);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    const auto pair_op = std::string(
+        "equations_diagnostic_ns_free_surface_pressure_representability_pair");
+    const auto base_pair_nnz =
+        problem.sys->sparsity(pair_op).computeStats().nnz;
+    const auto entry_revision =
+        problem.sys->sparsityPatternRevision();
+    const std::array<const void*, 8> old_vectors{
+        workspace.pressure_representability_load.get(),
+        workspace.pressure_representability_solution.get(),
+        workspace.pressure_representability_left_basis.get(),
+        workspace.pressure_representability_right_basis.get(),
+        workspace.pressure_representability_direction.get(),
+        workspace.pressure_representability_work.get(),
+        workspace.pressure_representability_residual.get(),
+        workspace.pressure_representability_normal_residual.get(),
+    };
+
+    constraint_state->enabled = true;
+    problem.sys->rebuildConstraintState();
+    EXPECT_GT(problem.sys->sparsityPatternRevision(), entry_revision);
+    EXPECT_GT(problem.sys->sparsity(pair_op).computeStats().nnz,
+              base_pair_nnz);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+    EXPECT_TRUE(report.converged);
+    EXPECT_EQ(workspace.sparsity_revision,
+              problem.sys->sparsityPatternRevision());
+
+    const std::array<const void*, 8> refreshed_vectors{
+        workspace.pressure_representability_load.get(),
+        workspace.pressure_representability_solution.get(),
+        workspace.pressure_representability_left_basis.get(),
+        workspace.pressure_representability_right_basis.get(),
+        workspace.pressure_representability_direction.get(),
+        workspace.pressure_representability_work.get(),
+        workspace.pressure_representability_residual.get(),
+        workspace.pressure_representability_normal_residual.get(),
+    };
+    for (std::size_t i = 0; i < old_vectors.size(); ++i) {
+        EXPECT_NE(refreshed_vectors[i], old_vectors[i]);
+    }
+    EXPECT_GT(diagnostic_counts.pressure_representability_pair.total, 0);
+    EXPECT_EQ(
+        diagnostic_counts.pressure_representability_pair.matrix_only,
+        diagnostic_counts.pressure_representability_pair.total);
+    EXPECT_NEAR(
+        workspace.pressure_representability_normal_residual->norm(),
+        0.0,
+        1.0e-12);
+    EXPECT_NE(telemetry.find("pressure_representability_available=1"),
+              std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "pressure_representability_convergence=normal_equation_stationarity"),
+        std::string::npos);
+}
+
 TEST(NewtonSolver, MonolithicAuxiliaryReportsComponentResidualNorms)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
@@ -1898,6 +6259,392 @@ TEST(NewtonSolver, RelativeToleranceCanConvergeAfterFirstUpdate)
     EXPECT_GT(rep.residual_norm, nopt.abs_tolerance);
 }
 
+TEST(NewtonSolver, ValidatesFieldResidualCriteria)
+{
+    using Criterion =
+        svmp::FE::timestepping::NewtonOptions::FieldResidualCriterion;
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.field_residual_criteria = {
+        Criterion{.field = 0, .abs_tolerance = 0.0, .rel_tolerance = 0.0}};
+    EXPECT_THROW(
+        (void)svmp::FE::timestepping::NewtonSolver(options),
+        svmp::FE::InvalidArgumentException);
+
+    options.field_residual_criteria = {
+        Criterion{.field = 0, .abs_tolerance = -1.0, .rel_tolerance = 0.0}};
+    EXPECT_THROW(
+        (void)svmp::FE::timestepping::NewtonSolver(options),
+        svmp::FE::InvalidArgumentException);
+
+    options.field_residual_criteria = {
+        Criterion{.field = 0, .abs_tolerance = 1e-8, .rel_tolerance = 0.0},
+        Criterion{.field = 0, .abs_tolerance = 0.0, .rel_tolerance = 1e-4}};
+    EXPECT_THROW(
+        (void)svmp::FE::timestepping::NewtonSolver(options),
+        svmp::FE::InvalidArgumentException);
+}
+
+TEST(NewtonSolver,
+     FieldResidualCriterionPreventsDominantFieldMaskingAndStepBypass)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto run = [](bool require_selected_field) {
+        auto problem = makeTwoFieldAffineProblem(
+            /*selected_target=*/1.0,
+            /*dominant_target=*/1000.0,
+            /*dt=*/0.1);
+
+        svmp::FE::timestepping::NewtonOptions options;
+        options.residual_op = "op";
+        options.jacobian_op = "op";
+        options.max_iterations = 6;
+        options.abs_tolerance = 0.0;
+        options.rel_tolerance = 1e-2;
+        // Exercise the historical step-only exit as well: with a configured
+        // field gate, a small step may not bypass the selected residual.
+        options.step_tolerance = 2000.0;
+        options.use_line_search = false;
+        if (require_selected_field) {
+            options.field_residual_criteria.push_back({
+                .field = problem.selected_field,
+                .abs_tolerance = 0.0,
+                .rel_tolerance = 1e-1});
+        }
+
+        svmp::FE::timestepping::NewtonSolver newton(options);
+        svmp::FE::timestepping::NewtonWorkspace workspace;
+        newton.allocateWorkspace(
+            *problem.sys, *problem.factory, workspace);
+        problem.history.repack(*problem.factory);
+
+        SelectedDofScalingLinearSolver selectively_damped(
+            *problem.linear,
+            problem.sys->fieldDofOffset(problem.selected_field),
+            /*scale=*/0.5);
+        return newton.solveStep(
+            *problem.transient,
+            selectively_damped,
+            /*solve_time=*/problem.history.dt(),
+            problem.history,
+            workspace);
+    };
+
+    const auto monolithic_only = run(/*require_selected_field=*/false);
+    ASSERT_TRUE(monolithic_only.converged);
+    EXPECT_EQ(monolithic_only.iterations, 1);
+
+    const auto field_gated = run(/*require_selected_field=*/true);
+    EXPECT_TRUE(field_gated.converged);
+    // The dominant field is exact after the first update, while the selected
+    // residual contracts by 1/2 per update and first meets 0.1 at 1/16.
+    EXPECT_EQ(field_gated.iterations, 4);
+}
+
+TEST(NewtonSolver,
+     FieldRelativeReferenceActivatesAfterAcceptedStateRefreshAndRequiresContraction)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    double refreshed_measure = 1.0;
+    TwoFieldProblem problem;
+    problem.mesh =
+        std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    problem.space = std::make_shared<svmp::FE::spaces::L2Space>(
+        svmp::FE::ElementType::Tetra4, /*order=*/0);
+    problem.sys =
+        std::make_unique<svmp::FE::systems::FESystem>(problem.mesh);
+    problem.selected_field = problem.sys->addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "selected", .space = problem.space, .components = 1});
+    problem.dominant_field = problem.sys->addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "dominant", .space = problem.space, .components = 1});
+    problem.sys->addOperator("op");
+    problem.sys->addCellKernel(
+        "op",
+        problem.selected_field,
+        problem.selected_field,
+        std::make_shared<RefreshedGeometryRootKernel>(
+            &refreshed_measure, static_cast<svmp::FE::Real>(1.0)));
+    problem.sys->addCellKernel(
+        "op",
+        problem.dominant_field,
+        problem.dominant_field,
+        std::make_shared<AffineScalarCellKernel>(
+            static_cast<svmp::FE::Real>(100.0)));
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = ts_test::singleTetraTopology();
+    problem.sys->setup({}, inputs);
+    problem.integrator =
+        std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    problem.transient =
+        std::make_unique<svmp::FE::systems::TransientSystem>(
+            *problem.sys, problem.integrator);
+    problem.factory = ts_test::createTestFactory();
+    ASSERT_NE(problem.factory, nullptr);
+    problem.linear = problem.factory->createLinearSolver(ts_test::directSolve());
+    ASSERT_NE(problem.linear, nullptr);
+
+    const auto selected_dof =
+        problem.sys->fieldDofOffset(problem.selected_field);
+    const auto dominant_dof =
+        problem.sys->fieldDofOffset(problem.dominant_field);
+    const auto n_dofs = problem.sys->dofHandler().getNumDofs();
+    problem.history = svmp::FE::timestepping::TimeHistory::allocate(
+        *problem.factory, n_dofs);
+    problem.history.setDt(0.1);
+    problem.history.setPrevDt(0.1);
+    std::vector<svmp::FE::Real> initial_values(
+        static_cast<std::size_t>(n_dofs), svmp::FE::Real{0.0});
+    initial_values[static_cast<std::size_t>(selected_dof)] =
+        svmp::FE::Real{1.0};
+    ts_test::setVectorByDof(problem.history.uPrev(), initial_values);
+    ts_test::setVectorByDof(problem.history.uPrev2(), initial_values);
+    problem.history.resetCurrentToPrevious();
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    struct AcceptedStateRecord {
+        double selected{0.0};
+        double dominant{0.0};
+        double measure{0.0};
+    };
+    std::vector<AcceptedStateRecord> accepted_states;
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 4;
+    options.abs_tolerance = 0.0;
+    options.rel_tolerance = 2e-2;
+    options.step_tolerance = 0.0;
+    options.use_line_search = false;
+    options.assemble_both_when_possible = true;
+    options.field_residual_criteria.push_back({
+        .field = problem.selected_field,
+        .abs_tolerance = 0.0,
+        // A value of one makes the activation sample satisfy the numerical
+        // ratio unless the solver explicitly requires a later contraction.
+        .rel_tolerance = 1.0});
+    options.synchronize_state =
+        [&refreshed_measure,
+         &accepted_states,
+         selected_dof,
+         dominant_dof](const svmp::FE::systems::SystemStateView& state,
+                       SyncPoint point) {
+            if (point != SyncPoint::AcceptedNonlinearState) {
+                return;
+            }
+            ASSERT_GT(state.u.size(), static_cast<std::size_t>(dominant_dof));
+            const auto selected =
+                static_cast<double>(state.u[static_cast<std::size_t>(selected_dof)]);
+            const auto dominant =
+                static_cast<double>(state.u[static_cast<std::size_t>(dominant_dof)]);
+            refreshed_measure = dominant > 50.0 ? 2.0 : 1.0;
+            accepted_states.push_back(
+                AcceptedStateRecord{selected, dominant, refreshed_measure});
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    SelectedDofScalingLinearSolver selectively_damped(
+        *problem.linear, selected_dof, /*scale=*/0.5);
+    const auto report = newton.solveStep(
+        *problem.transient,
+        selectively_damped,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    ASSERT_TRUE(report.converged);
+    // The initial selected residual is exactly 1*1-1 == 0.  Updating the
+    // dominant field refreshes the accepted geometry to measure two, creating
+    // the first positive selected residual 2*1-1 == 1.  Although rel_tol=1,
+    // that activation sample must not terminate Newton.  One damped selected
+    // update then contracts it to 2*0.75-1 == 0.5 before convergence.
+    EXPECT_EQ(report.iterations, 2);
+    ASSERT_GE(accepted_states.size(), 3u);
+    EXPECT_DOUBLE_EQ(accepted_states[0].selected, 1.0);
+    EXPECT_DOUBLE_EQ(accepted_states[0].dominant, 0.0);
+    EXPECT_DOUBLE_EQ(accepted_states[0].measure, 1.0);
+    EXPECT_DOUBLE_EQ(accepted_states[1].selected, 1.0);
+    EXPECT_NEAR(accepted_states[1].dominant, 100.0, 1e-12);
+    EXPECT_DOUBLE_EQ(accepted_states[1].measure, 2.0);
+    EXPECT_NEAR(accepted_states[2].selected, 0.75, 1e-12);
+    EXPECT_NEAR(accepted_states[2].dominant, 100.0, 1e-12);
+    EXPECT_DOUBLE_EQ(accepted_states[2].measure, 2.0);
+
+    const auto final_values = ts_test::getVectorByDof(problem.history.u());
+    EXPECT_NEAR(final_values[static_cast<std::size_t>(selected_dof)],
+                0.75,
+                1e-12);
+    EXPECT_NEAR(final_values[static_cast<std::size_t>(dominant_dof)],
+                100.0,
+                1e-12);
+}
+
+TEST(NewtonSolver,
+     FieldAbsoluteFloorAcceptsContractedActivatedResidualBeforeRelativeTarget)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    double refreshed_measure = 1.0;
+    auto problem = makeTwoFieldRefreshedGeometryProblem(
+        &refreshed_measure,
+        /*selected_initial=*/1.0,
+        /*selected_target=*/1.0,
+        /*dominant_target=*/100.0,
+        /*dt=*/0.1);
+    const auto selected_dof =
+        problem.sys->fieldDofOffset(problem.selected_field);
+    const auto dominant_dof =
+        problem.sys->fieldDofOffset(problem.dominant_field);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 4;
+    options.abs_tolerance = 0.0;
+    options.rel_tolerance = 2e-2;
+    options.step_tolerance = 0.0;
+    options.use_line_search = false;
+    options.assemble_both_when_possible = true;
+    options.field_residual_criteria.push_back({
+        .field = problem.selected_field,
+        .abs_tolerance = 1e-1,
+        .rel_tolerance = 1e-6});
+    options.synchronize_state =
+        [&refreshed_measure,
+         dominant_dof](const svmp::FE::systems::SystemStateView& state,
+                       SyncPoint point) {
+            if (point != SyncPoint::AcceptedNonlinearState) {
+                return;
+            }
+            ASSERT_GT(state.u.size(), static_cast<std::size_t>(dominant_dof));
+            const auto dominant = static_cast<double>(
+                state.u[static_cast<std::size_t>(dominant_dof)]);
+            refreshed_measure = dominant > 50.0 ? 2.0 : 1.0;
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    SelectedDofScalingLinearSolver selectively_damped(
+        *problem.linear, selected_dof, /*scale=*/0.5);
+    const auto report = newton.solveStep(
+        *problem.transient,
+        selectively_damped,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    ASSERT_TRUE(report.converged);
+    // On the unit tetra the activated selected residual is 1/6, above the
+    // 0.1 absolute floor.  The activation sample therefore cannot terminate
+    // Newton.  One damped selected update contracts the residual to 1/12,
+    // below the absolute floor but still at relative ratio 0.5 >> 1e-6.
+    EXPECT_EQ(report.iterations, 2);
+    const auto final_values = ts_test::getVectorByDof(problem.history.u());
+    EXPECT_NEAR(final_values[static_cast<std::size_t>(selected_dof)],
+                0.75,
+                1e-12);
+    EXPECT_NEAR(final_values[static_cast<std::size_t>(dominant_dof)],
+                100.0,
+                1e-12);
+}
+
+TEST(NewtonSolver,
+     FieldAbsoluteFloorMayAcceptTheRelativeReferenceActivationSample)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    double refreshed_measure = 1.0;
+    auto problem = makeTwoFieldRefreshedGeometryProblem(
+        &refreshed_measure,
+        /*selected_initial=*/1.0,
+        /*selected_target=*/1.0,
+        /*dominant_target=*/100.0,
+        /*dt=*/0.1);
+    const auto selected_dof =
+        problem.sys->fieldDofOffset(problem.selected_field);
+    const auto dominant_dof =
+        problem.sys->fieldDofOffset(problem.dominant_field);
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 3;
+    options.abs_tolerance = 0.0;
+    options.rel_tolerance = 2e-2;
+    options.step_tolerance = 0.0;
+    options.use_line_search = false;
+    options.assemble_both_when_possible = true;
+    options.field_residual_criteria.push_back({
+        .field = problem.selected_field,
+        .abs_tolerance = 2e-1,
+        .rel_tolerance = 1e-6});
+    options.synchronize_state =
+        [&refreshed_measure,
+         dominant_dof](const svmp::FE::systems::SystemStateView& state,
+                       SyncPoint point) {
+            if (point != SyncPoint::AcceptedNonlinearState) {
+                return;
+            }
+            ASSERT_GT(state.u.size(), static_cast<std::size_t>(dominant_dof));
+            const auto dominant = static_cast<double>(
+                state.u[static_cast<std::size_t>(dominant_dof)]);
+            refreshed_measure = dominant > 50.0 ? 2.0 : 1.0;
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    SelectedDofScalingLinearSolver selectively_damped(
+        *problem.linear, selected_dof, /*scale=*/0.5);
+    const auto report = newton.solveStep(
+        *problem.transient,
+        selectively_damped,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    ASSERT_TRUE(report.converged);
+    // The first positive selected residual is 1/6.  It defines the relative
+    // reference, so its relative ratio is one and cannot meet 1e-6, but it is
+    // already below the independent 0.2 absolute floor.  OR semantics permit
+    // convergence without applying a selected-field correction.
+    EXPECT_EQ(report.iterations, 1);
+    const auto final_values = ts_test::getVectorByDof(problem.history.u());
+    EXPECT_NEAR(final_values[static_cast<std::size_t>(selected_dof)],
+                1.0,
+                1e-12);
+    EXPECT_NEAR(final_values[static_cast<std::size_t>(dominant_dof)],
+                100.0,
+                1e-12);
+}
+
 TEST(NewtonSolver, ThrowsWhenLinearSolveFails)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
@@ -1929,6 +6676,302 @@ TEST(NewtonSolver, ThrowsWhenLinearSolveFails)
                                         problem.history,
                                         ws),
                  svmp::FE::FEException);
+}
+
+TEST(NewtonSolver,
+     RejectsFiniteInexactResultsWithoutUsableProgressAndPreservesHistory)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using Script = ScriptedFiniteInexactLinearSolver::Result;
+    const std::array<std::pair<const char*, Script>, 4> rejected_results{{
+        {"zero iterations despite reported reduction",
+         Script{0, 1.0, 0.5, 0.5, false}},
+        {"nonzero correction without residual reduction",
+         Script{1, 1.0, 1.0, 1.0, false}},
+        {"reported reduction with relative residual at least one",
+         Script{1, 1.0, 0.5, 1.0, false}},
+        {"zero correction despite reported reduction",
+         Script{1, 1.0, 0.5, 0.5, true}},
+    }};
+
+    for (const auto& [description, scripted_result] : rejected_results) {
+        SCOPED_TRACE(description);
+        auto problem = makeScalarProblem(
+            [](const svmp::FE::forms::FormExpr& u,
+               const svmp::FE::forms::FormExpr& v) {
+                return (u * v).dx();
+            },
+            /*dt=*/0.1,
+            /*u0=*/{1.0});
+
+        svmp::FE::timestepping::NewtonOptions options;
+        options.residual_op = "op";
+        options.jacobian_op = "op";
+        options.max_iterations = 1;
+        options.abs_tolerance = 1e-16;
+        options.rel_tolerance = 1e-16;
+        options.step_tolerance = 0.0;
+        options.use_line_search = false;
+        options.accept_inexact_linear_solutions = true;
+
+        svmp::FE::timestepping::NewtonSolver newton(options);
+        svmp::FE::timestepping::NewtonWorkspace workspace;
+        newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+        problem.history.repack(*problem.factory);
+
+        const auto entry_u = ts_test::getVectorByDof(problem.history.u());
+        const auto entry_u_prev =
+            ts_test::getVectorByDof(problem.history.uPrev());
+        const auto entry_u_prev2 =
+            ts_test::getVectorByDof(problem.history.uPrev2());
+
+        ScriptedFiniteInexactLinearSolver inexact(
+            *problem.linear, scripted_result);
+        bool threw = false;
+        try {
+            (void)newton.solveStep(
+                *problem.transient,
+                inexact,
+                /*solve_time=*/problem.history.dt(),
+                problem.history,
+                workspace);
+        } catch (const svmp::FE::FEException& error) {
+            threw = true;
+            EXPECT_NE(std::string(error.what()).find(
+                          "linear solve did not converge"),
+                      std::string::npos)
+                << error.what();
+        }
+
+        EXPECT_TRUE(threw);
+        EXPECT_EQ(inexact.solve_calls, 1);
+        EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()), entry_u);
+        EXPECT_EQ(ts_test::getVectorByDof(problem.history.uPrev()),
+                  entry_u_prev);
+        EXPECT_EQ(ts_test::getVectorByDof(problem.history.uPrev2()),
+                  entry_u_prev2);
+    }
+}
+
+TEST(NewtonSolver,
+     AcceptsFiniteInexactPositiveProgressWithNonzeroCorrectionAndPreservesHistory)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeScalarProblem(
+        [](const svmp::FE::forms::FormExpr& u,
+           const svmp::FE::forms::FormExpr& v) {
+            return (u * v).dx();
+        },
+        /*dt=*/0.1,
+        /*u0=*/{1.0});
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1e-16;
+    options.rel_tolerance = 1e-16;
+    options.step_tolerance = 0.0;
+    options.use_line_search = false;
+    options.accept_inexact_linear_solutions = true;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    const auto entry_u = ts_test::getVectorByDof(problem.history.u());
+    const auto entry_u_prev =
+        ts_test::getVectorByDof(problem.history.uPrev());
+    const auto entry_u_prev2 =
+        ts_test::getVectorByDof(problem.history.uPrev2());
+
+    ScriptedFiniteInexactLinearSolver inexact(
+        *problem.linear,
+        ScriptedFiniteInexactLinearSolver::Result{
+            1, 1.0, 0.5, 0.5, false});
+    const auto report = newton.solveStep(
+        *problem.transient,
+        inexact,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    EXPECT_EQ(inexact.solve_calls, 1);
+    EXPECT_FALSE(report.linear.converged);
+    const auto accepted_u = ts_test::getVectorByDof(problem.history.u());
+    ASSERT_EQ(accepted_u.size(), entry_u.size());
+    ASSERT_EQ(accepted_u.size(), 1u);
+    EXPECT_NE(accepted_u, entry_u);
+    EXPECT_NEAR(accepted_u.front(), 0.0, 1e-13);
+    EXPECT_EQ(ts_test::getVectorByDof(problem.history.uPrev()),
+              entry_u_prev);
+    EXPECT_EQ(ts_test::getVectorByDof(problem.history.uPrev2()),
+              entry_u_prev2);
+}
+
+TEST(NewtonSolver,
+     RejectsNonfiniteLinearReportEvenWhenInexactSolutionsAreAllowed)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeScalarProblem(
+        [](const svmp::FE::forms::FormExpr& u,
+           const svmp::FE::forms::FormExpr& v) { return (u * v).dx(); },
+        /*dt=*/0.1,
+        /*u0=*/{1.0});
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 1e-16;
+    nopt.rel_tolerance = 1e-16;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+    nopt.accept_inexact_linear_solutions = true;
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    InvalidNumericalLinearSolver invalid(
+        *problem.linear,
+        InvalidNumericalLinearSolver::Mode::NonfiniteReport);
+    try {
+        (void)newton.solveStep(*problem.transient,
+                               invalid,
+                               /*solve_time=*/problem.history.dt(),
+                               problem.history,
+                               ws);
+        FAIL() << "Newton accepted a nonfinite linear report";
+    } catch (const svmp::FE::FEException& error) {
+        EXPECT_NE(std::string(error.what()).find("numerical breakdown"),
+                  std::string::npos)
+            << error.what();
+    }
+    EXPECT_EQ(invalid.solve_calls, 1);
+    for (const auto value : problem.history.u().localSpan()) {
+        EXPECT_TRUE(std::isfinite(static_cast<double>(value)));
+    }
+}
+
+TEST(NewtonSolver, RejectsNonfiniteCorrectionDespiteConvergedLinearReport)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeScalarProblem(
+        [](const svmp::FE::forms::FormExpr& u,
+           const svmp::FE::forms::FormExpr& v) { return (u * v).dx(); },
+        /*dt=*/0.1,
+        /*u0=*/{1.0});
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 1e-16;
+    nopt.rel_tolerance = 1e-16;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+    nopt.accept_inexact_linear_solutions = true;
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    InvalidNumericalLinearSolver invalid(
+        *problem.linear,
+        InvalidNumericalLinearSolver::Mode::NonfiniteCorrection);
+    try {
+        (void)newton.solveStep(*problem.transient,
+                               invalid,
+                               /*solve_time=*/problem.history.dt(),
+                               problem.history,
+                               ws);
+        FAIL() << "Newton accepted a nonfinite correction";
+    } catch (const svmp::FE::FEException& error) {
+        EXPECT_NE(std::string(error.what()).find("numerical breakdown"),
+                  std::string::npos)
+            << error.what();
+    }
+    EXPECT_EQ(invalid.solve_calls, 1);
+    for (const auto value : problem.history.u().localSpan()) {
+        EXPECT_TRUE(std::isfinite(static_cast<double>(value)));
+    }
+}
+
+TEST(NewtonSolver,
+     RejectsNonfiniteExplicitBorderedRecoveryBeforeMutatingState)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeDirectCouplingProblem(
+        /*dt=*/0.1,
+        /*u0=*/{0.2, -0.4, 0.1, 0.7});
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1e-16;
+    options.rel_tolerance = 1e-16;
+    options.step_tolerance = 0.0;
+    options.use_line_search = false;
+    options.accept_inexact_linear_solutions = true;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    // Define the entry snapshot after applying the system's automatic gauge
+    // relation.  That canonical projection is part of solve initialization,
+    // not a consequence of accepting the Newton correction under test.
+    problem.sys->updateConstraints(problem.history.dt(), problem.history.dt());
+    auto& constraints = problem.sys->constraints();
+    constraints.updateGhostsAndDistribute(problem.history.u());
+    constraints.distributeMasterBearing(problem.history.uPrev());
+    constraints.distributeMasterBearing(problem.history.uPrev2());
+
+    const auto entry_u = ts_test::getVectorByDof(problem.history.u());
+    const auto entry_u_prev = ts_test::getVectorByDof(problem.history.uPrev());
+    const auto entry_u_prev2 = ts_test::getVectorByDof(problem.history.uPrev2());
+    const auto entry_auxiliary = problem.sys->checkpointAuxiliaryState();
+
+    OverflowingBorderedRecoveryLinearSolver overflowing(
+        *problem.linear, *problem.sys);
+    try {
+        (void)newton.solveStep(
+            *problem.transient,
+            overflowing,
+            /*solve_time=*/problem.history.dt(),
+            problem.history,
+            workspace);
+        FAIL() << "Newton accepted a nonfinite explicit bordered recovery";
+    } catch (const svmp::FE::FEException& error) {
+        EXPECT_NE(std::string(error.what()).find("post-recovery correction"),
+                  std::string::npos)
+            << error.what();
+    }
+
+    EXPECT_GT(overflowing.solve_calls, 1);
+    EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()), entry_u);
+    EXPECT_EQ(ts_test::getVectorByDof(problem.history.uPrev()), entry_u_prev);
+    EXPECT_EQ(ts_test::getVectorByDof(problem.history.uPrev2()), entry_u_prev2);
+    EXPECT_EQ(problem.sys->checkpointAuxiliaryState(), entry_auxiliary);
+    for (const auto value : workspace.delta->localSpan()) {
+        EXPECT_EQ(value, static_cast<svmp::FE::Real>(0.0));
+    }
 }
 
 TEST(NewtonSolver, PassesEffectiveStageTimeStepToLinearSolver)

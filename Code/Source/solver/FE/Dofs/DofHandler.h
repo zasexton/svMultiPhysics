@@ -876,6 +876,18 @@ public:
 	     */
 	    void setRankInfo(int my_rank, int world_size);
 
+#if FE_HAS_MPI
+    /**
+     * @brief Set the MPI communicator associated with a manually assembled layout
+     *
+     * Distribution routines populate this from DofDistributionOptions.  Callers
+     * that construct a DofHandler from an externally assembled DofMap must set
+     * it explicitly before finalization so later collectives use the same rank
+     * domain as the layout.
+     */
+    void setMpiComm(MPI_Comm communicator);
+#endif
+
 private:
     // Internal helpers
     void checkNotFinalized() const;

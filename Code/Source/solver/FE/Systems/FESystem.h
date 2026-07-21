@@ -174,6 +174,13 @@ struct AssemblyRequest {
     /// When true, EachNonlinearIteration auxiliary inputs are refreshed.
     /// Set to true on each Newton iteration within a time step.
     bool is_nonlinear_iteration{false};
+
+    /// Assemble an isolated FE diagnostic operator without advancing,
+    /// preparing, or injecting generalized auxiliary coupling. The ordinary
+    /// FE operator is still assembled, but production auxiliary recovery
+    /// caches (rank-one/reduced updates and bordered/local-condensed state)
+    /// are preserved exactly as left by the preceding production assembly.
+    bool suppress_auxiliary_coupling_assembly{false};
 };
 
 enum class MeshMotionFieldRole : std::uint8_t {
@@ -248,6 +255,11 @@ struct FEAdaptedStateTransferResult {
 struct GeometryTransactionCallback {
     std::string name;
     std::function<void(const GeometryTransactionDiagnostics&)> callback;
+};
+
+struct CutIntegrationContextUpdateCallback {
+    std::string name;
+    std::function<void(const assembly::CutIntegrationContext*)> callback;
 };
 
 struct MeshParticipantInfo {
@@ -347,7 +359,8 @@ public:
     GeometricNonlinearityTransactionEvent acceptGeometricNonlinearityState(
         const SystemStateView& state,
         GeometricNonlinearityUpdatePoint update_point);
-    GeometricNonlinearityTransactionEvent rollbackGeometricNonlinearityTrial();
+    GeometricNonlinearityTransactionEvent rollbackGeometricNonlinearityTrial(
+        bool force = false);
     FieldId addInterfaceField(std::string name,
                               std::shared_ptr<const spaces::FunctionSpace> space,
                               InterfaceId interface_marker,
@@ -1343,14 +1356,39 @@ public:
     [[nodiscard]] const sparsity::DistributedSparsityPattern* distributedSparsityIfAvailable(const OperatorTag& op) const noexcept;
     [[nodiscard]] std::shared_ptr<const backends::DofPermutation> dofPermutation() const noexcept { return dof_permutation_; }
 
-		    [[nodiscard]] bool isSetup() const noexcept { return is_setup_; }
-		    [[nodiscard]] int temporalOrder() const noexcept;
-		    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept;
-		    [[nodiscard]] bool hasTimeDependentConstraints() const noexcept;
-		    [[nodiscard]] bool requiresTimeAdvancement() const noexcept;
-		    [[nodiscard]] bool isTransient() const noexcept { return temporalOrder() > 0; }
-		    [[nodiscard]] std::vector<FieldId> timeDerivativeFields(const OperatorTag& op) const;
-		    [[nodiscard]] std::vector<FieldId> timeDerivativeFields() const;
+    /**
+     * @brief Revision counter for the stored sparsity patterns.
+     *
+     * Bumped whenever setup() rebuilds the patterns and whenever
+     * rebuildConstraintState() re-augments them because the algebraic
+     * constraint structure (slave/master topology) changed post-setup,
+     * e.g. when an interface-tracking constraint reclassifies cut cells.
+     * Solvers holding matrices allocated from these patterns must
+     * reallocate when this revision changes; otherwise backends that
+     * cannot grow their stored pattern (Eigen CSR) silently drop the
+     * new constraint-fill entries during assembly.
+     */
+    [[nodiscard]] std::uint64_t sparsityPatternRevision() const noexcept { return sparsity_pattern_revision_; }
+
+    [[nodiscard]] bool isSetup() const noexcept { return is_setup_; }
+#if FE_HAS_MPI
+    /**
+     * @brief Communicator governing this system's collective operations.
+     *
+     * After setup this is the DOF-handler communicator. Before setup,
+     * systems constructed from a native distributed mesh use that
+     * mesh's communicator. Systems without communicator metadata are
+     * local to MPI_COMM_SELF until setup supplies one.
+     */
+    [[nodiscard]] MPI_Comm activeMpiCommunicator() const noexcept;
+#endif
+    [[nodiscard]] int temporalOrder() const noexcept;
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept;
+    [[nodiscard]] bool hasTimeDependentConstraints() const noexcept;
+    [[nodiscard]] bool requiresTimeAdvancement() const noexcept;
+    [[nodiscard]] bool isTransient() const noexcept { return temporalOrder() > 0; }
+    [[nodiscard]] std::vector<FieldId> timeDerivativeFields(const OperatorTag& op) const;
+    [[nodiscard]] std::vector<FieldId> timeDerivativeFields() const;
 
 	    // ---- Parameter requirements (optional) ----
 	    [[nodiscard]] const ParameterRegistry& parameterRegistry() const noexcept { return parameter_registry_; }
@@ -1375,6 +1413,12 @@ public:
     void addContribution(analysis::ContributionDescriptor desc);
     void addVariableDescriptor(analysis::VariableDescriptor desc);
     void addInvariantDomainDescriptor(analysis::InvariantDomainDescriptor desc);
+    void registerGeneratedEmbeddedInterfaceMarker(InterfaceId interface_marker);
+    [[nodiscard]] bool isGeneratedEmbeddedInterfaceMarkerRegistered(
+        InterfaceId interface_marker) const noexcept {
+        return generated_embedded_interface_markers_.find(interface_marker) !=
+               generated_embedded_interface_markers_.end();
+    }
     void setAnalysisSolverOptions(backends::SolverOptions options);
     void clearAnalysisSolverOptions();
     void addAnalysisSummaries(analysis::AnalysisSummarySet summaries);
@@ -1414,6 +1458,15 @@ public:
 
     /// Build and store constraint summary from current AffineConstraints
     void buildConstraintSummary();
+
+    /**
+     * @brief Re-augment stored sparsity patterns after a post-setup change in
+     * constraint structure (slave/master topology). No-op when the structure
+     * signature is unchanged. Bumps sparsityPatternRevision() on change.
+     */
+    void refreshSparsityForConstraintStructureChange();
+    [[nodiscard]] static std::uint64_t computeConstraintStructureSignature(
+        const constraints::AffineConstraints& constraints);
     [[nodiscard]] const analysis::ConstraintAnalysisSummary* constraintSummary() const noexcept {
         return constraint_summary_ ? &*constraint_summary_ : nullptr;
     }
@@ -1449,20 +1502,33 @@ public:
         int interface_marker,
         geometry::CutIntegrationSide side) const;
 
-    void setCutIntegrationContext(std::shared_ptr<const assembly::CutIntegrationContext> context) noexcept {
+    void addCutIntegrationContextUpdateCallback(
+        CutIntegrationContextUpdateCallback hook);
+
+    void setCutIntegrationContext(std::shared_ptr<const assembly::CutIntegrationContext> context) {
         if (cut_integration_context_.get() != context.get()) {
             bumpConstraintLayoutRevision();
         }
         cut_integration_context_ = std::move(context);
         invalidateAnalysisCache();
+        for (const auto& hook : cut_integration_context_update_callbacks_) {
+            if (hook.callback) {
+                hook.callback(cut_integration_context_.get());
+            }
+        }
     }
 
-    void clearCutIntegrationContext() noexcept {
+    void clearCutIntegrationContext() {
         if (cut_integration_context_) {
             bumpConstraintLayoutRevision();
         }
         cut_integration_context_.reset();
         invalidateAnalysisCache();
+        for (const auto& hook : cut_integration_context_update_callbacks_) {
+            if (hook.callback) {
+                hook.callback(nullptr);
+            }
+        }
     }
 
     [[nodiscard]] const assembly::CutIntegrationContext* cutIntegrationContext() const noexcept {
@@ -1510,6 +1576,12 @@ public:
 private:
     [[nodiscard]] analysis::ProblemAnalysisContext buildProblemAnalysisContext() const;
     [[nodiscard]] analysis::ProblemAnalysisReport runProblemAnalysisPlanOnly() const;
+    [[nodiscard]] std::unique_ptr<sparsity::SparsityPattern>
+    buildActiveSparsityPatternFromBase(const sparsity::SparsityPattern& base) const;
+    [[nodiscard]] std::unique_ptr<sparsity::DistributedSparsityPattern>
+    buildActiveDistributedSparsityPatternFromBase(
+        const sparsity::DistributedSparsityPattern& base,
+        const sparsity::SparsityPattern* active_serial) const;
 
     struct PlannedCellTerm {
         FieldId test_field{INVALID_FIELD_ID};
@@ -1661,6 +1733,8 @@ private:
     OperatorRegistry operator_registry_;
     std::vector<FormCellDomainRestriction> form_install_cell_domain_restrictions_{};
     std::shared_ptr<const assembly::CutIntegrationContext> cut_integration_context_{};
+    std::vector<CutIntegrationContextUpdateCallback>
+        cut_integration_context_update_callbacks_{};
     std::set<InterfaceId> generated_embedded_interface_markers_{};
     std::vector<std::unique_ptr<constraints::Constraint>> constraint_defs_;
     std::vector<std::unique_ptr<constraints::ISystemConstraint>> system_constraint_defs_;
@@ -1691,7 +1765,12 @@ private:
 
 		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>> sparsity_by_op_{};
 		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::DistributedSparsityPattern>> distributed_sparsity_by_op_{};
+		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>> base_sparsity_by_op_{};
+		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::DistributedSparsityPattern>> base_distributed_sparsity_by_op_{};
 		    std::shared_ptr<const backends::DofPermutation> dof_permutation_{};
+		    int distributed_sparsity_dof_per_node_{0};
+		    std::uint64_t constraint_structure_signature_{0};
+		    std::uint64_t sparsity_pattern_revision_{0};
 
 	    std::unique_ptr<assembly::Assembler> assembler_{};
         bool use_constraints_in_assembly_{true};

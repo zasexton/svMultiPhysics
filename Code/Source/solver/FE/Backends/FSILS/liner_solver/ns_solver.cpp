@@ -1263,6 +1263,11 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int mom_ncomp, const
   std::vector<double> shared_face_local_norms;
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
     auto& face = lhs.face[faIn];
+    // valM row i is component i of the current momentum vector.  Keep the
+    // preprocessing loop within both the declared face width and its actual
+    // storage even if an externally supplied/legacy face is compact.
+    const int face_dof = std::max(
+        0, std::min({face.dof, mom_ncomp, dof, face.valM.nrows()}));
 
     if (face.coupledFlag) {
       if (face.sharedFlag) {
@@ -1270,7 +1275,7 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int mom_ncomp, const
         for (int a = 0; a < face.nNo; a++) {
           int Ac = face.glob(a);
           if (Ac < mynNo) {
-            for (int i = 0; i < mom_ncomp; i++) {
+            for (int i = 0; i < face_dof; i++) {
               local_nS += face.valM(i,a) * face.valM(i,a);
             }
           }
@@ -1281,7 +1286,7 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int mom_ncomp, const
       } else {
         face.nS = 0.0;
         for (int a = 0; a < face.nNo; a++) {
-          for (int i = 0; i < mom_ncomp; i++) {
+          for (int i = 0; i < face_dof; i++) {
             face.nS += face.valM(i,a) * face.valM(i,a);
           }
         }

@@ -20,6 +20,7 @@ namespace svmp {
 namespace FE {
 namespace sparsity {
 class SparsityPattern;
+class DistributedSparsityPattern;
 } // namespace sparsity
 
 namespace backends {
@@ -45,6 +46,35 @@ public:
         (void)row;
         (void)col;
         return 0.0;
+    }
+
+    /**
+     * @brief Rebuild matrix storage in place from a new sparsity pattern.
+     *
+     * Preserves object identity so long-lived references stay valid — needed
+     * when interface-tracking constraints re-augment the system sparsity in
+     * the middle of a nonlinear solve. Entries are zeroed. Returns false when
+     * the backend does not support in-place reinitialization (callers must
+     * then replace the matrix object instead).
+     */
+    virtual bool reinitFromPattern(const sparsity::SparsityPattern& pattern)
+    {
+        (void)pattern;
+        return false;
+    }
+
+    /**
+     * @brief Distributed-pattern counterpart of reinitFromPattern().
+     *
+     * Backends that retain layout metadata in their vectors may implement
+     * this only when the new owned/ghost layout remains compatible.  A false
+     * result tells the caller that an in-place refresh is unavailable.
+     */
+    virtual bool reinitFromPattern(
+        const sparsity::DistributedSparsityPattern& pattern)
+    {
+        (void)pattern;
+        return false;
     }
 };
 

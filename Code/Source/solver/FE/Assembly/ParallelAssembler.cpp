@@ -576,7 +576,13 @@ public:
     {
         base_->forEachInteriorFace(
             [&](GlobalIndex face_id, GlobalIndex cell_minus, GlobalIndex cell_plus) {
-                if (base_->isOwnedCell(cell_minus)) {
+                // Local face2cell orientation is not communicator-canonical:
+                // the same physical face can name the locally owned cell as
+                // `minus` on both ranks.  Expose every face adjacent to an
+                // owned cell; StandardAssembler selects one adjacent cell by
+                // a partition-invariant signature before reverse-scatter.
+                if (base_->isOwnedCell(cell_minus) ||
+                    base_->isOwnedCell(cell_plus)) {
                     callback(face_id, cell_minus, cell_plus);
                 }
             });

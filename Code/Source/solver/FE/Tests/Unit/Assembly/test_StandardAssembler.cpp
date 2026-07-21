@@ -29,6 +29,7 @@
 #include "Dofs/DofMap.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/JIT/JITCompiler.h"
 #include "Forms/MonolithicCellKernel.h"
 #include "Forms/Vocabulary.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
@@ -45,11 +46,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <vector>
 #include <memory>
 #include <numeric>
 #include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -57,6 +60,33 @@ namespace svmp {
 namespace FE {
 namespace assembly {
 namespace test {
+
+class ScopedStandardAssemblerEnvVar final {
+public:
+    ScopedStandardAssemblerEnvVar(const char* key, const char* value) : key_(key)
+    {
+        if (const char* current = std::getenv(key); current != nullptr) {
+            prior_ = std::string(current);
+        }
+        ::setenv(key_.c_str(), value, 1);
+    }
+
+    ~ScopedStandardAssemblerEnvVar()
+    {
+        if (prior_) {
+            ::setenv(key_.c_str(), prior_->c_str(), 1);
+        } else {
+            ::unsetenv(key_.c_str());
+        }
+    }
+
+    ScopedStandardAssemblerEnvVar(const ScopedStandardAssemblerEnvVar&) = delete;
+    ScopedStandardAssemblerEnvVar& operator=(const ScopedStandardAssemblerEnvVar&) = delete;
+
+private:
+    std::string key_;
+    std::optional<std::string> prior_;
+};
 
 // ============================================================================
 // Mock Classes for Testing
@@ -880,6 +910,23 @@ public:
     [[nodiscard]] RequiredData getRequiredData() const override {
         return RequiredData::BasisValues | RequiredData::IntegrationWeights;
     }
+};
+
+class CountingMassKernel final : public MassKernel {
+public:
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        ++compute_cell_calls_;
+        MassKernel::computeCell(ctx, output);
+    }
+
+    [[nodiscard]] int computeCellCalls() const noexcept
+    {
+        return compute_cell_calls_;
+    }
+
+private:
+    int compute_cell_calls_{0};
 };
 
 /**
@@ -3656,6 +3703,55 @@ CutIntegrationContext makeSingleCellReferenceCutVolumeContext(int marker)
     return context;
 }
 
+TEST(StandardAssemblerCutVolumes,
+     UniformlySmallShapeRegularTetrahedronUsesScaleConditionedCellInverse)
+{
+    constexpr int marker = 410;
+    constexpr Real scale = Real(1.0e-8);
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{scale, 0.0, 0.0},
+            std::array<Real, 3>{0.0, scale, 0.0},
+            std::array<Real, 3>{0.0, 0.0, scale},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+    auto dof_map = createSingleCellDofMap(4);
+    auto cut_context = makeSingleCellReferenceCutVolumeContext(marker);
+    TestDenseSystemView system(4);
+    StiffnessKernel kernel;
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    const auto result = assembler.assembleCutVolumes(
+        mesh,
+        cut_context,
+        marker,
+        geometry::CutIntegrationSide::Negative,
+        space,
+        space,
+        kernel,
+        &system,
+        &system,
+        /*assemble_matrix=*/true,
+        /*assemble_vector=*/true);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.elements_assembled, 1);
+    for (const Real value : system.matrix()) {
+        EXPECT_TRUE(std::isfinite(value));
+    }
+    for (const Real value : system.vectorData()) {
+        EXPECT_TRUE(std::isfinite(value));
+    }
+
+    // At the single reference cut point, J = scale I and w_phys = 0.02 scale^3.
+    // The (1,1) stiffness entry is therefore w_phys / scale^2.
+    ASSERT_EQ(system.matrix().size(), 16u);
+    EXPECT_NEAR(system.matrix()[5], Real(0.02) * scale, Real(1.0e-22));
+}
+
 TEST(StandardAssemblerCutVolumes, ReusesCutVolumeBasisCacheWithinEntryCap)
 {
     constexpr int marker = 411;
@@ -5158,9 +5254,13 @@ TEST(StandardAssemblerEdgeCases, ConstraintChainDistributesToMasters) {
     EXPECT_DOUBLE_EQ(sys.getMatrixEntry(2, 2), 3.0);
     EXPECT_DOUBLE_EQ(sys.getVectorEntry(2), 3.0);
 
-    // Constrained rows are not populated by distribution.
-    EXPECT_DOUBLE_EQ(sys.getMatrixEntry(0, 0), 0.0);
-    EXPECT_DOUBLE_EQ(sys.getMatrixEntry(1, 1), 0.0);
+    // Constrained rows receive identity diagonals (not term contributions) so
+    // factorizations never see empty rows; values are reconstructed by the
+    // post-solve distribute().
+    EXPECT_DOUBLE_EQ(sys.getMatrixEntry(0, 0), 1.0);
+    EXPECT_DOUBLE_EQ(sys.getMatrixEntry(1, 1), 1.0);
+    EXPECT_DOUBLE_EQ(sys.getVectorEntry(0), 0.0);
+    EXPECT_DOUBLE_EQ(sys.getVectorEntry(1), 0.0);
 }
 
 TEST(StandardAssemblerMovingDomain, MissingMeshMotionBindingThrowsClearly)
@@ -5257,6 +5357,103 @@ TEST(StandardAssemblerMovingDomain, KernelsAccessMeshMotionAndCurrentReferenceGe
     EXPECT_NEAR(kernel.max_measure_delta, 0.0, 1e-12);
     EXPECT_NEAR(kernel.first_transform_00, 1.0, 1e-12);
     EXPECT_NEAR(rhs.getVectorEntry(0), kernel.output_value, 1e-12);
+}
+
+TEST(StandardAssemblerCaches, MonolithicCompiledDispatchDefersToSelectiveWeightFallback)
+{
+    ScopedStandardAssemblerEnvVar enable_compiled(
+        "SVMP_FE_ENABLE_MONOLITHIC_COMPILED_DISPATCH", "1");
+    ScopedStandardAssemblerEnvVar allow_compiled(
+        "SVMP_FE_DISABLE_MONOLITHIC_COMPILED_DISPATCH", "0");
+    ScopedStandardAssemblerEnvVar disable_compare(
+        "SVMP_FE_COMPARE_MONOLITHIC_COMPILED", "0");
+
+    SingleQuadMeshAccess mesh;
+    auto scalar_space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+    auto scalar_map = createSingleCellDofMap(4);
+    auto fallback_kernel = std::make_shared<CountingMassKernel>();
+
+    const auto u = forms::TrialFunction(*scalar_space, "u");
+    const auto v = forms::TestFunction(*scalar_space, "v");
+    forms::FormCompiler form_compiler;
+    auto tangent_ir = form_compiler.compileBilinear((u * v).dx());
+
+    forms::JITOptions jit_options;
+    jit_options.enable = true;
+    jit_options.vectorize = false;
+    auto jit_compiler = forms::jit::JITCompiler::getOrCreate(jit_options);
+
+    std::vector<forms::MonolithicCellKernel::BlockSpec> blocks;
+    blocks.push_back(forms::MonolithicCellKernel::BlockSpec{
+        .test_field = 1,
+        .trial_field = 1,
+        .want_matrix = true,
+        .want_vector = false,
+        .fallback_kernel = fallback_kernel,
+        .tangent_ir = std::move(tangent_ir),
+        .test_space = scalar_space.get(),
+        .trial_space = scalar_space.get(),
+        .row_dof_map = &scalar_map,
+        .col_dof_map = &scalar_map,
+        .row_dof_offset = 0,
+        .col_dof_offset = 0,
+    });
+
+    forms::MonolithicCellKernel monolithic_kernel(
+        std::move(blocks), std::move(jit_compiler), jit_options);
+    monolithic_kernel.setResolved();
+    monolithic_kernel.ensureCompiled();
+    if (!monolithic_kernel.hasCompiledDispatch()) {
+        GTEST_SKIP() << monolithic_kernel.compileMessage();
+    }
+
+    TimeIntegrationContext time_ctx;
+    time_ctx.time_derivative_term_weight = Real{1.0};
+    time_ctx.non_time_derivative_term_weight = Real{1.0};
+
+    StandardAssembler assembler;
+    assembler.setDofMap(scalar_map);
+    assembler.setTimeIntegrationContext(&time_ctx);
+    assembler.initialize();
+
+    TestDenseSystemView output(4);
+    const FusedCellTerm parent_term{
+        .test_space = scalar_space.get(),
+        .trial_space = scalar_space.get(),
+        .kernel = &monolithic_kernel,
+        .row_dof_map = &scalar_map,
+        .col_dof_map = &scalar_map,
+        .row_dof_offset = 0,
+        .col_dof_offset = 0,
+        .matrix_view = &output,
+        .vector_view = nullptr,
+        .assemble_matrix = true,
+        .assemble_vector = false,
+    };
+
+    output.zero();
+    const auto compiled = assembler.assembleCellsFused(
+        mesh, std::span<const FusedCellTerm>(&parent_term, 1));
+    ASSERT_TRUE(compiled.success);
+    EXPECT_EQ(fallback_kernel->computeCellCalls(), 0)
+        << "control assembly did not take the env-enabled coupled dispatch";
+    const auto compiled_matrix = output.matrix();
+
+    time_ctx.time_derivative_term_weight = Real{0.0};
+    time_ctx.non_time_derivative_term_weight = Real{1.0};
+    output.zero();
+    const auto selective = assembler.assembleCellsFused(
+        mesh, std::span<const FusedCellTerm>(&parent_term, 1));
+    ASSERT_TRUE(selective.success);
+    EXPECT_EQ(fallback_kernel->computeCellCalls(), 1)
+        << "coupled compiled dispatch bypassed selective-weight fallback";
+
+    ASSERT_EQ(output.matrix().size(), compiled_matrix.size());
+    for (std::size_t i = 0; i < compiled_matrix.size(); ++i) {
+        EXPECT_NEAR(output.matrix()[i], compiled_matrix[i], Real{1.0e-12})
+            << "matrix[" << i << "]";
+    }
 }
 
 TEST(StandardAssemblerCaches, MonolithicFieldPopulationFastPathMatchesSequentialFallbackOnQuad4)

@@ -1323,8 +1323,10 @@ assembly::AssemblyResult assembleOperator(
     assembly::GlobalSystemView* vector_out)
 {
     system.requireSetup();
-    system.last_rank_one_updates_.clear();
-    system.last_reduced_field_updates_.clear();
+    if (!request.suppress_auxiliary_coupling_assembly) {
+        system.last_rank_one_updates_.clear();
+        system.last_reduced_field_updates_.clear();
+    }
 
     FE_THROW_IF(request.op.empty(), InvalidArgumentException, "assembleOperator: empty operator tag");
     FE_THROW_IF(!system.operator_registry_.has(request.op), InvalidArgumentException,
@@ -1364,7 +1366,9 @@ assembly::AssemblyResult assembleOperator(
                nearly_equal(system.partitioned_auxiliary_advance_dt_, dt);
     };
 
-    if (has_partitioned_auxiliary && !same_partitioned_auxiliary_step(state.time, state.dt)) {
+    if (!request.suppress_auxiliary_coupling_assembly &&
+        has_partitioned_auxiliary &&
+        !same_partitioned_auxiliary_step(state.time, state.dt)) {
         // Advance partitioned auxiliary blocks exactly once for the current
         // nonlinear solve state. The first assembly of a time step is often a
         // Newton iteration, so gating on request.is_nonlinear_iteration would
@@ -1386,7 +1390,10 @@ assembly::AssemblyResult assembleOperator(
     // Always refresh inputs and re-evaluate outputs for every assembly
     // pass (including Newton iterations), so P_out = X + Rp*Q uses the
     // latest flow rate Q computed from the current velocity iterate.
-    system.prepareAuxiliaryForAssembly(state, request.is_nonlinear_iteration);
+    if (!request.suppress_auxiliary_coupling_assembly) {
+        system.prepareAuxiliaryForAssembly(
+            state, request.is_nonlinear_iteration);
+    }
 
     if (request.zero_outputs) {
         if (request.want_matrix) {
@@ -1563,7 +1570,7 @@ assembly::AssemblyResult assembleOperator(
     // Inject generalized auxiliary values (neutral path).
     // These populate the auxiliary_inputs/auxiliary_state/auxiliary_outputs fields
     // in AssemblyContext, used by AuxiliaryInputRef/AuxiliaryOutputRef terminals.
-    {
+    if (!request.suppress_auxiliary_coupling_assembly) {
         auto* input_reg = system.auxiliaryInputRegistryIfPresent();
         auto* aux_mgr = system.auxiliaryStateManagerIfPresent();
 
@@ -1595,6 +1602,12 @@ assembly::AssemblyResult assembleOperator(
             }
             assembler.setAuxiliaryValues(aux_inputs, aux_state_flat, aux_outputs);
         }
+    } else {
+        // Do not flatten mutable auxiliary caches for an isolated diagnostic,
+        // and do not leave bindings from the preceding production assembly
+        // visible to a diagnostic form that promises no auxiliary terminals.
+        assembler.setAuxiliaryOutputBindings({});
+        assembler.setAuxiliaryValues({}, {}, {});
     }
 
     const auto& mesh = system.meshAccess();
@@ -2402,6 +2415,15 @@ assembly::AssemblyResult assembleOperator(
         }
     }
 #endif
+
+    // Isolated diagnostic operators must leave the production generalized
+    // auxiliary state and algebraic recovery data untouched. Their ordinary
+    // FE cells/faces/global terms have already been finalized and timed; skip
+    // all partitioned-output, mixed auxiliary, reduced, local-condensed, and
+    // bordered coupling injection below.
+    if (request.suppress_auxiliary_coupling_assembly) {
+        return total;
+    }
 
     const bool has_partitioned_output_coupling =
         request.want_matrix &&

@@ -153,9 +153,16 @@ public:
             if (r < 0 || r >= matrix_->numRows()) continue;
             valid.push_back(static_cast<PetscInt>(r));
         }
-        if (valid.empty()) return;
         const PetscScalar diag = set_diagonal ? static_cast<PetscScalar>(1.0) : static_cast<PetscScalar>(0.0);
-        FE_PETSC_CALL(MatZeroRows(matrix_->petsc(), static_cast<PetscInt>(valid.size()), valid.data(), diag, nullptr, nullptr));
+        // MatZeroRows is collective. Some diagnostic constraints are
+        // rank-local, so ranks with no locally valid rows must still enter the
+        // call with a zero count and a null row pointer.
+        FE_PETSC_CALL(MatZeroRows(matrix_->petsc(),
+                                  static_cast<PetscInt>(valid.size()),
+                                  valid.empty() ? nullptr : valid.data(),
+                                  diag,
+                                  nullptr,
+                                  nullptr));
     }
 
     // Vector ops (no-op)

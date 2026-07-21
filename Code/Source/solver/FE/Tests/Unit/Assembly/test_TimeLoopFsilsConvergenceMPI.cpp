@@ -13,18 +13,22 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/Assembler.h"
+#include "Assembly/TimeIntegrationContext.h"
 
 #include "Auxiliary/AuxiliaryBindings.h"
 #include "Auxiliary/AuxiliaryModelDSL.h"
 #include "Auxiliary/AuxiliaryModelBuilder.h"
 
 #include "Backends/FSILS/FsilsFactory.h"
+#include "Backends/FSILS/FsilsMatrix.h"
 #include "Backends/Interfaces/DofPermutation.h"
 #include "Backends/Interfaces/LinearSolver.h"
 #include "Backends/Utils/BackendOptions.h"
 
 #include "Core/FEException.h"
 #include "Core/Types.h"
+
+#include "Constraints/SystemConstraint.h"
 
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
@@ -42,6 +46,7 @@
 
 #include "TimeStepping/TimeHistory.h"
 #include "TimeStepping/TimeLoop.h"
+#include "TimeStepping/NewtonSolver.h"
 
 #include <mpi.h>
 
@@ -97,6 +102,393 @@ int stripCellOwner(int cell, int n_cells, int world_size)
     const int scaled = (cell * world_size) / n_cells;
     return std::min(std::max(scaled, 0), world_size - 1);
 }
+
+// A deliberately disconnected distributed mesh: every rank owns one local
+// Quad4 whose vertex and cell GIDs are unique to that rank.  This makes a
+// rank-zero-only affine constraint truly rank-local while Newton and the
+// distributed FSILS matrix still share one communicator.
+class RankLocalOwnedQuadMeshAccess final : public IMeshAccess {
+public:
+    explicit RankLocalOwnedQuadMeshAccess(int rank)
+        : nodes_{{
+              {static_cast<Real>(2 * rank), Real{0}, Real{0}},
+              {static_cast<Real>(2 * rank + 1), Real{0}, Real{0}},
+              {static_cast<Real>(2 * rank + 1), Real{1}, Real{0}},
+              {static_cast<Real>(2 * rank), Real{1}, Real{0}},
+          }}
+    {
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override
+    {
+        return cell_id == 0;
+    }
+
+    [[nodiscard]] ElementType getCellType(GlobalIndex cell_id) const override
+    {
+        FE_THROW_IF(cell_id != 0,
+                    InvalidArgumentException,
+                    "RankLocalOwnedQuadMeshAccess: invalid cell ID");
+        return ElementType::Quad4;
+    }
+
+    void getCellNodes(GlobalIndex cell_id,
+                      std::vector<GlobalIndex>& nodes) const override
+    {
+        FE_THROW_IF(cell_id != 0,
+                    InvalidArgumentException,
+                    "RankLocalOwnedQuadMeshAccess: invalid cell ID");
+        nodes = {0, 1, 2, 3};
+    }
+
+    [[nodiscard]] std::array<Real, 3>
+    getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(
+        GlobalIndex cell_id,
+        std::vector<std::array<Real, 3>>& coords) const override
+    {
+        FE_THROW_IF(cell_id != 0,
+                    InvalidArgumentException,
+                    "RankLocalOwnedQuadMeshAccess: invalid cell ID");
+        coords.assign(nodes_.begin(), nodes_.end());
+    }
+
+    [[nodiscard]] LocalIndex
+    getLocalFaceIndex(GlobalIndex /*face_id*/,
+                      GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int
+    getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override
+    {
+        return -1;
+    }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex>
+    getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(
+        std::function<void(GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachOwnedCell(
+        std::function<void(GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachBoundaryFace(
+        int /*marker*/,
+        std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)>
+            /*callback*/) const override
+    {
+    }
+
+private:
+    std::array<std::array<Real, 3>, 4> nodes_{};
+};
+
+[[nodiscard]] dofs::MeshTopologyInfo
+buildRankLocalOwnedQuadTopology(int rank)
+{
+    dofs::MeshTopologyInfo topo;
+    topo.dim = 2;
+    topo.n_cells = 1;
+    topo.n_vertices = 4;
+    topo.cell2vertex_offsets = {0, 4};
+    topo.cell2vertex_data = {0, 1, 2, 3};
+    topo.vertex_gids = {
+        static_cast<dofs::gid_t>(4 * rank + 0),
+        static_cast<dofs::gid_t>(4 * rank + 1),
+        static_cast<dofs::gid_t>(4 * rank + 2),
+        static_cast<dofs::gid_t>(4 * rank + 3),
+    };
+    topo.vertex_coords = {
+        static_cast<Real>(2 * rank), Real{0},
+        static_cast<Real>(2 * rank + 1), Real{0},
+        static_cast<Real>(2 * rank + 1), Real{1},
+        static_cast<Real>(2 * rank), Real{1},
+    };
+    topo.cell_gids = {static_cast<dofs::gid_t>(rank)};
+    topo.cell_owner_ranks = {rank};
+    // No rank shares an entity with any other rank.
+    topo.neighbor_ranks = {};
+    return topo;
+}
+
+struct RankZeroMpcState {
+    bool reverse{false};
+    Real inhomogeneity{0};
+};
+
+[[nodiscard]] GlobalIndex localVertexDof(
+    const systems::FESystem& system,
+    FieldId field,
+    GlobalIndex local_vertex)
+{
+    const auto* entity =
+        system.fieldDofHandler(field).getEntityDofMap();
+    FE_THROW_IF(entity == nullptr,
+                systems::InvalidStateException,
+                "localVertexDof: missing field EntityDofMap");
+    const auto dofs = entity->getVertexDofs(local_vertex);
+    FE_THROW_IF(dofs.size() != 1u,
+                systems::InvalidStateException,
+                "localVertexDof: scalar H1 vertex must have one DOF");
+    return system.fieldDofOffset(field) + dofs.front();
+}
+
+class RankZeroSwitchingMpc final
+    : public constraints::ISystemConstraint {
+public:
+    RankZeroSwitchingMpc(int rank,
+                         FieldId field,
+                         std::shared_ptr<RankZeroMpcState> state)
+        : rank_(rank)
+        , field_(field)
+        , state_(std::move(state))
+    {
+        FE_CHECK_NOT_NULL(state_.get(),
+                          "RankZeroSwitchingMpc: state");
+    }
+
+    void apply(
+        const systems::FESystem& system,
+        constraints::AffineConstraints& affine) override
+    {
+        if (rank_ != 0) {
+            return;
+        }
+        const auto first = localVertexDof(system, field_, 0);
+        const auto second = localVertexDof(system, field_, 1);
+        const auto slave = state_->reverse ? second : first;
+        const auto master = state_->reverse ? first : second;
+        affine.addLine(slave);
+        affine.addEntry(slave, master, 1.0);
+        affine.setInhomogeneity(slave, state_->inhomogeneity);
+    }
+
+    bool updateValues(
+        const systems::FESystem&,
+        constraints::AffineConstraints&,
+        double,
+        double) override
+    {
+        return false;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return false;
+    }
+
+    [[nodiscard]] systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        systems::SetupStorageRequirements requirements;
+        requirements.entity_dof_map = true;
+        return requirements;
+    }
+
+private:
+    int rank_{0};
+    FieldId field_{INVALID_FIELD_ID};
+    std::shared_ptr<RankZeroMpcState> state_{};
+};
+
+class ScalingLinearSolver final : public backends::LinearSolver {
+public:
+    ScalingLinearSolver(backends::LinearSolver& inner, Real scale)
+        : inner_(inner)
+        , scale_(scale)
+    {
+    }
+
+    [[nodiscard]] backends::BackendKind
+    backendKind() const noexcept override
+    {
+        return inner_.backendKind();
+    }
+
+    void setOptions(
+        const backends::SolverOptions& options) override
+    {
+        inner_.setOptions(options);
+    }
+
+    [[nodiscard]] const backends::SolverOptions&
+    getOptions() const noexcept override
+    {
+        return inner_.getOptions();
+    }
+
+    [[nodiscard]] backends::SolverReport solve(
+        const backends::GenericMatrix& matrix,
+        backends::GenericVector& solution,
+        const backends::GenericVector& rhs) override
+    {
+        auto report = inner_.solve(matrix, solution, rhs);
+        solution.scale(scale_);
+        return report;
+    }
+
+private:
+    backends::LinearSolver& inner_;
+    Real scale_{1};
+};
+
+// The main Newton solve is delegated once.  Every later solve belongs to the
+// explicit bordered K^{-1}B recovery exercised by the focused regression
+// below.  Its first report deliberately disagrees by rank while remaining
+// finite; subsequent reports remain finite but cannot pass residual replay or
+// polish.  Newton must therefore take and leave the recovery path collectively.
+class RankDivergentBorderedRecoveryLinearSolver final
+    : public backends::LinearSolver {
+public:
+    RankDivergentBorderedRecoveryLinearSolver(
+        backends::LinearSolver& inner,
+        int rank)
+        : inner_(inner)
+        , rank_(rank)
+    {
+    }
+
+    [[nodiscard]] backends::BackendKind
+    backendKind() const noexcept override
+    {
+        return inner_.backendKind();
+    }
+
+    void setOptions(
+        const backends::SolverOptions& options) override
+    {
+        inner_.setOptions(options);
+    }
+
+    [[nodiscard]] const backends::SolverOptions&
+    getOptions() const noexcept override
+    {
+        return inner_.getOptions();
+    }
+
+    [[nodiscard]] backends::SolverReport solve(
+        const backends::GenericMatrix& matrix,
+        backends::GenericVector& solution,
+        const backends::GenericVector& rhs) override
+    {
+        ++solve_calls;
+        if (solve_calls == 1) {
+            auto report = inner_.solve(matrix, solution, rhs);
+            report.converged = true;
+            report.numerical_breakdown = false;
+            report.iterations = std::max(report.iterations, 1);
+            report.initial_residual_norm = 1.0;
+            report.final_residual_norm = 0.0;
+            report.relative_residual = 0.0;
+            report.message = "delegated main Newton solve";
+            return report;
+        }
+
+        solution.zero();
+        backends::SolverReport report;
+        report.iterations = 1;
+        report.initial_residual_norm = 1.0;
+        report.final_residual_norm = 1.0;
+        report.relative_residual = 1.0;
+        report.message = "scripted bordered recovery miss";
+        if (solve_calls == 2) {
+            ++divergent_report_injections;
+            report.converged = rank_ != 0;
+            if (report.converged) {
+                report.final_residual_norm = 0.0;
+                report.relative_residual = 0.0;
+                report.message = "scripted rank-local bordered success";
+            }
+        }
+        return report;
+    }
+
+    void setRankOneUpdates(
+        std::span<const backends::RankOneUpdate> updates) override
+    {
+        inner_.setRankOneUpdates(updates);
+    }
+
+    void setReducedFieldUpdates(
+        std::span<const backends::ReducedFieldUpdate> updates) override
+    {
+        inner_.setReducedFieldUpdates(updates);
+    }
+
+    void setEffectiveTimeStep(double dt_eff) override
+    {
+        inner_.setEffectiveTimeStep(dt_eff);
+    }
+
+    void setDirichletDofs(
+        std::span<const GlobalIndex> dofs) override
+    {
+        inner_.setDirichletDofs(dofs);
+    }
+
+    void setGroupedBorderedFieldCouplings(
+        std::span<const backends::GroupedBorderedFieldCoupling> groups) override
+    {
+        inner_.setGroupedBorderedFieldCouplings(groups);
+    }
+
+    [[nodiscard]] bool
+    supportsNativeRankOneUpdates() const noexcept override
+    {
+        return inner_.supportsNativeRankOneUpdates();
+    }
+
+    [[nodiscard]] bool
+    supportsNativeReducedFieldUpdates() const noexcept override
+    {
+        return inner_.supportsNativeReducedFieldUpdates();
+    }
+
+    [[nodiscard]] bool supportsNullspace() const noexcept override
+    {
+        return inner_.supportsNullspace();
+    }
+
+    void setNullspaceBasis(
+        std::span<const std::vector<double>> basis) override
+    {
+        inner_.setNullspaceBasis(basis);
+    }
+
+    int solve_calls{0};
+    int divergent_report_injections{0};
+
+private:
+    backends::LinearSolver& inner_;
+    int rank_{0};
+};
 
 // 2D strip of Quad4 cells, with interleaved node IDs:
 // x-index i has nodes {2*i (bottom), 2*i+1 (top)}.
@@ -989,6 +1381,665 @@ TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
 #endif
 }
 
+TEST(TimeLoopFsilsConvergenceMPI,
+     RankLocalConstraintRefreshReinitializesJacobianCollectively)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "Run with exactly 2 MPI ranks to enable this test";
+    }
+
+    auto mesh = std::make_shared<RankLocalOwnedQuadMeshAccess>(rank);
+    const auto space = spaces::Space(spaces::SpaceType::H1,
+                                     ElementType::Quad4,
+                                     /*order=*/1,
+                                     /*components=*/1);
+    ASSERT_TRUE(space);
+
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        systems::FieldSpec{.name = "u",
+                           .space = space,
+                           .components = 1});
+    sys.addOperator("op");
+
+    const auto u =
+        forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::TestFunction(*space, "v");
+    (void)systems::installFormulation(
+        sys, "op", {u_field}, (u * v).dx());
+
+    auto mpc_state = std::make_shared<RankZeroMpcState>();
+    sys.addSystemConstraint(std::make_unique<RankZeroSwitchingMpc>(
+        rank, u_field, mpc_state));
+
+    systems::SetupOptions setup_opts;
+    setup_opts.assembler_name = "StandardAssembler";
+    setup_opts.assembly_options.ghost_policy =
+        GhostPolicy::ReverseScatter;
+    setup_opts.assembly_options.deterministic = true;
+    setup_opts.assembly_options.overlap_communication = false;
+    setup_opts.dof_options.global_numbering =
+        dofs::GlobalNumberingMode::OwnerContiguous;
+    setup_opts.dof_options.ownership =
+        dofs::OwnershipStrategy::CellOwner;
+    setup_opts.dof_options.my_rank = rank;
+    setup_opts.dof_options.world_size = size;
+    setup_opts.dof_options.mpi_comm = comm;
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = buildRankLocalOwnedQuadTopology(rank);
+    ASSERT_NO_THROW(sys.setup(setup_opts, inputs));
+    ASSERT_TRUE(sys.isSetup());
+
+    EXPECT_EQ(sys.constraints().numConstraints(), rank == 0 ? 1u : 0u);
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    ASSERT_EQ(n_dofs, 4 * size);
+
+    backends::FsilsFactory factory(
+        /*dof_per_node=*/1, sys.dofPermutation(), comm);
+    auto inner_linear =
+        factory.createLinearSolver(fsilsGmresDiagOptions());
+    ASSERT_TRUE(inner_linear);
+
+    // Allocate history before a distributed matrix exists, then repack it
+    // after Newton configures the FSILS owned-row layout.
+    auto history = timestepping::TimeHistory::allocate(
+        factory,
+        n_dofs,
+        /*history_depth=*/2,
+        /*allocate_second_order_state=*/false);
+    history.setTime(0.0);
+    history.setDt(0.1);
+    history.setPrevDt(0.1);
+    history.setStepIndex(0);
+    auto fill_one = [](backends::GenericVector& vector) {
+        auto values = vector.localSpan();
+        std::fill(values.begin(), values.end(), Real{1});
+    };
+    fill_one(history.uPrev());
+    fill_one(history.uPrev2());
+    history.resetCurrentToPrevious();
+
+    auto integrator =
+        std::make_shared<systems::BackwardDifferenceIntegrator>();
+    systems::TransientSystem transient(sys, std::move(integrator));
+
+    using SyncPoint =
+        timestepping::NewtonOptions::StateSynchronizationPoint;
+    timestepping::NewtonWorkspace workspace;
+    int line_search_trial_callbacks = 0;
+    int restored_callbacks = 0;
+    bool trial_semantics_active = false;
+    bool trial_revision_recorded = false;
+    bool restored_revision_recorded = false;
+    bool accepted_trial_sync_observed = false;
+    std::uint64_t trial_revision = 0;
+    std::uint64_t restored_revision = 0;
+    std::uint64_t trial_layout_revision = 0;
+    const backends::GenericMatrix* trial_jacobian = nullptr;
+
+    const auto base_revision = sys.sparsityPatternRevision();
+    timestepping::NewtonOptions newton_opts;
+    newton_opts.residual_op = "op";
+    newton_opts.jacobian_op = "op";
+    newton_opts.max_iterations = 1;
+    newton_opts.abs_tolerance = 0.0;
+    newton_opts.rel_tolerance = 0.0;
+    newton_opts.step_tolerance = 0.0;
+    newton_opts.stagnation_tolerance = 0.0;
+    newton_opts.assemble_both_when_possible = false;
+    newton_opts.use_line_search = true;
+    newton_opts.line_search_max_iterations = 1;
+    newton_opts.line_search_alpha_min = 1.0;
+    newton_opts.line_search_shrink = 0.5;
+    newton_opts.line_search_fail_on_no_reduction = true;
+    newton_opts.synchronize_state =
+        [&](const systems::SystemStateView&, SyncPoint point) {
+            if (point == SyncPoint::LineSearchTrialResidual) {
+                ++line_search_trial_callbacks;
+                if (!trial_semantics_active) {
+                    trial_semantics_active = true;
+                    mpc_state->reverse = true;
+                    mpc_state->inhomogeneity = Real{100};
+                    // All ranks enter the rebuild even though only rank zero
+                    // contributes an affine line.
+                    sys.rebuildConstraintState();
+                    trial_revision = sys.sparsityPatternRevision();
+                    trial_revision_recorded = true;
+                }
+                return;
+            }
+
+            if (point == SyncPoint::AcceptedNonlinearState &&
+                trial_semantics_active) {
+                accepted_trial_sync_observed = true;
+                trial_jacobian = workspace.jacobian.get();
+                const auto view = workspace.jacobian->createAssemblyView();
+                trial_layout_revision = view->matrixLayoutRevision();
+                return;
+            }
+
+            if (point == SyncPoint::RestoredNonlinearState) {
+                ++restored_callbacks;
+                if (trial_semantics_active) {
+                    trial_semantics_active = false;
+                    mpc_state->reverse = false;
+                    mpc_state->inhomogeneity = Real{0};
+                    // The first restored pass rebuilds the accepted
+                    // constraint set; the fixed-point callback is a no-op.
+                    sys.rebuildConstraintState();
+                    restored_revision = sys.sparsityPatternRevision();
+                    restored_revision_recorded = true;
+                }
+            }
+        };
+
+    timestepping::NewtonSolver newton(newton_opts);
+    newton.allocateWorkspace(sys, factory, workspace);
+    ASSERT_NE(workspace.jacobian, nullptr);
+    const auto* initial_jacobian = workspace.jacobian.get();
+    const auto initial_layout_revision =
+        workspace.jacobian->createAssemblyView()->matrixLayoutRevision();
+    history.repack(factory);
+    const std::vector<Real> accepted_base_state(
+        history.u().localSpan().begin(),
+        history.u().localSpan().end());
+
+    ScalingLinearSolver ascent_solver(*inner_linear, Real{-1});
+    timestepping::NewtonReport report{};
+    ASSERT_NO_THROW(report = newton.solveStep(
+                        transient,
+                        ascent_solver,
+                        /*solve_time=*/history.dt(),
+                        history,
+                        workspace));
+
+    EXPECT_FALSE(report.converged);
+    EXPECT_EQ(report.iterations, 1);
+    EXPECT_TRUE(report.linear.converged);
+    EXPECT_TRUE(trial_revision_recorded);
+    EXPECT_TRUE(restored_revision_recorded);
+    EXPECT_TRUE(accepted_trial_sync_observed);
+    ASSERT_NE(trial_jacobian, nullptr);
+    EXPECT_EQ(trial_jacobian, initial_jacobian)
+        << "A compatible distributed refresh should retain matrix identity so "
+           "existing vector layouts and bound references remain valid";
+    EXPECT_GT(trial_layout_revision, initial_layout_revision)
+        << "A rank-local sparsity change must advance the resolved-insertion "
+           "layout generation on every communicator rank";
+
+    if (rank == 0) {
+        EXPECT_GT(trial_revision, base_revision);
+        EXPECT_GT(restored_revision, trial_revision);
+    } else {
+        EXPECT_EQ(trial_revision, base_revision);
+        EXPECT_EQ(restored_revision, base_revision);
+    }
+
+    int trial_min = 0;
+    int trial_max = 0;
+    int restored_min = 0;
+    int restored_max = 0;
+    MPI_Allreduce(&line_search_trial_callbacks,
+                  &trial_min,
+                  1,
+                  MPI_INT,
+                  MPI_MIN,
+                  comm);
+    MPI_Allreduce(&line_search_trial_callbacks,
+                  &trial_max,
+                  1,
+                  MPI_INT,
+                  MPI_MAX,
+                  comm);
+    MPI_Allreduce(&restored_callbacks,
+                  &restored_min,
+                  1,
+                  MPI_INT,
+                  MPI_MIN,
+                  comm);
+    MPI_Allreduce(&restored_callbacks,
+                  &restored_max,
+                  1,
+                  MPI_INT,
+                  MPI_MAX,
+                  comm);
+    EXPECT_EQ(trial_min, 2);
+    EXPECT_EQ(trial_max, 2);
+    EXPECT_EQ(restored_min, 2);
+    EXPECT_EQ(restored_max, 2);
+
+    EXPECT_FALSE(trial_semantics_active);
+    EXPECT_FALSE(mpc_state->reverse);
+    EXPECT_DOUBLE_EQ(mpc_state->inhomogeneity, Real{0});
+    EXPECT_EQ(sys.constraints().numConstraints(), rank == 0 ? 1u : 0u);
+    if (rank == 0) {
+        const auto slave = localVertexDof(sys, u_field, 0);
+        const auto master = localVertexDof(sys, u_field, 1);
+        const auto line = sys.constraints().getConstraint(slave);
+        ASSERT_TRUE(line.has_value());
+        EXPECT_DOUBLE_EQ(line->inhomogeneity, 0.0);
+        ASSERT_EQ(line->entries.size(), 1u);
+        EXPECT_EQ(line->entries.front().master_dof, master);
+        EXPECT_DOUBLE_EQ(line->entries.front().weight, 1.0);
+    }
+
+    const auto final_state = history.u().localSpan();
+    ASSERT_EQ(final_state.size(), accepted_base_state.size());
+    for (std::size_t i = 0; i < final_state.size(); ++i) {
+        EXPECT_DOUBLE_EQ(final_state[i], accepted_base_state[i]);
+    }
+#endif
+}
+
+TEST(TimeLoopFsilsConvergenceMPI,
+     PseudoTransientContinuationIncludesRankWithNoOwnedDtRows)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "Run with exactly 2 MPI ranks to enable this test";
+    }
+
+    // Both ranks retain the same local cell topology, but cell-owner DOF
+    // ownership assigns the sole cell and all four scalar rows to rank zero.
+    // Rank one is therefore a real distributed FSILS participant with no
+    // locally owned dt row.
+    auto mesh = std::make_shared<StripQuadMeshAccess>(
+        /*n_cells=*/1, rank, size);
+    const auto space = spaces::Space(spaces::SpaceType::H1,
+                                     ElementType::Quad4,
+                                     /*order=*/1,
+                                     /*components=*/1);
+    ASSERT_TRUE(space);
+
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        systems::FieldSpec{.name = "u",
+                           .space = space,
+                           .components = 1});
+    sys.addOperator("op");
+
+    const auto u =
+        forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::TestFunction(*space, "v");
+    const auto reaction = forms::FormExpr::constant(Real{1});
+    const auto residual =
+        (u.dt(1) * v + reaction * u * v).dx();
+    (void)systems::installFormulation(
+        sys, "op", {u_field}, residual);
+
+    systems::SetupOptions setup_opts;
+    setup_opts.assembler_name = "StandardAssembler";
+    setup_opts.assembly_options.ghost_policy =
+        GhostPolicy::ReverseScatter;
+    setup_opts.assembly_options.deterministic = true;
+    setup_opts.assembly_options.overlap_communication = false;
+    setup_opts.dof_options.global_numbering =
+        dofs::GlobalNumberingMode::OwnerContiguous;
+    setup_opts.dof_options.ownership =
+        dofs::OwnershipStrategy::CellOwner;
+    setup_opts.dof_options.my_rank = rank;
+    setup_opts.dof_options.world_size = size;
+    setup_opts.dof_options.mpi_comm = comm;
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = buildStripTopology(
+        /*n_cells=*/1, rank, size);
+    ASSERT_NO_THROW(sys.setup(setup_opts, inputs));
+    ASSERT_TRUE(sys.isSetup());
+
+    const auto dt_fields = sys.timeDerivativeFields("op");
+    ASSERT_EQ(dt_fields.size(), 1u);
+    EXPECT_EQ(dt_fields.front(), u_field);
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    ASSERT_EQ(n_dofs, 4);
+
+    backends::FsilsFactory factory(
+        /*dof_per_node=*/1, sys.dofPermutation(), comm);
+    auto linear = factory.createLinearSolver(
+        fsilsGmresDiagOptions());
+    ASSERT_TRUE(linear);
+
+    auto history = timestepping::TimeHistory::allocate(
+        factory,
+        n_dofs,
+        /*history_depth=*/2,
+        /*allocate_second_order_state=*/false);
+    constexpr double dt = 0.1;
+    history.setTime(0.0);
+    history.setDt(dt);
+    history.setPrevDt(dt);
+    history.setStepIndex(0);
+    auto fill_one = [](backends::GenericVector& vector) {
+        auto values = vector.localSpan();
+        std::fill(values.begin(), values.end(), Real{1});
+    };
+    fill_one(history.uPrev());
+    fill_one(history.uPrev2());
+    history.resetCurrentToPrevious();
+
+    auto integrator =
+        std::make_shared<systems::BackwardDifferenceIntegrator>();
+    systems::TransientSystem transient(sys, std::move(integrator));
+
+    using SyncPoint =
+        timestepping::NewtonOptions::StateSynchronizationPoint;
+    int dt_only_jacobian_syncs = 0;
+    int all_jacobian_syncs = 0;
+
+    timestepping::NewtonOptions newton_opts;
+    newton_opts.residual_op = "op";
+    newton_opts.jacobian_op = "op";
+    newton_opts.max_iterations = 1;
+    newton_opts.abs_tolerance = 0.0;
+    newton_opts.rel_tolerance = 0.0;
+    newton_opts.step_tolerance = 0.0;
+    newton_opts.stagnation_tolerance = 0.0;
+    newton_opts.assemble_both_when_possible = false;
+    newton_opts.use_line_search = false;
+    newton_opts.pseudo_transient.enabled = true;
+    newton_opts.pseudo_transient.activate_on_linear_failure = false;
+    newton_opts.pseudo_transient.gamma_initial = 5.0;
+    newton_opts.pseudo_transient.gamma_growth = 2.0;
+    newton_opts.pseudo_transient.gamma_max = 100.0;
+    newton_opts.pseudo_transient.max_linear_retries = 2;
+    newton_opts.pseudo_transient.update_from_residual_ratio = false;
+    newton_opts.synchronize_state =
+        [&](const systems::SystemStateView& state, SyncPoint point) {
+            if (point != SyncPoint::JacobianAssembly) {
+                return;
+            }
+            ++all_jacobian_syncs;
+            const auto* time = state.time_integration;
+            if (time != nullptr &&
+                time->time_derivative_term_weight == Real{1} &&
+                time->non_time_derivative_term_weight == Real{0}) {
+                ++dt_only_jacobian_syncs;
+            }
+        };
+
+    timestepping::NewtonSolver newton(newton_opts);
+    timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(sys, factory, workspace);
+    ASSERT_NE(workspace.jacobian, nullptr);
+    ASSERT_NE(workspace.ptc_mass_lumped, nullptr);
+    history.repack(factory);
+
+    const auto* fsils_jacobian =
+        dynamic_cast<const backends::FsilsMatrix*>(
+            workspace.jacobian.get());
+    ASSERT_NE(fsils_jacobian, nullptr);
+    ASSERT_TRUE(fsils_jacobian->usesOwnedRowOperator());
+    int locally_owned_dt_rows = 0;
+    for (GlobalIndex dof = 0; dof < n_dofs; ++dof) {
+        if (fsils_jacobian->ownsFeDofRow(dof)) {
+            ++locally_owned_dt_rows;
+        }
+    }
+    EXPECT_EQ(locally_owned_dt_rows, rank == 0 ? 4 : 0);
+
+    int ownerless_rank_count = locally_owned_dt_rows == 0 ? 1 : 0;
+    int global_ownerless_rank_count = 0;
+    int global_owned_dt_rows = 0;
+    MPI_Allreduce(&ownerless_rank_count,
+                  &global_ownerless_rank_count,
+                  1,
+                  MPI_INT,
+                  MPI_SUM,
+                  comm);
+    MPI_Allreduce(&locally_owned_dt_rows,
+                  &global_owned_dt_rows,
+                  1,
+                  MPI_INT,
+                  MPI_SUM,
+                  comm);
+    ASSERT_EQ(global_ownerless_rank_count, 1);
+    ASSERT_EQ(global_owned_dt_rows, n_dofs);
+
+    timestepping::NewtonReport report{};
+    ASSERT_NO_THROW(report = newton.solveStep(
+                        transient,
+                        *linear,
+                        /*solve_time=*/dt,
+                        history,
+                        workspace));
+
+    EXPECT_FALSE(report.converged);
+    EXPECT_EQ(report.iterations, 1);
+    EXPECT_TRUE(report.linear.converged);
+    EXPECT_GT(report.linear.collective_calls, 0u);
+    EXPECT_TRUE(std::isfinite(report.residual_norm0));
+    EXPECT_TRUE(std::isfinite(report.residual_norm));
+    EXPECT_GT(report.residual_norm0, 0.0);
+    // A nonzero always-on PTC shift deliberately prevents the one-step
+    // linear reaction solve from being the exact unshifted Newton update.
+    EXPECT_GT(report.residual_norm, 1e-8);
+    EXPECT_LT(report.residual_norm, report.residual_norm0);
+
+    int dt_sync_min = 0;
+    int dt_sync_max = 0;
+    int jacobian_sync_min = 0;
+    int jacobian_sync_max = 0;
+    MPI_Allreduce(&dt_only_jacobian_syncs,
+                  &dt_sync_min,
+                  1,
+                  MPI_INT,
+                  MPI_MIN,
+                  comm);
+    MPI_Allreduce(&dt_only_jacobian_syncs,
+                  &dt_sync_max,
+                  1,
+                  MPI_INT,
+                  MPI_MAX,
+                  comm);
+    MPI_Allreduce(&all_jacobian_syncs,
+                  &jacobian_sync_min,
+                  1,
+                  MPI_INT,
+                  MPI_MIN,
+                  comm);
+    MPI_Allreduce(&all_jacobian_syncs,
+                  &jacobian_sync_max,
+                  1,
+                  MPI_INT,
+                  MPI_MAX,
+                  comm);
+    EXPECT_EQ(dt_sync_min, 1);
+    EXPECT_EQ(dt_sync_max, 1);
+    EXPECT_EQ(jacobian_sync_min, 3);
+    EXPECT_EQ(jacobian_sync_max, 3);
+
+    // The global norm is collective.  It must be nonzero on both ranks even
+    // though rank one contributed no local entry to the PTC diagonal loop.
+    const auto lumped_norm = workspace.ptc_mass_lumped->norm();
+    EXPECT_TRUE(std::isfinite(lumped_norm));
+    EXPECT_GT(lumped_norm, 0.0);
+
+    auto lumped_view =
+        workspace.ptc_mass_lumped->createAssemblyView();
+    ASSERT_NE(lumped_view, nullptr);
+    int local_positive_lumped_entries = 0;
+    for (GlobalIndex dof = 0; dof < n_dofs; ++dof) {
+        if (!fsils_jacobian->ownsFeDofRow(dof)) {
+            continue;
+        }
+        const auto value = lumped_view->getVectorEntry(dof);
+        EXPECT_TRUE(std::isfinite(value));
+        EXPECT_GT(value, Real{0});
+        if (value > Real{0}) {
+            ++local_positive_lumped_entries;
+        }
+    }
+    int global_positive_lumped_entries = 0;
+    MPI_Allreduce(&local_positive_lumped_entries,
+                  &global_positive_lumped_entries,
+                  1,
+                  MPI_INT,
+                  MPI_SUM,
+                  comm);
+    EXPECT_EQ(global_positive_lumped_entries, n_dofs);
+#endif
+}
+
+TEST(TimeLoopFsilsConvergenceMPI,
+     ConcurrentSplitSubcommunicatorsIsolateNewtonCollectives)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    int world_rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size != 4) {
+        GTEST_SKIP() << "Run with exactly 4 MPI ranks to enable this test";
+    }
+
+    // Run two independent, concurrent two-rank Newton solves.  No world
+    // collective is permitted below the split: color zero starts from the
+    // exact solution and returns before a linear solve, while color one must
+    // take a Newton update.  An accidental production MPI_COMM_WORLD
+    // collective therefore either contaminates the color-local norm and
+    // convergence assertions or blocks once the control paths diverge.
+    const int color = world_rank / 2;
+    MPI_Comm subcomm = MPI_COMM_NULL;
+    MPI_Comm_split(MPI_COMM_WORLD, color, world_rank, &subcomm);
+    ASSERT_NE(subcomm, MPI_COMM_NULL);
+    struct SubcommunicatorGuard {
+        MPI_Comm& communicator;
+        ~SubcommunicatorGuard()
+        {
+            if (communicator != MPI_COMM_NULL) {
+                MPI_Comm_free(&communicator);
+            }
+        }
+    } subcomm_guard{subcomm};
+
+    const int rank = mpiRank(subcomm);
+    const int size = mpiSize(subcomm);
+    ASSERT_EQ(size, 2);
+
+    auto mesh = std::make_shared<RankLocalOwnedQuadMeshAccess>(rank);
+    const auto space = spaces::Space(spaces::SpaceType::H1,
+                                     ElementType::Quad4,
+                                     /*order=*/1,
+                                     /*components=*/1);
+    ASSERT_TRUE(space);
+
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        systems::FieldSpec{.name = "u",
+                           .space = space,
+                           .components = 1});
+    sys.addOperator("op");
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::TestFunction(*space, "v");
+    (void)systems::installFormulation(sys, "op", {u_field}, (u * v).dx());
+
+    systems::SetupOptions setup_opts;
+    setup_opts.assembler_name = "StandardAssembler";
+    setup_opts.assembly_options.ghost_policy = GhostPolicy::ReverseScatter;
+    setup_opts.assembly_options.deterministic = true;
+    setup_opts.assembly_options.overlap_communication = false;
+    setup_opts.dof_options.global_numbering =
+        dofs::GlobalNumberingMode::OwnerContiguous;
+    setup_opts.dof_options.ownership = dofs::OwnershipStrategy::CellOwner;
+    setup_opts.dof_options.my_rank = rank;
+    setup_opts.dof_options.world_size = size;
+    setup_opts.dof_options.mpi_comm = subcomm;
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = buildRankLocalOwnedQuadTopology(rank);
+    ASSERT_NO_THROW(sys.setup(setup_opts, inputs));
+    ASSERT_TRUE(sys.isSetup());
+
+    int communicator_relation = MPI_UNEQUAL;
+    MPI_Comm_compare(sys.activeMpiCommunicator(),
+                     subcomm,
+                     &communicator_relation);
+    EXPECT_TRUE(communicator_relation == MPI_IDENT ||
+                communicator_relation == MPI_CONGRUENT);
+
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    ASSERT_EQ(n_dofs, 4 * size);
+    backends::FsilsFactory factory(
+        /*dof_per_node=*/1, sys.dofPermutation(), subcomm);
+    auto linear = factory.createLinearSolver(fsilsGmresDiagOptions());
+    ASSERT_TRUE(linear);
+
+    auto history = timestepping::TimeHistory::allocate(
+        factory,
+        n_dofs,
+        /*history_depth=*/2,
+        /*allocate_second_order_state=*/false);
+    constexpr double dt = 0.1;
+    history.setTime(0.0);
+    history.setDt(dt);
+    history.setPrevDt(dt);
+    history.setStepIndex(0);
+    const Real initial_value = color == 0 ? Real{0} : Real{1};
+    auto fill_initial = [initial_value](backends::GenericVector& vector) {
+        auto values = vector.localSpan();
+        std::fill(values.begin(), values.end(), initial_value);
+    };
+    fill_initial(history.uPrev());
+    fill_initial(history.uPrev2());
+    history.resetCurrentToPrevious();
+
+    auto integrator =
+        std::make_shared<systems::BackwardDifferenceIntegrator>();
+    systems::TransientSystem transient(sys, std::move(integrator));
+
+    timestepping::NewtonOptions newton_opts;
+    newton_opts.residual_op = "op";
+    newton_opts.jacobian_op = "op";
+    newton_opts.max_iterations = 2;
+    newton_opts.abs_tolerance = 1e-11;
+    newton_opts.rel_tolerance = 0.0;
+    newton_opts.step_tolerance = 0.0;
+    newton_opts.stagnation_tolerance = 0.0;
+    newton_opts.use_line_search = false;
+
+    timestepping::NewtonSolver newton(newton_opts);
+    timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(sys, factory, workspace);
+    history.repack(factory);
+
+    timestepping::NewtonReport report{};
+    ASSERT_NO_THROW(report = newton.solveStep(
+                        transient,
+                        *linear,
+                        /*solve_time=*/dt,
+                        history,
+                        workspace));
+    EXPECT_TRUE(report.converged);
+    if (color == 0) {
+        EXPECT_EQ(report.iterations, 0);
+        EXPECT_DOUBLE_EQ(report.residual_norm0, 0.0);
+        EXPECT_DOUBLE_EQ(report.residual_norm, 0.0);
+    } else {
+        EXPECT_EQ(report.iterations, 1);
+        EXPECT_GT(report.residual_norm0, 0.0);
+        EXPECT_LT(report.residual_norm, report.residual_norm0);
+        EXPECT_LE(report.residual_norm, newton_opts.abs_tolerance);
+        EXPECT_TRUE(report.linear.converged);
+        EXPECT_GT(report.linear.collective_calls, 0u);
+    }
+#endif
+}
+
 TEST(TimeLoopFsilsConvergenceMPI, DISABLED_GeneralizedAlphaMonolithicResistanceOutletsProbe)
 {
 #if !defined(FE_HAS_FSILS)
@@ -1239,6 +2290,155 @@ TEST(TimeLoopFsilsConvergenceMPI, DISABLED_GeneralizedAlphaMonolithicRCROutletsP
         EXPECT_TRUE(rep.success);
         EXPECT_TRUE(nr.converged);
         EXPECT_TRUE(nr.linear.converged);
+    }
+#endif
+}
+
+TEST(TimeLoopFsilsConvergenceMPI,
+     RankDivergentExplicitBorderedRecoveryFailsCollectivelyAndRestoresState)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    constexpr int n_cells = 4;
+    if (size < 2 || size > n_cells) {
+        GTEST_SKIP() << "Run with 2-4 MPI ranks to enable this test";
+    }
+
+    auto sys = buildOutletCoupledTransientSystemRCR(
+        comm, rank, size, n_cells);
+    ASSERT_TRUE(sys);
+    ASSERT_TRUE(sys->isSetup());
+
+    const auto n_dofs = sys->dofHandler().getNumDofs();
+    constexpr int dof_per_node = 3;
+    dofs::DofDistributionOptions dof_options;
+    dof_options.global_numbering =
+        dofs::GlobalNumberingMode::DenseGlobalIds;
+    dof_options.ownership = dofs::OwnershipStrategy::LowestRank;
+    dof_options.my_rank = rank;
+    dof_options.world_size = size;
+    dof_options.mpi_comm = comm;
+
+    auto permutation =
+        getFsilsDofPermutation(*sys, dof_per_node, dof_options);
+    ASSERT_TRUE(permutation)
+        << "Failed to build the distributed RCR test permutation";
+
+    backends::FsilsFactory factory(dof_per_node, permutation);
+    auto inner_linear =
+        factory.createLinearSolver(fsilsGmresDiagOptions());
+    ASSERT_TRUE(inner_linear);
+
+    auto history = timestepping::TimeHistory::allocate(
+        factory,
+        n_dofs,
+        /*history_depth=*/2,
+        /*allocate_second_order_state=*/false);
+    constexpr double dt = 0.05;
+    history.setTime(0.0);
+    history.setDt(dt);
+    history.setPrevDt(dt);
+    history.setStepIndex(0);
+    history.uPrev().zero();
+    history.uPrev2().zero();
+    history.resetCurrentToPrevious();
+
+    auto integrator =
+        std::make_shared<systems::BackwardDifferenceIntegrator>();
+    systems::TransientSystem transient(*sys, std::move(integrator));
+
+    timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1e-14;
+    options.rel_tolerance = 0.0;
+    options.step_tolerance = 0.0;
+    options.stagnation_tolerance = 0.0;
+    options.use_line_search = false;
+
+    timestepping::NewtonSolver newton(options);
+    timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*sys, factory, workspace);
+    history.repack(factory);
+
+    auto snapshot = [](const backends::GenericVector& vector) {
+        const auto values = vector.localSpan();
+        return std::vector<Real>(values.begin(), values.end());
+    };
+    const auto entry_u = snapshot(history.u());
+    const auto entry_u_prev = snapshot(history.uPrev());
+    const auto entry_u_prev2 = snapshot(history.uPrev2());
+    const auto entry_auxiliary = sys->checkpointAuxiliaryState();
+
+    RankDivergentBorderedRecoveryLinearSolver scripted(
+        *inner_linear, rank);
+    bool caught = false;
+    std::string caught_message;
+    try {
+        (void)newton.solveStep(
+            transient,
+            scripted,
+            /*solve_time=*/dt,
+            history,
+            workspace);
+    } catch (const FEException& error) {
+        caught = true;
+        caught_message = error.what();
+    }
+
+    const int local_caught = caught ? 1 : 0;
+    int caught_min = 0;
+    int caught_max = 0;
+    int solve_calls_min = 0;
+    int solve_calls_max = 0;
+    MPI_Allreduce(&local_caught,
+                  &caught_min,
+                  1,
+                  MPI_INT,
+                  MPI_MIN,
+                  comm);
+    MPI_Allreduce(&local_caught,
+                  &caught_max,
+                  1,
+                  MPI_INT,
+                  MPI_MAX,
+                  comm);
+    MPI_Allreduce(&scripted.solve_calls,
+                  &solve_calls_min,
+                  1,
+                  MPI_INT,
+                  MPI_MIN,
+                  comm);
+    MPI_Allreduce(&scripted.solve_calls,
+                  &solve_calls_max,
+                  1,
+                  MPI_INT,
+                  MPI_MAX,
+                  comm);
+
+    EXPECT_EQ(caught_min, 1);
+    EXPECT_EQ(caught_max, 1);
+    EXPECT_NE(caught_message.find("bordered K^{-1}B solve did not converge"),
+              std::string::npos)
+        << caught_message;
+    EXPECT_EQ(scripted.divergent_report_injections, 1);
+    EXPECT_EQ(solve_calls_min, solve_calls_max);
+    EXPECT_EQ(solve_calls_min, 4)
+        << "All ranks must run the main solve, one bordered column solve, "
+           "and both polish attempts";
+
+    EXPECT_EQ(snapshot(history.u()), entry_u);
+    EXPECT_EQ(snapshot(history.uPrev()), entry_u_prev);
+    EXPECT_EQ(snapshot(history.uPrev2()), entry_u_prev2);
+    EXPECT_EQ(sys->checkpointAuxiliaryState(), entry_auxiliary);
+    ASSERT_NE(workspace.delta, nullptr);
+    for (const auto value : workspace.delta->localSpan()) {
+        EXPECT_EQ(value, Real{0});
     }
 #endif
 }

@@ -1284,6 +1284,11 @@ public:
         return matrix_;
     }
 
+    [[nodiscard]] std::uint64_t matrixLayoutRevision() const noexcept override
+    {
+        return matrix_ != nullptr ? matrix_->layoutRevision() : 0u;
+    }
+
     [[nodiscard]] assembly::InsertionCapabilities insertionCapabilities() const noexcept override
     {
         return assembly::InsertionCapabilities{
@@ -1438,8 +1443,9 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
         }
         std::sort(cols.begin(), cols.end());
         cols.erase(std::unique(cols.begin(), cols.end()), cols.end());
-        if (cols.empty() || cols.front() != node) {
-            cols.insert(std::lower_bound(cols.begin(), cols.end(), node), node);
+        const auto diagonal = std::lower_bound(cols.begin(), cols.end(), node);
+        if (diagonal == cols.end() || *diagonal != node) {
+            cols.insert(diagonal, node);
         }
 
         node_row_ptr[static_cast<std::size_t>(node + 1)] =
@@ -1809,8 +1815,10 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
         std::sort(node_cols.begin(), node_cols.end());
         node_cols.erase(std::unique(node_cols.begin(), node_cols.end()), node_cols.end());
 
-        if (node_cols.empty() || node_cols.front() != global_node) {
-            node_cols.insert(std::lower_bound(node_cols.begin(), node_cols.end(), global_node), global_node);
+        const auto diagonal =
+            std::lower_bound(node_cols.begin(), node_cols.end(), global_node);
+        if (diagonal == node_cols.end() || *diagonal != global_node) {
+            node_cols.insert(diagonal, global_node);
         }
 
         for (const int col_global_node : node_cols) {
@@ -1880,6 +1888,114 @@ FsilsMatrix::~FsilsMatrix() = default;
 
 FsilsMatrix::FsilsMatrix(FsilsMatrix&&) noexcept = default;
 FsilsMatrix& FsilsMatrix::operator=(FsilsMatrix&&) noexcept = default;
+
+bool FsilsMatrix::reinitFromPattern(const sparsity::SparsityPattern& pattern)
+{
+    if (!shared_) {
+        return false;
+    }
+
+    FsilsMatrix replacement(
+        pattern,
+        shared_->dof,
+        shared_->dof_permutation
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+        ,
+        comm_
+#endif
+    );
+    return adoptCompatibleReinitialization(std::move(replacement));
+}
+
+bool FsilsMatrix::reinitFromPattern(
+    const sparsity::DistributedSparsityPattern& pattern)
+{
+    if (!shared_) {
+        return false;
+    }
+
+    FsilsMatrix replacement(
+        pattern,
+        shared_->dof,
+        shared_->dof_permutation
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+        ,
+        comm_
+#endif
+    );
+    return adoptCompatibleReinitialization(std::move(replacement));
+}
+
+bool FsilsMatrix::adoptCompatibleReinitialization(FsilsMatrix&& replacement)
+{
+    if (!replacement.shared_) {
+        return false;
+    }
+
+    const auto& current = *shared_;
+    const auto& next = *replacement.shared_;
+    const auto permutation_matches = [](const auto& lhs, const auto& rhs) {
+        if (lhs == rhs) {
+            return true;
+        }
+        if (!lhs || !rhs) {
+            return false;
+        }
+        return lhs->forward == rhs->forward &&
+               lhs->inverse == rhs->inverse &&
+               lhs->owner_rank == rhs->owner_rank;
+    };
+    const bool layout_matches =
+        global_rows_ == replacement.global_rows_ &&
+        global_cols_ == replacement.global_cols_ &&
+        current.global_dofs == next.global_dofs &&
+        current.dof == next.dof &&
+        current.gnNo == next.gnNo &&
+        current.owned_node_start == next.owned_node_start &&
+        current.owned_node_count == next.owned_node_count &&
+        current.owned_nodes == next.owned_nodes &&
+        current.ghost_nodes == next.ghost_nodes &&
+        current.lhs.nNo == next.lhs.nNo &&
+        current.lhs.mynNo == next.lhs.mynNo &&
+        current.lhs.shnNo == next.lhs.shnNo &&
+        current.lhs.owned_row_operator == next.lhs.owned_row_operator &&
+        permutation_matches(current.dof_permutation, next.dof_permutation);
+    if (!layout_matches) {
+        return false;
+    }
+
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+    int mpi_initialized = 0;
+    int mpi_finalized = 0;
+    MPI_Initialized(&mpi_initialized);
+    MPI_Finalized(&mpi_finalized);
+    if (mpi_initialized != 0 && mpi_finalized == 0) {
+        int communicator_relation = MPI_UNEQUAL;
+        MPI_Comm_compare(current.lhs.commu.comm,
+                         next.lhs.commu.comm,
+                         &communicator_relation);
+        if (communicator_relation != MPI_IDENT &&
+            communicator_relation != MPI_CONGRUENT) {
+            return false;
+        }
+    }
+#endif
+
+    // Vectors created by FsilsFactory retain a pointer to `shared_`.  Move the
+    // rebuilt LHS/CSR and lookup tables into that stable object rather than
+    // replacing its shared_ptr.  Compatibility above guarantees that the
+    // vectors' old-node storage and cached FE-DOF resolutions remain valid.
+    using std::swap;
+    swap(*shared_, *replacement.shared_);
+    values_ = std::move(replacement.values_);
+    global_rows_ = replacement.global_rows_;
+    global_cols_ = replacement.global_cols_;
+    nnz_ = replacement.nnz_;
+    ++layout_revision_;
+    resetDroppedEntryCount();
+    resetOffOwnerWriteCount();
+    return true;
+}
 
 GlobalIndex FsilsMatrix::numRows() const noexcept
 {

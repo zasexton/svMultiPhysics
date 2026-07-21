@@ -58,6 +58,42 @@ TEST(TimeHistory, EnsureSecondOrderStateAllocatesZeroedVectors)
     EXPECT_DOUBLE_EQ(h.uDDot().norm(), 0.0);
 }
 
+TEST(TimeHistory, RateStateSnapshotRestoresValuesAndAllocationState)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeHistory tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto factory = ts_test::createTestFactory();
+    ASSERT_NE(factory.get(), nullptr);
+
+    auto h = svmp::FE::timestepping::TimeHistory::allocate(
+        *factory, 4, /*history_depth=*/2, /*allocate_second_order_state=*/true);
+    const std::vector<svmp::FE::Real> u_dot = {1.0, -2.0, 3.0, -4.0};
+    const std::vector<svmp::FE::Real> u_ddot = {-5.0, 6.0, -7.0, 8.0};
+    ts_test::setVectorByDof(h.uDot(), u_dot);
+    ts_test::setVectorByDof(h.uDDot(), u_ddot);
+
+    auto populated = h.snapshotRateState(*factory);
+    h.uDot().zero();
+    h.uDDot().zero();
+    h.restoreRateState(populated);
+
+    ASSERT_TRUE(h.hasSecondOrderState());
+    EXPECT_EQ(ts_test::getVectorByDof(h.uDot()), u_dot);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uDDot()), u_ddot);
+
+    auto absent_history = svmp::FE::timestepping::TimeHistory::allocate(
+        *factory, 4, /*history_depth=*/2, /*allocate_second_order_state=*/false);
+    auto absent = absent_history.snapshotRateState(*factory);
+    absent_history.ensureSecondOrderState(*factory);
+    ASSERT_TRUE(absent_history.hasSecondOrderState());
+    absent_history.restoreRateState(absent);
+
+    EXPECT_FALSE(absent_history.hasUDotState());
+    EXPECT_FALSE(absent_history.hasUDDotState());
+    EXPECT_FALSE(absent_history.hasSecondOrderState());
+}
+
 TEST(TimeHistory, PrevKValidatesBounds)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN

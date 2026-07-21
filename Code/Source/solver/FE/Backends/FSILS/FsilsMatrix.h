@@ -64,6 +64,9 @@ public:
 
     void zero() override;
     void finalizeAssembly() override;
+    bool reinitFromPattern(const sparsity::SparsityPattern& pattern) override;
+    bool reinitFromPattern(
+        const sparsity::DistributedSparsityPattern& pattern) override;
     void mult(const GenericVector& x, GenericVector& y) const override;
     void multAdd(const GenericVector& x, GenericVector& y) const override;
 
@@ -98,6 +101,10 @@ public:
     [[nodiscard]] Real* fsilsValuesPtr() noexcept;
     [[nodiscard]] const Real* fsilsValuesPtr() const noexcept;
     [[nodiscard]] GlobalIndex fsilsNnz() const noexcept;
+    [[nodiscard]] std::uint64_t layoutRevision() const noexcept
+    {
+        return layout_revision_;
+    }
 
     /// Number of entries silently dropped by addValue() since last reset.
     [[nodiscard]] static std::uint64_t droppedEntryCount() noexcept;
@@ -114,11 +121,14 @@ public:
                   int dof, assembly::AddMode mode);
 
 private:
+    bool adoptCompatibleReinitialization(FsilsMatrix&& replacement);
+
     static std::atomic<std::uint64_t> dropped_entry_count_;
     static std::atomic<std::uint64_t> off_owner_write_count_;
     GlobalIndex global_rows_{0};
     GlobalIndex global_cols_{0};
     GlobalIndex nnz_{0};
+    std::uint64_t layout_revision_{1};
 
 #if defined(FE_HAS_MPI) && FE_HAS_MPI
     MPI_Comm comm_{MPI_COMM_WORLD};

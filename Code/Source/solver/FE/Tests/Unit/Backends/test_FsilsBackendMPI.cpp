@@ -16,13 +16,17 @@
 #include "Backends/FSILS/liner_solver/norm.h"
 #include "Backends/Utils/BackendOptions.h"
 #include "Core/FEException.h"
+#include "Sparsity/ConstraintSparsityAugmenter.h"
 #include "Sparsity/DistributedSparsityPattern.h"
+#include "TimeStepping/TimeHistory.h"
 
 #include "Array.h"
 #include "Vector.h"
 
 #include <mpi.h>
 #include <cmath>
+#include <memory>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -83,6 +87,84 @@ svmp::FE::sparsity::DistributedSparsityPattern makeTwoRankOverlapPatternDof2(int
         pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
     }
 
+    return pattern;
+}
+
+std::uint64_t allreduceU64(std::uint64_t local)
+{
+    std::uint64_t global = 0;
+    MPI_Allreduce(&local, &global, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+    return global;
+}
+
+svmp::FE::sparsity::DistributedSparsityPattern
+makeRefreshedEliminationFillPattern(int rank)
+{
+    using svmp::FE::sparsity::AugmentationMode;
+    using svmp::FE::sparsity::ConstraintSparsityAugmenter;
+    using svmp::FE::sparsity::DistributedSparsityPattern;
+    using svmp::FE::sparsity::IndexRange;
+    using svmp::FE::sparsity::SimpleConstraintSet;
+
+    const IndexRange owned{static_cast<GlobalIndex>(2 * rank),
+                           static_cast<GlobalIndex>(2 * rank + 2)};
+    DistributedSparsityPattern active(owned, owned, /*global_rows=*/4, /*global_cols=*/4);
+    active.ensureDiagonal();
+    if (rank == 0) {
+        active.addEntry(0, 1);
+    }
+
+    auto constraints = std::make_shared<SimpleConstraintSet>();
+    constraints->addConstraint(1, 3);
+    ConstraintSparsityAugmenter augmenter(constraints);
+    augmenter.augment(active, AugmentationMode::EliminationFill);
+    active.finalize();
+    if (rank == 0) {
+        active.setGhostRows(std::vector<GlobalIndex>{3},
+                            std::vector<GlobalIndex>{0, 3},
+                            std::vector<GlobalIndex>{0, 1, 3});
+    }
+    return active;
+}
+
+svmp::FE::sparsity::DistributedSparsityPattern
+makeTwoRankReinitializationPattern(int rank, bool add_interface_coupling)
+{
+    using svmp::FE::sparsity::DistributedSparsityPattern;
+    using svmp::FE::sparsity::IndexRange;
+
+    constexpr GlobalIndex n_global = 4;
+    const IndexRange owned =
+        (rank == 0) ? IndexRange{0, 2} : IndexRange{2, 4};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+    pattern.ensureDiagonal();
+    if (rank == 0) {
+        pattern.addEntry(0, 1);
+        pattern.addEntry(1, 0);
+        if (add_interface_coupling) {
+            pattern.addEntry(1, 2);
+        }
+    } else {
+        pattern.addEntry(2, 3);
+        pattern.addEntry(3, 2);
+        if (add_interface_coupling) {
+            pattern.addEntry(2, 1);
+        }
+    }
+    pattern.finalize();
+
+    // Keep the overlap layout fixed while the owned-row CSR changes.  This
+    // mirrors constraint-fill churn: existing vectors remain valid only
+    // because each rank retains the same owned and ghost nodes.
+    if (rank == 0) {
+        pattern.setGhostRows(std::vector<GlobalIndex>{2},
+                             std::vector<GlobalIndex>{0, 2},
+                             std::vector<GlobalIndex>{1, 2});
+    } else {
+        pattern.setGhostRows(std::vector<GlobalIndex>{1},
+                             std::vector<GlobalIndex>{0, 2},
+                             std::vector<GlobalIndex>{1, 2});
+    }
     return pattern;
 }
 
@@ -274,6 +356,128 @@ TEST(FsilsBackendMPI, SolveCGOverlap1DChain)
     }
 }
 
+TEST(FsilsBackendMPI, RefreshedDistributedConstraintFillAcceptsNewEntry)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    const auto pattern = makeRefreshedEliminationFillPattern(rank);
+    if (rank == 0) {
+        ASSERT_TRUE(pattern.hasEntry(0, 3));
+    }
+
+    FsilsFactory factory(/*dof_per_node=*/1);
+    auto matrix = factory.createMatrix(pattern);
+    ASSERT_NE(matrix, nullptr);
+
+    FsilsMatrix::resetDroppedEntryCount();
+    auto view = matrix->createAssemblyView();
+    ASSERT_NE(view, nullptr);
+    view->beginAssemblyPhase();
+    if (rank == 0) {
+        const GlobalIndex rows[1] = {0};
+        const GlobalIndex cols[1] = {3};
+        const Real values[1] = {2.5};
+        view->addMatrixEntries(
+            std::span<const GlobalIndex>(rows, 1),
+            std::span<const GlobalIndex>(cols, 1),
+            std::span<const Real>(values, 1),
+            assembly::AddMode::Add);
+    }
+    view->finalizeAssembly();
+    matrix->finalizeAssembly();
+
+    EXPECT_EQ(allreduceU64(FsilsMatrix::droppedEntryCount()), 0u);
+    if (rank == 0) {
+        EXPECT_DOUBLE_EQ(matrix->getEntry(0, 3), 2.5);
+    }
+}
+
+TEST(FsilsBackendMPI,
+     DistributedReinitPreservesExistingVectorsAcrossChangedAndUnchangedPatterns)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    auto initial = makeTwoRankReinitializationPattern(
+        rank, /*add_interface_coupling=*/false);
+    auto coupled = makeTwoRankReinitializationPattern(
+        rank, /*add_interface_coupling=*/true);
+
+    FsilsFactory factory(/*dof_per_node=*/1);
+    auto matrix = factory.createMatrix(initial);
+    auto x = factory.createVector(/*size=*/4);
+    auto y = factory.createVector(/*size=*/4);
+    auto* fsils_matrix = dynamic_cast<FsilsMatrix*>(matrix.get());
+    auto* fsils_x = dynamic_cast<FsilsVector*>(x.get());
+    auto* fsils_y = dynamic_cast<FsilsVector*>(y.get());
+    ASSERT_NE(fsils_matrix, nullptr);
+    ASSERT_NE(fsils_x, nullptr);
+    ASSERT_NE(fsils_y, nullptr);
+    const auto shared_before = fsils_matrix->shared();
+    ASSERT_NE(shared_before, nullptr);
+    ASSERT_EQ(fsils_x->shared(), shared_before.get());
+    ASSERT_EQ(fsils_y->shared(), shared_before.get());
+
+    ASSERT_TRUE(matrix->reinitFromPattern(coupled));
+    ASSERT_EQ(fsils_matrix->shared().get(), shared_before.get());
+    ASSERT_EQ(fsils_x->shared(), shared_before.get());
+    ASSERT_EQ(fsils_y->shared(), shared_before.get());
+    EXPECT_DOUBLE_EQ(matrix->getEntry(rank == 0 ? 1 : 2,
+                                     rank == 0 ? 2 : 1),
+                     0.0);
+
+    fsils_matrix->addValue(rank == 0 ? 0 : 2,
+                           rank == 0 ? 0 : 2,
+                           2.0,
+                           assembly::AddMode::Insert);
+    fsils_matrix->addValue(rank == 0 ? 1 : 3,
+                           rank == 0 ? 1 : 3,
+                           2.0,
+                           assembly::AddMode::Insert);
+    fsils_matrix->addValue(rank == 0 ? 1 : 2,
+                           rank == 0 ? 2 : 1,
+                           rank == 0 ? 3.0 : -1.0,
+                           assembly::AddMode::Insert);
+    matrix->finalizeAssembly();
+    x->set(1.0);
+    y->zero();
+    ASSERT_NO_THROW(matrix->mult(*x, *y));
+
+    const auto result = y->localSpan();
+    ASSERT_GE(result.size(), 2u);
+    if (rank == 0) {
+        EXPECT_DOUBLE_EQ(result[0], 2.0);
+        EXPECT_DOUBLE_EQ(result[1], 5.0);
+    } else {
+        EXPECT_DOUBLE_EQ(result[0], 1.0);
+        EXPECT_DOUBLE_EQ(result[1], 2.0);
+    }
+
+    // Reinitializing from an unchanged pattern also resets all owned values
+    // while retaining vector/matrix shared identity.
+    ASSERT_TRUE(matrix->reinitFromPattern(coupled));
+    ASSERT_EQ(fsils_matrix->shared().get(), shared_before.get());
+    y->set(-9.0);
+    ASSERT_NO_THROW(matrix->mult(*x, *y));
+    const auto reset_result = y->localSpan();
+    ASSERT_GE(reset_result.size(), 2u);
+    EXPECT_DOUBLE_EQ(reset_result[0], 0.0);
+    EXPECT_DOUBLE_EQ(reset_result[1], 0.0);
+}
+
 TEST(FsilsBackendMPI, SharedFaceReductionUsesOwnedRowHalo)
 {
     int rank = 0;
@@ -409,6 +613,50 @@ TEST(FsilsBackendMPI, FactoryCreateVectorUsesCachedDistributedOverlapLayout)
     EXPECT_THROW((void)factory.createVector(expected_local_size, n_global + 2), InvalidArgumentException);
 }
 
+TEST(FsilsBackendMPI, DistributedNodeBlockRowsHaveUniqueColumns)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    FsilsFactory factory(/*dof_per_node=*/2);
+    auto matrix = factory.createMatrix(makeTwoRankOverlapPatternDof2(rank));
+    const auto* fsils_matrix = dynamic_cast<const FsilsMatrix*>(matrix.get());
+    ASSERT_NE(fsils_matrix, nullptr);
+    ASSERT_NE(fsils_matrix->shared(), nullptr);
+
+    const auto& lhs = fsils_matrix->shared()->lhs;
+    EXPECT_EQ(lhs.nnz, rank == 0 ? 3 : 4);
+    for (int row = 0; row < lhs.nNo; ++row) {
+        const int start = lhs.rowPtr(0, row);
+        const int end = lhs.rowPtr(1, row);
+        ASSERT_GE(start, 0);
+        ASSERT_GE(end, start);
+        ASSERT_LT(end, lhs.nnz);
+
+        int diagonal_entries = 0;
+        for (int idx = start; idx <= end; ++idx) {
+            const int col = lhs.colPtr(idx);
+            if (idx > start) {
+                EXPECT_LT(lhs.colPtr(idx - 1), col)
+                    << "rank=" << rank << " row=" << row << " idx=" << idx;
+            }
+            if (col == row) {
+                ++diagonal_entries;
+            }
+        }
+        EXPECT_EQ(diagonal_entries, 1) << "rank=" << rank << " row=" << row;
+        ASSERT_GE(lhs.diagPtr(row), start);
+        ASSERT_LE(lhs.diagPtr(row), end);
+        EXPECT_EQ(lhs.colPtr(lhs.diagPtr(row)), row);
+    }
+}
+
 TEST(FsilsBackendMPI, FactoryPropagatesProvidedCommunicatorHandle)
 {
     int rank = 0;
@@ -498,8 +746,96 @@ TEST(FsilsBackendMPI, VectorCopyFromRejectsLocalSizeMismatchBetweenStandaloneAnd
         }
     }
 
+    // Rebuilding a matrix replaces FsilsShared even when node ownership,
+    // overlap ordering, and the DOF permutation are unchanged. Raw vector
+    // copies must accept that equivalent storage layout rather than requiring
+    // shared-pointer identity.
+    auto refreshed_matrix = factory.createMatrix(pattern);
+    const auto* refreshed_fsils_matrix =
+        dynamic_cast<const FsilsMatrix*>(refreshed_matrix.get());
+    ASSERT_NE(refreshed_fsils_matrix, nullptr);
+    ASSERT_NE(refreshed_fsils_matrix->shared(), nullptr);
+    EXPECT_NE(refreshed_fsils_matrix->shared().get(), fsils_matrix->shared().get());
+    const GlobalIndex refreshed_local_size =
+        static_cast<GlobalIndex>(refreshed_fsils_matrix->shared()->dof) *
+        static_cast<GlobalIndex>(refreshed_fsils_matrix->shared()->lhs.nNo);
+    auto refreshed_dst = factory.createVector(refreshed_local_size, n_global);
+    EXPECT_NO_THROW(refreshed_dst->copyFrom(*shared_src));
+    {
+        const auto src_vals = shared_src->localSpan();
+        const auto dst_vals = refreshed_dst->localSpan();
+        ASSERT_EQ(src_vals.size(), dst_vals.size());
+        for (std::size_t i = 0; i < src_vals.size(); ++i) {
+            EXPECT_DOUBLE_EQ(dst_vals[i], src_vals[i]);
+        }
+    }
+
     EXPECT_THROW(shared_dst->copyFrom(*standalone), InvalidArgumentException);
     EXPECT_THROW(standalone->copyFrom(*shared_src), InvalidArgumentException);
+}
+
+TEST(FsilsBackendMPI, TimeHistoryRateSnapshotRestoresDistributedOverlapValues)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr GlobalIndex n_global = 6;
+    FsilsFactory factory(/*dof_per_node=*/2);
+    auto matrix = factory.createMatrix(makeTwoRankOverlapPatternDof2(rank));
+    ASSERT_NE(matrix, nullptr);
+
+    auto history = timestepping::TimeHistory::allocate(
+        factory,
+        n_global,
+        /*history_depth=*/2,
+        /*allocate_second_order_state=*/true);
+
+    const auto* rate_layout = dynamic_cast<const FsilsVector*>(&history.uDot());
+    ASSERT_NE(rate_layout, nullptr);
+    ASSERT_NE(rate_layout->shared(), nullptr);
+
+    std::vector<Real> expected_dot;
+    std::vector<Real> expected_ddot;
+    {
+        auto dot = history.uDot().localSpan();
+        auto ddot = history.uDDot().localSpan();
+        ASSERT_EQ(dot.size(), ddot.size());
+        expected_dot.resize(dot.size());
+        expected_ddot.resize(ddot.size());
+        for (std::size_t i = 0; i < dot.size(); ++i) {
+            expected_dot[i] = static_cast<Real>(100 * rank + static_cast<int>(i) + 1);
+            expected_ddot[i] = -expected_dot[i] - Real(0.25);
+            dot[i] = expected_dot[i];
+            ddot[i] = expected_ddot[i];
+        }
+    }
+
+    auto snapshot = history.snapshotRateState(factory);
+    history.uDot().zero();
+    history.uDDot().set(Real(7.0));
+    history.restoreRateState(snapshot);
+
+    const auto* restored_dot = dynamic_cast<const FsilsVector*>(&history.uDot());
+    const auto* restored_ddot = dynamic_cast<const FsilsVector*>(&history.uDDot());
+    ASSERT_NE(restored_dot, nullptr);
+    ASSERT_NE(restored_ddot, nullptr);
+    EXPECT_EQ(restored_dot->shared(), rate_layout->shared());
+    EXPECT_EQ(restored_ddot->shared(), rate_layout->shared());
+
+    const auto dot = history.uDot().localSpan();
+    const auto ddot = history.uDDot().localSpan();
+    ASSERT_EQ(dot.size(), expected_dot.size());
+    ASSERT_EQ(ddot.size(), expected_ddot.size());
+    for (std::size_t i = 0; i < dot.size(); ++i) {
+        EXPECT_DOUBLE_EQ(dot[i], expected_dot[i]);
+        EXPECT_DOUBLE_EQ(ddot[i], expected_ddot[i]);
+    }
 }
 
 TEST(FsilsBackendMPI, OwnedFeDofsMatchesDistributedOverlapOwnership)

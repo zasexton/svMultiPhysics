@@ -9,6 +9,7 @@
 
 #include "FE/Basis/LagrangeBasis.h"
 #include "FE/Geometry/FrameGeometry.h"
+#include "FE/Geometry/IsoparametricMapping.h"
 #include "FE/Quadrature/QuadratureFactory.h"
 
 #include <algorithm>
@@ -27,6 +28,78 @@ void expectMatrixNear(const Matrix3x3& actual, const Matrix3x3& expected, Real t
             EXPECT_NEAR(actual[r][c], expected[r][c], tol);
         }
     }
+}
+
+void expectFrameInverseIdentity(const FrameGeometryData& frame, Real tol)
+{
+    ASSERT_EQ(frame.jacobians.size(), frame.inverse_jacobians.size());
+    for (std::size_t q = 0; q < frame.jacobians.size(); ++q) {
+        const auto& jacobian = frame.jacobians[q];
+        const auto& inverse = frame.inverse_jacobians[q];
+        for (std::size_t row = 0; row < 3u; ++row) {
+            for (std::size_t column = 0; column < 3u; ++column) {
+                Real product = 0.0;
+                for (std::size_t inner = 0; inner < 3u; ++inner) {
+                    product += jacobian[row][inner] *
+                               inverse[inner][column];
+                }
+                EXPECT_NEAR(product,
+                            row == column ? Real(1) : Real(0),
+                            tol);
+            }
+        }
+    }
+}
+
+std::vector<math::Vector<Real, 3>> paraboloidHex27Nodes(
+    const basis::LagrangeBasis& basis,
+    Real patch_half_width,
+    Real radius,
+    const math::Vector<Real, 3>& translation = {})
+{
+    std::vector<math::Vector<Real, 3>> nodes;
+    nodes.reserve(basis.nodes().size());
+    for (const auto& xi : basis.nodes()) {
+        const Real x = patch_half_width * xi[0];
+        const Real y = patch_half_width * xi[1];
+        const Real zeta = xi[2];
+        const Real top_blend = (Real(1) + zeta) * Real(0.5);
+        const Real z = patch_half_width * zeta -
+                       top_blend * (x * x + y * y) /
+                           (Real(2) * radius);
+        nodes.push_back({translation[0] + x,
+                         translation[1] + y,
+                         translation[2] + z});
+    }
+    return nodes;
+}
+
+Real paraboloidMeanCurvature(Real x, Real y, Real radius)
+{
+    const Real gradient_squared =
+        (x * x + y * y) / (radius * radius);
+    return (Real(2) + gradient_squared) /
+           (radius *
+            std::pow(Real(1) + gradient_squared, Real(1.5)));
+}
+
+std::vector<math::Vector<Real, 3>> parabolicQuad9Nodes(
+    const basis::LagrangeBasis& basis,
+    Real radius,
+    Real scale,
+    const math::Vector<Real, 3>& translation)
+{
+    std::vector<math::Vector<Real, 3>> nodes;
+    nodes.reserve(basis.nodes().size());
+    for (const auto& xi : basis.nodes()) {
+        const Real bottom_blend = (Real(1) - xi[1]) * Real(0.5);
+        const Real y = xi[1] + bottom_blend * xi[0] * xi[0] /
+                                   (Real(2) * radius);
+        nodes.push_back({translation[0] + scale * xi[0],
+                         translation[1] + scale * y,
+                         translation[2]});
+    }
+    return nodes;
 }
 
 } // namespace
@@ -89,6 +162,119 @@ TEST(FrameGeometry, NonAffineQuadCellMeasuresVary)
     ASSERT_EQ(face.surface_jacobians.size(), face_quad->num_points());
     EXPECT_GT(face.surface_measures[0], 0.0);
     EXPECT_NEAR(face.normals[0][2], 0.0, 1e-12);
+}
+
+TEST(FrameGeometry, CellFrameAcceptsUniformlySmallShapeRegularTetrahedron)
+{
+    constexpr Real scale = 1.0e-8;
+    const std::vector<Point3D> nodes{
+        {0.0, 0.0, 0.0},
+        {scale, 0.0, 0.0},
+        {0.0, scale, 0.0},
+        {0.0, 0.0, scale},
+    };
+    const auto quad =
+        quadrature::QuadratureFactory::create(ElementType::Tetra4, 2);
+
+    FrameGeometryData frame;
+    ASSERT_NO_THROW(
+        frame = evaluateCellFrame(ElementType::Tetra4, *quad, nodes));
+    ASSERT_EQ(frame.inverse_jacobians.size(), quad->num_points());
+    ASSERT_EQ(frame.jacobians.size(), quad->num_points());
+    ASSERT_EQ(frame.measures.size(), quad->num_points());
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        const auto& jacobian = frame.jacobians[q];
+        const auto& inverse = frame.inverse_jacobians[q];
+        for (std::size_t row = 0; row < 3u; ++row) {
+            for (std::size_t column = 0; column < 3u; ++column) {
+                Real product = 0.0;
+                for (std::size_t inner = 0; inner < 3u; ++inner) {
+                    product += jacobian[row][inner] *
+                               inverse[inner][column];
+                }
+                EXPECT_NEAR(product, row == column ? Real(1) : Real(0),
+                            1.0e-12);
+            }
+        }
+        EXPECT_GT(frame.measures[q], Real(0));
+        EXPECT_TRUE(std::isfinite(frame.measures[q]));
+    }
+}
+
+TEST(FrameGeometry, CellFrameRejectsScaleIndependentNearCollinearTetrahedron)
+{
+    const auto quad =
+        quadrature::QuadratureFactory::create(ElementType::Tetra4, 2);
+
+    for (const Real scale : {Real(1), Real(1.0e-8)}) {
+        const std::vector<Point3D> nodes{
+            {0.0, 0.0, 0.0},
+            {scale, 0.0, 0.0},
+            {scale, scale * Real(1.0e-14), 0.0},
+            {0.0, 0.0, scale},
+        };
+        EXPECT_THROW(
+            (void)evaluateCellFrame(ElementType::Tetra4, *quad, nodes),
+            FEException);
+    }
+}
+
+TEST(FrameGeometry, CellFrameAcceptsUniformlyTinyRotatedCurveAndQuad)
+{
+    constexpr Real scale = Real(1e-16);
+
+    const auto line_quad =
+        quadrature::QuadratureFactory::create(ElementType::Line2, 2);
+    const std::vector<Point3D> line_nodes{
+        {0.0, 0.0, 0.0},
+        {0.0, scale, Real(2) * scale},
+    };
+    FrameGeometryData line_frame;
+    ASSERT_NO_THROW(line_frame = evaluateCellFrame(
+                        ElementType::Line2, *line_quad, line_nodes));
+    expectFrameInverseIdentity(line_frame, Real(2e-12));
+    for (const Real measure : line_frame.measures) {
+        EXPECT_TRUE(std::isfinite(measure));
+        EXPECT_GT(measure, Real(0));
+    }
+
+    const auto quad_rule =
+        quadrature::QuadratureFactory::create(ElementType::Quad4, 2);
+    const Point3D a{scale, scale, 0.0};
+    const Point3D b{0.0, scale, scale};
+    const std::vector<Point3D> quad_nodes{
+        {0.0, 0.0, 0.0},
+        a,
+        {a[0] + b[0], a[1] + b[1], a[2] + b[2]},
+        b,
+    };
+    FrameGeometryData quad_frame;
+    ASSERT_NO_THROW(quad_frame = evaluateCellFrame(
+                        ElementType::Quad4, *quad_rule, quad_nodes));
+    expectFrameInverseIdentity(quad_frame, Real(2e-12));
+    for (const Real measure : quad_frame.measures) {
+        EXPECT_TRUE(std::isfinite(measure));
+        EXPECT_GT(measure, Real(0));
+    }
+}
+
+TEST(FrameGeometry, CellFrameRejectsScaleIndependentNearCollinearQuad)
+{
+    const auto quad =
+        quadrature::QuadratureFactory::create(ElementType::Quad4, 2);
+    for (const Real scale : {Real(1), Real(1e-8)}) {
+        const Point3D a{scale, 0.0, 0.0};
+        const Point3D b{scale, scale * Real(1e-15), 0.0};
+        const std::vector<Point3D> nodes{
+            {0.0, 0.0, 0.0},
+            a,
+            {a[0] + b[0], a[1] + b[1], a[2] + b[2]},
+            b,
+        };
+        EXPECT_THROW(
+            (void)evaluateCellFrame(ElementType::Quad4, *quad, nodes),
+            FEException);
+    }
 }
 
 TEST(FrameGeometry, TetraFaceGeometryUsesSurfaceMeasureAndOutwardNormal)
@@ -331,7 +517,10 @@ TEST(FrameGeometry, QuadFaceGeometrySensitivityMatchesFiniteDifferenceAndTransla
 
     ASSERT_EQ(evaluated.n_qpts, fd.n_qpts);
     ASSERT_EQ(evaluated.n_nodes, fd.n_nodes);
-    constexpr Real fd_reference_tol = 2.0e-9;
+    // The anchored isoparametric sum intentionally changes the final rounding
+    // of this finite-difference oracle by about one double-precision ulp at
+    // the selected perturbation size.
+    constexpr Real fd_reference_tol = 3.0e-9;
     for (LocalIndex q = 0; q < evaluated.n_qpts; ++q) {
         for (LocalIndex node = 0; node < evaluated.n_nodes; ++node) {
             for (int component = 0; component < 3; ++component) {
@@ -463,4 +652,140 @@ TEST(FrameGeometry, Quad9GeometrySensitivityCoversHighOrderControlPoints)
             }
         }
     }
+}
+
+TEST(FrameGeometry, AnalyticMeanCurvatureIsInvariantUnderLargeTranslationAndScale)
+{
+    auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Hex27, 2);
+    constexpr Real base_radius = Real(2);
+    const auto base_nodes =
+        paraboloidHex27Nodes(*basis, Real(1), base_radius);
+    const auto quad =
+        quadrature::QuadratureFactory::create(ElementType::Quad4, 3);
+
+    const auto evaluate = [&](Real scale,
+                              const math::Vector<Real, 3>& translation) {
+        auto nodes = base_nodes;
+        for (auto& node : nodes) {
+            node = translation + node * scale;
+        }
+        IsoparametricMapping mapping(basis, std::move(nodes));
+        return evaluateFaceFrame(mapping,
+                                 ElementType::Hex27,
+                                 /*local_face_id=*/1,
+                                 ElementType::Quad4,
+                                 *quad);
+    };
+
+    const auto base = evaluate(Real(1), {});
+    const auto translated = evaluate(
+        Real(1), math::Vector<Real, 3>{Real(1.0e8), Real(-2.0e8), Real(3.0e8)});
+    const auto small = evaluate(Real(1.0e-6), {});
+    const auto large = evaluate(Real(1.0e6), {});
+
+    ASSERT_EQ(base.mean_curvatures.size(), quad->num_points());
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        const auto canonical = quad->points()[q];
+        const Real expected = paraboloidMeanCurvature(
+            canonical[0], canonical[1], base_radius);
+        EXPECT_NEAR(base.mean_curvatures[q], expected, Real(2.0e-12));
+        EXPECT_NEAR(translated.mean_curvatures[q], expected, Real(2.0e-8));
+        EXPECT_NEAR(small.mean_curvatures[q] * Real(1.0e-6),
+                    expected,
+                    Real(2.0e-12));
+        EXPECT_NEAR(large.mean_curvatures[q] * Real(1.0e6),
+                    expected,
+                    Real(2.0e-12));
+    }
+}
+
+TEST(FrameGeometry, AnalyticMeanCurvatureIsExactAcrossParaboloidPatchRefinement)
+{
+    auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Hex27, 2);
+    constexpr Real radius = Real(2.5);
+    const auto quad =
+        quadrature::QuadratureFactory::create(ElementType::Quad4, 3);
+
+    for (const Real patch_half_width :
+         {Real(1), Real(0.5), Real(0.25), Real(0.125)}) {
+        IsoparametricMapping mapping(
+            basis,
+            paraboloidHex27Nodes(
+                *basis, patch_half_width, radius));
+        const auto face = evaluateFaceFrame(mapping,
+                                            ElementType::Hex27,
+                                            /*local_face_id=*/1,
+                                            ElementType::Quad4,
+                                            *quad);
+        ASSERT_EQ(face.mean_curvatures.size(), quad->num_points());
+        for (std::size_t q = 0; q < quad->num_points(); ++q) {
+            const auto canonical = quad->points()[q];
+            const Real x = patch_half_width * canonical[0];
+            const Real y = patch_half_width * canonical[1];
+            EXPECT_NEAR(face.mean_curvatures[q],
+                        paraboloidMeanCurvature(x, y, radius),
+                        Real(3.0e-12));
+        }
+    }
+}
+
+TEST(FrameGeometry, AnalyticCurveCurvatureIsTranslationAndScaleInvariant)
+{
+    auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 2);
+    constexpr Real radius = Real(1.75);
+    const auto quad =
+        quadrature::QuadratureFactory::create(ElementType::Line2, 3);
+    const auto evaluate = [&](Real scale,
+                              const math::Vector<Real, 3>& translation) {
+        IsoparametricMapping mapping(
+            basis,
+            parabolicQuad9Nodes(
+                *basis, radius, scale, translation));
+        return evaluateFaceFrame(mapping,
+                                 ElementType::Quad9,
+                                 /*local_face_id=*/0,
+                                 ElementType::Line2,
+                                 *quad);
+    };
+
+    const auto base = evaluate(Real(1), {});
+    const auto translated = evaluate(
+        Real(1), math::Vector<Real, 3>{Real(1.0e8), Real(-2.0e8), Real(0)});
+    const auto small = evaluate(Real(1.0e-6), {});
+    const auto large = evaluate(Real(1.0e6), {});
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        const Real x = quad->points()[q][0];
+        const Real gradient_squared = x * x / (radius * radius);
+        const Real expected =
+            Real(1) /
+            (radius *
+             std::pow(Real(1) + gradient_squared, Real(1.5)));
+        EXPECT_NEAR(base.mean_curvatures[q], expected, Real(2.0e-12));
+        EXPECT_NEAR(translated.mean_curvatures[q], expected, Real(2.0e-8));
+        EXPECT_NEAR(small.mean_curvatures[q] * Real(1.0e-6),
+                    expected,
+                    Real(2.0e-12));
+        EXPECT_NEAR(large.mean_curvatures[q] * Real(1.0e6),
+                    expected,
+                    Real(2.0e-12));
+    }
+}
+
+TEST(FrameGeometry, MeanCurvatureFailsClosedForDegenerateFaceParametrization)
+{
+    auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Hex27, 2);
+    IsoparametricMapping mapping(
+        basis, paraboloidHex27Nodes(*basis, Real(1), Real(2)));
+    const auto quad =
+        quadrature::QuadratureFactory::create(ElementType::Quad4, 2);
+    const std::array<LocalIndex, 4> invalid_alignment{0, 0, 0, 0};
+
+    EXPECT_THROW(
+        (void)evaluateFaceFrame(mapping,
+                                ElementType::Hex27,
+                                /*local_face_id=*/1,
+                                ElementType::Quad4,
+                                *quad,
+                                invalid_alignment),
+        FEException);
 }

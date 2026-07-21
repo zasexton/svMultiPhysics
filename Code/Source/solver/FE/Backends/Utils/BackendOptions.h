@@ -642,6 +642,11 @@ struct SolverOptions {
 
 struct SolverReport {
     bool converged{false};
+    /// The backend detected invalid numerical state (NaN/Inf metrics or
+    /// correction values).  Callers must not accept this report through an
+    /// inexact-solve policy; a retry may be attempted, but the correction is
+    /// unusable until a subsequent solve clears this flag.
+    bool numerical_breakdown{false};
     int iterations{0};
     Real initial_residual_norm{0.0};
     Real final_residual_norm{0.0};
@@ -663,6 +668,7 @@ struct SolverReport {
     double blockschur_momentum_collective_time_seconds{0.0};
     int blockschur_schur_solve_calls{0};
     int blockschur_schur_iterations{0};
+    int blockschur_true_residual_retries{0};
     double blockschur_schur_setup_time_seconds{0.0};
     double blockschur_schur_solve_time_seconds{0.0};
     std::uint64_t blockschur_schur_collective_calls{0};

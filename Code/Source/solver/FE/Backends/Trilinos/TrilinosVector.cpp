@@ -293,8 +293,29 @@ public:
 
     void zeroVectorEntries(std::span<const GlobalIndex> dofs) override
     {
+        FE_CHECK_NOT_NULL(vec_, "TrilinosVectorView::vec");
+        auto data = vec_->tpetra()->getDataNonConst(0);
+        bool modified = false;
         for (const auto d : dofs) {
-            addVectorEntry(d, 0.0, assembly::AddMode::Insert);
+            if (d < 0 || d >= vec_->size()) {
+                continue;
+            }
+            const auto lid = vec_->map()->getLocalElement(
+                static_cast<trilinos::GO>(d));
+            // Constraint synchronization intentionally retains owned and
+            // ghost lines. Zeroing a distributed residual is an owned-entry
+            // cleanup operation, so valid nonowned GIDs are ignored here.
+            // Generic add/set insertion keeps its fail-closed nonlocal throw.
+            if (lid == Teuchos::OrdinalTraits<trilinos::LO>::invalid()) {
+                continue;
+            }
+            data[static_cast<trilinos::LO>(lid)] =
+                static_cast<trilinos::Scalar>(0.0);
+            modified = true;
+        }
+        if (modified) {
+            vec_->invalidateLocalCache();
+            vec_->markModified();
         }
     }
 

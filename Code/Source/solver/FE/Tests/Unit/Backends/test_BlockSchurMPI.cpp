@@ -110,6 +110,7 @@ void expectSolverReportSane(const SolverReport& rep, int max_iter)
 void expectBlockSchurMetricsPresent(const SolverReport& rep)
 {
     EXPECT_GT(rep.blockschur_outer_iterations, 0);
+    EXPECT_EQ(rep.iterations, rep.blockschur_outer_iterations);
     EXPECT_GT(rep.blockschur_momentum_solve_calls, 0);
     EXPECT_GT(rep.blockschur_momentum_iterations, 0);
     EXPECT_GE(rep.blockschur_momentum_restart_cycles, 0);
@@ -955,6 +956,60 @@ TEST(PetscBackendMPI, SolveBlockSchur2x2)
     for (auto val : s0) EXPECT_NEAR(val, 1.0, 1e-8);
     for (auto val : s1) EXPECT_NEAR(val, 1.0, 1e-8);
 }
+
+TEST(PetscBackendMPI, ZeroRowsIsCollectiveWhenOnlyOneRankHasRows)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr GlobalIndex n_global = 2;
+    const IndexRange owned{rank, rank + 1};
+    DistributedSparsityPattern pattern(
+        owned, owned, n_global, n_global);
+    pattern.addEntry(rank, rank);
+    pattern.finalize();
+
+    auto factory = BackendFactory::create(BackendKind::PETSc);
+    ASSERT_NE(factory, nullptr);
+    auto matrix = factory->createMatrix(pattern);
+    ASSERT_NE(matrix, nullptr);
+
+    auto assembly_view = matrix->createAssemblyView();
+    ASSERT_NE(assembly_view, nullptr);
+    assembly_view->beginAssemblyPhase();
+    assembly_view->addMatrixEntry(
+        rank,
+        rank,
+        static_cast<Real>(rank + 2),
+        assembly::AddMode::Insert);
+    assembly_view->finalizeAssembly();
+
+    // MatZeroRows is collective even though only rank zero owns a constrained
+    // row. Rank one must participate with a zero row count; returning early
+    // on its empty local span deadlocks rank zero in PETSc.
+    std::vector<GlobalIndex> constrained_rows;
+    if (rank == 0) {
+        constrained_rows.push_back(0);
+    }
+    auto constraint_view = matrix->createAssemblyView();
+    ASSERT_NE(constraint_view, nullptr);
+    constraint_view->beginAssemblyPhase();
+    constraint_view->zeroRows(
+        constrained_rows, /*set_diagonal=*/false);
+    constraint_view->finalizeAssembly();
+
+    if (rank == 0) {
+        EXPECT_NEAR(matrix->getEntry(0, 0), Real{0.0}, Real{1.0e-14});
+    } else {
+        EXPECT_NEAR(matrix->getEntry(1, 1), Real{3.0}, Real{1.0e-14});
+    }
+}
 #endif
 
 TEST(FsilsBackendMPI, SolveNSBlockSchur3DOF)
@@ -1174,6 +1229,80 @@ TEST(FsilsBackendMPI, SolveNSBlockSchur3DOF)
     }
 }
 
+TEST(FsilsBackendMPI,
+     RankLocalNonfiniteRightHandSideFailsCollectivelyWithoutKernelRetry)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 3;
+    constexpr GlobalIndex n_global = 2 * dof;
+    const IndexRange owned{
+        static_cast<GlobalIndex>(rank * dof),
+        static_cast<GlobalIndex>((rank + 1) * dof)};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+    for (GlobalIndex row = owned.first; row < owned.last; ++row) {
+        for (GlobalIndex column = owned.first; column < owned.last; ++column) {
+            pattern.addEntry(row, column);
+        }
+    }
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    FsilsFactory factory(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+    auto x = factory.createVector(n_global);
+
+    const std::array<GlobalIndex, dof> indices{{
+        owned.first, owned.first + 1, owned.first + 2}};
+    const std::array<Real, dof * dof> block{{
+        4.0, 0.0, 1.0,
+        0.0, 3.0, 1.0,
+        1.0, 1.0, 0.0}};
+    auto matrix_view = A->createAssemblyView();
+    matrix_view->beginAssemblyPhase();
+    matrix_view->addMatrixEntries(
+        std::span<const GlobalIndex>(indices.data(), indices.size()),
+        std::span<const Real>(block.data(), block.size()),
+        assembly::AddMode::Insert);
+    matrix_view->finalizeAssembly();
+    A->finalizeAssembly();
+
+    const Real nan = std::numeric_limits<Real>::quiet_NaN();
+    const std::array<Real, dof> local_rhs = rank == 0
+        ? std::array<Real, dof>{{1.0, 2.0, 3.0}}
+        : std::array<Real, dof>{{1.0, nan, 3.0}};
+    auto rhs_view = b->createAssemblyView();
+    rhs_view->beginAssemblyPhase();
+    rhs_view->addVectorEntries(
+        std::span<const GlobalIndex>(indices.data(), indices.size()),
+        std::span<const Real>(local_rhs.data(), local_rhs.size()),
+        assembly::AddMode::Insert);
+    rhs_view->finalizeAssembly();
+
+    auto options = makeFsilsBlockSchurOptions(
+        dof, /*primary_components=*/2, /*constraint_components=*/1);
+    options.fsils_residual_check_policy = FsilsResidualCheckPolicy::Always;
+    auto solver = factory.createLinearSolver(options);
+    const auto report = solver->solve(*A, *x, *b);
+
+    EXPECT_FALSE(report.converged);
+    EXPECT_TRUE(report.numerical_breakdown);
+    EXPECT_EQ(report.blockschur_true_residual_retries, 0);
+    EXPECT_TRUE(std::isinf(report.final_residual_norm));
+    EXPECT_TRUE(std::isinf(report.relative_residual));
+    for (const auto value : x->localSpan()) {
+        EXPECT_TRUE(std::isfinite(value));
+        EXPECT_EQ(value, Real{0.0});
+    }
+}
+
 TEST(FsilsBackendMPI, DirichletNativeFaceSetupIsCollectiveWhenOnlyOneRankHasDofs)
 {
     int rank = 0;
@@ -1381,6 +1510,187 @@ TEST(FsilsBackendMPI, SolveBlockSchur4DOFMultiConstraintPreconditioners)
 
         const Real denom = std::max<Real>(b->norm(), 1e-30);
         EXPECT_LE(r->norm() / denom, 1e-8);
+    }
+}
+
+TEST(FsilsBackendMPI,
+     SolveBlockSchurDof8WithAuxiliaryPrimaryAndSparseNativeVelocityFace)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+    ScopedEnvVar enable_native_face(
+        "SVMP_FSILS_ENABLE_MPI_NATIVE_FACE_RANK_ONE", "1");
+
+    constexpr int dof = 8;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+    const IndexRange owned =
+        (rank == 0) ? IndexRange{0, dof} : IndexRange{dof, n_global};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+    pattern.setDofIndexing(
+        DistributedSparsityPattern::DofIndexing::NodalInterleaved);
+
+    std::array<GlobalIndex, 2 * dof> element_dofs{};
+    const GlobalIndex element_start = (rank == 0) ? 0 : dof;
+    for (int local = 0; local < 2 * dof; ++local) {
+        element_dofs[static_cast<std::size_t>(local)] =
+            element_start + local;
+    }
+    pattern.addElementCouplings(element_dofs);
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    // Rank 0 contributes to node 1, which is owned by rank 1.  Preserve the
+    // full element-column closure for those eight ghost rows.
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows;
+        std::vector<GlobalIndex> ghost_row_ptr;
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_rows.reserve(dof);
+        ghost_row_ptr.reserve(dof + 1);
+        ghost_cols.reserve(dof * 2 * dof);
+        ghost_row_ptr.push_back(0);
+        for (int component = 0; component < dof; ++component) {
+            ghost_rows.push_back(dof + component);
+            for (GlobalIndex col = 0; col < 2 * dof; ++col) {
+                ghost_cols.push_back(col);
+            }
+            ghost_row_ptr.push_back(
+                static_cast<GlobalIndex>(ghost_cols.size()));
+        }
+        pattern.setGhostRows(std::move(ghost_rows),
+                             std::move(ghost_row_ptr),
+                             std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+    auto x = factory.createVector(n_global);
+
+    std::array<Real, dof * dof> node_block{};
+    for (int component = 0; component < 7; ++component) {
+        node_block[static_cast<std::size_t>(component * dof + component)] =
+            static_cast<Real>(6.0 - 0.35 * component);
+    }
+    for (int component = 0; component < 6; ++component) {
+        node_block[static_cast<std::size_t>(component * dof + component + 1)] =
+            Real(0.08);
+        node_block[static_cast<std::size_t>((component + 1) * dof + component)] =
+            Real(0.08);
+    }
+    const std::array<Real, 7> pressure_coupling{
+        Real(0.40), Real(-0.30), Real(0.20), Real(0.10),
+        Real(-0.08), Real(0.06), Real(-0.04)};
+    for (int component = 0; component < 7; ++component) {
+        node_block[static_cast<std::size_t>(component * dof + 7)] =
+            pressure_coupling[static_cast<std::size_t>(component)];
+        node_block[static_cast<std::size_t>(7 * dof + component)] =
+            pressure_coupling[static_cast<std::size_t>(component)];
+    }
+    node_block[static_cast<std::size_t>(7 * dof + 7)] = Real(1.5);
+
+    std::array<Real, dof * dof> neighbor_block{};
+    for (int component = 0; component < 7; ++component) {
+        neighbor_block[static_cast<std::size_t>(component * dof + component)] =
+            component < 3 ? Real(-0.45) : Real(-0.20);
+    }
+
+    constexpr int element_size = 2 * dof;
+    std::array<Real, element_size * element_size> element_matrix{};
+    for (int row = 0; row < dof; ++row) {
+        for (int col = 0; col < dof; ++col) {
+            element_matrix[static_cast<std::size_t>(row * element_size + col)] =
+                node_block[static_cast<std::size_t>(row * dof + col)];
+            element_matrix[static_cast<std::size_t>(
+                row * element_size + dof + col)] =
+                neighbor_block[static_cast<std::size_t>(row * dof + col)];
+            element_matrix[static_cast<std::size_t>(
+                (dof + row) * element_size + col)] =
+                neighbor_block[static_cast<std::size_t>(col * dof + row)];
+            element_matrix[static_cast<std::size_t>(
+                (dof + row) * element_size + dof + col)] =
+                node_block[static_cast<std::size_t>(row * dof + col)];
+        }
+    }
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    viewA->addMatrixEntries(element_dofs,
+                            element_matrix,
+                            assembly::AddMode::Add);
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    auto exact = factory.createVector(n_global);
+    std::fill(exact->localSpan().begin(), exact->localSpan().end(), Real(1.0));
+    exact->updateGhosts();
+    A->mult(*exact, *b);
+
+    // Split a sparse, non-prefix physical Velocity face across both owners.
+    // Native BlockSchur storage must keep these values on K rows 0 and 2 while
+    // padding phi/extension rows 3:7 with zeros.
+    RankOneUpdate update{};
+    update.sigma = Real(25.0);
+    update.active_components = {0, 2};
+    update.prefer_native_face = true;
+    if (rank == 0) {
+        update.v = {{0, Real(0.12)}, {2, Real(-0.07)}};
+    } else {
+        update.v = {{16, Real(0.09)}, {18, Real(0.05)}};
+    }
+    addRankOneContribution(
+        factory, *b, *exact,
+        std::span<const RankOneUpdate>(&update, 1), MPI_COMM_WORLD);
+
+    auto opts = makeFsilsBlockSchurOptions(
+        /*dof_per_node=*/dof,
+        /*primary_components=*/7,
+        /*constraint_components=*/1,
+        FsilsBlockSchurSchurPreconditioner::DiagL,
+        FsilsBlockSchurMomentumApproximation::DiagK);
+    opts.rel_tol = 1e-9;
+    opts.abs_tol = 1e-12;
+    opts.max_iter = 60;
+    opts.krylov_dim = 80;
+    opts.fsils_blockschur_gm_max_iter = 240;
+    opts.fsils_blockschur_cg_max_iter = 240;
+    opts.fsils_blockschur_gm_rel_tol = 1e-12;
+    opts.fsils_blockschur_cg_rel_tol = 1e-12;
+    opts.fsils_residual_check_policy = FsilsResidualCheckPolicy::Always;
+    opts.block_layout->blocks[0].name =
+        "VelocityAuxiliaryComputationalPrimary";
+    opts.block_layout->blocks[1].name = "Pressure";
+
+    auto solver = factory.createLinearSolver(opts);
+    solver->setRankOneUpdates(std::span<const RankOneUpdate>(&update, 1));
+    const auto report = solver->solve(*A, *x, *b);
+    ASSERT_TRUE(report.converged) << report.message;
+    expectSolverReportSane(report, opts.max_iter);
+    expectBlockSchurMetricsPresent(report);
+    EXPECT_EQ(report.message.find("fallback"), std::string::npos)
+        << report.message;
+    EXPECT_LE(report.relative_residual, opts.rel_tol);
+
+    const Real true_relative_residual = fullOperatorRelativeResidual(
+        factory,
+        *A,
+        *x,
+        *b,
+        std::span<const RankOneUpdate>(&update, 1),
+        MPI_COMM_WORLD);
+    EXPECT_LE(true_relative_residual, Real(1e-8));
+
+    const auto global_solution =
+        gatherOwnedGlobalVector(*x, n_global, MPI_COMM_WORLD);
+    ASSERT_EQ(global_solution.size(), static_cast<std::size_t>(n_global));
+    for (const Real value : global_solution) {
+        EXPECT_NEAR(value, Real(1.0), 1e-7);
     }
 }
 

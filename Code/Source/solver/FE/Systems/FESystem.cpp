@@ -46,6 +46,8 @@
 
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/MixedBlockKernelSet.h"
+#include "Forms/MonolithicCellKernel.h"
 #include "Forms/SymbolicDifferentiation.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 
@@ -233,18 +235,38 @@ void mixConstraintRevisionString(std::uint64_t& h,
     return Real(1.0);
 }
 
+#if FE_HAS_MPI
+using AnalysisCommunicator = MPI_Comm;
+#else
+using AnalysisCommunicator = int;
+constexpr AnalysisCommunicator kSerialAnalysisCommunicator = 0;
+#endif
+
+[[nodiscard]] AnalysisCommunicator activeAnalysisCommunicator(
+    const FESystem& system) noexcept
+{
+#if FE_HAS_MPI
+    return system.activeMpiCommunicator();
+#else
+    (void)system;
+    return kSerialAnalysisCommunicator;
+#endif
+}
+
 template <typename T>
-[[nodiscard]] T mpiAllreduceSumIfActive(T value) noexcept
+[[nodiscard]] T mpiAllreduceSumIfActive(
+    T value,
+    AnalysisCommunicator communicator) noexcept
 {
 #if FE_HAS_MPI
     int initialized = 0;
     MPI_Initialized(&initialized);
-    if (!initialized) {
+    if (!initialized || communicator == MPI_COMM_NULL) {
         return value;
     }
 
     int size = 1;
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_size(communicator, &size);
     if (size <= 1) {
         return value;
     }
@@ -252,58 +274,65 @@ template <typename T>
     T global = value;
     if constexpr (std::is_same_v<T, int>) {
         const auto seq = debug::nextMpiCollectiveTraceSeq();
-        debug::traceMpiCollective("before", seq, "FESystem::mpiAllreduceSumIfActive<int>", 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-        MPI_Allreduce(&value, &global, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-        debug::traceMpiCollective("after", seq, "FESystem::mpiAllreduceSumIfActive<int>", 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+        debug::traceMpiCollective("before", seq, "FESystem::mpiAllreduceSumIfActive<int>", 1, MPI_INT, MPI_SUM, communicator);
+        MPI_Allreduce(&value, &global, 1, MPI_INT, MPI_SUM, communicator);
+        debug::traceMpiCollective("after", seq, "FESystem::mpiAllreduceSumIfActive<int>", 1, MPI_INT, MPI_SUM, communicator);
     } else {
         const auto seq = debug::nextMpiCollectiveTraceSeq();
-        debug::traceMpiCollective("before", seq, "FESystem::mpiAllreduceSumIfActive<double>", 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-        MPI_Allreduce(&value, &global, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-        debug::traceMpiCollective("after", seq, "FESystem::mpiAllreduceSumIfActive<double>", 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        debug::traceMpiCollective("before", seq, "FESystem::mpiAllreduceSumIfActive<double>", 1, MPI_DOUBLE, MPI_SUM, communicator);
+        MPI_Allreduce(&value, &global, 1, MPI_DOUBLE, MPI_SUM, communicator);
+        debug::traceMpiCollective("after", seq, "FESystem::mpiAllreduceSumIfActive<double>", 1, MPI_DOUBLE, MPI_SUM, communicator);
     }
     return global;
 #else
+    (void)communicator;
     return value;
 #endif
 }
 
 #if FE_HAS_MPI
-[[nodiscard]] bool mpiWorldActiveForAnalysis() noexcept
+[[nodiscard]] bool mpiCommunicatorActiveForAnalysis(
+    AnalysisCommunicator communicator) noexcept
 {
     int initialized = 0;
     MPI_Initialized(&initialized);
-    if (!initialized) {
+    if (!initialized || communicator == MPI_COMM_NULL) {
         return false;
     }
     int size = 1;
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_size(communicator, &size);
     return size > 1;
 }
 
-[[nodiscard]] std::uint64_t mpiSumUint64(std::uint64_t value) noexcept
+[[nodiscard]] std::uint64_t mpiSumUint64(
+    std::uint64_t value,
+    AnalysisCommunicator communicator) noexcept
 {
-    if (!mpiWorldActiveForAnalysis()) {
+    if (!mpiCommunicatorActiveForAnalysis(communicator)) {
         return value;
     }
     unsigned long long local = static_cast<unsigned long long>(value);
     unsigned long long global = local;
     const auto seq = debug::nextMpiCollectiveTraceSeq();
-    debug::traceMpiCollective("before", seq, "FESystem::mpiSumUint64", 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(&local, &global, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
-    debug::traceMpiCollective("after", seq, "FESystem::mpiSumUint64", 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+    debug::traceMpiCollective("before", seq, "FESystem::mpiSumUint64", 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, communicator);
+    MPI_Allreduce(&local, &global, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, communicator);
+    debug::traceMpiCollective("after", seq, "FESystem::mpiSumUint64", 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, communicator);
     return static_cast<std::uint64_t>(global);
 }
 
-[[nodiscard]] double mpiReduceDouble(double value, MPI_Op op) noexcept
+[[nodiscard]] double mpiReduceDouble(
+    double value,
+    MPI_Op op,
+    AnalysisCommunicator communicator) noexcept
 {
-    if (!mpiWorldActiveForAnalysis()) {
+    if (!mpiCommunicatorActiveForAnalysis(communicator)) {
         return value;
     }
     double global = value;
     const auto seq = debug::nextMpiCollectiveTraceSeq();
-    debug::traceMpiCollective("before", seq, "FESystem::mpiReduceDouble", 1, MPI_DOUBLE, op, MPI_COMM_WORLD);
-    MPI_Allreduce(&value, &global, 1, MPI_DOUBLE, op, MPI_COMM_WORLD);
-    debug::traceMpiCollective("after", seq, "FESystem::mpiReduceDouble", 1, MPI_DOUBLE, op, MPI_COMM_WORLD);
+    debug::traceMpiCollective("before", seq, "FESystem::mpiReduceDouble", 1, MPI_DOUBLE, op, communicator);
+    MPI_Allreduce(&value, &global, 1, MPI_DOUBLE, op, communicator);
+    debug::traceMpiCollective("after", seq, "FESystem::mpiReduceDouble", 1, MPI_DOUBLE, op, communicator);
     return global;
 }
 #endif
@@ -750,7 +779,8 @@ findAnalysisSaddlePairFromContributions(
     const analysis::SparseRowScanSource& source,
     const AnalysisSaddlePair& pair,
     const std::unordered_set<GlobalIndex>& constrained_dofs,
-    Real tolerance)
+    Real tolerance,
+    AnalysisCommunicator communicator)
 {
     CouplingMatrixStats stats;
     source.forEachLocalRow(
@@ -821,27 +851,32 @@ findAnalysisSaddlePairFromContributions(
         });
 
 #if FE_HAS_MPI
-    stats.active_multiplier_rows = mpiSumUint64(stats.active_multiplier_rows);
-    stats.active_primary_rows = mpiSumUint64(stats.active_primary_rows);
+    stats.active_multiplier_rows =
+        mpiSumUint64(stats.active_multiplier_rows, communicator);
+    stats.active_primary_rows =
+        mpiSumUint64(stats.active_primary_rows, communicator);
     stats.multiplier_rows_with_primary_entries =
-        mpiSumUint64(stats.multiplier_rows_with_primary_entries);
+        mpiSumUint64(stats.multiplier_rows_with_primary_entries, communicator);
     stats.primary_rows_with_multiplier_entries =
-        mpiSumUint64(stats.primary_rows_with_multiplier_entries);
+        mpiSumUint64(stats.primary_rows_with_multiplier_entries, communicator);
     stats.primary_rows_with_diagonal =
-        mpiSumUint64(stats.primary_rows_with_diagonal);
-    stats.nonfinite_entries = mpiSumUint64(stats.nonfinite_entries);
+        mpiSumUint64(stats.primary_rows_with_diagonal, communicator);
+    stats.nonfinite_entries =
+        mpiSumUint64(stats.nonfinite_entries, communicator);
     stats.multiplier_min_row_norm =
-        mpiReduceDouble(stats.multiplier_min_row_norm, MPI_MIN);
+        mpiReduceDouble(stats.multiplier_min_row_norm, MPI_MIN, communicator);
     stats.primary_min_row_norm =
-        mpiReduceDouble(stats.primary_min_row_norm, MPI_MIN);
+        mpiReduceDouble(stats.primary_min_row_norm, MPI_MIN, communicator);
     stats.multiplier_coupling_frob_sq =
-        mpiReduceDouble(stats.multiplier_coupling_frob_sq, MPI_SUM);
+        mpiReduceDouble(stats.multiplier_coupling_frob_sq, MPI_SUM, communicator);
     stats.primary_coupling_frob_sq =
-        mpiReduceDouble(stats.primary_coupling_frob_sq, MPI_SUM);
+        mpiReduceDouble(stats.primary_coupling_frob_sq, MPI_SUM, communicator);
     stats.primary_min_abs_diag =
-        mpiReduceDouble(stats.primary_min_abs_diag, MPI_MIN);
+        mpiReduceDouble(stats.primary_min_abs_diag, MPI_MIN, communicator);
     stats.primary_max_abs_diag =
-        mpiReduceDouble(stats.primary_max_abs_diag, MPI_MAX);
+        mpiReduceDouble(stats.primary_max_abs_diag, MPI_MAX, communicator);
+#else
+    (void)communicator;
 #endif
 
     if (!std::isfinite(stats.multiplier_min_row_norm)) {
@@ -858,7 +893,8 @@ findAnalysisSaddlePairFromContributions(
 
 [[nodiscard]] SparseRankEstimate estimateSparseRankFromRows(
     const analysis::SparseRowScanSource& source,
-    const std::unordered_set<GlobalIndex>& constrained_dofs)
+    const std::unordered_set<GlobalIndex>& constrained_dofs,
+    AnalysisCommunicator communicator)
 {
     SparseRankEstimate estimate;
     source.forEachLocalRow(
@@ -932,18 +968,25 @@ findAnalysisSaddlePairFromContributions(
 
 #if FE_HAS_MPI
     if (source.isDistributed()) {
-        estimate.row_count = mpiSumUint64(estimate.row_count);
-        estimate.estimated_rank = mpiSumUint64(estimate.estimated_rank);
-        estimate.nullity = mpiSumUint64(estimate.nullity);
-        estimate.near_zero_row_count = mpiSumUint64(estimate.near_zero_row_count);
+        estimate.row_count = mpiSumUint64(estimate.row_count, communicator);
+        estimate.estimated_rank =
+            mpiSumUint64(estimate.estimated_rank, communicator);
+        estimate.nullity = mpiSumUint64(estimate.nullity, communicator);
+        estimate.near_zero_row_count =
+            mpiSumUint64(estimate.near_zero_row_count, communicator);
         estimate.near_zero_pivot_count =
-            mpiSumUint64(estimate.near_zero_pivot_count);
+            mpiSumUint64(estimate.near_zero_pivot_count, communicator);
         estimate.matrix_norm_estimate =
             static_cast<Real>(mpiReduceDouble(estimate.matrix_norm_estimate,
-                                              MPI_MAX));
+                                              MPI_MAX,
+                                              communicator));
         estimate.tolerance =
-            static_cast<Real>(mpiReduceDouble(estimate.tolerance, MPI_MAX));
+            static_cast<Real>(mpiReduceDouble(estimate.tolerance,
+                                              MPI_MAX,
+                                              communicator));
     }
+#else
+    (void)communicator;
 #endif
     return estimate;
 }
@@ -1858,7 +1901,9 @@ struct MeshScaleStats {
     std::uint64_t sample_count{0u};
 };
 
-[[nodiscard]] MeshScaleStats meshScaleStats(const assembly::IMeshAccess* mesh)
+[[nodiscard]] MeshScaleStats meshScaleStats(
+    const assembly::IMeshAccess* mesh,
+    AnalysisCommunicator communicator)
 {
     MeshScaleStats stats;
     if (mesh == nullptr) {
@@ -1879,11 +1924,13 @@ struct MeshScaleStats {
         }
     });
 #if FE_HAS_MPI
-    stats.sample_count = mpiSumUint64(stats.sample_count);
+    stats.sample_count = mpiSumUint64(stats.sample_count, communicator);
     stats.h_min = static_cast<Real>(mpiReduceDouble(
-        static_cast<double>(stats.h_min), MPI_MIN));
+        static_cast<double>(stats.h_min), MPI_MIN, communicator));
     stats.h_max = static_cast<Real>(mpiReduceDouble(
-        static_cast<double>(stats.h_max), MPI_MAX));
+        static_cast<double>(stats.h_max), MPI_MAX, communicator));
+#else
+    (void)communicator;
 #endif
     stats.available = stats.sample_count > 0u &&
                       std::isfinite(static_cast<double>(stats.h_min)) &&
@@ -2025,7 +2072,8 @@ template <std::size_t N>
 [[nodiscard]] CoefficientSampleStats sampleCoefficientNode(
     const RuntimeCoefficientNode& coefficient,
     const assembly::IMeshAccess* mesh,
-    const SystemStateView* state)
+    const SystemStateView* state,
+    AnalysisCommunicator communicator)
 {
     CoefficientSampleStats stats;
     if (coefficient.node == nullptr || mesh == nullptr) {
@@ -2069,18 +2117,20 @@ template <std::size_t N>
     });
 
 #if FE_HAS_MPI
-    stats.sample_count = mpiSumUint64(stats.sample_count);
-    stats.nonfinite_count = mpiSumUint64(stats.nonfinite_count);
+    stats.sample_count = mpiSumUint64(stats.sample_count, communicator);
+    stats.nonfinite_count = mpiSumUint64(stats.nonfinite_count, communicator);
     stats.symmetry_violation_count =
-        mpiSumUint64(stats.symmetry_violation_count);
+        mpiSumUint64(stats.symmetry_violation_count, communicator);
     stats.min_value = static_cast<Real>(mpiReduceDouble(
-        static_cast<double>(stats.min_value), MPI_MIN));
+        static_cast<double>(stats.min_value), MPI_MIN, communicator));
     stats.max_value = static_cast<Real>(mpiReduceDouble(
-        static_cast<double>(stats.max_value), MPI_MAX));
+        static_cast<double>(stats.max_value), MPI_MAX, communicator));
     stats.min_abs_positive = static_cast<Real>(mpiReduceDouble(
-        static_cast<double>(stats.min_abs_positive), MPI_MIN));
+        static_cast<double>(stats.min_abs_positive), MPI_MIN, communicator));
     stats.max_abs = static_cast<Real>(mpiReduceDouble(
-        static_cast<double>(stats.max_abs), MPI_MAX));
+        static_cast<double>(stats.max_abs), MPI_MAX, communicator));
+#else
+    (void)communicator;
 #endif
 
     if (!std::isfinite(static_cast<double>(stats.min_value))) {
@@ -2101,7 +2151,8 @@ makeCoefficientSummaryFromRuntimeNode(
     const analysis::ContributionDescriptor& contribution,
     const OperatorTag& fallback_op,
     const assembly::IMeshAccess* mesh,
-    const SystemStateView* state)
+    const SystemStateView* state,
+    AnalysisCommunicator communicator)
 {
     constexpr Real tolerance = static_cast<Real>(1.0e-12);
 
@@ -2126,7 +2177,8 @@ makeCoefficientSummaryFromRuntimeNode(
         summary.symmetry = analysis::SymmetryClass::Unknown;
     }
 
-    const auto stats = sampleCoefficientNode(coefficient, mesh, state);
+    const auto stats =
+        sampleCoefficientNode(coefficient, mesh, state, communicator);
     if (stats.sample_count > 0u) {
         summary.min_eigenvalue = stats.min_value;
         summary.max_eigenvalue = stats.max_value;
@@ -2477,7 +2529,8 @@ buildRuntimeCoefficientSummaries(
     const OperatorTag& op,
     const ParameterRegistry& parameter_registry,
     const assembly::IMeshAccess* mesh,
-    const SystemStateView* state)
+    const SystemStateView* state,
+    AnalysisCommunicator communicator)
 {
     std::vector<analysis::CoefficientPropertySummary> out;
 
@@ -2497,7 +2550,8 @@ buildRuntimeCoefficientSummaries(
                                                       contribution,
                                                       op,
                                                       mesh,
-                                                      state));
+                                                      state,
+                                                      communicator));
         }
         if (contribution.source_expression) {
             auto scan = analysis::scanFormExpr(*contribution.source_expression);
@@ -2790,7 +2844,8 @@ void applyPowerRange(Real& min_value,
     const std::unordered_map<std::string, std::pair<Real, Real>>&
         coefficient_abs_ranges,
     const assembly::IMeshAccess* mesh,
-    const SystemStateView* state)
+    const SystemStateView* state,
+    AnalysisCommunicator communicator)
 {
     analysis::ParameterScaleSummary summary;
     summary.nondimensional_parameter_id = std::move(id);
@@ -2810,7 +2865,7 @@ void applyPowerRange(Real& min_value,
         ? static_cast<Real>(0)
         : static_cast<Real>(1);
 
-    const auto h_stats = meshScaleStats(mesh);
+    const auto h_stats = meshScaleStats(mesh, communicator);
     if (h_stats.available) {
         applyPowerRange(summary.min_scale_value,
                         summary.max_scale_value,
@@ -2892,7 +2947,9 @@ void applyPowerRange(Real& min_value,
 }
 
 [[nodiscard]] std::optional<analysis::MeshGeometryQualitySummary>
-buildMeshGeometryQualitySummary(const assembly::IMeshAccess& mesh)
+buildMeshGeometryQualitySummary(
+    const assembly::IMeshAccess& mesh,
+    AnalysisCommunicator communicator)
 {
     constexpr Real quality_threshold = static_cast<Real>(100.0);
 
@@ -3007,18 +3064,23 @@ buildMeshGeometryQualitySummary(const assembly::IMeshAccess& mesh)
     Real global_max_condition = local_max_condition;
 
 #if FE_HAS_MPI
-    global_valid = mpiSumUint64(global_valid);
-    global_inverted = mpiSumUint64(global_inverted);
-    global_poor = mpiSumUint64(global_poor);
+    global_valid = mpiSumUint64(global_valid, communicator);
+    global_inverted = mpiSumUint64(global_inverted, communicator);
+    global_poor = mpiSumUint64(global_poor, communicator);
     global_min_jacobian =
         static_cast<Real>(mpiReduceDouble(static_cast<double>(global_min_jacobian),
-                                          MPI_MIN));
+                                          MPI_MIN,
+                                          communicator));
     global_max_jacobian =
         static_cast<Real>(mpiReduceDouble(static_cast<double>(global_max_jacobian),
-                                          MPI_MAX));
+                                          MPI_MAX,
+                                          communicator));
     global_max_condition =
         static_cast<Real>(mpiReduceDouble(static_cast<double>(global_max_condition),
-                                          MPI_MAX));
+                                          MPI_MAX,
+                                          communicator));
+#else
+    (void)communicator;
 #endif
 
     if (global_valid == 0u ||
@@ -3267,11 +3329,13 @@ public:
     FESystemAnalysisMeshAccess(const assembly::IMeshAccess* mesh,
                                const analysis::AnalysisSummarySet* summaries,
                                std::string revision,
-                               bool pending)
+                               bool pending,
+                               AnalysisCommunicator communicator)
         : mesh_(mesh),
           summaries_(summaries),
           revision_(std::move(revision)),
-          pending_(pending)
+          pending_(pending),
+          communicator_(communicator)
     {}
 
     [[nodiscard]] bool evidencePending() const noexcept override {
@@ -3299,7 +3363,8 @@ public:
         if (mesh_ == nullptr) {
             return std::nullopt;
         }
-        auto summary = buildMeshGeometryQualitySummary(*mesh_);
+        auto summary =
+            buildMeshGeometryQualitySummary(*mesh_, communicator_);
         if (!summary) {
             return std::nullopt;
         }
@@ -3327,6 +3392,7 @@ private:
     const analysis::AnalysisSummarySet* summaries_{nullptr};
     std::string revision_;
     bool pending_{false};
+    AnalysisCommunicator communicator_{};
 };
 
 class FESystemAnalysisSolverAccess final : public analysis::SolverAccess {
@@ -3815,7 +3881,8 @@ void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
     std::span<const std::pair<GlobalIndex, Real>> input_gradient,
     Real doutput_dinput,
     const dofs::IndexSet& owned_dofs,
-    backends::RankOneUpdate& promoted)
+    backends::RankOneUpdate& promoted,
+    AnalysisCommunicator communicator)
 {
     auto log_failure = [&](const std::string& reason) {
         if (!monolithicDirectTraceEnabled()) {
@@ -3859,11 +3926,15 @@ void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
             cross += dRdQ * it->second;
         }
     }
-    const int global_q_has = mpiAllreduceSumIfActive(q_map.empty() ? 0 : 1);
-    const int global_dR_has = mpiAllreduceSumIfActive(dR_map.empty() ? 0 : 1);
-    const Real global_q_norm_sq = mpiAllreduceSumIfActive(q_norm_sq);
-    const Real global_dRdQ_norm_sq = mpiAllreduceSumIfActive(dRdQ_norm_sq);
-    const Real global_cross = mpiAllreduceSumIfActive(cross);
+    const int global_q_has =
+        mpiAllreduceSumIfActive(q_map.empty() ? 0 : 1, communicator);
+    const int global_dR_has =
+        mpiAllreduceSumIfActive(dR_map.empty() ? 0 : 1, communicator);
+    const Real global_q_norm_sq =
+        mpiAllreduceSumIfActive(q_norm_sq, communicator);
+    const Real global_dRdQ_norm_sq =
+        mpiAllreduceSumIfActive(dRdQ_norm_sq, communicator);
+    const Real global_cross = mpiAllreduceSumIfActive(cross, communicator);
     if (global_q_has == 0 || global_dR_has == 0 ||
         !(global_q_norm_sq > kTol * kTol) ||
         !(global_dRdQ_norm_sq > kTol * kTol)) {
@@ -3890,7 +3961,8 @@ void scatterAuxiliaryFlatEntity(const AuxiliaryBlockStorage& blk,
     }
 
     constexpr Real kRelTolSq = static_cast<Real>(1e-4);
-    const Real residual_sq = mpiAllreduceSumIfActive(local_residual_sq);
+    const Real residual_sq =
+        mpiAllreduceSumIfActive(local_residual_sq, communicator);
     if (!(residual_sq / std::max(global_dRdQ_norm_sq, Real(1e-30)) <= kRelTolSq)) {
         if (monolithicDirectTraceEnabled()) {
             std::ostringstream oss;
@@ -4687,6 +4759,27 @@ FESystem::~FESystem() = default;
 FESystem::FESystem(FESystem&&) noexcept = default;
 FESystem& FESystem::operator=(FESystem&&) noexcept = default;
 
+#if FE_HAS_MPI
+MPI_Comm FESystem::activeMpiCommunicator() const noexcept
+{
+    if (is_setup_) {
+        const auto communicator = dof_handler_.mpiComm();
+        if (communicator != MPI_COMM_NULL) {
+            return communicator;
+        }
+    }
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH && defined(MESH_HAS_MPI)
+    if (mesh_) {
+        const auto communicator = mesh_->mpi_comm();
+        if (communicator != MPI_COMM_NULL) {
+            return communicator;
+        }
+    }
+#endif
+    return MPI_COMM_SELF;
+}
+#endif
+
 std::uint64_t FESystem::systemLayoutRevision() const noexcept
 {
     std::uint64_t key = 1469598103934665603ULL;
@@ -4997,7 +5090,10 @@ void FESystem::invalidateSetup() noexcept
     global_kernel_state_provider_.reset();
     sparsity_by_op_.clear();
     distributed_sparsity_by_op_.clear();
+    base_sparsity_by_op_.clear();
+    base_distributed_sparsity_by_op_.clear();
     dof_permutation_.reset();
+    distributed_sparsity_dof_per_node_ = 0;
     parameter_registry_.clear();
     use_backend_row_ownership_for_assembly_ = false;
     if (operator_backends_) {
@@ -5091,6 +5187,14 @@ void FESystem::addInvariantDomainDescriptor(analysis::InvariantDomainDescriptor 
     invalidateAnalysisCache();
 }
 
+void FESystem::registerGeneratedEmbeddedInterfaceMarker(InterfaceId interface_marker) {
+    if (interface_marker < 0) {
+        return;
+    }
+    generated_embedded_interface_markers_.insert(interface_marker);
+    invalidateAnalysisCache();
+}
+
 void FESystem::setAnalysisSolverOptions(backends::SolverOptions options) {
     analysis_solver_options_.emplace(std::move(options));
     invalidateAnalysisCache();
@@ -5133,6 +5237,8 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
     }
 
     assembled_tangent_analysis_summary_attempted_ = true;
+    const auto analysis_communicator =
+        activeAnalysisCommunicator(*this);
     analysis_summaries_.reset();
     if (registered_analysis_summaries_) {
         analysis_summaries_.emplace(*registered_analysis_summaries_);
@@ -5163,7 +5269,7 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
     scan_options.symmetry_tolerance = static_cast<Real>(1.0e-10);
 #if FE_HAS_MPI
     if (source->isDistributed()) {
-        scan_options.mpi_comm = MPI_COMM_WORLD;
+        scan_options.mpi_comm = analysis_communicator;
     }
 #endif
 
@@ -5203,7 +5309,8 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
         (plan.has(analysis::AnalysisSummaryKind::NullspaceDegeneracy) ||
          plan.has(analysis::AnalysisSummaryKind::ReducedMatrix) ||
          plan.has(analysis::AnalysisSummaryKind::InfSupEstimate))) {
-        const auto rank = estimateSparseRankFromRows(*source, constrained_lookup);
+        const auto rank = estimateSparseRankFromRows(
+            *source, constrained_lookup, analysis_communicator);
         summaries.nullspace_degeneracies.push_back(
             makeNullspaceDegeneracySummary(
                 op,
@@ -5236,7 +5343,8 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
         coupling_stats = scanCouplingStats(*source,
                                            *saddle_pair,
                                            constrained_lookup,
-                                           static_cast<Real>(1.0e-12));
+                                           static_cast<Real>(1.0e-12),
+                                           analysis_communicator);
     }
 
     if (saddle_pair && coupling_stats &&
@@ -5391,7 +5499,8 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
     if (mesh_access_ &&
         (plan.has(analysis::AnalysisSummaryKind::MeshGeometryQuality) ||
          matrix_summaries_generated)) {
-        if (auto summary = buildMeshGeometryQualitySummary(*mesh_access_)) {
+        if (auto summary = buildMeshGeometryQualitySummary(
+                *mesh_access_, analysis_communicator)) {
             summaries.mesh_geometry_quality.push_back(std::move(*summary));
         }
     }
@@ -5406,7 +5515,8 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
             op,
             parameter_registry_,
             mesh_access_.get(),
-            state);
+            state,
+            analysis_communicator);
     }
     if (plan.has(analysis::AnalysisSummaryKind::CoefficientProperties)) {
         for (auto& summary : runtime_coefficient_summaries) {
@@ -5479,7 +5589,8 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
                             parameter_registry_,
                             coefficient_abs_ranges,
                             mesh_access_.get(),
-                            state));
+                            state,
+                            analysis_communicator));
                 }
             } else {
                 auto id = contributionIdentity(contribution, op) + ":scale";
@@ -5661,7 +5772,7 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
     invalidateAnalysisCache();
     if (analysis_summaries_) {
 #if FE_HAS_MPI
-        if (mpiWorldActiveForAnalysis()) {
+        if (mpiCommunicatorActiveForAnalysis(analysis_communicator)) {
             return analysis_summaries_->totalSummaryCount() > registered_summary_count;
         }
 #endif
@@ -6009,7 +6120,8 @@ analysis::ProblemAnalysisReport FESystem::runProblemAnalysis() const {
     FESystemAnalysisMeshAccess mesh_access(mesh_access_.get(),
                                            summaries,
                                            mesh_revision.str(),
-                                           mesh_access_ == nullptr);
+                                           mesh_access_ == nullptr,
+                                           activeAnalysisCommunicator(*this));
     FESystemAnalysisSolverAccess solver_access(summaries,
                                                assembled_backend_pending);
     return analyzer.analyzeWithEvidenceSynthesis(ctx,
@@ -6489,14 +6601,17 @@ GeometricNonlinearityTransactionEvent FESystem::acceptGeometricNonlinearityState
     updateCurrentCoordinatesFromMeshDisplacement(state, options);
 
     if (mesh_coordinate_backup_.has_value()) {
-        mesh_coordinate_backup_.reset();
-        mesh_motion_field_backup_.clear();
+        // The coordinate update above already emitted its accepted-state
+        // notification.  Retain the rollback snapshot through this second,
+        // commit notification as well, in case any callback throws.
         geometry_transaction_last_revision_ = operatorRevisionSnapshot();
         for (const auto& hook : geometry_transaction_callbacks_) {
             if (hook.callback) {
                 hook.callback(geometryTransactionDiagnostics());
             }
         }
+        mesh_coordinate_backup_.reset();
+        mesh_motion_field_backup_.clear();
     }
     event.geometry_state = geometry_transaction_state_;
 #else
@@ -6505,14 +6620,16 @@ GeometricNonlinearityTransactionEvent FESystem::acceptGeometricNonlinearityState
     return event;
 }
 
-GeometricNonlinearityTransactionEvent FESystem::rollbackGeometricNonlinearityTrial()
+GeometricNonlinearityTransactionEvent
+FESystem::rollbackGeometricNonlinearityTrial(bool force)
 {
     GeometricNonlinearityTransactionEvent event{};
     event.update_point = GeometricNonlinearityUpdatePoint::RolledBackTrial;
     event.line_search_rejected = true;
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     event.geometry_state = geometry_transaction_state_;
-    if (requiresLineSearchRollback(geometric_nonlinearity_policy_, event) &&
+    if ((force ||
+         requiresLineSearchRollback(geometric_nonlinearity_policy_, event)) &&
         meshCoordinateTransactionActive()) {
         rollbackMeshCoordinateTransaction();
         event.geometry_state = geometry_transaction_state_;
@@ -6706,13 +6823,16 @@ void FESystem::commitMeshCoordinateTransaction()
     geometry_transaction_state_ = GeometryTransactionState::Accepted;
     geometry_transaction_last_event_ = "commit";
     geometry_transaction_last_revision_ = operatorRevisionSnapshot();
-    mesh_coordinate_backup_.reset();
-    mesh_motion_field_backup_.clear();
     for (const auto& hook : geometry_transaction_callbacks_) {
         if (hook.callback) {
             hook.callback(geometryTransactionDiagnostics());
         }
     }
+    // A callback failure aborts the commit.  Retain both backups until every
+    // observer has completed so the caller can still roll the transaction
+    // back to its exact pre-trial coordinate and motion-field state.
+    mesh_coordinate_backup_.reset();
+    mesh_motion_field_backup_.clear();
 }
 
 void FESystem::rollbackMeshCoordinateTransaction()
@@ -6923,6 +7043,16 @@ void FESystem::addGeometryTransactionCallback(GeometryTransactionCallback hook)
     FE_THROW_IF(!hook.callback, InvalidArgumentException,
                 "FESystem::addGeometryTransactionCallback: callback must be callable");
     geometry_transaction_callbacks_.push_back(std::move(hook));
+}
+
+void FESystem::addCutIntegrationContextUpdateCallback(
+    CutIntegrationContextUpdateCallback hook)
+{
+    FE_THROW_IF(hook.name.empty(), InvalidArgumentException,
+                "FESystem::addCutIntegrationContextUpdateCallback: hook name must not be empty");
+    FE_THROW_IF(!hook.callback, InvalidArgumentException,
+                "FESystem::addCutIntegrationContextUpdateCallback: callback must be callable");
+    cut_integration_context_update_callbacks_.push_back(std::move(hook));
 }
 
 namespace {
@@ -9468,6 +9598,31 @@ void gatherTimeDerivativeFieldsFromKernel(const assembly::AssemblyKernel* kernel
 
     if (const auto* k = dynamic_cast<const forms::jit::JITKernelWrapper*>(kernel)) {
         gatherTimeDerivativeFieldsFromKernel(&k->fallbackKernel(), kernel_trial_field, out);
+        return;
+    }
+
+    // Cell fusion replaces the individually registered cell kernels with a
+    // single aggregate kernel.  Its operator-registry entry carries only the
+    // first block's trial field, so inspect every fallback block with that
+    // block's own trial-field identity.  Otherwise a transient field in a
+    // fused coupled formulation (for example dt(phi) in level-set transport
+    // coupled to an algebraic extension velocity) is incorrectly classified
+    // as algebraic by generalized-alpha time integration.
+    if (const auto* k = dynamic_cast<const forms::MonolithicCellKernel*>(kernel)) {
+        for (std::size_t i = 0; i < k->numBlocks(); ++i) {
+            const auto& block = k->blockSpec(i);
+            gatherTimeDerivativeFieldsFromKernel(
+                block.fallback_kernel.get(), block.trial_field, out);
+        }
+        return;
+    }
+
+    if (const auto* k = dynamic_cast<const forms::MixedBlockKernelSet*>(kernel)) {
+        for (std::size_t i = 0; i < k->numBlocks(); ++i) {
+            const auto& block = k->blockSpec(i);
+            gatherTimeDerivativeFieldsFromKernel(
+                block.fallback_kernel.get(), block.trial_field, out);
+        }
         return;
     }
 
@@ -14603,7 +14758,9 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                         // recover the exact native face rank-one path when
                                         // appropriate.
                                         const bool global_q_u_nonempty =
-                                            mpiAllreduceSumIfActive(q_u.empty() ? 0 : 1) > 0;
+                                            mpiAllreduceSumIfActive(
+                                                q_u.empty() ? 0 : 1,
+                                                activeAnalysisCommunicator(*this)) > 0;
                                         if (!entry.lower_to_direct_only && global_q_u_nonempty) {
                                             if (monolithicDirectTraceEnabled()) {
                                                 std::ostringstream oss;
@@ -14748,7 +14905,8 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                             q_u.data(), q_u.size()),
                                         coupling_record.dO_dI[static_cast<std::size_t>(active_input_col)],
                                         owned_dofs,
-                                        promoted)) {
+                                        promoted,
+                                        activeAnalysisCommunicator(*this))) {
                                     last_rank_one_updates_.push_back(std::move(promoted));
                                     promoted_direct_only = true;
                                     if (monolithicDirectTraceEnabled()) {
@@ -14813,7 +14971,9 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
     }
 
     const int global_local_condensed_record_count =
-        mpiAllreduceSumIfActive(static_cast<int>(last_local_condensed_records_.size()));
+        mpiAllreduceSumIfActive(
+            static_cast<int>(last_local_condensed_records_.size()),
+            activeAnalysisCommunicator(*this));
     if (global_local_condensed_record_count > 0) {
         const auto& owned_dofs = dof_handler_.getPartition().locallyOwned();
 
@@ -15524,7 +15684,7 @@ FESystem::resolveAuxiliaryDeploymentScope_(DeployedAuxEntry& entry)
                     int mpi_initialized = 0;
                     MPI_Initialized(&mpi_initialized);
                     if (mpi_initialized) {
-                        MPI_Comm comm = is_setup_ ? dof_handler_.mpiComm() : MPI_COMM_WORLD;
+                        MPI_Comm comm = activeMpiCommunicator();
                         int comm_size = 1;
                         MPI_Comm_size(comm, &comm_size);
                         if (comm_size > 1) {
@@ -15998,10 +16158,9 @@ void FESystem::ensureAuxiliaryRegionLookupCache_()
 #if FE_HAS_MPI
         int mpi_initialized = 0;
         MPI_Initialized(&mpi_initialized);
-        MPI_Comm comm = MPI_COMM_WORLD;
+        MPI_Comm comm = activeMpiCommunicator();
         int comm_size = 1;
         if (mpi_initialized) {
-            comm = is_setup_ ? dof_handler_.mpiComm() : MPI_COMM_WORLD;
             MPI_Comm_rank(comm, &rank);
             MPI_Comm_size(comm, &comm_size);
         }
@@ -16627,7 +16786,7 @@ int FESystem::nodeAuxiliaryOwnerRank_(std::size_t node_id) const
     if (mpi_initialized) {
         int rank = 0;
         int comm_size = 1;
-        MPI_Comm comm = is_setup_ ? dof_handler_.mpiComm() : MPI_COMM_WORLD;
+        MPI_Comm comm = activeMpiCommunicator();
         MPI_Comm_rank(comm, &rank);
         MPI_Comm_size(comm, &comm_size);
         if (comm_size <= 1) {
@@ -18840,7 +18999,9 @@ void FESystem::inferQuadraturePointLayout_(DeployedAuxEntry& entry)
     }
 
     const int global_covered_cells =
-        mpiAllreduceSumIfActive(static_cast<int>(entry.entity_map.size()));
+        mpiAllreduceSumIfActive(
+            static_cast<int>(entry.entity_map.size()),
+            activeAnalysisCommunicator(*this));
     if (entry.entity_map.empty()) {
         FE_THROW_IF(global_covered_cells <= 0,
                     InvalidStateException,

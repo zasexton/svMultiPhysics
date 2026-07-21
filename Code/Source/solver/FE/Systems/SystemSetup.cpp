@@ -67,6 +67,7 @@
 #include <limits>
 #include <optional>
 #include <numeric>
+#include <sstream>
 #include <thread>
 #include <type_traits>
 #include <tuple>
@@ -126,6 +127,30 @@ void insertSortedUniqueIndex(std::vector<GlobalIndex>& values, GlobalIndex value
     if (it == values.end() || *it != value) {
         values.insert(it, value);
     }
+}
+
+[[nodiscard]] std::uint64_t countMasterBearingConstraintLines(
+    const constraints::AffineConstraints& constraints)
+{
+    std::uint64_t n_lines = 0;
+    constraints.forEach([&](const constraints::AffineConstraints::ConstraintView& view) {
+        if (!view.entries.empty()) {
+            ++n_lines;
+        }
+    });
+    return n_lines;
+}
+
+[[nodiscard]] const char* distributedDofIndexingName(
+    sparsity::DistributedSparsityPattern::DofIndexing indexing) noexcept
+{
+    switch (indexing) {
+    case sparsity::DistributedSparsityPattern::DofIndexing::Natural:
+        return "Natural";
+    case sparsity::DistributedSparsityPattern::DofIndexing::NodalInterleaved:
+        return "NodalInterleaved";
+    }
+    return "Unknown";
 }
 
 [[nodiscard]] int referenceVertexCount(ElementType type) noexcept;
@@ -380,6 +405,9 @@ void getCellCornerNodes(const assembly::IMeshAccess& access,
     partition.setGlobalSize(local_handler.getNumDofs());
     global_handler.setPartition(std::move(partition));
     global_handler.setRankInfo(options.my_rank, options.world_size);
+#if FE_HAS_MPI
+    global_handler.setMpiComm(options.mpi_comm);
+#endif
 
     if (const auto* local_entities = local_handler.getEntityDofMap()) {
         auto global_entities = std::make_unique<dofs::EntityDofMap>();
@@ -575,6 +603,122 @@ void hashConsistencySpan(std::uint64_t& hash, std::span<const T> values)
     debug::traceMpiCollective("before", seq, "SystemSetup::gaugeResolutionConsistent.max_hash", 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
     MPI_Allreduce(&local_hash, &max_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
     debug::traceMpiCollective("after", seq, "SystemSetup::gaugeResolutionConsistent.max_hash", 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
+
+    return min_count == max_count && min_hash == max_hash;
+}
+
+[[nodiscard]] bool gaugeCandidateDeclarationsConsistentAcrossRanks(
+    const gauge::GaugeRegistry* registry,
+    MPI_Comm comm)
+{
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (!mpi_initialized) {
+        return true;
+    }
+
+    int world_size = 1;
+    MPI_Comm_size(comm, &world_size);
+    if (world_size <= 1) {
+        return true;
+    }
+
+    struct CandidateKey {
+        int field{0};
+        int component{0};
+        int region{0};
+        int family{0};
+        int confidence{0};
+        int source{0};
+
+        [[nodiscard]] bool operator<(const CandidateKey& other) const noexcept
+        {
+            return std::tie(field,
+                            component,
+                            region,
+                            family,
+                            confidence,
+                            source) <
+                   std::tie(other.field,
+                            other.component,
+                            other.region,
+                            other.family,
+                            other.confidence,
+                            other.source);
+        }
+    };
+
+    std::vector<CandidateKey> keys;
+    if (registry != nullptr) {
+        keys.reserve(registry->candidates().size());
+        for (const auto& candidate : registry->candidates()) {
+            keys.push_back(CandidateKey{
+                static_cast<int>(candidate.field),
+                candidate.component,
+                candidate.region,
+                static_cast<int>(candidate.family),
+                static_cast<int>(candidate.confidence),
+                static_cast<int>(candidate.source)});
+        }
+    }
+    std::sort(keys.begin(), keys.end());
+
+    unsigned long long local_hash = kConsistencyHashSeed;
+    local_hash = mixConsistencyHash(
+        local_hash, static_cast<unsigned long long>(keys.size()));
+    for (const auto& key : keys) {
+        local_hash = mixConsistencyHash(
+            local_hash, static_cast<unsigned long long>(key.field));
+        local_hash = mixConsistencyHash(
+            local_hash, static_cast<unsigned long long>(key.component + 4096));
+        local_hash = mixConsistencyHash(
+            local_hash, static_cast<unsigned long long>(key.region + 4096));
+        local_hash = mixConsistencyHash(
+            local_hash, static_cast<unsigned long long>(key.family));
+        local_hash = mixConsistencyHash(
+            local_hash, static_cast<unsigned long long>(key.confidence));
+        local_hash = mixConsistencyHash(
+            local_hash, static_cast<unsigned long long>(key.source));
+    }
+
+    const int local_count = static_cast<int>(keys.size());
+    int min_count = 0;
+    int max_count = 0;
+    auto seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq,
+        "SystemSetup::gaugeCandidatesConsistent.min_count",
+        1, MPI_INT, MPI_MIN, comm);
+    MPI_Allreduce(&local_count, &min_count, 1, MPI_INT, MPI_MIN, comm);
+    debug::traceMpiCollective("after", seq,
+        "SystemSetup::gaugeCandidatesConsistent.min_count",
+        1, MPI_INT, MPI_MIN, comm);
+    seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq,
+        "SystemSetup::gaugeCandidatesConsistent.max_count",
+        1, MPI_INT, MPI_MAX, comm);
+    MPI_Allreduce(&local_count, &max_count, 1, MPI_INT, MPI_MAX, comm);
+    debug::traceMpiCollective("after", seq,
+        "SystemSetup::gaugeCandidatesConsistent.max_count",
+        1, MPI_INT, MPI_MAX, comm);
+
+    unsigned long long min_hash = 0ULL;
+    unsigned long long max_hash = 0ULL;
+    seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq,
+        "SystemSetup::gaugeCandidatesConsistent.min_hash",
+        1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, comm);
+    MPI_Allreduce(&local_hash, &min_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, comm);
+    debug::traceMpiCollective("after", seq,
+        "SystemSetup::gaugeCandidatesConsistent.min_hash",
+        1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, comm);
+    seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq,
+        "SystemSetup::gaugeCandidatesConsistent.max_hash",
+        1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
+    MPI_Allreduce(&local_hash, &max_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
+    debug::traceMpiCollective("after", seq,
+        "SystemSetup::gaugeCandidatesConsistent.max_hash",
+        1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
 
     return min_count == max_count && min_hash == max_hash;
 }
@@ -2621,6 +2765,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         dof_handler_.setDofMap(std::move(monolithic_map));
         dof_handler_.setPartition(std::move(part));
         dof_handler_.setRankInfo(opts.dof_options.my_rank, opts.dof_options.world_size);
+#if FE_HAS_MPI
+        dof_handler_.setMpiComm(opts.dof_options.mpi_comm);
+#endif
         if (merged_entity_map) {
             dof_handler_.setEntityDofMap(std::move(merged_entity_map));
         }
@@ -2848,6 +2995,21 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                             !claim.description.empty() ? claim.description : claim.claim_origin);
     }
 
+#if FE_HAS_MPI
+    {
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (mpi_initialized &&
+            !gaugeCandidateDeclarationsConsistentAcrossRanks(
+                gauge_registry_.get(), dof_handler_.mpiComm())) {
+            FE_THROW(FEException,
+                     "FESystem::setup: GaugeRegistry candidate declarations differ "
+                     "across MPI ranks. Nullspace declarations must be globally "
+                     "consistent before communicator-wide anchoring is resolved.");
+        }
+    }
+#endif
+
     // If the GaugeRegistry has candidates (populated by FormContributionLowerer
     // or by kernel contributions), resolve them
     // against anchoring evidence from the constraints already applied above.
@@ -3004,6 +3166,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 }
                 if (!already) seen_fields.push_back(candidate.field);
             }
+            std::sort(seen_fields.begin(), seen_fields.end());
 
             for (const auto fid : seen_fields) {
                 const auto idx = static_cast<std::size_t>(fid);
@@ -3037,12 +3200,48 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                                 break;
                             }
                         }
+#if FE_HAS_MPI
+                        {
+                            int mpi_initialized = 0;
+                            MPI_Initialized(&mpi_initialized);
+                            if (mpi_initialized) {
+                                int world_size = 1;
+                                MPI_Comm_size(dof_handler_.mpiComm(), &world_size);
+                                if (world_size > 1) {
+                                    const int local_has_dirichlet =
+                                        has_dirichlet ? 1 : 0;
+                                    int global_has_dirichlet = 0;
+                                    const auto seq =
+                                        debug::nextMpiCollectiveTraceSeq();
+                                    debug::traceMpiCollective(
+                                        "before", seq,
+                                        "SystemSetup::global_dirichlet_gauge_anchor",
+                                        1, MPI_INT, MPI_MAX,
+                                        dof_handler_.mpiComm());
+                                    MPI_Allreduce(
+                                        &local_has_dirichlet,
+                                        &global_has_dirichlet,
+                                        1,
+                                        MPI_INT,
+                                        MPI_MAX,
+                                        dof_handler_.mpiComm());
+                                    debug::traceMpiCollective(
+                                        "after", seq,
+                                        "SystemSetup::global_dirichlet_gauge_anchor",
+                                        1, MPI_INT, MPI_MAX,
+                                        dof_handler_.mpiComm());
+                                    has_dirichlet =
+                                        (global_has_dirichlet != 0);
+                                }
+                            }
+                        }
+#endif
                         if (has_dirichlet) {
                             gauge_registry_->addAnchoring(gauge::AnchoringEvidence{
                                 field, comp, -1,
                                 std::nullopt,
                                 gauge::AnchoringVerdict::Anchored,
-                                "StrongDirichlet constraint on DOFs"});
+                                "StrongDirichlet constraint on communicator-global DOFs"});
                         }
                     }
                 };
@@ -3496,6 +3695,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     // ---------------------------------------------------------------------
     sparsity_by_op_.clear();
     distributed_sparsity_by_op_.clear();
+    base_sparsity_by_op_.clear();
+    base_distributed_sparsity_by_op_.clear();
+    distributed_sparsity_dof_per_node_ = 0;
     const auto op_tags = operator_registry_.list();
     const auto n_total_dofs = dof_handler_.getNumDofs();
     const auto n_cells_sparsity = meshAccess().numCells();
@@ -3561,6 +3763,10 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         owned_range = backend_map->owned_range;
         nodal_map = std::move(backend_map);
     }
+    distributed_sparsity_dof_per_node_ =
+        (dist_mode == DistSparsityMode::NodalInterleaved && nodal_map.has_value())
+            ? nodal_map->dof_per_node
+            : 0;
 
     const auto& ghost_set = partition.ghost();
     const auto& relevant_set = partition.locallyRelevant();
@@ -3569,9 +3775,12 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         const auto& def = operator_registry_.get(tag);
         const bool build_serial_pattern =
             opts.retain_serial_sparsity || dist_mode == DistSparsityMode::None || !def.global.empty();
+        const bool keep_active_serial_pattern = build_serial_pattern;
+        const bool build_serial_base_pattern =
+            build_serial_pattern || dist_mode != DistSparsityMode::None;
 
         std::unique_ptr<sparsity::SparsityPattern> pattern;
-        if (build_serial_pattern) {
+        if (build_serial_base_pattern) {
             pattern = std::make_unique<sparsity::SparsityPattern>(
                 n_total_dofs, n_total_dofs);
         }
@@ -3784,6 +3993,15 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 		            };
 
 	        for (const auto& term : def.cells) {
+	            maybe_add_cell_pair(term.test_field, term.trial_field, term.kernel);
+	        }
+	        // Cut-volume terms assemble per-cell blocks over the active side of
+	        // the cut topology. The active cell set tracks the interface as it
+	        // moves, so conservatively treat them as cell terms covering every
+	        // cell; otherwise their writes have no sparsity and backends with
+	        // immutable patterns silently drop them (historically masked by the
+	        // velocity ghost-penalty interior-face fill).
+	        for (const auto& term : def.cut_volumes) {
 	            maybe_add_cell_pair(term.test_field, term.trial_field, term.kernel);
 	        }
 	        for (const auto& term : def.boundary) {
@@ -4245,6 +4463,17 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 	            }
 	        }
 
+        std::unique_ptr<sparsity::SparsityPattern> base_pattern;
+        if (pattern) {
+            base_pattern =
+                std::make_unique<sparsity::SparsityPattern>(pattern->cloneFinalized());
+        }
+        std::unique_ptr<sparsity::DistributedSparsityPattern> base_dist_pattern;
+        if (dist_pattern) {
+            base_dist_pattern = std::make_unique<sparsity::DistributedSparsityPattern>(
+                dist_pattern->cloneFinalized());
+        }
+
 		        if (opts.use_constraints_in_assembly && !affine_constraints_.empty()) {
 		            if (pattern) {
 		                auto query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
@@ -4284,203 +4513,240 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 	            }
 	        }
 
-		        if (pattern) {
-		            pattern->finalize();
-		            sparsity_by_op_.emplace(tag, std::move(pattern));
-		        }
-		        const auto* full_pattern = [&]() -> const sparsity::SparsityPattern* {
-		            auto it = sparsity_by_op_.find(tag);
-		            return (it != sparsity_by_op_.end() && it->second) ? it->second.get() : nullptr;
-		        }();
+        const sparsity::SparsityPattern* full_pattern = nullptr;
+        if (pattern) {
+            pattern->finalize();
+            full_pattern = pattern.get();
+        }
+        const auto* base_full_pattern = base_pattern.get();
 
-		        if (dist_pattern) {
-		            dist_pattern->finalize();
+        auto set_distributed_ghost_rows =
+            [&](sparsity::DistributedSparsityPattern& target,
+                const sparsity::SparsityPattern* row_pattern) {
+                // Store optional ghost-row sparsity using the locally relevant
+                // (owned+ghost) overlap. This is required by overlap-style MPI
+                // backends (e.g. FSILS) so all column nodes referenced by
+                // owned rows are present locally.
+                if (dist_mode == DistSparsityMode::NodalInterleaved) {
+                    FE_THROW_IF(!nodal_map.has_value(), InvalidStateException,
+                                "FESystem::setup: missing nodal mapping for ghost-row sparsity storage");
+                    const auto& nodal = *nodal_map;
+                    const int dof = nodal.dof_per_node;
 
-		            // Store optional ghost-row sparsity using the locally relevant (owned+ghost) overlap.
-		            // This is required by overlap-style MPI backends (e.g., FSILS) so all column nodes
-		            // referenced by owned rows are present locally.
-		            if (dist_mode == DistSparsityMode::NodalInterleaved) {
-		                FE_THROW_IF(!nodal_map.has_value(), InvalidStateException,
-		                            "FESystem::setup: missing nodal mapping for ghost-row sparsity storage");
-		                const auto& nodal = *nodal_map;
-		                const int dof = nodal.dof_per_node;
+                    std::vector<int> ghost_nodes_closed = nodal.ghost_nodes;
+                    for (const auto col_fs : target.getGhostColMap()) {
+                        if (col_fs < 0 || col_fs >= n_total_dofs) {
+                            continue;
+                        }
+                        const int node = static_cast<int>(col_fs / dof);
+                        if (node < 0 || static_cast<GlobalIndex>(node) >= nodal.n_nodes) {
+                            continue;
+                        }
+                        const GlobalIndex first_dof =
+                            static_cast<GlobalIndex>(node) * static_cast<GlobalIndex>(dof);
+                        if (owned_range.contains(first_dof)) {
+                            continue;
+                        }
+                        ghost_nodes_closed.push_back(node);
+                    }
+                    std::sort(ghost_nodes_closed.begin(), ghost_nodes_closed.end());
+                    ghost_nodes_closed.erase(std::unique(ghost_nodes_closed.begin(), ghost_nodes_closed.end()),
+                                             ghost_nodes_closed.end());
 
-		                std::vector<int> ghost_nodes_closed = nodal.ghost_nodes;
-		                for (const auto col_fs : dist_pattern->getGhostColMap()) {
-		                    if (col_fs < 0 || col_fs >= n_total_dofs) {
-		                        continue;
-		                    }
-		                    const int node = static_cast<int>(col_fs / dof);
-		                    if (node < 0 || static_cast<GlobalIndex>(node) >= nodal.n_nodes) {
-		                        continue;
-		                    }
-		                    const GlobalIndex first_dof =
-		                        static_cast<GlobalIndex>(node) * static_cast<GlobalIndex>(dof);
-		                    if (owned_range.contains(first_dof)) {
-		                        continue;
-		                    }
-		                    ghost_nodes_closed.push_back(node);
-		                }
-		                std::sort(ghost_nodes_closed.begin(), ghost_nodes_closed.end());
-		                ghost_nodes_closed.erase(std::unique(ghost_nodes_closed.begin(), ghost_nodes_closed.end()),
-		                                         ghost_nodes_closed.end());
+                    std::vector<unsigned char> ghost_node_in_overlap(
+                        static_cast<std::size_t>(std::max<GlobalIndex>(0, nodal.n_nodes)), 0u);
+                    for (const int node : ghost_nodes_closed) {
+                        if (node >= 0 && static_cast<GlobalIndex>(node) < nodal.n_nodes) {
+                            ghost_node_in_overlap[static_cast<std::size_t>(node)] = 1u;
+                        }
+                    }
 
-		                std::vector<unsigned char> ghost_node_in_overlap(
-		                    static_cast<std::size_t>(std::max<GlobalIndex>(0, nodal.n_nodes)), 0u);
-		                for (const int node : ghost_nodes_closed) {
-		                    if (node >= 0 && static_cast<GlobalIndex>(node) < nodal.n_nodes) {
-		                        ghost_node_in_overlap[static_cast<std::size_t>(node)] = 1u;
-		                    }
-		                }
+                    auto col_is_in_overlap = [&](GlobalIndex col_fs) {
+                        if (col_fs < 0 || col_fs >= n_total_dofs) {
+                            return false;
+                        }
+                        const auto node = static_cast<GlobalIndex>(col_fs / dof);
+                        if (node < 0 || static_cast<std::size_t>(node) >= ghost_node_in_overlap.size()) {
+                            return false;
+                        }
+                        return nodal.isRelevantDof(col_fs) ||
+                               ghost_node_in_overlap[static_cast<std::size_t>(node)] != 0u;
+                    };
 
-		                auto col_is_in_overlap = [&](GlobalIndex col_fs) {
-		                    if (col_fs < 0 || col_fs >= n_total_dofs) {
-		                        return false;
-		                    }
-		                    const auto node = static_cast<GlobalIndex>(col_fs / dof);
-		                    if (node < 0 || static_cast<std::size_t>(node) >= ghost_node_in_overlap.size()) {
-		                        return false;
-		                    }
-		                    return nodal.isRelevantDof(col_fs) ||
-		                           ghost_node_in_overlap[static_cast<std::size_t>(node)] != 0u;
-		                };
+                    std::vector<GlobalIndex> ghost_row_map;
+                    ghost_row_map.reserve(ghost_nodes_closed.size() *
+                                          static_cast<std::size_t>(std::max(1, dof)));
+                    for (const int node : ghost_nodes_closed) {
+                        for (int c = 0; c < dof; ++c) {
+                            ghost_row_map.push_back(static_cast<GlobalIndex>(node) * dof + c);
+                        }
+                    }
 
-		                std::vector<GlobalIndex> ghost_row_map;
-		                ghost_row_map.reserve(ghost_nodes_closed.size() * static_cast<std::size_t>(std::max(1, dof)));
-		                for (const int node : ghost_nodes_closed) {
-		                    for (int c = 0; c < dof; ++c) {
-		                        ghost_row_map.push_back(static_cast<GlobalIndex>(node) * dof + c);
-		                    }
-		                }
+                    if (!ghost_row_map.empty()) {
+                        std::vector<GlobalIndex> ghost_row_ptr;
+                        std::vector<GlobalIndex> ghost_row_cols_flat;
+                        ghost_row_ptr.reserve(ghost_row_map.size() + 1);
+                        ghost_row_ptr.push_back(0);
 
-		                if (!ghost_row_map.empty()) {
-		                    std::vector<GlobalIndex> ghost_row_ptr;
-		                    std::vector<GlobalIndex> ghost_row_cols_flat;
-		                    ghost_row_ptr.reserve(ghost_row_map.size() + 1);
-		                    ghost_row_ptr.push_back(0);
+                        for (const auto row_fs : ghost_row_map) {
+                            std::vector<GlobalIndex> cols_vec;
+                            cols_vec.reserve(32);
 
-			                    for (const auto row_fs : ghost_row_map) {
-			                        std::vector<GlobalIndex> cols_vec;
-			                        cols_vec.reserve(32);
+                            if (row_pattern != nullptr && row_fs >= 0 && row_fs < n_total_dofs &&
+                                static_cast<std::size_t>(row_fs) < nodal.fs_to_fe.size()) {
+                                const auto row_fe = nodal.fs_to_fe[static_cast<std::size_t>(row_fs)];
+                                if (row_fe >= 0 && row_fe < n_total_dofs) {
+                                    const auto cols_fe = row_pattern->getRowSpan(row_fe);
+                                    for (const auto col_fe : cols_fe) {
+                                        const auto col_fs = nodal.mapFeToFs(col_fe);
+                                        if (col_fs == INVALID_GLOBAL_INDEX) {
+                                            continue;
+                                        }
+                                        if (col_is_in_overlap(col_fs)) {
+                                            cols_vec.push_back(col_fs);
+                                        }
+                                    }
+                                }
+                            } else {
+                                const auto it_cols = ghost_row_cols.find(row_fs);
+                                if (it_cols != ghost_row_cols.end()) {
+                                    for (const auto col_fs : it_cols->second) {
+                                        if (col_is_in_overlap(col_fs)) {
+                                            cols_vec.push_back(col_fs);
+                                        }
+                                    }
+                                }
+                            }
 
-			                        if (full_pattern != nullptr && row_fs >= 0 && row_fs < n_total_dofs &&
-			                            static_cast<std::size_t>(row_fs) < nodal.fs_to_fe.size()) {
-			                            const auto row_fe = nodal.fs_to_fe[static_cast<std::size_t>(row_fs)];
-			                            if (row_fe >= 0 && row_fe < n_total_dofs) {
-			                                const auto cols_fe = full_pattern->getRowSpan(row_fe);
-			                                for (const auto col_fe : cols_fe) {
-			                                    const auto col_fs = nodal.mapFeToFs(col_fe);
-			                                    if (col_fs == INVALID_GLOBAL_INDEX) {
-			                                        continue;
-			                                    }
-			                                    if (col_is_in_overlap(col_fs)) {
-			                                        cols_vec.push_back(col_fs);
-			                                    }
-			                                }
-			                            }
-			                        } else {
-			                            const auto it_cols = ghost_row_cols.find(row_fs);
-			                            if (it_cols != ghost_row_cols.end()) {
-			                                for (const auto col_fs : it_cols->second) {
-			                                    if (col_is_in_overlap(col_fs)) {
-			                                        cols_vec.push_back(col_fs);
-			                                    }
-			                                }
-			                            }
-			                        }
+                            cols_vec.push_back(row_fs);
+                            cols_vec.erase(std::remove_if(cols_vec.begin(),
+                                                          cols_vec.end(),
+                                                          [&](GlobalIndex col) {
+                                                              return !col_is_in_overlap(col);
+                                                          }),
+                                           cols_vec.end());
+                            std::sort(cols_vec.begin(), cols_vec.end());
+                            cols_vec.erase(std::unique(cols_vec.begin(), cols_vec.end()), cols_vec.end());
 
-			                        cols_vec.push_back(row_fs); // ensure diagonal
+                            ghost_row_cols_flat.insert(ghost_row_cols_flat.end(), cols_vec.begin(), cols_vec.end());
+                            ghost_row_ptr.push_back(static_cast<GlobalIndex>(ghost_row_cols_flat.size()));
+                        }
 
-			                        cols_vec.erase(std::remove_if(cols_vec.begin(),
-			                                                     cols_vec.end(),
-			                                                     [&](GlobalIndex col) {
-			                                                         return !col_is_in_overlap(col);
-			                                                     }),
-			                                       cols_vec.end());
+                        target.setGhostRows(std::move(ghost_row_map),
+                                            std::move(ghost_row_ptr),
+                                            std::move(ghost_row_cols_flat));
+                    } else {
+                        target.clearGhostRows();
+                    }
+                } else {
+                    auto ghost_rows_all = ghost_set.toVector();
+                    std::vector<GlobalIndex> ghost_row_map;
+                    ghost_row_map.reserve(ghost_rows_all.size());
+                    for (const auto row : ghost_rows_all) {
+                        if (row < 0 || row >= n_total_dofs) {
+                            continue;
+                        }
+                        if (owned_range.contains(row)) {
+                            continue;
+                        }
+                        ghost_row_map.push_back(row);
+                    }
 
-		                        std::sort(cols_vec.begin(), cols_vec.end());
-		                        cols_vec.erase(std::unique(cols_vec.begin(), cols_vec.end()), cols_vec.end());
+                    if (!ghost_row_map.empty()) {
+                        std::vector<GlobalIndex> ghost_row_ptr;
+                        std::vector<GlobalIndex> ghost_row_cols_flat;
+                        ghost_row_ptr.reserve(ghost_row_map.size() + 1);
+                        ghost_row_ptr.push_back(0);
 
-			                        ghost_row_cols_flat.insert(ghost_row_cols_flat.end(), cols_vec.begin(), cols_vec.end());
-			                        ghost_row_ptr.push_back(static_cast<GlobalIndex>(ghost_row_cols_flat.size()));
-			                    }
+                        for (const auto row : ghost_row_map) {
+                            std::vector<GlobalIndex> cols_vec;
+                            cols_vec.reserve(32);
 
-		                    dist_pattern->setGhostRows(std::move(ghost_row_map),
-		                                              std::move(ghost_row_ptr),
-		                                              std::move(ghost_row_cols_flat));
-		                } else {
-		                    dist_pattern->clearGhostRows();
-		                }
-		            } else {
-		                auto ghost_rows_all = ghost_set.toVector();
-		                std::vector<GlobalIndex> ghost_row_map;
-		                ghost_row_map.reserve(ghost_rows_all.size());
-		                for (const auto row : ghost_rows_all) {
-		                    if (row < 0 || row >= n_total_dofs) {
-		                        continue;
-		                    }
-		                    if (owned_range.contains(row)) {
-		                        continue;
-		                    }
-		                    ghost_row_map.push_back(row);
-		                }
+                            if (row_pattern != nullptr && row >= 0 && row < n_total_dofs) {
+                                const auto cols = row_pattern->getRowSpan(row);
+                                for (const auto col : cols) {
+                                    if (relevant_set.contains(col)) {
+                                        cols_vec.push_back(col);
+                                    }
+                                }
+                            } else {
+                                const auto it_cols = ghost_row_cols.find(row);
+                                if (it_cols != ghost_row_cols.end()) {
+                                    for (const auto col : it_cols->second) {
+                                        if (relevant_set.contains(col)) {
+                                            cols_vec.push_back(col);
+                                        }
+                                    }
+                                }
+                            }
 
-		                if (!ghost_row_map.empty()) {
-		                    // ghost_set.toVector() is already sorted/unique; keep it that way after filtering.
-		                    std::vector<GlobalIndex> ghost_row_ptr;
-		                    std::vector<GlobalIndex> ghost_row_cols_flat;
-		                    ghost_row_ptr.reserve(ghost_row_map.size() + 1);
-		                    ghost_row_ptr.push_back(0);
+                            cols_vec.push_back(row);
+                            cols_vec.erase(std::remove_if(cols_vec.begin(),
+                                                          cols_vec.end(),
+                                                          [&](GlobalIndex col) {
+                                                              return (col < 0) ||
+                                                                     (col >= n_total_dofs) ||
+                                                                     !relevant_set.contains(col);
+                                                          }),
+                                           cols_vec.end());
+                            std::sort(cols_vec.begin(), cols_vec.end());
+                            cols_vec.erase(std::unique(cols_vec.begin(), cols_vec.end()), cols_vec.end());
 
-			                    for (const auto row : ghost_row_map) {
-			                        std::vector<GlobalIndex> cols_vec;
-			                        cols_vec.reserve(32);
+                            ghost_row_cols_flat.insert(ghost_row_cols_flat.end(), cols_vec.begin(), cols_vec.end());
+                            ghost_row_ptr.push_back(static_cast<GlobalIndex>(ghost_row_cols_flat.size()));
+                        }
 
-			                        if (full_pattern != nullptr && row >= 0 && row < n_total_dofs) {
-			                            const auto cols = full_pattern->getRowSpan(row);
-			                            for (const auto col : cols) {
-			                                if (relevant_set.contains(col)) {
-			                                    cols_vec.push_back(col);
-			                                }
-			                            }
-			                        } else {
-			                            const auto it_cols = ghost_row_cols.find(row);
-			                            if (it_cols != ghost_row_cols.end()) {
-			                                for (const auto col : it_cols->second) {
-			                                    if (relevant_set.contains(col)) {
-			                                        cols_vec.push_back(col);
-			                                    }
-			                                }
-			                            }
-			                        }
+                        target.setGhostRows(std::move(ghost_row_map),
+                                            std::move(ghost_row_ptr),
+                                            std::move(ghost_row_cols_flat));
+                    } else {
+                        target.clearGhostRows();
+                    }
+                }
+            };
 
-			                        cols_vec.push_back(row); // ensure diagonal
+        if (dist_pattern) {
+            dist_pattern->finalize();
+            set_distributed_ghost_rows(*dist_pattern, full_pattern);
+        }
+        if (base_dist_pattern) {
+            set_distributed_ghost_rows(*base_dist_pattern, base_full_pattern);
+        }
 
-		                        // Only store columns that are locally present (owned+ghost) so overlap backends can map them.
-		                        cols_vec.erase(std::remove_if(cols_vec.begin(),
-		                                                     cols_vec.end(),
-		                                                     [&](GlobalIndex col) {
-		                                                         return (col < 0) || (col >= n_total_dofs) || !relevant_set.contains(col);
-		                                                     }),
-		                                       cols_vec.end());
+        {
+            const auto master_lines = countMasterBearingConstraintLines(affine_constraints_);
+            std::ostringstream oss;
+            oss << "FESystem: sparsity setup"
+                << " diagnostic=constraint_sparsity_setup"
+                << " operator='" << tag << "'"
+                << " master_bearing_lines=" << master_lines
+                << " serial_base_nnz=" << (base_pattern ? base_pattern->getNnz() : 0)
+                << " serial_active_nnz=" << (pattern ? pattern->getNnz() : 0)
+                << " distributed_indexing="
+                << (dist_pattern ? distributedDofIndexingName(dist_pattern->dofIndexing()) : "none")
+                << " distributed_base_diag_nnz="
+                << (base_dist_pattern ? base_dist_pattern->getDiagNnz() : 0)
+                << " distributed_base_offdiag_nnz="
+                << (base_dist_pattern ? base_dist_pattern->getOffdiagNnz() : 0)
+                << " distributed_active_diag_nnz="
+                << (dist_pattern ? dist_pattern->getDiagNnz() : 0)
+                << " distributed_active_offdiag_nnz="
+                << (dist_pattern ? dist_pattern->getOffdiagNnz() : 0);
+            FE_LOG_INFO(oss.str());
+        }
 
-		                        std::sort(cols_vec.begin(), cols_vec.end());
-		                        cols_vec.erase(std::unique(cols_vec.begin(), cols_vec.end()), cols_vec.end());
-
-		                        ghost_row_cols_flat.insert(ghost_row_cols_flat.end(), cols_vec.begin(), cols_vec.end());
-		                        ghost_row_ptr.push_back(static_cast<GlobalIndex>(ghost_row_cols_flat.size()));
-		                    }
-
-		                    dist_pattern->setGhostRows(std::move(ghost_row_map),
-		                                              std::move(ghost_row_ptr),
-		                                              std::move(ghost_row_cols_flat));
-		                } else {
-		                    dist_pattern->clearGhostRows();
-		                }
-		            }
-
-		            distributed_sparsity_by_op_.emplace(tag, std::move(dist_pattern));
-		        }
+        if (base_pattern) {
+            base_sparsity_by_op_.emplace(tag, std::move(base_pattern));
+        }
+        if (pattern && keep_active_serial_pattern) {
+            sparsity_by_op_.emplace(tag, std::move(pattern));
+        }
+        if (base_dist_pattern) {
+            base_distributed_sparsity_by_op_.emplace(tag, std::move(base_dist_pattern));
+        }
+        if (dist_pattern) {
+            distributed_sparsity_by_op_.emplace(tag, std::move(dist_pattern));
+        }
 			    }
 
     // Persist a node-interleaved backend permutation for overlap backends (FSILS). This is needed
@@ -5582,7 +5848,348 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     }
 
     buildAssemblyPlans();
+    constraint_structure_signature_ = computeConstraintStructureSignature(affine_constraints_);
+    ++sparsity_pattern_revision_;
     is_setup_ = true;
+}
+
+std::uint64_t FESystem::computeConstraintStructureSignature(
+    const constraints::AffineConstraints& constraints)
+{
+    // Order-independent hash over the master-bearing constraint lines.
+    // Dirichlet (master-less) lines are excluded: they introduce no
+    // elimination fill, so their appearance cannot invalidate sparsity.
+    auto mix = [](std::uint64_t x) noexcept {
+        x ^= x >> 33;
+        x *= 0xff51afd7ed558ccdULL;
+        x ^= x >> 33;
+        x *= 0xc4ceb9fe1a85ec53ULL;
+        x ^= x >> 33;
+        return x;
+    };
+    std::uint64_t signature = 0;
+    std::uint64_t n_lines = 0;
+    constraints.forEach([&](const constraints::AffineConstraints::ConstraintView& view) {
+        if (view.entries.empty()) {
+            return;
+        }
+        std::uint64_t line_hash = 0;
+        for (const auto& entry : view.entries) {
+            line_hash += mix(static_cast<std::uint64_t>(entry.master_dof) + 0x9e3779b97f4a7c15ULL);
+        }
+        line_hash = mix(line_hash ^ mix(static_cast<std::uint64_t>(view.slave_dof)));
+        signature += line_hash;
+        ++n_lines;
+    });
+    return mix(signature ^ mix(n_lines));
+}
+
+std::unique_ptr<sparsity::SparsityPattern>
+FESystem::buildActiveSparsityPatternFromBase(const sparsity::SparsityPattern& base) const
+{
+    FE_THROW_IF(!base.isFinalized(), InvalidStateException,
+                "FESystem::buildActiveSparsityPatternFromBase: base pattern is not finalized");
+
+    auto rebuilt = std::make_unique<sparsity::SparsityPattern>(base.numRows(),
+                                                               base.numCols());
+    for (GlobalIndex row = 0; row < base.numRows(); ++row) {
+        rebuilt->addEntries(row, base.getRowSpan(row));
+    }
+
+    if (use_constraints_in_assembly_ && !affine_constraints_.empty()) {
+        auto query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
+        sparsity::ConstraintSparsityAugmenter augmenter(std::move(query));
+        augmenter.augment(*rebuilt, sparsity::AugmentationMode::EliminationFill);
+    }
+
+    if (last_setup_options_.sparsity_options.ensure_diagonal) {
+        rebuilt->ensureDiagonal();
+    }
+    if (last_setup_options_.sparsity_options.ensure_non_empty_rows) {
+        rebuilt->ensureNonEmptyRows();
+    }
+    rebuilt->finalize();
+    return rebuilt;
+}
+
+std::unique_ptr<sparsity::DistributedSparsityPattern>
+FESystem::buildActiveDistributedSparsityPatternFromBase(
+    const sparsity::DistributedSparsityPattern& base,
+    const sparsity::SparsityPattern* active_serial) const
+{
+    FE_THROW_IF(!base.isFinalized(), InvalidStateException,
+                "FESystem::buildActiveDistributedSparsityPatternFromBase: base pattern is not finalized");
+
+    auto rebuilt = std::make_unique<sparsity::DistributedSparsityPattern>(
+        base.ownedRows(),
+        base.ownedCols(),
+        base.globalRows(),
+        base.globalCols());
+    rebuilt->setDofIndexing(base.dofIndexing());
+
+    const auto owned = base.ownedRows();
+    for (GlobalIndex row = owned.first; row < owned.last; ++row) {
+        const auto cols = base.getOwnedRowGlobalCols(row);
+        rebuilt->addEntries(row, std::span<const GlobalIndex>(cols.data(), cols.size()));
+    }
+
+    if (use_constraints_in_assembly_ && !affine_constraints_.empty()) {
+        if (base.dofIndexing() ==
+            sparsity::DistributedSparsityPattern::DofIndexing::NodalInterleaved) {
+            FE_THROW_IF(dof_permutation_ == nullptr ||
+                            dof_permutation_->forward.empty() ||
+                            dof_permutation_->inverse.empty(),
+                        InvalidStateException,
+                        "FESystem::buildActiveDistributedSparsityPatternFromBase: "
+                        "missing nodal-interleaved DOF permutation for constraint sparsity refresh");
+            auto query = std::make_shared<PermutedAffineConstraintsQuery>(
+                affine_constraints_,
+                std::span<const GlobalIndex>(dof_permutation_->forward),
+                std::span<const GlobalIndex>(dof_permutation_->inverse));
+            sparsity::ConstraintSparsityAugmenter augmenter(std::move(query));
+            augmenter.augment(*rebuilt, sparsity::AugmentationMode::EliminationFill);
+        } else {
+            auto query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
+            sparsity::ConstraintSparsityAugmenter augmenter(std::move(query));
+            augmenter.augment(*rebuilt, sparsity::AugmentationMode::EliminationFill);
+        }
+    }
+
+    if (last_setup_options_.sparsity_options.ensure_diagonal) {
+        rebuilt->ensureDiagonal();
+    }
+    if (last_setup_options_.sparsity_options.ensure_non_empty_rows) {
+        rebuilt->ensureNonEmptyRows();
+    }
+    rebuilt->finalize();
+
+    const auto ghost_cols_span = rebuilt->getGhostColMap();
+    // Ghost-row storage is optional.  In particular, a valid distributed
+    // partition may own every algebraic row on one rank (and therefore have
+    // no ghost rows there) while another rank participates with ghost-only
+    // mesh work.  getGhostRowMap() deliberately rejects absent storage, so do
+    // not query it unless the finalized base pattern actually has rows.
+    std::span<const GlobalIndex> base_ghost_rows_span;
+    if (base.numGhostRows() > 0) {
+        base_ghost_rows_span = base.getGhostRowMap();
+    }
+    if (!ghost_cols_span.empty() || !base_ghost_rows_span.empty()) {
+        const auto owned_cols = rebuilt->ownedCols();
+        const bool nodal_interleaved =
+            rebuilt->dofIndexing() ==
+            sparsity::DistributedSparsityPattern::DofIndexing::NodalInterleaved;
+        const int dof_per_node =
+            nodal_interleaved ? distributed_sparsity_dof_per_node_ : 1;
+        FE_THROW_IF(nodal_interleaved && dof_per_node <= 0,
+                    InvalidStateException,
+                    "FESystem::buildActiveDistributedSparsityPatternFromBase: "
+                    "missing nodal-interleaved dof_per_node metadata for ghost-row refresh");
+
+        std::vector<GlobalIndex> rows(base_ghost_rows_span.begin(), base_ghost_rows_span.end());
+        for (const auto col : ghost_cols_span) {
+            if (col < 0 || col >= rebuilt->globalRows() || owned_cols.contains(col)) {
+                continue;
+            }
+            if (nodal_interleaved) {
+                const auto node = col / dof_per_node;
+                for (int c = 0; c < dof_per_node; ++c) {
+                    rows.push_back(node * dof_per_node + c);
+                }
+            } else {
+                rows.push_back(col);
+            }
+        }
+        std::sort(rows.begin(), rows.end());
+        rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+        rows.erase(std::remove_if(rows.begin(), rows.end(),
+                                  [&](GlobalIndex row) {
+                                      return row < 0 || row >= rebuilt->globalRows() ||
+                                             rebuilt->ownedRows().contains(row);
+                                  }),
+                   rows.end());
+
+        std::unordered_map<GlobalIndex, GlobalIndex> base_ghost_local_row;
+        base_ghost_local_row.reserve(base_ghost_rows_span.size());
+        for (GlobalIndex local = 0;
+             local < static_cast<GlobalIndex>(base_ghost_rows_span.size());
+             ++local) {
+            base_ghost_local_row.emplace(base_ghost_rows_span[static_cast<std::size_t>(local)],
+                                         local);
+        }
+
+        std::unordered_set<GlobalIndex> locally_present_cols(
+            ghost_cols_span.begin(), ghost_cols_span.end());
+        for (const auto row : rows) {
+            locally_present_cols.insert(row);
+        }
+        auto locally_present = [&](GlobalIndex col) {
+            return col >= 0 && col < rebuilt->globalCols() &&
+                   (owned_cols.contains(col) || locally_present_cols.count(col) != 0u);
+        };
+
+        auto to_fe = [&](GlobalIndex backend_dof) -> GlobalIndex {
+            if (!nodal_interleaved) {
+                return backend_dof;
+            }
+            if (dof_permutation_ == nullptr ||
+                backend_dof < 0 ||
+                static_cast<std::size_t>(backend_dof) >= dof_permutation_->inverse.size()) {
+                return INVALID_GLOBAL_INDEX;
+            }
+            return dof_permutation_->inverse[static_cast<std::size_t>(backend_dof)];
+        };
+        auto to_backend = [&](GlobalIndex fe_dof) -> GlobalIndex {
+            if (!nodal_interleaved) {
+                return fe_dof;
+            }
+            if (dof_permutation_ == nullptr ||
+                fe_dof < 0 ||
+                static_cast<std::size_t>(fe_dof) >= dof_permutation_->forward.size()) {
+                return INVALID_GLOBAL_INDEX;
+            }
+            return dof_permutation_->forward[static_cast<std::size_t>(fe_dof)];
+        };
+
+        std::vector<GlobalIndex> ptr;
+        std::vector<GlobalIndex> cols_flat;
+        ptr.reserve(rows.size() + 1u);
+        ptr.push_back(0);
+        for (const auto row : rows) {
+            std::vector<GlobalIndex> cols;
+            cols.reserve(32);
+
+            const auto fe_row = to_fe(row);
+            if (active_serial != nullptr &&
+                fe_row >= 0 &&
+                fe_row < active_serial->numRows()) {
+                for (const auto fe_col : active_serial->getRowSpan(fe_row)) {
+                    const auto backend_col = to_backend(fe_col);
+                    if (locally_present(backend_col)) {
+                        cols.push_back(backend_col);
+                    }
+                }
+            }
+
+            if (const auto it = base_ghost_local_row.find(row);
+                it != base_ghost_local_row.end()) {
+                for (const auto col : base.getGhostRowCols(it->second)) {
+                    if (locally_present(col)) {
+                        cols.push_back(col);
+                    }
+                }
+            }
+
+            if (locally_present(row)) {
+                cols.push_back(row);
+            }
+            std::sort(cols.begin(), cols.end());
+            cols.erase(std::unique(cols.begin(), cols.end()), cols.end());
+
+            cols_flat.insert(cols_flat.end(), cols.begin(), cols.end());
+            ptr.push_back(static_cast<GlobalIndex>(cols_flat.size()));
+        }
+
+        if (!rows.empty()) {
+            rebuilt->setGhostRows(std::move(rows), std::move(ptr), std::move(cols_flat));
+        } else {
+            rebuilt->clearGhostRows();
+        }
+    }
+
+    return rebuilt;
+}
+
+void FESystem::refreshSparsityForConstraintStructureChange()
+{
+    const auto signature = computeConstraintStructureSignature(affine_constraints_);
+    if (signature == constraint_structure_signature_) {
+        return;
+    }
+    const auto old_signature = constraint_structure_signature_;
+    constraint_structure_signature_ = signature;
+
+    if (!use_constraints_in_assembly_) {
+        return;
+    }
+
+    // The setup-time active patterns were augmented for the constraint
+    // structure that existed at setup. A different slave/master topology needs
+    // different elimination fill. Rebuild active patterns from unaugmented
+    // bases so removed constraints do not leave accidental stale fill, and so
+    // distributed backends receive the same refreshed structure as serial
+    // backends.
+    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>>
+        rebuilt_serial_by_op;
+    rebuilt_serial_by_op.reserve(base_sparsity_by_op_.size());
+    for (const auto& [tag, base] : base_sparsity_by_op_) {
+        FE_THROW_IF(!base, InvalidStateException,
+                    "FESystem::rebuildConstraintState: null base serial sparsity for operator '" +
+                        tag + "'");
+        rebuilt_serial_by_op.emplace(tag, buildActiveSparsityPatternFromBase(*base));
+    }
+
+    for (auto& [tag, pattern] : sparsity_by_op_) {
+        const auto it = rebuilt_serial_by_op.find(tag);
+        FE_THROW_IF(it == rebuilt_serial_by_op.end() || !it->second,
+                    InvalidStateException,
+                    "FESystem::rebuildConstraintState: active serial sparsity for operator '" +
+                        tag + "' has no base pattern");
+        pattern = std::make_unique<sparsity::SparsityPattern>(it->second->cloneFinalized());
+    }
+
+    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::DistributedSparsityPattern>>
+        rebuilt_distributed_by_op;
+    rebuilt_distributed_by_op.reserve(base_distributed_sparsity_by_op_.size());
+    for (const auto& [tag, base] : base_distributed_sparsity_by_op_) {
+        FE_THROW_IF(!base, InvalidStateException,
+                    "FESystem::rebuildConstraintState: null base distributed sparsity for operator '" +
+                        tag + "'");
+        const auto serial_it = rebuilt_serial_by_op.find(tag);
+        const auto* active_serial =
+            (serial_it != rebuilt_serial_by_op.end() && serial_it->second)
+                ? serial_it->second.get()
+                : nullptr;
+        rebuilt_distributed_by_op.emplace(
+            tag, buildActiveDistributedSparsityPatternFromBase(*base, active_serial));
+    }
+
+    for (auto& [tag, pattern] : distributed_sparsity_by_op_) {
+        const auto it = rebuilt_distributed_by_op.find(tag);
+        FE_THROW_IF(it == rebuilt_distributed_by_op.end() || !it->second,
+                    InvalidStateException,
+                    "FESystem::rebuildConstraintState: active distributed sparsity for operator '" +
+                        tag + "' has no base pattern");
+        pattern = std::move(it->second);
+    }
+
+    ++sparsity_pattern_revision_;
+    GlobalIndex active_distributed_diag_nnz = 0;
+    GlobalIndex active_distributed_offdiag_nnz = 0;
+    for (const auto& [tag, pattern] : distributed_sparsity_by_op_) {
+        (void)tag;
+        if (pattern) {
+            active_distributed_diag_nnz += pattern->getDiagNnz();
+            active_distributed_offdiag_nnz += pattern->getOffdiagNnz();
+        }
+    }
+    FE_LOG_INFO("FESystem: constraint structure changed post-setup;"
+                " diagnostic=constraint_sparsity_refresh"
+                " old_constraint_structure_signature=" +
+                std::to_string(old_signature) +
+                " new_constraint_structure_signature=" +
+                std::to_string(constraint_structure_signature_) +
+                " master_bearing_lines=" +
+                std::to_string(countMasterBearingConstraintLines(affine_constraints_)) +
+                " re-augmented_serial=" +
+                std::to_string(sparsity_by_op_.size()) +
+                " re-augmented_distributed=" +
+                std::to_string(distributed_sparsity_by_op_.size()) +
+                " active_distributed_diag_nnz=" +
+                std::to_string(active_distributed_diag_nnz) +
+                " active_distributed_offdiag_nnz=" +
+                std::to_string(active_distributed_offdiag_nnz) +
+                " sparsity_pattern_revision=" +
+                std::to_string(sparsity_pattern_revision_));
 }
 
 void FESystem::rebuildConstraintState()
@@ -5640,6 +6247,7 @@ void FESystem::rebuildConstraintState()
     }
 
     affine_constraints_.close();
+    refreshSparsityForConstraintStructureChange();
     bumpConstraintLayoutRevision();
     {
         const auto deps = constraintDependencyDeclaration();
@@ -5810,6 +6418,59 @@ void FESystem::buildAssemblyPlans()
                     continue;
                 }
 
+                // StandardAssembler's semantic MonolithicCell fast path owns
+                // the complete cell-term batch and therefore applies only
+                // when this is the operator's sole registered cell term.  If
+                // another cell term coexists with the semantic parent, the
+                // generic multi-term path would invoke MonolithicCellKernel's
+                // compatibility computeCell entry point using only the first
+                // block's maps.  That silently drops every later mixed block,
+                // including cross derivatives.  Expand to the exact fallback
+                // blocks in this case, matching the safe MixedBlockSet
+                // semantics below; the sole-term case retains coupled JIT.
+                if (def.cells.size() > 1u) {
+                    for (std::size_t bi = 0; bi < monolithic->numBlocks();
+                         ++bi) {
+                        const auto& bs = monolithic->blockSpec(bi);
+                        if (!bs.fallback_kernel ||
+                            !bs.fallback_kernel->hasCell()) {
+                            continue;
+                        }
+                        const auto& b_test_field =
+                            field_registry_.get(bs.test_field);
+                        const auto& b_trial_field =
+                            field_registry_.get(bs.trial_field);
+                        auto block_participant_scope =
+                            common_participant_scope(
+                                b_test_field,
+                                b_trial_field,
+                                "expanded monolithic cell");
+                        block_participant_scope = merge_participant_scope(
+                            std::move(block_participant_scope),
+                            kernel_participant_scope(
+                                *bs.fallback_kernel,
+                                "expanded monolithic cell"),
+                            "expanded monolithic cell");
+                        plan.cell_terms.push_back(PlannedCellTerm{
+                            bs.test_field,
+                            bs.trial_field,
+                            bs.test_space,
+                            bs.trial_space,
+                            bs.fallback_kernel.get(),
+                            bs.row_dof_map,
+                            bs.col_dof_map,
+                            bs.row_dof_offset,
+                            bs.col_dof_offset,
+                            std::move(block_participant_scope),
+                            bs.fallback_kernel->semanticKernelKind(),
+                            bs.want_matrix &&
+                                !bs.fallback_kernel->isVectorOnly(),
+                            bs.want_vector &&
+                                !bs.fallback_kernel->isMatrixOnly()});
+                    }
+                    continue;
+                }
+
                 const auto& first_bs = monolithic->blockSpec(0);
                 plan.cell_terms.push_back(PlannedCellTerm{
                     term.test_field,
@@ -5886,6 +6547,61 @@ void FESystem::buildAssemblyPlans()
                     vector_capable = vector_capable || bs.want_vector;
                 }
                 if (!any_active) {
+                    continue;
+                }
+
+                // StandardAssembler's semantic MixedBlockSet fast path owns
+                // the complete cell-term batch and therefore applies only
+                // when this is the operator's sole registered cell term.  A
+                // coupled operator commonly contains an existing physics
+                // formulation (for example Navier--Stokes momentum) before a
+                // level-set phi/E formulation is appended.  Passing the
+                // semantic parent through the generic multi-term path uses
+                // only its first block's row/column maps and silently omits
+                // cross blocks such as dR_phi/dE.  Preserve correctness in
+                // that case by expanding the semantic set into its exact
+                // fallback blocks; the single-term case below retains the
+                // fused optimization.
+                if (def.cells.size() > 1u) {
+                    for (std::size_t bi = 0; bi < mixed_block->numBlocks();
+                         ++bi) {
+                        const auto& bs = mixed_block->blockSpec(bi);
+                        if (!bs.fallback_kernel ||
+                            !bs.fallback_kernel->hasCell()) {
+                            continue;
+                        }
+                        const auto& b_test_field =
+                            field_registry_.get(bs.test_field);
+                        const auto& b_trial_field =
+                            field_registry_.get(bs.trial_field);
+                        auto block_participant_scope =
+                            common_participant_scope(
+                                b_test_field,
+                                b_trial_field,
+                                "expanded mixed-block cell");
+                        block_participant_scope = merge_participant_scope(
+                            std::move(block_participant_scope),
+                            kernel_participant_scope(
+                                *bs.fallback_kernel,
+                                "expanded mixed-block cell"),
+                            "expanded mixed-block cell");
+                        plan.cell_terms.push_back(PlannedCellTerm{
+                            bs.test_field,
+                            bs.trial_field,
+                            bs.test_space,
+                            bs.trial_space,
+                            bs.fallback_kernel.get(),
+                            bs.row_dof_map,
+                            bs.col_dof_map,
+                            bs.row_dof_offset,
+                            bs.col_dof_offset,
+                            std::move(block_participant_scope),
+                            bs.fallback_kernel->semanticKernelKind(),
+                            bs.want_matrix &&
+                                !bs.fallback_kernel->isVectorOnly(),
+                            bs.want_vector &&
+                                !bs.fallback_kernel->isMatrixOnly()});
+                    }
                     continue;
                 }
 

@@ -1343,11 +1343,29 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         FE_THROW_IF(mb.n_components < 1 || cb.n_components < 1,
                     NotImplementedException,
                     "FsilsLinearSolver::solve: BlockSchur requires valid saddle-point layout");
-        FE_THROW_IF(mb.n_components + cb.n_components != dof,
+        const auto block_range_is_valid = [dof](const BlockDescriptor& block) {
+            return block.start_component >= 0 && block.n_components > 0 &&
+                   block.start_component <= dof - block.n_components;
+        };
+        const bool ranges_are_valid =
+            block_range_is_valid(mb) && block_range_is_valid(cb);
+        const int mb_end =
+            ranges_are_valid ? mb.start_component + mb.n_components : 0;
+        const int cb_end =
+            ranges_are_valid ? cb.start_component + cb.n_components : 0;
+        const bool ranges_overlap =
+            ranges_are_valid && mb.start_component < cb_end &&
+            cb.start_component < mb_end;
+        FE_THROW_IF(!ranges_are_valid || ranges_overlap ||
+                        mb.n_components + cb.n_components != dof,
                     NotImplementedException,
-                    "FsilsLinearSolver::solve: BlockSchur saddle-point blocks must cover all DOFs "
-                    "(momentum=" + std::to_string(mb.n_components) + " + constraint=" +
-                    std::to_string(cb.n_components) + " != dof=" + std::to_string(dof) + ")");
+                    "FsilsLinearSolver::solve: BlockSchur saddle-point blocks "
+                    "must form a disjoint, in-range partition covering all DOFs "
+                    "(momentum=" + std::to_string(mb.start_component) + ":" +
+                    std::to_string(mb.n_components) + ", constraint=" +
+                    std::to_string(cb.start_component) + ":" +
+                    std::to_string(cb.n_components) + ", dof=" +
+                    std::to_string(dof) + ")");
     }
 
     // FSILS destructively modifies the matrix during preconditioning/solve.
@@ -1623,7 +1641,10 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             unsigned long long rows{0};
             unsigned long long zero_rows{0};
             unsigned long long missing_diag{0};
+            unsigned long long diag_col_mismatch{0};
             unsigned long long zero_diag{0};
+            unsigned long long legacy_scan_zero_diag{0};
+            unsigned long long diag_ptr_legacy_scan_abs_mismatch{0};
             unsigned long long nonfinite_entries{0};
             unsigned long long nonfinite_rows{0};
             double min_abs_diag{std::numeric_limits<double>::infinity()};
@@ -1641,6 +1662,10 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             static_cast<std::size_t>(stat_count), 0);
         std::vector<int> local_dirichlet_nodes;
         local_dirichlet_nodes.reserve(dirichlet_dofs_.size());
+        unsigned long long local_structural_diag_entries = 0;
+        unsigned long long local_duplicate_diag_entries = 0;
+        unsigned long long local_duplicate_diag_rows = 0;
+        unsigned long long local_max_diag_entries_per_row = 0;
 
         for (const auto dof_idx : dirichlet_dofs_) {
             GlobalIndex fsils_dof = dof_idx;
@@ -1675,7 +1700,10 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         auto update_stats = [&](int stat_index,
                                 double row_abs_sum,
                                 bool diag_present,
+                                bool diag_col_matches,
                                 double abs_diag,
+                                bool legacy_scan_diag_present,
+                                double legacy_scan_abs_diag,
                                 unsigned long long nonfinite_entries,
                                 bool row_nonfinite) {
             auto& stats = local_stats[static_cast<std::size_t>(stat_index)];
@@ -1693,8 +1721,19 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 ++stats.missing_diag;
                 return;
             }
+            if (!diag_col_matches) {
+                ++stats.diag_col_mismatch;
+            }
             if (abs_diag <= tiny) {
                 ++stats.zero_diag;
+            }
+            if (legacy_scan_diag_present) {
+                if (legacy_scan_abs_diag <= tiny) {
+                    ++stats.legacy_scan_zero_diag;
+                }
+                if (abs_diag != legacy_scan_abs_diag) {
+                    ++stats.diag_ptr_legacy_scan_abs_mismatch;
+                }
             }
             stats.min_abs_diag = std::min(stats.min_abs_diag, abs_diag);
             stats.max_abs_diag = std::max(stats.max_abs_diag, abs_diag);
@@ -1711,15 +1750,44 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         for (int row = 0; row < lhs.mynNo; ++row) {
             const auto start = lhs.rowPtr(0, row);
             const auto end = lhs.rowPtr(1, row);
+            const auto diag_nz = lhs.diagPtr(row);
+            const bool diag_present =
+                start >= 0 && end >= start && diag_nz >= start && diag_nz <= end;
+            const bool diag_col_matches =
+                diag_present && lhs.colPtr(diag_nz) == row;
+            int legacy_scan_diag_nz = -1;
+            unsigned long long structural_diag_entries = 0;
+            if (start >= 0 && end >= start) {
+                for (auto nz = start; nz <= end; ++nz) {
+                    if (lhs.colPtr(nz) == row) {
+                        ++structural_diag_entries;
+                        legacy_scan_diag_nz = static_cast<int>(nz);
+                    }
+                }
+            }
+            local_structural_diag_entries += structural_diag_entries;
+            local_max_diag_entries_per_row =
+                std::max(local_max_diag_entries_per_row, structural_diag_entries);
+            if (structural_diag_entries > 1) {
+                ++local_duplicate_diag_rows;
+                local_duplicate_diag_entries += structural_diag_entries - 1;
+            }
+            const bool legacy_scan_diag_present = legacy_scan_diag_nz >= 0;
             for (int rc = 0; rc < dof; ++rc) {
-                bool diag_present = false;
-                double abs_diag = 0.0;
+                double abs_diag =
+                    diag_present
+                        ? std::abs(static_cast<double>(Val(rc * dof + rc, diag_nz)))
+                        : 0.0;
+                const double legacy_scan_abs_diag =
+                    legacy_scan_diag_present
+                        ? std::abs(static_cast<double>(
+                              Val(rc * dof + rc, legacy_scan_diag_nz)))
+                        : 0.0;
                 double row_abs_sum = 0.0;
                 bool row_nonfinite = false;
                 unsigned long long nonfinite_entries = 0;
                 if (start >= 0 && end >= start) {
                     for (auto nz = start; nz <= end; ++nz) {
-                        const int col = lhs.colPtr(nz);
                         for (int cc = 0; cc < dof; ++cc) {
                             const double value =
                                 Val(rc * dof + cc, static_cast<int>(nz));
@@ -1730,23 +1798,25 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                             }
                             const double abs_value = std::abs(value);
                             row_abs_sum += abs_value;
-                            if (col == row && cc == rc) {
-                                diag_present = true;
-                                abs_diag = abs_value;
-                            }
                         }
                     }
                 }
                 update_stats(rc,
                              row_abs_sum,
                              diag_present,
+                             diag_col_matches,
                              abs_diag,
+                             legacy_scan_diag_present,
+                             legacy_scan_abs_diag,
                              nonfinite_entries,
                              row_nonfinite);
                 update_stats(total_index,
                              row_abs_sum,
                              diag_present,
+                             diag_col_matches,
                              abs_diag,
+                             legacy_scan_diag_present,
+                             legacy_scan_abs_diag,
                              nonfinite_entries,
                              row_nonfinite);
             }
@@ -1813,10 +1883,32 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             global_dirichlet_node_count = local_dirichlet_node_count;
         }
 
+        auto reduceStructuralCount = [&](unsigned long long local, MPI_Op op) {
+            unsigned long long global = local;
+            if (lhs.commu.nTasks > 1) {
+                fe_fsi_linear_solver::fsils_allreduce(
+                    &local, &global, 1, MPI_UNSIGNED_LONG_LONG, op, lhs.commu);
+            }
+            return global;
+        };
+        const auto structural_diag_entries =
+            reduceStructuralCount(local_structural_diag_entries, MPI_SUM);
+        const auto duplicate_diag_entries =
+            reduceStructuralCount(local_duplicate_diag_entries, MPI_SUM);
+        const auto duplicate_diag_rows =
+            reduceStructuralCount(local_duplicate_diag_rows, MPI_SUM);
+        const auto max_diag_entries_per_row =
+            reduceStructuralCount(local_max_diag_entries_per_row, MPI_MAX);
+
         const auto rows = reduceCounts(&MatrixStats::rows);
         const auto zero_rows = reduceCounts(&MatrixStats::zero_rows);
         const auto missing_diag = reduceCounts(&MatrixStats::missing_diag);
+        const auto diag_col_mismatch = reduceCounts(&MatrixStats::diag_col_mismatch);
         const auto zero_diag = reduceCounts(&MatrixStats::zero_diag);
+        const auto legacy_scan_zero_diag =
+            reduceCounts(&MatrixStats::legacy_scan_zero_diag);
+        const auto diag_ptr_legacy_scan_abs_mismatch =
+            reduceCounts(&MatrixStats::diag_ptr_legacy_scan_abs_mismatch);
         const auto nonfinite_entries = reduceCounts(&MatrixStats::nonfinite_entries);
         const auto nonfinite_rows = reduceCounts(&MatrixStats::nonfinite_rows);
         const auto min_abs_diag = reduceDoubles(&MatrixStats::min_abs_diag, MPI_MIN);
@@ -1848,7 +1940,17 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             << " rows=" << rows[static_cast<std::size_t>(total_index)]
             << " zero_rows=" << zero_rows[static_cast<std::size_t>(total_index)]
             << " missing_diag=" << missing_diag[static_cast<std::size_t>(total_index)]
+            << " diag_col_mismatch="
+            << diag_col_mismatch[static_cast<std::size_t>(total_index)]
             << " zero_diag=" << zero_diag[static_cast<std::size_t>(total_index)]
+            << " legacy_scan_zero_diag="
+            << legacy_scan_zero_diag[static_cast<std::size_t>(total_index)]
+            << " diag_ptr_legacy_scan_abs_mismatch="
+            << diag_ptr_legacy_scan_abs_mismatch[static_cast<std::size_t>(total_index)]
+            << " structural_diag_entries=" << structural_diag_entries
+            << " duplicate_diag_entries=" << duplicate_diag_entries
+            << " duplicate_diag_rows=" << duplicate_diag_rows
+            << " max_diag_entries_per_row=" << max_diag_entries_per_row
             << " nonfinite_entries="
             << nonfinite_entries[static_cast<std::size_t>(total_index)]
             << " nonfinite_rows=" << nonfinite_rows[static_cast<std::size_t>(total_index)]
@@ -1873,7 +1975,13 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             oss << " component" << comp << "_rows=" << rows[idx]
                 << " component" << comp << "_zero_rows=" << zero_rows[idx]
                 << " component" << comp << "_missing_diag=" << missing_diag[idx]
+                << " component" << comp << "_diag_col_mismatch="
+                << diag_col_mismatch[idx]
                 << " component" << comp << "_zero_diag=" << zero_diag[idx]
+                << " component" << comp << "_legacy_scan_zero_diag="
+                << legacy_scan_zero_diag[idx]
+                << " component" << comp << "_diag_ptr_legacy_scan_abs_mismatch="
+                << diag_ptr_legacy_scan_abs_mismatch[idx]
                 << " component" << comp << "_nonfinite_entries=" << nonfinite_entries[idx]
                 << " component" << comp << "_min_abs_diag="
                 << finiteOrZero(min_abs_diag[idx])
@@ -1899,7 +2007,10 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 unsigned long long block_rows = 0;
                 unsigned long long block_zero_rows = 0;
                 unsigned long long block_missing_diag = 0;
+                unsigned long long block_diag_col_mismatch = 0;
                 unsigned long long block_zero_diag = 0;
+                unsigned long long block_legacy_scan_zero_diag = 0;
+                unsigned long long block_diag_ptr_legacy_scan_abs_mismatch = 0;
                 unsigned long long block_nonfinite_entries = 0;
                 unsigned long long block_dirichlet_dofs = 0;
                 double block_min_abs_diag = std::numeric_limits<double>::infinity();
@@ -1913,7 +2024,11 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                     block_rows += rows[idx];
                     block_zero_rows += zero_rows[idx];
                     block_missing_diag += missing_diag[idx];
+                    block_diag_col_mismatch += diag_col_mismatch[idx];
                     block_zero_diag += zero_diag[idx];
+                    block_legacy_scan_zero_diag += legacy_scan_zero_diag[idx];
+                    block_diag_ptr_legacy_scan_abs_mismatch +=
+                        diag_ptr_legacy_scan_abs_mismatch[idx];
                     block_nonfinite_entries += nonfinite_entries[idx];
                     block_dirichlet_dofs += global_dirichlet_dofs[idx];
                     block_min_abs_diag = std::min(block_min_abs_diag, min_abs_diag[idx]);
@@ -1935,7 +2050,14 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                     << " block" << block_index << "_rows=" << block_rows
                     << " block" << block_index << "_zero_rows=" << block_zero_rows
                     << " block" << block_index << "_missing_diag=" << block_missing_diag
+                    << " block" << block_index << "_diag_col_mismatch="
+                    << block_diag_col_mismatch
                     << " block" << block_index << "_zero_diag=" << block_zero_diag
+                    << " block" << block_index << "_legacy_scan_zero_diag="
+                    << block_legacy_scan_zero_diag
+                    << " block" << block_index
+                    << "_diag_ptr_legacy_scan_abs_mismatch="
+                    << block_diag_ptr_legacy_scan_abs_mismatch
                     << " block" << block_index << "_nonfinite_entries="
                     << block_nonfinite_entries
                     << " block" << block_index << "_min_abs_diag="
@@ -2389,15 +2511,33 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                     face_comps.push_back(c);
                 }
             }
-            const int face_dof = static_cast<int>(face_comps.size());
+            // FSILS' native face operators interpret row i of val/valM as
+            // component i of the vector passed to the current solve.  A compact
+            // array containing only active components therefore changes the
+            // meaning of sparse/non-prefix component sets, and is too short
+            // when a BlockSchur computational primary contains auxiliary nodal
+            // fields.  Retain the full relevant component coordinate system:
+            // the K-block width for BlockSchur, or the full system width for a
+            // monolithic solve.  Inactive rows remain zero.
+            const bool use_primary_face_coordinates =
+                use_blockschur && has_saddle_point;
+            const int face_dof =
+                use_primary_face_coordinates ? mom_ncomp : dof;
 
-            // Build a fast lookup: component index -> face-local index (-1 if not active).
+            // Build a fast lookup from full-system component to the row used by
+            // the native face.  BlockSchur faces are expressed in K-local
+            // coordinates; monolithic faces use full-system coordinates.
             std::vector<int> comp_to_face_idx(static_cast<std::size_t>(dof), -1);
-            for (int fi = 0; fi < face_dof; ++fi) {
-                const int c = face_comps[static_cast<std::size_t>(fi)];
-                if (c >= 0 && c < dof) {
-                    comp_to_face_idx[static_cast<std::size_t>(c)] = fi;
-                }
+            for (const int c : face_comps) {
+                const int face_component =
+                    use_primary_face_coordinates ? c - mom_start : c;
+                FE_THROW_IF(c < 0 || c >= dof || face_component < 0 ||
+                                face_component >= face_dof,
+                            NotImplementedException,
+                            "FsilsLinearSolver::solve: native rank-one face active "
+                            "component " + std::to_string(c) +
+                                " is outside the computational primary block");
+                comp_to_face_idx[static_cast<std::size_t>(c)] = face_component;
             }
 
             // Seed the overlap buffer from the local view and then synchronize
@@ -5579,6 +5719,30 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         solution_stage_scaling_undone = true;
     };
 
+    // Preserve the finiteness of the caller-provided RHS independently of
+    // FSILS's internal norm telemetry.  A non-finite original norm must not
+    // be replaced by a later finite internal value and mistaken for a
+    // recoverable backend breakdown.
+    int local_original_rhs_is_finite = 1;
+    for (const auto value : b->data()) {
+        if (!std::isfinite(static_cast<double>(value))) {
+            local_original_rhs_is_finite = 0;
+            break;
+        }
+    }
+    int all_original_rhs_is_finite = local_original_rhs_is_finite;
+    if (lhs.commu.nTasks > 1) {
+        fe_fsi_linear_solver::fsils_allreduce(
+            &local_original_rhs_is_finite,
+            &all_original_rhs_is_finite,
+            1,
+            MPI_INT,
+            MPI_LAND,
+            lhs.commu);
+    }
+    const bool original_rhs_is_globally_finite =
+        all_original_rhs_is_finite != 0;
+
     fe_fsi_linear_solver::fsils_reset_collective_stats(lhs.commu);
     rebuildPreparedSystem(use_blockschur);
     compareFaceOperatorAgainstFe();
@@ -5688,16 +5852,97 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
     };
 
+    auto synchronizeFsilsSolveSuccess =
+        [&](bool local_success,
+            std::string_view phase,
+            std::string& error_out) -> bool {
+        int local_ok = local_success ? 1 : 0;
+        int all_ok = local_ok;
+        if (lhs.commu.nTasks > 1) {
+            fe_fsi_linear_solver::fsils_allreduce(
+                &local_ok, &all_ok, 1, MPI_INT, MPI_LAND, lhs.commu);
+        }
+        if (all_ok == 0 && local_success) {
+            error_out = std::string(phase) + " failed on another rank";
+        }
+        return all_ok != 0;
+    };
+
+    auto anyRankRequestsFsilsBranch = [&](bool local_request) -> bool {
+        int local = local_request ? 1 : 0;
+        int any = local;
+        if (lhs.commu.nTasks > 1) {
+            fe_fsi_linear_solver::fsils_allreduce(
+                &local, &any, 1, MPI_INT, MPI_LOR, lhs.commu);
+        }
+        return any != 0;
+    };
+
     int blockschur_true_residual_retries = 0;
     auto tightenBlockSchurTrueResidualRetryControls =
         [&](std::string_view phase,
             const FsilsResidualCheckResult& rejected_check) -> bool {
+        const bool rhs_is_finite = original_rhs_is_globally_finite;
+        const bool rejected_residual_is_finite =
+            std::isfinite(static_cast<double>(rejected_check.residual_norm)) &&
+            std::isfinite(static_cast<double>(rejected_check.relative_residual)) &&
+            rejected_check.residual_norm >= Real{0.0} &&
+            rejected_check.relative_residual >= Real{0.0};
+        const bool internal_residual_is_finite =
+            std::isfinite(static_cast<double>(ls.RI.iNorm)) &&
+            std::isfinite(static_cast<double>(ls.RI.fNorm));
+        bool solution_is_finite = true;
+        for (const auto value : x->data()) {
+            if (!std::isfinite(static_cast<double>(value))) {
+                solution_is_finite = false;
+                break;
+            }
+        }
+
+        // A finite RHS followed by NaN/Inf internal, true-residual, or
+        // correction state is a solver breakdown, not an ordinary tolerance
+        // miss.  Rebuild the destructively prepared FSILS system and retry
+        // once even when the optional finite-residual retry policy is off.
+        // Nonfinite input is deliberately excluded: rerunning the same bad
+        // RHS cannot recover and must fail closed immediately.
+        const bool local_forced_nonfinite_breakdown_retry =
+            rhs_is_finite &&
+            (!rejected_residual_is_finite ||
+             !internal_residual_is_finite ||
+             !solution_is_finite);
+        const bool local_requested_finite_residual_retry =
+            rhs_is_finite && fsilsBlockSchurTrueResidualRetryEnabled() &&
+            ls.RI.suc && rejected_residual_is_finite;
+        int local_forced_retry =
+            local_forced_nonfinite_breakdown_retry ? 1 : 0;
+        int any_forced_retry = local_forced_retry;
+        int local_requested_retry =
+            local_requested_finite_residual_retry ? 1 : 0;
+        int all_requested_retry = local_requested_retry;
+        if (lhs.commu.nTasks > 1) {
+            fe_fsi_linear_solver::fsils_allreduce(
+                &local_forced_retry,
+                &any_forced_retry,
+                1,
+                MPI_INT,
+                MPI_LOR,
+                lhs.commu);
+            fe_fsi_linear_solver::fsils_allreduce(
+                &local_requested_retry,
+                &all_requested_retry,
+                1,
+                MPI_INT,
+                MPI_LAND,
+                lhs.commu);
+        }
+        const bool forced_nonfinite_breakdown_retry =
+            any_forced_retry != 0;
+        const bool requested_finite_residual_retry =
+            all_requested_retry != 0;
+
         if (!use_blockschur ||
-            !fsilsBlockSchurTrueResidualRetryEnabled() ||
-            !ls.RI.suc ||
-            rejected_check.ok ||
-            !std::isfinite(static_cast<double>(rejected_check.residual_norm)) ||
-            !std::isfinite(static_cast<double>(rejected_check.relative_residual))) {
+            (!forced_nonfinite_breakdown_retry &&
+             !requested_finite_residual_retry)) {
             return false;
         }
 
@@ -5731,7 +5976,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         tighten_rel(ls.CG.relTol);
         increase_mitr(ls.GM.mItr);
         increase_mitr(ls.CG.mItr);
-        if (!changed) {
+        if (!changed && !forced_nonfinite_breakdown_retry) {
             return false;
         }
 
@@ -5740,6 +5985,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             oss << "FsilsLinearSolver: BlockSchur true-residual retry"
                 << " diagnostic=fsils_blockschur_true_residual_retry"
                 << " phase=" << phase
+                << " forced_nonfinite_breakdown="
+                << (forced_nonfinite_breakdown_retry ? 1 : 0)
                 << " rejected_residual_norm=" << rejected_check.residual_norm
                 << " rejected_relative_residual=" << rejected_check.relative_residual
                 << " retry_rel_tol=" << retry_rel
@@ -5752,7 +5999,14 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     };
 
     std::string solve_error;
-    bool solve_ok = runFsilsSolve(use_blockschur, solve_error);
+    bool solve_ok = false;
+    if (original_rhs_is_globally_finite) {
+        solve_ok = runFsilsSolve(use_blockschur, solve_error);
+        solve_ok = synchronizeFsilsSolveSuccess(
+            solve_ok, "initial FSILS solve", solve_error);
+    } else {
+        solve_error = "non-finite original RHS";
+    }
     FsilsResidualCheckResult initial_check{};
     FsilsResidualCheckResult initial_internal_check{};
     if (solve_ok) {
@@ -5771,7 +6025,10 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             use_blockschur ? "blockschur" : std::string(solverMethodToString(options_.method));
         initial_internal_check = validateInternalResidual(phase);
         initial_check = initial_internal_check;
-        if (shouldValidateResidual(initial_internal_check.ok, /*recovery_phase=*/false)) {
+        const bool validate_initial_residual = anyRankRequestsFsilsBranch(
+            shouldValidateResidual(initial_internal_check.ok,
+                                   /*recovery_phase=*/false));
+        if (validate_initial_residual) {
             initial_check = validateOriginalResidual(phase);
             initial_check = maybeRecenterConstraintMeanAndValidate(phase, initial_check);
             if (phase == "blockschur") {
@@ -5781,11 +6038,15 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                                                            phase);
             }
         }
-        if (!initial_check.ok &&
+        const bool any_initial_check_failed =
+            anyRankRequestsFsilsBranch(!initial_check.ok);
+        if (any_initial_check_failed &&
             tightenBlockSchurTrueResidualRetryControls(phase, initial_check)) {
             ++blockschur_true_residual_retries;
             rebuildPreparedSystem(use_blockschur);
             solve_ok = runFsilsSolve(use_blockschur, solve_error);
+            solve_ok = synchronizeFsilsSolveSuccess(
+                solve_ok, "BlockSchur retry", solve_error);
             if (solve_ok) {
                 undoStageScalingOnSolution(use_blockschur);
                 storeSolveBufferToSolution();
@@ -5797,8 +6058,11 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 const std::string retry_phase = "blockschur_retry";
                 initial_internal_check = validateInternalResidual(retry_phase);
                 initial_check = initial_internal_check;
-                if (shouldValidateResidual(initial_internal_check.ok,
-                                           /*recovery_phase=*/false)) {
+                const bool validate_retry_residual =
+                    anyRankRequestsFsilsBranch(
+                        shouldValidateResidual(initial_internal_check.ok,
+                                               /*recovery_phase=*/false));
+                if (validate_retry_residual) {
                     initial_check = validateOriginalResidual(retry_phase);
                     initial_check =
                         maybeRecenterConstraintMeanAndValidate(retry_phase, initial_check);
@@ -5822,7 +6086,17 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         initial_check.detail = std::string("initial solve threw: ") + solve_error;
     }
 
-    if (solve_ok && initial_check.ok &&
+    // Normalize the post-retry decision before any optional diagnostics that
+    // perform collectives.  Rank-local residual telemetry is not permitted
+    // to send only a subset of ranks into the constraint-mean reductions.
+    int local_fail = (!solve_ok || !initial_check.ok) ? 1 : 0;
+    int any_fail = local_fail;
+    if (lhs.commu.nTasks > 1) {
+        fe_fsi_linear_solver::fsils_allreduce(
+            &local_fail, &any_fail, 1, MPI_INT, MPI_LOR, lhs.commu);
+    }
+
+    if (solve_ok && any_fail == 0 &&
         use_blockschur && has_native_rank_one_updates && has_saddle_point && con_ncomp == 1) {
         const auto returned_con_stats = computeReturnedSolutionConstraintMeanStats();
         if (returned_con_stats.valid && returned_con_stats.count > 0u &&
@@ -5851,12 +6125,6 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
     }
 
-    int local_fail = (!solve_ok || !initial_check.ok) ? 1 : 0;
-    int any_fail = local_fail;
-    if (lhs.commu.nTasks > 1) {
-        fe_fsi_linear_solver::fsils_allreduce(&local_fail, &any_fail, 1, MPI_INT, MPI_LOR, lhs.commu);
-    }
-
     FsilsResidualCheckResult final_check{};
     if (any_fail != 0) {
         final_check = initial_check;
@@ -5865,7 +6133,10 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         storeSolveBufferToSolution();
         const auto final_internal_check = validateInternalResidual("fsils_final");
         final_check = final_internal_check;
-        if (shouldValidateResidual(final_internal_check.ok, /*recovery_phase=*/false)) {
+        const bool validate_final_residual = anyRankRequestsFsilsBranch(
+            shouldValidateResidual(final_internal_check.ok,
+                                   /*recovery_phase=*/false));
+        if (validate_final_residual) {
             const std::string phase = "fsils_final";
             final_check = validateOriginalResidual(phase);
             final_check = maybeRecenterConstraintMeanAndValidate(phase, final_check);
@@ -5881,6 +6152,34 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         final_check.detail = "fsils solve threw: " + solve_error;
     }
 
+    auto residualCheckIsFinite = [](const FsilsResidualCheckResult& check) {
+        return std::isfinite(static_cast<double>(check.rhs_norm)) &&
+               std::isfinite(static_cast<double>(check.residual_norm)) &&
+               std::isfinite(static_cast<double>(check.relative_residual)) &&
+               check.rhs_norm >= Real{0.0} &&
+               check.residual_norm >= Real{0.0} &&
+               check.relative_residual >= Real{0.0};
+    };
+    bool local_solution_is_finite = true;
+    for (const auto value : x->data()) {
+        if (!std::isfinite(static_cast<double>(value))) {
+            local_solution_is_finite = false;
+            break;
+        }
+    }
+    const bool local_internal_state_is_finite =
+        std::isfinite(static_cast<double>(ls.RI.iNorm)) &&
+        std::isfinite(static_cast<double>(ls.RI.fNorm));
+    const bool local_initial_norm_is_finite =
+        std::isfinite(static_cast<double>(report.initial_residual_norm)) &&
+        report.initial_residual_norm >= Real{0.0};
+    const bool local_numerical_breakdown =
+        solve_ok &&
+        (!local_solution_is_finite ||
+         !local_internal_state_is_finite ||
+         !local_initial_norm_is_finite ||
+         !residualCheckIsFinite(final_check));
+
     int local_final_ok = final_check.ok ? 1 : 0;
     int any_final_ok = local_final_ok;
     if (lhs.commu.nTasks > 1) {
@@ -5891,6 +6190,48 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         final_check.detail = "true residual check failed on another rank";
         final_check.residual_norm = std::numeric_limits<Real>::infinity();
         final_check.relative_residual = std::numeric_limits<Real>::infinity();
+    }
+
+    int local_breakdown = local_numerical_breakdown ? 1 : 0;
+    int any_breakdown = local_breakdown;
+    if (lhs.commu.nTasks > 1) {
+        fe_fsi_linear_solver::fsils_allreduce(
+            &local_breakdown, &any_breakdown, 1, MPI_INT, MPI_LOR, lhs.commu);
+    }
+    bool numerical_breakdown = any_breakdown != 0;
+    if (numerical_breakdown) {
+        std::string breakdown_detail;
+        if (!local_solution_is_finite) {
+            breakdown_detail = "solution";
+        }
+        auto append_breakdown_reason = [&](std::string_view reason) {
+            if (!breakdown_detail.empty()) {
+                breakdown_detail += ',';
+            }
+            breakdown_detail += reason;
+        };
+        if (!local_internal_state_is_finite) {
+            append_breakdown_reason("internal_residual");
+        }
+        if (!local_initial_norm_is_finite) {
+            append_breakdown_reason("initial_residual");
+        }
+        if (!residualCheckIsFinite(final_check)) {
+            append_breakdown_reason("true_residual");
+        }
+        if (breakdown_detail.empty()) {
+            breakdown_detail = "remote_rank";
+        }
+
+        // Never expose a correction associated with nonfinite solver state.
+        // Mark the kernel solve unusable as well as nonconverged so summary
+        // telemetry cannot report solve_ok=1 for a numerical breakdown.
+        x->zero();
+        solve_ok = false;
+        final_check.ok = false;
+        final_check.residual_norm = std::numeric_limits<Real>::infinity();
+        final_check.relative_residual = std::numeric_limits<Real>::infinity();
+        final_check.detail = "numerical breakdown: " + breakdown_detail;
     }
 
     if (num_added_faces > 0) {
@@ -6022,10 +6363,19 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         traceLog(oss.str());
     }
 
-    report.iterations = ls.RI.itr;
+    // The legacy BlockSchur kernels reconstruct `RI.itr` from a zero-based
+    // loop index, so a completed first outer iteration can be reported as
+    // zero.  `blockschur_stats` is incremented exactly once for every outer
+    // iteration actually entered (including a terminal breakdown iteration)
+    // and is therefore the authoritative public iteration count.
+    report.iterations =
+        use_blockschur ? ls.blockschur_stats.outer_iterations : ls.RI.itr;
     report.final_residual_norm = final_check.residual_norm;
     report.relative_residual = final_check.relative_residual;
     report.converged = final_check.ok;
+    report.numerical_breakdown = numerical_breakdown;
+    report.blockschur_true_residual_retries =
+        blockschur_true_residual_retries;
     report.message = use_blockschur ? "fsils (blockschur)" : "fsils";
     if (!final_check.ok && !final_check.detail.empty()) {
         report.message = "fsils (" + final_check.detail + ")";
@@ -6061,6 +6411,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     const bool fnorm_ok = is_finite(raw_fnorm);
     const bool rel_ok = is_finite(raw_rel);
     if (!iters_ok || !fnorm_ok || !rel_ok || !x_finite) {
+        numerical_breakdown = true;
+        solve_ok = false;
         report.iterations = std::max(0, std::min(raw_iterations, max_expected_iters));
         std::string reason;
         if (!iters_ok) reason += "itr";
@@ -6080,9 +6432,12 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
         x->zero();
         report.converged = false;
+        report.numerical_breakdown = true;
         report.final_residual_norm = std::numeric_limits<Real>::infinity();
         report.relative_residual = std::numeric_limits<Real>::infinity();
-        report.message = "fsils (breakdown:" + reason + ")";
+        if (report.message.find("numerical breakdown") == std::string::npos) {
+            report.message = "fsils (numerical breakdown:" + reason + ")";
+        }
     } else {
         if (!report.converged) {
             const std::string rel_msg = "fsils (not converged; itr=" + std::to_string(report.iterations) +
@@ -6210,6 +6565,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             << (current_preparation_uses_blockschur ? "blockschur" : "original")
             << " solve_ok=" << (solve_ok ? 1 : 0)
             << " converged=" << (report.converged ? 1 : 0)
+            << " numerical_breakdown="
+            << (report.numerical_breakdown ? 1 : 0)
             << " iterations=" << report.iterations
             << " initial_residual_norm=" << report.initial_residual_norm
             << " final_residual_norm=" << report.final_residual_norm

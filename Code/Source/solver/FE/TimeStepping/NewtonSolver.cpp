@@ -7,6 +7,7 @@
 
 #include "TimeStepping/NewtonSolver.h"
 
+#include "Assembly/CutIntegrationContext.h"
 #include "Backends/Interfaces/BackendFactory.h"
 #include "Constraints/AffineConstraints.h"
 #include "Constraints/GaugeDiagnostics.h"
@@ -27,6 +28,8 @@
 #endif
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <chrono>
 #include <exception>
 #include <functional>
@@ -58,6 +61,13 @@ namespace FE {
 namespace timestepping {
 
 namespace {
+
+#if FE_HAS_MPI
+using NewtonCommunicator = MPI_Comm;
+#else
+using NewtonCommunicator = int;
+constexpr NewtonCommunicator kSerialNewtonCommunicator = 0;
+#endif
 
 [[nodiscard]] bool oopTraceEnabled() noexcept
 {
@@ -106,6 +116,21 @@ namespace {
     return enabled;
 }
 
+/// Opt-out for the master-bearing (MPC) constraint-state distribution into
+/// the solution and rate history at state-sync points (here) and at the
+/// accepted-step boundary (TimeLoop). Unlike the full history stamping above,
+/// the master-bearing form pulls slave values from the SAME vector's masters,
+/// so it cannot rewrite the trajectory of time-dependent Dirichlet data; it
+/// exists so DOFs that enter or leave interface-tracking MPC sets (e.g.
+/// small-cut aggregation) never expose the free-vs-extension value jump to
+/// the time-integration stencils as a 1/(gamma*dt)-scaled rate pulse.
+[[nodiscard]] bool mpcStateDistributeDisabled() noexcept
+{
+    static const bool disabled =
+        envBoolEnabled("SVMP_NO_MPC_STATE_DISTRIBUTE");
+    return disabled;
+}
+
 [[nodiscard]] bool pressureRowContributionDiagnosticEnabled() noexcept
 {
     static const bool enabled =
@@ -113,6 +138,51 @@ namespace {
         envBoolEnabled("SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC");
     return enabled;
 }
+
+[[nodiscard]] bool freeSurfaceConservativeBalanceDiagnosticEnabled() noexcept
+{
+    // Preserve the same precedence as the Navier--Stokes registration gate so
+    // an explicit primary setting of "0" cannot be overridden by an ambient
+    // compatibility alias.  Do not cache this value: unit and integration
+    // harnesses can scope environment variables within one process.
+    constexpr std::array<const char*, 4> names{
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+        "SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+        "SVMP_NS_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC",
+        "SVMP_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC",
+    };
+    for (const char* name : names) {
+        const char* value = std::getenv(name);
+        if (value != nullptr && value[0] != '\0') {
+            return envBoolEnabled(name);
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool
+freeSurfaceConservativeBalanceDiagnosticEveryAssemblyRequested() noexcept
+{
+    // Every requested full diagnostic sample is assembled.  Qualification
+    // runs may additionally force the revision/exact-load-guarded mixed pair
+    // and LSQR cache off, so those expensive operations repeat for every
+    // sample (including both halves of a line-search accepted refresh).
+    constexpr std::array<const char*, 2> names{
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY",
+        "SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY",
+    };
+    for (const char* name : names) {
+        const char* value = std::getenv(name);
+        if (value != nullptr && value[0] != '\0') {
+            return envBoolEnabled(name);
+        }
+    }
+    return false;
+}
+
+inline constexpr std::string_view
+    kFreeSurfacePressureRepresentabilityPairOperator{
+        "equations_diagnostic_ns_free_surface_pressure_representability_pair"};
 
 [[nodiscard]] bool newtonMatrixSupportDiagnosticRequested() noexcept
 {
@@ -889,17 +959,18 @@ void addMatrixSupportFieldAbs(
 
 [[nodiscard]] bool newtonAssemblyDiagnosticsEnabled() noexcept
 {
-    static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_NEWTON_ASSEMBLY_DIAGNOSTICS");
-        if (env == nullptr) {
-            return false;
-        }
-        while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
-            ++env;
-        }
-        return *env != '\0' && *env != '0';
-    }();
-    return enabled;
+    // This diagnostic is deliberately scopeable by unit/integration
+    // harnesses in the same process.  Caching the first lookup made a later
+    // explicit enable silently ineffective and rendered diagnostic coverage
+    // dependent on test/solve order.
+    const char* env = std::getenv("SVMP_NEWTON_ASSEMBLY_DIAGNOSTICS");
+    if (env == nullptr) {
+        return false;
+    }
+    while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+        ++env;
+    }
+    return *env != '\0' && *env != '0';
 }
 
 struct ProcessMemorySnapshot {
@@ -987,8 +1058,10 @@ void logPostTangentAnalysisReport(const systems::FESystem& system,
 {
 #if FE_HAS_MPI
     int initialized = 0;
+    int finalized = 0;
     MPI_Initialized(&initialized);
-    if (!initialized) {
+    MPI_Finalized(&finalized);
+    if (!initialized || finalized) {
         return 0;
     }
     int rank = 0;
@@ -999,11 +1072,49 @@ void logPostTangentAnalysisReport(const systems::FESystem& system,
 #endif
 }
 
+[[nodiscard]] int communicatorRank(NewtonCommunicator communicator) noexcept
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    MPI_Finalized(&finalized);
+    if (!initialized || finalized || communicator == MPI_COMM_NULL) {
+        return 0;
+    }
+    int rank = 0;
+    (void)MPI_Comm_rank(communicator, &rank);
+    return rank;
+#else
+    (void)communicator;
+    return 0;
+#endif
+}
+
+[[nodiscard]] NewtonCommunicator systemCommunicator(
+    const systems::FESystem& system) noexcept
+{
+#if FE_HAS_MPI
+    return system.activeMpiCommunicator();
+#else
+    (void)system;
+    return kSerialNewtonCommunicator;
+#endif
+}
+
 [[nodiscard]] const char* stateSyncPointName(
     NewtonOptions::StateSynchronizationPoint point) noexcept
 {
     using Point = NewtonOptions::StateSynchronizationPoint;
     switch (point) {
+    case Point::OuterFixedPointState:
+        return "outer_fixed_point_state";
+    case Point::ProjectedOuterFixedPointState:
+        return "projected_outer_fixed_point_state";
+    case Point::EndpointCandidateState:
+        return "endpoint_candidate_state";
+    case Point::ProjectedEndpointCandidateState:
+        return "projected_endpoint_candidate_state";
     case Point::AcceptedNonlinearState:
         return "accepted_nonlinear_state";
     case Point::ResidualAssembly:
@@ -1016,25 +1127,83 @@ void logPostTangentAnalysisReport(const systems::FESystem& system,
         return "line_search_trial";
     case Point::RestoredNonlinearState:
         return "restored_nonlinear_state";
+    case Point::RestoredOuterFixedPointState:
+        return "restored_outer_fixed_point_state";
+    case Point::RestoredProjectedOuterFixedPointState:
+        return "restored_projected_outer_fixed_point_state";
+    case Point::RestoredTimeStepState:
+        return "restored_time_step_state";
+    case Point::RestoredProjectedTimeStepState:
+        return "restored_projected_time_step_state";
     case Point::FinalResidualAssembly:
         return "final_residual";
     }
     return "unknown";
 }
 
-[[nodiscard]] bool mpiMultiTaskActive() noexcept
+struct ConstraintSemanticFingerprint {
+    std::uint64_t hash_a{1469598103934665603ULL};
+    std::uint64_t hash_b{0x9e3779b97f4a7c15ULL};
+    std::uint64_t line_count{0u};
+    std::uint64_t entry_count{0u};
+
+    [[nodiscard]] bool operator==(
+        const ConstraintSemanticFingerprint&) const noexcept = default;
+};
+
+[[nodiscard]] ConstraintSemanticFingerprint constraintSemanticFingerprint(
+    const constraints::AffineConstraints& affine_constraints)
+{
+    ConstraintSemanticFingerprint fingerprint;
+    auto mix_word = [&fingerprint](std::uint64_t word) noexcept {
+        fingerprint.hash_a ^= word;
+        fingerprint.hash_a *= 1099511628211ULL;
+
+        word ^= word >> 30;
+        word *= 0xbf58476d1ce4e5b9ULL;
+        word ^= word >> 27;
+        word *= 0x94d049bb133111ebULL;
+        word ^= word >> 31;
+        fingerprint.hash_b =
+            std::rotl(fingerprint.hash_b ^ word, 27) *
+                0x9e3779b185ebca87ULL +
+            0x632be59bd9b4e019ULL;
+    };
+
+    affine_constraints.forEach(
+        [&](const constraints::AffineConstraints::ConstraintView& line) {
+            mix_word(0xa0761d6478bd642fULL);
+            mix_word(static_cast<std::uint64_t>(line.slave_dof));
+            mix_word(std::bit_cast<std::uint64_t>(line.inhomogeneity));
+            mix_word(static_cast<std::uint64_t>(line.entries.size()));
+            ++fingerprint.line_count;
+            for (const auto& entry : line.entries) {
+                mix_word(static_cast<std::uint64_t>(entry.master_dof));
+                mix_word(std::bit_cast<std::uint64_t>(entry.weight));
+                ++fingerprint.entry_count;
+            }
+        });
+    mix_word(fingerprint.line_count);
+    mix_word(fingerprint.entry_count);
+    return fingerprint;
+}
+
+[[nodiscard]] bool mpiMultiTaskActive(NewtonCommunicator communicator) noexcept
 {
 #if FE_HAS_MPI
     int initialized = 0;
+    int finalized = 0;
     MPI_Initialized(&initialized);
-    if (!initialized) {
+    MPI_Finalized(&finalized);
+    if (!initialized || finalized || communicator == MPI_COMM_NULL) {
         return false;
     }
 
     int size = 1;
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_size(communicator, &size);
     return size > 1;
 #else
+    (void)communicator;
     return false;
 #endif
 }
@@ -1176,36 +1345,42 @@ void logPostTangentAnalysisReport(const systems::FESystem& system,
 }
 
 template <typename T>
-[[nodiscard]] T mpiAllreduceSumIfActive(T value) noexcept
+[[nodiscard]] T mpiAllreduceSumIfActive(
+    T value,
+    NewtonCommunicator communicator) noexcept
 {
 #if FE_HAS_MPI
     int initialized = 0;
+    int finalized = 0;
     MPI_Initialized(&initialized);
-    if (!initialized) {
+    MPI_Finalized(&finalized);
+    if (!initialized || finalized || communicator == MPI_COMM_NULL) {
         return value;
     }
 
     int size = 1;
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_size(communicator, &size);
     if (size <= 1) {
         return value;
     }
 
     T global = value;
     if constexpr (std::is_same_v<T, int>) {
-        MPI_Allreduce(&value, &global, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(&value, &global, 1, MPI_INT, MPI_SUM, communicator);
     } else {
-        MPI_Allreduce(&value, &global, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(&value, &global, 1, MPI_DOUBLE, MPI_SUM, communicator);
     }
     return global;
 #else
+    (void)communicator;
     return value;
 #endif
 }
 
 [[nodiscard]] bool tryPromoteReducedFieldUpdateToNativeRankOne(
     const backends::ReducedFieldUpdate& update,
-    backends::RankOneUpdate& promoted)
+    backends::RankOneUpdate& promoted,
+    NewtonCommunicator communicator)
 {
     if (update.grouped_coupling_id >= 0) {
         return false;
@@ -1251,11 +1426,15 @@ template <typename T>
         }
     }
 
-    const int global_q_has = mpiAllreduceSumIfActive(q_map.empty() ? 0 : 1);
-    const int global_u_has = mpiAllreduceSumIfActive(u_map.empty() ? 0 : 1);
-    const Real global_q_norm_sq = mpiAllreduceSumIfActive(q_norm_sq);
-    const Real global_u_norm_sq = mpiAllreduceSumIfActive(u_norm_sq);
-    const Real global_cross = mpiAllreduceSumIfActive(cross);
+    const int global_q_has =
+        mpiAllreduceSumIfActive(q_map.empty() ? 0 : 1, communicator);
+    const int global_u_has =
+        mpiAllreduceSumIfActive(u_map.empty() ? 0 : 1, communicator);
+    const Real global_q_norm_sq =
+        mpiAllreduceSumIfActive(q_norm_sq, communicator);
+    const Real global_u_norm_sq =
+        mpiAllreduceSumIfActive(u_norm_sq, communicator);
+    const Real global_cross = mpiAllreduceSumIfActive(cross, communicator);
     if (global_q_has == 0 || global_u_has == 0 ||
         !(global_q_norm_sq > kTol * kTol) ||
         !(global_u_norm_sq > kTol * kTol)) {
@@ -1279,7 +1458,8 @@ template <typename T>
         }
     }
 
-    const Real residual_sq = mpiAllreduceSumIfActive(local_residual_sq);
+    const Real residual_sq =
+        mpiAllreduceSumIfActive(local_residual_sq, communicator);
     if (!(residual_sq / std::max(global_u_norm_sq, Real(1e-30)) <= kRelTolSq)) {
         return false;
     }
@@ -1314,7 +1494,8 @@ template <typename T>
 [[nodiscard]] std::vector<Real> gatherGlobalDenseVectorFromOwnedEntries(
     backends::GenericVector& vec,
     std::size_t n,
-    const dofs::IndexSet& owned_dofs)
+    const dofs::IndexSet& owned_dofs,
+    NewtonCommunicator communicator)
 {
     auto view = vec.createAssemblyView();
     FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: global dense gather view");
@@ -1331,17 +1512,22 @@ template <typename T>
 
 #if FE_HAS_MPI
     int mpi_initialized = 0;
+    int mpi_finalized = 0;
     MPI_Initialized(&mpi_initialized);
-    if (mpi_initialized && !local.empty()) {
+    MPI_Finalized(&mpi_finalized);
+    if (mpi_initialized && !mpi_finalized &&
+        communicator != MPI_COMM_NULL && !local.empty()) {
         std::vector<Real> global(local.size(), Real(0.0));
         MPI_Allreduce(local.data(),
                       global.data(),
                       static_cast<int>(local.size()),
                       MPI_DOUBLE,
                       MPI_SUM,
-                      MPI_COMM_WORLD);
+                      communicator);
         return global;
     }
+#else
+    (void)communicator;
 #endif
 
     return local;
@@ -1410,32 +1596,33 @@ struct ScalarFieldVertexDumpRecord {
     const auto field_range = fmap.getFieldDofRange(field_idx);
     const auto& field_dh = sys.fieldDofHandler(static_cast<FieldId>(field_idx));
     const auto* emap = field_dh.getEntityDofMap();
-    if (emap == nullptr) {
-        return {};
-    }
-
     const auto& field_owned = field_dh.getPartition().locallyOwned();
     std::vector<ScalarFieldVertexDumpRecord> local_records;
     local_records.reserve(static_cast<std::size_t>(field_owned.size()));
-    for (const auto local_dof : field_owned) {
-        const auto ent = emap->getDofEntity(local_dof);
-        if (!ent || ent->kind != dofs::EntityKind::Vertex) {
-            continue;
+    if (emap != nullptr) {
+        for (const auto local_dof : field_owned) {
+            const auto ent = emap->getDofEntity(local_dof);
+            if (!ent || ent->kind != dofs::EntityKind::Vertex) {
+                continue;
+            }
+            const GlobalIndex monolithic_dof = field_range.first + local_dof;
+            const auto xyz = sys.meshAccess().getNodeCoordinates(ent->id);
+            local_records.push_back(ScalarFieldVertexDumpRecord{
+                .monolithic_dof = monolithic_dof,
+                .vertex_id = ent->id,
+                .xyz = xyz,
+                .value = view->getVectorEntry(monolithic_dof),
+            });
         }
-        const GlobalIndex monolithic_dof = field_range.first + local_dof;
-        const auto xyz = sys.meshAccess().getNodeCoordinates(ent->id);
-        local_records.push_back(ScalarFieldVertexDumpRecord{
-            .monolithic_dof = monolithic_dof,
-            .vertex_id = ent->id,
-            .xyz = xyz,
-            .value = view->getVectorEntry(monolithic_dof),
-        });
     }
 
 #if FE_HAS_MPI
     int mpi_initialized = 0;
+    int mpi_finalized = 0;
     MPI_Initialized(&mpi_initialized);
-    if (mpi_initialized) {
+    MPI_Finalized(&mpi_finalized);
+    const auto communicator = sys.activeMpiCommunicator();
+    if (mpi_initialized && !mpi_finalized && communicator != MPI_COMM_NULL) {
         constexpr int kPackedStride = 6;
         std::vector<double> local_packed(local_records.size() * kPackedStride, 0.0);
         for (std::size_t i = 0; i < local_records.size(); ++i) {
@@ -1449,7 +1636,8 @@ struct ScalarFieldVertexDumpRecord {
         }
 
         int mpi_size = 1;
-        MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+        MPI_Comm_size(communicator, &mpi_size);
+        const int root_rank = communicatorRank(communicator);
         std::vector<int> recv_counts(static_cast<std::size_t>(mpi_size), 0);
         const int local_count = static_cast<int>(local_packed.size());
         MPI_Gather(&local_count,
@@ -1459,11 +1647,11 @@ struct ScalarFieldVertexDumpRecord {
                    1,
                    MPI_INT,
                    0,
-                   MPI_COMM_WORLD);
+                   communicator);
 
         std::vector<double> gathered;
         std::vector<int> displs;
-        if (mpiRank() == 0) {
+        if (root_rank == 0) {
             displs.resize(static_cast<std::size_t>(mpi_size), 0);
             int offset = 0;
             for (int i = 0; i < mpi_size; ++i) {
@@ -1481,9 +1669,9 @@ struct ScalarFieldVertexDumpRecord {
                     displs.data(),
                     MPI_DOUBLE,
                     0,
-                    MPI_COMM_WORLD);
+                    communicator);
 
-        if (mpiRank() != 0) {
+        if (root_rank != 0) {
             return {};
         }
 
@@ -1845,8 +2033,9 @@ void applyJacobianCheckComponentFilter(const systems::FESystem& sys,
                                        std::string_view filter_label,
                                        std::size_t sweep_index)
 {
+    const auto communicator = systemCommunicator(sys);
     if (tokens.empty()) {
-        if (mpiRank() == 0) {
+        if (communicatorRank(communicator) == 0) {
             FE_LOG_INFO("NewtonSolver: Jacobian check component filter diagnostic=jacobian_check_component_filter components='" +
                         std::string(filter_label) +
                         "' component_filter='" + std::string(filter_label) +
@@ -1868,19 +2057,24 @@ void applyJacobianCheckComponentFilter(const systems::FESystem& sys,
             zero_dofs.push_back(dof);
         }
     }
+    auto view = direction.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: Jacobian check component filter view");
+    view->beginAssemblyPhase();
     if (!zero_dofs.empty()) {
-        auto view = direction.createAssemblyView();
-        FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: Jacobian check component filter view");
-        view->beginAssemblyPhase();
         view->zeroVectorEntries(zero_dofs);
-        view->finalizeAssembly();
     }
+    // A distributed assembly finalization can be collective even when this
+    // rank has no selected entries to zero.
+    view->finalizeAssembly();
 
     unsigned long long zeroed_count = static_cast<unsigned long long>(zero_dofs.size());
 #if FE_HAS_MPI
     int mpi_initialized = 0;
+    int mpi_finalized = 0;
     MPI_Initialized(&mpi_initialized);
-    if (mpi_initialized) {
+    MPI_Finalized(&mpi_finalized);
+    if (mpi_initialized && !mpi_finalized &&
+        communicator != MPI_COMM_NULL) {
         unsigned long long global_selected = 0u;
         unsigned long long global_zeroed = 0u;
         const unsigned long long local_zeroed = zeroed_count;
@@ -1889,19 +2083,19 @@ void applyJacobianCheckComponentFilter(const systems::FESystem& sys,
                       1,
                       MPI_UNSIGNED_LONG_LONG,
                       MPI_SUM,
-                      MPI_COMM_WORLD);
+                      communicator);
         MPI_Allreduce(&local_zeroed,
                       &global_zeroed,
                       1,
                       MPI_UNSIGNED_LONG_LONG,
                       MPI_SUM,
-                      MPI_COMM_WORLD);
+                      communicator);
         selected_count = global_selected;
         zeroed_count = global_zeroed;
     }
 #endif
 
-    if (mpiRank() == 0) {
+    if (communicatorRank(communicator) == 0) {
         FE_LOG_INFO("NewtonSolver: Jacobian check component filter diagnostic=jacobian_check_component_filter components='" +
                     std::string(filter_label) +
                     "' component_filter='" + std::string(filter_label) +
@@ -1965,6 +2159,305 @@ void copyVector(backends::GenericVector& dst, const backends::GenericVector& src
     }
 }
 
+void recreatePressureRepresentabilityVectors(
+    const backends::BackendFactory& factory,
+    GlobalIndex n_dofs,
+    NewtonWorkspace& workspace)
+{
+    FE_THROW_IF(
+        n_dofs <= 0,
+        systems::InvalidStateException,
+        "NewtonSolver: pressure-representability vector layout has no DOFs");
+    const auto create_vector = [&]() {
+        auto vector = factory.createVector(n_dofs);
+        FE_CHECK_NOT_NULL(
+            vector.get(),
+            "NewtonSolver pressure-representability vector");
+        return vector;
+    };
+
+    // Construct the complete replacement set before releasing any old
+    // vectors. Besides providing basic exception safety, this makes a layout
+    // refresh observable and prevents an allocator from recycling an old
+    // object address while the set is only partially rebuilt.
+    auto load = create_vector();
+    auto solution = create_vector();
+    auto left_basis = create_vector();
+    auto right_basis = create_vector();
+    auto direction = create_vector();
+    auto work = create_vector();
+    auto residual = create_vector();
+    auto normal_residual = create_vector();
+
+    workspace.pressure_representability_load = std::move(load);
+    workspace.pressure_representability_solution = std::move(solution);
+    workspace.pressure_representability_left_basis =
+        std::move(left_basis);
+    workspace.pressure_representability_right_basis =
+        std::move(right_basis);
+    workspace.pressure_representability_direction = std::move(direction);
+    workspace.pressure_representability_work = std::move(work);
+    workspace.pressure_representability_residual = std::move(residual);
+    workspace.pressure_representability_normal_residual =
+        std::move(normal_residual);
+}
+
+struct PressureRepresentabilityLsqrResult {
+    double residual_norm{std::numeric_limits<double>::quiet_NaN()};
+    double relative_residual{std::numeric_limits<double>::quiet_NaN()};
+    double normal_residual_norm{std::numeric_limits<double>::quiet_NaN()};
+    double relative_normal_residual{
+        std::numeric_limits<double>::quiet_NaN()};
+    double pressure_norm{std::numeric_limits<double>::quiet_NaN()};
+    int iterations{0};
+    bool converged{false};
+    bool breakdown{false};
+};
+
+/**
+ * Solve min_p ||G p + f|| with Golub--Kahan LSQR from p=0.
+ *
+ * `pair` is the constrained, symmetric mixed operator [0,G;G^T,0].  Inputs
+ * carrying pressure coefficients therefore produce G-actions, while inputs
+ * carrying velocity residuals produce G^T-actions through the same generic
+ * matrix multiply.  No normal matrix is formed and no backend storage is
+ * inspected or globally gathered.
+ */
+PressureRepresentabilityLsqrResult solvePressureRepresentabilityLsqr(
+    const backends::GenericMatrix& pair,
+    const backends::GenericVector& load,
+    backends::GenericVector& pressure,
+    backends::GenericVector& left_basis,
+    backends::GenericVector& right_basis,
+    backends::GenericVector& direction,
+    backends::GenericVector& work,
+    backends::GenericVector& residual,
+    backends::GenericVector& normal_residual,
+    int max_iterations,
+    const std::function<bool(bool)>& all_ranks)
+{
+    PressureRepresentabilityLsqrResult result;
+    pressure.zero();
+    left_basis.zero();
+    right_basis.zero();
+    direction.zero();
+    work.zero();
+    residual.zero();
+    normal_residual.zero();
+
+    const auto vector_is_finite = [&](const backends::GenericVector& vector) {
+        const auto values = vector.localSpan();
+        const bool local_finite = std::all_of(
+            values.begin(), values.end(), [](Real value) {
+                return std::isfinite(static_cast<double>(value));
+            });
+        return all_ranks(local_finite);
+    };
+    const auto finite_nonnegative = [&](double value) {
+        return all_ranks(std::isfinite(value) && value >= 0.0);
+    };
+
+    const double load_norm = load.norm();
+    if (!vector_is_finite(load) || !finite_nonnegative(load_norm)) {
+        result.breakdown = true;
+        return result;
+    }
+
+    auto evaluate_fresh_residual = [&]() {
+        pressure.updateGhosts();
+        pair.mult(pressure, residual);
+        residual.markModified();
+        axpy(residual, Real{1.0}, load);
+        residual.updateGhosts();
+        pair.mult(residual, normal_residual);
+        normal_residual.markModified();
+
+        result.residual_norm = residual.norm();
+        result.normal_residual_norm = normal_residual.norm();
+        result.pressure_norm = pressure.norm();
+        return vector_is_finite(residual) &&
+               vector_is_finite(normal_residual) &&
+               vector_is_finite(pressure) &&
+               finite_nonnegative(result.residual_norm) &&
+               finite_nonnegative(result.normal_residual_norm) &&
+               finite_nonnegative(result.pressure_norm);
+    };
+
+    if (!evaluate_fresh_residual()) {
+        result.breakdown = true;
+        return result;
+    }
+    const double initial_normal_residual_norm =
+        result.normal_residual_norm;
+    const double absolute_stationarity_tolerance =
+        100.0 * std::numeric_limits<Real>::epsilon() *
+        std::max(1.0, initial_normal_residual_norm);
+    const double stationarity_tolerance =
+        absolute_stationarity_tolerance +
+        1.0e-10 * initial_normal_residual_norm;
+
+    const auto refresh_relative_metrics = [&]() {
+        result.relative_residual =
+            load_norm > 0.0
+                ? result.residual_norm / load_norm
+                : (result.residual_norm <= absolute_stationarity_tolerance
+                       ? 0.0
+                       : std::numeric_limits<double>::infinity());
+        result.relative_normal_residual =
+            initial_normal_residual_norm > 0.0
+                ? result.normal_residual_norm /
+                      initial_normal_residual_norm
+                : (result.normal_residual_norm <=
+                           absolute_stationarity_tolerance
+                       ? 0.0
+                       : std::numeric_limits<double>::infinity());
+    };
+    refresh_relative_metrics();
+
+    // If G^T f is already at the scale-aware roundoff floor, p=0 is the
+    // least-squares stationarity certificate.  This includes loads wholly in
+    // the orthogonal complement of range(G).
+    const bool initially_stationary = all_ranks(
+        result.normal_residual_norm <= absolute_stationarity_tolerance);
+    if (initially_stationary) {
+        result.converged = true;
+        return result;
+    }
+    if (max_iterations <= 0 || !(load_norm > 0.0)) {
+        return result;
+    }
+
+    // LSQR solves G p = -f.  The vectors remain monolithic, but the zero
+    // diagonal blocks ensure the Golub--Kahan bases alternate exactly between
+    // velocity and pressure subspaces.
+    left_basis.copyFrom(load);
+    left_basis.scale(static_cast<Real>(-1.0 / load_norm));
+    left_basis.updateGhosts();
+    pair.mult(left_basis, right_basis);
+    right_basis.markModified();
+    double alpha = right_basis.norm();
+    if (!vector_is_finite(right_basis) || !finite_nonnegative(alpha) ||
+        !(alpha > 0.0)) {
+        result.breakdown = true;
+        (void)evaluate_fresh_residual();
+        refresh_relative_metrics();
+        return result;
+    }
+    right_basis.scale(static_cast<Real>(1.0 / alpha));
+    direction.copyFrom(right_basis);
+
+    double rho_bar = alpha;
+    double phi_bar = load_norm;
+    for (int iteration = 0; iteration < max_iterations; ++iteration) {
+        right_basis.updateGhosts();
+        pair.mult(right_basis, work);
+        work.markModified();
+        axpy(work, static_cast<Real>(-alpha), left_basis);
+        double beta = work.norm();
+        bool recurrence_finite =
+            vector_is_finite(work) && finite_nonnegative(beta);
+        if (!recurrence_finite) {
+            result.breakdown = true;
+            break;
+        }
+
+        if (beta > 0.0) {
+            left_basis.copyFrom(work);
+            left_basis.scale(static_cast<Real>(1.0 / beta));
+            left_basis.updateGhosts();
+            pair.mult(left_basis, work);
+            work.markModified();
+            axpy(work, static_cast<Real>(-beta), right_basis);
+            alpha = work.norm();
+            recurrence_finite =
+                vector_is_finite(work) && finite_nonnegative(alpha);
+            if (!recurrence_finite) {
+                result.breakdown = true;
+                break;
+            }
+            if (alpha > 0.0) {
+                right_basis.copyFrom(work);
+                right_basis.scale(static_cast<Real>(1.0 / alpha));
+            } else {
+                right_basis.zero();
+            }
+        } else {
+            left_basis.zero();
+            right_basis.zero();
+            alpha = 0.0;
+        }
+
+        const double rho = std::hypot(rho_bar, beta);
+        const bool rotation_finite = all_ranks(
+            std::isfinite(rho) && rho > 0.0 &&
+            std::isfinite(rho_bar) && std::isfinite(phi_bar) &&
+            std::isfinite(alpha));
+        if (!rotation_finite) {
+            result.breakdown = true;
+            break;
+        }
+        const double cosine = rho_bar / rho;
+        const double sine = beta / rho;
+        const double theta = sine * alpha;
+        rho_bar = -cosine * alpha;
+        const double phi = cosine * phi_bar;
+        phi_bar = sine * phi_bar;
+        const double solution_scale = phi / rho;
+        const double direction_scale = theta / rho;
+        const bool coefficients_finite = all_ranks(
+            std::isfinite(cosine) && std::isfinite(sine) &&
+            std::isfinite(theta) && std::isfinite(rho_bar) &&
+            std::isfinite(phi) && std::isfinite(phi_bar) &&
+            std::isfinite(solution_scale) &&
+            std::isfinite(direction_scale));
+        if (!coefficients_finite) {
+            result.breakdown = true;
+            break;
+        }
+
+        axpy(pressure, static_cast<Real>(solution_scale), direction);
+        direction.scale(static_cast<Real>(-direction_scale));
+        axpy(direction, Real{1.0}, right_basis);
+        result.iterations = iteration + 1;
+
+        if (!evaluate_fresh_residual()) {
+            result.breakdown = true;
+            break;
+        }
+        refresh_relative_metrics();
+        const bool stationary = all_ranks(
+            result.normal_residual_norm <= stationarity_tolerance);
+        if (stationary) {
+            result.converged = true;
+            break;
+        }
+
+        // Exact bidiagonal termination without stationarity is a genuine
+        // numerical breakdown; it is not silently relabelled convergence.
+        const bool exact_recurrence_terminated =
+            all_ranks(alpha == 0.0 || beta == 0.0);
+        if (exact_recurrence_terminated) {
+            result.breakdown = true;
+            break;
+        }
+    }
+
+    // Do not rely on recurrence estimates for qualification.  Recompute both
+    // r=Gp+f and G^T r from the assembled operator after the final update (or
+    // after a breakdown) and publish only those fresh norms.
+    if (!evaluate_fresh_residual()) {
+        result.breakdown = true;
+        result.converged = false;
+    }
+    refresh_relative_metrics();
+    if (result.converged) {
+        result.converged = all_ranks(
+            !result.breakdown &&
+            result.normal_residual_norm <= stationarity_tolerance);
+    }
+    return result;
+}
+
 double residualNormForConvergence(const backends::GenericVector& r, backends::GenericVector& scratch)
 {
     if (r.backendKind() != backends::BackendKind::FSILS) {
@@ -1992,27 +2485,38 @@ double residualNormForConvergence(const backends::GenericVector& r, backends::Ge
 #endif
 }
 
-double auxiliaryResidualNormForConvergence(const systems::FESystem::BorderedCouplingData& bordered)
+double auxiliaryResidualNormForConvergence(
+    const systems::FESystem::BorderedCouplingData& bordered,
+    NewtonCommunicator communicator)
 {
-    if (!bordered.active || bordered.g.empty()) {
-        return 0.0;
-    }
-
     long double local_sq = 0.0L;
-    for (const auto v : bordered.g) {
-        local_sq += static_cast<long double>(v) * static_cast<long double>(v);
+    if (bordered.active) {
+        for (const auto v : bordered.g) {
+            local_sq += static_cast<long double>(v) *
+                        static_cast<long double>(v);
+        }
     }
 
 #if FE_HAS_MPI
     if (!bordered.globally_reduced) {
         int mpi_initialized = 0;
+        int mpi_finalized = 0;
         MPI_Initialized(&mpi_initialized);
-        if (mpi_initialized) {
+        MPI_Finalized(&mpi_finalized);
+        if (mpi_initialized && !mpi_finalized &&
+            communicator != MPI_COMM_NULL) {
             long double global_sq = 0.0L;
-            MPI_Allreduce(&local_sq, &global_sq, 1, MPI_LONG_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+            MPI_Allreduce(&local_sq,
+                          &global_sq,
+                          1,
+                          MPI_LONG_DOUBLE,
+                          MPI_SUM,
+                          communicator);
             local_sq = global_sq;
         }
     }
+#else
+    (void)communicator;
 #endif
 
     return std::sqrt(static_cast<double>(local_sq));
@@ -2028,26 +2532,119 @@ struct ResidualNormComponents {
     }
 };
 
+struct FieldResidualNormDefinition {
+    FieldId field{INVALID_FIELD_ID};
+    GlobalIndex begin{0};
+    GlobalIndex end{0};
+};
+
+struct FieldResidualNormSample {
+    std::vector<double> norms{};
+    std::vector<std::uint64_t> owned_dof_counts{};
+};
+
+[[nodiscard]] FieldResidualNormSample fieldResidualNormsForConvergence(
+    const systems::FESystem& system,
+    backends::GenericVector& residual,
+    std::span<const FieldResidualNormDefinition> definitions)
+{
+    FieldResidualNormSample sample;
+    sample.norms.assign(definitions.size(), 0.0);
+    sample.owned_dof_counts.assign(definitions.size(), 0u);
+    if (definitions.empty()) {
+        return sample;
+    }
+
+    const auto owned_dofs = ownedDofsForVector(
+        residual, system.dofHandler().getPartition().locallyOwned());
+    auto view = residual.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: field residual convergence view");
+
+    std::vector<double> local_squared_norms(definitions.size(), 0.0);
+    std::vector<unsigned long long> local_counts(definitions.size(), 0ull);
+    for (const auto dof : owned_dofs) {
+        for (std::size_t i = 0; i < definitions.size(); ++i) {
+            const auto& definition = definitions[i];
+            if (dof < definition.begin || dof >= definition.end) {
+                continue;
+            }
+            const double value = static_cast<double>(view->getVectorEntry(dof));
+            local_squared_norms[i] += value * value;
+            ++local_counts[i];
+            break;
+        }
+    }
+
+    std::vector<double> global_squared_norms = local_squared_norms;
+    std::vector<unsigned long long> global_counts = local_counts;
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    int mpi_finalized = 0;
+    MPI_Initialized(&mpi_initialized);
+    MPI_Finalized(&mpi_finalized);
+    if (mpi_initialized && !mpi_finalized) {
+        const auto communicator = system.activeMpiCommunicator();
+        if (communicator != MPI_COMM_NULL) {
+            int communicator_size = 1;
+            MPI_Comm_size(communicator, &communicator_size);
+            if (communicator_size > 1) {
+                FE_THROW_IF(definitions.size() >
+                                static_cast<std::size_t>(std::numeric_limits<int>::max()),
+                            systems::InvalidStateException,
+                            "NewtonSolver: too many field residual convergence criteria for MPI reduction");
+                const auto count = static_cast<int>(definitions.size());
+                MPI_Allreduce(local_squared_norms.data(),
+                              global_squared_norms.data(),
+                              count,
+                              MPI_DOUBLE,
+                              MPI_SUM,
+                              communicator);
+                MPI_Allreduce(local_counts.data(),
+                              global_counts.data(),
+                              count,
+                              MPI_UNSIGNED_LONG_LONG,
+                              MPI_SUM,
+                              communicator);
+            }
+        }
+    }
+#endif
+
+    for (std::size_t i = 0; i < definitions.size(); ++i) {
+        sample.norms[i] = std::sqrt(std::max(0.0, global_squared_norms[i]));
+        sample.owned_dof_counts[i] =
+            static_cast<std::uint64_t>(global_counts[i]);
+    }
+    return sample;
+}
+
+[[nodiscard]] int activeSystemRank(const systems::FESystem& system) noexcept
+{
+    return communicatorRank(systemCommunicator(system));
+}
+
 [[nodiscard]] ResidualNormComponents borderedResidualNormComponentsForConvergence(
     const backends::GenericVector& r,
     backends::GenericVector& scratch,
-    const systems::FESystem::BorderedCouplingData& bordered)
+    const systems::FESystem::BorderedCouplingData& bordered,
+    NewtonCommunicator communicator)
 {
     return ResidualNormComponents{
         residualNormForConvergence(r, scratch),
-        auxiliaryResidualNormForConvergence(bordered)
+        auxiliaryResidualNormForConvergence(bordered, communicator)
     };
 }
 
 void zeroVectorEntries(std::span<const GlobalIndex> dofs, backends::GenericVector& vec)
 {
-    if (dofs.empty()) {
-        return;
-    }
     auto view = vec.createAssemblyView();
     FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: zeroVectorEntries view");
     view->beginAssemblyPhase();
-    view->zeroVectorEntries(dofs);
+    if (!dofs.empty()) {
+        view->zeroVectorEntries(dofs);
+    }
+    // Distributed backends may require every communicator rank to finalize,
+    // including ranks whose local constrained-row list is empty.
     view->finalizeAssembly();
 }
 
@@ -2158,7 +2755,7 @@ std::vector<ComponentNormSnapshot> componentNormSnapshot(const systems::FESystem
     auto stats = zeroComponentNormSnapshot(sys);
     const auto owned_dofs =
         ownedDofsForVector(vec, sys.dofHandler().getPartition().locallyOwned());
-    if (owned_dofs.empty() || fmap.numFields() == 0 || stats.empty()) {
+    if (fmap.numFields() == 0 || stats.empty()) {
         return stats;
     }
 
@@ -2198,8 +2795,11 @@ std::vector<ComponentNormSnapshot> componentNormSnapshot(const systems::FESystem
 
 #if FE_HAS_MPI
     int mpi_initialized = 0;
+    int mpi_finalized = 0;
     MPI_Initialized(&mpi_initialized);
-    if (mpi_initialized && !stats.empty()) {
+    MPI_Finalized(&mpi_finalized);
+    if (mpi_initialized && !mpi_finalized && !stats.empty()) {
+        const auto communicator = sys.activeMpiCommunicator();
         std::vector<double> local(stats.size(), 0.0);
         std::vector<double> global(stats.size(), 0.0);
         for (std::size_t i = 0; i < stats.size(); ++i) {
@@ -2210,7 +2810,7 @@ std::vector<ComponentNormSnapshot> componentNormSnapshot(const systems::FESystem
                       static_cast<int>(global.size()),
                       MPI_DOUBLE,
                       MPI_SUM,
-                      MPI_COMM_WORLD);
+                      communicator);
         for (std::size_t i = 0; i < stats.size(); ++i) {
             stats[i].norm = global[i];
         }
@@ -2224,6 +2824,7 @@ std::vector<ComponentNormSnapshot> componentNormSnapshot(const systems::FESystem
 }
 
 void logJacobianCheckComponentDetails(
+    NewtonCommunicator communicator,
     std::string_view component_filter,
     std::size_t sweep_index,
     std::span<const ComponentNormSnapshot> base,
@@ -2235,7 +2836,7 @@ void logJacobianCheckComponentDetails(
     std::span<const ComponentNormSnapshot> err,
     std::span<const ComponentNormSnapshot> sign_flip_err)
 {
-    if (mpiRank() != 0) {
+    if (communicatorRank(communicator) != 0) {
         return;
     }
     const auto count = std::min({
@@ -2281,7 +2882,7 @@ void logJacobianCheckComponentBreakdown(const systems::FESystem& sys,
     const auto& fmap = sys.fieldMap();
     const auto owned_dofs =
         ownedDofsForVector(fd, sys.dofHandler().getPartition().locallyOwned());
-    if (owned_dofs.empty() || fmap.numFields() == 0) {
+    if (fmap.numFields() == 0) {
         return;
     }
 
@@ -2342,8 +2943,11 @@ void logJacobianCheckComponentBreakdown(const systems::FESystem& sys,
 
 #if FE_HAS_MPI
     int mpi_initialized = 0;
+    int mpi_finalized = 0;
     MPI_Initialized(&mpi_initialized);
-    if (mpi_initialized && !stats.empty()) {
+    MPI_Finalized(&mpi_finalized);
+    if (mpi_initialized && !mpi_finalized && !stats.empty()) {
+        const auto communicator = sys.activeMpiCommunicator();
         std::vector<double> packed(stats.size() * 3u, 0.0);
         for (std::size_t i = 0; i < stats.size(); ++i) {
             packed[3u * i + 0u] = stats[i].fd_sq;
@@ -2356,7 +2960,7 @@ void logJacobianCheckComponentBreakdown(const systems::FESystem& sys,
                       static_cast<int>(packed.size()),
                       MPI_DOUBLE,
                       MPI_SUM,
-                      MPI_COMM_WORLD);
+                      communicator);
         for (std::size_t i = 0; i < stats.size(); ++i) {
             stats[i].fd_sq = reduced[3u * i + 0u];
             stats[i].err_sq = reduced[3u * i + 1u];
@@ -2365,7 +2969,7 @@ void logJacobianCheckComponentBreakdown(const systems::FESystem& sys,
     }
 #endif
 
-    if (mpiRank() != 0) {
+    if (communicatorRank(systemCommunicator(sys)) != 0) {
         return;
     }
 
@@ -2438,6 +3042,28 @@ void logJacobianCheckTopMismatchEntries(const systems::FESystem& sys,
     std::sort(top_entries.begin(), top_entries.end(),
               [](const Entry& a, const Entry& b) { return std::abs(a.value) > std::abs(b.value); });
 
+    // Map each flagged dof to its mesh vertex and coordinates so mismatch
+    // locations can be tied to the discretization (vertex-DOF fields only;
+    // sub-vertex dofs report vertex=-1).
+    std::unordered_map<GlobalIndex, GlobalIndex> dof_to_vertex;
+    {
+        const auto& fmap = sys.fieldMap();
+        for (std::size_t field_idx = 0; field_idx < fmap.numFields(); ++field_idx) {
+            const auto field_id = static_cast<FieldId>(field_idx);
+            const auto offset = sys.fieldDofOffset(field_id);
+            const auto* entity_map = sys.fieldDofHandler(field_id).getEntityDofMap();
+            if (entity_map == nullptr) {
+                continue;
+            }
+            const auto n_vertices = entity_map->numVertices();
+            for (GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
+                for (const auto local_dof : entity_map->getVertexDofs(vertex)) {
+                    dof_to_vertex.emplace(offset + local_dof, vertex);
+                }
+            }
+        }
+    }
+
     std::ostringstream oss;
     oss << "NewtonSolver: Jacobian check top mismatch entries"
         << " diagnostic=jacobian_check_top_mismatch"
@@ -2448,7 +3074,16 @@ void logJacobianCheckTopMismatchEntries(const systems::FESystem& sys,
         oss << " [" << describeFieldComponentDof(sys, entry.dof)
             << " fd=" << entry.fd
             << " jv=" << entry.jv
-            << " err=" << entry.value << "]";
+            << " err=" << entry.value;
+        const auto it = dof_to_vertex.find(entry.dof);
+        if (it != dof_to_vertex.end()) {
+            const auto xyz = sys.meshAccess().getNodeCoordinates(it->second);
+            oss << " vertex=" << it->second
+                << " xyz=(" << xyz[0] << "," << xyz[1] << "," << xyz[2] << ")";
+        } else {
+            oss << " vertex=-1";
+        }
+        oss << "]";
     }
     FE_LOG_INFO(oss.str());
 }
@@ -2460,7 +3095,10 @@ void logVectorComponentNorms(const systems::FESystem& sys,
     const auto& fmap = sys.fieldMap();
     const auto owned_dofs =
         ownedDofsForVector(vec, sys.dofHandler().getPartition().locallyOwned());
-    if (owned_dofs.empty() || fmap.numFields() == 0) {
+    // Field layout is communicator-global, but a valid distributed rank may
+    // own no vector row.  Such a rank must still contribute neutral values to
+    // the component reductions entered by its peers.
+    if (fmap.numFields() == 0) {
         return;
     }
 
@@ -2521,8 +3159,11 @@ void logVectorComponentNorms(const systems::FESystem& sys,
 
 #if FE_HAS_MPI
     int mpi_initialized = 0;
+    int mpi_finalized = 0;
     MPI_Initialized(&mpi_initialized);
-    if (mpi_initialized && !comps.empty()) {
+    MPI_Finalized(&mpi_finalized);
+    if (mpi_initialized && !mpi_finalized && !comps.empty()) {
+        const auto comm = sys.activeMpiCommunicator();
         std::vector<double> local_norm(comps.size(), 0.0);
         std::vector<double> global_norm(comps.size(), 0.0);
         std::vector<double> local_sum(comps.size(), 0.0);
@@ -2545,31 +3186,31 @@ void logVectorComponentNorms(const systems::FESystem& sys,
                       static_cast<int>(local_norm.size()),
                       MPI_DOUBLE,
                       MPI_SUM,
-                      MPI_COMM_WORLD);
+                      comm);
         MPI_Allreduce(local_sum.data(),
                       global_sum.data(),
                       static_cast<int>(local_sum.size()),
                       MPI_DOUBLE,
                       MPI_SUM,
-                      MPI_COMM_WORLD);
+                      comm);
         MPI_Allreduce(local_min.data(),
                       global_min.data(),
                       static_cast<int>(local_min.size()),
                       MPI_DOUBLE,
                       MPI_MIN,
-                      MPI_COMM_WORLD);
+                      comm);
         MPI_Allreduce(local_max.data(),
                       global_max.data(),
                       static_cast<int>(local_max.size()),
                       MPI_DOUBLE,
                       MPI_MAX,
-                      MPI_COMM_WORLD);
+                      comm);
         MPI_Allreduce(local_count.data(),
                       global_count.data(),
                       static_cast<int>(local_count.size()),
                       MPI_UNSIGNED_LONG_LONG,
                       MPI_SUM,
-                      MPI_COMM_WORLD);
+                      comm);
         for (std::size_t i = 0; i < comps.size(); ++i) {
             comps[i].sq_norm = global_norm[i];
             comps[i].sum = global_sum[i];
@@ -2580,7 +3221,13 @@ void logVectorComponentNorms(const systems::FESystem& sys,
     }
 #endif
 
-    if (mpiRank() != 0) {
+    int logging_rank = mpiRank();
+#if FE_HAS_MPI
+    if (mpi_initialized && !mpi_finalized) {
+        MPI_Comm_rank(sys.activeMpiCommunicator(), &logging_rank);
+    }
+#endif
+    if (logging_rank != 0) {
         return;
     }
 
@@ -2613,11 +3260,12 @@ void logNewtonFieldResidualDiagnostic(
     if (!newtonFieldResidualDiagnosticEnabled()) {
         return;
     }
+    const auto communicator = systemCommunicator(sys);
 
     const auto& field_name = newtonFieldResidualDiagnosticFieldName();
     const auto field_id = sys.findFieldByName(field_name);
     if (field_id == INVALID_FIELD_ID) {
-        if (mpiRank() == 0) {
+        if (communicatorRank(communicator) == 0) {
             FE_LOG_INFO(
                 "NewtonSolver: field residual diagnostic skipped "
                 "diagnostic=newton_field_residual_skipped reason=field_not_found "
@@ -2629,7 +3277,7 @@ void logNewtonFieldResidualDiagnostic(
     const auto field_offset = sys.fieldDofOffset(field_id);
     const auto field_dofs = sys.fieldDofHandler(field_id).getNumDofs();
     if (field_offset < 0 || field_dofs <= 0) {
-        if (mpiRank() == 0) {
+        if (communicatorRank(communicator) == 0) {
             std::ostringstream oss;
             oss << "NewtonSolver: field residual diagnostic skipped"
                 << " diagnostic=newton_field_residual_skipped"
@@ -2686,21 +3334,24 @@ void logNewtonFieldResidualDiagnostic(
 
 #if FE_HAS_MPI
     int mpi_initialized = 0;
+    int mpi_finalized = 0;
     MPI_Initialized(&mpi_initialized);
-    if (mpi_initialized) {
+    MPI_Finalized(&mpi_finalized);
+    if (mpi_initialized && !mpi_finalized &&
+        communicator != MPI_COMM_NULL) {
         const double local_sq_double = static_cast<double>(local_sq);
         MPI_Allreduce(&local_sq_double, &global_sq, 1, MPI_DOUBLE, MPI_SUM,
-                      MPI_COMM_WORLD);
+                      communicator);
         MPI_Allreduce(&local_sum, &global_sum, 1, MPI_DOUBLE, MPI_SUM,
-                      MPI_COMM_WORLD);
+                      communicator);
         MPI_Allreduce(&local_min, &global_min, 1, MPI_DOUBLE, MPI_MIN,
-                      MPI_COMM_WORLD);
+                      communicator);
         MPI_Allreduce(&local_max, &global_max, 1, MPI_DOUBLE, MPI_MAX,
-                      MPI_COMM_WORLD);
+                      communicator);
         MPI_Allreduce(&local_max_abs, &global_max_abs, 1, MPI_DOUBLE, MPI_MAX,
-                      MPI_COMM_WORLD);
+                      communicator);
         MPI_Allreduce(&local_count, &global_count, 1,
-                      MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+                      MPI_UNSIGNED_LONG_LONG, MPI_SUM, communicator);
     }
 #endif
 
@@ -2716,7 +3367,7 @@ void logNewtonFieldResidualDiagnostic(
     std::ostringstream oss;
     oss << "NewtonSolver: field residual diagnostic"
         << " diagnostic=newton_field_residual"
-        << " rank=" << mpiRank()
+        << " rank=" << communicatorRank(communicator)
         << " iteration=" << iteration
         << " phase='" << phase << "'"
         << " sync_point=" << stateSyncPointName(sync_point)
@@ -5447,22 +6098,23 @@ void applyActivePressureSupportRankClamp(
         clamp_coupling_threshold,
         clamp_self_threshold);
 
+    auto matrix_view = matrix.createAssemblyView();
+    FE_CHECK_NOT_NULL(matrix_view.get(),
+                      "NewtonSolver: active pressure support-rank clamp matrix view");
+    matrix_view->beginAssemblyPhase();
     if (!summary.clamp_candidate_row_global_dofs.empty()) {
-        auto matrix_view = matrix.createAssemblyView();
-        FE_CHECK_NOT_NULL(matrix_view.get(),
-                          "NewtonSolver: active pressure support-rank clamp matrix view");
-        matrix_view->beginAssemblyPhase();
         matrix_view->zeroRows(
             std::span<const GlobalIndex>(summary.clamp_candidate_row_global_dofs.data(),
                                          summary.clamp_candidate_row_global_dofs.size()),
             /*set_diagonal=*/true);
-        matrix_view->finalizeAssembly();
-
-        zeroVectorEntries(
-            std::span<const GlobalIndex>(summary.clamp_candidate_row_global_dofs.data(),
-                                         summary.clamp_candidate_row_global_dofs.size()),
-            rhs);
     }
+    // Candidate rows are rank-local; distributed matrix finalization is not.
+    matrix_view->finalizeAssembly();
+
+    zeroVectorEntries(
+        std::span<const GlobalIndex>(summary.clamp_candidate_row_global_dofs.data(),
+                                     summary.clamp_candidate_row_global_dofs.size()),
+        rhs);
 
     std::ostringstream oss;
     oss << std::setprecision(17);
@@ -7642,11 +8294,11 @@ void applyActivePressureGraphCompletion(
         }
     }
     GlobalIndex edge_count = 0;
+    auto matrix_view = matrix.createAssemblyView();
+    FE_CHECK_NOT_NULL(matrix_view.get(),
+                      "NewtonSolver: active pressure graph completion matrix view");
+    matrix_view->beginAssemblyPhase();
     if (!weighted_edges.empty()) {
-        auto matrix_view = matrix.createAssemblyView();
-        FE_CHECK_NOT_NULL(matrix_view.get(),
-                          "NewtonSolver: active pressure graph completion matrix view");
-        matrix_view->beginAssemblyPhase();
         for (const auto& edge : weighted_edges) {
             const auto row_i = edge.row_i;
             const auto row_j = edge.row_j;
@@ -7663,8 +8315,9 @@ void applyActivePressureGraphCompletion(
                 row_j, row_i, static_cast<Real>(-edge.weight), assembly::AddMode::Add);
             ++edge_count;
         }
-        matrix_view->finalizeAssembly();
     }
+    // Locally empty edge sets still participate in distributed finalization.
+    matrix_view->finalizeAssembly();
 
     std::ostringstream oss;
     oss << std::setprecision(17);
@@ -8034,8 +8687,41 @@ void normalizeFsilsPostSolveIncrementIfNeeded(backends::GenericVector& vec)
 
 void addRankOneOperatorMatvec(std::span<const backends::RankOneUpdate> updates,
                               backends::GenericVector& x,
-                              backends::GenericVector& y)
+                              backends::GenericVector& y,
+                              NewtonCommunicator communicator)
 {
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    int mpi_finalized = 0;
+    MPI_Initialized(&mpi_initialized);
+    MPI_Finalized(&mpi_finalized);
+    if (mpi_initialized && !mpi_finalized &&
+        communicator != MPI_COMM_NULL) {
+        const auto local_count =
+            static_cast<unsigned long long>(updates.size());
+        unsigned long long min_count = local_count;
+        unsigned long long max_count = local_count;
+        MPI_Allreduce(&local_count,
+                      &min_count,
+                      1,
+                      MPI_UNSIGNED_LONG_LONG,
+                      MPI_MIN,
+                      communicator);
+        MPI_Allreduce(&local_count,
+                      &max_count,
+                      1,
+                      MPI_UNSIGNED_LONG_LONG,
+                      MPI_MAX,
+                      communicator);
+        FE_THROW_IF(
+            min_count != max_count,
+            systems::InvalidStateException,
+            "NewtonSolver: rank-one update count differs across the active "
+            "system communicator");
+    }
+#else
+    (void)communicator;
+#endif
     if (updates.empty()) {
         return;
     }
@@ -8055,16 +8741,15 @@ void addRankOneOperatorMatvec(std::span<const backends::RankOneUpdate> updates,
     }
 
 #if FE_HAS_MPI
-    int mpi_initialized = 0;
-    MPI_Initialized(&mpi_initialized);
-    if (mpi_initialized) {
+    if (mpi_initialized && !mpi_finalized &&
+        communicator != MPI_COMM_NULL) {
         std::vector<Real> global_dots(dots.size(), Real(0.0));
         MPI_Allreduce(dots.data(),
                       global_dots.data(),
                       static_cast<int>(dots.size()),
                       MPI_DOUBLE,
                       MPI_SUM,
-                      MPI_COMM_WORLD);
+                      communicator);
         dots.swap(global_dots);
     }
 #endif
@@ -8084,8 +8769,41 @@ void addRankOneOperatorMatvec(std::span<const backends::RankOneUpdate> updates,
 
 void addReducedFieldOperatorMatvec(std::span<const backends::ReducedFieldUpdate> updates,
                                    backends::GenericVector& x,
-                                   backends::GenericVector& y)
+                                   backends::GenericVector& y,
+                                   NewtonCommunicator communicator)
 {
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    int mpi_finalized = 0;
+    MPI_Initialized(&mpi_initialized);
+    MPI_Finalized(&mpi_finalized);
+    if (mpi_initialized && !mpi_finalized &&
+        communicator != MPI_COMM_NULL) {
+        const auto local_count =
+            static_cast<unsigned long long>(updates.size());
+        unsigned long long min_count = local_count;
+        unsigned long long max_count = local_count;
+        MPI_Allreduce(&local_count,
+                      &min_count,
+                      1,
+                      MPI_UNSIGNED_LONG_LONG,
+                      MPI_MIN,
+                      communicator);
+        MPI_Allreduce(&local_count,
+                      &max_count,
+                      1,
+                      MPI_UNSIGNED_LONG_LONG,
+                      MPI_MAX,
+                      communicator);
+        FE_THROW_IF(
+            min_count != max_count,
+            systems::InvalidStateException,
+            "NewtonSolver: reduced-field update count differs across the "
+            "active system communicator");
+    }
+#else
+    (void)communicator;
+#endif
     if (updates.empty()) {
         return;
     }
@@ -8105,16 +8823,15 @@ void addReducedFieldOperatorMatvec(std::span<const backends::ReducedFieldUpdate>
     }
 
 #if FE_HAS_MPI
-    int mpi_initialized = 0;
-    MPI_Initialized(&mpi_initialized);
-    if (mpi_initialized) {
+    if (mpi_initialized && !mpi_finalized &&
+        communicator != MPI_COMM_NULL) {
         std::vector<Real> global_dots(dots.size(), Real(0.0));
         MPI_Allreduce(dots.data(),
                       global_dots.data(),
                       static_cast<int>(dots.size()),
                       MPI_DOUBLE,
                       MPI_SUM,
-                      MPI_COMM_WORLD);
+                      communicator);
         dots.swap(global_dots);
     }
 #endif
@@ -8135,6 +8852,7 @@ void addReducedFieldOperatorMatvec(std::span<const backends::ReducedFieldUpdate>
 bool tryPromoteExactReducedUpdateToNativeRankOne(
     const backends::ReducedFieldUpdate& update,
     backends::RankOneUpdate& promoted,
+    NewtonCommunicator communicator,
     Real rel_residual_sq_limit = Real(1e-24))
 {
     if (!nativeFaceRankOnePromotionEnabled()) {
@@ -8166,8 +8884,10 @@ bool tryPromoteExactReducedUpdateToNativeRankOne(
         }
         right_map[dof] += value;
     }
-    const int global_left_has = mpiAllreduceSumIfActive(left_map.empty() ? 0 : 1);
-    const int global_right_has = mpiAllreduceSumIfActive(right_map.empty() ? 0 : 1);
+    const int global_left_has = mpiAllreduceSumIfActive(
+        left_map.empty() ? 0 : 1, communicator);
+    const int global_right_has = mpiAllreduceSumIfActive(
+        right_map.empty() ? 0 : 1, communicator);
     if (global_left_has == 0 || global_right_has == 0) {
         return false;
     }
@@ -8183,9 +8903,11 @@ bool tryPromoteExactReducedUpdateToNativeRankOne(
         right_norm_sq += value * value;
     }
 
-    const Real global_left_norm_sq = mpiAllreduceSumIfActive(left_norm_sq);
-    const Real global_right_norm_sq = mpiAllreduceSumIfActive(right_norm_sq);
-    const Real global_cross = mpiAllreduceSumIfActive(cross);
+    const Real global_left_norm_sq =
+        mpiAllreduceSumIfActive(left_norm_sq, communicator);
+    const Real global_right_norm_sq =
+        mpiAllreduceSumIfActive(right_norm_sq, communicator);
+    const Real global_cross = mpiAllreduceSumIfActive(cross, communicator);
 
     if (!(global_left_norm_sq > Real(1e-30)) || !(global_right_norm_sq > Real(1e-30))) {
         return false;
@@ -8207,7 +8929,8 @@ bool tryPromoteExactReducedUpdateToNativeRankOne(
         local_residual_sq += diff * diff;
     }
 
-    const Real residual_sq = mpiAllreduceSumIfActive(local_residual_sq);
+    const Real residual_sq =
+        mpiAllreduceSumIfActive(local_residual_sq, communicator);
     const Real rel_residual_sq = residual_sq / std::max(global_right_norm_sq, Real(1e-30));
     if (!(rel_residual_sq <= rel_residual_sq_limit) || !(std::abs(alpha) > Real(1e-30))) {
         return false;
@@ -9204,8 +9927,20 @@ void restoreFsilsMatrixSnapshot(backends::GenericMatrix& A, const FsilsMatrixSna
                                           Real pivot_tol = static_cast<Real>(1e-20))
 {
     const auto n = b.size();
-    if (A.size() != n * n) {
+    const auto fail_closed = [&]() {
+        std::fill(b.begin(), b.end(), Real(0.0));
         return false;
+    };
+    const auto finite = [](Real value) {
+        return std::isfinite(static_cast<double>(value));
+    };
+
+    if (A.size() != n * n ||
+        !(pivot_tol >= Real(0.0)) ||
+        !finite(pivot_tol) ||
+        !std::all_of(A.begin(), A.end(), finite) ||
+        !std::all_of(b.begin(), b.end(), finite)) {
+        return fail_closed();
     }
 
     for (std::size_t k = 0; k < n; ++k) {
@@ -9213,13 +9948,16 @@ void restoreFsilsMatrixSnapshot(backends::GenericMatrix& A, const FsilsMatrixSna
         Real pivot_abs = std::abs(A[k * n + k]);
         for (std::size_t i = k + 1; i < n; ++i) {
             const Real cand = std::abs(A[i * n + k]);
+            if (!finite(cand)) {
+                return fail_closed();
+            }
             if (cand > pivot_abs) {
                 pivot_abs = cand;
                 pivot = i;
             }
         }
-        if (!(pivot_abs > pivot_tol)) {
-            return false;
+        if (!finite(pivot_abs) || !(pivot_abs > pivot_tol)) {
+            return fail_closed();
         }
         if (pivot != k) {
             for (std::size_t j = 0; j < n; ++j) {
@@ -9229,16 +9967,28 @@ void restoreFsilsMatrixSnapshot(backends::GenericMatrix& A, const FsilsMatrixSna
         }
 
         const Real diag = A[k * n + k];
+        if (!finite(diag)) {
+            return fail_closed();
+        }
         for (std::size_t i = k + 1; i < n; ++i) {
             const Real factor = A[i * n + k] / diag;
+            if (!finite(factor)) {
+                return fail_closed();
+            }
             if (std::abs(factor) <= pivot_tol) {
                 continue;
             }
             A[i * n + k] = 0.0;
             for (std::size_t j = k + 1; j < n; ++j) {
                 A[i * n + j] -= factor * A[k * n + j];
+                if (!finite(A[i * n + j])) {
+                    return fail_closed();
+                }
             }
             b[i] -= factor * b[k];
+            if (!finite(b[i])) {
+                return fail_closed();
+            }
         }
     }
 
@@ -9246,14 +9996,23 @@ void restoreFsilsMatrixSnapshot(backends::GenericMatrix& A, const FsilsMatrixSna
         Real sum = b[static_cast<std::size_t>(i)];
         for (std::size_t j = static_cast<std::size_t>(i) + 1; j < n; ++j) {
             sum -= A[static_cast<std::size_t>(i) * n + j] * b[j];
+            if (!finite(sum)) {
+                return fail_closed();
+            }
         }
         const Real diag = A[static_cast<std::size_t>(i) * n + static_cast<std::size_t>(i)];
-        if (!(std::abs(diag) > pivot_tol)) {
-            return false;
+        if (!finite(diag) || !(std::abs(diag) > pivot_tol)) {
+            return fail_closed();
         }
         b[static_cast<std::size_t>(i)] = sum / diag;
+        if (!finite(b[static_cast<std::size_t>(i)])) {
+            return fail_closed();
+        }
     }
 
+    if (!std::all_of(b.begin(), b.end(), finite)) {
+        return fail_closed();
+    }
     return true;
 }
 
@@ -9470,7 +10229,8 @@ void rebaseGroupedCouplingIds(std::vector<backends::ReducedFieldUpdate>& reduced
 [[nodiscard]] bool buildAlgebraicAuxiliaryReduction(
     const systems::FESystem::BorderedCouplingData& bordered,
     const dofs::IndexSet& owned_dofs,
-    AlgebraicAuxiliaryReduction& out)
+    AlgebraicAuxiliaryReduction& out,
+    NewtonCommunicator communicator)
 {
     out = {};
     if (!bordered.active || bordered.n_aux <= 0) {
@@ -9615,7 +10375,8 @@ void rebaseGroupedCouplingIds(std::vector<backends::ReducedFieldUpdate>& reduced
             }
         }
         if (!promoted_ok && allow_native_rank_one_promotion) {
-            promoted_ok = tryPromoteExactReducedUpdateToNativeRankOne(upd, promoted);
+            promoted_ok = tryPromoteExactReducedUpdateToNativeRankOne(
+                upd, promoted, communicator);
         }
         if (!promoted_ok && !independent_modes) {
             for (const auto& record : bordered.direct_coupling_records) {
@@ -9793,6 +10554,48 @@ NewtonSolver::NewtonSolver(NewtonOptions options)
     FE_THROW_IF(options_.step_tolerance < 0.0 || !std::isfinite(options_.step_tolerance),
                 InvalidArgumentException,
                 "NewtonSolver: step_tolerance must be finite and >= 0");
+    if (options_.external_state_fixed_point.enabled) {
+        FE_THROW_IF(
+            options_.external_state_fixed_point.max_iterations <= 0,
+            InvalidArgumentException,
+            "NewtonSolver: external_state_fixed_point.max_iterations must be > 0");
+        FE_THROW_IF(
+            !(options_.abs_tolerance > 0.0),
+            InvalidArgumentException,
+            "NewtonSolver: external-state fixed-point convergence requires a positive absolute residual tolerance");
+        FE_THROW_IF(
+            !options_.synchronize_state,
+            InvalidArgumentException,
+            "NewtonSolver: external-state fixed point requires synchronize_state");
+    }
+
+    std::set<FieldId> field_residual_criterion_fields;
+    for (const auto& criterion : options_.field_residual_criteria) {
+        FE_THROW_IF(criterion.field == INVALID_FIELD_ID,
+                    InvalidArgumentException,
+                    "NewtonSolver: field residual criterion requires a valid field");
+        FE_THROW_IF(criterion.abs_tolerance < 0.0 ||
+                        !std::isfinite(criterion.abs_tolerance),
+                    InvalidArgumentException,
+                    "NewtonSolver: field residual criterion abs_tolerance must be finite and >= 0");
+        FE_THROW_IF(criterion.rel_tolerance < 0.0 ||
+                        !std::isfinite(criterion.rel_tolerance),
+                    InvalidArgumentException,
+                    "NewtonSolver: field residual criterion rel_tolerance must be finite and >= 0");
+        FE_THROW_IF(!(criterion.abs_tolerance > 0.0) &&
+                        !(criterion.rel_tolerance > 0.0),
+                    InvalidArgumentException,
+                    "NewtonSolver: field residual criterion must enable an absolute or relative tolerance");
+        FE_THROW_IF(options_.external_state_fixed_point.enabled &&
+                        !(criterion.abs_tolerance > 0.0),
+                    InvalidArgumentException,
+                    "NewtonSolver: external-state fixed-point field criteria require positive absolute tolerances");
+        const bool inserted =
+            field_residual_criterion_fields.insert(criterion.field).second;
+        FE_THROW_IF(!inserted,
+                    InvalidArgumentException,
+                    "NewtonSolver: duplicate field residual criterion");
+    }
 
     FE_THROW_IF(options_.jacobian_rebuild_period <= 0, InvalidArgumentException,
                 "NewtonSolver: jacobian_rebuild_period must be >= 1");
@@ -9874,21 +10677,83 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
     const auto n_dofs = system.dofHandler().getNumDofs();
     FE_THROW_IF(n_dofs <= 0, systems::InvalidStateException, "NewtonSolver::allocateWorkspace: system has no DOFs");
 
-    const auto* dist = system.distributedSparsityIfAvailable(options_.jacobian_op);
-    if (dist != nullptr && factory.backendKind() != backends::BackendKind::Eigen) {
+    const auto* dist =
+        system.distributedSparsityIfAvailable(options_.jacobian_op);
+    workspace.jacobian.reset();
+    workspace.diagnostic_jacobian_scratch.reset();
+    workspace.pressure_representability_pair_matrix.reset();
+    workspace.pressure_representability_load.reset();
+    workspace.pressure_representability_solution.reset();
+    workspace.pressure_representability_left_basis.reset();
+    workspace.pressure_representability_right_basis.reset();
+    workspace.pressure_representability_direction.reset();
+    workspace.pressure_representability_work.reset();
+    workspace.pressure_representability_residual.reset();
+    workspace.pressure_representability_normal_residual.reset();
+
+    bool allocate_pressure_representability =
+        freeSurfaceConservativeBalanceDiagnosticEnabled() &&
+        system.hasOperator(std::string(
+            kFreeSurfacePressureRepresentabilityPairOperator));
+#if FE_HAS_MPI
+    {
+        int initialized = 0;
+        int finalized = 0;
+        MPI_Initialized(&initialized);
+        MPI_Finalized(&finalized);
+        if (initialized != 0 && finalized == 0) {
+            const int local = allocate_pressure_representability ? 1 : 0;
+            int global = local;
+            MPI_Allreduce(&local,
+                          &global,
+                          1,
+                          MPI_INT,
+                          MPI_MIN,
+                          system.activeMpiCommunicator());
+            allocate_pressure_representability = global != 0;
+        }
+    }
+#endif
+    if (allocate_pressure_representability) {
+        const std::string pair_op(
+            kFreeSurfacePressureRepresentabilityPairOperator);
+        const auto* pair_dist =
+            system.distributedSparsityIfAvailable(pair_op);
+        if (pair_dist != nullptr &&
+            factory.backendKind() != backends::BackendKind::Eigen) {
+            workspace.pressure_representability_pair_matrix =
+                factory.createMatrix(*pair_dist);
+        } else {
+            workspace.pressure_representability_pair_matrix =
+                factory.createMatrix(system.sparsity(pair_op));
+        }
+
+        recreatePressureRepresentabilityVectors(
+            factory, n_dofs, workspace);
+    }
+
+    // Matrix creation selects the vector layout cached by the distributed
+    // backend factories.  Build the optional diagnostic matrices first and
+    // their vectors immediately after the pressure pair.  Build the production
+    // Jacobian last, before every production Newton vector, so PETSc/Trilinos
+    // ghost maps and the FSILS shared layout used by TimeHistory::repack remain
+    // those of the production operator rather than the narrower diagnostic.
+    if (pressureRowContributionMatrixDiagnosticEnabled()) {
+        if (dist != nullptr &&
+            factory.backendKind() != backends::BackendKind::Eigen) {
+            workspace.diagnostic_jacobian_scratch =
+                factory.createMatrix(*dist);
+        } else {
+            workspace.diagnostic_jacobian_scratch =
+                factory.createMatrix(system.sparsity(options_.jacobian_op));
+        }
+    }
+    if (dist != nullptr &&
+        factory.backendKind() != backends::BackendKind::Eigen) {
         workspace.jacobian = factory.createMatrix(*dist);
     } else {
-        const auto& pattern = system.sparsity(options_.jacobian_op);
-        workspace.jacobian = factory.createMatrix(pattern);
-    }
-    workspace.diagnostic_jacobian_scratch.reset();
-    if (pressureRowContributionMatrixDiagnosticEnabled()) {
-        if (dist != nullptr && factory.backendKind() != backends::BackendKind::Eigen) {
-            workspace.diagnostic_jacobian_scratch = factory.createMatrix(*dist);
-        } else {
-            const auto& pattern = system.sparsity(options_.jacobian_op);
-            workspace.diagnostic_jacobian_scratch = factory.createMatrix(pattern);
-        }
+        workspace.jacobian =
+            factory.createMatrix(system.sparsity(options_.jacobian_op));
     }
     workspace.residual = factory.createVector(n_dofs);
     workspace.delta = factory.createVector(n_dofs);
@@ -9897,7 +10762,10 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
     workspace.residual_base = factory.createVector(n_dofs);
     workspace.residual_minus = factory.createVector(n_dofs);
     workspace.ptc_mass_lumped.reset();
+    workspace.line_search_history_backup.clear();
     workspace.dt_field_dofs.clear();
+    workspace.factory = &factory;
+    workspace.sparsity_revision = system.sparsityPatternRevision();
 
     FE_CHECK_NOT_NULL(workspace.jacobian.get(), "NewtonSolver workspace.jacobian");
     FE_CHECK_NOT_NULL(workspace.residual.get(), "NewtonSolver workspace.residual");
@@ -9909,6 +10777,11 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
     if (pressureRowContributionMatrixDiagnosticEnabled()) {
         FE_CHECK_NOT_NULL(workspace.diagnostic_jacobian_scratch.get(),
                           "NewtonSolver workspace.diagnostic_jacobian_scratch");
+    }
+    if (allocate_pressure_representability) {
+        FE_CHECK_NOT_NULL(
+            workspace.pressure_representability_pair_matrix.get(),
+            "NewtonSolver workspace.pressure_representability_pair_matrix");
     }
 
     if (options_.pseudo_transient.enabled) {
@@ -9945,42 +10818,773 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
             << " dist_sparsity=" << ((dist != nullptr && factory.backendKind() != backends::BackendKind::Eigen) ? "yes" : "no")
             << " diagnostic_jacobian_scratch="
             << (workspace.diagnostic_jacobian_scratch != nullptr ? "yes" : "no")
+            << " pressure_representability_workspace="
+            << (workspace.pressure_representability_pair_matrix != nullptr
+                    ? "yes"
+                    : "no")
             << " dt_field_dofs=" << workspace.dt_field_dofs.size();
         traceLog(oss.str());
     }
 }
 
-NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
-                                     backends::LinearSolver& linear,
-                                     double solve_time,
-                                     TimeHistory& history,
-                                     NewtonWorkspace& workspace,
-                                     const backends::GenericVector* residual_addition) const
+void NewtonSolver::maybeReallocateJacobianForSparsity(const systems::FESystem& system,
+                                                      NewtonWorkspace& workspace) const
+{
+    bool factory_available = workspace.factory != nullptr;
+    const auto revision = system.sparsityPatternRevision();
+    bool revision_changed = revision != workspace.sparsity_revision;
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    MPI_Finalized(&finalized);
+    if (initialized != 0 && finalized == 0) {
+        const auto communicator = system.activeMpiCommunicator();
+        const int local_factory_available = factory_available ? 1 : 0;
+        int min_factory_available = local_factory_available;
+        int max_factory_available = local_factory_available;
+        MPI_Allreduce(&local_factory_available,
+                      &min_factory_available,
+                      1,
+                      MPI_INT,
+                      MPI_MIN,
+                      communicator);
+        MPI_Allreduce(&local_factory_available,
+                      &max_factory_available,
+                      1,
+                      MPI_INT,
+                      MPI_MAX,
+                      communicator);
+        FE_THROW_IF(
+            min_factory_available != max_factory_available,
+            systems::InvalidStateException,
+            "NewtonSolver: workspace factory availability differs across the "
+            "active system communicator");
+        factory_available = max_factory_available != 0;
+
+        const int local_changed = revision_changed ? 1 : 0;
+        int global_changed = local_changed;
+        MPI_Allreduce(&local_changed,
+                      &global_changed,
+                      1,
+                      MPI_INT,
+                      MPI_MAX,
+                      communicator);
+        revision_changed = global_changed != 0;
+    }
+#endif
+    if (!factory_available) {
+        return;
+    }
+    if (!revision_changed) {
+        return;
+    }
+
+    const auto& factory = *workspace.factory;
+    const auto* dist = system.distributedSparsityIfAvailable(options_.jacobian_op);
+    const bool use_distributed =
+        dist != nullptr && factory.backendKind() != backends::BackendKind::Eigen;
+
+    auto create_matrix = [&]() -> std::unique_ptr<backends::GenericMatrix> {
+        if (use_distributed) {
+            return factory.createMatrix(*dist);
+        }
+        return factory.createMatrix(system.sparsity(options_.jacobian_op));
+    };
+
+    // Refresh the diagnostic pair before the production Jacobian.  A matrix
+    // replacement updates the backend factory's cached vector layout; doing
+    // the production refresh last restores that cache for any vectors created
+    // later in this nonlinear solve.  FSILS requires in-place refresh here so
+    // the pair matrix remains compatible with its already allocated LSQR
+    // vectors.
+    if (workspace.pressure_representability_pair_matrix) {
+        const std::string pair_op(
+            kFreeSurfacePressureRepresentabilityPairOperator);
+        FE_THROW_IF(
+            !system.hasOperator(pair_op),
+            systems::InvalidStateException,
+            "NewtonSolver: pressure-representability pair operator disappeared during a sparsity refresh");
+        const auto* pair_dist =
+            system.distributedSparsityIfAvailable(pair_op);
+        const bool use_pair_distributed =
+            pair_dist != nullptr &&
+            factory.backendKind() != backends::BackendKind::Eigen;
+        bool pair_in_place =
+            use_pair_distributed
+                ? workspace.pressure_representability_pair_matrix
+                      ->reinitFromPattern(*pair_dist)
+                : workspace.pressure_representability_pair_matrix
+                      ->reinitFromPattern(system.sparsity(pair_op));
+#if FE_HAS_MPI
+        if (use_pair_distributed) {
+            const int local_pair_in_place = pair_in_place ? 1 : 0;
+            int global_pair_in_place = local_pair_in_place;
+            MPI_Allreduce(&local_pair_in_place,
+                          &global_pair_in_place,
+                          1,
+                          MPI_INT,
+                          MPI_MIN,
+                          system.activeMpiCommunicator());
+            pair_in_place = global_pair_in_place != 0;
+        }
+#endif
+        FE_THROW_IF(
+            !pair_in_place &&
+                factory.backendKind() == backends::BackendKind::FSILS,
+            systems::InvalidStateException,
+            "NewtonSolver: FSILS pressure-representability matrix sparsity refresh changed its vector layout; rebuild the nonlinear workspace at a time-step boundary");
+        if (!pair_in_place) {
+            workspace.pressure_representability_pair_matrix =
+                use_pair_distributed
+                    ? factory.createMatrix(*pair_dist)
+                    : factory.createMatrix(system.sparsity(pair_op));
+            FE_CHECK_NOT_NULL(
+                workspace.pressure_representability_pair_matrix.get(),
+                "NewtonSolver: pressure-representability matrix sparsity refresh");
+            // The replacement may carry a different PETSc/Trilinos owned and
+            // ghost map even when its global dimensions are unchanged.  The
+            // factory cache currently describes the refreshed pair pattern;
+            // recreate every LSQR vector now, before the production-J refresh
+            // deliberately restores the factory's production layout.
+            recreatePressureRepresentabilityVectors(
+                factory,
+                system.dofHandler().getNumDofs(),
+                workspace);
+        }
+        FE_CHECK_NOT_NULL(
+            workspace.pressure_representability_pair_matrix.get(),
+            "NewtonSolver: pressure-representability matrix sparsity refresh");
+    }
+
+    // Prefer in-place reinitialization: it preserves object identity, so the
+    // matrix references that solveStep binds for the whole step stay valid
+    // even when the sparsity changes between Newton iterations (monolithic
+    // level-set + NS systems reclassify cut-cell constraints per iterate).
+    bool in_place = false;
+    if (workspace.jacobian) {
+        in_place = use_distributed
+                       ? workspace.jacobian->reinitFromPattern(*dist)
+                       : workspace.jacobian->reinitFromPattern(
+                             system.sparsity(options_.jacobian_op));
+    }
+#if FE_HAS_MPI
+    if (use_distributed) {
+        const int local_in_place = in_place ? 1 : 0;
+        int global_in_place = local_in_place;
+        MPI_Allreduce(&local_in_place,
+                      &global_in_place,
+                      1,
+                      MPI_INT,
+                      MPI_MIN,
+                      system.activeMpiCommunicator());
+        in_place = global_in_place != 0;
+    }
+#endif
+    FE_THROW_IF(
+        !in_place && factory.backendKind() == backends::BackendKind::FSILS,
+        systems::InvalidStateException,
+        "NewtonSolver: FSILS cannot replace a Jacobian while workspace and "
+        "time-history vectors retain its prior layout; in-place sparsity "
+        "refresh requires unchanged dimensions, communicator, DOF "
+        "permutation, and owned/ghost node layout. Rebuild the nonlinear "
+        "workspace at a time-step boundary before changing that layout");
+    if (!in_place) {
+        workspace.jacobian = create_matrix();
+    }
+    FE_CHECK_NOT_NULL(workspace.jacobian.get(),
+                      "NewtonSolver: jacobian reallocation for sparsity refresh");
+    if (workspace.diagnostic_jacobian_scratch) {
+        bool scratch_in_place =
+            use_distributed
+                ? workspace.diagnostic_jacobian_scratch->reinitFromPattern(*dist)
+                : workspace.diagnostic_jacobian_scratch->reinitFromPattern(
+                      system.sparsity(options_.jacobian_op));
+#if FE_HAS_MPI
+        if (use_distributed) {
+            const int local_scratch_in_place = scratch_in_place ? 1 : 0;
+            int global_scratch_in_place = local_scratch_in_place;
+            MPI_Allreduce(&local_scratch_in_place,
+                          &global_scratch_in_place,
+                          1,
+                          MPI_INT,
+                          MPI_MIN,
+                          system.activeMpiCommunicator());
+            scratch_in_place = global_scratch_in_place != 0;
+        }
+#endif
+        FE_THROW_IF(
+            !scratch_in_place &&
+                factory.backendKind() == backends::BackendKind::FSILS,
+            systems::InvalidStateException,
+            "NewtonSolver: FSILS diagnostic Jacobian sparsity refresh changed "
+            "its vector layout; rebuild the nonlinear workspace at a "
+            "time-step boundary");
+        if (!scratch_in_place) {
+            workspace.diagnostic_jacobian_scratch = create_matrix();
+        }
+    }
+    workspace.sparsity_revision = revision;
+    FE_LOG_INFO("NewtonSolver: reallocated Jacobian for re-augmented sparsity"
+                " diagnostic=jacobian_sparsity_reallocation"
+                " mode=" + std::string(in_place ? "in_place" : "replace") +
+                " sparsity_pattern_revision=" +
+                std::to_string(revision));
+}
+
+NewtonReport NewtonSolver::solveStep(
+    systems::TransientSystem& transient,
+    backends::LinearSolver& linear,
+    double solve_time,
+    TimeHistory& history,
+    NewtonWorkspace& workspace,
+    const backends::GenericVector* residual_addition) const
+{
+    if (!options_.external_state_fixed_point.enabled) {
+        return solveStepFrozenExternalState(
+            transient,
+            linear,
+            solve_time,
+            history,
+            workspace,
+            residual_addition);
+    }
+
+    FE_THROW_IF(!workspace.isAllocated(), InvalidArgumentException,
+                "NewtonSolver::solveStep: workspace not allocated");
+    FE_CHECK_NOT_NULL(
+        workspace.factory,
+        "NewtonSolver: external-state fixed-point workspace factory");
+    FE_THROW_IF(
+        transient.system().geometricNonlinearityEnabled(),
+        systems::InvalidStateException,
+        "NewtonSolver: external-state fixed point currently requires fixed mesh coordinates so a failed outer solve can restore the complete entry state");
+    FE_THROW_IF(
+        transient.system().meshCoordinateTransactionActive(),
+        systems::InvalidStateException,
+        "NewtonSolver: external-state fixed point cannot start with an active mesh-coordinate transaction");
+
+    auto& system = transient.system();
+    FE_THROW_IF(!(history.dt() > 0.0), InvalidArgumentException,
+                "NewtonSolver: dt must be > 0");
+    FE_THROW_IF(!std::isfinite(solve_time), InvalidArgumentException,
+                "NewtonSolver: solve_time must be finite");
+
+    // Establish the same stage-time constraint values that every inner Newton
+    // solve will use before defining the transactional entry state.  Without
+    // this ordering a generalized-alpha stage could snapshot endpoint/previous
+    // values and then fail rollback solely because the restored fingerprint
+    // contains the correct stage-time inhomogeneities.
+    system.updateConstraints(solve_time, history.dt());
+    system.constraints().updateGhostsAndDistribute(history.u());
+    syncOwnedRowHaloIfNeeded(history.u());
+
+    const auto vector_size = history.u().size();
+    auto raw_entry_u = workspace.factory->createVector(vector_size);
+    FE_CHECK_NOT_NULL(raw_entry_u.get(),
+                      "NewtonSolver: external-state raw entry solution backup");
+    raw_entry_u->copyFrom(history.u());
+    auto entry_u = workspace.factory->createVector(vector_size);
+    FE_CHECK_NOT_NULL(entry_u.get(),
+                      "NewtonSolver: external-state canonical entry solution backup");
+
+    std::vector<std::unique_ptr<backends::GenericVector>> entry_history(
+        static_cast<std::size_t>(history.historyDepth()));
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+        auto& backup = entry_history[static_cast<std::size_t>(k - 1)];
+        backup = workspace.factory->createVector(history.uPrevK(k).size());
+        FE_CHECK_NOT_NULL(
+            backup.get(),
+            "NewtonSolver: external-state history backup");
+        backup->copyFrom(history.uPrevK(k));
+    }
+    auto entry_rate_state = history.snapshotRateState(*workspace.factory);
+    const auto raw_entry_auxiliary_state = system.checkpointAuxiliaryState();
+    const auto raw_entry_bordered_state = system.borderedCoupling();
+    auto entry_auxiliary_state = raw_entry_auxiliary_state;
+    auto entry_bordered_state = raw_entry_bordered_state;
+    ConstraintSemanticFingerprint entry_constraint_semantics{};
+    bool canonical_entry_defined = false;
+
+    auto anyRank = [&](bool local_value) {
+#if FE_HAS_MPI
+        int initialized = 0;
+        int finalized = 0;
+        MPI_Initialized(&initialized);
+        MPI_Finalized(&finalized);
+        if (initialized != 0 && finalized == 0) {
+            const int local = local_value ? 1 : 0;
+            int global = local;
+            MPI_Allreduce(&local,
+                          &global,
+                          1,
+                          MPI_INT,
+                          MPI_MAX,
+                          system.activeMpiCommunicator());
+            return global != 0;
+        }
+#endif
+        return local_value;
+    };
+
+    auto restoreEntryHistoryAndRates = [&]() {
+        FE_THROW_IF(
+            entry_history.size() !=
+                static_cast<std::size_t>(history.historyDepth()),
+            systems::InvalidStateException,
+            "NewtonSolver: external-state fixed point changed history depth");
+        for (int k = 1; k <= history.historyDepth(); ++k) {
+            auto& backup = entry_history[static_cast<std::size_t>(k - 1)];
+            FE_CHECK_NOT_NULL(
+                backup.get(),
+                "NewtonSolver: external-state history restore backup");
+            history.uPrevK(k).copyFrom(*backup);
+        }
+        history.restoreRateState(entry_rate_state);
+        // restoreRateState swaps buffers.  Refill the reusable snapshot now so
+        // every later outer iteration starts from the same immutable stage
+        // history/rates rather than from the preceding MPC projection.
+        history.snapshotRateState(entry_rate_state, *workspace.factory);
+    };
+
+    auto projectWithCurrentConstraints = [&]() {
+        auto& constraints = system.constraints();
+        history.updateGhosts();
+        if (!anyRank(!constraints.empty())) {
+            return;
+        }
+        constraints.updateGhostsAndDistribute(history.u());
+        syncOwnedRowHaloIfNeeded(history.u());
+        if (distributeConstraintsIntoHistoryRequested()) {
+            for (int k = 1; k <= history.historyDepth(); ++k) {
+                constraints.distribute(history.uPrevK(k));
+                syncOwnedRowHaloIfNeeded(history.uPrevK(k));
+            }
+        } else {
+            for (int k = 1; k <= history.historyDepth(); ++k) {
+                syncOwnedRowHaloIfNeeded(history.uPrevK(k));
+            }
+        }
+        if (!mpcStateDistributeDisabled() &&
+            anyRank(constraints.hasMasterBearingLines())) {
+            for (int k = 1; k <= history.historyDepth(); ++k) {
+                if (transient.integrator().historySlotStoresRate(k)) {
+                    constraints.distributeMasterBearingHomogeneous(
+                        history.uPrevK(k));
+                } else {
+                    constraints.distributeMasterBearing(history.uPrevK(k));
+                }
+                syncOwnedRowHaloIfNeeded(history.uPrevK(k));
+            }
+            if (history.hasUDotState()) {
+                constraints.distributeMasterBearingHomogeneous(
+                    history.uDot());
+                syncOwnedRowHaloIfNeeded(history.uDot());
+            }
+            if (history.hasUDDotState()) {
+                constraints.distributeMasterBearingHomogeneous(
+                    history.uDDot());
+                syncOwnedRowHaloIfNeeded(history.uDDot());
+            }
+        }
+    };
+
+    auto synchronizeOuterState = [&, this](
+                                     NewtonOptions::StateSynchronizationPoint
+                                         point) {
+        constexpr int max_constraint_projection_passes = 3;
+        auto semantic_before =
+            constraintSemanticFingerprint(system.constraints());
+        for (int pass = 0;; ++pass) {
+            history.updateGhosts();
+            auto state = makeStateView(history, solve_time);
+            std::optional<assembly::TimeIntegrationContext> time_context;
+            if (system.temporalOrder() > 0) {
+                time_context = transient.integrator().buildContext(
+                    system.temporalOrder(), state);
+                state.time_integration = &(*time_context);
+            }
+            auto callback_point = point;
+            if (pass > 0) {
+                callback_point =
+                    point == NewtonOptions::StateSynchronizationPoint::
+                                 RestoredOuterFixedPointState
+                        ? NewtonOptions::StateSynchronizationPoint::
+                              RestoredProjectedOuterFixedPointState
+                        : NewtonOptions::StateSynchronizationPoint::
+                              ProjectedOuterFixedPointState;
+            }
+            options_.synchronize_state(state, callback_point);
+            const auto semantic_after =
+                constraintSemanticFingerprint(system.constraints());
+            const bool semantics_changed =
+                anyRank(semantic_after != semantic_before);
+
+            // Always project once and invoke the callback a second time.  Even
+            // an unchanged topology may newly constrain the current iterate,
+            // and curvature/prescribed extension must be regenerated from the
+            // projected state rather than the pre-projection candidate.
+            projectWithCurrentConstraints();
+            if (pass > 0 && !semantics_changed) {
+                return;
+            }
+            FE_THROW_IF(
+                pass >= max_constraint_projection_passes,
+                systems::InvalidStateException,
+                std::string("NewtonSolver: external-state synchronization did not reach a stable affine-constraint fixed point at '") +
+                    stateSyncPointName(point) + "'");
+            if (semantics_changed) {
+                system.clearLocalCondensedRecovery();
+                if (auto* registry =
+                        system.auxiliaryInputRegistryIfPresent()) {
+                    registry->invalidateAll();
+                }
+            }
+            semantic_before = semantic_after;
+        }
+    };
+
+    auto previous_outer_iterate =
+        workspace.factory->createVector(vector_size);
+    FE_CHECK_NOT_NULL(
+        previous_outer_iterate.get(),
+        "NewtonSolver: external-state previous outer iterate");
+
+    bool entry_state_restored = false;
+    auto restoreEntryState = [&]() {
+        if (entry_state_restored) {
+            return;
+        }
+        system.rollbackGeometricNonlinearityTrial(/*force=*/true);
+        FE_THROW_IF(
+            system.meshCoordinateTransactionActive(),
+            systems::InvalidStateException,
+            "NewtonSolver: external-state rollback left an active mesh-coordinate transaction");
+        history.u().copyFrom(
+            canonical_entry_defined ? *entry_u : *raw_entry_u);
+        restoreEntryHistoryAndRates();
+        const auto& auxiliary_state = canonical_entry_defined
+                                          ? entry_auxiliary_state
+                                          : raw_entry_auxiliary_state;
+        if (!auxiliary_state.empty()) {
+            system.restoreAuxiliaryState(auxiliary_state);
+        }
+        system.borderedCoupling() = canonical_entry_defined
+                                        ? entry_bordered_state
+                                        : raw_entry_bordered_state;
+        system.clearLocalCondensedRecovery();
+        if (auto* registry = system.auxiliaryInputRegistryIfPresent()) {
+            registry->invalidateAll();
+        }
+        system.updateConstraints(solve_time, history.dt());
+        synchronizeOuterState(
+            NewtonOptions::StateSynchronizationPoint::
+                RestoredOuterFixedPointState);
+        if (canonical_entry_defined) {
+            FE_THROW_IF(
+                constraintSemanticFingerprint(system.constraints()) !=
+                    entry_constraint_semantics,
+                systems::InvalidStateException,
+                "NewtonSolver: restored external-state callback did not reproduce the canonical entry affine-constraint semantics");
+            previous_outer_iterate->copyFrom(history.u());
+            axpy(*previous_outer_iterate,
+                 static_cast<Real>(-1.0),
+                 *entry_u);
+            const double restored_solution_change =
+                previous_outer_iterate->norm();
+            const double restoration_tolerance =
+                64.0 * std::numeric_limits<double>::epsilon() *
+                std::max(1.0, entry_u->norm());
+            FE_THROW_IF(
+                !std::isfinite(restored_solution_change) ||
+                    restored_solution_change > restoration_tolerance,
+                systems::InvalidStateException,
+                "NewtonSolver: restored external-state callback changed the canonical entry solution while reprojecting its affine constraints");
+        }
+        entry_state_restored = true;
+    };
+
+    NewtonOptions inner_options = options_;
+    inner_options.external_state_fixed_point.enabled = false;
+    inner_options.synchronize_state = {};
+    inner_options.accepted_state_sync_invalidates_residual = false;
+    inner_options.min_iterations = 0;
+    inner_options.rel_tolerance = 0.0;
+    for (auto& criterion : inner_options.field_residual_criteria) {
+        criterion.rel_tolerance = 0.0;
+    }
+    NewtonSolver inner_solver(std::move(inner_options));
+
+    NewtonReport aggregate{};
+    backends::SolverReport last_nontrivial_linear{};
+    int inner_iterations_total = 0;
+    try {
+        // The generated active set at a generalized-alpha stage can differ
+        // from the state prepared at the preceding endpoint.  Establish its
+        // complete constraint/projection fixed point before defining the
+        // rollback fingerprint.  The raw committed history/rate snapshots
+        // above remain the immutable source used on every later outer pass;
+        // only the current algebraic state and external solver state are
+        // canonicalized here.
+        system.rollbackGeometricNonlinearityTrial(/*force=*/true);
+        system.clearLocalCondensedRecovery();
+        synchronizeOuterState(
+            NewtonOptions::StateSynchronizationPoint::
+                OuterFixedPointState);
+        entry_u->copyFrom(history.u());
+        entry_auxiliary_state = system.checkpointAuxiliaryState();
+        entry_bordered_state = system.borderedCoupling();
+        entry_constraint_semantics =
+            constraintSemanticFingerprint(system.constraints());
+        canonical_entry_defined = true;
+
+        const int max_outer =
+            options_.external_state_fixed_point.max_iterations;
+        for (int outer = 0; outer < max_outer; ++outer) {
+            if (outer > 0) {
+                system.rollbackGeometricNonlinearityTrial(/*force=*/true);
+                system.clearLocalCondensedRecovery();
+                restoreEntryHistoryAndRates();
+                system.updateConstraints(solve_time, history.dt());
+                synchronizeOuterState(
+                    NewtonOptions::StateSynchronizationPoint::
+                        OuterFixedPointState);
+            }
+            FE_THROW_IF(
+                system.meshCoordinateTransactionActive(),
+                systems::InvalidStateException,
+                "NewtonSolver: external-state refresh opened a mesh-coordinate transaction");
+
+            previous_outer_iterate->copyFrom(history.u());
+            auto inner_report = inner_solver.solveStepFrozenExternalState(
+                transient,
+                linear,
+                solve_time,
+                history,
+                workspace,
+                residual_addition);
+            inner_iterations_total += inner_report.iterations;
+            if (inner_report.iterations > 0 ||
+                inner_report.linear.iterations > 0) {
+                last_nontrivial_linear = inner_report.linear;
+            }
+
+            workspace.residual_scratch->copyFrom(history.u());
+            axpy(*workspace.residual_scratch,
+                 static_cast<Real>(-1.0),
+                 *previous_outer_iterate);
+            const double state_change_norm =
+                workspace.residual_scratch->norm();
+
+            aggregate = inner_report;
+            aggregate.outer_iterations = outer + 1;
+            aggregate.inner_iterations_total = inner_iterations_total;
+            aggregate.iterations = inner_iterations_total;
+            aggregate.outer_state_change_norm = state_change_norm;
+
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: external-state fixed point"
+                    << " outer_iteration=" << (outer + 1)
+                    << " inner_converged="
+                    << (inner_report.converged ? 1 : 0)
+                    << " inner_iterations=" << inner_report.iterations
+                    << " inner_iterations_total="
+                    << inner_iterations_total
+                    << " state_change_norm=" << state_change_norm
+                    << " refreshed_residual_norm="
+                    << inner_report.residual_norm;
+                traceLog(oss.str());
+            }
+
+            if (!inner_report.converged) {
+                aggregate.converged = false;
+                restoreEntryState();
+                return aggregate;
+            }
+
+            // A zero-update solve is the convergence certificate: the
+            // residual was assembled after G was regenerated from this exact
+            // algebraic state and already met every absolute tolerance.
+            if (inner_report.iterations == 0) {
+                aggregate.converged = true;
+                if (inner_iterations_total > 0 &&
+                    aggregate.linear.iterations == 0) {
+                    aggregate.linear = last_nontrivial_linear;
+                }
+                return aggregate;
+            }
+        }
+
+        aggregate.converged = false;
+        restoreEntryState();
+        return aggregate;
+    } catch (...) {
+        const auto original_failure = std::current_exception();
+        try {
+            restoreEntryState();
+        } catch (...) {
+            std::throw_with_nested(systems::InvalidStateException(
+                "NewtonSolver: external-state fixed-point failure was followed by a rollback failure"));
+        }
+        std::rethrow_exception(original_failure);
+    }
+}
+
+NewtonReport NewtonSolver::solveStepFrozenExternalState(
+    systems::TransientSystem& transient,
+    backends::LinearSolver& linear,
+    double solve_time,
+    TimeHistory& history,
+    NewtonWorkspace& workspace,
+    const backends::GenericVector* residual_addition) const
 {
     FE_THROW_IF(!workspace.isAllocated(), InvalidArgumentException,
                 "NewtonSolver::solveStep: workspace not allocated");
 
-    auto& J = *workspace.jacobian;
+    // Interface-tracking constraints can re-augment the sparsity patterns at
+    // any state-sync point (e.g. the accepted-state cut refresh at the end of
+    // the previous solve). The matrix references below bind for the whole
+    // step, so the reallocation must happen here, before any binding.
+    maybeReallocateJacobianForSparsity(transient.system(), workspace);
+
+    struct CurrentJacobianProxy {
+        NewtonWorkspace& workspace;
+
+        [[nodiscard]] backends::GenericMatrix& get() const
+        {
+            FE_CHECK_NOT_NULL(workspace.jacobian.get(), "NewtonSolver workspace.jacobian");
+            return *workspace.jacobian;
+        }
+
+        [[nodiscard]] std::unique_ptr<assembly::GlobalSystemView> createAssemblyView() const
+        {
+            return get().createAssemblyView();
+        }
+
+        [[nodiscard]] backends::BackendKind backendKind() const
+        {
+            return get().backendKind();
+        }
+
+        [[nodiscard]] GlobalIndex numRows() const
+        {
+            return get().numRows();
+        }
+
+        [[nodiscard]] GlobalIndex numCols() const
+        {
+            return get().numCols();
+        }
+
+        void zero() const
+        {
+            get().zero();
+        }
+
+        void mult(const backends::GenericVector& x, backends::GenericVector& y) const
+        {
+            get().mult(x, y);
+        }
+
+        operator backends::GenericMatrix&() const
+        {
+            return get();
+        }
+
+    };
+
+    CurrentJacobianProxy J{workspace};
     auto& r = *workspace.residual;
     auto& du = *workspace.delta;
     auto& u_backup = *workspace.u_backup;
     auto& residual_scratch = *workspace.residual_scratch;
     auto& residual_base = *workspace.residual_base;
     auto& residual_minus = *workspace.residual_minus;
-    auto* diagnostic_jacobian_scratch =
-        workspace.diagnostic_jacobian_scratch.get();
-
     NewtonReport report;
 
     const auto& sys = transient.system();
+#if FE_HAS_MPI
+    const NewtonCommunicator system_communicator =
+        sys.activeMpiCommunicator();
+#else
+    constexpr NewtonCommunicator system_communicator =
+        kSerialNewtonCommunicator;
+#endif
+    struct FieldResidualConvergenceState {
+        NewtonOptions::FieldResidualCriterion criterion{};
+        FieldResidualNormDefinition definition{};
+        std::string name{};
+        double initial_norm{std::numeric_limits<double>::quiet_NaN()};
+        double current_norm{std::numeric_limits<double>::quiet_NaN()};
+        std::uint64_t owned_dof_count{0u};
+        bool relative_reference_available{false};
+        bool relative_reference_activated_this_sample{false};
+    };
+    std::vector<FieldResidualConvergenceState> field_residual_states;
+    std::vector<FieldResidualNormDefinition> field_residual_definitions;
+    if (!options_.field_residual_criteria.empty()) {
+        const auto unknown_fields = sys.unknownFieldIdsInDofMapOrder();
+        field_residual_states.reserve(options_.field_residual_criteria.size());
+        field_residual_definitions.reserve(options_.field_residual_criteria.size());
+        for (const auto& criterion : options_.field_residual_criteria) {
+            FE_THROW_IF(std::find(unknown_fields.begin(),
+                                  unknown_fields.end(),
+                                  criterion.field) == unknown_fields.end(),
+                        InvalidArgumentException,
+                        "NewtonSolver: field residual criterion must reference an unknown field in the system");
+            const auto begin = sys.fieldDofOffset(criterion.field);
+            const auto count = sys.fieldDofHandler(criterion.field).getNumDofs();
+            FE_THROW_IF(begin < 0 || count <= 0 || begin + count > r.size(),
+                        systems::InvalidStateException,
+                        "NewtonSolver: field residual criterion has an invalid monolithic DOF range");
+            FieldResidualNormDefinition definition{
+                criterion.field,
+                begin,
+                begin + count};
+            field_residual_definitions.push_back(definition);
+            field_residual_states.push_back(FieldResidualConvergenceState{
+                criterion,
+                definition,
+                sys.fieldRecord(criterion.field).name});
+        }
+    }
     const auto base_linear_options = sys.augmentSolverOptions(linear.getOptions());
     linear.setOptions(base_linear_options);
     const auto& constraints = sys.constraints();
     const int temporal_order = transient.system().temporalOrder();
 
+    auto anyRank = [&](bool local_value) {
+#if FE_HAS_MPI
+        int initialized = 0;
+        int finalized = 0;
+        MPI_Initialized(&initialized);
+        MPI_Finalized(&finalized);
+        if (initialized != 0 && finalized == 0) {
+            const int local = local_value ? 1 : 0;
+            int global = local;
+            MPI_Allreduce(&local,
+                          &global,
+                          1,
+                          MPI_INT,
+                          MPI_MAX,
+                          sys.activeMpiCommunicator());
+            return global != 0;
+        }
+#endif
+        return local_value;
+    };
+
+    auto allRanks = [&](bool local_value) {
+        return !anyRank(!local_value);
+    };
+
     auto syncHistoryState = [&]() {
         history.updateGhosts();
-        if (constraints.empty()) {
+        // Constraint storage is rank-local.  Every rank in the system
+        // communicator must nevertheless enter the same halo exchanges when
+        // any rank owns a relevant line.
+        if (!anyRank(!constraints.empty())) {
             return;
         }
         constraints.distribute(history.u());
@@ -10007,6 +11611,41 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 syncOwnedRowHaloIfNeeded(history.uPrevK(k));
             }
         }
+        // Master-bearing (MPC) lines are different from Dirichlet data: their
+        // slave values come from the SAME vector's masters, so distributing
+        // them into the history cannot rewrite a prescribed trajectory — it
+        // re-imposes the extension on whatever the masters already were at
+        // that time level. Doing this at every state sync keeps DOFs that
+        // just entered an interface-tracking MPC set (cut refreshes rebuild
+        // the slave set mid-solve) on the extension trajectory at ALL time
+        // levels, so the generalized-alpha stage stencils never see the
+        // free-vs-extension value jump as a 1/(gamma*dt)-scaled rate pulse
+        // (band-localized velocity-error floor in the open-vessel MMS). The
+        // rate slots get the homogeneous form: constraint coefficients are
+        // time-constant within a step, so slave rates are the same master
+        // combination. Dirichlet lines are untouched throughout (their
+        // finite-difference rates keep carrying g_dot).
+        const bool any_master_bearing_lines =
+            anyRank(constraints.hasMasterBearingLines());
+        if (!mpcStateDistributeDisabled() && any_master_bearing_lines) {
+            for (int k = 1; k <= history.historyDepth(); ++k) {
+                if (transient.integrator().historySlotStoresRate(k)) {
+                    constraints.distributeMasterBearingHomogeneous(
+                        history.uPrevK(k));
+                } else {
+                    constraints.distributeMasterBearing(history.uPrevK(k));
+                }
+                syncOwnedRowHaloIfNeeded(history.uPrevK(k));
+            }
+            if (history.hasUDotState()) {
+                constraints.distributeMasterBearingHomogeneous(history.uDot());
+                syncOwnedRowHaloIfNeeded(history.uDot());
+            }
+            if (history.hasUDDotState()) {
+                constraints.distributeMasterBearingHomogeneous(history.uDDot());
+                syncOwnedRowHaloIfNeeded(history.uDDot());
+            }
+        }
     };
 
     auto syncCurrentState = [&]() {
@@ -10029,8 +11668,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         return out;
     };
     using StateSyncPoint = NewtonOptions::StateSynchronizationPoint;
-    auto synchronizeState = [&](const systems::SystemStateView& state,
-                                StateSyncPoint point) {
+    auto invokeStateSynchronization = [&](
+                                          const systems::SystemStateView& state,
+                                          StateSyncPoint point) {
         if (options_.synchronize_state) {
             options_.synchronize_state(state, point);
         }
@@ -10052,10 +11692,6 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
     auto base_state_holder = makeNewtonState(history, solve_time);
     const auto& base_state = base_state_holder.view;
-    synchronizeState(base_state, StateSyncPoint::AcceptedNonlinearState);
-    transient.system().acceptGeometricNonlinearityState(
-        base_state,
-        systems::GeometricNonlinearityUpdatePoint::AcceptedNonlinearState);
 
     std::optional<assembly::TimeIntegrationContext> dt_scale_ctx;
     if (options_.scale_dt_increments && !(options_.dt_increment_scale > 0.0)) {
@@ -10099,8 +11735,19 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
     std::vector<GlobalIndex> constrained_dofs;
     std::vector<GlobalIndex> dirichlet_dofs;
+    bool any_constrained_dofs = false;
     bool has_non_dirichlet_affine_constraints = false;
-    if (!constraints.empty()) {
+    bool any_non_dirichlet_affine_constraints = false;
+    auto refreshConstraintDofCaches = [&]() {
+        constrained_dofs.clear();
+        dirichlet_dofs.clear();
+        has_non_dirichlet_affine_constraints = false;
+        if (constraints.empty()) {
+            any_constrained_dofs = anyRank(false);
+            linear.setDirichletDofs({});
+            any_non_dirichlet_affine_constraints = anyRank(false);
+            return;
+        }
         constrained_dofs.reserve(constraints.numConstraints());
         dirichlet_dofs.reserve(constraints.numConstraints());
         constraints.forEach([&constrained_dofs](const constraints::AffineConstraints::ConstraintView& cv) {
@@ -10124,15 +11771,19 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         std::sort(constrained_dofs.begin(), constrained_dofs.end());
         constrained_dofs.erase(std::unique(constrained_dofs.begin(), constrained_dofs.end()),
                                constrained_dofs.end());
+        any_constrained_dofs = anyRank(!constrained_dofs.empty());
 
         std::sort(dirichlet_dofs.begin(), dirichlet_dofs.end());
         dirichlet_dofs.erase(std::unique(dirichlet_dofs.begin(), dirichlet_dofs.end()),
                              dirichlet_dofs.end());
-    }
-    linear.setDirichletDofs(dirichlet_dofs);
+        linear.setDirichletDofs(dirichlet_dofs);
+        any_non_dirichlet_affine_constraints =
+            anyRank(has_non_dirichlet_affine_constraints);
+    };
+    refreshConstraintDofCaches();
 
     auto zeroConstrainedResidualEntries = [&]() {
-        if (constrained_dofs.empty()) {
+        if (!any_constrained_dofs) {
             return;
         }
         auto r_zero = r.createAssemblyView();
@@ -10150,7 +11801,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     };
 
     auto reapplyConstrainedJacobianRows = [&]() {
-        if (constrained_dofs.empty()) {
+        if (!any_constrained_dofs) {
             return;
         }
         auto J_zero = J.createAssemblyView();
@@ -10161,6 +11812,143 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     };
 
     bool have_residual = false;
+    bool have_jacobian = false;
+    int last_jacobian_it = -1;
+    bool ptc_mass_ready = false;
+    double ptc_gamma = 0.0;
+    double ptc_gamma_applied = 0.0;
+    double ptc_prev_residual_norm = std::numeric_limits<double>::quiet_NaN();
+    bool line_search_history_transaction_active = false;
+    auto invalidateConstraintDependentAlgebra = [&]() {
+        have_residual = false;
+        have_jacobian = false;
+        last_jacobian_it = -1;
+        ptc_mass_ready = false;
+        ptc_gamma = 0.0;
+        ptc_gamma_applied = 0.0;
+        ptc_prev_residual_norm =
+            std::numeric_limits<double>::quiet_NaN();
+        linear.setRankOneUpdates({});
+        linear.setReducedFieldUpdates({});
+        linear.setGroupedBorderedFieldCouplings({});
+    };
+    auto synchronizeState = [&](const systems::SystemStateView& state,
+                                StateSyncPoint point) {
+        auto distribute_with_current_constraints = [&]() {
+            const bool geometry_transaction_active_on_any_rank = anyRank(
+                transient.system().meshCoordinateTransactionActive());
+
+            // Trial merit must use the same state-dependent MPC semantics for
+            // u and for every vector in the transient stencil.  Those history
+            // changes are safe only while the line-search history transaction
+            // is armed; every rejected alpha restores its exact base copies.
+            const bool mutable_current_history_state =
+                state.u_vector == &history.u();
+            const bool history_projection_is_transaction_safe =
+                point != StateSyncPoint::LineSearchTrialResidual ||
+                line_search_history_transaction_active;
+            if (mutable_current_history_state &&
+                history_projection_is_transaction_safe) {
+                syncHistoryState();
+            } else if (point == StateSyncPoint::LineSearchTrialResidual ||
+                       geometry_transaction_active_on_any_rank) {
+                FE_THROW_IF(state.u_vector == nullptr,
+                            systems::InvalidStateException,
+                            "NewtonSolver: a line-search synchronization changed "
+                            "constraints for a non-mutable state view");
+                auto& candidate = *const_cast<backends::GenericVector*>(
+                    state.u_vector);
+                constraints.updateGhostsAndDistribute(candidate);
+                syncOwnedRowHaloIfNeeded(candidate);
+            } else if (state.u_vector == &history.u()) {
+                syncHistoryState();
+            } else {
+                FE_THROW_IF(state.u_vector == nullptr,
+                            systems::InvalidStateException,
+                            "NewtonSolver: synchronization changed constraints "
+                            "for a non-mutable state view");
+                auto& synchronized = *const_cast<backends::GenericVector*>(
+                    state.u_vector);
+                constraints.updateGhostsAndDistribute(synchronized);
+                syncOwnedRowHaloIfNeeded(synchronized);
+            }
+        };
+
+        // A synchronization callback can derive cut/support constraints from
+        // the trial state.  If those constraints change, project the state and
+        // call the callback again so curvature, extension fields, and other
+        // residual-defining data see the projected vector rather than the
+        // pre-constraint candidate.  Require a bounded fixed point instead of
+        // silently assembling with mutually inconsistent state and constraints.
+        constexpr int max_constraint_projection_passes = 3;
+        auto semantic_before = constraintSemanticFingerprint(constraints);
+        for (int pass = 0;; ++pass) {
+            invokeStateSynchronization(state, point);
+            const auto semantic_after =
+                constraintSemanticFingerprint(constraints);
+            const bool changed_on_any_rank =
+                anyRank(semantic_after != semantic_before);
+            if (!changed_on_any_rank) {
+                // A line-search trial installs candidate MPC semantics before
+                // it is accepted.  The accepted callback can therefore be
+                // semantically unchanged even though committed history and
+                // rate vectors have not yet been projected with that set.
+                // Complete the transaction before any refreshed residual or
+                // convergence decision.  Use a communicator-wide predicate
+                // because relevant constraints are stored rank-locally.
+                if (point == StateSyncPoint::AcceptedNonlinearState &&
+                    state.u_vector == &history.u() &&
+                    !mpcStateDistributeDisabled() &&
+                    anyRank(constraints.hasMasterBearingLines())) {
+                    syncHistoryState();
+                    invalidateConstraintDependentAlgebra();
+                }
+                return;
+            }
+
+            FE_THROW_IF(
+                pass >= max_constraint_projection_passes,
+                systems::InvalidStateException,
+                std::string("NewtonSolver: state synchronization did not reach a stable affine-constraint fixed point at '") +
+                    stateSyncPointName(point) + "'");
+
+            distribute_with_current_constraints();
+            const bool refresh_geometry_on_any_rank = anyRank(
+                transient.system().geometricNonlinearityEnabled() ||
+                transient.system().meshCoordinateTransactionActive());
+            if (refresh_geometry_on_any_rank) {
+                // A constraint projection can also change a displacement
+                // unknown.  Refresh coordinates before the second callback
+                // at every synchronization point, not only during line
+                // search, so cut geometry and derived fields use the same
+                // projected state.  An active transaction retains the
+                // original accepted-coordinate backup.
+                transient.system().beginGeometricNonlinearityTrial(state);
+            }
+            refreshConstraintDofCaches();
+
+            // Coefficients and inhomogeneities alter the transformed operator
+            // even when the slave/master sparsity is unchanged.  Any semantic
+            // change therefore invalidates all algebra tied to the old set.
+            invalidateConstraintDependentAlgebra();
+            semantic_before = semantic_after;
+        }
+    };
+
+    // The initial callback may build state-dependent cuts and constraints.
+    // Use the same projection/refresh fixed-point contract as every later
+    // residual evaluation before declaring this the accepted base state.
+    try {
+        transient.system().beginGeometricNonlinearityTrial(base_state);
+        synchronizeState(base_state, StateSyncPoint::AcceptedNonlinearState);
+        transient.system().acceptGeometricNonlinearityState(
+            base_state,
+            systems::GeometricNonlinearityUpdatePoint::AcceptedNonlinearState);
+    } catch (...) {
+        transient.system().rollbackGeometricNonlinearityTrial(/*force=*/true);
+        throw;
+    }
+
     ResidualNormComponents current_residual_components{};
     ResidualNormComponents initial_residual_components{};
     double current_residual_norm = std::numeric_limits<double>::quiet_NaN();
@@ -10172,16 +11960,43 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
     auto computeResidualComponents = [&]() -> ResidualNormComponents {
         return borderedResidualNormComponentsForConvergence(
-            r, residual_scratch, transient.system().borderedCoupling());
+            r,
+            residual_scratch,
+            transient.system().borderedCoupling(),
+            system_communicator);
     };
 
     auto computeResidualNorm = [&]() -> double {
         return computeResidualComponents().combined();
     };
 
+    auto refreshFieldResidualNorms = [&]() {
+        const auto sample = fieldResidualNormsForConvergence(
+            sys,
+            r,
+            std::span<const FieldResidualNormDefinition>(
+                field_residual_definitions.data(),
+                field_residual_definitions.size()));
+        FE_THROW_IF(sample.norms.size() != field_residual_states.size() ||
+                        sample.owned_dof_counts.size() !=
+                            field_residual_states.size(),
+                    systems::InvalidStateException,
+                    "NewtonSolver: inconsistent field residual convergence sample");
+        for (std::size_t i = 0; i < field_residual_states.size(); ++i) {
+            FE_THROW_IF(sample.owned_dof_counts[i] == 0u,
+                        systems::InvalidStateException,
+                        "NewtonSolver: field residual convergence criterion has no owned DOFs on the active communicator");
+            auto& state = field_residual_states[i];
+            state.current_norm = sample.norms[i];
+            state.owned_dof_count = sample.owned_dof_counts[i];
+            state.relative_reference_activated_this_sample = false;
+        }
+    };
+
     auto refreshResidualComponents = [&]() -> double {
         current_residual_components = computeResidualComponents();
         current_residual_norm = current_residual_components.combined();
+        refreshFieldResidualNorms();
         return current_residual_norm;
     };
 
@@ -10241,7 +12056,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 dt_dofs_all = dt_dofs_all.unionWith(dofs::IndexSet(range.first, range.second));
             }
 #if defined(FE_HAS_FSILS)
-            if (const auto* fsils_jacobian = dynamic_cast<const backends::FsilsMatrix*>(&J);
+            if (const auto* fsils_jacobian = dynamic_cast<const backends::FsilsMatrix*>(&J.get());
                 fsils_jacobian != nullptr && fsils_jacobian->usesOwnedRowOperator()) {
                 ptc_uses_backend_owned_rows = true;
                 const auto dt_dofs = dt_dofs_all.toVector();
@@ -10260,18 +12075,30 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
     }
 
-    const bool ptc_can_run = ptc_enabled && (workspace.ptc_mass_lumped != nullptr) && !ptc_owned_dofs.empty();
+    // PTC assembly, matrix replacement, and residual refresh are collective on
+    // the active system communicator.  Some valid distributed layouts have no
+    // locally owned time-derivative row on one or more ranks, so a rank-local
+    // nonempty-row test would let those ranks skip collectives entered by their
+    // peers.  Require storage everywhere, but only one communicator rank needs
+    // to own a row for the distributed diagonal to be meaningful.
+    const bool local_ptc_storage_available =
+        ptc_enabled && (workspace.ptc_mass_lumped != nullptr);
+    const bool ptc_storage_available_on_all_ranks =
+        allRanks(local_ptc_storage_available);
+    const bool any_ptc_owned_rows =
+        anyRank(local_ptc_storage_available && !ptc_owned_dofs.empty());
+    const bool ptc_can_run =
+        ptc_storage_available_on_all_ranks && any_ptc_owned_rows;
     if (oopTraceEnabled() && ptc_enabled) {
         traceLog("NewtonSolver: PTC diagonal ownership rows=" + std::to_string(ptc_owned_dofs.size()) +
                  (ptc_uses_backend_owned_rows ? " mode=backend-owned-row" : " mode=fe-owned"));
     }
     const bool jacobian_matrix_state_independent =
         sys.operatorMatrixStateIndependent(options_.jacobian_op);
-    const bool can_reuse_state_independent_jacobian =
+    const bool base_can_reuse_state_independent_jacobian =
         jacobian_matrix_state_independent &&
         !ptc_enabled &&
-        !has_monolithic_auxiliary_unknowns &&
-        !has_non_dirichlet_affine_constraints;
+        !has_monolithic_auxiliary_unknowns;
     if (oopTraceEnabled()) {
         std::string reason;
         if (!jacobian_matrix_state_independent) {
@@ -10280,7 +12107,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             reason = "pseudo-transient continuation modifies the matrix";
         } else if (has_monolithic_auxiliary_unknowns) {
             reason = "monolithic auxiliary unknowns require fresh coupled assembly";
-        } else if (has_non_dirichlet_affine_constraints) {
+        } else if (any_non_dirichlet_affine_constraints) {
             reason = "non-Dirichlet affine constraints can alter matrix structure";
         } else {
             reason = "operator matrix is state-independent";
@@ -10289,14 +12116,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                  "' state_independent=" +
                  (jacobian_matrix_state_independent ? "true" : "false") +
                  " reuse=" +
-                 (can_reuse_state_independent_jacobian ? "enabled" : "disabled") +
+                 ((base_can_reuse_state_independent_jacobian &&
+                   !any_non_dirichlet_affine_constraints)
+                      ? "enabled"
+                      : "disabled") +
                  " reason='" + reason + "'");
     }
-    bool ptc_mass_ready = false;
-    double ptc_gamma = 0.0;
-    double ptc_gamma_applied = 0.0;
-    double ptc_prev_residual_norm = std::numeric_limits<double>::quiet_NaN();
-
     systems::OperatorTag residual_op_used = options_.residual_op;
     std::vector<backends::RankOneUpdate> assembled_rank_one_updates;
     std::vector<backends::RankOneUpdate> effective_rank_one_updates;
@@ -10307,6 +12132,52 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     bool linear_has_live_bordered = false;
     const systems::FESystem::BorderedCouplingData* solve_bordered_ptr = nullptr;
     AlgebraicAuxiliaryReduction algebraic_aux_reduction;
+
+    auto validateLowRankUpdateSlots =
+        [&](std::size_t rank_one_count,
+            std::size_t reduced_count,
+            std::size_t grouped_count,
+            const char* phase) {
+#if FE_HAS_MPI
+            int initialized = 0;
+            int finalized = 0;
+            MPI_Initialized(&initialized);
+            MPI_Finalized(&finalized);
+            if (initialized != 0 && finalized == 0 &&
+                system_communicator != MPI_COMM_NULL) {
+                const std::array<unsigned long long, 3> local_counts{
+                    static_cast<unsigned long long>(rank_one_count),
+                    static_cast<unsigned long long>(reduced_count),
+                    static_cast<unsigned long long>(grouped_count)};
+                auto min_counts = local_counts;
+                auto max_counts = local_counts;
+                MPI_Allreduce(local_counts.data(),
+                              min_counts.data(),
+                              static_cast<int>(local_counts.size()),
+                              MPI_UNSIGNED_LONG_LONG,
+                              MPI_MIN,
+                              system_communicator);
+                MPI_Allreduce(local_counts.data(),
+                              max_counts.data(),
+                              static_cast<int>(local_counts.size()),
+                              MPI_UNSIGNED_LONG_LONG,
+                              MPI_MAX,
+                              system_communicator);
+                FE_THROW_IF(
+                    min_counts != max_counts,
+                    systems::InvalidStateException,
+                    "NewtonSolver: low-rank update slot counts differ across "
+                    "the active system communicator at phase '" +
+                        std::string(phase != nullptr ? phase : "unknown") +
+                        "'");
+            }
+#else
+            (void)rank_one_count;
+            (void)reduced_count;
+            (void)grouped_count;
+            (void)phase;
+#endif
+        };
 
     auto captureRankOneUpdates = [&]() {
         const auto updates = transient.system().lastRankOneUpdates();
@@ -10329,6 +12200,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
         active_reduced_field_updates = effective_reduced_field_updates;
         grouped_bordered_field_couplings.clear();
+        validateLowRankUpdateSlots(effective_rank_one_updates.size(),
+                                   active_reduced_field_updates.size(),
+                                   grouped_bordered_field_couplings.size(),
+                                   "assembly_capture");
     };
 
     auto logNewtonAssemblyDiagnostic =
@@ -10350,6 +12225,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 << " want_matrix=" << (req.want_matrix ? 1 : 0)
                 << " want_vector=" << (req.want_vector ? 1 : 0)
                 << " zero_outputs=" << (req.zero_outputs ? 1 : 0)
+                << " suppress_auxiliary_coupling_assembly="
+                << (req.suppress_auxiliary_coupling_assembly ? 1 : 0)
                 << " nonlinear_iteration="
                 << (req.is_nonlinear_iteration ? 1 : 0)
                 << " same_op=" << (same_op ? 1 : 0)
@@ -10409,6 +12286,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     scratch_view.get(),
                     "NewtonSolver: pressure row contribution diagnostic view");
                 std::unique_ptr<assembly::GlobalSystemView> matrix_scratch_view;
+                // A state-sync callback can re-augment constraint sparsity
+                // and replace the distributed diagnostic matrix.  Resolve
+                // the pointer after that synchronization/reallocation rather
+                // than retaining a solveStep-lifetime raw pointer.
+                auto* diagnostic_jacobian_scratch =
+                    workspace.diagnostic_jacobian_scratch.get();
                 const bool want_matrix_diagnostic =
                     pressureRowContributionMatrixDiagnosticEnabled() &&
                     diagnostic_jacobian_scratch != nullptr;
@@ -10419,14 +12302,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         matrix_scratch_view.get(),
                         "NewtonSolver: pressure row contribution matrix diagnostic view");
                 }
-                transient.system().beginTimeStep(
-                    /*reset_auxiliary_state=*/false,
-                    /*invalidate_auxiliary_inputs=*/false);
                 systems::AssemblyRequest req;
                 req.op = op;
                 req.want_matrix = want_matrix_diagnostic;
                 req.want_vector = true;
                 req.suppress_constraint_inhomogeneity = true;
+                req.suppress_auxiliary_coupling_assembly = true;
                 req.is_nonlinear_iteration = true;
                 const auto ar =
                     transient.assemble(req,
@@ -10503,6 +12384,719 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
         };
 
+    struct FreeSurfaceDiagnosticGeometryKey {
+        bool revision_tracking_available{false};
+        std::uint64_t mesh_geometry_revision{0u};
+        std::uint64_t mesh_topology_revision{0u};
+        std::uint64_t mesh_ownership_revision{0u};
+        std::uint64_t mesh_numbering_revision{0u};
+        std::uint64_t mesh_field_layout_revision{0u};
+        std::uint64_t mesh_label_revision{0u};
+        std::uint64_t mesh_active_configuration_epoch{0u};
+        std::uint64_t mesh_coordinate_configuration_key{0u};
+        std::uintptr_t cut_context_identity{0u};
+        std::uint64_t cut_context_content_revision{0u};
+        std::uint64_t system_layout_revision{0u};
+        std::uint64_t sparsity_pattern_revision{0u};
+        ConstraintSemanticFingerprint constraint_semantics{};
+
+        [[nodiscard]] bool operator==(
+            const FreeSurfaceDiagnosticGeometryKey&) const noexcept = default;
+    };
+
+    auto freeSurfaceDiagnosticGeometryKey = [&]() {
+        const auto& mesh = transient.system().meshAccess();
+        const auto* cut_context =
+            transient.system().cutIntegrationContext();
+        FreeSurfaceDiagnosticGeometryKey key;
+        // Both fitted and unfitted operators depend on the background mesh.
+        // A cut context tracks generated quadrature/content changes, but it
+        // cannot invalidate stale entries after untracked background geometry,
+        // topology, ownership, numbering, field-layout, or label changes.
+        // Cache only when IMeshAccess explicitly promises that all revision
+        // queries below form a trustworthy invalidation domain.
+        key.revision_tracking_available = mesh.revisionTrackingAvailable();
+        key.mesh_geometry_revision = mesh.geometryRevision();
+        key.mesh_topology_revision = mesh.topologyRevision();
+        key.mesh_ownership_revision = mesh.ownershipRevision();
+        key.mesh_numbering_revision = mesh.numberingRevision();
+        key.mesh_field_layout_revision = mesh.fieldLayoutRevision();
+        key.mesh_label_revision = mesh.labelRevision();
+        key.mesh_active_configuration_epoch =
+            mesh.activeConfigurationEpoch();
+        key.mesh_coordinate_configuration_key =
+            mesh.coordinateConfigurationKey();
+        key.cut_context_identity =
+            reinterpret_cast<std::uintptr_t>(cut_context);
+        key.cut_context_content_revision =
+            cut_context != nullptr ? cut_context->contentRevision() : 0u;
+        key.system_layout_revision =
+            transient.system().systemLayoutRevision();
+        key.sparsity_pattern_revision =
+            transient.system().sparsityPatternRevision();
+        key.constraint_semantics =
+            constraintSemanticFingerprint(constraints);
+        return key;
+    };
+
+    struct FreeSurfacePressureRepresentabilityCache {
+        bool valid{false};
+        FreeSurfaceDiagnosticGeometryKey geometry{};
+        PressureRepresentabilityLsqrResult result{};
+    };
+    FreeSurfacePressureRepresentabilityCache
+        free_surface_pressure_representability_cache;
+
+    bool free_surface_conservative_balance_unavailable_logged = false;
+    auto assembleFreeSurfaceConservativeBalanceDiagnostic =
+        [&](const systems::SystemStateView& state,
+            const char* phase,
+            StateSyncPoint sync_point) {
+            const bool local_diagnostic_enabled =
+                freeSurfaceConservativeBalanceDiagnosticEnabled();
+            const bool diagnostic_enabled_on_any_rank =
+                anyRank(local_diagnostic_enabled);
+            if (!diagnostic_enabled_on_any_rank) {
+                return;
+            }
+            if (!allRanks(local_diagnostic_enabled)) {
+                if (!free_surface_conservative_balance_unavailable_logged &&
+                    communicatorRank(system_communicator) == 0) {
+                    FE_LOG_INFO(
+                        "NewtonSolver: free-surface conservative balance"
+                        " diagnostic=free_surface_conservative_balance"
+                        " available=0"
+                        " reason=diagnostic_enablement_differs_across_communicator"
+                        " pressure_representability_available=0"
+                        " pressure_representability_method=lsqr"
+                        " pressure_representability_convergence=normal_equation_stationarity"
+                        " pressure_representability_distance_gate_applied=0"
+                        " pressure_representability_claimed=0"
+                        " pressure_representability_reason=diagnostic_enablement_differs_across_communicator");
+                }
+                free_surface_conservative_balance_unavailable_logged = true;
+                return;
+            }
+
+            // Assemble every requested diagnostic sample.  Equality of the
+            // current coefficient vector, time scalars, and geometry is not a
+            // complete residual-state key: supported forms may also depend on
+            // solution/time-step history, auxiliary state/inputs, user data,
+            // or runtime parameter callbacks.  Suppressing a full sample on a
+            // partial fingerprint could therefore hide a changed pressure or
+            // surface load and would lose accepted-state provenance.  Only the
+            // mixed pressure pair/LSQR work below is cached, after the current
+            // constrained surface load has been reassembled and compared
+            // exactly.  The qualification switch forces even that safe cache
+            // off so every pair matrix and LSQR solve is repeated.
+            const bool every_assembly_on_any_rank = anyRank(
+                freeSurfaceConservativeBalanceDiagnosticEveryAssemblyRequested());
+            const auto geometry_key =
+                freeSurfaceDiagnosticGeometryKey();
+
+            // These tags are installed by the Navier--Stokes formulation only
+            // when every effective free surface uses the variational
+            // SurfaceStress form.  Keeping the strings here avoids an FE ->
+            // Physics dependency while preserving a strict three-vector plus
+            // one symmetric-matrix contract for qualification tooling.
+            constexpr std::array<const char*, 3> ops{
+                "equations_diagnostic_ns_free_surface_pressure_virtual_work",
+                "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
+                "equations_diagnostic_ns_free_surface_conservative_balance",
+            };
+            for (const char* op : ops) {
+                const bool local_operator_installed =
+                    transient.system().hasOperator(op);
+                if (!allRanks(local_operator_installed)) {
+                    if (!free_surface_conservative_balance_unavailable_logged &&
+                        communicatorRank(system_communicator) == 0) {
+                        std::ostringstream skipped;
+                        skipped
+                            << "NewtonSolver: free-surface conservative balance"
+                            << " diagnostic=free_surface_conservative_balance"
+                            << " available=0"
+                            << " reason=operator_not_installed_on_all_ranks"
+                            << " missing_op='" << op << "'"
+                            << " pressure_representability_available=0"
+                            << " pressure_representability_method=lsqr"
+                            << " pressure_representability_convergence=normal_equation_stationarity"
+                            << " pressure_representability_distance_gate_applied=0"
+                            << " pressure_representability_claimed=0"
+                            << " pressure_representability_reason=conservative_balance_operator_unavailable"
+                            << " iteration=" << current_newton_iteration
+                            << " phase='"
+                            << (phase != nullptr ? phase : "unknown") << "'"
+                            << " sync_point=" << stateSyncPointName(sync_point)
+                            << " scope=pressure_and_surface_energy_first_variations_only"
+                            << " contract=instantaneous_constrained_velocity_test_virtual_work"
+                            << " total_momentum_equilibrium_claimed=0"
+                            << " discrete_energy_theorem_claimed=0";
+                        FE_LOG_INFO(skipped.str());
+                    }
+                    free_surface_conservative_balance_unavailable_logged = true;
+                    return;
+                }
+            }
+
+            const std::string pair_op(
+                kFreeSurfacePressureRepresentabilityPairOperator);
+            const bool pair_operator_available = allRanks(
+                transient.system().hasOperator(pair_op));
+            const bool local_representability_workspace_available =
+                workspace.pressure_representability_pair_matrix != nullptr &&
+                workspace.pressure_representability_load != nullptr &&
+                workspace.pressure_representability_solution != nullptr &&
+                workspace.pressure_representability_left_basis != nullptr &&
+                workspace.pressure_representability_right_basis != nullptr &&
+                workspace.pressure_representability_direction != nullptr &&
+                workspace.pressure_representability_work != nullptr &&
+                workspace.pressure_representability_residual != nullptr &&
+                workspace.pressure_representability_normal_residual != nullptr;
+            const bool representability_workspace_available = allRanks(
+                local_representability_workspace_available);
+
+            bool local_representability_layout_compatible = false;
+            if (local_representability_workspace_available) {
+                const auto& pair_matrix =
+                    *workspace.pressure_representability_pair_matrix;
+                const std::array<const backends::GenericVector*, 8>
+                    pair_vectors{
+                        workspace.pressure_representability_load.get(),
+                        workspace.pressure_representability_solution.get(),
+                        workspace.pressure_representability_left_basis.get(),
+                        workspace.pressure_representability_right_basis.get(),
+                        workspace.pressure_representability_direction.get(),
+                        workspace.pressure_representability_work.get(),
+                        workspace.pressure_representability_residual.get(),
+                        workspace.pressure_representability_normal_residual
+                            .get(),
+                    };
+                const auto expected_size = pair_matrix.numRows();
+                const auto expected_backend = pair_matrix.backendKind();
+                const auto expected_local_size =
+                    pair_vectors.front()->localSpan().size();
+                local_representability_layout_compatible =
+                    expected_size > 0 &&
+                    pair_matrix.numCols() == expected_size &&
+                    std::all_of(
+                        pair_vectors.begin(),
+                        pair_vectors.end(),
+                        [&](const backends::GenericVector* vector) {
+                            return vector != nullptr &&
+                                   vector->backendKind() == expected_backend &&
+                                   vector->size() == expected_size &&
+                                   vector->localSpan().size() ==
+                                       expected_local_size;
+                        });
+#if defined(FE_HAS_FSILS)
+                // FSILS matrix-vector products require identity of the shared
+                // overlap/permutation layout, not merely equal global and
+                // local sizes.  Fail closed before assembly/LSQR if a caller
+                // has replaced any diagnostic vector with another layout.
+                if (local_representability_layout_compatible &&
+                    expected_backend == backends::BackendKind::FSILS) {
+                    const auto* fsils_matrix =
+                        dynamic_cast<const backends::FsilsMatrix*>(
+                            &pair_matrix);
+                    const auto* shared =
+                        fsils_matrix != nullptr
+                            ? fsils_matrix->shared().get()
+                            : nullptr;
+                    local_representability_layout_compatible =
+                        shared != nullptr &&
+                        std::all_of(
+                            pair_vectors.begin(),
+                            pair_vectors.end(),
+                            [shared](const backends::GenericVector* vector) {
+                                const auto* fsils_vector =
+                                    dynamic_cast<const backends::FsilsVector*>(
+                                        vector);
+                                return fsils_vector != nullptr &&
+                                       fsils_vector->shared() == shared;
+                            });
+                }
+#endif
+            }
+            const bool representability_layout_compatible = allRanks(
+                local_representability_layout_compatible);
+            const bool representability_storage_usable =
+                representability_workspace_available &&
+                representability_layout_compatible;
+
+            const bool pressure_pair_matrix_state_independent =
+                pair_operator_available &&
+                allRanks(transient.system().operatorMatrixStateIndependent(
+                    pair_op));
+            const bool local_pressure_representability_cache_prior_sample =
+                free_surface_pressure_representability_cache.valid;
+            const bool local_pressure_representability_cache_geometry_match =
+                local_pressure_representability_cache_prior_sample &&
+                free_surface_pressure_representability_cache.geometry ==
+                    geometry_key;
+            const bool local_pressure_representability_cache_candidate =
+                !every_assembly_on_any_rank &&
+                geometry_key.revision_tracking_available &&
+                representability_storage_usable &&
+                pressure_pair_matrix_state_independent &&
+                local_pressure_representability_cache_geometry_match;
+            const bool pressure_representability_cache_candidate =
+                allRanks(
+                    local_pressure_representability_cache_candidate);
+            std::string pressure_representability_cache_rejection_reason;
+            if (every_assembly_on_any_rank) {
+                pressure_representability_cache_rejection_reason =
+                    "every_assembly_policy";
+            } else if (!pair_operator_available) {
+                pressure_representability_cache_rejection_reason =
+                    "pair_operator_unavailable";
+            } else if (!geometry_key.revision_tracking_available) {
+                pressure_representability_cache_rejection_reason =
+                    "revision_key_unavailable";
+            } else if (!representability_storage_usable) {
+                pressure_representability_cache_rejection_reason =
+                    "storage_or_layout_unusable";
+            } else if (!pressure_pair_matrix_state_independent) {
+                pressure_representability_cache_rejection_reason =
+                    "pair_matrix_state_dependent";
+            } else if (!local_pressure_representability_cache_prior_sample) {
+                pressure_representability_cache_rejection_reason =
+                    "no_prior_sample";
+            } else if (!local_pressure_representability_cache_geometry_match) {
+                pressure_representability_cache_rejection_reason =
+                    "geometry_or_constraints_changed";
+            } else if (!pressure_representability_cache_candidate) {
+                pressure_representability_cache_rejection_reason =
+                    "candidate_unavailable_on_another_rank";
+            } else {
+                pressure_representability_cache_rejection_reason =
+                    "exact_load_check_pending";
+            }
+            if (pressure_representability_cache_candidate) {
+                // Preserve the previous constrained surface load in an LSQR
+                // work vector before the current state reassembles it below.
+                // A geometry key alone is deliberately insufficient: exact
+                // load equality also catches state/parameter dependencies that
+                // an operator may carry despite unchanged cut geometry.
+                workspace.pressure_representability_work->copyFrom(
+                    *workspace.pressure_representability_load);
+            }
+
+            std::array<double, 3> norms{};
+            for (std::size_t i = 0; i < ops.size(); ++i) {
+                // Assemble the surface-energy load directly into its
+                // pair-owned RHS.  Production-layout and pair-layout vectors
+                // may have different ghost sets or FSILS shared orderings, so
+                // copyFrom/local-span positional transfer is not a valid map.
+                auto& diagnostic_vector =
+                    i == 1u && representability_storage_usable
+                        ? *workspace.pressure_representability_load
+                        : residual_scratch;
+                diagnostic_vector.zero();
+                auto scratch_view = diagnostic_vector.createAssemblyView();
+                FE_CHECK_NOT_NULL(
+                    scratch_view.get(),
+                    "NewtonSolver: free-surface conservative balance diagnostic view");
+                systems::AssemblyRequest req;
+                req.op = ops[i];
+                req.want_vector = true;
+                req.suppress_constraint_inhomogeneity = true;
+                req.suppress_auxiliary_coupling_assembly = true;
+                req.is_nonlinear_iteration = true;
+                const auto ar =
+                    transient.assemble(req, state, nullptr, scratch_view.get());
+                logNewtonAssemblyDiagnostic(
+                    "free_surface_conservative_balance",
+                    sync_point,
+                    req,
+                    ar);
+                FE_THROW_IF(
+                    !ar.success,
+                    FEException,
+                    "NewtonSolver: free-surface conservative balance diagnostic assembly failed for op '" +
+                        std::string(ops[i]) + "': " + ar.error_message);
+
+                // Match the constrained residual space used by Newton.  The
+                // diagnostic operators contain velocity-test rows only; the
+                // vector norm therefore is exactly their global constrained
+                // virtual-work coefficient norm.
+                zeroVectorEntries(constrained_dofs, diagnostic_vector);
+                norms[i] = diagnostic_vector.norm();
+                if (i == 1u && representability_storage_usable) {
+                    diagnostic_vector.updateGhosts();
+                }
+            }
+
+            bool pressure_representability_available = false;
+            std::string pressure_representability_reason;
+            PressureRepresentabilityLsqrResult pressure_representability{};
+            std::uint64_t active_pressure_dofs = 0u;
+            int pressure_representability_iteration_cap = 0;
+
+            std::optional<FieldId> velocity_field;
+            std::optional<FieldId> pressure_field;
+            if (!pair_operator_available) {
+                pressure_representability_reason =
+                    "pair_operator_not_installed_on_all_ranks";
+            } else if (!representability_workspace_available) {
+                pressure_representability_reason =
+                    "workspace_not_allocated_on_all_ranks";
+            } else if (!representability_layout_compatible) {
+                pressure_representability_reason =
+                    "pair_matrix_vector_layout_mismatch";
+            } else {
+                const auto& load_definition =
+                    transient.system().operatorDefinition(ops[1]);
+                std::set<FieldId> load_test_fields;
+                const auto collect_test_fields =
+                    [&load_test_fields](const auto& terms) {
+                        for (const auto& term : terms) {
+                            if (term.test_field != INVALID_FIELD_ID) {
+                                load_test_fields.insert(term.test_field);
+                            }
+                        }
+                    };
+                collect_test_fields(load_definition.cells);
+                collect_test_fields(load_definition.boundary);
+                collect_test_fields(load_definition.interior);
+                collect_test_fields(load_definition.interface_faces);
+                collect_test_fields(load_definition.cut_volumes);
+                if (load_test_fields.size() == 1u) {
+                    velocity_field = *load_test_fields.begin();
+                }
+
+                const auto& pair_definition =
+                    transient.system().operatorDefinition(pair_op);
+                std::set<FieldId> pair_fields;
+                const auto collect_pair_fields =
+                    [&pair_fields](const auto& terms) {
+                        for (const auto& term : terms) {
+                            if (term.test_field != INVALID_FIELD_ID) {
+                                pair_fields.insert(term.test_field);
+                            }
+                            if (term.trial_field != INVALID_FIELD_ID) {
+                                pair_fields.insert(term.trial_field);
+                            }
+                        }
+                    };
+                collect_pair_fields(pair_definition.cells);
+                collect_pair_fields(pair_definition.boundary);
+                collect_pair_fields(pair_definition.interior);
+                collect_pair_fields(pair_definition.interface_faces);
+                collect_pair_fields(pair_definition.cut_volumes);
+                if (velocity_field.has_value()) {
+                    pair_fields.erase(*velocity_field);
+                }
+                if (pair_fields.size() == 1u) {
+                    pressure_field = *pair_fields.begin();
+                }
+
+                const bool fields_identified_on_all_ranks = allRanks(
+                    velocity_field.has_value() && pressure_field.has_value());
+                if (!fields_identified_on_all_ranks) {
+                    pressure_representability_reason =
+                        "mixed_velocity_pressure_fields_not_identifiable";
+                }
+            }
+
+            if (pressure_representability_reason.empty()) {
+                const auto pressure_begin =
+                    transient.system().fieldDofOffset(*pressure_field);
+                const auto pressure_count =
+                    transient.system()
+                        .fieldDofHandler(*pressure_field)
+                        .getNumDofs();
+                const auto pressure_end = pressure_begin + pressure_count;
+
+                bool local_nonzero_pressure_inhomogeneity = false;
+                constraints.forEach(
+                    [&](const constraints::AffineConstraints::ConstraintView&
+                            line) {
+                        if (line.slave_dof >= pressure_begin &&
+                            line.slave_dof < pressure_end &&
+                            (!std::isfinite(line.inhomogeneity) ||
+                             line.inhomogeneity != 0.0)) {
+                            local_nonzero_pressure_inhomogeneity = true;
+                        }
+                    });
+                if (anyRank(local_nonzero_pressure_inhomogeneity)) {
+                    pressure_representability_reason =
+                        "nonzero_pressure_constraint_inhomogeneity";
+                }
+
+                const auto& owned = transient.system()
+                                        .dofHandler()
+                                        .getPartition()
+                                        .locallyOwned();
+                std::uint64_t local_active_pressure_dofs = 0u;
+                for (GlobalIndex dof = pressure_begin; dof < pressure_end;
+                     ++dof) {
+                    if (owned.contains(dof) &&
+                        !std::binary_search(constrained_dofs.begin(),
+                                            constrained_dofs.end(),
+                                            dof)) {
+                        ++local_active_pressure_dofs;
+                    }
+                }
+                active_pressure_dofs = local_active_pressure_dofs;
+#if FE_HAS_MPI
+                {
+                    int initialized = 0;
+                    int finalized = 0;
+                    MPI_Initialized(&initialized);
+                    MPI_Finalized(&finalized);
+                    if (initialized != 0 && finalized == 0) {
+                        std::uint64_t global_active_pressure_dofs = 0u;
+                        MPI_Allreduce(&local_active_pressure_dofs,
+                                      &global_active_pressure_dofs,
+                                      1,
+                                      MPI_UINT64_T,
+                                      MPI_SUM,
+                                      system_communicator);
+                        active_pressure_dofs =
+                            global_active_pressure_dofs;
+                    }
+                }
+#endif
+                // In exact arithmetic Golub--Kahan LSQR terminates within the
+                // pressure-space dimension.  Finite-precision loss of Krylov
+                // orthogonality can require more than n iterations, however;
+                // Algorithm 583 recommends 4*n when the operator is not known
+                // to be well conditioned.  Retain the existing hard ceiling so
+                // this diagnostic cannot acquire unbounded solve cost.
+                pressure_representability_iteration_cap =
+                    static_cast<int>(
+                        4u * std::min<std::uint64_t>(
+                                 active_pressure_dofs, 250u));
+            }
+
+            bool pressure_representability_cache_hit = false;
+            bool pressure_representability_cache_load_equality_checked = false;
+            bool pressure_representability_cache_load_equal = false;
+            double pressure_representability_cache_load_difference_norm =
+                std::numeric_limits<double>::quiet_NaN();
+            if (pressure_representability_reason.empty() &&
+                pressure_representability_cache_candidate) {
+                axpy(*workspace.pressure_representability_work,
+                     static_cast<Real>(-1.0),
+                     *workspace.pressure_representability_load);
+                pressure_representability_cache_load_difference_norm =
+                    workspace.pressure_representability_work->norm();
+                pressure_representability_cache_load_equality_checked = true;
+                pressure_representability_cache_load_equal = allRanks(
+                    std::isfinite(
+                        pressure_representability_cache_load_difference_norm) &&
+                    pressure_representability_cache_load_difference_norm ==
+                        0.0);
+                pressure_representability_cache_hit =
+                    pressure_representability_cache_load_equal;
+                pressure_representability_cache_rejection_reason =
+                    pressure_representability_cache_hit
+                        ? "none"
+                        : "load_changed_or_nonfinite";
+                if (pressure_representability_cache_hit) {
+                    pressure_representability =
+                        free_surface_pressure_representability_cache.result;
+                    pressure_representability_available = true;
+                }
+            }
+
+            if (pressure_representability_cache_rejection_reason ==
+                    "exact_load_check_pending" &&
+                !pressure_representability_cache_load_equality_checked) {
+                pressure_representability_cache_rejection_reason =
+                    "diagnostic_unavailable_before_load_check";
+            }
+
+            if (pressure_representability_reason.empty() &&
+                !pressure_representability_cache_hit) {
+                auto& pair_matrix =
+                    *workspace.pressure_representability_pair_matrix;
+                pair_matrix.zero();
+                auto pair_view = pair_matrix.createAssemblyView();
+                FE_CHECK_NOT_NULL(
+                    pair_view.get(),
+                    "NewtonSolver: pressure-representability pair matrix view");
+                systems::AssemblyRequest pair_request;
+                pair_request.op = pair_op;
+                pair_request.want_matrix = true;
+                pair_request.want_vector = false;
+                pair_request.suppress_constraint_inhomogeneity = true;
+                pair_request.suppress_auxiliary_coupling_assembly = true;
+                pair_request.is_nonlinear_iteration = true;
+                const auto pair_assembly = transient.assemble(
+                    pair_request, state, pair_view.get(), nullptr);
+                logNewtonAssemblyDiagnostic(
+                    "free_surface_conservative_balance",
+                    sync_point,
+                    pair_request,
+                    pair_assembly);
+                FE_THROW_IF(
+                    !pair_assembly.success,
+                    FEException,
+                    "NewtonSolver: pressure-representability pair assembly failed for op '" +
+                        pair_op + "': " + pair_assembly.error_message);
+
+                // Affine substitution has already moved slave-column and
+                // slave-test effects onto masters.  The only remaining slave
+                // matrix entries are artificial identity diagonals stamped by
+                // constrained assembly; remove them instead of allowing LSQR
+                // to interpret constraints as physical pressure work.
+                auto constrained_pair_view =
+                    pair_matrix.createAssemblyView();
+                FE_CHECK_NOT_NULL(
+                    constrained_pair_view.get(),
+                    "NewtonSolver: pressure-representability constrained pair view");
+                constrained_pair_view->beginAssemblyPhase();
+                constrained_pair_view->zeroRows(
+                    constrained_dofs, /*set_diagonal=*/false);
+                constrained_pair_view->finalizeAssembly();
+                zeroVectorEntries(
+                    constrained_dofs,
+                    *workspace.pressure_representability_load);
+                workspace.pressure_representability_load->updateGhosts();
+
+                pressure_representability =
+                    solvePressureRepresentabilityLsqr(
+                        pair_matrix,
+                        *workspace.pressure_representability_load,
+                        *workspace.pressure_representability_solution,
+                        *workspace.pressure_representability_left_basis,
+                        *workspace.pressure_representability_right_basis,
+                        *workspace.pressure_representability_direction,
+                        *workspace.pressure_representability_work,
+                        *workspace.pressure_representability_residual,
+                        *workspace
+                             .pressure_representability_normal_residual,
+                        pressure_representability_iteration_cap,
+                        allRanks);
+                pressure_representability_available = true;
+                if (geometry_key.revision_tracking_available &&
+                    pressure_pair_matrix_state_independent) {
+                    free_surface_pressure_representability_cache.valid =
+                        true;
+                    free_surface_pressure_representability_cache.geometry =
+                        geometry_key;
+                    free_surface_pressure_representability_cache.result =
+                        pressure_representability;
+                }
+            }
+
+            const double denominator = norms[0] + norms[1];
+            const bool normalization_available =
+                std::isfinite(denominator) && denominator > 0.0;
+            const double normalized_imbalance =
+                normalization_available
+                    ? norms[2] / denominator
+                    : std::numeric_limits<double>::quiet_NaN();
+            const bool alignment_available =
+                std::isfinite(norms[0]) && std::isfinite(norms[1]) &&
+                std::isfinite(norms[2]) && norms[0] > 0.0 && norms[1] > 0.0;
+            double alignment_cosine = std::numeric_limits<double>::quiet_NaN();
+            if (alignment_available) {
+                alignment_cosine =
+                    (norms[2] * norms[2] - norms[0] * norms[0] -
+                     norms[1] * norms[1]) /
+                    (2.0 * norms[0] * norms[1]);
+                // Roundoff can place a mathematically valid cosine just
+                // outside the closed interval.
+                alignment_cosine = std::clamp(alignment_cosine, -1.0, 1.0);
+            }
+            const double magnitude_mismatch =
+                normalization_available
+                    ? std::abs(norms[0] - norms[1]) / denominator
+                    : std::numeric_limits<double>::quiet_NaN();
+
+            if (communicatorRank(system_communicator) == 0) {
+                std::ostringstream oss;
+                oss << std::setprecision(17)
+                    << "NewtonSolver: free-surface conservative balance"
+                    << " diagnostic=free_surface_conservative_balance"
+                    << " available=1"
+                    << " rank=" << communicatorRank(system_communicator)
+                    << " iteration=" << current_newton_iteration
+                    << " phase='"
+                    << (phase != nullptr ? phase : "unknown") << "'"
+                    << " sync_point=" << stateSyncPointName(sync_point)
+                    << " pressure_virtual_work_norm=" << norms[0]
+                    << " surface_energy_virtual_work_norm=" << norms[1]
+                    << " conservative_balance_norm=" << norms[2]
+                    << " normalization=pressure_plus_surface_energy_norms"
+                    << " normalized_imbalance=" << normalized_imbalance
+                    << " magnitude_mismatch=" << magnitude_mismatch
+                    << " alignment_cosine=" << alignment_cosine
+                    << " pressure_representability_cache_revision_key_available="
+                    << (geometry_key.revision_tracking_available ? 1 : 0)
+                    << " pressure_representability_pair_every_assembly="
+                    << (every_assembly_on_any_rank ? 1 : 0)
+                    << " pressure_representability_available="
+                    << (pressure_representability_available ? 1 : 0)
+                    << " pressure_representability_cache_hit="
+                    << (pressure_representability_cache_hit ? 1 : 0)
+                    << " pressure_representability_pair_matrix_state_independent="
+                    << (pressure_pair_matrix_state_independent ? 1 : 0)
+                    << " pressure_representability_cache_prior_sample="
+                    << (local_pressure_representability_cache_prior_sample
+                            ? 1
+                            : 0)
+                    << " pressure_representability_cache_geometry_match="
+                    << (local_pressure_representability_cache_geometry_match
+                            ? 1
+                            : 0)
+                    << " pressure_representability_cache_candidate="
+                    << (pressure_representability_cache_candidate ? 1 : 0)
+                    << " pressure_representability_cache_load_equality_checked="
+                    << (pressure_representability_cache_load_equality_checked
+                            ? 1
+                            : 0)
+                    << " pressure_representability_cache_load_equal="
+                    << (pressure_representability_cache_load_equal ? 1 : 0)
+                    << " pressure_representability_cache_load_difference_norm="
+                    << pressure_representability_cache_load_difference_norm
+                    << " pressure_representability_cache_rejection_reason="
+                    << pressure_representability_cache_rejection_reason
+                    << " pressure_representability_cache_policy="
+                       "geometry_constraints_state_independent_pair_and_exact_load"
+                    << " pressure_representability_method=lsqr"
+                    << " pressure_representability_convergence=normal_equation_stationarity"
+                    << " pressure_representability_distance_gate_applied=0"
+                    << " pressure_representability_claimed=0";
+                if (pressure_representability_available) {
+                    oss << " pressure_representability_residual_norm="
+                        << pressure_representability.residual_norm
+                        << " pressure_representability_relative_residual="
+                        << pressure_representability.relative_residual
+                        << " pressure_representability_normal_residual_norm="
+                        << pressure_representability.normal_residual_norm
+                        << " pressure_representability_relative_normal_residual="
+                        << pressure_representability.relative_normal_residual
+                        << " pressure_representability_pressure_norm="
+                        << pressure_representability.pressure_norm
+                        << " pressure_representability_iterations="
+                        << pressure_representability.iterations
+                        << " pressure_representability_converged="
+                        << (pressure_representability.converged ? 1 : 0)
+                        << " pressure_representability_breakdown="
+                        << (pressure_representability.breakdown ? 1 : 0)
+                        << " pressure_representability_active_pressure_dofs="
+                        << active_pressure_dofs
+                        << " pressure_representability_iteration_cap="
+                        << pressure_representability_iteration_cap;
+                } else {
+                    oss << " pressure_representability_reason="
+                        << pressure_representability_reason;
+                }
+                oss << " pressure_representability_norm=constrained_reduced_coefficient_l2"
+                    << " pressure_representability_load=surface_area_variation_plus_young_wall_energy"
+                    << " scope=pressure_and_surface_energy_first_variations_only"
+                    << " contract=instantaneous_constrained_velocity_test_virtual_work"
+                    << " excludes=line_friction_and_wetted_wall_navier_dissipation"
+                    << " total_momentum_equilibrium_claimed=0"
+                    << " discrete_energy_theorem_claimed=0";
+                FE_LOG_INFO(oss.str());
+            }
+
+        };
+
     auto assembleResidualOnly = [&](const systems::SystemStateView& state,
                                     const char* phase,
                                     StateSyncPoint sync_point = StateSyncPoint::ResidualAssembly) -> double {
@@ -10521,6 +13115,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
 
         synchronizeState(state, sync_point);
+        // Residual synchronization may rebuild state-dependent constraint
+        // sparsity.  Pressure-row matrix diagnostics executed below must use
+        // a scratch matrix allocated from that refreshed pattern, even though
+        // the primary assembly in this function is vector-only.
+        maybeReallocateJacobianForSparsity(transient.system(), workspace);
         transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
                                          /*invalidate_auxiliary_inputs=*/false);
         systems::AssemblyRequest req;
@@ -10563,18 +13162,19 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             solve_time,
             base_state.dt);
         assemblePressureRowContributionDiagnostics(state, phase, sync_point);
+        assembleFreeSurfaceConservativeBalanceDiagnostic(state, phase, sync_point);
         traceResidualComponents(phase);
         return refreshResidualComponents();
     };
 
     auto assembleJacobianOnly = [&](const systems::SystemStateView& state) {
-        auto J_view = J.createAssemblyView();
-        FE_CHECK_NOT_NULL(J_view.get(), "NewtonSolver: jacobian assembly view");
-
         if (oopTraceEnabled()) {
             traceLog("NewtonSolver: beginTimeStep() + assemble (matrix) op='" + options_.jacobian_op + "'");
         }
         synchronizeState(state, StateSyncPoint::JacobianAssembly);
+        maybeReallocateJacobianForSparsity(transient.system(), workspace);
+        auto J_view = J.createAssemblyView();
+        FE_CHECK_NOT_NULL(J_view.get(), "NewtonSolver: jacobian assembly view");
         transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
                                          /*invalidate_auxiliary_inputs=*/false);
         systems::AssemblyRequest req;
@@ -10603,15 +13203,15 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
     auto assembleJacobianAndResidual = [&](const systems::SystemStateView& state) -> double {
         residual_op_used = options_.residual_op;
-        auto J_view = J.createAssemblyView();
-        auto r_view = r.createAssemblyView();
-        FE_CHECK_NOT_NULL(J_view.get(), "NewtonSolver: jacobian assembly view");
-        FE_CHECK_NOT_NULL(r_view.get(), "NewtonSolver: residual assembly view");
-
         if (oopTraceEnabled()) {
             traceLog("NewtonSolver: beginTimeStep() + assemble (matrix+vector) op='" + options_.residual_op + "'");
         }
         synchronizeState(state, StateSyncPoint::JacobianAndResidualAssembly);
+        maybeReallocateJacobianForSparsity(transient.system(), workspace);
+        auto J_view = J.createAssemblyView();
+        auto r_view = r.createAssemblyView();
+        FE_CHECK_NOT_NULL(J_view.get(), "NewtonSolver: jacobian assembly view");
+        FE_CHECK_NOT_NULL(r_view.get(), "NewtonSolver: residual assembly view");
         transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
                                          /*invalidate_auxiliary_inputs=*/false);
         systems::AssemblyRequest req;
@@ -10658,6 +13258,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             state,
             "jacobian_and_residual",
             StateSyncPoint::JacobianAndResidualAssembly);
+        assembleFreeSurfaceConservativeBalanceDiagnostic(
+            state,
+            "jacobian_and_residual",
+            StateSyncPoint::JacobianAndResidualAssembly);
         traceResidualComponents("jacobian_and_residual");
         return refreshResidualComponents();
     };
@@ -10666,15 +13270,15 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                                          bool& out_vector_ok) -> double {
         out_vector_ok = false;
 
-        auto J_view = J.createAssemblyView();
-        auto r_view = r.createAssemblyView();
-        FE_CHECK_NOT_NULL(J_view.get(), "NewtonSolver: jacobian assembly view");
-        FE_CHECK_NOT_NULL(r_view.get(), "NewtonSolver: residual assembly view");
-
         if (oopTraceEnabled()) {
             traceLog("NewtonSolver: beginTimeStep() + assemble (matrix+vector) op='" + options_.jacobian_op + "'");
         }
         synchronizeState(state, StateSyncPoint::JacobianAndResidualAssembly);
+        maybeReallocateJacobianForSparsity(transient.system(), workspace);
+        auto J_view = J.createAssemblyView();
+        auto r_view = r.createAssemblyView();
+        FE_CHECK_NOT_NULL(J_view.get(), "NewtonSolver: jacobian assembly view");
+        FE_CHECK_NOT_NULL(r_view.get(), "NewtonSolver: residual assembly view");
         transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
                                          /*invalidate_auxiliary_inputs=*/false);
         systems::AssemblyRequest req;
@@ -10706,7 +13310,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             traceLog(oss.str());
         }
 
-        out_vector_ok = (ar.vector_entries_inserted > 0);
+        // Assembly counters are rank-local; an empty-owner rank must follow
+        // the same combined-assembly fallback decision as its peers.
+        out_vector_ok = anyRank(ar.vector_entries_inserted > 0);
         if (!out_vector_ok) {
             return std::numeric_limits<double>::quiet_NaN();
         }
@@ -10722,6 +13328,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             solve_time,
             base_state.dt);
         assemblePressureRowContributionDiagnostics(
+            state,
+            "jacobian_op_combined",
+            StateSyncPoint::JacobianAndResidualAssembly);
+        assembleFreeSurfaceConservativeBalanceDiagnostic(
             state,
             "jacobian_op_combined",
             StateSyncPoint::JacobianAndResidualAssembly);
@@ -10748,14 +13358,14 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             linear.supportsNativeRankOneUpdates() &&
             linear.supportsNativeReducedFieldUpdates() &&
             !force_explicit_rank_one_updates &&
-            !has_non_dirichlet_affine_constraints;
+            !any_non_dirichlet_affine_constraints;
         const bool force_explicit_matrix_assembly =
             linear_has_live_bordered && !use_native_rank_one_updates;
         if (oopTraceEnabled()) {
             traceLog("NewtonSolver: rank-1 updates=" + std::to_string(rank_one_updates.size()) +
                      " reduced updates=" + std::to_string(reduced_updates.size()) +
                      (force_explicit_matrix_assembly ? " (explicit matrix path)" : "")
-                     + (has_non_dirichlet_affine_constraints
+                     + (any_non_dirichlet_affine_constraints
                             ? " (constraint-transformed)"
                             : ""));
             for (std::size_t i = 0; i < rank_one_updates.size(); ++i) {
@@ -10858,16 +13468,20 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         return true;
     };
 
-    auto scalarToleranceSatisfied = [&](double norm, double norm0, bool pre_first_update) -> bool {
+    auto scalarToleranceSatisfied = [](double norm,
+                                       double norm0,
+                                       double abs_tolerance,
+                                       double rel_tolerance,
+                                       bool pre_first_update) -> bool {
         if (!std::isfinite(norm)) {
             return false;
         }
-        const bool abs_enabled = options_.abs_tolerance > 0.0;
-        const bool rel_enabled = options_.rel_tolerance > 0.0;
-        const bool abs_ok = abs_enabled && norm <= options_.abs_tolerance;
+        const bool abs_enabled = abs_tolerance > 0.0;
+        const bool rel_enabled = rel_tolerance > 0.0;
+        const bool abs_ok = abs_enabled && norm <= abs_tolerance;
         const bool rel_ok = rel_enabled
             && (norm0 > 0.0 && std::isfinite(norm0)
-                    ? (norm / norm0 <= options_.rel_tolerance)
+                    ? (norm / norm0 <= rel_tolerance)
                     : abs_ok);
         if (!abs_enabled && !rel_enabled) {
             return false;
@@ -10885,41 +13499,127 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         return abs_ok || rel_ok;
     };
 
+    auto globalToleranceSatisfied = [&](double norm,
+                                        double norm0,
+                                        bool pre_first_update) -> bool {
+        return scalarToleranceSatisfied(norm,
+                                         norm0,
+                                         options_.abs_tolerance,
+                                         options_.rel_tolerance,
+                                         pre_first_update);
+    };
+
     auto componentToleranceSatisfied = [&](double norm, double norm0, bool pre_first_update) -> bool {
         if (norm == 0.0 && norm0 == 0.0) {
             return true;
         }
-        return scalarToleranceSatisfied(norm, norm0, pre_first_update);
+        return globalToleranceSatisfied(norm, norm0, pre_first_update);
     };
 
     auto tolerancesSatisfied = [&](bool pre_first_update) -> bool {
+        bool monolithic_satisfied = false;
         if (!componentResidualConvergenceActive()) {
-            return scalarToleranceSatisfied(current_residual_norm, report.residual_norm0, pre_first_update);
+            monolithic_satisfied = globalToleranceSatisfied(
+                current_residual_norm,
+                report.residual_norm0,
+                pre_first_update);
+        } else {
+            const bool field_ok = componentToleranceSatisfied(
+                current_residual_components.field,
+                initial_residual_components.field,
+                pre_first_update);
+            const bool aux_ok = componentToleranceSatisfied(
+                current_residual_components.auxiliary,
+                initial_residual_components.auxiliary,
+                pre_first_update);
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                const double field_rel =
+                    (initial_residual_components.field > 0.0 && std::isfinite(initial_residual_components.field))
+                        ? current_residual_components.field / initial_residual_components.field
+                        : std::numeric_limits<double>::quiet_NaN();
+                const double aux_rel =
+                    (initial_residual_components.auxiliary > 0.0 && std::isfinite(initial_residual_components.auxiliary))
+                        ? current_residual_components.auxiliary / initial_residual_components.auxiliary
+                        : std::numeric_limits<double>::quiet_NaN();
+                oss << "NewtonSolver: component convergence"
+                    << " field_ok=" << (field_ok ? 1 : 0)
+                    << " aux_ok=" << (aux_ok ? 1 : 0)
+                    << " field_rel=" << field_rel
+                    << " aux_rel=" << aux_rel;
+                traceLog(oss.str());
+            }
+            monolithic_satisfied = field_ok && aux_ok;
         }
-        const bool field_ok = componentToleranceSatisfied(current_residual_components.field,
-                                                          initial_residual_components.field,
-                                                          pre_first_update);
-        const bool aux_ok = componentToleranceSatisfied(current_residual_components.auxiliary,
-                                                        initial_residual_components.auxiliary,
-                                                        pre_first_update);
-        if (oopTraceEnabled()) {
-            std::ostringstream oss;
-            const double field_rel =
-                (initial_residual_components.field > 0.0 && std::isfinite(initial_residual_components.field))
-                    ? current_residual_components.field / initial_residual_components.field
-                    : std::numeric_limits<double>::quiet_NaN();
-            const double aux_rel =
-                (initial_residual_components.auxiliary > 0.0 && std::isfinite(initial_residual_components.auxiliary))
-                    ? current_residual_components.auxiliary / initial_residual_components.auxiliary
-                    : std::numeric_limits<double>::quiet_NaN();
-            oss << "NewtonSolver: component convergence"
-                << " field_ok=" << (field_ok ? 1 : 0)
-                << " aux_ok=" << (aux_ok ? 1 : 0)
-                << " field_rel=" << field_rel
-                << " aux_rel=" << aux_rel;
-            traceLog(oss.str());
+
+        bool configured_fields_satisfied = true;
+        for (auto& state : field_residual_states) {
+            const auto& criterion = state.criterion;
+            // A coupled block can be exactly inactive in the initial residual
+            // and become active only after another field moves or an accepted
+            // state refresh changes residual-defining geometry.  Establish a
+            // relative reference only when this accepted/current residual is
+            // actually tested for convergence; rejected line-search trials
+            // must not define the reference.  The activation sample itself is
+            // never accepted by the relative criterion, so a later residual
+            // evaluation must demonstrate contraction.
+            if (criterion.rel_tolerance > 0.0 &&
+                !state.relative_reference_available &&
+                state.current_norm > 0.0 &&
+                std::isfinite(state.current_norm)) {
+                state.initial_norm = state.current_norm;
+                state.relative_reference_available = true;
+                state.relative_reference_activated_this_sample = true;
+            }
+            const bool zero_residual =
+                state.current_norm == 0.0 && state.initial_norm == 0.0;
+            bool satisfied = zero_residual || scalarToleranceSatisfied(
+                state.current_norm,
+                state.initial_norm,
+                criterion.abs_tolerance,
+                criterion.rel_tolerance,
+                pre_first_update);
+            const bool abs_ok = criterion.abs_tolerance > 0.0 &&
+                                state.current_norm <= criterion.abs_tolerance;
+            if (state.relative_reference_activated_this_sample && !abs_ok) {
+                satisfied = false;
+            }
+            configured_fields_satisfied =
+                configured_fields_satisfied && satisfied;
+
+            if (activeSystemRank(sys) == 0) {
+                const bool rel_ok = criterion.rel_tolerance > 0.0 &&
+                                    (state.initial_norm > 0.0 &&
+                                             std::isfinite(state.initial_norm)
+                                         ? state.current_norm /
+                                                   state.initial_norm <=
+                                               criterion.rel_tolerance
+                                         : abs_ok);
+                const double relative_norm =
+                    state.initial_norm > 0.0 && std::isfinite(state.initial_norm)
+                        ? state.current_norm / state.initial_norm
+                        : std::numeric_limits<double>::quiet_NaN();
+                std::ostringstream oss;
+                oss << "NewtonSolver: field convergence"
+                    << " diagnostic=newton_field_convergence"
+                    << " field_id=" << criterion.field
+                    << " field='" << state.name << "'"
+                    << " owned_dofs=" << state.owned_dof_count
+                    << " norm0=" << state.initial_norm
+                    << " norm=" << state.current_norm
+                    << " relative_norm=" << relative_norm
+                    << " abs_tolerance=" << criterion.abs_tolerance
+                    << " rel_tolerance=" << criterion.rel_tolerance
+                    << " abs_ok=" << (abs_ok ? 1 : 0)
+                    << " rel_ok=" << (rel_ok ? 1 : 0)
+                    << " relative_reference_activated="
+                    << (state.relative_reference_activated_this_sample ? 1 : 0)
+                    << " pre_first_update=" << (pre_first_update ? 1 : 0)
+                    << " satisfied=" << (satisfied ? 1 : 0);
+                FE_LOG_INFO(oss.str());
+            }
         }
-        return field_ok && aux_ok;
+        return monolithic_satisfied && configured_fields_satisfied;
     };
 
     auto minIterationsSatisfied = [&](int completed_iterations) -> bool {
@@ -10947,11 +13647,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         systems::SystemStateView state_dt = state;
         state_dt.time_integration = &ctx_dt_only;
 
+        synchronizeState(state_dt, StateSyncPoint::JacobianAssembly);
+        maybeReallocateJacobianForSparsity(transient.system(), workspace);
         J.zero();
         auto J_view = J.createAssemblyView();
         FE_CHECK_NOT_NULL(J_view.get(), "NewtonSolver: PTC dt-only Jacobian view");
-
-        synchronizeState(state_dt, StateSyncPoint::JacobianAssembly);
         transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
                                          /*invalidate_auxiliary_inputs=*/false);
         systems::AssemblyRequest req;
@@ -11007,8 +13707,6 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         ptc_gamma_applied = clamped;
     };
 
-    bool have_jacobian = false;
-    int last_jacobian_it = -1;
     const int base_jacobian_period = std::max(1, options_.jacobian_rebuild_period);
     int direct_only_outlet_jacobian_period = 1;
 
@@ -11030,14 +13728,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         double ntp_total = NTP() - ntp_total_start;
         ntp_other = ntp_total - ntp_assembly - ntp_linear - ntp_update - ntp_constraints;
         if (ntp_other < 0.0) ntp_other = 0.0;
-        int mpi_rank = 0;
-#if FE_HAS_MPI
-        int mpi_initialized = 0;
-        MPI_Initialized(&mpi_initialized);
-        if (mpi_initialized) {
-            MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
-        }
-#endif
+        const int mpi_rank = communicatorRank(system_communicator);
         if (mpi_rank == 0 && ntp_total > 1e-6) {
             auto pct = [&](double t) { return 100.0 * t / ntp_total; };
             fprintf(stderr,
@@ -11080,7 +13771,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
 
         const int jacobian_period = std::max(base_jacobian_period, direct_only_outlet_jacobian_period);
-        const bool need_jacobian =
+        const bool can_reuse_state_independent_jacobian =
+            base_can_reuse_state_independent_jacobian &&
+            !any_non_dirichlet_affine_constraints;
+        bool need_jacobian =
             !have_jacobian ||
             (!can_reuse_state_independent_jacobian &&
              ((jacobian_period == 1) || ((it - last_jacobian_it) >= jacobian_period)));
@@ -11112,6 +13806,14 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     residual_first_convergence_check
                         ? "post_update_convergence_check"
                         : nullptr);
+                // A residual synchronization can install a different affine
+                // constraint set.  Recompute the within-iteration Jacobian
+                // decision instead of using the value cached before that
+                // callback.
+                if (!have_jacobian) {
+                    need_jacobian = true;
+                    jacobian_ready = false;
+                }
                 if (need_jacobian && !residual_first_convergence_check) {
                     assembleJacobianOnly(state);
                     ptc_gamma_applied = 0.0;
@@ -11142,6 +13844,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             report.residual_norm0 = current_residual_norm;
             report.field_residual_norm0 = initial_residual_components.field;
             report.auxiliary_residual_norm0 = initial_residual_components.auxiliary;
+            for (auto& state : field_residual_states) {
+                state.initial_norm = state.current_norm;
+                state.relative_reference_available =
+                    state.current_norm > 0.0 &&
+                    std::isfinite(state.current_norm);
+                state.relative_reference_activated_this_sample = false;
+            }
         }
 
         if (oopTraceEnabled()) {
@@ -11281,16 +13990,94 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     zeroVectorEntries(constrained_dofs, vec);
                 };
 
-                // Backup the current nonlinear state so the diagnostic
-                // assemblies do not perturb the live monolithic bordered data.
+                // A finite-difference residual evaluation is a speculative
+                // nonlinear state, just like a rejected line-search alpha.
+                // Snapshot every mutable part of that state before invoking
+                // user synchronization or assembly callbacks.  In particular,
+                // a state-dependent MPC can project all transient history and
+                // optional rate vectors while reaching its constraint fixed
+                // point; restoring only u cannot undo a topology reversal.
                 copyVector(u_backup, history.u());
+                FE_CHECK_NOT_NULL(
+                    workspace.factory,
+                    "NewtonSolver: Jacobian-check history backup factory");
+                std::vector<std::unique_ptr<backends::GenericVector>>
+                    diagnostic_history_backup(
+                        static_cast<std::size_t>(history.historyDepth()));
+                for (int k = 1; k <= history.historyDepth(); ++k) {
+                    auto& backup = diagnostic_history_backup[
+                        static_cast<std::size_t>(k - 1)];
+                    backup = workspace.factory->createVector(
+                        history.uPrevK(k).size());
+                    FE_CHECK_NOT_NULL(
+                        backup.get(),
+                        "NewtonSolver: Jacobian-check history backup");
+                    backup->copyFrom(history.uPrevK(k));
+                }
+                auto diagnostic_rate_state_backup =
+                    history.snapshotRateState(*workspace.factory);
+                const auto diagnostic_base_constraint_semantics =
+                    constraintSemanticFingerprint(constraints);
                 const auto aux_state_backup =
                     transient.system().checkpointAuxiliaryState();
                 const auto bordered_backup = transient.system().borderedCoupling();
+                const bool diagnostic_base_had_local_condensed_recovery =
+                    transient.system().hasLocalCondensedRecovery();
+                const bool diagnostic_base_any_local_condensed_recovery =
+                    anyRank(diagnostic_base_had_local_condensed_recovery);
+                const bool diagnostic_base_have_residual = have_residual;
+                const bool diagnostic_base_have_jacobian = have_jacobian;
+                const int diagnostic_base_last_jacobian_it = last_jacobian_it;
+                const bool diagnostic_base_ptc_mass_ready = ptc_mass_ready;
+                const double diagnostic_base_ptc_gamma = ptc_gamma;
+                const double diagnostic_base_ptc_gamma_applied =
+                    ptc_gamma_applied;
+                const double diagnostic_base_ptc_prev_residual_norm =
+                    ptc_prev_residual_norm;
+                FE_THROW_IF(
+                    anyRank(transient.system()
+                                .meshCoordinateTransactionActive()),
+                    systems::InvalidStateException,
+                    "NewtonSolver: Jacobian check started with an active "
+                    "mesh-coordinate transaction");
 
+                auto restoreDiagnosticHistoryState = [&]() {
+                    FE_THROW_IF(
+                        diagnostic_history_backup.size() !=
+                            static_cast<std::size_t>(history.historyDepth()),
+                        systems::InvalidStateException,
+                        "NewtonSolver: Jacobian-check probe changed history depth");
+                    for (int k = 1; k <= history.historyDepth(); ++k) {
+                        auto& backup = diagnostic_history_backup[
+                            static_cast<std::size_t>(k - 1)];
+                        FE_CHECK_NOT_NULL(
+                            backup.get(),
+                            "NewtonSolver: Jacobian-check history restore backup");
+                        history.uPrevK(k).copyFrom(*backup);
+                    }
+                    // Rate snapshots preserve both values and allocation
+                    // state.  This restores an originally absent first-step
+                    // rate state even if a speculative callback allocated it.
+                    history.restoreRateState(diagnostic_rate_state_backup);
+                    history.snapshotRateState(
+                        diagnostic_rate_state_backup,
+                        *workspace.factory);
+                };
                 auto restoreDiagnosticState = [&]() {
+                    // Roll speculative coordinates back before rebuilding
+                    // state-derived cuts/support for the accepted algebraic
+                    // snapshot.  Force is required because diagnostics must
+                    // never inherit a policy that keeps rejected geometry.
+                    transient.system().rollbackGeometricNonlinearityTrial(
+                        /*force=*/true);
+                    FE_THROW_IF(
+                        anyRank(transient.system()
+                                    .meshCoordinateTransactionActive()),
+                        systems::InvalidStateException,
+                        "NewtonSolver: Jacobian-check geometry could not be "
+                        "rolled back");
                     copyVector(history.u(), u_backup);
-                    syncCurrentState();
+                    restoreDiagnosticHistoryState();
                     if (!aux_state_backup.empty()) {
                         transient.system().restoreAuxiliaryState(aux_state_backup);
                     }
@@ -11298,7 +14085,94 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     if (auto* reg = transient.system().auxiliaryInputRegistryIfPresent()) {
                         reg->invalidateAll();
                     }
+
+                    // The rejected probe's constraint set must not touch the
+                    // restored vectors.  RestoredNonlinearState first rebuilds
+                    // the accepted cut/MPC semantics, after which
+                    // synchronizeState projects the exact snapshots with that
+                    // set and refreshes any dependent geometry at a bounded
+                    // fixed point.
+                    history.u().updateGhosts();
+                    syncOwnedRowHaloIfNeeded(history.u());
+                    auto restored_state_holder =
+                        makeNewtonState(history, solve_time);
+                    synchronizeState(
+                        restored_state_holder.view,
+                        StateSyncPoint::RestoredNonlinearState);
+
+                    // A constraint projection during restoration can open a
+                    // base-state geometry transaction.  Its coordinates are
+                    // identical to the pre-probe accepted coordinates, so
+                    // close it by rolling back to the exact coordinate backup
+                    // rather than committing from a diagnostic callback.
+                    transient.system().rollbackGeometricNonlinearityTrial(
+                        /*force=*/true);
+                    FE_THROW_IF(
+                        anyRank(transient.system()
+                                    .meshCoordinateTransactionActive()),
+                        systems::InvalidStateException,
+                        "NewtonSolver: Jacobian-check base geometry "
+                        "transaction remained active after restoration");
+                    FE_THROW_IF(
+                        anyRank(constraintSemanticFingerprint(constraints) !=
+                                diagnostic_base_constraint_semantics),
+                        systems::InvalidStateException,
+                        "NewtonSolver: Jacobian-check restoration did not "
+                        "reproduce the accepted affine-constraint state");
+
+                    // The residual and physical Jacobian objects themselves
+                    // were never used as probe output.  Preserve those cache
+                    // facts, except when a transient structure revision means
+                    // the workspace matrix must be rebuilt before any future
+                    // reuse.  The current linear solve can still use the
+                    // untouched base-pattern matrix assembled above.
+                    have_residual = diagnostic_base_have_residual;
+                    const bool base_pattern_still_current = allRanks(
+                        transient.system().sparsityPatternRevision() ==
+                        workspace.sparsity_revision);
+                    have_jacobian = diagnostic_base_have_jacobian &&
+                                    base_pattern_still_current;
+                    last_jacobian_it = have_jacobian
+                                           ? diagnostic_base_last_jacobian_it
+                                           : -1;
+                    ptc_mass_ready = diagnostic_base_ptc_mass_ready;
+                    ptc_gamma = diagnostic_base_ptc_gamma;
+                    ptc_gamma_applied = diagnostic_base_ptc_gamma_applied;
+                    ptc_prev_residual_norm =
+                        diagnostic_base_ptc_prev_residual_norm;
+                    if (!diagnostic_base_had_local_condensed_recovery) {
+                        transient.system().clearLocalCondensedRecovery();
+                    }
                 };
+
+                auto evaluateDiagnosticProbeTransactionally =
+                    [&](auto&& evaluate_probe) {
+                        try {
+                            evaluate_probe();
+                        } catch (...) {
+                            const auto probe_failure =
+                                std::current_exception();
+                            try {
+                                restoreDiagnosticState();
+                            } catch (...) {
+                                std::throw_with_nested(
+                                    systems::InvalidStateException(
+                                        "NewtonSolver: Jacobian-check probe "
+                                        "failed and exact nonlinear-state "
+                                        "restoration also failed"));
+                            }
+                            std::rethrow_exception(probe_failure);
+                        }
+                        try {
+                            restoreDiagnosticState();
+                        } catch (...) {
+                            std::throw_with_nested(
+                                systems::InvalidStateException(
+                                    "NewtonSolver: Jacobian-check probe "
+                                    "completed but exact nonlinear-state "
+                                    "restoration failed"));
+                        }
+                    };
 
                 auto base_component_norms = zeroComponentNormSnapshot(transient.system());
                 auto perturbed_component_norms = base_component_norms;
@@ -11309,40 +14183,59 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 auto err_component_norms = base_component_norms;
                 auto sign_flip_err_component_norms = base_component_norms;
 
-                // Assemble r(u) with residual_op into residual_base.
-                residual_base.zero();
-                {
+                auto assembleDiagnosticBaseResidual = [&]() {
+                    residual_base.zero();
                     auto r_view = residual_base.createAssemblyView();
-                    FE_CHECK_NOT_NULL(r_view.get(), "NewtonSolver: jacobian check residual base view");
+                    FE_CHECK_NOT_NULL(
+                        r_view.get(),
+                        "NewtonSolver: jacobian check residual base view");
 
-                    synchronizeState(state, StateSyncPoint::ResidualAssembly);
-                    transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
-                                                     /*invalidate_auxiliary_inputs=*/false);
+                    auto diagnostic_state_holder =
+                        makeNewtonState(history, solve_time);
+                    synchronizeState(
+                        diagnostic_state_holder.view,
+                        StateSyncPoint::ResidualAssembly);
+                    transient.system().beginTimeStep(
+                        /*reset_auxiliary_state=*/false,
+                        /*invalidate_auxiliary_inputs=*/false);
                     systems::AssemblyRequest req;
                     req.op = options_.residual_op;
                     req.want_vector = true;
                     req.suppress_constraint_inhomogeneity = true;
                     req.is_nonlinear_iteration = true;
-                    const auto ar = transient.assemble(req, state, nullptr, r_view.get());
-                    FE_THROW_IF(!ar.success, FEException,
-                                "NewtonSolver: Jacobian check base residual assembly failed: " + ar.error_message);
-                }
-                applyResidualFixups(residual_base);
-                base_component_norms = componentNormSnapshot(transient.system(), residual_base);
-                restoreDiagnosticState();
-                synchronizeState(state, StateSyncPoint::AcceptedNonlinearState);
+                    const auto ar = transient.assemble(
+                        req,
+                        diagnostic_state_holder.view,
+                        nullptr,
+                        r_view.get());
+                    FE_THROW_IF(
+                        !ar.success,
+                        FEException,
+                        "NewtonSolver: Jacobian check base residual "
+                        "assembly failed: " +
+                            ar.error_message);
+                    applyResidualFixups(residual_base);
+                    base_component_norms = componentNormSnapshot(
+                        transient.system(), residual_base);
+                };
+
+                // Assemble r(u) with residual_op into residual_base.
+                evaluateDiagnosticProbeTransactionally(
+                    assembleDiagnosticBaseResidual);
 
                 // Assemble r(u + h*v) with residual_op into residual_scratch.
-                axpy(history.u(), static_cast<Real>(h), du);
-                syncCurrentState();
-
-                residual_scratch.zero();
-                {
+                evaluateDiagnosticProbeTransactionally([&]() {
+                    axpy(history.u(), static_cast<Real>(h), du);
+                    syncCurrentState();
+                    residual_scratch.zero();
                     auto r_view = residual_scratch.createAssemblyView();
-                    FE_CHECK_NOT_NULL(r_view.get(), "NewtonSolver: jacobian check residual perturbed view");
+                    FE_CHECK_NOT_NULL(
+                        r_view.get(),
+                        "NewtonSolver: jacobian check residual perturbed view");
 
-                    transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
-                                                     /*invalidate_auxiliary_inputs=*/false);
+                    transient.system().beginTimeStep(
+                        /*reset_auxiliary_state=*/false,
+                        /*invalidate_auxiliary_inputs=*/false);
                     systems::AssemblyRequest req;
                     req.op = options_.residual_op;
                     req.want_vector = true;
@@ -11353,30 +14246,34 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                      StateSyncPoint::ResidualAssembly);
                     const auto ar = transient.assemble(
                         req, perturbed_state_holder.view, nullptr, r_view.get());
-                    FE_THROW_IF(!ar.success, FEException,
-                                "NewtonSolver: Jacobian check perturbed residual assembly failed: " + ar.error_message);
-                }
-                applyResidualFixups(residual_scratch);
-                perturbed_component_norms =
-                    componentNormSnapshot(transient.system(), residual_scratch);
-                restoreDiagnosticState();
-                synchronizeState(state, StateSyncPoint::AcceptedNonlinearState);
+                    FE_THROW_IF(
+                        !ar.success,
+                        FEException,
+                        "NewtonSolver: Jacobian check perturbed residual "
+                        "assembly failed: " +
+                            ar.error_message);
+                    applyResidualFixups(residual_scratch);
+                    perturbed_component_norms = componentNormSnapshot(
+                        transient.system(), residual_scratch);
+                });
 
                 double fd_curvature_norm = 0.0;
                 if (difference_scheme == JacobianCheckDifferenceScheme::Central) {
                     // Assemble r(u - h*v) into residual_minus. A centered
                     // check cancels step-independent refresh jumps and gives a
                     // more reliable smooth-tangent diagnostic.
-                    axpy(history.u(), static_cast<Real>(-h), du);
-                    syncCurrentState();
-
-                    residual_minus.zero();
-                    {
+                    evaluateDiagnosticProbeTransactionally([&]() {
+                        axpy(history.u(), static_cast<Real>(-h), du);
+                        syncCurrentState();
+                        residual_minus.zero();
                         auto r_view = residual_minus.createAssemblyView();
-                        FE_CHECK_NOT_NULL(r_view.get(), "NewtonSolver: jacobian check residual minus view");
+                        FE_CHECK_NOT_NULL(
+                            r_view.get(),
+                            "NewtonSolver: jacobian check residual minus view");
 
-                        transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
-                                                         /*invalidate_auxiliary_inputs=*/false);
+                        transient.system().beginTimeStep(
+                            /*reset_auxiliary_state=*/false,
+                            /*invalidate_auxiliary_inputs=*/false);
                         systems::AssemblyRequest req;
                         req.op = options_.residual_op;
                         req.want_vector = true;
@@ -11387,13 +14284,23 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                          StateSyncPoint::ResidualAssembly);
                         const auto ar = transient.assemble(
                             req, minus_state_holder.view, nullptr, r_view.get());
-                        FE_THROW_IF(!ar.success, FEException,
-                                    "NewtonSolver: Jacobian check minus residual assembly failed: " +
-                                        ar.error_message);
+                        FE_THROW_IF(
+                            !ar.success,
+                            FEException,
+                            "NewtonSolver: Jacobian check minus residual "
+                            "assembly failed: " +
+                                ar.error_message);
+                        applyResidualFixups(residual_minus);
+                    });
+
+                    // Residual-only assembly refreshes the right-hand side of
+                    // locally condensed auxiliary recovery records.  Leave
+                    // those system-side caches describing the accepted base,
+                    // not the final finite-difference perturbation.
+                    if (diagnostic_base_any_local_condensed_recovery) {
+                        evaluateDiagnosticProbeTransactionally(
+                            assembleDiagnosticBaseResidual);
                     }
-                    applyResidualFixups(residual_minus);
-                    restoreDiagnosticState();
-                    synchronizeState(state, StateSyncPoint::AcceptedNonlinearState);
 
                     copyVector(u_backup, residual_minus);
                     axpy(u_backup, static_cast<Real>(1.0), residual_scratch);
@@ -11406,6 +14313,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                          static_cast<Real>(-1.0 / (2.0 * h)),
                          residual_minus);
                 } else {
+                    if (diagnostic_base_any_local_condensed_recovery) {
+                        evaluateDiagnosticProbeTransactionally(
+                            assembleDiagnosticBaseResidual);
+                    }
                     // residual_scratch <- (r(u+h*v) - r(u)) / h.
                     axpy(residual_scratch, static_cast<Real>(-1.0), residual_base);
                     residual_scratch.scale(static_cast<Real>(1.0 / h));
@@ -11445,7 +14356,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         std::span<const backends::RankOneUpdate>(effective_rank_one_updates.data(),
                                                                  effective_rank_one_updates.size()),
                         du,
-                        u_backup);
+                        u_backup,
+                        system_communicator);
                 }
                 if (!active_reduced_field_updates.empty()) {
                     addReducedFieldOperatorMatvec(
@@ -11453,7 +14365,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                             active_reduced_field_updates.data(),
                             active_reduced_field_updates.size()),
                         du,
-                        u_backup);
+                        u_backup,
+                        system_communicator);
                 }
                 zeroVectorEntries(constrained_dofs, u_backup);
                 const double jv_norm = u_backup.norm();
@@ -11536,7 +14449,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         << " ||r_used-r_residual||=" << r_diff_norm;
                     FE_LOG_INFO(oss.str());
                 }
-	                logJacobianCheckComponentDetails(component_filter_label,
+	                logJacobianCheckComponentDetails(system_communicator,
+	                                                 component_filter_label,
 	                                                 sweep_index,
 	                                                 base_component_norms,
 	                                                 perturbed_component_norms,
@@ -11670,7 +14584,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         algebraic_aux_reduction = {};
         solve_bordered_ptr = has_bordered ? &bordered_full : nullptr;
         if (has_bordered &&
-            buildAlgebraicAuxiliaryReduction(bordered_full, owned_dofs, algebraic_aux_reduction)) {
+            buildAlgebraicAuxiliaryReduction(
+                bordered_full,
+                owned_dofs,
+                algebraic_aux_reduction,
+                system_communicator)) {
             if (!algebraic_aux_reduction.promoted_rank_one_updates.empty()) {
                 effective_rank_one_updates.insert(effective_rank_one_updates.end(),
                                                   algebraic_aux_reduction.promoted_rank_one_updates.begin(),
@@ -11747,7 +14665,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         std::vector<Real> condensed_DinvC;
         if (has_solve_bordered &&
             linear.supportsNativeReducedFieldUpdates() &&
-            !has_non_dirichlet_affine_constraints) {
+            !any_non_dirichlet_affine_constraints) {
             const auto& solve_bordered = *solve_bordered_ptr;
             const auto nf = solve_bordered.n_field_dofs;
             const auto na = static_cast<std::size_t>(solve_bordered.n_aux);
@@ -11926,11 +14844,19 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             traceLog(oss.str());
         }
 
+        // The availability and one-slot promotion decisions below precede
+        // communicator collectives.  Verify the rank-local sparse factors
+        // retain the same globally ordered slots even on empty-owner ranks.
+        validateLowRankUpdateSlots(effective_rank_one_updates.size(),
+                                   active_reduced_field_updates.size(),
+                                   grouped_bordered_field_couplings.size(),
+                                   "post_auxiliary_reduction");
+
         const bool direct_only_outlet_updates_available =
             !force_explicit_rank_one_updates &&
             linear.supportsNativeRankOneUpdates() &&
             linear.supportsNativeReducedFieldUpdates() &&
-            !has_non_dirichlet_affine_constraints &&
+            !any_non_dirichlet_affine_constraints &&
             !has_solve_bordered &&
             grouped_bordered_field_couplings.empty() &&
             (!effective_rank_one_updates.empty() || !active_reduced_field_updates.empty());
@@ -11966,7 +14892,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (allow_direct_only_reduced_rank_one_promotion) {
                 for (const auto& update : active_reduced_field_updates) {
                     backends::RankOneUpdate promoted_rank_one;
-                    if (tryPromoteReducedFieldUpdateToNativeRankOne(update, promoted_rank_one)) {
+                    if (tryPromoteReducedFieldUpdateToNativeRankOne(
+                            update,
+                            promoted_rank_one,
+                            system_communicator)) {
                         effective_rank_one_updates.push_back(std::move(promoted_rank_one));
                         ++promoted_count;
                     } else {
@@ -12024,11 +14953,16 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
         }
 
+        validateLowRankUpdateSlots(effective_rank_one_updates.size(),
+                                   active_reduced_field_updates.size(),
+                                   grouped_bordered_field_couplings.size(),
+                                   "pre_linear_bridge");
+
         // Bridge rank-1 / reduced updates from coupled BC assembly to the linear
         // solver only after any bordered condensation has augmented the active
         // reduced/grouped coupling sets for this Newton solve.
         const bool explicit_rank_one_in_matrix = bridgeRankOneUpdates();
-        if (!constrained_dofs.empty()) {
+        if (any_constrained_dofs) {
             const bool exact_direct_coupling_in_matrix =
                 transient.system().lastRankOneUpdates().empty() &&
                 !bordered_full.direct_coupling_records.empty();
@@ -12046,7 +14980,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             linear.supportsNativeReducedFieldUpdates() &&
             linear.supportsNativeRankOneUpdates() &&
             !force_explicit_rank_one_updates &&
-            !has_non_dirichlet_affine_constraints;
+            !any_non_dirichlet_affine_constraints;
         const bool has_native_direct_face_only_updates =
             has_native_rank_one_updates &&
             (!has_solve_bordered || condensed_bordered_active) &&
@@ -12129,6 +15063,103 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     static_cast<Real>(options_.abs_tolerance) * residual_fraction;
                 return rep.final_residual_norm <= static_cast<double>(nonlinear_floor) &&
                        rep.relative_residual <= static_cast<double>(max_relative_residual);
+            };
+
+        const auto sanitizeLinearSolveResult =
+            [&](backends::SolverReport& linear_report,
+                backends::GenericVector& correction,
+                std::string_view phase) -> bool {
+                const bool report_metrics_are_finite =
+                    linear_report.iterations >= 0 &&
+                    std::isfinite(static_cast<double>(
+                        linear_report.initial_residual_norm)) &&
+                    std::isfinite(static_cast<double>(
+                        linear_report.final_residual_norm)) &&
+                    std::isfinite(static_cast<double>(
+                        linear_report.relative_residual)) &&
+                    linear_report.initial_residual_norm >= Real{0.0} &&
+                    linear_report.final_residual_norm >= Real{0.0} &&
+                    linear_report.relative_residual >= Real{0.0};
+                bool correction_is_finite = true;
+                for (const auto value : correction.localSpan()) {
+                    if (!std::isfinite(static_cast<double>(value))) {
+                        correction_is_finite = false;
+                        break;
+                    }
+                }
+                const bool local_result_is_usable =
+                    !linear_report.numerical_breakdown &&
+                    report_metrics_are_finite &&
+                    correction_is_finite;
+                const bool result_is_usable =
+                    allRanks(local_result_is_usable);
+                if (result_is_usable) {
+                    return true;
+                }
+
+                const auto raw_initial = linear_report.initial_residual_norm;
+                const auto raw_final = linear_report.final_residual_norm;
+                const auto raw_relative = linear_report.relative_residual;
+                const int raw_iterations = linear_report.iterations;
+                const bool backend_reported_breakdown =
+                    linear_report.numerical_breakdown;
+
+                std::string reason;
+                auto append_reason = [&](std::string_view entry) {
+                    if (!reason.empty()) {
+                        reason += ',';
+                    }
+                    reason.append(entry.data(), entry.size());
+                };
+                if (backend_reported_breakdown) {
+                    append_reason("backend");
+                }
+                if (!report_metrics_are_finite) {
+                    append_reason("report");
+                }
+                if (!correction_is_finite) {
+                    append_reason("correction");
+                }
+                if (reason.empty()) {
+                    append_reason("remote_rank");
+                }
+
+                // A numerical breakdown is never an admissible inexact
+                // Newton correction.  Zero it before any normalization,
+                // replay, line search, or bordered recovery can consume it.
+                correction.zero();
+                linear_report.converged = false;
+                linear_report.numerical_breakdown = true;
+                linear_report.final_residual_norm =
+                    std::numeric_limits<Real>::infinity();
+                linear_report.relative_residual =
+                    std::numeric_limits<Real>::infinity();
+                const std::string detail =
+                    "numerical breakdown: " + reason;
+                if (linear_report.message.empty()) {
+                    linear_report.message = detail;
+                } else if (linear_report.message.find(detail) ==
+                           std::string::npos) {
+                    linear_report.message += " (" + detail + ")";
+                }
+
+                if (mpiRank() == 0) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: rejected unusable linear result"
+                        << " diagnostic=linear_solve_invalid_result"
+                        << " phase='" << phase << "'"
+                        << " reason='" << reason << "'"
+                        << " backend_breakdown="
+                        << (backend_reported_breakdown ? 1 : 0)
+                        << " correction_finite="
+                        << (correction_is_finite ? 1 : 0)
+                        << " iterations=" << raw_iterations
+                        << " initial_residual_norm=" << raw_initial
+                        << " final_residual_norm=" << raw_final
+                        << " relative_residual=" << raw_relative;
+                    FE_LOG_INFO(oss.str());
+                }
+                return false;
             };
 
         int ptc_retries = 0;
@@ -12234,7 +15265,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     traceLog("NewtonSolver: applied pure algebraic reduced RHS shift");
                 }
             }
-            const bool mpi_runtime_analysis = mpiMultiTaskActive();
+            const bool mpi_runtime_analysis =
+                mpiMultiTaskActive(system_communicator);
             if (!tangent_analysis_report_logged) {
                 tangent_analysis_report_logged = true;
                 const bool numeric_summaries_updated =
@@ -12320,13 +15352,15 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         std::span<const backends::RankOneUpdate>(effective_rank_one_updates.data(),
                                                                  effective_rank_one_updates.size()),
                         u_backup,
-                        residual_base);
+                        residual_base,
+                        system_communicator);
                     addReducedFieldOperatorMatvec(
                         std::span<const backends::ReducedFieldUpdate>(
                             active_reduced_field_updates.data(),
                             active_reduced_field_updates.size()),
                         u_backup,
-                        residual_base);
+                        residual_base,
+                        system_communicator);
                 }
                 logVectorComponentNorms(transient.system(), u_backup, "linear probe x");
                 logVectorTopEntries(transient.system(), u_backup, "linear probe x", 8u);
@@ -12356,13 +15390,15 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                             std::span<const backends::RankOneUpdate>(effective_rank_one_updates.data(),
                                                                      effective_rank_one_updates.size()),
                             u_backup,
-                            residual_base);
+                            residual_base,
+                            system_communicator);
                         addReducedFieldOperatorMatvec(
                             std::span<const backends::ReducedFieldUpdate>(
                                 active_reduced_field_updates.data(),
                                 active_reduced_field_updates.size()),
                             u_backup,
-                            residual_base);
+                            residual_base,
+                            system_communicator);
                     }
 
                     const auto label_x =
@@ -12432,6 +15468,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             ntp0 = NTP();
             report.linear = linear.solve(J, du, *linear_rhs);
             ntp_linear += NTP() - ntp0;
+            const bool linear_result_is_usable =
+                sanitizeLinearSolveResult(report.linear, du, "newton");
             log_linear_solve_memory("after_linear_solve");
             ntp_linear_iters_total += report.linear.iterations;
             copyVector(residual_minus, *linear_rhs);
@@ -12441,9 +15479,15 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (!first_linear_vector_dumped && it == 0 && ptc_retries == 0) {
                 if (const auto dump_prefix = firstLinearVectorDumpPrefix()) {
                     first_linear_dense_rhs = gatherGlobalDenseVectorFromOwnedEntries(
-                        *linear_rhs, static_cast<std::size_t>(J.numRows()), owned_dofs);
+                        *linear_rhs,
+                        static_cast<std::size_t>(J.numRows()),
+                        owned_dofs,
+                        system_communicator);
                     first_linear_dense_du_raw = gatherGlobalDenseVectorFromOwnedEntries(
-                        du, static_cast<std::size_t>(J.numRows()), owned_dofs);
+                        du,
+                        static_cast<std::size_t>(J.numRows()),
+                        owned_dofs,
+                        system_communicator);
                 }
             }
             if (oopTraceEnabled()) {
@@ -12456,7 +15500,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (!first_linear_vector_dumped && it == 0 && ptc_retries == 0) {
                 if (const auto dump_prefix = firstLinearVectorDumpPrefix()) {
                     const auto dense_du_normalized = gatherGlobalDenseVectorFromOwnedEntries(
-                        du, static_cast<std::size_t>(J.numRows()), owned_dofs);
+                        du,
+                        static_cast<std::size_t>(J.numRows()),
+                        owned_dofs,
+                        system_communicator);
                     std::optional<std::vector<ScalarFieldVertexDumpRecord>> scalar_field_vertex_records;
                     std::optional<std::string> scalar_field_vertex_name;
                     if (const auto field_idx =
@@ -12500,6 +15547,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                             << " rhs_norm=" << rhs_norm
                             << " residual_before=" << current_residual_norm
                             << " converged=" << report.linear.converged
+                            << " numerical_breakdown="
+                            << (report.linear.numerical_breakdown ? 1 : 0)
                             << " iters=" << report.linear.iterations
                             << " r0=" << report.linear.initial_residual_norm
                             << " rn=" << report.linear.final_residual_norm
@@ -12540,13 +15589,15 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         std::span<const backends::RankOneUpdate>(effective_rank_one_updates.data(),
                                                                  effective_rank_one_updates.size()),
                         du,
-                        residual_scratch);
+                        residual_scratch,
+                        system_communicator);
                     addReducedFieldOperatorMatvec(
                         std::span<const backends::ReducedFieldUpdate>(
                             active_reduced_field_updates.data(),
                             active_reduced_field_updates.size()),
                         du,
-                        residual_scratch);
+                        residual_scratch,
+                        system_communicator);
                 }
                 copyVector(u_backup, residual_scratch);
                 axpy(u_backup, static_cast<Real>(-1.0), residual_base);
@@ -12596,6 +15647,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (oopTraceEnabled()) {
                 std::ostringstream oss;
                 oss << "NewtonSolver: linear solve converged=" << report.linear.converged
+                    << " numerical_breakdown="
+                    << (report.linear.numerical_breakdown ? 1 : 0)
                     << " iters=" << report.linear.iterations
                     << " r0=" << report.linear.initial_residual_norm
                     << " rn=" << report.linear.final_residual_norm
@@ -12603,18 +15656,28 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     << " msg='" << report.linear.message << "'";
                 traceLog(oss.str());
             }
-            if (report.linear.converged) {
+            // Linear solver reports are expected to describe a collective
+            // solve, but do not rely on every backend returning bit-identical
+            // local status.  A partial-rank early exit would desynchronize the
+            // PTC retry and subsequent distributed matrix operations.
+            if (linear_result_is_usable &&
+                allRanks(report.linear.converged)) {
                 break;
             }
 
             const bool meets_original_linear_target =
+                linear_result_is_usable &&
                 (needs_strict_coupled_solve_options || needs_validated_native_rank_one_options) &&
                 reportMeetsRequestedLinearTarget(report.linear, bordered_solver_options_guard.saved);
             const bool meets_nonlinear_linear_floor =
+                linear_result_is_usable &&
                 reportMeetsNonlinearAbsoluteLinearFloor(report.linear,
                                                         static_cast<Real>(0.1),
                                                         static_cast<Real>(0.1));
-            if (meets_original_linear_target || meets_nonlinear_linear_floor) {
+            const bool meets_collective_linear_acceptance =
+                allRanks(meets_original_linear_target ||
+                         meets_nonlinear_linear_floor);
+            if (meets_collective_linear_acceptance) {
                 report.linear.converged = true;
                 const Real rhs_norm =
                     std::max<Real>(static_cast<Real>(report.linear.initial_residual_norm),
@@ -12651,13 +15714,52 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 break;
             }
 
-            // Inexact Newton: accept the approximate solution even when the linear
-            // solve doesn't fully converge. This matches the legacy solver behavior
-            // where imprecise linear solutions still produce effective Newton steps.
-            const bool allow_inexact_main_solve =
+            // Inexact Newton is an explicit opt-in, but even that policy must
+            // only consume a finite correction backed by measurable linear
+            // progress.  In particular, a backend's finite default report
+            // (zero iterations and zero residuals) is not evidence that a
+            // usable Newton direction was produced.  Form the decision
+            // collectively so every rank either leaves this retry loop or
+            // follows the same failure/PTC path.
+            const bool local_inexact_report_has_progress =
+                report.linear.iterations > 0 &&
+                report.linear.initial_residual_norm > Real{0.0} &&
+                report.linear.final_residual_norm >= Real{0.0} &&
+                report.linear.final_residual_norm <
+                    report.linear.initial_residual_norm &&
+                report.linear.relative_residual >= Real{0.0} &&
+                report.linear.relative_residual < Real{1.0} &&
+                std::isfinite(static_cast<double>(
+                    report.linear.initial_residual_norm)) &&
+                std::isfinite(static_cast<double>(
+                    report.linear.final_residual_norm)) &&
+                std::isfinite(static_cast<double>(
+                    report.linear.relative_residual));
+            bool local_inexact_correction_is_finite = true;
+            bool local_inexact_correction_is_nonzero = false;
+            for (const auto value : du.localSpan()) {
+                if (!std::isfinite(static_cast<double>(value))) {
+                    local_inexact_correction_is_finite = false;
+                    break;
+                }
+                local_inexact_correction_is_nonzero =
+                    local_inexact_correction_is_nonzero || value != Real{0.0};
+            }
+            const bool inexact_correction_is_finite =
+                allRanks(local_inexact_correction_is_finite);
+            const bool inexact_correction_is_globally_nonzero =
+                anyRank(local_inexact_correction_is_nonzero);
+            const bool all_ranks_allow_inexact_main_solve = allRanks(
+                linear_result_is_usable &&
+                !report.linear.numerical_breakdown &&
                 options_.accept_inexact_linear_solutions &&
                 !needs_strict_coupled_solve_options &&
-                !needs_validated_native_rank_one_options;
+                !needs_validated_native_rank_one_options &&
+                local_inexact_report_has_progress);
+            const bool allow_inexact_main_solve =
+                all_ranks_allow_inexact_main_solve &&
+                inexact_correction_is_finite &&
+                inexact_correction_is_globally_nonzero;
             if (allow_inexact_main_solve) {
                 if (oopTraceEnabled()) {
                     traceLog("NewtonSolver: accepting inexact linear solution (rel=" +
@@ -12718,7 +15820,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
 
         auto gatherDenseVector = [&](backends::GenericVector& vec, std::size_t n) {
-            return gatherGlobalDenseVectorFromOwnedEntries(vec, n, owned_dofs);
+            return gatherGlobalDenseVectorFromOwnedEntries(
+                vec, n, owned_dofs, system_communicator);
         };
 
         auto scatterDenseVector = [](backends::GenericVector& vec, std::span<const Real> dense) {
@@ -12833,7 +15936,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                             effective_rank_one_updates.data(),
                                             effective_rank_one_updates.size()),
                                         x,
-                                        product);
+                                        product,
+                                        system_communicator);
                                 }
                                 if (!active_reduced_field_updates.empty()) {
                                     addReducedFieldOperatorMatvec(
@@ -12841,7 +15945,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                             active_reduced_field_updates.data(),
                                             active_reduced_field_updates.size()),
                                         x,
-                                        product);
+                                        product,
+                                        system_communicator);
                                 }
                                 copyVector(residual, rhs);
                                 axpy(residual, static_cast<Real>(-1.0), product);
@@ -12886,13 +15991,34 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                             auto z_report = linear.solve(J, du, residual_scratch);
                             ntp_linear += NTP() - ntp0;
                             ntp_linear_iters_total += z_report.iterations;
+                            const bool z_result_is_usable =
+                                sanitizeLinearSolveResult(
+                                    z_report, du, "bordered_column");
                             normalizeFsilsPostSolveIncrementIfNeeded(du);
                             int z_total_iterations = z_report.iterations;
-                            bool z_converged = z_report.converged;
-                            if (!z_converged &&
+                            const bool local_z_backend_converged =
+                                z_result_is_usable && z_report.converged;
+                            const bool local_z_meets_original_target =
+                                z_result_is_usable &&
+                                !local_z_backend_converged &&
                                 has_native_rank_one_updates &&
-                                reportMeetsRequestedLinearTarget(z_report, base_linear_options)) {
-                                z_converged = true;
+                                reportMeetsRequestedLinearTarget(
+                                    z_report, base_linear_options);
+                            const bool local_z_meets_near_target =
+                                z_result_is_usable &&
+                                !local_z_backend_converged &&
+                                !local_z_meets_original_target &&
+                                has_native_rank_one_updates &&
+                                reportMeetsRequestedLinearTargetWithinFactor(
+                                    z_report,
+                                    base_linear_options,
+                                    static_cast<Real>(4.0));
+                            bool z_converged = allRanks(
+                                local_z_backend_converged ||
+                                local_z_meets_original_target ||
+                                local_z_meets_near_target);
+                            if (z_converged &&
+                                local_z_meets_original_target) {
                                 if (oopTraceEnabled()) {
                                     const Real rhs_norm =
                                         std::max<Real>(static_cast<Real>(z_report.initial_residual_norm),
@@ -12907,11 +16033,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                         << " iters=" << z_report.iterations;
                                     traceLog(oss.str());
                                 }
-                            } else if (!z_converged &&
-                                       has_native_rank_one_updates &&
-                                       reportMeetsRequestedLinearTargetWithinFactor(
-                                           z_report, base_linear_options, static_cast<Real>(4.0))) {
-                                z_converged = true;
+                            } else if (z_converged &&
+                                       local_z_meets_near_target) {
                                 if (oopTraceEnabled()) {
                                     const Real rhs_norm =
                                         std::max<Real>(static_cast<Real>(z_report.initial_residual_norm),
@@ -12928,7 +16051,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                     traceLog(oss.str());
                                 }
                             }
-                            if (!z_converged && grouped_bordered_field_couplings.empty()) {
+                            if (z_result_is_usable && !z_converged &&
+                                grouped_bordered_field_couplings.empty()) {
                                 constexpr int max_polish_attempts = 2;
                                 for (int polish = 0;
                                      polish < max_polish_attempts && !z_converged;
@@ -12940,8 +16064,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                                                  u_backup,
                                                                  residual_base);
                                     const Real target = bordered_column_target(rhs_norm);
-                                    if (std::isfinite(static_cast<double>(before_norm)) &&
-                                        before_norm <= target) {
+                                    const bool replay_is_acceptable = allRanks(
+                                        std::isfinite(static_cast<double>(before_norm)) &&
+                                        before_norm <= target);
+                                    if (replay_is_acceptable) {
                                         z_converged = true;
                                         z_report.converged = true;
                                         z_report.final_residual_norm = before_norm;
@@ -12957,7 +16083,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                         }
                                         break;
                                     }
-                                    if (!std::isfinite(static_cast<double>(before_norm))) {
+                                    const bool replay_is_finite = allRanks(
+                                        std::isfinite(static_cast<double>(before_norm)));
+                                    if (!replay_is_finite) {
                                         break;
                                     }
 
@@ -12969,7 +16097,16 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                     ntp_linear += NTP() - ntp0;
                                     ntp_linear_iters_total += polish_report.iterations;
                                     z_total_iterations += polish_report.iterations;
+                                    const bool polish_result_is_usable =
+                                        sanitizeLinearSolveResult(
+                                            polish_report,
+                                            u_backup,
+                                            "bordered_polish");
                                     normalizeFsilsPostSolveIncrementIfNeeded(u_backup);
+                                    if (!polish_result_is_usable) {
+                                        z_report = polish_report;
+                                        break;
+                                    }
                                     axpy(du, static_cast<Real>(1.0), u_backup);
 
                                     restoreFsilsMatrixSnapshot(J, fsils_matrix_snapshot);
@@ -12994,8 +16131,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                             << polish_report.iterations;
                                         traceLog(oss.str());
                                     }
-                                    if (std::isfinite(static_cast<double>(after_norm)) &&
-                                        after_norm <= after_target) {
+                                    const bool polished_result_is_acceptable =
+                                        allRanks(
+                                            std::isfinite(static_cast<double>(after_norm)) &&
+                                            after_norm <= after_target);
+                                    if (polished_result_is_acceptable) {
                                         z_converged = true;
                                         z_report = polish_report;
                                         z_report.converged = true;
@@ -13009,6 +16149,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                     }
                                 }
                             }
+                            // Keep the final recovery outcome communicator-wide
+                            // even if a future backend or residual implementation
+                            // returns rank-local status metadata.
+                            z_converged = allRanks(z_converged);
                             z_report.iterations = z_total_iterations;
                             FE_THROW_IF(!z_converged, FEException,
                                         "NewtonSolver: bordered K^{-1}B solve did not converge: " +
@@ -13147,7 +16291,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         systems::InvalidStateException,
                         "NewtonSolver: condensed bordered storage size mismatch");
 
-            const auto dense_du = gatherGlobalDenseVectorFromOwnedEntries(du, nf, owned_dofs);
+            const auto dense_du = gatherGlobalDenseVectorFromOwnedEntries(
+                du, nf, owned_dofs, system_communicator);
             const auto direct_ct_du =
                 projectCtDuFromDirectCouplingRecords(solve_bordered, dense_du);
 
@@ -13222,7 +16367,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
         } else if (algebraic_aux_reduction.active) {
             auto dense_du =
-                gatherGlobalDenseVectorFromOwnedEntries(du, static_cast<std::size_t>(J.numRows()), owned_dofs);
+                gatherGlobalDenseVectorFromOwnedEntries(
+                    du,
+                    static_cast<std::size_t>(J.numRows()),
+                    owned_dofs,
+                    system_communicator);
             const bool use_pure_algebraic_bordered_recovery =
                 pureAlgebraicBorderedRecoveryEnabled() &&
                 has_bordered &&
@@ -13287,6 +16436,67 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         applyDtIncrementScaling();
 
+        // The backend result was checked before bordered/condensed/algebraic
+        // recovery and dt-field scaling.  Each of those transformations can
+        // still overflow a previously finite correction.  Reject the complete
+        // transformed step collectively before it can update auxiliary state,
+        // local condensed unknowns, TimeHistory, or a line-search trial.
+        const auto finiteValues = [](const auto& values) {
+            return std::all_of(
+                values.begin(), values.end(), [](const auto value) {
+                    return std::isfinite(static_cast<double>(value));
+                });
+        };
+        const bool local_du_is_finite = finiteValues(du.localSpan());
+        const bool local_aux_delta_is_finite = finiteValues(aux_delta);
+        const bool local_solve_aux_delta_is_finite =
+            finiteValues(solve_aux_delta);
+        const bool local_transformed_correction_is_finite =
+            local_du_is_finite &&
+            local_aux_delta_is_finite &&
+            local_solve_aux_delta_is_finite;
+        if (!allRanks(local_transformed_correction_is_finite)) {
+            // All ranks take the same failure branch.  Erase every correction
+            // buffer first so exception handling, diagnostics, or a caller
+            // that reuses the workspace cannot observe a poisoned update.
+            du.zero();
+            std::fill(aux_delta.begin(), aux_delta.end(), Real(0.0));
+            std::fill(solve_aux_delta.begin(), solve_aux_delta.end(), Real(0.0));
+            report.linear.converged = false;
+            report.linear.numerical_breakdown = true;
+            report.linear.final_residual_norm =
+                std::numeric_limits<Real>::infinity();
+            report.linear.relative_residual =
+                std::numeric_limits<Real>::infinity();
+            constexpr std::string_view detail =
+                "numerical breakdown: nonfinite post-recovery correction";
+            if (report.linear.message.empty()) {
+                report.linear.message.assign(detail.data(), detail.size());
+            } else if (report.linear.message.find(detail) ==
+                       std::string::npos) {
+                report.linear.message += " (";
+                report.linear.message.append(detail.data(), detail.size());
+                report.linear.message += ")";
+            }
+
+            if (mpiRank() == 0) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: rejected nonfinite transformed correction"
+                    << " diagnostic=post_recovery_invalid_correction"
+                    << " du_finite=" << (local_du_is_finite ? 1 : 0)
+                    << " aux_delta_finite="
+                    << (local_aux_delta_is_finite ? 1 : 0)
+                    << " solve_aux_delta_finite="
+                    << (local_solve_aux_delta_is_finite ? 1 : 0)
+                    << " remote_rank_failure="
+                    << (local_transformed_correction_is_finite ? 1 : 0);
+                FE_LOG_INFO(oss.str());
+            }
+            FE_THROW(
+                systems::InvalidStateException,
+                "NewtonSolver: rejected nonfinite post-recovery correction before state update");
+        }
+
         logActivePressureUpdateSupportDiagnostic(
             transient.system(),
             J,
@@ -13326,6 +16536,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         if (!use_line_search_this_iteration) {
             ntp0 = NTP();
+            copyVector(u_backup, history.u());
             if (!aux_delta.empty()) {
                 applyAuxiliaryDelta(transient.system(), bordered_full, aux_delta, static_cast<Real>(1.0));
             }
@@ -13336,29 +16547,68 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             axpy(history.u(), static_cast<Real>(-1.0), du);
             syncCurrentState();
             auto accepted_state_holder = makeNewtonState(history, solve_time);
-            synchronizeState(accepted_state_holder.view,
-                             StateSyncPoint::AcceptedNonlinearState);
-            transient.system().acceptGeometricNonlinearityState(
-                accepted_state_holder.view,
-                systems::GeometricNonlinearityUpdatePoint::AcceptedNonlinearState);
-            if (transient.system().geometricNonlinearityEnabled()) {
+            try {
+                transient.system().beginGeometricNonlinearityTrial(
+                    accepted_state_holder.view);
+                synchronizeState(accepted_state_holder.view,
+                                 StateSyncPoint::AcceptedNonlinearState);
+                transient.system().acceptGeometricNonlinearityState(
+                    accepted_state_holder.view,
+                    systems::GeometricNonlinearityUpdatePoint::AcceptedNonlinearState);
+            } catch (...) {
+                transient.system().rollbackGeometricNonlinearityTrial(
+                    /*force=*/true);
+                throw;
+            }
+            const bool accepted_sync_invalidated_residual = !have_residual;
+            if (transient.system().geometricNonlinearityEnabled() ||
+                options_.accepted_state_sync_invalidates_residual) {
                 have_jacobian = false;
             }
             ntp_update += NTP() - ntp0;
             have_residual = false;
 
+            double actual_step_norm = du_norm;
+            if (options_.step_tolerance > 0.0) {
+                copyVector(residual_scratch, history.u());
+                axpy(residual_scratch, static_cast<Real>(-1.0), u_backup);
+                actual_step_norm = residual_scratch.norm();
+            }
+
+            const bool step_tolerance_requires_residual =
+                options_.accepted_state_sync_invalidates_residual ||
+                accepted_sync_invalidated_residual ||
+                !field_residual_states.empty();
+            if (step_tolerance_requires_residual &&
+                options_.step_tolerance > 0.0) {
+                current_residual_norm = assembleResidualOnly(
+                    accepted_state_holder.view,
+                    /*phase=*/"accepted_state_refresh",
+                    StateSyncPoint::ResidualAssembly);
+                have_residual = true;
+            }
+
             if (options_.step_tolerance > 0.0) {
                 if (oopTraceEnabled()) {
                     std::ostringstream oss;
-                    oss << "NewtonSolver: step ||du||=" << du_norm << " step_tol=" << options_.step_tolerance;
+                    oss << "NewtonSolver: actual projected step ||u_new-u_base||="
+                        << actual_step_norm
+                        << " raw ||du||=" << du_norm
+                        << " step_tol=" << options_.step_tolerance;
                     traceLog(oss.str());
                 }
                 if (minIterationsSatisfied(it + 1) &&
-                    du_norm <= options_.step_tolerance) {
+                    actual_step_norm <= options_.step_tolerance &&
+                    (!step_tolerance_requires_residual ||
+                     tolerancesSatisfied(/*pre_first_update=*/false))) {
                     report.converged = true;
                     report.iterations = it + 1;
+                    if (have_residual) {
+                        updateResidualReport();
+                    }
                     if (oopTraceEnabled()) {
-                        traceLog("NewtonSolver: converged by step tolerance.");
+                        traceLog(
+                            "NewtonSolver: converged by step tolerance on the synchronized residual state.");
                     }
                     printNewtonProfile(it + 1);
                     return report;
@@ -13369,6 +16619,52 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         // Backtracking line search: choose alpha in (0,1] so the residual norm decreases.
         copyVector(u_backup, history.u());
+        FE_CHECK_NOT_NULL(workspace.factory,
+                          "NewtonSolver: line-search history backup factory");
+        auto snapshotHistoryVector = [&] (
+                                         std::unique_ptr<backends::GenericVector>& backup,
+                                         const backends::GenericVector& source,
+                                         const char* label) {
+            if (!backup || backup->size() != source.size()) {
+                backup = workspace.factory->createVector(source.size());
+            }
+            FE_CHECK_NOT_NULL(backup.get(), label);
+            backup->copyFrom(source);
+        };
+        workspace.line_search_history_backup.resize(
+            static_cast<std::size_t>(history.historyDepth()));
+        for (int k = 1; k <= history.historyDepth(); ++k) {
+            snapshotHistoryVector(
+                workspace.line_search_history_backup[
+                    static_cast<std::size_t>(k - 1)],
+                history.uPrevK(k),
+                "NewtonSolver: line-search history backup");
+        }
+        auto line_search_rate_backup =
+            history.snapshotRateState(*workspace.factory);
+        auto restoreLineSearchHistoryState = [&]() {
+            FE_THROW_IF(
+                workspace.line_search_history_backup.size() !=
+                    static_cast<std::size_t>(history.historyDepth()),
+                systems::InvalidStateException,
+                "NewtonSolver: line-search history depth changed during a trial");
+            for (int k = 1; k <= history.historyDepth(); ++k) {
+                auto& backup = workspace.line_search_history_backup[
+                    static_cast<std::size_t>(k - 1)];
+                FE_CHECK_NOT_NULL(
+                    backup.get(),
+                    "NewtonSolver: line-search history restore backup");
+                history.uPrevK(k).copyFrom(*backup);
+            }
+            history.restoreRateState(line_search_rate_backup);
+            // restoreRateState swaps ownership with the snapshot. Refresh the
+            // reusable copy immediately so a later rejected alpha restores
+            // the same base values instead of swapping the prior trial back
+            // into the live history. Allocation absence is preserved too.
+            history.snapshotRateState(
+                line_search_rate_backup, *workspace.factory);
+        };
+        line_search_history_transaction_active = true;
         const auto aux_state_backup =
             (aux_delta.empty() && !use_local_condensed_recovery)
                 ? std::vector<Real>{}
@@ -13378,10 +16674,61 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 ? gatherDenseFieldDelta()
                 : std::vector<Real>{};
         const auto bordered_backup = transient.system().borderedCoupling();
+        const auto base_constraint_semantics =
+            constraintSemanticFingerprint(constraints);
         const double r_norm0 = current_residual_norm;
         const double r_norm0_sq = r_norm0 * r_norm0;
-        auto evaluateLineSearchTrial = [&](double trial_alpha, const char* phase) -> double {
+
+        auto restoreLineSearchBaseState = [&]() {
+            // Geometry must be rolled back before rebuilding cut/support data
+            // for the accepted algebraic state.  Reversing these operations
+            // leaves derived geometry describing the rejected coordinates.
+            transient.system().rollbackGeometricNonlinearityTrial(
+                /*force=*/true);
+            FE_THROW_IF(
+                anyRank(
+                    transient.system().meshCoordinateTransactionActive()),
+                systems::InvalidStateException,
+                "NewtonSolver: rejected line-search geometry could not be rolled back; enable geometric rollback on line-search rejection");
             copyVector(history.u(), u_backup);
+            restoreLineSearchHistoryState();
+            if (!aux_state_backup.empty()) {
+                transient.system().restoreAuxiliaryState(aux_state_backup);
+            }
+            transient.system().borderedCoupling() = bordered_backup;
+            if (auto* reg =
+                    transient.system().auxiliaryInputRegistryIfPresent()) {
+                reg->invalidateAll();
+            }
+
+            // Do not impose the rejected trial's constraints on the restored
+            // vector.  The synchronization callback first reconstructs the
+            // accepted cut/constraint state, then synchronizeState projects
+            // with that reconstructed set.
+            history.u().updateGhosts();
+            syncOwnedRowHaloIfNeeded(history.u());
+            auto restored_state_holder = makeNewtonState(history, solve_time);
+            synchronizeState(restored_state_holder.view,
+                             StateSyncPoint::RestoredNonlinearState);
+            FE_THROW_IF(
+                anyRank(constraintSemanticFingerprint(constraints) !=
+                        base_constraint_semantics),
+                systems::InvalidStateException,
+                "NewtonSolver: line-search restoration did not reproduce "
+                "the accepted affine-constraint state");
+        };
+
+        bool candidate_accepted_state_synchronized = false;
+        auto evaluateLineSearchTrial = [&](double trial_alpha, const char* phase) -> double {
+            candidate_accepted_state_synchronized = false;
+            FE_THROW_IF(
+                anyRank(constraintSemanticFingerprint(constraints) !=
+                        base_constraint_semantics),
+                systems::InvalidStateException,
+                "NewtonSolver: line-search trial did not start from the "
+                "accepted affine-constraint state");
+            copyVector(history.u(), u_backup);
+            restoreLineSearchHistoryState();
             if (!aux_state_backup.empty()) {
                 transient.system().restoreAuxiliaryState(aux_state_backup);
             }
@@ -13398,20 +16745,49 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 reg->invalidateAll();
             }
             axpy(history.u(), static_cast<Real>(-trial_alpha), du);
+
+            // Linear solves operate in eliminated coordinates, so lift the
+            // raw increment with the accepted/base constraints before asking
+            // the callback to derive trial-dependent constraints.  Per-alpha
+            // restoration above guarantees this is never a prior rejected
+            // trial's constraint set.
             syncCurrentState();
 
             auto trial_state_holder = makeNewtonState(history, solve_time);
-            transient.system().beginGeometricNonlinearityTrial(trial_state_holder.view);
             try {
-                return assembleResidualOnly(
+                transient.system().beginGeometricNonlinearityTrial(
+                    trial_state_holder.view);
+                double synchronized_norm = assembleResidualOnly(
                     trial_state_holder.view,
                     phase,
                     StateSyncPoint::LineSearchTrialResidual);
-            } catch (const std::exception& ex) {
-                if (trial_alpha == 0.0) {
-                    throw;
+                if (!std::isfinite(synchronized_norm)) {
+                    return synchronized_norm;
                 }
-                transient.system().rollbackGeometricNonlinearityTrial();
+
+                // The Armijo decision must use the exact state that would be
+                // committed, including any AcceptedNonlinearState refresh of
+                // cuts, curvature, extension data, affine constraints, and
+                // transient MPC histories.  This remains a reversible trial:
+                // geometry is committed only after the merit test passes, and
+                // a rejection invokes RestoredNonlinearState from the base
+                // snapshot.
+                have_residual = true;
+                synchronizeState(trial_state_holder.view,
+                                 StateSyncPoint::AcceptedNonlinearState);
+                if (options_.accepted_state_sync_invalidates_residual ||
+                    !have_residual) {
+                    const std::string accepted_phase =
+                        std::string(phase) + "_accepted_refresh";
+                    synchronized_norm = assembleResidualOnly(
+                        trial_state_holder.view,
+                        accepted_phase.c_str(),
+                        StateSyncPoint::ResidualAssembly);
+                }
+                have_residual = std::isfinite(synchronized_norm);
+                candidate_accepted_state_synchronized = have_residual;
+                return synchronized_norm;
+            } catch (const std::exception& ex) {
                 FE_LOG_INFO(std::string("NewtonSolver: line search trial residual failed; treating trial as rejected. reason='") +
                             ex.what() + "'");
                 return std::numeric_limits<double>::infinity();
@@ -13419,13 +16795,15 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         };
 
         double alpha = 1.0;
-        double last_tried_alpha = 0.0;
         double trial_norm = std::numeric_limits<double>::infinity();
         bool accepted = false;
         double best_alpha = 0.0;
         double best_trial_norm = std::numeric_limits<double>::infinity();
         bool have_best_trial = false;
         bool failed_to_reduce = false;
+        double full_projected_step_norm =
+            std::numeric_limits<double>::infinity();
+        bool have_full_projected_step = false;
         const int line_search_iteration_budget =
             std::max(1, options_.line_search_max_iterations);
 
@@ -13439,8 +16817,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             traceLog(oss.str());
         }
         for (int ls = 0; ls < line_search_iteration_budget; ++ls) {
-            last_tried_alpha = alpha;
             trial_norm = evaluateLineSearchTrial(alpha, /*phase=*/"line_search");
+            if (ls == 0 && alpha == 1.0 && std::isfinite(trial_norm)) {
+                copyVector(residual_scratch, history.u());
+                axpy(residual_scratch, static_cast<Real>(-1.0), u_backup);
+                full_projected_step_norm = residual_scratch.norm();
+                have_full_projected_step = true;
+            }
 
             bool ok = false;
             if (std::isfinite(trial_norm) && std::isfinite(r_norm0)) {
@@ -13479,6 +16862,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 break;
             }
 
+            // Every rejected alpha is a complete transaction.  Restore the
+            // accepted vector, geometry, auxiliary state, cuts, and affine
+            // constraints before constructing the next candidate.
+            restoreLineSearchBaseState();
             if (alpha <= options_.line_search_alpha_min) {
                 break;
             }
@@ -13490,61 +16877,75 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         bool reverted_to_original = false;
         if (!accepted) {
-            const bool reached_alpha_min = last_tried_alpha <= options_.line_search_alpha_min;
-            if (reached_alpha_min) {
-                alpha = last_tried_alpha;
-                if (oopTraceEnabled()) {
-                    std::ostringstream oss;
-                    oss << "NewtonSolver: line search reached alpha_min; keeping clamped trial alpha="
-                        << alpha << " ||r(alpha)||=" << trial_norm;
-                    traceLog(oss.str());
-                }
-            } else if (have_best_trial && std::isfinite(best_trial_norm) && best_trial_norm < r_norm0) {
+            if (have_best_trial && std::isfinite(best_trial_norm) &&
+                best_trial_norm < r_norm0) {
                 alpha = best_alpha;
-                if (best_alpha != last_tried_alpha) {
-                    trial_norm = evaluateLineSearchTrial(alpha, /*phase=*/"line_search_best");
+                // All rejected trials have been restored, including the last
+                // one, so recreate the best candidate from the base state.
+                // Never reuse a scalar merit while leaving different external
+                // cut/constraint state active.
+                trial_norm = evaluateLineSearchTrial(
+                    alpha, /*phase=*/"line_search_best");
+                if (std::isfinite(trial_norm) && trial_norm < r_norm0) {
+                    accepted = true;
+                    if (oopTraceEnabled()) {
+                        std::ostringstream oss;
+                        oss << "NewtonSolver: line search did not satisfy Armijo; keeping strictly reducing best trial alpha="
+                            << alpha << " ||r(alpha)||=" << trial_norm;
+                        traceLog(oss.str());
+                    }
                 } else {
-                    trial_norm = best_trial_norm;
-                }
-                if (oopTraceEnabled()) {
-                    std::ostringstream oss;
-                    oss << "NewtonSolver: line search did not satisfy Armijo; keeping best trial alpha="
-                        << alpha << " ||r(alpha)||=" << trial_norm;
-                    traceLog(oss.str());
+                    restoreLineSearchBaseState();
+                    reverted_to_original = true;
+                    failed_to_reduce = true;
                 }
             } else {
                 alpha = 0.0;
-                trial_norm = evaluateLineSearchTrial(alpha, /*phase=*/"line_search_reject");
                 reverted_to_original = true;
                 failed_to_reduce = true;
-                if (oopTraceEnabled()) {
-                    std::ostringstream oss;
-                    oss << "NewtonSolver: line search did not reduce residual; reverting to original iterate"
-                        << " ||r||=" << trial_norm;
-                    traceLog(oss.str());
-                }
             }
         }
 
-        // `history.u` and `r` now correspond to the accepted trial, the best fallback
-        // trial, or the restored original iterate.
+        // `history.u` now corresponds to the accepted trial, the strictly
+        // reducing best fallback, or the restored original iterate.
         auto accepted_state_holder = makeNewtonState(history, solve_time);
         if (reverted_to_original) {
-            synchronizeState(accepted_state_holder.view,
-                             StateSyncPoint::RestoredNonlinearState);
-            transient.system().rollbackGeometricNonlinearityTrial();
-        } else {
-            synchronizeState(accepted_state_holder.view,
-                             StateSyncPoint::AcceptedNonlinearState);
-            transient.system().acceptGeometricNonlinearityState(
+            // The rejected-alpha path already restored geometry before cuts
+            // and constraints.  Reassemble the base residual without opening
+            // a synthetic alpha=0 geometry transaction.
+            current_residual_norm = assembleResidualOnly(
                 accepted_state_holder.view,
-                systems::GeometricNonlinearityUpdatePoint::AcceptedNonlinearState);
-            if (transient.system().geometricNonlinearityEnabled()) {
+                /*phase=*/"line_search_reject",
+                StateSyncPoint::ResidualAssembly);
+            trial_norm = current_residual_norm;
+            have_residual = true;
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: line search did not reduce residual; reverting to original iterate"
+                    << " ||r||=" << current_residual_norm;
+                traceLog(oss.str());
+            }
+        } else {
+            have_residual = std::isfinite(trial_norm);
+            FE_THROW_IF(
+                !candidate_accepted_state_synchronized || !have_residual,
+                systems::InvalidStateException,
+                "NewtonSolver: line-search candidate was selected without a stable accepted-state residual");
+            try {
+                transient.system().acceptGeometricNonlinearityState(
+                    accepted_state_holder.view,
+                    systems::GeometricNonlinearityUpdatePoint::AcceptedNonlinearState);
+            } catch (...) {
+                restoreLineSearchBaseState();
+                throw;
+            }
+            if (transient.system().geometricNonlinearityEnabled() ||
+                options_.accepted_state_sync_invalidates_residual) {
                 have_jacobian = false;
             }
+            current_residual_norm = trial_norm;
         }
-        current_residual_norm = trial_norm;
-        have_residual = std::isfinite(current_residual_norm);
+        line_search_history_transaction_active = false;
 
         if (failed_to_reduce && options_.line_search_fail_on_no_reduction) {
             report.converged = false;
@@ -13559,23 +16960,40 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             return report;
         }
 
-        if (options_.step_tolerance > 0.0) {
-            const double step_norm = reverted_to_original ? du_norm : (alpha * du_norm);
+        // A genuinely zero full Newton correction is a valid step-tolerance
+        // convergence signal even though Armijo cannot strictly reduce the
+        // merit function.  Do not confuse that case with a rejected nonzero
+        // correction whose rollback also leaves ||u_new-u_base|| == 0.
+        const bool rejected_zero_full_step =
+            failed_to_reduce && reverted_to_original &&
+            have_full_projected_step &&
+            full_projected_step_norm <= options_.step_tolerance;
+        if (options_.step_tolerance > 0.0 &&
+            (!failed_to_reduce || rejected_zero_full_step)) {
+            copyVector(residual_scratch, history.u());
+            axpy(residual_scratch, static_cast<Real>(-1.0), u_backup);
+            const double step_norm = residual_scratch.norm();
             if (oopTraceEnabled()) {
                 std::ostringstream oss;
-                oss << "NewtonSolver: step ||"
-                    << (reverted_to_original ? "du" : "alpha*du")
-                    << "||=" << step_norm
+                oss << "NewtonSolver: actual projected step ||u_new-u_base||="
+                    << step_norm
+                    << " nominal alpha*||du||=" << (alpha * du_norm)
+                    << " full projected ||du||="
+                    << full_projected_step_norm
                     << " step_tol=" << options_.step_tolerance;
                 traceLog(oss.str());
             }
             if (minIterationsSatisfied(it + 1) &&
-                step_norm <= options_.step_tolerance) {
+                step_norm <= options_.step_tolerance &&
+                ((!options_.accepted_state_sync_invalidates_residual &&
+                  field_residual_states.empty()) ||
+                 tolerancesSatisfied(/*pre_first_update=*/false))) {
                 report.converged = true;
                 report.iterations = it + 1;
                 updateResidualReport();
                 if (oopTraceEnabled()) {
-                    traceLog("NewtonSolver: converged by step tolerance.");
+                    traceLog(
+                        "NewtonSolver: converged by step tolerance on the synchronized residual state.");
                 }
                 printNewtonProfile(it + 1);
                 return report;

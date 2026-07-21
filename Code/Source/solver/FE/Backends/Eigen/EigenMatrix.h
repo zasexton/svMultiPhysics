@@ -44,12 +44,16 @@ public:
 
     [[nodiscard]] Real getEntry(GlobalIndex row, GlobalIndex col) const override;
 
+    bool reinitFromPattern(const sparsity::SparsityPattern& pattern) override;
+
     [[nodiscard]] SparseMat& eigen() noexcept { return mat_; }
     [[nodiscard]] const SparseMat& eigen() const noexcept { return mat_; }
 
     void addValue(GlobalIndex row, GlobalIndex col, Real value, assembly::AddMode mode);
 
 private:
+    void initializeFromPattern(const sparsity::SparsityPattern& pattern);
+
     GlobalIndex n_rows_{0};
     GlobalIndex n_cols_{0};
     SparseMat mat_;

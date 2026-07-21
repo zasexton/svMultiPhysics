@@ -12,8 +12,13 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/GlobalSystemView.h"
+#include "Backends/FSILS/FsilsFactory.h"
+#include "Backends/FSILS/FsilsMatrix.h"
+#include "Constraints/DirichletBC.h"
 #include "Forms/Vocabulary.h"
+#include "Mesh/Mesh.h"
 #include "Spaces/SpaceFactory.h"
+#include "Sparsity/DistributedSparsityPattern.h"
 #include "Systems/FESystem.h"
 #include "Systems/OperatorBackends.h"
 #include "Systems/FormsInstaller.h"
@@ -115,7 +120,9 @@ std::vector<int> neighborRanks(int my_rank, int world_size)
 
 class FourTetraMeshAccess final : public IMeshAccess {
 public:
-    FourTetraMeshAccess(std::vector<int> cell_owner_ranks, int my_rank)
+    FourTetraMeshAccess(std::vector<int> cell_owner_ranks,
+                        int my_rank,
+                        Real coordinate_scale = Real(1.0))
         : cell_owner_ranks_(std::move(cell_owner_ranks)),
           my_rank_(my_rank)
     {
@@ -127,6 +134,11 @@ public:
             {1.0, 1.0, 0.0},  // 4
             {1.0, 0.2, 1.0}   // 5
         };
+        for (auto& point : nodes_) {
+            for (auto& coordinate : point) {
+                coordinate *= coordinate_scale;
+            }
+        }
 
         cells_ = {
             std::array<GlobalIndex, 4>{0, 1, 2, 3},  // 0
@@ -490,6 +502,211 @@ TEST(FESystemSerialParallelEquivalenceMPI, CoupledNavierStokesLikeAssemblyMatche
 
         EXPECT_LT(maxAbsDiff(owned.matrix, scatter.matrix), tol);
         EXPECT_LT(maxAbsDiff(owned.vector, scatter.vector), tol);
+    }
+}
+
+TEST(FESystemSerialParallelEquivalenceMPI,
+     GaugeDirichletAnchoringIsCommunicatorGlobal)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "This communicator-wide gauge regression requires exactly 2 ranks";
+    }
+
+    const auto cell_owners = partitionTetraCellsRoundRobin(size);
+    auto mesh = std::make_shared<FourTetraMeshAccess>(
+        cell_owners, rank);
+    const auto topology = buildFourTetraTopology(
+        cell_owners, rank, size);
+    auto space = spaces::Space(
+        spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    systems::FESystem system(mesh);
+    const auto field = system.addField(systems::FieldSpec{
+        .name = "scalar",
+        .space = space,
+        .components = 1,
+    });
+    system.addOperator("diffusion");
+    const auto state = forms::FormExpr::stateField(
+        field, *space, "scalar");
+    const auto test = forms::TestFunction(*space, "test");
+    (void)systems::installFormulation(
+        system,
+        "diffusion",
+        {field},
+        forms::inner(forms::grad(state), forms::grad(test)).dx());
+
+    // Model an active-side support constraint that exists on only one rank.
+    // Before communicator-global anchoring, rank 0 selected mean-zero
+    // enforcement while rank 1 selected Anchored, and setup rejected the
+    // divergent GaugeRegistry resolutions.
+    if (rank == 1) {
+        system.addConstraint(
+            std::make_unique<constraints::DirichletBC>(0, 0.0));
+    }
+
+    systems::SetupOptions options;
+    options.dof_options.global_numbering =
+        dofs::GlobalNumberingMode::GlobalIds;
+    options.dof_options.ownership = dofs::OwnershipStrategy::VertexGID;
+    options.dof_options.my_rank = rank;
+    options.dof_options.world_size = size;
+    options.dof_options.mpi_comm = comm;
+    systems::SetupInputs inputs;
+    inputs.topology_override = topology;
+    ASSERT_NO_THROW(system.setup(options, inputs));
+
+    // Parallel constraint synchronization happens after gauge resolution, so
+    // both ranks correctly see this line by the time setup returns.  The
+    // ASSERT_NO_THROW above is the regression: without the communicator-wide
+    // evidence reduction, setup resolves mean-zero on rank 0 and anchored on
+    // rank 1, then rejects the inconsistent GaugeRegistry resolutions.
+    EXPECT_TRUE(system.constraints().isConstrained(0));
+
+    const auto* registry = system.gaugeRegistryIfPresent();
+    ASSERT_NE(registry, nullptr);
+    const auto mode = std::find_if(
+        registry->resolvedModes().begin(),
+        registry->resolvedModes().end(),
+        [field](const gauge::ResolvedMode& candidate) {
+            return candidate.candidate.field == field &&
+                   candidate.candidate.family ==
+                       gauge::NullspaceModeFamily::ScalarConstant;
+        });
+    ASSERT_NE(mode, registry->resolvedModes().end());
+    EXPECT_EQ(mode->status, gauge::GaugeStatus::Anchored);
+    EXPECT_EQ(mode->policy, gauge::EnforcementPolicy::None);
+}
+
+TEST(FESystemSerialParallelEquivalenceMPI,
+     AnalysisAndPreSetupRegistrationUseSystemSubcommunicator)
+{
+    int world_rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size != 4) {
+        GTEST_SKIP() << "This split-communicator regression requires exactly 4 MPI ranks";
+    }
+
+    const int color = world_rank / 2;
+    MPI_Comm subcomm = MPI_COMM_NULL;
+    MPI_Comm_split(MPI_COMM_WORLD, color, world_rank, &subcomm);
+    ASSERT_NE(subcomm, MPI_COMM_NULL);
+    struct SubcommunicatorGuard {
+        MPI_Comm& communicator;
+        ~SubcommunicatorGuard() { MPI_Comm_free(&communicator); }
+    } subcomm_guard{subcomm};
+
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(subcomm, &rank);
+    MPI_Comm_size(subcomm, &size);
+    ASSERT_EQ(size, 2);
+
+    // Equation modules register marker geometry before FESystem::setup(). A
+    // native mesh must therefore expose its communicator during definition.
+    auto native_mesh = svmp::create_mesh(svmp::MeshComm(subcomm));
+    systems::FESystem pre_setup_system(native_mesh);
+    int communicator_relation = MPI_UNEQUAL;
+    MPI_Comm_compare(pre_setup_system.activeMpiCommunicator(),
+                     subcomm,
+                     &communicator_relation);
+    EXPECT_TRUE(communicator_relation == MPI_IDENT ||
+                communicator_relation == MPI_CONGRUENT);
+
+    const auto cell_owners = partitionTetraCellsRoundRobin(size);
+    const Real coordinate_scale = color == 0 ? Real(1.0) : Real(3.0);
+    auto mesh = std::make_shared<FourTetraMeshAccess>(
+        cell_owners, rank, coordinate_scale);
+    const auto topo = buildFourTetraTopology(cell_owners, rank, size);
+    auto system = buildCoupledNavierStokesLikeSystem(
+        mesh,
+        topo,
+        subcomm,
+        rank,
+        size,
+        /*assembler_name=*/"ParallelAssembler",
+        GhostPolicy::OwnedRowsOnly);
+
+    communicator_relation = MPI_UNEQUAL;
+    MPI_Comm_compare(system.activeMpiCommunicator(),
+                     subcomm,
+                     &communicator_relation);
+    EXPECT_TRUE(communicator_relation == MPI_IDENT ||
+                communicator_relation == MPI_CONGRUENT);
+
+    const auto* pattern = system.distributedSparsityIfAvailable("ns");
+    ASSERT_NE(pattern, nullptr);
+    const auto permutation = system.dofPermutation();
+    ASSERT_TRUE(permutation);
+
+    backends::FsilsFactory factory(/*dof_per_node=*/4,
+                                   permutation,
+                                   subcomm);
+    auto matrix = factory.createMatrix(*pattern);
+    auto* fsils_matrix = dynamic_cast<backends::FsilsMatrix*>(matrix.get());
+    ASSERT_NE(fsils_matrix, nullptr);
+    matrix->zero();
+
+    const Real diagonal = color == 0 ? Real(2.0) : Real(-7.0);
+    // Each global row is inserted by exactly one owner.  FSILS finalization
+    // communicates that owned value to overlap copies; it does not sum one
+    // contribution from every rank for an owner-only insertion.
+    const Real local_diagonal = diagonal;
+    const auto& dof_map = system.dofHandler().getDofMap();
+    for (GlobalIndex row = 0; row < system.dofHandler().getNumDofs(); ++row) {
+        if (dof_map.isOwnedDof(row)) {
+            fsils_matrix->addValue(row, row, local_diagonal, AddMode::Add);
+        }
+    }
+    matrix->finalizeAssembly();
+
+    ASSERT_TRUE(system.updateAnalysisSummariesFromAssembledOperator(
+        *matrix, "ns"));
+    const auto* summaries = system.latestAnalysisSummaries();
+    ASSERT_NE(summaries, nullptr);
+    ASSERT_FALSE(summaries->discrete_matrices.empty());
+    ASSERT_FALSE(summaries->mesh_geometry_quality.empty());
+
+    const auto& matrix_summary = summaries->discrete_matrices.front();
+    const auto& mesh_summary = summaries->mesh_geometry_quality.front();
+    EXPECT_EQ(matrix_summary.scanned_row_count,
+              static_cast<std::uint64_t>(system.dofHandler().getNumDofs()));
+    EXPECT_NEAR(matrix_summary.max_abs_entry,
+                std::abs(diagonal),
+                1.0e-12);
+    if (color == 0) {
+        EXPECT_EQ(matrix_summary.negative_diagonal_count, 0u);
+    } else {
+        EXPECT_EQ(matrix_summary.negative_diagonal_count,
+                  static_cast<std::uint64_t>(
+                      system.dofHandler().getNumDofs()));
+    }
+
+    const std::array<double, 2> local_result{
+        static_cast<double>(matrix_summary.max_abs_entry),
+        static_cast<double>(mesh_summary.max_jacobian)};
+    std::array<double, 8> world_results{};
+    MPI_Allgather(local_result.data(),
+                  static_cast<int>(local_result.size()),
+                  MPI_DOUBLE,
+                  world_results.data(),
+                  static_cast<int>(local_result.size()),
+                  MPI_DOUBLE,
+                  MPI_COMM_WORLD);
+
+    if (world_rank == 0) {
+        EXPECT_NEAR(world_results[0], 2.0, 1.0e-12);
+        EXPECT_NEAR(world_results[2], 2.0, 1.0e-12);
+        EXPECT_NEAR(world_results[4], 7.0, 1.0e-12);
+        EXPECT_NEAR(world_results[6], 7.0, 1.0e-12);
+        EXPECT_NEAR(world_results[1], world_results[3], 1.0e-12);
+        EXPECT_NEAR(world_results[5], world_results[7], 1.0e-12);
+        EXPECT_GT(world_results[5], world_results[1] * 20.0);
     }
 }
 

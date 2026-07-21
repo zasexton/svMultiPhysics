@@ -20,6 +20,7 @@
 #include "Mesh/Topology/CellShape.h"
 
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 namespace svmp {
@@ -198,6 +199,109 @@ TEST(GeometricNonlinearity, FESystemTrialAcceptRollbackLifecycleUpdatesMeshCoord
     EXPECT_EQ(committed.update_point, GeometricNonlinearityUpdatePoint::AcceptedTimeStep);
     EXPECT_EQ(committed.geometry_state, GeometryTransactionState::Committed);
     EXPECT_FALSE(sys.meshCoordinateTransactionActive());
+
+    policy.rollback_geometry_on_line_search_reject = false;
+    sys.setGeometricNonlinearityPolicy(policy);
+    (void)sys.beginGeometricNonlinearityTrial(view);
+    ASSERT_TRUE(sys.meshCoordinateTransactionActive());
+    (void)sys.rollbackGeometricNonlinearityTrial();
+    EXPECT_TRUE(sys.meshCoordinateTransactionActive());
+    const auto forced_rollback =
+        sys.rollbackGeometricNonlinearityTrial(/*force=*/true);
+    EXPECT_EQ(forced_rollback.geometry_state,
+              GeometryTransactionState::RolledBack);
+    EXPECT_FALSE(sys.meshCoordinateTransactionActive());
+}
+
+TEST(GeometricNonlinearity, AcceptanceCallbackFailureKeepsGeometryRollbackable)
+{
+    auto mesh = makeQuadMesh();
+    const auto handles = svmp::motion::attach_motion_fields(*mesh, 2);
+    auto* disp = svmp::MeshFields::field_data_as<svmp::real_t>(
+        mesh->local_mesh(), handles.displacement);
+    ASSERT_NE(disp, nullptr);
+    const auto ncomp = svmp::MeshFields::field_components(
+        mesh->local_mesh(), handles.displacement);
+    ASSERT_EQ(ncomp, 2u);
+    for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+        disp[v * ncomp + 0] = 0.10;
+        disp[v * ncomp + 1] = -0.05;
+    }
+
+    auto scalar_space = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    auto vector_space = std::make_shared<spaces::ProductSpace>(scalar_space, 2);
+
+    FESystem sys(mesh);
+    const auto displacement =
+        sys.addMeshDisplacementUnknown("mesh_displacement", vector_space);
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", displacement, std::make_shared<assembly::MassKernel>(1.0));
+    sys.setup();
+
+    GeometricNonlinearityPolicy policy{};
+    policy.enabled = true;
+    sys.setGeometricNonlinearityPolicy(policy);
+
+    std::vector<Real> state(static_cast<std::size_t>(sys.dofHandler().getNumDofs()), 0.0);
+    ASSERT_EQ(sys.syncBoundMeshMotionFieldsToState(state), mesh->n_vertices() * 2u);
+    SystemStateView view;
+    view.u = state;
+
+    std::vector<bool> transaction_active_during_accept_notifications;
+    bool throw_on_direct_commit = false;
+    sys.addGeometryTransactionCallback(GeometryTransactionCallback{
+        .name = "throw-on-acceptance-commit-notification",
+        .callback = [&](const GeometryTransactionDiagnostics& diagnostics) {
+            if (diagnostics.last_event == "commit" &&
+                throw_on_direct_commit) {
+                EXPECT_TRUE(sys.meshCoordinateTransactionActive());
+                throw std::runtime_error("direct commit callback failed");
+            }
+            if (diagnostics.last_event != "accepted-nonlinear-state") {
+                return;
+            }
+            transaction_active_during_accept_notifications.push_back(
+                sys.meshCoordinateTransactionActive());
+            if (transaction_active_during_accept_notifications.size() == 2u) {
+                throw std::runtime_error("acceptance commit callback failed");
+            }
+        },
+    });
+
+    (void)sys.beginGeometricNonlinearityTrial(view);
+    ASSERT_TRUE(sys.meshCoordinateTransactionActive());
+    ASSERT_TRUE(mesh->has_current_coords());
+
+    EXPECT_THROW(
+        sys.acceptGeometricNonlinearityState(
+            view, GeometricNonlinearityUpdatePoint::AcceptedNonlinearState),
+        std::runtime_error);
+    ASSERT_EQ(transaction_active_during_accept_notifications.size(), 2u);
+    EXPECT_TRUE(transaction_active_during_accept_notifications[0]);
+    EXPECT_TRUE(transaction_active_during_accept_notifications[1]);
+    EXPECT_TRUE(sys.meshCoordinateTransactionActive());
+    EXPECT_EQ(sys.meshCoordinateTransactionState(), GeometryTransactionState::Accepted);
+
+    const auto rolled_back =
+        sys.rollbackGeometricNonlinearityTrial(/*force=*/true);
+    EXPECT_EQ(rolled_back.geometry_state, GeometryTransactionState::RolledBack);
+    EXPECT_FALSE(sys.meshCoordinateTransactionActive());
+    EXPECT_FALSE(mesh->has_current_coords());
+
+    // The lower-level public commit entry point must provide the same strong
+    // exception guarantee as acceptGeometricNonlinearityState().
+    (void)sys.beginGeometricNonlinearityTrial(view);
+    ASSERT_TRUE(sys.meshCoordinateTransactionActive());
+    ASSERT_TRUE(mesh->has_current_coords());
+    throw_on_direct_commit = true;
+    EXPECT_THROW(sys.commitMeshCoordinateTransaction(), std::runtime_error);
+    EXPECT_TRUE(sys.meshCoordinateTransactionActive());
+    const auto direct_rolled_back =
+        sys.rollbackGeometricNonlinearityTrial(/*force=*/true);
+    EXPECT_EQ(direct_rolled_back.geometry_state,
+              GeometryTransactionState::RolledBack);
+    EXPECT_FALSE(sys.meshCoordinateTransactionActive());
+    EXPECT_FALSE(mesh->has_current_coords());
 }
 
 TEST(GeometricNonlinearity, UpdatedLagrangianRebaseCommitsReferenceAndClearsDisplacementField)

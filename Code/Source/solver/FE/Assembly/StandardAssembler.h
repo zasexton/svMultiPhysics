@@ -1374,6 +1374,15 @@ private:
     std::vector<GlobalIndex> scratch_fused_resolved_offsets_;
     std::vector<GlobalIndex> scratch_fused_vector_resolved_;
     std::vector<GlobalIndex> scratch_fused_vector_resolved_offsets_;
+    const void* scratch_fused_matrix_layout_handle_{nullptr};
+    std::uint64_t scratch_fused_matrix_layout_revision_{0};
+    const void* scratch_fused_vector_layout_handle_{nullptr};
+    std::uint64_t scratch_fused_vector_layout_revision_{0};
+    void clearFusedMatrixResolvedScratch() noexcept;
+    void clearFusedVectorResolvedScratch() noexcept;
+    void clearFusedResolvedScratch() noexcept;
+    void ensureFusedMatrixResolvedScratchLayout(const GlobalSystemView* view) noexcept;
+    void ensureFusedVectorResolvedScratchLayout(const GlobalSystemView* view) noexcept;
 
     // Per-cell flag: whether any DOF in the cell is constrained.
     // Built once during first assembly call; avoids per-call hasConstrainedDofs().

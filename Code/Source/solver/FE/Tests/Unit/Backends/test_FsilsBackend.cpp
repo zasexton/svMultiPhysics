@@ -967,6 +967,16 @@ TEST(FsilsBackendLegacyKernels, BoundaryPreprocessingComputesCoupledFaceNorms)
     EXPECT_DOUBLE_EQ(lhs.face[0].nS, 123.0);
     EXPECT_NEAR(lhs.face[1].nS, 1.0 + 4.0 + 9.0 + 16.0, 1e-14);
     EXPECT_NEAR(lhs.face[2].nS, 2.25 + 6.25, 1e-14);
+
+    // A legacy/externally supplied compact physical-velocity face remains
+    // safe when the BlockSchur computational primary is wider than the face.
+    // All three stored rows contribute, but preprocessing must not read the
+    // nonexistent auxiliary rows 3:7.
+    ns_solver::bc_pre(lhs, /*mom_ncomp=*/7, /*dof=*/8, lhs.nNo, lhs.mynNo);
+    EXPECT_NEAR(lhs.face[1].nS,
+                1.0 + 4.0 + 2500.0 + 9.0 + 16.0 + 3600.0,
+                1e-14);
+    EXPECT_NEAR(lhs.face[2].nS, 2.25 + 6.25 + 9801.0, 1e-14);
 }
 
 TEST(FsilsBackendLegacyKernels, PrecondDiagAppliesExactSymmetricDof3Scaling)
@@ -1734,6 +1744,332 @@ TEST(FsilsBackend, SolveBlockSchurDof3SingleNode)
     const Real denom = std::sqrt(b2);
     const Real rel = std::sqrt(r2) / ((denom > 1e-30) ? denom : 1e-30);
     EXPECT_LE(rel, opts.rel_tol + 1e-12);
+}
+
+TEST(FsilsBackend,
+     BlockSchurNonfiniteResultForcesOneRetryThenFailsClosed)
+{
+    // The safety retry is mandatory for a finite RHS followed by backend
+    // NaN/Inf state; it must not depend on the opt-in retry for ordinary
+    // finite tolerance misses.
+    ScopedUnsetEnvVar retry_enable(
+        "SVMP_FSILS_ENABLE_BLOCKSCHUR_TRUE_RESIDUAL_RETRY");
+    ScopedEnvVar retry_max_iter(
+        "SVMP_FSILS_BLOCKSCHUR_TRUE_RESIDUAL_RETRY_MAX_ITER", "4");
+
+    FsilsFactory factory(/*dof_per_node=*/3);
+    const auto pattern = make_dense_pattern(3);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(3);
+    auto x = factory.createVector(3);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    const GlobalIndex dofs[3] = {0, 1, 2};
+    const Real nan = std::numeric_limits<Real>::quiet_NaN();
+    const Real Ke[9] = {
+        nan, 1.0, 1.0,
+        1.0, 3.0, 0.0,
+        1.0, 0.0, 1.0};
+    viewA->addMatrixEntries(dofs, Ke, assembly::AddMode::Insert);
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    auto viewb = b->createAssemblyView();
+    viewb->beginAssemblyPhase();
+    const Real be[3] = {1.0, 2.0, 3.0};
+    viewb->addVectorEntries(dofs, be, assembly::AddMode::Insert);
+    viewb->finalizeAssembly();
+
+    SolverOptions opts;
+    opts.method = SolverMethod::BlockSchur;
+    opts.preconditioner = PreconditionerType::Diagonal;
+    opts.rel_tol = 1e-8;
+    opts.abs_tol = 1e-10;
+    opts.max_iter = 2;
+    opts.krylov_dim = 4;
+    opts.fsils_blockschur_gm_max_iter = 4;
+    opts.fsils_blockschur_cg_max_iter = 4;
+    opts.fsils_residual_check_policy = FsilsResidualCheckPolicy::Always;
+    BlockLayout layout;
+    layout.blocks.push_back(
+        {"velocity", 0, 2, BlockRole::PrimaryField});
+    layout.blocks.push_back(
+        {"pressure", 2, 1, BlockRole::ConstraintField});
+    layout.momentum_block = 0;
+    layout.constraint_block = 1;
+    opts.block_layout = layout;
+
+    auto solver = factory.createLinearSolver(opts);
+    const auto report = solver->solve(*A, *x, *b);
+
+    EXPECT_FALSE(report.converged);
+    EXPECT_TRUE(report.numerical_breakdown);
+    EXPECT_EQ(report.blockschur_true_residual_retries, 1);
+    EXPECT_TRUE(std::isinf(
+        static_cast<double>(report.final_residual_norm)));
+    EXPECT_TRUE(std::isinf(
+        static_cast<double>(report.relative_residual)));
+    EXPECT_NE(report.message.find("numerical breakdown"),
+              std::string::npos)
+        << report.message;
+    for (const auto value : x->localSpan()) {
+        EXPECT_TRUE(std::isfinite(static_cast<double>(value)));
+        EXPECT_EQ(value, Real{0.0});
+    }
+}
+
+TEST(FsilsBackend,
+     BlockSchurNonfiniteRightHandSideFailsClosedWithoutRetry)
+{
+    // A retry is reserved for a finite caller RHS followed by a backend
+    // breakdown.  Invalid input must fail once without repeating the same
+    // destructive solve.
+    ScopedEnvVar retry_enable(
+        "SVMP_FSILS_ENABLE_BLOCKSCHUR_TRUE_RESIDUAL_RETRY", "1");
+
+    FsilsFactory factory(/*dof_per_node=*/3);
+    const auto pattern = make_dense_pattern(3);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(3);
+    auto x = factory.createVector(3);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    const GlobalIndex dofs[3] = {0, 1, 2};
+    const Real Ke[9] = {
+        4.0, 0.0, 1.0,
+        0.0, 3.0, 1.0,
+        1.0, 1.0, 0.0};
+    viewA->addMatrixEntries(dofs, Ke, assembly::AddMode::Insert);
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    auto viewb = b->createAssemblyView();
+    viewb->beginAssemblyPhase();
+    const Real nan = std::numeric_limits<Real>::quiet_NaN();
+    const Real be[3] = {1.0, nan, 2.0};
+    viewb->addVectorEntries(dofs, be, assembly::AddMode::Insert);
+    viewb->finalizeAssembly();
+
+    SolverOptions opts;
+    opts.method = SolverMethod::BlockSchur;
+    opts.preconditioner = PreconditionerType::Diagonal;
+    opts.rel_tol = 1e-8;
+    opts.abs_tol = 1e-10;
+    opts.max_iter = 2;
+    opts.krylov_dim = 4;
+    opts.fsils_blockschur_gm_max_iter = 4;
+    opts.fsils_blockschur_cg_max_iter = 4;
+    opts.fsils_residual_check_policy = FsilsResidualCheckPolicy::Always;
+    BlockLayout layout;
+    layout.blocks.push_back(
+        {"velocity", 0, 2, BlockRole::PrimaryField});
+    layout.blocks.push_back(
+        {"pressure", 2, 1, BlockRole::ConstraintField});
+    layout.momentum_block = 0;
+    layout.constraint_block = 1;
+    opts.block_layout = layout;
+
+    auto solver = factory.createLinearSolver(opts);
+    const auto report = solver->solve(*A, *x, *b);
+
+    EXPECT_FALSE(report.converged);
+    EXPECT_TRUE(report.numerical_breakdown);
+    EXPECT_EQ(report.blockschur_true_residual_retries, 0);
+    EXPECT_TRUE(std::isinf(
+        static_cast<double>(report.final_residual_norm)));
+    EXPECT_TRUE(std::isinf(
+        static_cast<double>(report.relative_residual)));
+    for (const auto value : x->localSpan()) {
+        EXPECT_TRUE(std::isfinite(static_cast<double>(value)));
+        EXPECT_EQ(value, Real{0.0});
+    }
+}
+
+TEST(FsilsBackend,
+     SolveBlockSchurDof8WithAuxiliaryPrimaryAndSparseNativeVelocityFace)
+{
+    constexpr int dof = 8;
+    FsilsFactory factory(/*dof_per_node=*/dof);
+    const auto pattern = make_dense_pattern(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(dof);
+    auto x = factory.createVector(dof);
+
+    std::array<GlobalIndex, dof> dofs{};
+    for (int component = 0; component < dof; ++component) {
+        dofs[static_cast<std::size_t>(component)] = component;
+    }
+
+    // Computational partition:
+    //   K = [Velocity(3), phi(1), extension velocity E(3)]
+    //   S = [Pressure(1)]
+    // Auxiliary rows have their own diagonal/cross-coupled equations and are
+    // deliberately nonzero in the manufactured solution.
+    std::array<Real, dof * dof> matrix{};
+    for (int component = 0; component < 7; ++component) {
+        matrix[static_cast<std::size_t>(component * dof + component)] =
+            static_cast<Real>(5.0 + 0.25 * component);
+    }
+    for (int component = 0; component < 6; ++component) {
+        matrix[static_cast<std::size_t>(component * dof + component + 1)] =
+            Real(0.1);
+        matrix[static_cast<std::size_t>((component + 1) * dof + component)] =
+            Real(0.1);
+    }
+    const std::array<Real, 7> pressure_coupling{
+        Real(0.40), Real(-0.30), Real(0.20), Real(0.10),
+        Real(-0.08), Real(0.06), Real(-0.04)};
+    for (int component = 0; component < 7; ++component) {
+        matrix[static_cast<std::size_t>(component * dof + 7)] =
+            pressure_coupling[static_cast<std::size_t>(component)];
+        matrix[static_cast<std::size_t>(7 * dof + component)] =
+            pressure_coupling[static_cast<std::size_t>(component)];
+    }
+    matrix[static_cast<std::size_t>(7 * dof + 7)] = Real(1.5);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    viewA->addMatrixEntries(dofs, matrix, assembly::AddMode::Insert);
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    const std::array<Real, dof> exact{
+        Real(0.25), Real(-0.50), Real(0.75), Real(0.40),
+        Real(-0.30), Real(0.20), Real(-0.10), Real(0.60)};
+    std::array<Real, dof> rhs{};
+    for (int row = 0; row < dof; ++row) {
+        for (int col = 0; col < dof; ++col) {
+            rhs[static_cast<std::size_t>(row)] +=
+                matrix[static_cast<std::size_t>(row * dof + col)] *
+                exact[static_cast<std::size_t>(col)];
+        }
+    }
+    auto viewb = b->createAssemblyView();
+    viewb->beginAssemblyPhase();
+    viewb->addVectorEntries(dofs, rhs, assembly::AddMode::Insert);
+    viewb->finalizeAssembly();
+
+    // Exercise the native-face representation at the same 7+1 width used by
+    // the coupled free-surface system.  The sparse {0,2} component set must
+    // remain on physical Velocity rows 0 and 2; compacting it to rows 0 and 1
+    // would corrupt both the face operator and its BlockSchur preconditioner.
+    RankOneUpdate update{};
+    update.sigma = Real(35.0);
+    update.active_components = {0, 2};
+    update.prefer_native_face = true;
+    update.v = {{0, Real(0.18)}, {2, Real(-0.11)}};
+    auto exact_vector = factory.createVector(dof);
+    std::copy(exact.begin(), exact.end(), exact_vector->localSpan().begin());
+    addRankOneContributionSerial(
+        factory, *b, *exact_vector,
+        std::span<const RankOneUpdate>(&update, 1));
+
+    SolverOptions opts;
+    opts.method = SolverMethod::BlockSchur;
+    opts.preconditioner = PreconditionerType::Diagonal;
+    opts.rel_tol = 1e-10;
+    opts.abs_tol = 1e-12;
+    opts.max_iter = 50;
+    opts.krylov_dim = 80;
+    opts.fsils_blockschur_gm_max_iter = 200;
+    opts.fsils_blockschur_cg_max_iter = 200;
+    opts.fsils_blockschur_gm_rel_tol = 1e-12;
+    opts.fsils_blockschur_cg_rel_tol = 1e-12;
+    opts.fsils_residual_check_policy = FsilsResidualCheckPolicy::Always;
+    BlockLayout layout;
+    layout.blocks.push_back({"VelocityAuxiliaryComputationalPrimary", 0, 7,
+                             BlockRole::PrimaryField});
+    layout.blocks.push_back({"Pressure", 7, 1,
+                             BlockRole::ConstraintField});
+    layout.momentum_block = 0;
+    layout.constraint_block = 1;
+    opts.block_layout = layout;
+
+    auto solver = factory.createLinearSolver(opts);
+    solver->setRankOneUpdates(std::span<const RankOneUpdate>(&update, 1));
+    const auto report = solver->solve(*A, *x, *b);
+    ASSERT_TRUE(report.converged) << report.message;
+    EXPECT_GT(report.blockschur_outer_iterations, 0);
+    EXPECT_EQ(report.iterations, report.blockschur_outer_iterations);
+    EXPECT_EQ(report.message.find("fallback"), std::string::npos)
+        << report.message;
+    EXPECT_LE(report.relative_residual, opts.rel_tol);
+
+    const Real true_relative_residual =
+        fullOperatorRelativeResidualSerial(
+            factory, *A, *x, *b,
+            std::span<const RankOneUpdate>(&update, 1));
+    EXPECT_LE(true_relative_residual, Real(1e-9));
+
+    const auto solution = x->localSpan();
+    ASSERT_EQ(solution.size(), exact.size());
+    for (std::size_t i = 0; i < exact.size(); ++i) {
+        EXPECT_NEAR(solution[i], exact[i], 1e-8);
+    }
+}
+
+TEST(FsilsBackend, BlockSchurRejectsNonFinalPressureWithoutAuxiliaryGrouping)
+{
+    constexpr int dof = 8;
+    FsilsFactory factory(/*dof_per_node=*/dof);
+    const auto pattern = make_dense_pattern(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(dof);
+    auto x = factory.createVector(dof);
+
+    std::array<GlobalIndex, dof> dofs{};
+    std::array<Real, dof * dof> identity{};
+    std::array<Real, dof> rhs{};
+    for (int component = 0; component < dof; ++component) {
+        dofs[static_cast<std::size_t>(component)] = component;
+        identity[static_cast<std::size_t>(component * dof + component)] =
+            Real(1.0);
+        rhs[static_cast<std::size_t>(component)] = Real(1.0);
+    }
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    viewA->addMatrixEntries(dofs, identity, assembly::AddMode::Insert);
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+    auto viewb = b->createAssemblyView();
+    viewb->beginAssemblyPhase();
+    viewb->addVectorEntries(dofs, rhs, assembly::AddMode::Insert);
+    viewb->finalizeAssembly();
+
+    SolverOptions opts;
+    opts.method = SolverMethod::BlockSchur;
+    BlockLayout malformed;
+    malformed.blocks.push_back({"Velocity", 0, 3,
+                                BlockRole::PrimaryField});
+    malformed.blocks.push_back({"Pressure", 3, 1,
+                                BlockRole::ConstraintField});
+    malformed.blocks.push_back({"phi", 4, 1,
+                                BlockRole::AuxiliaryField});
+    malformed.blocks.push_back({"LevelSetAdvectionVelocity", 5, 3,
+                                BlockRole::AuxiliaryField});
+    malformed.momentum_block = 0;
+    malformed.constraint_block = 1;
+    opts.block_layout = malformed;
+
+    auto solver = factory.createLinearSolver(opts);
+    EXPECT_THROW((void)solver->solve(*A, *x, *b), NotImplementedException);
+
+    // Component-count equality is insufficient: these blocks overlap at
+    // component 6 and leave component 7 uncovered even though 7 + 1 == 8.
+    BlockLayout overlapping;
+    overlapping.blocks.push_back({"computational_primary", 0, 7,
+                                  BlockRole::PrimaryField});
+    overlapping.blocks.push_back({"Pressure", 6, 1,
+                                  BlockRole::ConstraintField});
+    overlapping.momentum_block = 0;
+    overlapping.constraint_block = 1;
+    opts.block_layout = overlapping;
+    auto overlapping_solver = factory.createLinearSolver(opts);
+    EXPECT_THROW((void)overlapping_solver->solve(*A, *x, *b),
+                 NotImplementedException);
 }
 
 TEST(FsilsBackend, RankOneUpdateSolversConverge)
@@ -3411,6 +3747,237 @@ TEST(FsilsBackend, MatrixGetEntryRespectsPermutationAndSparseStructure)
     EXPECT_DOUBLE_EQ(fsils->getEntry(3, 2), 0.0);
     EXPECT_DOUBLE_EQ(fsils->getEntry(-1, 0), 0.0);
     EXPECT_DOUBLE_EQ(fsils->getEntry(0, 7), 0.0);
+}
+
+TEST(FsilsBackend, ReinitFromPatternPreservesExistingVectorLayoutAndResetsValues)
+{
+    sparsity::SparsityPattern diagonal_pattern(4, 4);
+    for (GlobalIndex dof = 0; dof < 4; ++dof) {
+        diagonal_pattern.addEntry(dof, dof);
+    }
+    diagonal_pattern.finalize();
+
+    sparsity::SparsityPattern coupled_pattern(4, 4);
+    for (GlobalIndex dof = 0; dof < 4; ++dof) {
+        coupled_pattern.addEntry(dof, dof);
+    }
+    coupled_pattern.addEntry(0, 1);
+    coupled_pattern.addEntry(1, 0);
+    coupled_pattern.finalize();
+
+    FsilsFactory factory;
+    auto matrix = factory.createMatrix(diagonal_pattern);
+    auto* fsils = dynamic_cast<FsilsMatrix*>(matrix.get());
+    ASSERT_NE(fsils, nullptr);
+    const auto* const original_layout = fsils->shared().get();
+
+    auto x = factory.createVector(4);
+    auto y = factory.createVector(4);
+    auto* fsils_x = dynamic_cast<FsilsVector*>(x.get());
+    auto* fsils_y = dynamic_cast<FsilsVector*>(y.get());
+    ASSERT_NE(fsils_x, nullptr);
+    ASSERT_NE(fsils_y, nullptr);
+    ASSERT_EQ(fsils_x->shared(), original_layout);
+    ASSERT_EQ(fsils_y->shared(), original_layout);
+    fsils_x->data() = {1.0, 2.0, 3.0, 4.0};
+
+    {
+        auto view = matrix->createAssemblyView();
+        ASSERT_NE(view, nullptr);
+        view->beginAssemblyPhase();
+        for (GlobalIndex dof = 0; dof < 4; ++dof) {
+            view->addMatrixEntry(dof, dof, 2.0, assembly::AddMode::Insert);
+        }
+        view->finalizeAssembly();
+    }
+    matrix->mult(*x, *y);
+    EXPECT_EQ(fsils_y->data(), (std::vector<Real>{2.0, 4.0, 6.0, 8.0}));
+
+    ASSERT_TRUE(matrix->reinitFromPattern(coupled_pattern));
+    EXPECT_EQ(fsils->shared().get(), original_layout);
+    EXPECT_EQ(fsils_x->shared(), original_layout);
+    EXPECT_EQ(fsils_y->shared(), original_layout);
+    for (GlobalIndex row = 0; row < 4; ++row) {
+        for (GlobalIndex col = 0; col < 4; ++col) {
+            EXPECT_DOUBLE_EQ(fsils->getEntry(row, col), 0.0);
+        }
+    }
+
+    {
+        auto view = matrix->createAssemblyView();
+        ASSERT_NE(view, nullptr);
+        view->beginAssemblyPhase();
+        for (GlobalIndex dof = 0; dof < 4; ++dof) {
+            view->addMatrixEntry(dof, dof, 1.0, assembly::AddMode::Insert);
+        }
+        view->addMatrixEntry(0, 1, 3.0, assembly::AddMode::Insert);
+        view->addMatrixEntry(1, 0, -2.0, assembly::AddMode::Insert);
+        view->finalizeAssembly();
+    }
+    matrix->mult(*x, *y);
+    EXPECT_EQ(fsils_y->data(), (std::vector<Real>{7.0, 0.0, 3.0, 4.0}));
+
+    ASSERT_TRUE(matrix->reinitFromPattern(coupled_pattern));
+    EXPECT_EQ(fsils->shared().get(), original_layout);
+    matrix->mult(*x, *y);
+    EXPECT_EQ(fsils_y->data(), (std::vector<Real>{0.0, 0.0, 0.0, 0.0}));
+}
+
+TEST(FsilsBackend, PreparedMatrixDiagnosticsRespectMortonNodePermutationAndIdentityRows)
+{
+    constexpr GlobalIndex nodes_per_axis = 9;
+    constexpr GlobalIndex n_nodes = nodes_per_axis * nodes_per_axis;
+    constexpr int dof_per_node = 4;
+    constexpr GlobalIndex n_dofs = n_nodes * dof_per_node;
+
+    std::vector<GlobalIndex> natural_node_to_backend(
+        static_cast<std::size_t>(n_nodes), INVALID_GLOBAL_INDEX);
+    for (GlobalIndex node = 0; node < n_nodes; ++node) {
+        natural_node_to_backend[static_cast<std::size_t>(node)] = node;
+    }
+
+    // Reproduce the application layout: FE DOFs are component-major while FSILS
+    // stores node-interleaved point blocks, with an optional Morton node ordering.
+    std::vector<std::pair<unsigned int, GlobalIndex>> morton_nodes;
+    morton_nodes.reserve(static_cast<std::size_t>(n_nodes));
+    for (GlobalIndex node = 0; node < n_nodes; ++node) {
+        const auto x = static_cast<unsigned int>(node % nodes_per_axis);
+        const auto y = static_cast<unsigned int>(node / nodes_per_axis);
+        unsigned int code = 0;
+        for (unsigned int bit = 0; bit < 4; ++bit) {
+            code |= ((x >> bit) & 1u) << (2u * bit);
+            code |= ((y >> bit) & 1u) << (2u * bit + 1u);
+        }
+        morton_nodes.emplace_back(code, node);
+    }
+    std::sort(morton_nodes.begin(), morton_nodes.end());
+
+    std::vector<GlobalIndex> morton_node_to_backend(static_cast<std::size_t>(n_nodes),
+                                                    INVALID_GLOBAL_INDEX);
+    for (GlobalIndex backend_node = 0; backend_node < n_nodes; ++backend_node) {
+        morton_node_to_backend[static_cast<std::size_t>(
+            morton_nodes[static_cast<std::size_t>(backend_node)].second)] = backend_node;
+    }
+
+    sparsity::SparsityPattern pattern(n_dofs, n_dofs);
+    for (GlobalIndex row = 0; row < n_dofs; ++row) {
+        for (GlobalIndex col = 0; col < n_dofs; ++col) {
+            pattern.addEntry(row, col);
+        }
+    }
+    pattern.finalize();
+
+    std::vector<GlobalIndex> identity_rows;
+    identity_rows.reserve(18u + 9u + 30u);
+    for (GlobalIndex node = 0; node < 18; ++node) {
+        identity_rows.push_back(n_nodes + node);
+    }
+    for (GlobalIndex node = 0; node < 9; ++node) {
+        identity_rows.push_back(2 * n_nodes + node);
+    }
+    for (GlobalIndex node = 0; node < 30; ++node) {
+        identity_rows.push_back(3 * n_nodes + node);
+    }
+
+    SolverOptions options;
+    options.method = SolverMethod::GMRES;
+    options.preconditioner = PreconditionerType::Diagonal;
+    options.rel_tol = 1e-12;
+    options.abs_tol = 1e-14;
+    options.max_iter = 20;
+    options.krylov_dim = 20;
+
+    auto exercise_ordering = [&](const std::vector<GlobalIndex>& node_to_backend) {
+        std::vector<GlobalIndex> forward(static_cast<std::size_t>(n_dofs),
+                                         INVALID_GLOBAL_INDEX);
+        for (int comp = 0; comp < dof_per_node; ++comp) {
+            for (GlobalIndex node = 0; node < n_nodes; ++node) {
+                const GlobalIndex fe_dof = static_cast<GlobalIndex>(comp) * n_nodes + node;
+                forward[static_cast<std::size_t>(fe_dof)] =
+                    node_to_backend[static_cast<std::size_t>(node)] * dof_per_node + comp;
+            }
+        }
+
+        FsilsFactory factory(dof_per_node, makePermutation(std::move(forward)));
+        auto matrix = factory.createMatrix(pattern);
+        auto* fsils = dynamic_cast<FsilsMatrix*>(matrix.get());
+        ASSERT_NE(fsils, nullptr);
+
+        auto view = matrix->createAssemblyView();
+        ASSERT_NE(view, nullptr);
+        view->beginAssemblyPhase();
+        for (GlobalIndex dof = 0; dof < n_dofs; ++dof) {
+            view->addMatrixEntry(dof,
+                                 dof,
+                                 Real(2.0) + Real(0.001) * static_cast<Real>(dof),
+                                 assembly::AddMode::Insert);
+        }
+        view->zeroRows(identity_rows, /*set_diagonal=*/true);
+        view->finalizeAssembly();
+        matrix->finalizeAssembly();
+
+        for (GlobalIndex dof = 0; dof < n_dofs; ++dof) {
+            const bool is_identity =
+                std::find(identity_rows.begin(), identity_rows.end(), dof) != identity_rows.end();
+            const Real expected =
+                is_identity ? Real(1.0) : Real(2.0) + Real(0.001) * static_cast<Real>(dof);
+            EXPECT_DOUBLE_EQ(fsils->getEntry(dof, dof), expected) << "dof=" << dof;
+        }
+
+        auto rhs = factory.createVector(n_dofs);
+        auto solution = factory.createVector(n_dofs);
+        auto exact = factory.createVector(n_dofs);
+        exact->set(1.0);
+        matrix->mult(*exact, *rhs);
+        solution->zero();
+        auto solver = factory.createLinearSolver(options);
+        const auto report = solver->solve(*matrix, *solution, *rhs);
+        EXPECT_TRUE(report.converged) << report.message;
+    };
+
+    ScopedEnvVar diagnostics("SVMP_FSILS_MATRIX_DIAGNOSTICS", "1");
+    ScopedEnvVar max_records("SVMP_FSILS_MATRIX_DIAGNOSTICS_MAX_RECORDS", "2");
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    exercise_ordering(natural_node_to_backend);
+    exercise_ordering(morton_node_to_backend);
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    auto occurrence_count = [&](const std::string& needle) {
+        std::size_t count = 0;
+        for (std::size_t pos = 0;
+             (pos = log_output.find(needle, pos)) != std::string::npos;
+             pos += needle.size()) {
+            ++count;
+        }
+        return count;
+    };
+    EXPECT_EQ(occurrence_count(
+                  " rows=324 zero_rows=0 missing_diag=0 diag_col_mismatch=0 zero_diag=0 "),
+              2u)
+        << log_output;
+    EXPECT_EQ(occurrence_count(
+                  " legacy_scan_zero_diag=0 diag_ptr_legacy_scan_abs_mismatch=0 "
+                  "structural_diag_entries=81 duplicate_diag_entries=0 "
+                  "duplicate_diag_rows=0 max_diag_entries_per_row=1 "),
+              2u)
+        << log_output;
+    for (int comp = 0; comp < dof_per_node; ++comp) {
+        const auto component = std::to_string(comp);
+        EXPECT_EQ(occurrence_count(
+                      " component" + component + "_rows=81 component" + component +
+                      "_zero_rows=0 component" + component +
+                      "_missing_diag=0 component" + component +
+                      "_diag_col_mismatch=0 component" + component + "_zero_diag=0 "),
+                  2u)
+            << log_output;
+        EXPECT_EQ(occurrence_count(
+                      " component" + component + "_legacy_scan_zero_diag=0 component" +
+                      component + "_diag_ptr_legacy_scan_abs_mismatch=0 "),
+                  2u)
+            << log_output;
+    }
 }
 
 TEST(FsilsBackend, MatrixResolutionCacheIsStableAcrossRepeatedAndReorderedQueries)

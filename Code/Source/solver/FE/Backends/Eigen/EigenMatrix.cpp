@@ -12,6 +12,9 @@
 #include "Sparsity/SparsityPattern.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 
 namespace svmp {
@@ -140,6 +143,17 @@ private:
 
 EigenMatrix::EigenMatrix(const sparsity::SparsityPattern& pattern)
 {
+    initializeFromPattern(pattern);
+}
+
+bool EigenMatrix::reinitFromPattern(const sparsity::SparsityPattern& pattern)
+{
+    initializeFromPattern(pattern);
+    return true;
+}
+
+void EigenMatrix::initializeFromPattern(const sparsity::SparsityPattern& pattern)
+{
     FE_THROW_IF(!pattern.isFinalized(), InvalidArgumentException,
                 "EigenMatrix: sparsity pattern must be finalized");
 
@@ -253,6 +267,41 @@ void EigenMatrix::addValue(GlobalIndex row_g, GlobalIndex col_g, Real value, ass
     const auto* finish = inner + end;
     const auto it = std::lower_bound(begin, finish, col);
     if (it == finish || *it != col) {
+        // Out-of-pattern write: correct only when the sparsity pattern covers
+        // every assembly write. Constraint condensation requires elimination
+        // fill in the pattern; constraints introduced after setup (e.g.,
+        // cut-context-dependent aggregation) can otherwise lose master
+        // couplings here, producing a Jacobian inconsistent with the residual.
+        // A dropped write is therefore always a defect signal: warn once by
+        // default, log samples with SVMP_EIGEN_COUNT_DROPPED=1, and throw
+        // with SVMP_EIGEN_STRICT_PATTERN=1.
+        static const bool strict_pattern = [] {
+            const char* env = std::getenv("SVMP_EIGEN_STRICT_PATTERN");
+            return env != nullptr && env[0] != '\0' && env[0] != '0';
+        }();
+        static const bool count_dropped = [] {
+            const char* env = std::getenv("SVMP_EIGEN_COUNT_DROPPED");
+            return env != nullptr && env[0] != '\0' && env[0] != '0';
+        }();
+        static std::atomic<long> dropped{0};
+        const long n = ++dropped;
+        if (strict_pattern) {
+            FE_THROW(FEException,
+                     "EigenMatrix::addValue: out-of-pattern write (row=" +
+                         std::to_string(row_g) + " col=" + std::to_string(col_g) +
+                         " value=" + std::to_string(value) +
+                         "); the sparsity pattern is stale (SVMP_EIGEN_STRICT_PATTERN=1)");
+        }
+        if (n == 1 || (count_dropped && (n <= 32 || n % 100000 == 0))) {
+            std::fprintf(stderr,
+                         "[EigenMatrix] %s out-of-pattern write #%ld (row=%lld col=%lld value=%.6g)%s\n",
+                         "dropped", n, static_cast<long long>(row_g),
+                         static_cast<long long>(col_g),
+                         static_cast<double>(value),
+                         n == 1 ? " — stale sparsity pattern? (set SVMP_EIGEN_COUNT_DROPPED=1 for samples,"
+                                  " SVMP_EIGEN_STRICT_PATTERN=1 to fail fast)"
+                                : "");
+        }
         return;
     }
 

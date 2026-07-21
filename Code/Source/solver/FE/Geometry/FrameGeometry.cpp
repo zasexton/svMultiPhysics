@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -489,6 +490,39 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     return D;
 }
 
+[[nodiscard]] GeometryMapping::MappingHessian canonicalToFacetHessian(
+    ElementType face_type,
+    std::span<const LocalIndex> align_facet_to_reference)
+{
+    GeometryMapping::MappingHessian H{};
+    if (face_type != ElementType::Quad4 ||
+        align_facet_to_reference.size() != 4u) {
+        return H;
+    }
+
+    // A facet permutation maps the canonical square through the bilinear
+    // corner weights.  Valid quad alignments are affine dihedral maps, but
+    // retaining this mixed derivative makes the chain rule exact even when a
+    // caller supplies a general (non-dihedral) corner permutation.
+    constexpr std::array<Real, 4> d2w_dsdt{
+        Real(1), Real(-1), Real(1), Real(-1)};
+    const auto add_mixed_derivative = [&](std::size_t local, int component) {
+        const auto src =
+            static_cast<std::size_t>(align_facet_to_reference[local]);
+        FE_THROW_IF(src >= 4u, FEException,
+                    "FrameGeometry: invalid quad face alignment index");
+        const Real value = Real(0.25) * d2w_dsdt[src];
+        const auto c = static_cast<std::size_t>(component);
+        H[c](0, 1) += value;
+        H[c](1, 0) += value;
+    };
+    add_mixed_derivative(1u, 0);
+    add_mixed_derivative(2u, 0);
+    add_mixed_derivative(2u, 1);
+    add_mixed_derivative(3u, 1);
+    return H;
+}
+
 [[nodiscard]] math::Matrix<Real, 3, 3> referenceFacetJacobian(
     ElementType cell_type,
     LocalIndex local_face_id,
@@ -522,6 +556,35 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     return D;
 }
 
+[[nodiscard]] GeometryMapping::MappingHessian referenceFacetHessian(
+    ElementType cell_type,
+    LocalIndex local_face_id)
+{
+    GeometryMapping::MappingHessian H{};
+    const int dim = element_dimension(cell_type);
+    if (dim != 3) {
+        return H;
+    }
+
+    auto [unused_vertices, coords] =
+        elements::ElementTransform::facet_vertices(
+            cell_type, static_cast<int>(local_face_id));
+    (void)unused_vertices;
+    if (coords.size() < 4u) {
+        return H;
+    }
+
+    // The reference quad-face map is bilinear.  Its only nonzero second
+    // derivative is d2 xi / (ds dt).
+    for (std::size_t r = 0; r < 3u; ++r) {
+        const Real mixed =
+            coords[0][r] - coords[1][r] + coords[2][r] - coords[3][r];
+        H[r](0, 1) = mixed;
+        H[r](1, 0) = mixed;
+    }
+    return H;
+}
+
 [[nodiscard]] math::Matrix<Real, 3, 3> referenceToCanonicalFaceJacobian(
     ElementType cell_type,
     LocalIndex local_face_id,
@@ -533,6 +596,56 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
         canonicalToFacetCoordinates(face_type, canonical_point, align_facet_to_reference);
     return referenceFacetJacobian(cell_type, local_face_id, facet_coords) *
            canonicalToFacetJacobian(face_type, canonical_point, align_facet_to_reference);
+}
+
+[[nodiscard]] GeometryMapping::MappingHessian referenceToCanonicalFaceHessian(
+    ElementType cell_type,
+    LocalIndex local_face_id,
+    ElementType face_type,
+    const math::Vector<Real, 3>& canonical_point,
+    std::span<const LocalIndex> align_facet_to_reference)
+{
+    GeometryMapping::MappingHessian H{};
+    const int face_dim = (face_type == ElementType::Line2) ? 1 : 2;
+    const int cell_dim = element_dimension(cell_type);
+    const auto facet_coords =
+        canonicalToFacetCoordinates(face_type,
+                                    canonical_point,
+                                    align_facet_to_reference);
+    const auto d_facet_d_canonical =
+        canonicalToFacetJacobian(face_type,
+                                 canonical_point,
+                                 align_facet_to_reference);
+    const auto d2_facet_d_canonical2 =
+        canonicalToFacetHessian(face_type, align_facet_to_reference);
+    const auto d_reference_d_facet =
+        referenceFacetJacobian(cell_type, local_face_id, facet_coords);
+    const auto d2_reference_d_facet2 =
+        referenceFacetHessian(cell_type, local_face_id);
+
+    for (int i = 0; i < cell_dim; ++i) {
+        const auto si = static_cast<std::size_t>(i);
+        for (int a = 0; a < face_dim; ++a) {
+            const auto sa = static_cast<std::size_t>(a);
+            for (int b = 0; b < face_dim; ++b) {
+                const auto sb = static_cast<std::size_t>(b);
+                Real value = Real(0);
+                for (int k = 0; k < face_dim; ++k) {
+                    const auto sk = static_cast<std::size_t>(k);
+                    value += d_reference_d_facet(si, sk) *
+                             d2_facet_d_canonical2[sk](sa, sb);
+                    for (int l = 0; l < face_dim; ++l) {
+                        const auto sl = static_cast<std::size_t>(l);
+                        value += d2_reference_d_facet2[si](sk, sl) *
+                                 d_facet_d_canonical(sk, sa) *
+                                 d_facet_d_canonical(sl, sb);
+                    }
+                }
+                H[si](sa, sb) = value;
+            }
+        }
+    }
+    return H;
 }
 
 [[nodiscard]] Matrix3x3 analyticSurfaceJacobian(
@@ -574,21 +687,6 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     return out;
 }
 
-[[nodiscard]] math::Vector<Real, 3> physicalPointOnFace(
-    const GeometryMapping& mapping,
-    ElementType cell_type,
-    LocalIndex local_face_id,
-    ElementType face_type,
-    const math::Vector<Real, 3>& canonical_point,
-    std::span<const LocalIndex> align_facet_to_reference)
-{
-    const auto facet_coords =
-        canonicalToFacetCoordinates(face_type, canonical_point, align_facet_to_reference);
-    const auto xi = elements::ElementTransform::facet_to_reference(
-        cell_type, static_cast<int>(local_face_id), facet_coords);
-    return mapping.map_to_physical(xi);
-}
-
 [[nodiscard]] math::Vector<Real, 3> surfaceJacobianColumn(
     const Matrix3x3& surface_jacobian,
     std::size_t column) noexcept
@@ -597,6 +695,117 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
         surface_jacobian[0][column],
         surface_jacobian[1][column],
         surface_jacobian[2][column]};
+}
+
+[[nodiscard]] bool finiteVector(const math::Vector<Real, 3>& value) noexcept
+{
+    return std::isfinite(value[0]) && std::isfinite(value[1]) &&
+           std::isfinite(value[2]);
+}
+
+[[nodiscard]] Real stableVectorNorm(const math::Vector<Real, 3>& value) noexcept
+{
+    const Real scale = std::max(
+        {std::abs(value[0]), std::abs(value[1]), std::abs(value[2])});
+    if (scale == Real(0)) {
+        return Real(0);
+    }
+    if (!std::isfinite(scale)) {
+        return std::numeric_limits<Real>::infinity();
+    }
+    const math::Vector<Real, 3> scaled = value / scale;
+    return scale * std::sqrt(scaled.dot(scaled));
+}
+
+[[nodiscard]] math::Matrix<Real, 3, 3> scaleConditionedInverse(
+    const math::Matrix<Real, 3, 3>& matrix)
+{
+    // Matrix::inverse uses an absolute determinant tolerance.  Normalize the
+    // columns so face-frame evaluation tests shape regularity rather than the
+    // physical units of an otherwise valid uniformly small element.  For
+    // J = A D, J^{-1} = D^{-1} A^{-1}.
+    std::array<Real, 3> column_scales{};
+    math::Matrix<Real, 3, 3> normalized{};
+    for (std::size_t c = 0; c < 3u; ++c) {
+        const math::Vector<Real, 3> column{
+            matrix(0, c), matrix(1, c), matrix(2, c)};
+        const Real column_scale = stableVectorNorm(column);
+        FE_THROW_IF(!std::isfinite(column_scale) || column_scale <= Real(0),
+                    FEException,
+                    "FrameGeometry: invalid Jacobian column scale");
+        column_scales[c] = column_scale;
+        for (std::size_t r = 0; r < 3u; ++r) {
+            normalized(r, c) = matrix(r, c) / column_scale;
+        }
+    }
+
+    const Real normalized_determinant = normalized.determinant();
+    FE_THROW_IF(!std::isfinite(normalized_determinant) ||
+                    math::approx_zero(normalized_determinant),
+                FEException,
+                "FrameGeometry: singular scale-conditioned Jacobian");
+    const auto normalized_inverse = normalized.inverse();
+    math::Matrix<Real, 3, 3> inverse{};
+    for (std::size_t r = 0; r < 3u; ++r) {
+        for (std::size_t c = 0; c < 3u; ++c) {
+            inverse(r, c) = normalized_inverse(r, c) / column_scales[r];
+            FE_THROW_IF(!std::isfinite(inverse(r, c)), FEException,
+                        "FrameGeometry: non-finite inverse Jacobian entry");
+        }
+    }
+    return inverse;
+}
+
+[[nodiscard]] Real mappingCoordinateSpan(const GeometryMapping& mapping)
+{
+    const auto& nodes = mapping.nodes();
+    if (nodes.empty()) {
+        return Real(0);
+    }
+
+    auto minimum = nodes.front();
+    auto maximum = nodes.front();
+    FE_THROW_IF(!finiteVector(minimum), FEException,
+                "FrameGeometry: non-finite mapping node while computing mean curvature");
+    for (const auto& node : nodes) {
+        FE_THROW_IF(!finiteVector(node), FEException,
+                    "FrameGeometry: non-finite mapping node while computing mean curvature");
+        for (std::size_t d = 0; d < 3u; ++d) {
+            minimum[d] = std::min(minimum[d], node[d]);
+            maximum[d] = std::max(maximum[d], node[d]);
+        }
+    }
+    return stableVectorNorm(maximum - minimum);
+}
+
+[[nodiscard]] math::Vector<Real, 3> faceSecondDerivative(
+    const math::Matrix<Real, 3, 3>& mapping_jacobian,
+    const GeometryMapping::MappingHessian& mapping_hessian,
+    const math::Matrix<Real, 3, 3>& d_reference_d_canonical,
+    const GeometryMapping::MappingHessian& d2_reference_d_canonical2,
+    int cell_dim,
+    int first_direction,
+    int second_direction)
+{
+    math::Vector<Real, 3> derivative{};
+    const auto a = static_cast<std::size_t>(first_direction);
+    const auto b = static_cast<std::size_t>(second_direction);
+    for (std::size_t m = 0; m < 3u; ++m) {
+        Real value = Real(0);
+        for (int i = 0; i < cell_dim; ++i) {
+            const auto si = static_cast<std::size_t>(i);
+            value += mapping_jacobian(m, si) *
+                     d2_reference_d_canonical2[si](a, b);
+            for (int j = 0; j < cell_dim; ++j) {
+                const auto sj = static_cast<std::size_t>(j);
+                value += mapping_hessian[m](si, sj) *
+                         d_reference_d_canonical(si, a) *
+                         d_reference_d_canonical(sj, b);
+            }
+        }
+        derivative[m] = value;
+    }
+    return derivative;
 }
 
 [[nodiscard]] Real meanCurvatureFromFaceGeometry(
@@ -610,67 +819,130 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     std::span<const LocalIndex> align_facet_to_reference)
 {
     const int face_dim = (face_type == ElementType::Line2) ? 1 : 2;
-    const auto n = toMathVector(normal);
-    const Real step = Real(1e-5);
-    const Real step2 = step * step;
+    const int cell_dim = element_dimension(cell_type);
+    auto n = toMathVector(normal);
+    const Real normal_norm = stableVectorNorm(n);
+    FE_THROW_IF(!std::isfinite(normal_norm) || normal_norm <= Real(0),
+                FEException,
+                "FrameGeometry: invalid normal while computing mean curvature");
+    n /= normal_norm;
 
-    auto shifted = [&](int direction, Real delta) {
-        auto point = canonical_point;
-        point[static_cast<std::size_t>(direction)] += delta;
-        return physicalPointOnFace(mapping,
-                                   cell_type,
-                                   local_face_id,
-                                   face_type,
-                                   point,
-                                   align_facet_to_reference);
-    };
-
-    const auto x0 = physicalPointOnFace(mapping,
-                                        cell_type,
+    const auto facet_coords =
+        canonicalToFacetCoordinates(face_type,
+                                    canonical_point,
+                                    align_facet_to_reference);
+    const auto xi = elements::ElementTransform::facet_to_reference(
+        cell_type, static_cast<int>(local_face_id), facet_coords);
+    const auto mapping_jacobian = mapping.jacobian(xi);
+    const auto mapping_hessian = mapping.mapping_hessian(xi);
+    const auto d_reference_d_canonical =
+        referenceToCanonicalFaceJacobian(cell_type,
+                                         local_face_id,
+                                         face_type,
+                                         canonical_point,
+                                         align_facet_to_reference);
+    const auto d2_reference_d_canonical2 =
+        referenceToCanonicalFaceHessian(cell_type,
                                         local_face_id,
                                         face_type,
                                         canonical_point,
                                         align_facet_to_reference);
-    const auto t0 = surfaceJacobianColumn(surface_jacobian, 0u);
-    const Real E = t0.dot(t0);
-    if (E <= detail::kDegenerateTol) {
-        return Real(0);
+
+    for (std::size_t r = 0; r < 3u; ++r) {
+        for (int i = 0; i < cell_dim; ++i) {
+            const auto si = static_cast<std::size_t>(i);
+            FE_THROW_IF(!std::isfinite(mapping_jacobian(r, si)), FEException,
+                        "FrameGeometry: non-finite mapping Jacobian while computing mean curvature");
+            for (int j = 0; j < cell_dim; ++j) {
+                const auto sj = static_cast<std::size_t>(j);
+                FE_THROW_IF(!std::isfinite(mapping_hessian[r](si, sj)), FEException,
+                            "FrameGeometry: non-finite mapping Hessian while computing mean curvature");
+            }
+        }
     }
 
-    const auto xuu = (shifted(0, step) - x0 * Real(2) + shifted(0, -step)) / step2;
+    const auto t0 = surfaceJacobianColumn(surface_jacobian, 0u);
+    const Real t0_norm = stableVectorNorm(t0);
+    const Real coordinate_span = mappingCoordinateSpan(mapping);
+    constexpr Real relative_degenerate_tolerance =
+        Real(64) * std::numeric_limits<Real>::epsilon();
+    FE_THROW_IF(!std::isfinite(t0_norm) ||
+                    t0_norm <= relative_degenerate_tolerance *
+                                   std::max(coordinate_span, t0_norm),
+                FEException,
+                "FrameGeometry: degenerate face tangent while computing mean curvature");
+
+    const auto xuu = faceSecondDerivative(mapping_jacobian,
+                                          mapping_hessian,
+                                          d_reference_d_canonical,
+                                          d2_reference_d_canonical2,
+                                          cell_dim,
+                                          0,
+                                          0);
+    FE_THROW_IF(!finiteVector(xuu), FEException,
+                "FrameGeometry: non-finite face Hessian while computing mean curvature");
     if (face_dim == 1) {
-        return -n.dot(xuu) / E;
+        const math::Vector<Real, 3> t0_scaled = t0 / t0_norm;
+        const math::Vector<Real, 3> xuu_scaled = xuu / t0_norm;
+        const Real curvature =
+            -n.dot(xuu_scaled) / t0_scaled.dot(t0_scaled) / t0_norm;
+        FE_THROW_IF(!std::isfinite(curvature), FEException,
+                    "FrameGeometry: non-finite mean curvature");
+        return curvature;
     }
 
     const auto t1 = surfaceJacobianColumn(surface_jacobian, 1u);
-    const Real F = t0.dot(t1);
-    const Real G = t1.dot(t1);
-    const Real det_first_form = E * G - F * F;
-    if (std::abs(det_first_form) <= detail::kDegenerateTol) {
-        return Real(0);
-    }
+    const Real t1_norm = stableVectorNorm(t1);
+    FE_THROW_IF(!std::isfinite(t1_norm) ||
+                    t1_norm <= relative_degenerate_tolerance *
+                                   std::max(coordinate_span, t1_norm),
+                FEException,
+                "FrameGeometry: degenerate face tangent while computing mean curvature");
 
-    auto shifted2 = [&](Real du, Real dv) {
-        auto point = canonical_point;
-        point[0] += du;
-        point[1] += dv;
-        return physicalPointOnFace(mapping,
-                                   cell_type,
-                                   local_face_id,
-                                   face_type,
-                                   point,
-                                   align_facet_to_reference);
-    };
+    const Real tangent_scale = std::max(t0_norm, t1_norm);
+    const math::Vector<Real, 3> t0_scaled = t0 / tangent_scale;
+    const math::Vector<Real, 3> t1_scaled = t1 / tangent_scale;
+    const Real E = t0_scaled.dot(t0_scaled);
+    const Real F = t0_scaled.dot(t1_scaled);
+    const Real G = t1_scaled.dot(t1_scaled);
+    const Real area = stableVectorNorm(t0_scaled.cross(t1_scaled));
+    const Real relative_area_tolerance =
+        Real(8) * std::sqrt(std::numeric_limits<Real>::epsilon());
+    FE_THROW_IF(!std::isfinite(area) ||
+                    area <= relative_area_tolerance * std::sqrt(E * G),
+                FEException,
+                "FrameGeometry: degenerate face metric while computing mean curvature");
 
-    const auto xvv = (shifted(1, step) - x0 * Real(2) + shifted(1, -step)) / step2;
-    const auto xuv = (shifted2(step, step) - shifted2(step, -step) -
-                      shifted2(-step, step) + shifted2(-step, -step)) /
-                     (Real(4) * step2);
+    const auto xuv = faceSecondDerivative(mapping_jacobian,
+                                          mapping_hessian,
+                                          d_reference_d_canonical,
+                                          d2_reference_d_canonical2,
+                                          cell_dim,
+                                          0,
+                                          1);
+    const auto xvv = faceSecondDerivative(mapping_jacobian,
+                                          mapping_hessian,
+                                          d_reference_d_canonical,
+                                          d2_reference_d_canonical2,
+                                          cell_dim,
+                                          1,
+                                          1);
+    FE_THROW_IF(!finiteVector(xuv) || !finiteVector(xvv), FEException,
+                "FrameGeometry: non-finite face Hessian while computing mean curvature");
 
-    const Real e = n.dot(xuu);
-    const Real f = n.dot(xuv);
-    const Real g = n.dot(xvv);
-    return -(e * G - Real(2) * f * F + g * E) / det_first_form;
+    const math::Vector<Real, 3> xuu_scaled = xuu / tangent_scale;
+    const math::Vector<Real, 3> xuv_scaled = xuv / tangent_scale;
+    const math::Vector<Real, 3> xvv_scaled = xvv / tangent_scale;
+    const Real e = n.dot(xuu_scaled);
+    const Real f = n.dot(xuv_scaled);
+    const Real g = n.dot(xvv_scaled);
+    const Real det_first_form = area * area;
+    const Real curvature =
+        -(e * G - Real(2) * f * F + g * E) /
+        det_first_form / tangent_scale;
+    FE_THROW_IF(!std::isfinite(curvature), FEException,
+                "FrameGeometry: non-finite mean curvature");
+    return curvature;
 }
 
 [[nodiscard]] FaceGeometryData evaluateFaceFrameImpl(
@@ -734,7 +1006,7 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
 
         const auto x = mapping.map_to_physical(xi);
         const auto J = mapping.jacobian(xi);
-        const auto J_inv = mapping.jacobian_inverse(xi);
+        const auto J_inv = scaleConditionedJacobianInverse(J);
         const Real det_J = mapping.jacobian_determinant(xi);
 
         data.cell_geometry.points[qidx] = toPoint(x);
@@ -792,6 +1064,12 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
 }
 
 } // namespace
+
+math::Matrix<Real, 3, 3> scaleConditionedJacobianInverse(
+    const math::Matrix<Real, 3, 3>& jacobian)
+{
+    return scaleConditionedInverse(jacobian);
+}
 
 Real NodalScalarSensitivity::at(LocalIndex q, LocalIndex node, int component) const
 {
@@ -854,7 +1132,11 @@ FrameGeometryData evaluateCellFrame(const GeometryMapping& mapping,
         const auto& xi = qpts[qidx];
         const auto x = mapping.map_to_physical(xi);
         const auto J = mapping.jacobian(xi);
-        const auto J_inv = mapping.jacobian_inverse(xi);
+        // Use the same scale-conditioned inverse as face-frame evaluation.
+        // GeometryMapping::jacobian_inverse ultimately delegates to the
+        // dense-matrix absolute determinant tolerance, which incorrectly
+        // rejects uniformly small but shape-regular physical cells.
+        const auto J_inv = scaleConditionedJacobianInverse(J);
         const Real det_J = mapping.jacobian_determinant(xi);
 
         data.points[qidx] = toPoint(x);
@@ -1069,7 +1351,7 @@ CellGeometrySensitivity evaluateCellGeometrySensitivity(
                     "FrameGeometry: geometry basis evaluation size mismatch");
 
         const auto J = mapping.jacobian(xi);
-        const auto J_inv = toArray(mapping.jacobian_inverse(xi));
+        const auto J_inv = toArray(scaleConditionedJacobianInverse(J));
         const Real det_J = mapping.jacobian_determinant(xi);
         const Real measure_sign = (det_J < Real(0)) ? Real(-1) : Real(1);
 
