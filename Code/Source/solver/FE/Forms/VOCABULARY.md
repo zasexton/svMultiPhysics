@@ -190,6 +190,7 @@ Status: `implemented/public`.
 | `.ds(marker)` | Boundary integral; `marker = -1` means default/all as supported by assembly |
 | `.dS()` | Interior facet integral |
 | `.dI(interface_marker)` | Registered interface-face integral |
+| `dInterfaceBoundary(expr, marker)` | Generated interface-boundary intersection measure; shares `.dI(marker)` dispatch, but the registered rule carries explicit geometric dimension d-2 (0D point in 2D, 1D line in 3D) and receives the codimension-two Jacobian |
 | `.dCutVolume(interface_marker, side)` | Generated cut-volume integral over the selected interface side |
 
 The compiler/IR distinguishes `Cell`, `Boundary`, `InteriorFace`,

@@ -81,6 +81,16 @@ inline ConstitutiveCall constitutive(std::shared_ptr<const ConstitutiveModel> mo
     return ConstitutiveCall{FormExpr::constitutive(std::move(model), std::move(inputs))};
 }
 
+// Generic generated-interface/boundary intersections are imported into the
+// cut-integration context as generated rules with their own marker and an
+// explicit d-2 geometric dimension. This helper shares dI dispatch, while the
+// rule metadata selects the codimension-two Jacobian in the assembler.
+[[nodiscard]] inline FormExpr dInterfaceBoundary(const FormExpr& integrand,
+                                                 int intersection_marker)
+{
+    return integrand.dI(intersection_marker);
+}
+
 inline ConstitutiveCall constitutive(std::shared_ptr<const ConstitutiveModel> model, std::initializer_list<FormExpr> inputs)
 {
     return ConstitutiveCall{FormExpr::constitutive(std::move(model), std::vector<FormExpr>(inputs.begin(), inputs.end()))};

@@ -308,6 +308,88 @@ TEST(FormsBoundaryConditions, ApplyRobinValue_AddsTwoBoundaryTermsPerMarker)
     EXPECT_TRUE(saw_rhs);
 }
 
+TEST(FormsBoundaryConditions, NaturalBCUsesGeneratedActiveBoundaryWhenProvided)
+{
+    auto space = svmp::FE::spaces::H1Space(ElementType::Tetra4, /*order=*/1);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(space, "v");
+
+    auto residual = (u * v).dx();
+    svmp::FE::forms::bc::NaturalBC bc(
+        /*boundary_marker=*/5,
+        svmp::FE::forms::FormExpr::constant(2.0),
+        /*generated_active_boundary_marker=*/105);
+    bc.contributeToResidual(residual, u, v);
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+    int generated_terms = 0;
+    int whole_face_terms = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain == svmp::FE::forms::IntegralDomain::InterfaceFace &&
+            term.interface_marker == 105) {
+            ++generated_terms;
+        }
+        if (term.domain == svmp::FE::forms::IntegralDomain::Boundary &&
+            term.boundary_marker == 5) {
+            ++whole_face_terms;
+        }
+    }
+
+    EXPECT_EQ(generated_terms, 1);
+    EXPECT_EQ(whole_face_terms, 0);
+}
+
+TEST(FormsBoundaryConditions, RobinBCUsesGeneratedActiveBoundaryWhenProvided)
+{
+    auto space = svmp::FE::spaces::H1Space(ElementType::Tetra4, /*order=*/1);
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(space, "v");
+
+    auto residual = (u * v).dx();
+    svmp::FE::forms::bc::RobinBC bc(
+        /*boundary_marker=*/7,
+        svmp::FE::forms::FormExpr::constant(3.0),
+        svmp::FE::forms::FormExpr::constant(4.0),
+        /*generated_active_boundary_marker=*/107);
+    bc.contributeToResidual(residual, u, v);
+
+    svmp::FE::forms::FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+    int generated_terms = 0;
+    int whole_face_terms = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain == svmp::FE::forms::IntegralDomain::InterfaceFace &&
+            term.interface_marker == 107) {
+            ++generated_terms;
+        }
+        if (term.domain == svmp::FE::forms::IntegralDomain::Boundary &&
+            term.boundary_marker == 7) {
+            ++whole_face_terms;
+        }
+    }
+
+    EXPECT_EQ(generated_terms, 2);
+    EXPECT_EQ(whole_face_terms, 0);
+}
+
+TEST(FormsBoundaryConditions, GeneratedActiveBoundaryMarkerMustBeNonnegative)
+{
+    EXPECT_THROW(
+        svmp::FE::forms::bc::NaturalBC(
+            /*boundary_marker=*/3,
+            svmp::FE::forms::FormExpr::constant(1.0),
+            /*generated_active_boundary_marker=*/-1),
+        std::invalid_argument);
+    EXPECT_THROW(
+        svmp::FE::forms::bc::RobinBC(
+            /*boundary_marker=*/3,
+            svmp::FE::forms::FormExpr::constant(1.0),
+            svmp::FE::forms::FormExpr::constant(0.0),
+            /*generated_active_boundary_marker=*/-1),
+        std::invalid_argument);
+}
+
 TEST(FormsBoundaryConditions, NormalComponentHelperBuildsScalarBoundaryTrace) {
     auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
     const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");

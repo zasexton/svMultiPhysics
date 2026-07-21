@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -99,15 +100,23 @@ private:
  */
 class NaturalBC : public BoundaryCondition {
 public:
-    NaturalBC(int boundary_marker, FormExpr flux)
+    NaturalBC(int boundary_marker,
+              FormExpr flux,
+              std::optional<int> generated_active_boundary_marker = std::nullopt)
         : boundary_marker_(boundary_marker)
         , flux_(std::move(flux))
+        , generated_active_boundary_marker_(generated_active_boundary_marker)
     {
         if (boundary_marker_ < 0) {
             throw std::invalid_argument("NaturalBC: boundary_marker must be >= 0");
         }
         if (!flux_.isValid()) {
             throw std::invalid_argument("NaturalBC: invalid flux expression");
+        }
+        if (generated_active_boundary_marker_.has_value() &&
+            *generated_active_boundary_marker_ < 0) {
+            throw std::invalid_argument(
+                "NaturalBC: generated active-boundary marker must be nonnegative");
         }
     }
 
@@ -117,7 +126,11 @@ public:
                               const FormExpr& /*u*/,
                               const FormExpr& v) const override
     {
-        residual = residual - inner(flux_, v).ds(boundary_marker_);
+        const auto integrand = inner(flux_, v);
+        residual = residual -
+                   (generated_active_boundary_marker_.has_value()
+                        ? integrand.dI(*generated_active_boundary_marker_)
+                        : integrand.ds(boundary_marker_));
     }
 
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
@@ -144,6 +157,7 @@ private:
 protected:
     int boundary_marker_{-1};
     FormExpr flux_{};
+    std::optional<int> generated_active_boundary_marker_{};
 };
 
 /**
@@ -151,10 +165,14 @@ protected:
  */
 class RobinBC : public BoundaryCondition {
 public:
-    RobinBC(int boundary_marker, FormExpr alpha, FormExpr rhs)
+    RobinBC(int boundary_marker,
+            FormExpr alpha,
+            FormExpr rhs,
+            std::optional<int> generated_active_boundary_marker = std::nullopt)
         : boundary_marker_(boundary_marker)
         , alpha_(std::move(alpha))
         , rhs_(std::move(rhs))
+        , generated_active_boundary_marker_(generated_active_boundary_marker)
     {
         if (boundary_marker_ < 0) {
             throw std::invalid_argument("RobinBC: boundary_marker must be >= 0");
@@ -165,6 +183,11 @@ public:
         if (!rhs_.isValid()) {
             throw std::invalid_argument("RobinBC: invalid rhs expression");
         }
+        if (generated_active_boundary_marker_.has_value() &&
+            *generated_active_boundary_marker_ < 0) {
+            throw std::invalid_argument(
+                "RobinBC: generated active-boundary marker must be nonnegative");
+        }
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
@@ -173,7 +196,15 @@ public:
                               const FormExpr& u,
                               const FormExpr& v) const override
     {
-        residual = residual + (alpha_ * inner(u, v)).ds(boundary_marker_) - inner(rhs_, v).ds(boundary_marker_);
+        const auto lhs = alpha_ * inner(u, v);
+        const auto rhs = inner(rhs_, v);
+        residual = residual +
+                   (generated_active_boundary_marker_.has_value()
+                        ? lhs.dI(*generated_active_boundary_marker_)
+                        : lhs.ds(boundary_marker_)) -
+                   (generated_active_boundary_marker_.has_value()
+                        ? rhs.dI(*generated_active_boundary_marker_)
+                        : rhs.ds(boundary_marker_));
     }
 
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
@@ -201,6 +232,7 @@ protected:
     int boundary_marker_{-1};
     FormExpr alpha_{};
     FormExpr rhs_{};
+    std::optional<int> generated_active_boundary_marker_{};
 };
 
 /**
