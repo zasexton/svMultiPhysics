@@ -1604,6 +1604,13 @@ public:
     void addCutIntegrationContextUpdateCallback(
         CutIntegrationContextUpdateCallback hook);
 
+    void beginCutIntegrationContextTransaction();
+    void commitCutIntegrationContextTransaction();
+    void rollbackCutIntegrationContextTransaction();
+    [[nodiscard]] bool cutIntegrationContextTransactionActive() const noexcept {
+        return cut_integration_context_transaction_backup_ != nullptr;
+    }
+
     void setCutIntegrationContext(std::shared_ptr<const assembly::CutIntegrationContext> context) {
         if (cut_integration_context_.get() != context.get()) {
             bumpConstraintLayoutRevision();
@@ -1832,6 +1839,20 @@ private:
     OperatorRegistry operator_registry_;
     std::vector<FormCellDomainRestriction> form_install_cell_domain_restrictions_{};
     std::shared_ptr<const assembly::CutIntegrationContext> cut_integration_context_{};
+    struct CutIntegrationContextTransactionBackup {
+        std::shared_ptr<const assembly::CutIntegrationContext> context{};
+        constraints::AffineConstraints affine_constraints{};
+        FELayoutRevisionState fe_layout_revisions{};
+        constraints::ConstraintRevisionSnapshot constraint_revision_snapshot{};
+        std::uint64_t constraint_structure_signature{0};
+        std::uint64_t sparsity_pattern_revision{0};
+        std::optional<analysis::ConstraintAnalysisSummary> constraint_summary{};
+        std::optional<analysis::ProblemAnalysisReport> analysis_report_cache{};
+        std::uint64_t analysis_inputs_version{0};
+        std::uint64_t analysis_report_version{0};
+    };
+    std::unique_ptr<CutIntegrationContextTransactionBackup>
+        cut_integration_context_transaction_backup_{};
     std::vector<CutIntegrationContextUpdateCallback>
         cut_integration_context_update_callbacks_{};
     std::set<InterfaceId> generated_embedded_interface_markers_{};

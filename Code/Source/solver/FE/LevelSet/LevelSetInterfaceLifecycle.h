@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 
@@ -188,10 +189,22 @@ public:
     [[nodiscard]] std::uint64_t valueRevision() const noexcept { return value_revision_; }
     void restoreValueRevision(std::uint64_t value_revision) noexcept;
 
+    void beginTransaction();
+    void commitTransaction();
+    void rollbackTransaction();
+    [[nodiscard]] bool transactionActive() const noexcept {
+        return transaction_active_;
+    }
+
 private:
     interfaces::GeneratedInterfaceMarkerRegistry marker_registry_;
     std::uint64_t value_revision_{0};
     std::unique_ptr<Cache> cache_;
+    bool transaction_active_{false};
+    std::optional<interfaces::GeneratedInterfaceMarkerRegistry>
+        transaction_marker_registry_backup_{};
+    std::uint64_t transaction_value_revision_backup_{0};
+    std::unique_ptr<Cache> transaction_cache_backup_{};
 };
 
 } // namespace svmp::FE::level_set

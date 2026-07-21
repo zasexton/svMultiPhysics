@@ -6192,6 +6192,65 @@ void FESystem::refreshSparsityForConstraintStructureChange()
                 std::to_string(sparsity_pattern_revision_));
 }
 
+void FESystem::beginCutIntegrationContextTransaction()
+{
+    requireSetup();
+    if (cut_integration_context_transaction_backup_) {
+        throw std::logic_error(
+            "FESystem cut-integration-context transaction is already active");
+    }
+    auto backup =
+        std::make_unique<CutIntegrationContextTransactionBackup>();
+    backup->context = cut_integration_context_;
+    backup->affine_constraints = affine_constraints_;
+    backup->fe_layout_revisions = fe_layout_revisions_;
+    backup->constraint_revision_snapshot = constraint_revision_snapshot_;
+    backup->constraint_structure_signature =
+        constraint_structure_signature_;
+    backup->sparsity_pattern_revision = sparsity_pattern_revision_;
+    backup->constraint_summary = constraint_summary_;
+    backup->analysis_report_cache = analysis_report_cache_;
+    backup->analysis_inputs_version = analysis_inputs_version_;
+    backup->analysis_report_version = analysis_report_version_;
+    cut_integration_context_transaction_backup_ = std::move(backup);
+}
+
+void FESystem::commitCutIntegrationContextTransaction()
+{
+    if (!cut_integration_context_transaction_backup_) {
+        throw std::logic_error(
+            "FESystem cut-integration-context transaction is not active");
+    }
+    cut_integration_context_transaction_backup_.reset();
+}
+
+void FESystem::rollbackCutIntegrationContextTransaction()
+{
+    if (!cut_integration_context_transaction_backup_) {
+        throw std::logic_error(
+            "FESystem cut-integration-context transaction is not active");
+    }
+    auto& backup = *cut_integration_context_transaction_backup_;
+    cut_integration_context_ = backup.context;
+    for (const auto& hook : cut_integration_context_update_callbacks_) {
+        if (hook.callback) {
+            hook.callback(cut_integration_context_.get());
+        }
+    }
+    affine_constraints_ = backup.affine_constraints;
+    refreshSparsityForConstraintStructureChange();
+    fe_layout_revisions_ = backup.fe_layout_revisions;
+    constraint_revision_snapshot_ = backup.constraint_revision_snapshot;
+    constraint_structure_signature_ =
+        backup.constraint_structure_signature;
+    sparsity_pattern_revision_ = backup.sparsity_pattern_revision;
+    constraint_summary_ = backup.constraint_summary;
+    analysis_report_cache_ = backup.analysis_report_cache;
+    analysis_inputs_version_ = backup.analysis_inputs_version;
+    analysis_report_version_ = backup.analysis_report_version;
+    cut_integration_context_transaction_backup_.reset();
+}
+
 void FESystem::rebuildConstraintState()
 {
     requireSetup();

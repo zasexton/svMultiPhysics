@@ -2882,6 +2882,79 @@ TEST(LevelSetInterfaceLifecycle, ReusesUnchangedGeneratedInterfaceCells)
               fresh_updated.domain.volumeRegions().size());
 }
 
+TEST(LevelSetInterfaceLifecycle,
+     TransactionRollbackRestoresRevisionAndGeneratedDomainCache)
+{
+    constexpr int interface_marker = 875;
+    const auto mesh = std::make_shared<MixedQuadTriangleMeshAccess>();
+    auto scalar_space = std::make_shared<MixedQuadTriangleLinearH1Space>();
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeMixedQuadTriangleSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < mesh->numVertices(); ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(
+            solution,
+            system,
+            phi,
+            vertex,
+            vertex < 4 ? x[0] : x[0] - FE::Real{2.5});
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "transaction-interface";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::Auto;
+    options.interface_quadrature_order = 1;
+    options.volume_quadrature_order = 1;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto initial = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(initial.success) << initial.diagnostic;
+    ASSERT_EQ(lifecycle.valueRevision(), initial.value_revision);
+
+    auto candidate = solution;
+    setFieldComponentValue(
+        candidate, system, phi, 0, FE::Real{-0.75});
+    ASSERT_NO_THROW(lifecycle.beginTransaction());
+    EXPECT_TRUE(lifecycle.transactionActive());
+    EXPECT_THROW(lifecycle.beginTransaction(), std::logic_error);
+    const auto candidate_result = lifecycle.build(system, options, candidate);
+    ASSERT_TRUE(candidate_result.success) << candidate_result.diagnostic;
+    EXPECT_EQ(candidate_result.value_revision, initial.value_revision + 1u);
+    EXPECT_EQ(candidate_result.domain_cache_hits, 0u);
+
+    ASSERT_NO_THROW(lifecycle.rollbackTransaction());
+    EXPECT_FALSE(lifecycle.transactionActive());
+    EXPECT_EQ(lifecycle.valueRevision(), initial.value_revision);
+    EXPECT_THROW(lifecycle.rollbackTransaction(), std::logic_error);
+
+    const auto rebuilt = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(rebuilt.success) << rebuilt.diagnostic;
+    EXPECT_EQ(rebuilt.value_revision, initial.value_revision + 1u);
+    EXPECT_EQ(rebuilt.domain_cache_hits, 1u);
+    EXPECT_EQ(rebuilt.cell_cache_hits, rebuilt.cell_count);
+    EXPECT_EQ(rebuilt.cell_cache_misses, 0u);
+    EXPECT_NEAR(rebuilt.summary.negative_volume_measure,
+                initial.summary.negative_volume_measure,
+                1.0e-12);
+    EXPECT_NEAR(rebuilt.summary.positive_volume_measure,
+                initial.summary.positive_volume_measure,
+                1.0e-12);
+}
+
 TEST(LevelSetInterfaceLifecycle, ReusesCellsAcrossUnrelatedMeshFieldLayoutChanges)
 {
     constexpr int interface_marker = 878;

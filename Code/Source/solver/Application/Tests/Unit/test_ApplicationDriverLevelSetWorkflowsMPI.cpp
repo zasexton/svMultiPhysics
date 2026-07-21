@@ -1774,14 +1774,16 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
 )xml");
 
   svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+  ActiveCutContextRefreshCache refresh_cache;
   ActiveCutContextRefreshReport report{};
-  ASSERT_NO_THROW(report = refreshActiveCutIntegrationContextFromSolution(
-                      sim,
-                      *params,
-                      std::span<const svmp::FE::Real>(solution.data(),
-                                                      solution.size()),
-                      lifecycle,
-                      "application-driver-mpi-boundary-marker-union-test"));
+  ASSERT_NO_THROW(
+      report = refreshActiveCutIntegrationContextFromSolutionCached(
+          sim,
+          *params,
+          std::span<const svmp::FE::Real>(solution.data(), solution.size()),
+          lifecycle,
+          refresh_cache,
+          "application-driver-mpi-boundary-marker-union-test"));
   EXPECT_TRUE(report.refreshed);
   // The serial eight-cell strip has reference area 32 (the Quad4 parent area
   // is four) and physical area eight.  phi=y-0.5 bisects both exactly.  Ghost
@@ -1798,6 +1800,137 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   EXPECT_NEAR(report.positive_volume, 16.0, 1.0e-12);
   EXPECT_NEAR(report.negative_physical_volume, 4.0, 1.0e-12);
   EXPECT_NEAR(report.positive_physical_volume, 4.0, 1.0e-12);
+
+  const auto active_cut_requests = activeCutVolumeRequests(*params);
+  ASSERT_EQ(active_cut_requests.size(), 1u);
+  const auto* original_context = sim.fe_system->cutIntegrationContext();
+  ASSERT_NE(original_context, nullptr);
+  const auto lifecycle_revision_before_transaction =
+      lifecycle.valueRevision();
+  const auto constraint_revision_before_transaction =
+      sim.fe_system->constraintLayoutRevision();
+  const auto sparsity_revision_before_transaction =
+      sim.fe_system->sparsityPatternRevision();
+  const auto constraint_count_before_transaction =
+      sim.fe_system->constraints().numConstraints();
+  const auto mesh_revisions_before_transaction =
+      mesh->event_bus().revision_state();
+  const auto refresh_cache_before_transaction = refresh_cache;
+  const auto mesh_phi_count =
+      mesh->field_components(mesh_field) *
+      mesh->field_entity_count(mesh_field);
+  const auto* mesh_phi_data_before_transaction =
+      static_cast<const svmp::real_t*>(mesh->field_data(mesh_field));
+  ASSERT_NE(mesh_phi_data_before_transaction, nullptr);
+  const std::vector<svmp::real_t> mesh_phi_before_transaction(
+      mesh_phi_data_before_transaction,
+      mesh_phi_data_before_transaction + mesh_phi_count);
+
+  auto candidate_solution = solution;
+  for (std::size_t field_dof = 0;
+       field_dof < static_cast<std::size_t>(field_dofs.getNumDofs());
+       ++field_dof) {
+    const auto index = static_cast<std::size_t>(field_offset) + field_dof;
+    ASSERT_LT(index, candidate_solution.size());
+    candidate_solution[index] += svmp::FE::Real{0.2};
+  }
+  LevelSetMaintenanceGeometryTransaction geometry_transaction(
+      sim, lifecycle, refresh_cache, active_cut_requests);
+  ActiveCutContextRefreshReport candidate_report{};
+  ASSERT_NO_THROW(candidate_report = geometry_transaction.refresh(
+                      *params,
+                      std::span<const svmp::FE::Real>(
+                          candidate_solution.data(),
+                          candidate_solution.size())));
+  EXPECT_TRUE(candidate_report.refreshed);
+  EXPECT_NE(sim.fe_system->cutIntegrationContext(), original_context);
+  EXPECT_TRUE(sim.fe_system->cutIntegrationContextTransactionActive());
+  EXPECT_TRUE(lifecycle.transactionActive());
+  ASSERT_NO_THROW(geometry_transaction.rollback());
+
+  EXPECT_EQ(sim.fe_system->cutIntegrationContext(), original_context);
+  EXPECT_FALSE(sim.fe_system->cutIntegrationContextTransactionActive());
+  EXPECT_FALSE(lifecycle.transactionActive());
+  EXPECT_EQ(lifecycle.valueRevision(),
+            lifecycle_revision_before_transaction);
+  EXPECT_EQ(sim.fe_system->constraintLayoutRevision(),
+            constraint_revision_before_transaction);
+  EXPECT_EQ(sim.fe_system->sparsityPatternRevision(),
+            sparsity_revision_before_transaction);
+  EXPECT_EQ(sim.fe_system->constraints().numConstraints(),
+            constraint_count_before_transaction);
+  ASSERT_EQ(refresh_cache.last_signature.has_value(),
+            refresh_cache_before_transaction.last_signature.has_value());
+  if (refresh_cache.last_signature.has_value()) {
+    EXPECT_TRUE(*refresh_cache.last_signature ==
+                *refresh_cache_before_transaction.last_signature);
+  }
+  ASSERT_EQ(
+      refresh_cache.last_vector_signature.has_value(),
+      refresh_cache_before_transaction.last_vector_signature.has_value());
+  if (refresh_cache.last_vector_signature.has_value()) {
+    EXPECT_TRUE(*refresh_cache.last_vector_signature ==
+                *refresh_cache_before_transaction.last_vector_signature);
+  }
+  const auto mesh_revisions_after_transaction =
+      mesh->event_bus().revision_state();
+  EXPECT_EQ(mesh_revisions_after_transaction.geometry,
+            mesh_revisions_before_transaction.geometry);
+  EXPECT_EQ(mesh_revisions_after_transaction.reference_geometry,
+            mesh_revisions_before_transaction.reference_geometry);
+  EXPECT_EQ(mesh_revisions_after_transaction.current_geometry,
+            mesh_revisions_before_transaction.current_geometry);
+  EXPECT_EQ(mesh_revisions_after_transaction.reference_rebase,
+            mesh_revisions_before_transaction.reference_rebase);
+  EXPECT_EQ(mesh_revisions_after_transaction.topology,
+            mesh_revisions_before_transaction.topology);
+  EXPECT_EQ(mesh_revisions_after_transaction.ownership,
+            mesh_revisions_before_transaction.ownership);
+  EXPECT_EQ(mesh_revisions_after_transaction.numbering,
+            mesh_revisions_before_transaction.numbering);
+  EXPECT_EQ(mesh_revisions_after_transaction.field_layout,
+            mesh_revisions_before_transaction.field_layout);
+  EXPECT_EQ(mesh_revisions_after_transaction.labels,
+            mesh_revisions_before_transaction.labels);
+  EXPECT_EQ(mesh_revisions_after_transaction.active_configuration,
+            mesh_revisions_before_transaction.active_configuration);
+  const auto* mesh_phi_data_after_transaction =
+      static_cast<const svmp::real_t*>(mesh->field_data(mesh_field));
+  ASSERT_NE(mesh_phi_data_after_transaction, nullptr);
+  EXPECT_EQ(std::vector<svmp::real_t>(
+                mesh_phi_data_after_transaction,
+                mesh_phi_data_after_transaction + mesh_phi_count),
+            mesh_phi_before_transaction);
+
+  const auto cached_restored_report =
+      refreshActiveCutIntegrationContextFromSolutionCached(
+          sim,
+          *params,
+          std::span<const svmp::FE::Real>(solution.data(), solution.size()),
+          lifecycle,
+          refresh_cache,
+          "application-driver-mpi-maintenance-transaction-restored");
+  EXPECT_FALSE(cached_restored_report.refreshed);
+  EXPECT_EQ(sim.fe_system->cutIntegrationContext(), original_context);
+  EXPECT_EQ(lifecycle.valueRevision(),
+            lifecycle_revision_before_transaction);
+
+  const int local_transaction_restored =
+      sim.fe_system->cutIntegrationContext() == original_context &&
+              lifecycle.valueRevision() ==
+                  lifecycle_revision_before_transaction &&
+              mesh_revisions_after_transaction.active_configuration ==
+                  mesh_revisions_before_transaction.active_configuration
+          ? 1
+          : 0;
+  int communicator_transaction_restored = 0;
+  MPI_Allreduce(&local_transaction_restored,
+                &communicator_transaction_restored,
+                1,
+                MPI_INT,
+                MPI_MIN,
+                MPI_COMM_WORLD);
+  EXPECT_EQ(communicator_transaction_restored, 1);
 
   ASSERT_TRUE(sim.fe_system->dofPermutation());
   svmp::FE::backends::FsilsFactory maintenance_factory(

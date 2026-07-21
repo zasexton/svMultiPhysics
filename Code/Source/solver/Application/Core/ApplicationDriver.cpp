@@ -54,6 +54,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <filesystem>
 #include <iomanip>
@@ -5807,6 +5808,10 @@ struct LevelSetVolumeCorrectionMaintenanceEvent {
   svmp::FE::level_set::LevelSetGlobalShiftCorrectionResult correction{};
 };
 
+using LevelSetMaintenanceCandidateValidator = std::function<void(
+    std::span<const svmp::FE::Real>,
+    std::span<const LevelSetVolumeCorrectionMaintenanceEvent>)>;
+
 bool applyLevelSetMaintenance(
     application::core::SimulationComponents& sim,
     svmp::FE::timestepping::TimeHistory& history,
@@ -5817,7 +5822,8 @@ bool applyLevelSetMaintenance(
         accepted_contact_stage_constraints = {},
     std::span<const svmp::FE::Real> accepted_contact_stage_solution = {},
     std::vector<LevelSetVolumeCorrectionMaintenanceEvent>*
-        applied_volume_corrections = nullptr)
+        applied_volume_corrections = nullptr,
+    const LevelSetMaintenanceCandidateValidator& validate_candidate = {})
 {
   if (applied_volume_corrections != nullptr) {
     applied_volume_corrections->clear();
@@ -6184,6 +6190,10 @@ bool applyLevelSetMaintenance(
     }
   }
 
+  if (changed && validate_candidate) {
+    validate_candidate(fe_solution, staged_volume_corrections);
+  }
+
   if (changed) {
     // Reinitialization and a global shift change the level-set
     // representation after the physical step.  Apply the identical FE
@@ -6227,20 +6237,25 @@ bool applyLevelSetMaintenance(
     auto current_solution = gatherFeOrderedSolution(history.u());
     const auto synchronized_dofs =
         apply_representation_delta(current_solution);
-    scatterFeOrderedSolution(history.u(), current_solution);
-
-    auto previous_solution = gatherFeOrderedSolution(history.uPrev());
-    (void)apply_representation_delta(previous_solution);
-    scatterFeOrderedSolution(history.uPrev(), previous_solution);
-    for (int k = 2; k <= history.historyDepth(); ++k) {
-      auto older_solution = gatherFeOrderedSolution(history.uPrevK(k));
-      (void)apply_representation_delta(older_solution);
-      scatterFeOrderedSolution(history.uPrevK(k), older_solution);
+    std::vector<std::vector<svmp::FE::Real>> synchronized_history;
+    synchronized_history.reserve(
+        static_cast<std::size_t>(history.historyDepth()));
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+      auto previous_solution =
+          gatherFeOrderedSolution(history.uPrevK(k));
+      (void)apply_representation_delta(previous_solution);
+      synchronized_history.push_back(std::move(previous_solution));
     }
-    history.updateGhosts();
+    if (synchronized_history.empty()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set maintenance requires at least one FE history level.");
+    }
     const auto current_previous_delta = globalMaxAbsDifference(
-        history.uSpan(),
-        history.uPrevSpan(),
+        std::span<const svmp::FE::Real>(current_solution.data(),
+                                       current_solution.size()),
+        std::span<const svmp::FE::Real>(
+            synchronized_history.front().data(),
+            synchronized_history.front().size()),
         activeFESystemCommunicator(*sim.fe_system));
     std::ostringstream log;
     log
@@ -6254,6 +6269,17 @@ bool applyLevelSetMaintenance(
         << " current_previous_max_abs_delta=" << current_previous_delta
         << " history_depth=" << history.historyDepth();
     staged_commit_logs.push_back(log.str());
+
+    // Every size, field-slice, collective, and diagnostic invariant has now
+    // passed.  Publish the staged coefficient arrays only after those checks
+    // so a rejected candidate leaves every accepted history vector untouched.
+    scatterFeOrderedSolution(history.u(), current_solution);
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+      scatterFeOrderedSolution(
+          history.uPrevK(k),
+          synchronized_history[static_cast<std::size_t>(k - 1)]);
+    }
+    history.updateGhosts();
   }
   requests = std::move(staged_requests);
   for (const auto& log : staged_commit_logs) {
@@ -6265,7 +6291,7 @@ bool applyLevelSetMaintenance(
   return changed;
 }
 
-void logLevelSetVolumeCorrectionFreeSurfaceWork(
+std::vector<std::string> buildLevelSetVolumeCorrectionFreeSurfaceWorkLogs(
     application::core::SimulationComponents& sim,
     std::span<const LevelSetVolumeCorrectionMaintenanceEvent> events,
     std::span<const svmp::FE::systems::
@@ -6275,6 +6301,7 @@ void logLevelSetVolumeCorrectionFreeSurfaceWork(
                         AcceptedFreeSurfaceDiscreteFunctionalState>
         after)
 {
+  std::vector<std::string> logs;
   if (!sim.fe_system) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Volume-correction work accounting requires an FE system.");
@@ -6287,7 +6314,7 @@ void logLevelSetVolumeCorrectionFreeSurfaceWork(
         "[svMultiPhysics::Application] Applied volume-correction event coverage differs across the FE communicator.");
   }
   if (events.empty()) {
-    return;
+    return logs;
   }
   const auto declarations =
       sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
@@ -6569,7 +6596,24 @@ void logLevelSetVolumeCorrectionFreeSurfaceWork(
         << (functional_count > 0u ? "declared_free_surface_functional"
                                   : "non_free_surface_level_set")
         << functional_details.str();
-    application::core::oopCout() << log.str() << std::endl;
+    logs.push_back(log.str());
+  }
+  return logs;
+}
+
+void logLevelSetVolumeCorrectionFreeSurfaceWork(
+    application::core::SimulationComponents& sim,
+    std::span<const LevelSetVolumeCorrectionMaintenanceEvent> events,
+    std::span<const svmp::FE::systems::
+                        AcceptedFreeSurfaceDiscreteFunctionalState>
+        before,
+    std::span<const svmp::FE::systems::
+                        AcceptedFreeSurfaceDiscreteFunctionalState>
+        after)
+{
+  for (const auto& log : buildLevelSetVolumeCorrectionFreeSurfaceWorkLogs(
+           sim, events, before, after)) {
+    application::core::oopCout() << log << std::endl;
   }
 }
 
@@ -7826,6 +7870,101 @@ std::size_t projectLevelSetCurvatureFieldsFromState(
   }
 
   return updated_fields;
+}
+
+struct ActiveLevelSetMeshFieldCheckpoint {
+  struct Field {
+    std::string name{};
+    std::size_t components{0};
+    std::size_t entity_count{0};
+    std::vector<double> values{};
+  };
+
+  bool valid{false};
+  svmp::MeshRevisionState revisions{};
+  std::vector<Field> fields{};
+};
+
+ActiveLevelSetMeshFieldCheckpoint captureActiveLevelSetMeshFields(
+    application::core::SimulationComponents& sim,
+    const std::vector<ActiveCutVolumeRequest>& requests)
+{
+  ActiveLevelSetMeshFieldCheckpoint checkpoint;
+  if (!sim.primary_mesh) {
+    return checkpoint;
+  }
+  auto& mesh = *sim.primary_mesh;
+  checkpoint.valid = true;
+  checkpoint.revisions = mesh.event_bus().revision_state();
+  std::set<std::string> visited_fields;
+  for (const auto& request : requests) {
+    if (!visited_fields.insert(request.level_set_field_name).second ||
+        !mesh.has_field(
+            svmp::EntityKind::Vertex, request.level_set_field_name)) {
+      continue;
+    }
+    const auto handle = mesh.field_handle(
+        svmp::EntityKind::Vertex, request.level_set_field_name);
+    if (mesh.field_type(handle) != svmp::FieldScalarType::Float64) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Cannot checkpoint a non-Float64 active level-set mesh field.");
+    }
+    ActiveLevelSetMeshFieldCheckpoint::Field field;
+    field.name = request.level_set_field_name;
+    field.components = mesh.field_components(handle);
+    field.entity_count = mesh.field_entity_count(handle);
+    const auto value_count = field.components * field.entity_count;
+    const auto* data = static_cast<const double*>(mesh.field_data(handle));
+    if (value_count > 0u && data == nullptr) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Cannot checkpoint an empty active level-set mesh field.");
+    }
+    if (value_count > 0u) {
+      field.values.assign(data, data + value_count);
+    }
+    checkpoint.fields.push_back(std::move(field));
+  }
+  return checkpoint;
+}
+
+void restoreActiveLevelSetMeshFields(
+    application::core::SimulationComponents& sim,
+    const ActiveLevelSetMeshFieldCheckpoint& checkpoint)
+{
+  if (!checkpoint.valid) {
+    return;
+  }
+  if (!sim.primary_mesh) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Cannot restore active level-set mesh fields without the checkpointed mesh.");
+  }
+  auto& mesh = *sim.primary_mesh;
+  for (const auto& field : checkpoint.fields) {
+    if (!mesh.has_field(svmp::EntityKind::Vertex, field.name)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] A checkpointed active level-set mesh field disappeared during maintenance.");
+    }
+    const auto handle =
+        mesh.field_handle(svmp::EntityKind::Vertex, field.name);
+    if (mesh.field_type(handle) != svmp::FieldScalarType::Float64 ||
+        mesh.field_components(handle) != field.components ||
+        mesh.field_entity_count(handle) != field.entity_count) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] A checkpointed active level-set mesh field changed layout during maintenance.");
+    }
+    auto* data = static_cast<double*>(mesh.field_data(handle));
+    if (!field.values.empty() && data == nullptr) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] A checkpointed active level-set mesh field has no restore storage.");
+    }
+    if (!field.values.empty()) {
+      std::copy(field.values.begin(), field.values.end(), data);
+    }
+  }
+  if (!checkpoint.fields.empty()) {
+    mesh.event_bus().notify(svmp::MeshEvent::FieldsChanged);
+  }
+  mesh.event_bus().restore_revision_state(checkpoint.revisions);
 }
 
 std::size_t syncActiveLevelSetVertexFieldsFromSolution(
@@ -10465,6 +10604,133 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCached(
       solution_source);
 }
 
+class LevelSetMaintenanceGeometryTransaction {
+public:
+  LevelSetMaintenanceGeometryTransaction(
+      application::core::SimulationComponents& sim,
+      svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
+      ActiveCutContextRefreshCache& refresh_cache,
+      const std::vector<ActiveCutVolumeRequest>& requests)
+      : sim_(sim),
+        lifecycle_(lifecycle),
+        refresh_cache_(refresh_cache),
+        refresh_cache_backup_(refresh_cache),
+        mesh_field_checkpoint_(
+            captureActiveLevelSetMeshFields(sim, requests))
+  {
+    if (!sim_.fe_system) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set maintenance geometry transaction requires an FE system.");
+    }
+    lifecycle_.beginTransaction();
+    lifecycle_transaction_active_ = true;
+    try {
+      sim_.fe_system->beginCutIntegrationContextTransaction();
+      system_transaction_active_ = true;
+      active_ = true;
+    } catch (...) {
+      lifecycle_.rollbackTransaction();
+      lifecycle_transaction_active_ = false;
+      throw;
+    }
+  }
+
+  LevelSetMaintenanceGeometryTransaction(
+      const LevelSetMaintenanceGeometryTransaction&) = delete;
+  LevelSetMaintenanceGeometryTransaction& operator=(
+      const LevelSetMaintenanceGeometryTransaction&) = delete;
+
+  ~LevelSetMaintenanceGeometryTransaction()
+  {
+    if (!active_) {
+      return;
+    }
+    try {
+      rollback();
+    } catch (...) {
+    }
+  }
+
+  [[nodiscard]] ActiveCutContextRefreshReport refresh(
+      const Parameters& params,
+      std::span<const svmp::FE::Real> candidate)
+  {
+    if (!active_) {
+      throw std::logic_error(
+          "level-set maintenance geometry transaction is not active");
+    }
+    return refreshActiveCutIntegrationContextFromSolutionCached(
+        sim_,
+        params,
+        candidate,
+        lifecycle_,
+        refresh_cache_,
+        "accepted_step_maintenance_candidate",
+        "staged_fe_solution");
+  }
+
+  void commit()
+  {
+    if (!active_ || !system_transaction_active_ ||
+        !lifecycle_transaction_active_) {
+      throw std::logic_error(
+          "level-set maintenance geometry transaction is not active");
+    }
+    sim_.fe_system->commitCutIntegrationContextTransaction();
+    system_transaction_active_ = false;
+    lifecycle_.commitTransaction();
+    lifecycle_transaction_active_ = false;
+    active_ = false;
+  }
+
+  void rollback()
+  {
+    if (!active_) {
+      return;
+    }
+    std::exception_ptr first_failure;
+    const auto attempt = [&](auto&& action) {
+      try {
+        action();
+      } catch (...) {
+        if (!first_failure) {
+          first_failure = std::current_exception();
+        }
+      }
+    };
+    attempt([&] {
+      restoreActiveLevelSetMeshFields(sim_, mesh_field_checkpoint_);
+    });
+    if (system_transaction_active_) {
+      attempt([&] {
+        sim_.fe_system->rollbackCutIntegrationContextTransaction();
+        system_transaction_active_ = false;
+      });
+    }
+    if (lifecycle_transaction_active_) {
+      attempt([&] {
+        lifecycle_.rollbackTransaction();
+        lifecycle_transaction_active_ = false;
+      });
+    }
+    attempt([&] { refresh_cache_ = refresh_cache_backup_; });
+    active_ = false;
+    if (first_failure) {
+      std::rethrow_exception(first_failure);
+    }
+  }
+
+private:
+  application::core::SimulationComponents& sim_;
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle_;
+  ActiveCutContextRefreshCache& refresh_cache_;
+  ActiveCutContextRefreshCache refresh_cache_backup_{};
+  ActiveLevelSetMeshFieldCheckpoint mesh_field_checkpoint_{};
+  bool lifecycle_transaction_active_{false};
+  bool system_transaction_active_{false};
+  bool active_{false};
+};
+
 class ZeroTimeDerivativeIntegrator final : public svmp::FE::systems::TimeIntegrator {
 public:
   [[nodiscard]] std::string name() const override { return "ZeroTimeDerivative"; }
@@ -11497,27 +11763,91 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     }
     std::vector<LevelSetVolumeCorrectionMaintenanceEvent>
         applied_volume_corrections;
-    const bool level_set_maintenance_changed = applyLevelSetMaintenance(
-        sim,
-        h,
-        level_set_maintenance,
-        pending_contact_stages,
-        pending_contact_stage_constraints,
-        pending_contact_stage_solution,
-        &applied_volume_corrections);
-    const auto cut_report = refreshActiveCutIntegrationContextCached(
-        sim, params, h.u(), *cut_lifecycle, *cut_refresh_cache,
-        "accepted_step");
-    if (!applied_volume_corrections.empty()) {
-      std::vector<
-          svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
-          post_maintenance_functionals =
-              evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
-      logLevelSetVolumeCorrectionFreeSurfaceWork(
+    std::vector<std::string> volume_correction_work_logs;
+    ActiveCutContextRefreshReport cut_report{};
+    std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
+        maintenance_geometry_transaction;
+    bool level_set_maintenance_changed = false;
+    try {
+      const LevelSetMaintenanceCandidateValidator validate_candidate =
+          [&](std::span<const svmp::FE::Real> candidate,
+              std::span<const LevelSetVolumeCorrectionMaintenanceEvent>
+                  staged_volume_corrections) {
+            maintenance_geometry_transaction =
+                std::make_unique<LevelSetMaintenanceGeometryTransaction>(
+                    sim,
+                    *cut_lifecycle,
+                    *cut_refresh_cache,
+                    transient_active_cut_requests);
+            cut_report = maintenance_geometry_transaction->refresh(
+                params, candidate);
+            if (!staged_volume_corrections.empty()) {
+              const auto post_maintenance_functionals =
+                  evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+              volume_correction_work_logs =
+                  buildLevelSetVolumeCorrectionFreeSurfaceWorkLogs(
+                      sim,
+                      staged_volume_corrections,
+                      pre_maintenance_functionals,
+                      post_maintenance_functionals);
+            }
+          };
+      level_set_maintenance_changed = applyLevelSetMaintenance(
           sim,
-          applied_volume_corrections,
-          pre_maintenance_functionals,
-          post_maintenance_functionals);
+          h,
+          level_set_maintenance,
+          pending_contact_stages,
+          pending_contact_stage_constraints,
+          pending_contact_stage_solution,
+          &applied_volume_corrections,
+          validate_candidate);
+      if (maintenance_geometry_transaction) {
+        maintenance_geometry_transaction->commit();
+        oopCout()
+            << "[svMultiPhysics::Application] Level-set maintenance transaction"
+            << " diagnostic=level_set_maintenance_transaction"
+            << " step=" << h.stepIndex()
+            << " outcome=committed"
+            << " geometry_validated_before_commit=true"
+            << " accepted_state_change=true"
+            << " volume_corrections="
+            << applied_volume_corrections.size() << std::endl;
+      }
+    } catch (...) {
+      const auto failure = std::current_exception();
+      std::string rollback_failure;
+      if (maintenance_geometry_transaction) {
+        try {
+          maintenance_geometry_transaction->rollback();
+        } catch (const std::exception& error) {
+          rollback_failure = error.what();
+        } catch (...) {
+          rollback_failure = "unknown rollback failure";
+        }
+      }
+      oopCout()
+          << "[svMultiPhysics::Application] Level-set maintenance transaction"
+          << " diagnostic=level_set_maintenance_transaction"
+          << " step=" << h.stepIndex()
+          << " outcome=rolled_back"
+          << " accepted_state_change=false"
+          << " geometry_state_restored="
+          << (rollback_failure.empty() ? "true" : "false")
+          << std::endl;
+      if (!rollback_failure.empty()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set maintenance rollback failed after candidate rejection: " +
+            rollback_failure);
+      }
+      std::rethrow_exception(failure);
+    }
+    if (!level_set_maintenance_changed) {
+      cut_report = refreshActiveCutIntegrationContextCached(
+          sim, params, h.u(), *cut_lifecycle, *cut_refresh_cache,
+          "accepted_step");
+    }
+    for (const auto& log : volume_correction_work_logs) {
+      oopCout() << log << std::endl;
     }
     if (parseBoolEnv("SVMP_CUT_RULE_DUMP", false)) {
       dumpActiveCutVolumeRulesForProbe(*sim.fe_system, h.stepIndex());

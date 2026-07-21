@@ -20,9 +20,11 @@
 #include "Spaces/ProductSpace.h"
 #include "Systems/FESystem.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -508,6 +510,104 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 3)));
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 4)));
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 5)));
+#endif
+}
+
+TEST(LevelSetActiveSideVertexDirichletConstraint,
+     CutContextTransactionRollbackRestoresStructuralConstraintState)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = buildTwoQuadStripWithCutLeftCell();
+    auto space = std::make_shared<spaces::H1Space>(
+        ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<LevelSetActiveSideVertexDirichletConstraint>(
+            pressure,
+            "phi",
+            LevelSetConstraintSide::Negative,
+            Real{0.0},
+            Real{0.0}));
+
+    ASSERT_NO_THROW(system.setup());
+    const auto dry_bottom = vertexDof(system, pressure, 2);
+    const auto dry_top = vertexDof(system, pressure, 5);
+    ASSERT_TRUE(system.constraints().isConstrained(dry_bottom));
+    ASSERT_TRUE(system.constraints().isConstrained(dry_top));
+    const auto original_constraint_count =
+        system.constraints().numConstraints();
+    const auto original_layout_revision = system.constraintLayoutRevision();
+    const auto original_sparsity_revision =
+        system.sparsityPatternRevision();
+    const auto original_mesh_revisions =
+        mesh->event_bus().revision_state();
+    const auto original_constraint_revisions =
+        system.constraintRevisionSnapshot();
+    EXPECT_EQ(system.cutIntegrationContext(), nullptr);
+    EXPECT_FALSE(system.constraintStateStaleForCurrentRevisions());
+
+    const auto phi_handle = MeshFields::get_field_handle(
+        mesh->local_mesh(), EntityKind::Vertex, "phi");
+    auto* phi = MeshFields::field_data_as<real_t>(
+        mesh->local_mesh(), phi_handle);
+    ASSERT_NE(phi, nullptr);
+    const std::vector<real_t> original_phi(phi, phi + mesh->n_vertices());
+
+    ASSERT_NO_THROW(system.beginCutIntegrationContextTransaction());
+    EXPECT_TRUE(system.cutIntegrationContextTransactionActive());
+    EXPECT_THROW(system.beginCutIntegrationContextTransaction(),
+                 std::logic_error);
+    phi[2] = -1.0;
+    phi[5] = -1.0;
+    mesh->event_bus().notify(MeshEvent::FieldsChanged);
+    const auto refresh =
+        system.refreshConstraintStateForCurrentRevisions(
+            /*time=*/0.0,
+            /*dt=*/0.0,
+            /*allow_structural_rebuild=*/true);
+    ASSERT_TRUE(refresh.structural_rebuild);
+    EXPECT_FALSE(system.constraints().isConstrained(dry_bottom));
+    EXPECT_FALSE(system.constraints().isConstrained(dry_top));
+    EXPECT_NE(system.constraints().numConstraints(),
+              original_constraint_count);
+    EXPECT_NE(system.constraintLayoutRevision(), original_layout_revision);
+    EXPECT_NE(system.sparsityPatternRevision(), original_sparsity_revision);
+
+    auto candidate_context =
+        std::make_shared<assembly::CutIntegrationContext>();
+    system.setCutIntegrationContext(candidate_context);
+    EXPECT_EQ(system.cutIntegrationContext(), candidate_context.get());
+
+    std::copy(original_phi.begin(), original_phi.end(), phi);
+    mesh->event_bus().notify(MeshEvent::FieldsChanged);
+    mesh->event_bus().restore_revision_state(original_mesh_revisions);
+    ASSERT_NO_THROW(system.rollbackCutIntegrationContextTransaction());
+    EXPECT_FALSE(system.cutIntegrationContextTransactionActive());
+    EXPECT_THROW(system.rollbackCutIntegrationContextTransaction(),
+                 std::logic_error);
+
+    EXPECT_EQ(system.cutIntegrationContext(), nullptr);
+    EXPECT_EQ(system.constraints().numConstraints(),
+              original_constraint_count);
+    EXPECT_TRUE(system.constraints().isConstrained(dry_bottom));
+    EXPECT_TRUE(system.constraints().isConstrained(dry_top));
+    EXPECT_EQ(system.constraintLayoutRevision(), original_layout_revision);
+    EXPECT_EQ(system.sparsityPatternRevision(), original_sparsity_revision);
+    EXPECT_FALSE(system.constraintStateStaleForCurrentRevisions());
+    const auto restored_constraint_revisions =
+        system.constraintRevisionSnapshot();
+    EXPECT_EQ(restored_constraint_revisions.valid,
+              original_constraint_revisions.valid);
+    EXPECT_EQ(restored_constraint_revisions.mesh_field_values,
+              original_constraint_revisions.mesh_field_values);
+    EXPECT_EQ(restored_constraint_revisions.fe_constraint_layout,
+              original_constraint_revisions.fe_constraint_layout);
 #endif
 }
 

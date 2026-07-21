@@ -2022,6 +2022,50 @@ void LevelSetGeneratedInterfaceLifecycle::restoreValueRevision(
     value_revision_ = value_revision;
 }
 
+void LevelSetGeneratedInterfaceLifecycle::beginTransaction()
+{
+    if (transaction_active_) {
+        throw std::logic_error(
+            "generated level-set interface lifecycle transaction is already active");
+    }
+    auto marker_registry_backup = marker_registry_;
+    auto cache_backup =
+        cache_ ? std::make_unique<Cache>(*cache_) : std::unique_ptr<Cache>{};
+    transaction_marker_registry_backup_ =
+        std::move(marker_registry_backup);
+    transaction_value_revision_backup_ = value_revision_;
+    transaction_cache_backup_ = std::move(cache_backup);
+    transaction_active_ = true;
+}
+
+void LevelSetGeneratedInterfaceLifecycle::commitTransaction()
+{
+    if (!transaction_active_) {
+        throw std::logic_error(
+            "generated level-set interface lifecycle transaction is not active");
+    }
+    transaction_marker_registry_backup_.reset();
+    transaction_cache_backup_.reset();
+    transaction_value_revision_backup_ = 0;
+    transaction_active_ = false;
+}
+
+void LevelSetGeneratedInterfaceLifecycle::rollbackTransaction()
+{
+    if (!transaction_active_ ||
+        !transaction_marker_registry_backup_.has_value()) {
+        throw std::logic_error(
+            "generated level-set interface lifecycle transaction is not active");
+    }
+    marker_registry_ =
+        std::move(*transaction_marker_registry_backup_);
+    value_revision_ = transaction_value_revision_backup_;
+    cache_ = std::move(transaction_cache_backup_);
+    transaction_marker_registry_backup_.reset();
+    transaction_value_revision_backup_ = 0;
+    transaction_active_ = false;
+}
+
 std::string levelSetImplicitCutBackendCellDiagnostic(
     ImplicitCutQuadratureBackend backend,
     GlobalIndex cell_id,

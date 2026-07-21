@@ -4070,6 +4070,311 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
 }
 
 TEST(ApplicationDriverLevelSetVolumeCorrection,
+     CandidateGeometryFailureRestoresCompleteMaintenanceTransaction)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  constexpr int interface_marker = 809;
+  auto mesh = makeWorkflowTriangleMesh();
+  (void)svmp::MeshFields::attach_field(
+      mesh->local_mesh(),
+      svmp::EntityKind::Vertex,
+      "phi",
+      svmp::FieldScalarType::Float64,
+      1);
+  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+      svmp::FE::ElementType::Triangle3,
+      /*order=*/1);
+  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "phi",
+      .space = scalar_space,
+      .components = 1,
+  });
+  ASSERT_NO_THROW(system->setup({}));
+
+  std::vector<svmp::FE::Real> phi_vertex_values(mesh->n_vertices(), 0.0);
+  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+    phi_vertex_values[vertex] =
+        workflowVertexPoint(*mesh, vertex)[0] - svmp::FE::Real{0.5};
+  }
+  const auto coefficients = projectWorkflowVertexValues(
+      *system,
+      phi,
+      phi_vertex_values,
+      /*components=*/1u,
+      "ApplicationDriver maintenance transaction phi");
+  std::vector<svmp::FE::Real> initial(
+      static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
+  writeWorkflowFieldSlice(*system, phi, coefficients, initial);
+
+  std::unique_ptr<svmp::FE::backends::BackendFactory> factory;
+  try {
+    factory = svmp::FE::backends::BackendFactory::create(
+        svmp::FE::backends::BackendKind::FSILS);
+  } catch (const std::exception&) {
+    GTEST_SKIP() << "Requires an available FE vector backend.";
+  }
+  auto history = svmp::FE::timestepping::TimeHistory::allocate(
+      *factory,
+      system->dofHandler().getNumDofs(),
+      /*history_depth=*/2,
+      /*allocate_second_order_state=*/true);
+  history.setStepIndex(1);
+  history.setDt(0.1);
+  history.setPrevDt(0.1);
+  scatterFeOrderedSolution(history.u(), initial);
+  scatterFeOrderedSolution(history.uPrev(), initial);
+  scatterFeOrderedSolution(history.uPrev2(), initial);
+  std::vector<svmp::FE::Real> rates(initial.size(), 0.375);
+  scatterFeOrderedSolution(history.uDot(), rates);
+
+  application::core::SimulationComponents sim;
+  sim.primary_mesh = mesh;
+  sim.fe_system = std::move(system);
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>transaction_interface</Generated_interface_domain_id>
+      <Interface_marker>809</Interface_marker>
+      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  const auto active_requests = activeCutVolumeRequests(*params);
+  ASSERT_EQ(active_requests.size(), 1u);
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+  ActiveCutContextRefreshCache refresh_cache;
+  ASSERT_TRUE(refreshActiveCutIntegrationContextFromSolutionCached(
+                  sim,
+                  *params,
+                  initial,
+                  lifecycle,
+                  refresh_cache,
+                  "application-driver-maintenance-transaction-initial")
+                  .refreshed);
+
+  const auto* original_context = sim.fe_system->cutIntegrationContext();
+  ASSERT_NE(original_context, nullptr);
+  ASSERT_TRUE(original_context->hasGeneratedInterfaceMarker(interface_marker));
+  const auto lifecycle_revision_before = lifecycle.valueRevision();
+  const auto constraint_revision_before =
+      sim.fe_system->constraintLayoutRevision();
+  const auto sparsity_revision_before =
+      sim.fe_system->sparsityPatternRevision();
+  const auto constraint_count_before =
+      sim.fe_system->constraints().numConstraints();
+  const auto mesh_revisions_before = mesh->event_bus().revision_state();
+  const auto refresh_cache_before = refresh_cache;
+  const auto mesh_phi_handle = mesh->field_handle(
+      svmp::EntityKind::Vertex, "phi");
+  const auto mesh_phi_count =
+      mesh->field_components(mesh_phi_handle) *
+      mesh->field_entity_count(mesh_phi_handle);
+  const auto* mesh_phi_data_before =
+      static_cast<const double*>(mesh->field_data(mesh_phi_handle));
+  ASSERT_NE(mesh_phi_data_before, nullptr);
+  const std::vector<double> mesh_phi_before(
+      mesh_phi_data_before, mesh_phi_data_before + mesh_phi_count);
+
+  const auto current_revision_before = history.u().valueRevision();
+  const auto previous_revision_before = history.uPrev().valueRevision();
+  const auto previous2_revision_before = history.uPrev2().valueRevision();
+  const auto rate_revision_before = history.uDot().valueRevision();
+  const auto current_before = gatherFeOrderedSolution(history.u());
+  const auto previous_before = gatherFeOrderedSolution(history.uPrev());
+  const auto previous2_before = gatherFeOrderedSolution(history.uPrev2());
+  const auto rates_before = gatherFeOrderedSolution(history.uDot());
+
+  LevelSetMaintenanceRequest request{};
+  request.level_set_field_name = "phi";
+  request.volume_correction.enabled = true;
+  request.volume_correction.cadence_steps = 1;
+  request.volume_correction.use_initial_negative_volume_as_target = false;
+  request.volume_correction.target_negative_volume = 0.36;
+  request.volume_correction.minimum_relative_volume_error = 0.0;
+  request.volume_correction.maximum_interface_displacement_fraction = 0.10;
+  request.volume_correction
+      .maximum_cumulative_interface_displacement_fraction = 1.0;
+  std::vector<LevelSetMaintenanceRequest> requests{request};
+  std::vector<LevelSetVolumeCorrectionMaintenanceEvent> published_events;
+  std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
+      geometry_transaction;
+  bool candidate_context_replaced = false;
+  const LevelSetMaintenanceCandidateValidator reject_candidate =
+      [&](std::span<const svmp::FE::Real> candidate,
+          std::span<const LevelSetVolumeCorrectionMaintenanceEvent> events) {
+        if (events.size() != 1u) {
+          throw std::runtime_error(
+              "injected maintenance candidate had incomplete event coverage");
+        }
+        geometry_transaction =
+            std::make_unique<LevelSetMaintenanceGeometryTransaction>(
+                sim, lifecycle, refresh_cache, active_requests);
+        const auto report = geometry_transaction->refresh(*params, candidate);
+        candidate_context_replaced =
+            report.refreshed &&
+            sim.fe_system->cutIntegrationContext() != original_context;
+        throw std::runtime_error(
+            "injected post-refresh maintenance validation failure");
+      };
+
+  testing::internal::CaptureStdout();
+  EXPECT_THROW(
+      (void)applyLevelSetMaintenance(
+          sim,
+          history,
+          requests,
+          {},
+          {},
+          {},
+          &published_events,
+          reject_candidate),
+      std::runtime_error);
+  const auto output = testing::internal::GetCapturedStdout();
+  ASSERT_NE(geometry_transaction, nullptr);
+  ASSERT_NO_THROW(geometry_transaction->rollback());
+  EXPECT_TRUE(candidate_context_replaced);
+  EXPECT_EQ(output.find("Level-set volume corrected"), std::string::npos);
+  EXPECT_TRUE(published_events.empty());
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_FALSE(requests.front().volume_target_initialized);
+  EXPECT_DOUBLE_EQ(
+      requests.front().cumulative_volume_correction_interface_displacement,
+      0.0);
+  EXPECT_DOUBLE_EQ(
+      requests.front().cumulative_volume_correction_contact_line_displacement,
+      0.0);
+
+  EXPECT_EQ(gatherFeOrderedSolution(history.u()), current_before);
+  EXPECT_EQ(gatherFeOrderedSolution(history.uPrev()), previous_before);
+  EXPECT_EQ(gatherFeOrderedSolution(history.uPrev2()), previous2_before);
+  EXPECT_EQ(gatherFeOrderedSolution(history.uDot()), rates_before);
+  EXPECT_EQ(history.u().valueRevision(), current_revision_before);
+  EXPECT_EQ(history.uPrev().valueRevision(), previous_revision_before);
+  EXPECT_EQ(history.uPrev2().valueRevision(), previous2_revision_before);
+  EXPECT_EQ(history.uDot().valueRevision(), rate_revision_before);
+
+  EXPECT_EQ(sim.fe_system->cutIntegrationContext(), original_context);
+  EXPECT_FALSE(sim.fe_system->cutIntegrationContextTransactionActive());
+  EXPECT_FALSE(lifecycle.transactionActive());
+  EXPECT_EQ(lifecycle.valueRevision(), lifecycle_revision_before);
+  EXPECT_EQ(sim.fe_system->constraintLayoutRevision(),
+            constraint_revision_before);
+  EXPECT_EQ(sim.fe_system->sparsityPatternRevision(),
+            sparsity_revision_before);
+  EXPECT_EQ(sim.fe_system->constraints().numConstraints(),
+            constraint_count_before);
+  ASSERT_EQ(refresh_cache.last_signature.has_value(),
+            refresh_cache_before.last_signature.has_value());
+  if (refresh_cache.last_signature.has_value()) {
+    EXPECT_TRUE(*refresh_cache.last_signature ==
+                *refresh_cache_before.last_signature);
+  }
+  ASSERT_EQ(refresh_cache.last_vector_signature.has_value(),
+            refresh_cache_before.last_vector_signature.has_value());
+  if (refresh_cache.last_vector_signature.has_value()) {
+    EXPECT_TRUE(*refresh_cache.last_vector_signature ==
+                *refresh_cache_before.last_vector_signature);
+  }
+
+  const auto mesh_revisions_after = mesh->event_bus().revision_state();
+  EXPECT_EQ(mesh_revisions_after.geometry, mesh_revisions_before.geometry);
+  EXPECT_EQ(mesh_revisions_after.reference_geometry,
+            mesh_revisions_before.reference_geometry);
+  EXPECT_EQ(mesh_revisions_after.current_geometry,
+            mesh_revisions_before.current_geometry);
+  EXPECT_EQ(mesh_revisions_after.reference_rebase,
+            mesh_revisions_before.reference_rebase);
+  EXPECT_EQ(mesh_revisions_after.topology, mesh_revisions_before.topology);
+  EXPECT_EQ(mesh_revisions_after.ownership, mesh_revisions_before.ownership);
+  EXPECT_EQ(mesh_revisions_after.numbering, mesh_revisions_before.numbering);
+  EXPECT_EQ(mesh_revisions_after.field_layout,
+            mesh_revisions_before.field_layout);
+  EXPECT_EQ(mesh_revisions_after.labels, mesh_revisions_before.labels);
+  EXPECT_EQ(mesh_revisions_after.active_configuration,
+            mesh_revisions_before.active_configuration);
+  const auto* mesh_phi_data_after =
+      static_cast<const double*>(mesh->field_data(mesh_phi_handle));
+  ASSERT_NE(mesh_phi_data_after, nullptr);
+  EXPECT_EQ(std::vector<double>(
+                mesh_phi_data_after, mesh_phi_data_after + mesh_phi_count),
+            mesh_phi_before);
+
+  const auto cached_report =
+      refreshActiveCutIntegrationContextFromSolutionCached(
+          sim,
+          *params,
+          initial,
+          lifecycle,
+          refresh_cache,
+          "application-driver-maintenance-transaction-restored");
+  EXPECT_FALSE(cached_report.refreshed);
+  EXPECT_EQ(sim.fe_system->cutIntegrationContext(), original_context);
+  EXPECT_EQ(lifecycle.valueRevision(), lifecycle_revision_before);
+
+  std::vector<svmp::FE::Real> committed_candidate;
+  bool committed_candidate_refreshed = false;
+  const LevelSetMaintenanceCandidateValidator accept_candidate =
+      [&](std::span<const svmp::FE::Real> candidate,
+          std::span<const LevelSetVolumeCorrectionMaintenanceEvent> events) {
+        if (events.size() != 1u) {
+          throw std::runtime_error(
+              "accepted maintenance candidate had incomplete event coverage");
+        }
+        committed_candidate.assign(candidate.begin(), candidate.end());
+        geometry_transaction =
+            std::make_unique<LevelSetMaintenanceGeometryTransaction>(
+                sim, lifecycle, refresh_cache, active_requests);
+        const auto report = geometry_transaction->refresh(*params, candidate);
+        committed_candidate_refreshed =
+            report.refreshed &&
+            sim.fe_system->cutIntegrationContext() != original_context;
+      };
+  ASSERT_TRUE(applyLevelSetMaintenance(
+      sim,
+      history,
+      requests,
+      {},
+      {},
+      {},
+      &published_events,
+      accept_candidate));
+  ASSERT_NE(geometry_transaction, nullptr);
+  ASSERT_NO_THROW(geometry_transaction->commit());
+  EXPECT_TRUE(committed_candidate_refreshed);
+  EXPECT_FALSE(sim.fe_system->cutIntegrationContextTransactionActive());
+  EXPECT_FALSE(lifecycle.transactionActive());
+  EXPECT_NE(sim.fe_system->cutIntegrationContext(), original_context);
+  ASSERT_EQ(published_events.size(), 1u);
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_TRUE(requests.front().volume_target_initialized);
+  EXPECT_EQ(gatherFeOrderedSolution(history.u()), committed_candidate);
+  EXPECT_EQ(gatherFeOrderedSolution(history.uPrev()), committed_candidate);
+  EXPECT_EQ(gatherFeOrderedSolution(history.uPrev2()), committed_candidate);
+  EXPECT_EQ(gatherFeOrderedSolution(history.uDot()), rates_before);
+  EXPECT_GT(history.uDot().valueRevision(), rate_revision_before);
+  const auto committed_cached_report =
+      refreshActiveCutIntegrationContextFromSolutionCached(
+          sim,
+          *params,
+          committed_candidate,
+          lifecycle,
+          refresh_cache,
+          "application-driver-maintenance-transaction-committed");
+  EXPECT_FALSE(committed_cached_report.refreshed);
+#endif
+}
+
+TEST(ApplicationDriverLevelSetVolumeCorrection,
      CumulativeDisplacementBudgetRejectsBeforeAccountingExcessEvent)
 {
   LevelSetMaintenanceRequest request{};
