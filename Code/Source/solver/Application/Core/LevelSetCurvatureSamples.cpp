@@ -83,6 +83,23 @@ physicalCellPointAtReference(
 namespace application {
 namespace core {
 
+std::optional<std::array<svmp::FE::Real, 3>>
+mapLevelSetCurvatureReferenceSampleToPhysical(
+    const svmp::FE::assembly::IMeshAccess& mesh,
+    svmp::FE::GlobalIndex cell,
+    const std::array<svmp::FE::Real, 3>& reference_point)
+{
+  if (!allFinite(reference_point)) {
+    throw std::invalid_argument(
+        "level-set curvature reference sample must be finite");
+  }
+  const auto mapping = createCellGeometryMapping(mesh, cell);
+  if (mapping == nullptr) {
+    return std::nullopt;
+  }
+  return physicalCellPointAtReference(*mapping, reference_point);
+}
+
 std::vector<svmp::FE::level_set::LevelSetCurvatureProjectionSample>
 collectLevelSetCurvatureCutVolumeSupplementalSamples(
     const svmp::FE::systems::FESystem& system,
@@ -298,4 +315,3 @@ collectLevelSetCurvatureCutVolumeSupplementalSamples(
 
 } // namespace core
 } // namespace application
-

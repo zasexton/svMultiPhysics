@@ -3,6 +3,7 @@
 #include "Application/Core/LevelSetCurvatureSamples.h"
 #include "Application/Core/LevelSetMaintenanceHistory.h"
 #include "FE/Assembly/CutIntegrationContext.h"
+#include "FE/Assembly/MeshAccess.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
@@ -33,6 +34,39 @@ std::shared_ptr<svmp::Mesh> buildSingleQuadMesh()
   shape.family = svmp::CellFamily::Quad;
   shape.num_corners = 4;
   shape.order = 1;
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      x_ref,
+      cell2vertex_offsets,
+      cell2vertex,
+      {shape});
+  base->finalize();
+  return svmp::create_mesh(std::move(base));
+}
+
+std::shared_ptr<svmp::Mesh> buildWarpedBiquadraticQuadMesh()
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+
+  const std::vector<svmp::real_t> x_ref = {
+      0.0, 0.0,
+      2.0, 0.0,
+      2.0, 1.0,
+      0.0, 1.0,
+      1.0, -0.2,
+      2.2, 0.5,
+      1.0, 1.3,
+      -0.1, 0.5,
+      1.4, 0.35,
+  };
+  const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 9};
+  const std::vector<svmp::index_t> cell2vertex = {
+      0, 1, 2, 3, 4, 5, 6, 7, 8};
+
+  svmp::CellShape shape{};
+  shape.family = svmp::CellFamily::Quad;
+  shape.num_corners = 4;
+  shape.order = 2;
   base->build_from_arrays(
       /*spatial_dim=*/2,
       x_ref,
@@ -249,4 +283,32 @@ TEST(LevelSetCurvatureSamples,
           marker,
           svmp::FE::geometry::CutIntegrationSide::Positive);
   EXPECT_TRUE(positive_samples.empty());
+}
+
+TEST(LevelSetCurvatureSamples,
+     MapsWarpedHighOrderValueAndCoordinateAtIdenticalReferencePoint)
+{
+  const auto mesh = buildWarpedBiquadraticQuadMesh();
+  const svmp::FE::assembly::MeshAccess access(*mesh);
+  const std::array<svmp::FE::Real, 3> xi{{0.0, 0.0, 0.0}};
+
+  const auto physical =
+      application::core::mapLevelSetCurvatureReferenceSampleToPhysical(
+          access, 0, xi);
+  ASSERT_TRUE(physical.has_value());
+  EXPECT_NEAR((*physical)[0], 1.4, 1.0e-13);
+  EXPECT_NEAR((*physical)[1], 0.35, 1.0e-13);
+  EXPECT_NEAR((*physical)[2], 0.0, 1.0e-13);
+
+  std::vector<std::array<svmp::FE::Real, 3>> nodes;
+  access.getCellCoordinates(0, nodes);
+  ASSERT_EQ(nodes.size(), 9u);
+  std::array<svmp::FE::Real, 3> nodal_average{{0.0, 0.0, 0.0}};
+  for (const auto& node : nodes) {
+    for (std::size_t d = 0; d < nodal_average.size(); ++d) {
+      nodal_average[d] += node[d] / static_cast<svmp::FE::Real>(nodes.size());
+    }
+  }
+  EXPECT_GT(std::abs((*physical)[0] - nodal_average[0]), 0.25);
+  EXPECT_GT(std::abs((*physical)[1] - nodal_average[1]), 0.1);
 }

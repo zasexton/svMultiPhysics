@@ -6960,29 +6960,6 @@ referenceCellSamplePoint(svmp::FE::ElementType type)
   }
 }
 
-std::optional<std::array<svmp::FE::Real, 3>> physicalCellSamplePoint(
-    const svmp::FE::assembly::IMeshAccess& mesh,
-    svmp::FE::GlobalIndex cell)
-{
-  std::vector<std::array<svmp::FE::Real, 3>> coords;
-  mesh.getCellCoordinates(cell, coords);
-  if (coords.empty()) {
-    return std::nullopt;
-  }
-  std::array<svmp::FE::Real, 3> point{0.0, 0.0, 0.0};
-  for (const auto& coord : coords) {
-    point[0] += coord[0];
-    point[1] += coord[1];
-    point[2] += coord[2];
-  }
-  const auto inv =
-      svmp::FE::Real{1.0} / static_cast<svmp::FE::Real>(coords.size());
-  point[0] *= inv;
-  point[1] *= inv;
-  point[2] *= inv;
-  return point;
-}
-
 std::shared_ptr<svmp::FE::geometry::GeometryMapping> createCellGeometryMapping(
     const svmp::FE::assembly::IMeshAccess& mesh,
     svmp::FE::GlobalIndex cell)
@@ -7160,8 +7137,18 @@ collectLevelSetCurvatureSupplementalSamples(
     }
     const auto reference_point =
         referenceCellSamplePoint(mesh.getCellType(cell));
-    const auto physical_point = physicalCellSamplePoint(mesh, cell);
-    if (!reference_point.has_value() || !physical_point.has_value()) {
+    if (!reference_point.has_value()) {
+      return;
+    }
+    const std::array<svmp::FE::Real, 3> reference_coordinate{{
+        (*reference_point)[0],
+        (*reference_point)[1],
+        (*reference_point)[2],
+    }};
+    const auto physical_point =
+        application::core::mapLevelSetCurvatureReferenceSampleToPhysical(
+            mesh, cell, reference_coordinate);
+    if (!physical_point.has_value()) {
       return;
     }
     const auto cell_dofs = field_dofs.getCellDofs(cell);
