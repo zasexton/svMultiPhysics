@@ -64,6 +64,9 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
     EXPECT_EQ(options.conservative_phase.liquid_side,
               level_set::LevelSetPhaseSide::Negative);
     EXPECT_DOUBLE_EQ(options.conservative_phase.invariant_tolerance, 1.0e-12);
+    EXPECT_DOUBLE_EQ(
+        options.conservative_phase.component_activity_tolerance,
+        1.0e-8);
     EXPECT_DOUBLE_EQ(options.conservative_phase.maximum_courant, 1.0);
     EXPECT_TRUE(options.conservative_phase.enforce_courant_limit);
     EXPECT_TRUE(options.conservative_phase.require_constant_preservation);

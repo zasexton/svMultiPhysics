@@ -1212,6 +1212,9 @@ TEST(LevelSetTransport,
         options.conservative_phase.maximum_courant = 1.01;
     });
     expect_rejected_without_fields([](auto& options) {
+        options.conservative_phase.component_activity_tolerance = 0.0;
+    });
+    expect_rejected_without_fields([](auto& options) {
         options.conservative_phase.geometry_measure_tolerance = 0.0;
     });
 }

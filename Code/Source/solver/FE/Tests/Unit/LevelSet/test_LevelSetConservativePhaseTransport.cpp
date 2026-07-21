@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cmath>
 #include <limits>
 #include <string>
 
@@ -40,12 +41,21 @@ TEST(LevelSetConservativePhaseTransport,
     EXPECT_TRUE(result.constant_preservation_satisfied);
     EXPECT_EQ(result.maximum_constant_preservation_error, 0.0);
     EXPECT_TRUE(result.interior_cancellation_satisfied);
+    EXPECT_TRUE(result.component_balance_satisfied);
+    EXPECT_TRUE(result.component_measure_closure_satisfied);
     EXPECT_EQ(result.maximum_edge_pair_cancellation_residual, 0.0);
     EXPECT_EQ(result.low_order_nodal_cancellation_residual, 0.0);
     EXPECT_EQ(result.raw_nodal_cancellation_residual, 0.0);
     EXPECT_EQ(result.limited_nodal_cancellation_residual, 0.0);
+    EXPECT_EQ(result.low_order_component_transfer_closure_residual, 0.0);
+    EXPECT_EQ(result.raw_component_transfer_closure_residual, 0.0);
+    EXPECT_EQ(result.limited_component_transfer_closure_residual, 0.0);
     EXPECT_EQ(result.global_mass_balance_residual, 0.0);
     ASSERT_EQ(result.nodes.size(), previous.size());
+    ASSERT_EQ(result.components.size(), 1u);
+    EXPECT_EQ(result.components.front().component_id, 0);
+    EXPECT_EQ(result.components.front().nodes, previous.size());
+    EXPECT_EQ(result.maximum_component_balance_residual, 0.0);
     for (const auto& node : result.nodes) {
         EXPECT_EQ(node.low_order_liquid_indicator, 0.4);
         EXPECT_EQ(node.limited_liquid_indicator, 0.4);
@@ -308,6 +318,96 @@ TEST(LevelSetConservativePhaseTransport,
     EXPECT_NEAR(result.global_mass_balance_residual, 0.0, 1.0e-14);
 }
 
+TEST(LevelSetConservativePhaseTransport,
+     TracksDisconnectedPhaseSupportsAndTheirBoundaryTransfers)
+{
+    const std::array<FE::Real, 6> volumes{1.0, 1.0, 1.0,
+                                           1.0, 1.0, 1.0};
+    const std::array<FE::Real, 6> previous{0.8, 0.2, 1.0e-10,
+                                            1.0e-10, 0.3, 0.7};
+    const std::array<FE::Real, 6> lower{0.0, 0.0, 0.0,
+                                         0.0, 0.0, 0.0};
+    const std::array<FE::Real, 6> upper{1.0, 1.0, 1.0,
+                                         1.0, 1.0, 1.0};
+    const std::array<FE::Real, 6> boundary{0.02, 0.0, 0.0,
+                                            0.0, 0.0, -0.02};
+    const std::array<level_set::LevelSetPhaseFluxEdge, 5> edges{
+        level_set::LevelSetPhaseFluxEdge{0, 1, 0.05, 0.30},
+        level_set::LevelSetPhaseFluxEdge{1, 2, 0.0, 0.0},
+        level_set::LevelSetPhaseFluxEdge{2, 3, 0.0, 0.0},
+        level_set::LevelSetPhaseFluxEdge{3, 4, 0.0, 0.0},
+        level_set::LevelSetPhaseFluxEdge{4, 5, -0.05, -0.30},
+    };
+
+    const auto result =
+        level_set::applyLevelSetConservativePhaseFluxCorrection(
+            level_set::LevelSetPhaseFluxStageView{
+                .lumped_control_volume = volumes,
+                .previous_liquid_indicator = previous,
+                .lower_liquid_indicator = lower,
+                .upper_liquid_indicator = upper,
+                .interior_edges = edges,
+                .physical_boundary_mass_transfer = boundary,
+                .component_activity_tolerance = 1.0e-8,
+                .require_constant_preservation = false,
+            });
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_TRUE(result.applied);
+    EXPECT_TRUE(result.component_balance_satisfied);
+    EXPECT_TRUE(result.component_measure_closure_satisfied);
+    EXPECT_TRUE(result.subthreshold_component_present);
+    EXPECT_DOUBLE_EQ(result.component_activity_tolerance, 1.0e-8);
+    ASSERT_EQ(result.node_component_ids.size(), previous.size());
+    EXPECT_EQ(result.node_component_ids[0], 0);
+    EXPECT_EQ(result.node_component_ids[1], 0);
+    EXPECT_EQ(result.node_component_ids[2], FE::INVALID_GLOBAL_INDEX);
+    EXPECT_EQ(result.node_component_ids[3], FE::INVALID_GLOBAL_INDEX);
+    EXPECT_EQ(result.node_component_ids[4], 4);
+    EXPECT_EQ(result.node_component_ids[5], 4);
+    ASSERT_EQ(result.components.size(), 2u);
+    EXPECT_EQ(result.subthreshold_component.nodes, 2u);
+    EXPECT_NEAR(result.subthreshold_component.previous_liquid_measure,
+                2.0e-10, 1.0e-20);
+    EXPECT_NEAR(result.subthreshold_component.limited_liquid_measure,
+                2.0e-10, 1.0e-20);
+    EXPECT_NEAR(result.subthreshold_component.limited_balance_residual,
+                0.0, 1.0e-20);
+    EXPECT_EQ(result.components[0].component_id, 0);
+    EXPECT_EQ(result.components[0].nodes, 2u);
+    EXPECT_NEAR(result.components[0].previous_liquid_measure,
+                1.0, 1.0e-14);
+    EXPECT_NEAR(result.components[0].limited_liquid_measure,
+                1.02, 1.0e-14);
+    EXPECT_NEAR(result.components[0].physical_boundary_mass_transfer,
+                0.02, 1.0e-14);
+    EXPECT_NEAR(result.components[0].limited_balance_residual,
+                0.0, 1.0e-14);
+    EXPECT_EQ(result.components[1].component_id, 4);
+    EXPECT_EQ(result.components[1].nodes, 2u);
+    EXPECT_NEAR(result.components[1].previous_liquid_measure,
+                1.0, 1.0e-14);
+    EXPECT_NEAR(result.components[1].limited_liquid_measure,
+                0.98, 1.0e-14);
+    EXPECT_NEAR(result.components[1].physical_boundary_mass_transfer,
+                -0.02, 1.0e-14);
+    EXPECT_NEAR(result.components[1].limited_balance_residual,
+                0.0, 1.0e-14);
+    EXPECT_LE(result.maximum_component_balance_residual, 3.0e-16);
+    EXPECT_LE(std::abs(
+                  result.limited_component_measure_closure_residual),
+              2.0e-16);
+    EXPECT_LE(std::abs(
+                  result.low_order_component_transfer_closure_residual),
+              2.0e-16);
+    EXPECT_LE(std::abs(
+                  result.raw_component_transfer_closure_residual),
+              2.0e-16);
+    EXPECT_LE(std::abs(
+                  result.limited_component_transfer_closure_residual),
+              2.0e-16);
+}
+
 TEST(LevelSetConservativePhaseTransport, RejectsInvalidNodalStageData)
 {
     const std::array<FE::Real, 2> volumes{1.0, 0.0};
@@ -360,6 +460,18 @@ TEST(LevelSetConservativePhaseTransport, RejectsInvalidNodalStageData)
         });
     EXPECT_FALSE(result.success);
     EXPECT_NE(result.diagnostic.find("non-finite"), std::string::npos);
+
+    result = level_set::applyLevelSetConservativePhaseFluxCorrection(
+        level_set::LevelSetPhaseFluxStageView{
+            .lumped_control_volume = positive_volumes,
+            .previous_liquid_indicator = previous,
+            .lower_liquid_indicator = lower,
+            .upper_liquid_indicator = upper,
+            .component_activity_tolerance = 0.0,
+        });
+    EXPECT_FALSE(result.success);
+    EXPECT_NE(result.diagnostic.find("activity tolerance"),
+              std::string::npos);
 }
 
 } // namespace

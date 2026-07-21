@@ -5,6 +5,7 @@
 #include <exception>
 #include <initializer_list>
 #include <limits>
+#include <map>
 #include <set>
 #include <utility>
 #include <vector>
@@ -58,6 +59,273 @@ template <typename Projection>
     return value >= lower - slack && value <= upper + slack;
 }
 
+void buildComponentLedger(LevelSetPhaseFluxCorrectionResult& result,
+                          Real invariant_tolerance,
+                          Real component_activity_tolerance)
+{
+    const std::size_t node_count = result.nodes.size();
+    result.components.clear();
+    result.subthreshold_component = {};
+    result.subthreshold_component_present = false;
+    result.component_activity_tolerance = component_activity_tolerance;
+    result.node_component_ids.assign(node_count, INVALID_GLOBAL_INDEX);
+    std::vector<std::size_t> parent(node_count, 0u);
+    std::vector<bool> participating(node_count, false);
+    std::vector<bool> active(node_count, false);
+    for (std::size_t node = 0u; node < node_count; ++node) {
+        parent[node] = node;
+        const auto& ledger = result.nodes[node];
+        const Real activity_scale = std::max(
+            {std::abs(ledger.previous_liquid_indicator),
+             std::abs(ledger.low_order_liquid_indicator),
+             std::abs(ledger.raw_target_liquid_indicator),
+             std::abs(ledger.limited_liquid_indicator),
+             std::abs(ledger.physical_boundary_mass_transfer) /
+                 ledger.lumped_control_volume,
+             std::abs(ledger.discrete_divergence_mass_source) /
+                 ledger.lumped_control_volume,
+             std::abs(ledger.low_order_interior_mass_transfer) /
+                 ledger.lumped_control_volume,
+             std::abs(ledger.raw_antidiffusive_mass_transfer) /
+                 ledger.lumped_control_volume,
+             std::abs(ledger.limited_antidiffusive_mass_transfer) /
+                 ledger.lumped_control_volume});
+        participating[node] = activity_scale > Real{0.0};
+        active[node] = activity_scale > component_activity_tolerance;
+    }
+
+    const auto find_root = [&parent](std::size_t node) {
+        std::size_t root = node;
+        while (parent[root] != root) {
+            root = parent[root];
+        }
+        while (parent[node] != node) {
+            const auto next = parent[node];
+            parent[node] = root;
+            node = next;
+        }
+        return root;
+    };
+    for (const auto& edge : result.edges) {
+        const auto first = static_cast<std::size_t>(edge.first_node);
+        const auto second = static_cast<std::size_t>(edge.second_node);
+        if (!active[first] || !active[second]) {
+            continue;
+        }
+        const auto first_root = find_root(first);
+        const auto second_root = find_root(second);
+        if (first_root != second_root) {
+            parent[std::max(first_root, second_root)] =
+                std::min(first_root, second_root);
+        }
+    }
+
+    const auto accumulate_node = [](LevelSetPhaseFluxComponentLedger& component,
+                                    const LevelSetPhaseFluxNodeLedger& ledger) {
+        ++component.nodes;
+        component.previous_liquid_measure +=
+            ledger.lumped_control_volume *
+            ledger.previous_liquid_indicator;
+        component.low_order_liquid_measure +=
+            ledger.lumped_control_volume *
+            ledger.low_order_liquid_indicator;
+        component.raw_target_liquid_measure +=
+            ledger.lumped_control_volume *
+            ledger.raw_target_liquid_indicator;
+        component.limited_liquid_measure +=
+            ledger.lumped_control_volume *
+            ledger.limited_liquid_indicator;
+        component.physical_boundary_mass_transfer +=
+            ledger.physical_boundary_mass_transfer;
+        component.discrete_divergence_mass_source +=
+            ledger.discrete_divergence_mass_source;
+        component.low_order_interior_mass_transfer +=
+            ledger.low_order_interior_mass_transfer;
+        component.raw_antidiffusive_mass_transfer +=
+            ledger.raw_antidiffusive_mass_transfer;
+        component.limited_antidiffusive_mass_transfer +=
+            ledger.limited_antidiffusive_mass_transfer;
+    };
+
+    std::map<std::size_t, std::size_t> component_index;
+    for (std::size_t node = 0u; node < node_count; ++node) {
+        if (!active[node]) {
+            if (participating[node]) {
+                result.subthreshold_component_present = true;
+                accumulate_node(result.subthreshold_component,
+                                result.nodes[node]);
+            }
+            continue;
+        }
+        const auto root = find_root(node);
+        auto [position, inserted] = component_index.emplace(
+            root, result.components.size());
+        if (inserted) {
+            result.components.push_back(LevelSetPhaseFluxComponentLedger{
+                .component_id = static_cast<GlobalIndex>(root),
+            });
+        }
+        result.node_component_ids[node] =
+            result.components[position->second].component_id;
+        accumulate_node(result.components[position->second],
+                        result.nodes[node]);
+    }
+
+    result.component_balance_satisfied = true;
+    const auto finalize_component =
+        [&result, invariant_tolerance](
+            LevelSetPhaseFluxComponentLedger& component) {
+        component.low_order_balance_residual =
+            component.low_order_liquid_measure -
+            component.previous_liquid_measure -
+            component.physical_boundary_mass_transfer -
+            component.discrete_divergence_mass_source -
+            component.low_order_interior_mass_transfer;
+        component.raw_target_balance_residual =
+            component.raw_target_liquid_measure -
+            component.previous_liquid_measure -
+            component.physical_boundary_mass_transfer -
+            component.discrete_divergence_mass_source -
+            component.low_order_interior_mass_transfer -
+            component.raw_antidiffusive_mass_transfer;
+        component.limited_balance_residual =
+            component.limited_liquid_measure -
+            component.previous_liquid_measure -
+            component.physical_boundary_mass_transfer -
+            component.discrete_divergence_mass_source -
+            component.low_order_interior_mass_transfer -
+            component.limited_antidiffusive_mass_transfer;
+        const Real component_tolerance = scaledTolerance(
+            invariant_tolerance,
+            {component.previous_liquid_measure,
+             component.low_order_liquid_measure,
+             component.raw_target_liquid_measure,
+             component.limited_liquid_measure,
+             component.physical_boundary_mass_transfer,
+             component.discrete_divergence_mass_source,
+             component.low_order_interior_mass_transfer,
+             component.raw_antidiffusive_mass_transfer,
+             component.limited_antidiffusive_mass_transfer});
+        const Real maximum_residual = std::max(
+            {std::abs(component.low_order_balance_residual),
+             std::abs(component.raw_target_balance_residual),
+             std::abs(component.limited_balance_residual)});
+        result.maximum_component_balance_residual = std::max(
+            result.maximum_component_balance_residual, maximum_residual);
+        result.component_balance_satisfied =
+            result.component_balance_satisfied &&
+            maximum_residual <= component_tolerance;
+    };
+    for (auto& component : result.components) {
+        finalize_component(component);
+    }
+    if (result.subthreshold_component_present) {
+        finalize_component(result.subthreshold_component);
+    }
+
+    const auto component_sum = [&result](auto projection) {
+        long double sum = 0.0L;
+        for (const auto& component : result.components) {
+            sum += static_cast<long double>(projection(component));
+        }
+        if (result.subthreshold_component_present) {
+            sum += static_cast<long double>(
+                projection(result.subthreshold_component));
+        }
+        return static_cast<Real>(sum);
+    };
+    const auto component_absolute_sum = [&result](auto projection) {
+        long double sum = 0.0L;
+        for (const auto& component : result.components) {
+            sum += std::abs(static_cast<long double>(
+                projection(component)));
+        }
+        if (result.subthreshold_component_present) {
+            sum += std::abs(static_cast<long double>(
+                projection(result.subthreshold_component)));
+        }
+        return static_cast<Real>(sum);
+    };
+    result.previous_component_measure_closure_residual =
+        component_sum([](const auto& component) {
+            return component.previous_liquid_measure;
+        }) - result.total_previous_liquid_measure;
+    result.low_order_component_measure_closure_residual =
+        component_sum([](const auto& component) {
+            return component.low_order_liquid_measure;
+        }) - result.total_low_order_liquid_measure;
+    result.raw_target_component_measure_closure_residual =
+        component_sum([](const auto& component) {
+            return component.raw_target_liquid_measure;
+        }) - result.total_raw_target_liquid_measure;
+    result.limited_component_measure_closure_residual =
+        component_sum([](const auto& component) {
+            return component.limited_liquid_measure;
+        }) - result.total_limited_liquid_measure;
+    result.boundary_component_transfer_closure_residual =
+        component_sum([](const auto& component) {
+            return component.physical_boundary_mass_transfer;
+        }) - result.total_physical_boundary_mass_transfer;
+    result.divergence_component_source_closure_residual =
+        component_sum([](const auto& component) {
+            return component.discrete_divergence_mass_source;
+        }) - result.total_discrete_divergence_mass_source;
+    result.low_order_component_transfer_closure_residual =
+        component_sum([](const auto& component) {
+            return component.low_order_interior_mass_transfer;
+        });
+    result.raw_component_transfer_closure_residual =
+        component_sum([](const auto& component) {
+            return component.raw_antidiffusive_mass_transfer;
+        });
+    result.limited_component_transfer_closure_residual =
+        component_sum([](const auto& component) {
+            return component.limited_antidiffusive_mass_transfer;
+        });
+    const Real closure_tolerance = scaledTolerance(
+        invariant_tolerance,
+        {result.total_previous_liquid_measure,
+         result.total_low_order_liquid_measure,
+         result.total_raw_target_liquid_measure,
+         result.total_limited_liquid_measure,
+         result.total_physical_boundary_mass_transfer,
+         result.total_discrete_divergence_mass_source,
+         component_absolute_sum([](const auto& component) {
+             return component.physical_boundary_mass_transfer;
+         }),
+         component_absolute_sum([](const auto& component) {
+             return component.discrete_divergence_mass_source;
+         }),
+         component_absolute_sum([](const auto& component) {
+             return component.low_order_interior_mass_transfer;
+         }),
+         component_absolute_sum([](const auto& component) {
+             return component.raw_antidiffusive_mass_transfer;
+         }),
+         component_absolute_sum([](const auto& component) {
+             return component.limited_antidiffusive_mass_transfer;
+         })});
+    result.component_measure_closure_satisfied =
+        std::abs(result.previous_component_measure_closure_residual) <=
+            closure_tolerance &&
+        std::abs(result.low_order_component_measure_closure_residual) <=
+            closure_tolerance &&
+        std::abs(result.raw_target_component_measure_closure_residual) <=
+            closure_tolerance &&
+        std::abs(result.limited_component_measure_closure_residual) <=
+            closure_tolerance &&
+        std::abs(result.boundary_component_transfer_closure_residual) <=
+            closure_tolerance &&
+        std::abs(result.divergence_component_source_closure_residual) <=
+            closure_tolerance &&
+        std::abs(result.low_order_component_transfer_closure_residual) <=
+            closure_tolerance &&
+        std::abs(result.raw_component_transfer_closure_residual) <=
+            closure_tolerance &&
+        std::abs(result.limited_component_transfer_closure_residual) <=
+            closure_tolerance;
+}
+
 } // namespace
 
 LevelSetPhaseFluxCorrectionResult
@@ -93,6 +361,13 @@ applyLevelSetConservativePhaseFluxCorrection(
             stage.invariant_tolerance < Real{0.0}) {
             result.diagnostic =
                 "conservative phase-flux correction requires a finite nonnegative invariant tolerance";
+            return result;
+        }
+        if (!std::isfinite(stage.component_activity_tolerance) ||
+            !(stage.component_activity_tolerance > Real{0.0}) ||
+            stage.component_activity_tolerance > Real{1.0}) {
+            result.diagnostic =
+                "conservative phase-flux correction requires a component activity tolerance in (0,1]";
             return result;
         }
 
@@ -523,6 +798,10 @@ applyLevelSetConservativePhaseFluxCorrection(
                 global_tolerance &&
             std::abs(result.global_mass_balance_residual) <= global_tolerance;
 
+        buildComponentLedger(result,
+                             stage.invariant_tolerance,
+                             stage.component_activity_tolerance);
+
         result.constant_state_input =
             previous_maximum - previous_minimum <=
             scaledTolerance(stage.invariant_tolerance,
@@ -554,6 +833,8 @@ applyLevelSetConservativePhaseFluxCorrection(
                          result.interior_cancellation_satisfied &&
                          result.local_balance_satisfied &&
                          result.global_balance_satisfied &&
+                         result.component_balance_satisfied &&
+                         result.component_measure_closure_satisfied &&
                          (!result.constant_preservation_required ||
                           result.constant_preservation_satisfied);
         if (!result.limited_bounds_satisfied) {
@@ -568,6 +849,12 @@ applyLevelSetConservativePhaseFluxCorrection(
         } else if (!result.global_balance_satisfied) {
             result.diagnostic =
                 "conservative phase-flux correction failed global phase-measure balance";
+        } else if (!result.component_balance_satisfied) {
+            result.diagnostic =
+                "conservative phase-flux correction failed a connected-component balance";
+        } else if (!result.component_measure_closure_satisfied) {
+            result.diagnostic =
+                "conservative phase-flux correction failed connected-component measure closure";
         } else if (result.constant_preservation_required &&
                    !result.constant_preservation_satisfied) {
             result.diagnostic =

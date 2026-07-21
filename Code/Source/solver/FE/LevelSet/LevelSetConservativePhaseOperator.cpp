@@ -1133,11 +1133,14 @@ advanceLevelSetP1ConservativePhaseStage(
         if (!(time_step > Real{0.0}) || !std::isfinite(time_step) ||
             !std::isfinite(options.invariant_tolerance) ||
             options.invariant_tolerance < Real{0.0} ||
+            !std::isfinite(options.component_activity_tolerance) ||
+            !(options.component_activity_tolerance > Real{0.0}) ||
+            options.component_activity_tolerance > Real{1.0} ||
             !(options.maximum_courant > Real{0.0}) ||
             options.maximum_courant > Real{1.0} ||
             !std::isfinite(options.maximum_courant)) {
             result.diagnostic =
-                "P1 conservative phase stage requires a positive finite time step, nonnegative finite tolerance, and Courant limit in (0,1]";
+                "P1 conservative phase stage requires a positive finite time step, nonnegative finite invariant tolerance, component activity tolerance in (0,1], and Courant limit in (0,1]";
             return result;
         }
 
@@ -1322,6 +1325,8 @@ advanceLevelSetP1ConservativePhaseStage(
                     .discrete_divergence_mass_source =
                         result.discrete_divergence_mass_source,
                     .invariant_tolerance = options.invariant_tolerance,
+                    .component_activity_tolerance =
+                        options.component_activity_tolerance,
                     .require_constant_preservation =
                         options.require_constant_preservation,
                 });

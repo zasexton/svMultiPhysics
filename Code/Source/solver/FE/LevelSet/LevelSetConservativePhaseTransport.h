@@ -53,6 +53,7 @@ struct LevelSetPhaseFluxStageView {
     std::span<const Real> physical_boundary_mass_transfer{};
     std::span<const Real> discrete_divergence_mass_source{};
     Real invariant_tolerance{1.0e-12};
+    Real component_activity_tolerance{1.0e-8};
     bool require_constant_preservation{true};
 };
 
@@ -91,6 +92,34 @@ struct LevelSetPhaseFluxNodeLedger {
     Real local_mass_balance_residual{0.0};
 };
 
+/**
+ * @brief Balance of one connected phase-support component during a stage.
+ *
+ * Components are built from nodes whose previous, low-order, raw, or limited
+ * phase indicator, normalized source, or normalized algebraic transfer
+ * exceeds the declared component-activity tolerance. Active nodes joined by
+ * an algebraic edge share one component. The identifier is the smallest
+ * canonical node index in the component, so it is deterministic for
+ * replicated distributed graphs. Subthreshold nonzero support is retained in
+ * a separate balance record and therefore cannot hide phase measure.
+ */
+struct LevelSetPhaseFluxComponentLedger {
+    GlobalIndex component_id{INVALID_GLOBAL_INDEX};
+    std::size_t nodes{0u};
+    Real previous_liquid_measure{0.0};
+    Real low_order_liquid_measure{0.0};
+    Real raw_target_liquid_measure{0.0};
+    Real limited_liquid_measure{0.0};
+    Real physical_boundary_mass_transfer{0.0};
+    Real discrete_divergence_mass_source{0.0};
+    Real low_order_interior_mass_transfer{0.0};
+    Real raw_antidiffusive_mass_transfer{0.0};
+    Real limited_antidiffusive_mass_transfer{0.0};
+    Real low_order_balance_residual{0.0};
+    Real raw_target_balance_residual{0.0};
+    Real limited_balance_residual{0.0};
+};
+
 struct LevelSetPhaseFluxCorrectionResult {
     bool success{false};
     bool applied{false};
@@ -99,6 +128,9 @@ struct LevelSetPhaseFluxCorrectionResult {
     bool interior_cancellation_satisfied{false};
     bool local_balance_satisfied{false};
     bool global_balance_satisfied{false};
+    bool component_balance_satisfied{false};
+    bool component_measure_closure_satisfied{false};
+    bool subthreshold_component_present{false};
     bool constant_state_input{false};
     bool constant_preservation_required{true};
     bool constant_preservation_satisfied{false};
@@ -116,6 +148,17 @@ struct LevelSetPhaseFluxCorrectionResult {
     Real maximum_low_order_local_mass_balance_residual{0.0};
     Real maximum_raw_target_local_mass_balance_residual{0.0};
     Real maximum_local_mass_balance_residual{0.0};
+    Real maximum_component_balance_residual{0.0};
+    Real component_activity_tolerance{0.0};
+    Real previous_component_measure_closure_residual{0.0};
+    Real low_order_component_measure_closure_residual{0.0};
+    Real raw_target_component_measure_closure_residual{0.0};
+    Real limited_component_measure_closure_residual{0.0};
+    Real boundary_component_transfer_closure_residual{0.0};
+    Real divergence_component_source_closure_residual{0.0};
+    Real low_order_component_transfer_closure_residual{0.0};
+    Real raw_component_transfer_closure_residual{0.0};
+    Real limited_component_transfer_closure_residual{0.0};
     Real low_order_global_mass_balance_residual{0.0};
     Real raw_target_global_mass_balance_residual{0.0};
     Real global_mass_balance_residual{0.0};
@@ -128,6 +171,9 @@ struct LevelSetPhaseFluxCorrectionResult {
     Real maximum_limited_liquid_indicator{0.0};
     std::vector<LevelSetPhaseFluxNodeLedger> nodes{};
     std::vector<LevelSetPhaseFluxEdgeLedger> edges{};
+    std::vector<GlobalIndex> node_component_ids{};
+    std::vector<LevelSetPhaseFluxComponentLedger> components{};
+    LevelSetPhaseFluxComponentLedger subthreshold_component{};
     std::string diagnostic{};
 };
 
@@ -139,7 +185,8 @@ struct LevelSetPhaseFluxCorrectionResult {
  * low-order edge transfers.  Raw antidiffusive edge transfers are constrained
  * by symmetric pair factors, so every accepted correction is conservative by
  * construction.  The returned ledger retains every quantity needed to verify
- * local nodal balance and global phase-measure balance.
+ * local nodal balance, deterministic connected-component balance, and global
+ * phase-measure balance.
  */
 [[nodiscard]] LevelSetPhaseFluxCorrectionResult
 applyLevelSetConservativePhaseFluxCorrection(

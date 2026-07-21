@@ -4051,6 +4051,19 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   ASSERT_NE(result.geometry_transaction, nullptr);
   ASSERT_EQ(result.maintenance_ledgers.size(), requests_.size());
   const auto& ledger = result.maintenance_ledgers.front();
+  EXPECT_TRUE(ledger.transport_stage.success);
+  EXPECT_TRUE(ledger.transport_stage.correction.success);
+  EXPECT_TRUE(
+      ledger.transport_stage.correction.component_balance_satisfied);
+  EXPECT_TRUE(ledger.transport_stage.correction
+                  .component_measure_closure_satisfied);
+  EXPECT_DOUBLE_EQ(
+      ledger.transport_stage.correction.component_activity_tolerance,
+      requests_.front().conservative_phase.component_activity_tolerance);
+  EXPECT_EQ(ledger.transport_stage.correction.nodes.size(),
+            fieldCount(phase_));
+  EXPECT_FALSE(ledger.transport_stage.correction.edges.empty());
+  EXPECT_FALSE(ledger.transport_stage.correction.components.empty());
   EXPECT_TRUE(ledger.reinitialization_due);
   EXPECT_TRUE(ledger.reinitialization_applied);
   EXPECT_TRUE(ledger.reinitialization.success);
@@ -4073,6 +4086,19 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   EXPECT_NE(output.find("post_reinitialization_geometry_measure="),
             std::string::npos);
   EXPECT_NE(output.find("post_correction_geometry_measure="),
+            std::string::npos);
+  EXPECT_NE(output.find("transport_nodes="), std::string::npos);
+  EXPECT_NE(output.find("transport_edges="), std::string::npos);
+  EXPECT_NE(output.find("transport_components="), std::string::npos);
+  EXPECT_NE(output.find("transport_component_activity_tolerance="),
+            std::string::npos);
+  EXPECT_NE(output.find("transport_subthreshold_component_present="),
+            std::string::npos);
+  EXPECT_NE(
+      output.find(
+          "transport_limited_component_transfer_closure_residual="),
+      std::string::npos);
+  EXPECT_NE(output.find("diagnostic=conservative_phase_component_ledger"),
             std::string::npos);
 
   const auto projection = projectCurrentConservativePhaseGeometry(

@@ -3126,6 +3126,13 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
       request.conservative_phase.invariant_tolerance =
           static_cast<svmp::FE::Real>(*tolerance);
     }
+    if (const auto tolerance = first_defined_double_parameter(
+            eq_params,
+            {"Conservative_phase_component_activity_tolerance",
+             "ConservativePhaseComponentActivityTolerance"})) {
+      request.conservative_phase.component_activity_tolerance =
+          static_cast<svmp::FE::Real>(*tolerance);
+    }
     if (const auto maximum_courant = first_defined_double_parameter(
             eq_params,
             {"Conservative_phase_maximum_courant",
@@ -11459,6 +11466,8 @@ struct ConservativePhaseMaintenanceStageLedger {
   svmp::FE::Real post_correction_geometry_measure{0.0};
   ConservativePhaseMomentMismatch post_reinitialization_mismatch{};
   ConservativePhaseMomentMismatch post_correction_mismatch{};
+  svmp::FE::level_set::LevelSetP1PhaseTransportStageResult
+      transport_stage{};
   svmp::FE::level_set::LevelSetSignedDistanceRepairResult
       reinitialization{};
   ConservativePhaseGeometryReconciliationResult reconciliation{};
@@ -11909,13 +11918,15 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     svmp::FE::level_set::LevelSetP1PhaseStageOptions stage_options;
     stage_options.invariant_tolerance =
         request.conservative_phase.invariant_tolerance;
+    stage_options.component_activity_tolerance =
+        request.conservative_phase.component_activity_tolerance;
     stage_options.maximum_courant =
         request.conservative_phase.maximum_courant;
     stage_options.enforce_courant_limit =
         request.conservative_phase.enforce_courant_limit;
     stage_options.require_constant_preservation =
         request.conservative_phase.require_constant_preservation;
-    const auto stage =
+    auto stage =
         svmp::FE::level_set::advanceLevelSetP1ConservativePhaseStage(
             graph,
             previous_phase,
@@ -11997,8 +12008,21 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         << stage.correction.global_mass_balance_residual
         << " max_local_balance_residual="
         << stage.correction.maximum_local_mass_balance_residual
+        << " phase_components=" << stage.correction.components.size()
+        << " component_activity_tolerance="
+        << stage.correction.component_activity_tolerance
+        << " subthreshold_component_present="
+        << (stage.correction.subthreshold_component_present
+                ? "true"
+                : "false")
+        << " subthreshold_limited_measure="
+        << stage.correction.subthreshold_component
+               .limited_liquid_measure
+        << " max_component_balance_residual="
+        << stage.correction.maximum_component_balance_residual
         << " limited_edges=" << stage.correction.limited_edges
         << " courant=" << stage.maximum_courant << std::endl;
+    maintenance_ledger.transport_stage = std::move(stage);
   }
 
   auto transaction =
@@ -12280,6 +12304,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
                   : "false")
           << std::endl;
       const auto& repair = maintenance_ledger.reinitialization;
+      const auto& transport = maintenance_ledger.transport_stage;
       application::core::oopCout()
           << std::setprecision(17)
           << "[svMultiPhysics::Application] Conservative phase maintenance ledger"
@@ -12309,6 +12334,39 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
                  .maximum_nodal_residual
           << " retained_assembly_measure="
           << projection.retained_liquid_measure
+          << " transport_nodes="
+          << transport.correction.nodes.size()
+          << " transport_edges="
+          << transport.correction.edges.size()
+          << " transport_components="
+          << transport.correction.components.size()
+          << " transport_component_activity_tolerance="
+          << transport.correction.component_activity_tolerance
+          << " transport_subthreshold_component_present="
+          << (transport.correction.subthreshold_component_present
+                  ? "true"
+                  : "false")
+          << " transport_subthreshold_nodes="
+          << transport.correction.subthreshold_component.nodes
+          << " transport_subthreshold_limited_measure="
+          << transport.correction.subthreshold_component
+                 .limited_liquid_measure
+          << " transport_component_balance_satisfied="
+          << (transport.correction.component_balance_satisfied
+                  ? "true"
+                  : "false")
+          << " transport_component_measure_closure_satisfied="
+          << (transport.correction.component_measure_closure_satisfied
+                  ? "true"
+                  : "false")
+          << " transport_max_component_balance_residual="
+          << transport.correction.maximum_component_balance_residual
+          << " transport_limited_component_closure_residual="
+          << transport.correction
+                 .limited_component_measure_closure_residual
+          << " transport_limited_component_transfer_closure_residual="
+          << transport.correction
+                 .limited_component_transfer_closure_residual
           << " reinitialization_due="
           << (maintenance_ledger.reinitialization_due ? "true" : "false")
           << " reinitialization_applied="
@@ -12336,6 +12394,53 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           << " reconciliation_maximum_removed_contact_increment="
           << reconciliation.maximum_removed_contact_increment
           << std::endl;
+      const auto emit_component_ledger =
+          [&](const auto& component, std::string_view classification) {
+        application::core::oopCout()
+            << std::setprecision(17)
+            << "[svMultiPhysics::Application] Conservative phase component ledger"
+            << " diagnostic=conservative_phase_component_ledger"
+            << " field='"
+            << request.conservative_phase.liquid_indicator.field_name
+            << "'"
+            << " step=" << history.stepIndex() + 1
+            << " classification=" << classification
+            << " component_id=" << component.component_id
+            << " nodes=" << component.nodes
+            << " previous_liquid_measure="
+            << component.previous_liquid_measure
+            << " low_order_liquid_measure="
+            << component.low_order_liquid_measure
+            << " raw_target_liquid_measure="
+            << component.raw_target_liquid_measure
+            << " limited_liquid_measure="
+            << component.limited_liquid_measure
+            << " physical_boundary_mass_transfer="
+            << component.physical_boundary_mass_transfer
+            << " discrete_divergence_mass_source="
+            << component.discrete_divergence_mass_source
+            << " low_order_interior_mass_transfer="
+            << component.low_order_interior_mass_transfer
+            << " raw_antidiffusive_mass_transfer="
+            << component.raw_antidiffusive_mass_transfer
+            << " limited_antidiffusive_mass_transfer="
+            << component.limited_antidiffusive_mass_transfer
+            << " low_order_balance_residual="
+            << component.low_order_balance_residual
+            << " raw_target_balance_residual="
+            << component.raw_target_balance_residual
+            << " limited_balance_residual="
+            << component.limited_balance_residual
+            << std::endl;
+      };
+      for (const auto& component : transport.correction.components) {
+        emit_component_ledger(component, "resolved");
+      }
+      if (transport.correction.subthreshold_component_present) {
+        emit_component_ledger(
+            transport.correction.subthreshold_component,
+            "subthreshold");
+      }
     }
     result.changed = candidate != result.original_solution;
     if (result.changed) {

@@ -494,6 +494,8 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
              options.conservative_phase.liquid_side))
       << ",\"invariant_tolerance\":"
       << json_real(options.conservative_phase.invariant_tolerance)
+      << ",\"component_activity_tolerance\":"
+      << json_real(options.conservative_phase.component_activity_tolerance)
       << ",\"maximum_courant\":"
       << json_real(options.conservative_phase.maximum_courant)
       << ",\"enforce_courant_limit\":"
@@ -574,7 +576,7 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << ",\"maintenance_transaction\":{\"ordering\":"
       << json_string(
              options.conservative_phase.enabled
-                 ? "provisional_level_set_then_conservative_phase_then_geometry_reconciliation_then_wall_aware_maintenance"
+                 ? "conservative_phase_transport_then_raw_geometry_rebuild_then_wall_aware_reinitialization_then_local_geometry_reconciliation_then_validation_then_commit"
                  : "transport_then_reinitialization_then_volume_correction_then_geometry_refresh")
       << ",\"reinitialization\":{\"enabled\":"
       << json_bool(options.reinitialization.enabled)
@@ -1254,6 +1256,13 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
            "ConservativePhaseInvariantTolerance"},
           "Conservative_phase_invariant_tolerance")) {
     options.conservative_phase.invariant_tolerance = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Conservative_phase_component_activity_tolerance",
+           "ConservativePhaseComponentActivityTolerance"},
+          "Conservative_phase_component_activity_tolerance")) {
+    options.conservative_phase.component_activity_tolerance = *value;
   }
   if (const auto value = get_defined_real(
           params,

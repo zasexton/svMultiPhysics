@@ -498,9 +498,32 @@ TEST(LevelSetConservativePhaseOperatorMPI,
     EXPECT_TRUE(stage.correction.interior_cancellation_satisfied);
     EXPECT_TRUE(stage.correction.local_balance_satisfied);
     EXPECT_TRUE(stage.correction.global_balance_satisfied);
+    EXPECT_TRUE(stage.correction.component_balance_satisfied);
+    EXPECT_TRUE(stage.correction.component_measure_closure_satisfied);
     EXPECT_GE(stage.correction.minimum_limited_liquid_indicator, 0.0);
     EXPECT_LE(stage.correction.maximum_limited_liquid_indicator, 1.0);
     EXPECT_EQ(stage.correction.maximum_edge_pair_cancellation_residual, 0.0);
+    ASSERT_EQ(stage.correction.node_component_ids.size(), graph.nodes);
+    const auto local_component_count = static_cast<unsigned long long>(
+        stage.correction.components.size());
+    unsigned long long minimum_component_count = 0u;
+    unsigned long long maximum_component_count = 0u;
+    MPI_Allreduce(&local_component_count, &minimum_component_count, 1,
+                  MPI_UNSIGNED_LONG_LONG, MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(&local_component_count, &maximum_component_count, 1,
+                  MPI_UNSIGNED_LONG_LONG, MPI_MAX, MPI_COMM_WORLD);
+    EXPECT_EQ(minimum_component_count, maximum_component_count);
+    std::vector<FE::GlobalIndex> minimum_component_ids(graph.nodes, 0);
+    std::vector<FE::GlobalIndex> maximum_component_ids(graph.nodes, 0);
+    MPI_Allreduce(stage.correction.node_component_ids.data(),
+                  minimum_component_ids.data(),
+                  static_cast<int>(graph.nodes), MPI_INT64_T, MPI_MIN,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(stage.correction.node_component_ids.data(),
+                  maximum_component_ids.data(),
+                  static_cast<int>(graph.nodes), MPI_INT64_T, MPI_MAX,
+                  MPI_COMM_WORLD);
+    EXPECT_EQ(minimum_component_ids, maximum_component_ids);
 
     std::vector<FE::Real> limited(graph.nodes, 0.0);
     for (std::size_t i = 0; i < graph.nodes; ++i) {
@@ -526,6 +549,13 @@ TEST(LevelSetConservativePhaseOperatorMPI,
     ASSERT_TRUE(constant_stage.success) << constant_stage.diagnostic;
     EXPECT_TRUE(constant_stage.correction.constant_state_input);
     EXPECT_TRUE(constant_stage.correction.constant_preservation_satisfied);
+    EXPECT_TRUE(constant_stage.correction.component_balance_satisfied);
+    EXPECT_TRUE(
+        constant_stage.correction.component_measure_closure_satisfied);
+    ASSERT_EQ(constant_stage.correction.components.size(), 1u);
+    EXPECT_EQ(constant_stage.correction.components.front().component_id, 0);
+    EXPECT_EQ(constant_stage.correction.components.front().nodes,
+              graph.nodes);
     for (const auto& node : constant_stage.correction.nodes) {
         EXPECT_NEAR(node.limited_liquid_indicator, 0.4, 2.0e-14);
     }

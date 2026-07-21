@@ -662,6 +662,12 @@ void validateConservativePhaseOptions(
         throw std::invalid_argument(
             "installLevelSetTransport: conservative phase invariant tolerance must be finite and nonnegative");
     }
+    if (!std::isfinite(phase.component_activity_tolerance) ||
+        !(phase.component_activity_tolerance > Real{0.0}) ||
+        phase.component_activity_tolerance > Real{1.0}) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase component activity tolerance must be in (0, 1]");
+    }
     if (!std::isfinite(phase.maximum_courant) ||
         !(phase.maximum_courant > Real{0.0}) ||
         phase.maximum_courant > Real{1.0}) {

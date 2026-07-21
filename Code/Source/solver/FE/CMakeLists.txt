@@ -2321,6 +2321,7 @@ if(FE_BUILD_TESTS)
     # Level-set module tests
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/LevelSet/test_main.cpp)
         set(FE_LEVELSET_TEST_SOURCES
+            Tests/Unit/LevelSet/test_LevelSetConservativePhaseBenchmarks.cpp
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseOperator.cpp
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseState.cpp
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseTransport.cpp

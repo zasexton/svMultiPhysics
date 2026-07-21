@@ -382,7 +382,7 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
   ASSERT_NE(phase_insertion, std::string::npos);
   expected.insert(
       phase_insertion,
-      R"json(,"conservative_phase":{"enabled":false,"field":"liquid_indicator","source":"Unknown","auto_register":true,"liquid_side":"Negative","invariant_tolerance":9.9999999999999998e-13,"maximum_courant":1,"enforce_courant_limit":true,"require_constant_preservation":true,"impermeable_normal_velocity_tolerance":1e-10,"reconcile_geometry":true,"geometry_measure_tolerance":1e-10,"geometry_correction_max_iterations":50,"maximum_geometry_displacement_fraction":0.10000000000000001,"boundary_flux_policy":"closed_boundary_only","newton_policy":"held_at_previous_accepted_endpoint"})json");
+      R"json(,"conservative_phase":{"enabled":false,"field":"liquid_indicator","source":"Unknown","auto_register":true,"liquid_side":"Negative","invariant_tolerance":9.9999999999999998e-13,"component_activity_tolerance":1e-08,"maximum_courant":1,"enforce_courant_limit":true,"require_constant_preservation":true,"impermeable_normal_velocity_tolerance":1e-10,"reconcile_geometry":true,"geometry_measure_tolerance":1e-10,"geometry_correction_max_iterations":50,"maximum_geometry_displacement_fraction":0.10000000000000001,"boundary_flux_policy":"closed_boundary_only","newton_policy":"held_at_previous_accepted_endpoint"})json");
   EXPECT_EQ(artifact->json, expected);
 #endif
 }
@@ -461,6 +461,9 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
       svmp::Physics::ParameterValue{true, "positive"};
   input.equation_params["Conservative_phase_invariant_tolerance"] =
       svmp::Physics::ParameterValue{true, "3.0e-11"};
+  input.equation_params[
+      "Conservative_phase_component_activity_tolerance"] =
+      svmp::Physics::ParameterValue{true, "4.0e-7"};
   input.equation_params["Conservative_phase_maximum_courant"] =
       svmp::Physics::ParameterValue{true, "0.45"};
   input.equation_params["Conservative_phase_enforce_courant_limit"] =
@@ -507,6 +510,9 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
             std::string::npos);
   EXPECT_NE(artifact->json.find("\"maximum_courant\":0.45000000000000001"),
             std::string::npos);
+  EXPECT_NE(artifact->json.find(
+                "\"component_activity_tolerance\":3.9999999999999998e-07"),
+            std::string::npos);
   EXPECT_NE(artifact->json.find("\"enforce_courant_limit\":false"),
             std::string::npos);
   EXPECT_NE(artifact->json.find("\"reconcile_geometry\":false"),
@@ -515,7 +521,7 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
                 "\"geometry_correction_max_iterations\":19"),
             std::string::npos);
   EXPECT_NE(artifact->json.find(
-                "\"ordering\":\"provisional_level_set_then_conservative_phase_then_geometry_reconciliation_then_wall_aware_maintenance\""),
+                "\"ordering\":\"conservative_phase_transport_then_raw_geometry_rebuild_then_wall_aware_reinitialization_then_local_geometry_reconciliation_then_validation_then_commit\""),
             std::string::npos);
 #endif
 }

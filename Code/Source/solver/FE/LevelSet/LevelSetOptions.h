@@ -196,6 +196,7 @@ struct LevelSetConservativePhaseOptions {
     };
     LevelSetPhaseSide liquid_side{LevelSetPhaseSide::Negative};
     Real invariant_tolerance{1.0e-12};
+    Real component_activity_tolerance{1.0e-8};
     Real maximum_courant{1.0};
     bool enforce_courant_limit{true};
     bool require_constant_preservation{true};
