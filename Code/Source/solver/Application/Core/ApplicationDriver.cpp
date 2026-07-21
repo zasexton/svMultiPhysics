@@ -4402,77 +4402,62 @@ evaluateAcceptedFreeSurfaceContactStages(
   return stages;
 }
 
-void recordAcceptedFreeSurfaceDiscreteFunctionals(
-    application::core::SimulationComponents& sim,
-    std::uint64_t accepted_step,
-    svmp::FE::Real accepted_time,
-    svmp::FE::Real dt,
-    std::uint64_t state_revision,
-    std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
-        contact_stages = {})
+std::vector<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+evaluateCurrentFreeSurfaceDiscreteFunctionals(
+    application::core::SimulationComponents& sim)
 {
   const auto declarations =
       sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
-  if (declarations.empty()) {
-    if (!contact_stages.empty()) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Contact-stage states were supplied without free-surface functional declarations.");
-    }
-    return;
-  }
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
-  const double local_contact_stage_count =
-      static_cast<double>(contact_stages.size());
-  if (globalMinDouble(local_contact_stage_count, comm) !=
-      globalMaxDouble(local_contact_stage_count, comm)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Accepted contact-stage coverage differs across the FE communicator.");
-  }
-  std::map<
-      int,
-      const svmp::FE::systems::FreeSurfaceAcceptedContactStageState*>
-      contact_stage_by_marker;
-  bool local_contact_stages_valid = true;
-  for (const auto& stage : contact_stages) {
-    const int marker = stage.geometry_revision.interface_marker;
-    const double local_marker = static_cast<double>(marker);
-    if (globalMinDouble(local_marker, comm) !=
-        globalMaxDouble(local_marker, comm)) {
-      local_contact_stages_valid = false;
-    }
-    local_contact_stages_valid =
-        marker >= 0 &&
-        contact_stage_by_marker.emplace(marker, &stage).second &&
-        local_contact_stages_valid;
-  }
-  if (globalMinDouble(local_contact_stages_valid ? 1.0 : 0.0, comm) != 1.0) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Accepted contact-stage states must have communicator-consistent unique nonnegative interface markers.");
-  }
   const auto local_declaration_count =
       static_cast<double>(declarations.size());
   if (globalMinDouble(local_declaration_count, comm) !=
-          globalMaxDouble(local_declaration_count, comm)) {
+      globalMaxDouble(local_declaration_count, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Free-surface functional declarations differ across the FE communicator.");
+  }
+  if (declarations.empty()) {
+    return {};
   }
   const auto* context = sim.fe_system->cutIntegrationContext();
   const auto context_available = context != nullptr ? 1.0 : 0.0;
   if (globalMinDouble(context_available, comm) != 1.0) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] Accepted free-surface functional recording requires an authoritative cut-integration context on every rank.");
+        "[svMultiPhysics::Application] Free-surface functional evaluation requires an authoritative cut-integration context on every rank.");
   }
 
   std::vector<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
-      accepted_states;
-  accepted_states.reserve(declarations.size());
+      states;
+  states.reserve(declarations.size());
   for (const auto& declaration : declarations) {
+    const std::array<double, 6> declaration_metadata{
+        static_cast<double>(declaration.interface_marker),
+        static_cast<double>(declaration.level_set_field),
+        static_cast<double>(declaration.velocity_field),
+        static_cast<double>(declaration.parameters.liquid_side),
+        static_cast<double>(declaration.parameters.surface_tension),
+        static_cast<double>(declaration.parameters.volume_multiplier)};
+    bool declaration_metadata_consistent = true;
+    for (const auto value : declaration_metadata) {
+      const bool local_finite = std::isfinite(value);
+      if (globalMinDouble(local_finite ? 1.0 : 0.0, comm) != 1.0) {
+        declaration_metadata_consistent = false;
+        continue;
+      }
+      declaration_metadata_consistent =
+          globalMinDouble(value, comm) == globalMaxDouble(value, comm) &&
+          declaration_metadata_consistent;
+    }
+    if (!declaration_metadata_consistent) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Free-surface functional declaration ordering or scalar parameters differ across the FE communicator.");
+    }
     const bool local_marker_available =
         context->hasFreeSurfaceGeometrySnapshotForMarker(
             declaration.interface_marker);
     if (globalMinDouble(local_marker_available ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Accepted free-surface functional marker " +
+          "[svMultiPhysics::Application] Free-surface functional marker " +
           std::to_string(declaration.interface_marker) +
           " is missing an authoritative geometry snapshot on at least one rank.");
     }
@@ -4491,7 +4476,7 @@ void recordAcceptedFreeSurfaceDiscreteFunctionals(
     if (minimum_revision != maximum_revision) {
       std::ostringstream diagnostic;
       diagnostic
-          << "[svMultiPhysics::Application] Accepted free-surface geometry revision differs across the FE communicator for marker "
+          << "[svMultiPhysics::Application] Free-surface geometry revision differs across the FE communicator for marker "
           << declaration.interface_marker
           << ": local=" << snapshot_revision
           << " minimum=" << minimum_revision
@@ -4508,13 +4493,12 @@ void recordAcceptedFreeSurfaceDiscreteFunctionals(
             << " quadrature_policy=" << revision.quadrature_policy_key;
       }
       diagnostic << ".";
-      throw std::runtime_error(
-          diagnostic.str());
+      throw std::runtime_error(diagnostic.str());
     }
     const bool local_snapshot_available = found != snapshots.end();
     if (globalMinDouble(local_snapshot_available ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Accepted free-surface geometry snapshot storage is incomplete across the FE communicator for marker " +
+          "[svMultiPhysics::Application] Free-surface geometry snapshot storage is incomplete across the FE communicator for marker " +
           std::to_string(declaration.interface_marker) + ".");
     }
     context->assertFreeSurfaceGeometrySnapshotCurrentForMarker(
@@ -4584,6 +4568,83 @@ void recordAcceptedFreeSurfaceDiscreteFunctionals(
           global_sum(wall.owned_contact_measure);
       wall.young_wall_energy = global_sum(wall.young_wall_energy);
     }
+    states.push_back(
+        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState{
+            .interface_marker = declaration.interface_marker,
+            .geometry_revision = snapshot.revision(),
+            .state = std::move(global_state),
+            .contact_stage = std::nullopt,
+        });
+  }
+  return states;
+}
+
+void recordAcceptedFreeSurfaceDiscreteFunctionals(
+    application::core::SimulationComponents& sim,
+    std::uint64_t accepted_step,
+    svmp::FE::Real accepted_time,
+    svmp::FE::Real dt,
+    std::uint64_t state_revision,
+    std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+        contact_stages = {})
+{
+  const auto declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto local_declaration_count =
+      static_cast<double>(declarations.size());
+  if (globalMinDouble(local_declaration_count, comm) !=
+      globalMaxDouble(local_declaration_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted free-surface functional declarations differ across the FE communicator.");
+  }
+  if (declarations.empty()) {
+    if (!contact_stages.empty()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Contact-stage states were supplied without free-surface functional declarations.");
+    }
+    return;
+  }
+  const double local_contact_stage_count =
+      static_cast<double>(contact_stages.size());
+  if (globalMinDouble(local_contact_stage_count, comm) !=
+      globalMaxDouble(local_contact_stage_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact-stage coverage differs across the FE communicator.");
+  }
+  std::map<
+      int,
+      const svmp::FE::systems::FreeSurfaceAcceptedContactStageState*>
+      contact_stage_by_marker;
+  bool local_contact_stages_valid = true;
+  for (const auto& stage : contact_stages) {
+    const int marker = stage.geometry_revision.interface_marker;
+    const double local_marker = static_cast<double>(marker);
+    if (globalMinDouble(local_marker, comm) !=
+        globalMaxDouble(local_marker, comm)) {
+      local_contact_stages_valid = false;
+    }
+    local_contact_stages_valid =
+        marker >= 0 &&
+        contact_stage_by_marker.emplace(marker, &stage).second &&
+        local_contact_stages_valid;
+  }
+  if (globalMinDouble(local_contact_stages_valid ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact-stage states must have communicator-consistent unique nonnegative interface markers.");
+  }
+  auto accepted_states = evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+  if (accepted_states.size() != declarations.size()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted free-surface functional evaluation returned incomplete declaration coverage.");
+  }
+  for (std::size_t index = 0; index < declarations.size(); ++index) {
+    const auto& declaration = declarations[index];
+    auto& accepted_state = accepted_states[index];
+    if (accepted_state.interface_marker != declaration.interface_marker) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted free-surface functional evaluation changed declaration order.");
+    }
     const auto contact_stage =
         contact_stage_by_marker.find(declaration.interface_marker);
     const bool dynamic_contact_declared =
@@ -4594,18 +4655,9 @@ void recordAcceptedFreeSurfaceDiscreteFunctionals(
           "[svMultiPhysics::Application] Accepted contact-stage coverage does not match the free-surface declaration for marker " +
           std::to_string(declaration.interface_marker) + ".");
     }
-    accepted_states.push_back(
-        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState{
-            .interface_marker = declaration.interface_marker,
-            .geometry_revision = snapshot.revision(),
-            .state = std::move(global_state),
-            .contact_stage =
-                contact_stage != contact_stage_by_marker.end()
-                    ? std::optional<svmp::FE::systems::
-                          FreeSurfaceAcceptedContactStageState>{
-                          *contact_stage->second}
-                    : std::nullopt,
-        });
+    if (contact_stage != contact_stage_by_marker.end()) {
+      accepted_state.contact_stage = *contact_stage->second;
+    }
   }
 
   const auto declared_dynamic_count = std::count_if(
@@ -5747,6 +5799,14 @@ void assertCollectiveWallAwareRepairResult(
   }
 }
 
+struct LevelSetVolumeCorrectionMaintenanceEvent {
+  svmp::FE::FieldId level_set_field{svmp::FE::INVALID_FIELD_ID};
+  std::string level_set_field_name{};
+  int completed_step{0};
+  bool includes_other_maintenance{false};
+  svmp::FE::level_set::LevelSetGlobalShiftCorrectionResult correction{};
+};
+
 bool applyLevelSetMaintenance(
     application::core::SimulationComponents& sim,
     svmp::FE::timestepping::TimeHistory& history,
@@ -5755,8 +5815,13 @@ bool applyLevelSetMaintenance(
         accepted_contact_stages = {},
     std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>
         accepted_contact_stage_constraints = {},
-    std::span<const svmp::FE::Real> accepted_contact_stage_solution = {})
+    std::span<const svmp::FE::Real> accepted_contact_stage_solution = {},
+    std::vector<LevelSetVolumeCorrectionMaintenanceEvent>*
+        applied_volume_corrections = nullptr)
 {
+  if (applied_volume_corrections != nullptr) {
+    applied_volume_corrections->clear();
+  }
   if (!sim.fe_system || requests.empty()) {
     return false;
   }
@@ -5767,6 +5832,8 @@ bool applyLevelSetMaintenance(
   // request succeeds and the common FE history update is complete.
   auto staged_requests = requests;
   std::vector<std::string> staged_commit_logs;
+  std::vector<LevelSetVolumeCorrectionMaintenanceEvent>
+      staged_volume_corrections;
   bool changed = false;
   auto fe_solution = gatherFeOrderedSolution(history.u());
   const auto accepted_solution_before_maintenance = fe_solution;
@@ -5905,6 +5972,11 @@ bool applyLevelSetMaintenance(
         }
         changed = true;
         modified_level_set_fields.insert(field);
+        for (auto& event : staged_volume_corrections) {
+          if (event.level_set_field == field) {
+            event.includes_other_maintenance = true;
+          }
+        }
         std::ostringstream log;
         log
           << "[svMultiPhysics::Application] Level-set reinitialized field='"
@@ -5965,6 +6037,8 @@ bool applyLevelSetMaintenance(
     }
 
     if (do_volume) {
+      const bool includes_other_maintenance =
+          modified_level_set_fields.contains(field);
       if (!request.volume_target_initialized) {
         request.volume_target =
             request.volume_correction.target_negative_volume;
@@ -6002,6 +6076,24 @@ bool applyLevelSetMaintenance(
         // reject before applying its returned vector if repeated global shifts
         // would exceed the application-level cumulative path-length budget.
         accountAppliedLevelSetVolumeCorrection(request, result);
+        if (std::any_of(
+                staged_volume_corrections.begin(),
+                staged_volume_corrections.end(),
+                [field](const auto& event) {
+                  return event.level_set_field == field;
+                })) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] One maintenance transaction cannot apply multiple global volume corrections to the same level-set field.");
+        }
+        staged_volume_corrections.push_back(
+            LevelSetVolumeCorrectionMaintenanceEvent{
+                .level_set_field = field,
+                .level_set_field_name = request.level_set_field_name,
+                .completed_step = completed_step,
+                .includes_other_maintenance =
+                    includes_other_maintenance,
+                .correction = result,
+            });
         fe_solution = std::move(corrected);
         changed = true;
         modified_level_set_fields.insert(field);
@@ -6167,7 +6259,318 @@ bool applyLevelSetMaintenance(
   for (const auto& log : staged_commit_logs) {
     application::core::oopCout() << log << std::endl;
   }
+  if (applied_volume_corrections != nullptr) {
+    *applied_volume_corrections = std::move(staged_volume_corrections);
+  }
   return changed;
+}
+
+void logLevelSetVolumeCorrectionFreeSurfaceWork(
+    application::core::SimulationComponents& sim,
+    std::span<const LevelSetVolumeCorrectionMaintenanceEvent> events,
+    std::span<const svmp::FE::systems::
+                        AcceptedFreeSurfaceDiscreteFunctionalState>
+        before,
+    std::span<const svmp::FE::systems::
+                        AcceptedFreeSurfaceDiscreteFunctionalState>
+        after)
+{
+  if (!sim.fe_system) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Volume-correction work accounting requires an FE system.");
+  }
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto local_event_count = static_cast<double>(events.size());
+  if (globalMinDouble(local_event_count, comm) !=
+      globalMaxDouble(local_event_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Applied volume-correction event coverage differs across the FE communicator.");
+  }
+  if (events.empty()) {
+    return;
+  }
+  const auto declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+  const auto local_declaration_count =
+      static_cast<double>(declarations.size());
+  const auto local_before_count = static_cast<double>(before.size());
+  const auto local_after_count = static_cast<double>(after.size());
+  if (globalMinDouble(local_declaration_count, comm) !=
+          globalMaxDouble(local_declaration_count, comm) ||
+      globalMinDouble(local_before_count, comm) !=
+          globalMaxDouble(local_before_count, comm) ||
+      globalMinDouble(local_after_count, comm) !=
+          globalMaxDouble(local_after_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Volume-correction functional state coverage differs across the FE communicator.");
+  }
+  std::map<
+      int,
+      const svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState*>
+      before_by_marker;
+  std::map<
+      int,
+      const svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState*>
+      after_by_marker;
+  bool local_state_maps_valid =
+      before.size() == after.size() && before.size() == declarations.size();
+  for (const auto& state : before) {
+    local_state_maps_valid =
+        state.interface_marker >= 0 &&
+        before_by_marker.emplace(state.interface_marker, &state).second &&
+        local_state_maps_valid;
+  }
+  for (const auto& state : after) {
+    local_state_maps_valid =
+        state.interface_marker >= 0 &&
+        after_by_marker.emplace(state.interface_marker, &state).second &&
+        local_state_maps_valid;
+  }
+  if (local_state_maps_valid) {
+    auto before_it = before_by_marker.begin();
+    auto after_it = after_by_marker.begin();
+    for (; before_it != before_by_marker.end(); ++before_it, ++after_it) {
+      local_state_maps_valid =
+          before_it->first == after_it->first && local_state_maps_valid;
+    }
+  }
+  if (globalMinDouble(local_state_maps_valid ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Volume-correction work accounting requires unique, matching functional state sets.");
+  }
+
+  for (const auto& event : events) {
+    const bool local_event_valid =
+        event.level_set_field != svmp::FE::INVALID_FIELD_ID &&
+        !event.level_set_field_name.empty() &&
+        sim.fe_system->findFieldByName(event.level_set_field_name) ==
+            event.level_set_field &&
+        event.completed_step >= 0 && event.correction.correction_applied &&
+        std::isfinite(event.correction.applied_shift);
+    if (globalMinDouble(local_event_valid ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Volume-correction work accounting received an invalid applied event.");
+    }
+    const std::array<double, 5> event_metadata{
+        static_cast<double>(event.level_set_field),
+        static_cast<double>(event.completed_step),
+        event.includes_other_maintenance ? 1.0 : 0.0,
+        static_cast<double>(
+            event.correction.negative_component_volume_transfers.size()),
+        static_cast<double>(event.correction.applied_shift)};
+    bool event_metadata_consistent = true;
+    for (const auto value : event_metadata) {
+      const auto minimum = globalMinDouble(value, comm);
+      const auto maximum = globalMaxDouble(value, comm);
+      const auto tolerance =
+          4096.0 * std::numeric_limits<double>::epsilon() *
+          std::max({1.0, std::abs(minimum), std::abs(maximum)});
+      event_metadata_consistent =
+          std::isfinite(value) &&
+          std::abs(maximum - minimum) <= tolerance &&
+          event_metadata_consistent;
+    }
+    if (!event_metadata_consistent) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Applied volume-correction event metadata differs across the FE communicator.");
+    }
+    std::size_t functional_count = 0u;
+    svmp::FE::Real liquid_volume_change = 0.0;
+    svmp::FE::Real liquid_gas_area_change = 0.0;
+    svmp::FE::Real wetted_wall_area_change = 0.0;
+    svmp::FE::Real contact_measure_change = 0.0;
+    svmp::FE::Real surface_energy_change = 0.0;
+    svmp::FE::Real young_wall_energy_change = 0.0;
+    svmp::FE::Real volume_constraint_potential_change = 0.0;
+    svmp::FE::Real total_potential_change = 0.0;
+    std::ostringstream functional_details;
+    for (const auto& declaration : declarations) {
+      if (declaration.level_set_field != event.level_set_field) {
+        continue;
+      }
+      ++functional_count;
+      const auto before_it =
+          before_by_marker.find(declaration.interface_marker);
+      const auto after_it =
+          after_by_marker.find(declaration.interface_marker);
+      const bool local_state_available =
+          before_it != before_by_marker.end() &&
+          after_it != after_by_marker.end();
+      if (globalMinDouble(local_state_available ? 1.0 : 0.0, comm) != 1.0) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Volume-correction work accounting is missing a functional state for interface marker " +
+            std::to_string(declaration.interface_marker) + ".");
+      }
+      const auto& initial = *before_it->second;
+      const auto& corrected = *after_it->second;
+      const bool local_revision_valid =
+          initial.geometry_revision.complete() &&
+          corrected.geometry_revision.complete() &&
+          initial.geometry_revision.interface_marker ==
+              declaration.interface_marker &&
+          corrected.geometry_revision.interface_marker ==
+              declaration.interface_marker &&
+          initial.geometry_revision.source_id ==
+              corrected.geometry_revision.source_id &&
+          initial.geometry_revision.domain_id ==
+              declaration.geometry_domain_id &&
+          corrected.geometry_revision.domain_id ==
+              declaration.geometry_domain_id &&
+          initial.geometry_revision.isovalue ==
+              corrected.geometry_revision.isovalue &&
+          initial.geometry_revision.source_value_revision !=
+              corrected.geometry_revision.source_value_revision &&
+          initial.geometry_revision.snapshot_revision_key !=
+              corrected.geometry_revision.snapshot_revision_key &&
+          initial.state.snapshot_revision_key ==
+              initial.geometry_revision.snapshot_revision_key &&
+          corrected.state.snapshot_revision_key ==
+              corrected.geometry_revision.snapshot_revision_key &&
+          initial.state.liquid_side == corrected.state.liquid_side &&
+          initial.state.liquid_side == declaration.parameters.liquid_side &&
+          initial.state.surface_tension == corrected.state.surface_tension &&
+          initial.state.surface_tension ==
+              declaration.parameters.surface_tension &&
+          initial.state.volume_multiplier ==
+              corrected.state.volume_multiplier &&
+          initial.state.volume_multiplier ==
+              declaration.parameters.volume_multiplier;
+      if (globalMinDouble(local_revision_valid ? 1.0 : 0.0, comm) != 1.0) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Applied volume correction did not produce distinct, complete free-surface geometry revisions.");
+      }
+      const auto& initial_state = initial.state;
+      const auto& corrected_state = corrected.state;
+      const auto marker_liquid_volume_change =
+          corrected_state.owned_liquid_volume -
+          initial_state.owned_liquid_volume;
+      const auto marker_liquid_gas_area_change =
+          corrected_state.owned_liquid_gas_area -
+          initial_state.owned_liquid_gas_area;
+      const auto marker_wetted_wall_area_change =
+          corrected_state.owned_wetted_wall_area -
+          initial_state.owned_wetted_wall_area;
+      const auto marker_contact_measure_change =
+          corrected_state.owned_contact_measure -
+          initial_state.owned_contact_measure;
+      const auto marker_surface_energy_change =
+          corrected_state.liquid_gas_surface_energy -
+          initial_state.liquid_gas_surface_energy;
+      const auto marker_young_wall_energy_change =
+          corrected_state.young_wall_energy -
+          initial_state.young_wall_energy;
+      const auto marker_volume_potential_change =
+          corrected_state.volume_constraint_potential -
+          initial_state.volume_constraint_potential;
+      const auto marker_total_potential_change =
+          corrected_state.total_potential - initial_state.total_potential;
+      liquid_volume_change += marker_liquid_volume_change;
+      liquid_gas_area_change += marker_liquid_gas_area_change;
+      wetted_wall_area_change += marker_wetted_wall_area_change;
+      contact_measure_change += marker_contact_measure_change;
+      surface_energy_change += marker_surface_energy_change;
+      young_wall_energy_change += marker_young_wall_energy_change;
+      volume_constraint_potential_change +=
+          marker_volume_potential_change;
+      total_potential_change += marker_total_potential_change;
+      functional_details
+          << " interface_marker=" << declaration.interface_marker
+          << " geometry_domain_id='" << declaration.geometry_domain_id << "'"
+          << " initial_source_value_revision="
+          << initial.geometry_revision.source_value_revision
+          << " corrected_source_value_revision="
+          << corrected.geometry_revision.source_value_revision
+          << " initial_snapshot_revision="
+          << initial.geometry_revision.snapshot_revision_key
+          << " corrected_snapshot_revision="
+          << corrected.geometry_revision.snapshot_revision_key
+          << " marker_liquid_volume_change="
+          << marker_liquid_volume_change
+          << " marker_liquid_gas_area_change="
+          << marker_liquid_gas_area_change
+          << " marker_wetted_wall_area_change="
+          << marker_wetted_wall_area_change
+          << " marker_contact_measure_change="
+          << marker_contact_measure_change
+          << " marker_surface_energy_change="
+          << marker_surface_energy_change
+          << " marker_young_wall_energy_change="
+          << marker_young_wall_energy_change
+          << " marker_volume_constraint_potential_change="
+          << marker_volume_potential_change
+          << " marker_total_potential_change="
+          << marker_total_potential_change;
+    }
+    const auto local_functional_count =
+        static_cast<double>(functional_count);
+    if (globalMinDouble(local_functional_count, comm) !=
+        globalMaxDouble(local_functional_count, comm)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Volume-correction functional matching differs across the FE communicator.");
+    }
+    const std::array<svmp::FE::Real, 8> totals{
+        liquid_volume_change,
+        liquid_gas_area_change,
+        wetted_wall_area_change,
+        contact_measure_change,
+        surface_energy_change,
+        young_wall_energy_change,
+        volume_constraint_potential_change,
+        total_potential_change};
+    bool totals_consistent = true;
+    for (const auto value : totals) {
+      const bool local_finite = std::isfinite(value);
+      if (globalMinDouble(local_finite ? 1.0 : 0.0, comm) != 1.0) {
+        totals_consistent = false;
+        continue;
+      }
+      const auto minimum = globalMinDouble(value, comm);
+      const auto maximum = globalMaxDouble(value, comm);
+      const auto tolerance =
+          4096.0 * std::numeric_limits<double>::epsilon() *
+          std::max({1.0, std::abs(minimum), std::abs(maximum)});
+      totals_consistent =
+          std::abs(maximum - minimum) <= tolerance && totals_consistent;
+    }
+    if (!totals_consistent) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Volume-correction work accounting differs across the FE communicator.");
+    }
+
+    std::ostringstream log;
+    log << std::setprecision(17)
+        << "[svMultiPhysics::Application] Level-set volume correction work"
+        << " diagnostic=level_set_volume_correction_work"
+        << " field='" << event.level_set_field_name << "'"
+        << " step=" << event.completed_step
+        << " scope="
+        << (event.includes_other_maintenance
+                ? "maintenance_sequence_with_other_stage"
+                : "global_shift_only")
+        << " numerical_work_classification=maintenance"
+        << " numerical_work_sign=energy_after_minus_before"
+        << " free_surface_functional_count=" << functional_count
+        << " applied_shift=" << event.correction.applied_shift
+        << " negative_component_count="
+        << event.correction.negative_component_volume_transfers.size()
+        << " negative_component_volume_transfer="
+        << event.correction.total_component_volume_transfer
+        << " liquid_volume_change=" << liquid_volume_change
+        << " liquid_gas_area_change=" << liquid_gas_area_change
+        << " wetted_wall_area_change=" << wetted_wall_area_change
+        << " contact_measure_change=" << contact_measure_change
+        << " surface_energy_change=" << surface_energy_change
+        << " young_wall_energy_change=" << young_wall_energy_change
+        << " volume_constraint_potential_change="
+        << volume_constraint_potential_change
+        << " total_potential_change=" << total_potential_change
+        << " numerical_free_surface_work=" << total_potential_change
+        << " applicability="
+        << (functional_count > 0u ? "declared_free_surface_functional"
+                                  : "non_free_surface_level_set")
+        << functional_details.str();
+    application::core::oopCout() << log.str() << std::endl;
+  }
 }
 
 svmp::FE::systems::SystemStateView stateViewForHistory(
@@ -11078,17 +11481,44 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           "post_accept",
           /*honor_fail_on_trigger=*/true);
     }
-    const bool level_set_maintenance_changed =
-        applyLevelSetMaintenance(
-            sim,
-            h,
-            level_set_maintenance,
-            pending_contact_stages,
-            pending_contact_stage_constraints,
-            pending_contact_stage_solution);
+    const bool volume_maintenance_due = std::any_of(
+        level_set_maintenance.begin(),
+        level_set_maintenance.end(),
+        [&](const auto& request) {
+          return svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
+              request.volume_correction, h.stepIndex());
+        });
+    std::vector<
+        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+        pre_maintenance_functionals;
+    if (volume_maintenance_due) {
+      pre_maintenance_functionals =
+          evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+    }
+    std::vector<LevelSetVolumeCorrectionMaintenanceEvent>
+        applied_volume_corrections;
+    const bool level_set_maintenance_changed = applyLevelSetMaintenance(
+        sim,
+        h,
+        level_set_maintenance,
+        pending_contact_stages,
+        pending_contact_stage_constraints,
+        pending_contact_stage_solution,
+        &applied_volume_corrections);
     const auto cut_report = refreshActiveCutIntegrationContextCached(
         sim, params, h.u(), *cut_lifecycle, *cut_refresh_cache,
         "accepted_step");
+    if (!applied_volume_corrections.empty()) {
+      std::vector<
+          svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+          post_maintenance_functionals =
+              evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+      logLevelSetVolumeCorrectionFreeSurfaceWork(
+          sim,
+          applied_volume_corrections,
+          pre_maintenance_functionals,
+          post_maintenance_functionals);
+    }
     if (parseBoolEnv("SVMP_CUT_RULE_DUMP", false)) {
       dumpActiveCutVolumeRulesForProbe(*sim.fe_system, h.stepIndex());
     }

@@ -3950,6 +3950,126 @@ void addValidComponentTransferLedger(
 }
 
 TEST(ApplicationDriverLevelSetVolumeCorrection,
+     ReportsAuthoritativeFreeSurfacePotentialChange)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeWorkflowTriangleMesh();
+  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+      svmp::FE::ElementType::Triangle3,
+      /*order=*/1);
+  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "phi",
+      .space = scalar_space,
+      .components = 1,
+  });
+  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+  parameters.surface_tension = 1.0;
+  parameters.volume_multiplier = 0.5;
+  system->declareFreeSurfaceDiscreteFunctional(
+      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+          .interface_marker = 808,
+          .level_set_field = phi,
+          .geometry_domain_id = "volume_work_fixture",
+          .parameters = parameters,
+          .owner_component =
+              "ApplicationDriverLevelSetVolumeCorrection.WorkFixture",
+      });
+  ASSERT_NO_THROW(system->setup({}));
+  application::core::SimulationComponents sim;
+  sim.primary_mesh = mesh;
+  sim.fe_system = std::move(system);
+
+  const auto make_state = [](std::uint64_t source_revision,
+                             std::uint64_t snapshot_revision,
+                             svmp::FE::Real liquid_volume,
+                             svmp::FE::Real liquid_gas_area,
+                             svmp::FE::Real wetted_wall_area,
+                             svmp::FE::Real contact_measure,
+                             svmp::FE::Real surface_energy,
+                             svmp::FE::Real wall_energy,
+                             svmp::FE::Real volume_potential,
+                             svmp::FE::Real total_potential) {
+    svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState state;
+    state.interface_marker = 808;
+    state.geometry_revision.source_id = "field:0";
+    state.geometry_revision.domain_id = "volume_work_fixture";
+    state.geometry_revision.interface_marker = 808;
+    state.geometry_revision.source_value_revision = source_revision;
+    state.geometry_revision.snapshot_revision_key = snapshot_revision;
+    state.state.snapshot_revision_key = snapshot_revision;
+    state.state.surface_tension = 1.0;
+    state.state.volume_multiplier = 0.5;
+    state.state.owned_liquid_volume = liquid_volume;
+    state.state.owned_liquid_gas_area = liquid_gas_area;
+    state.state.owned_wetted_wall_area = wetted_wall_area;
+    state.state.owned_contact_measure = contact_measure;
+    state.state.liquid_gas_surface_energy = surface_energy;
+    state.state.young_wall_energy = wall_energy;
+    state.state.volume_constraint_potential = volume_potential;
+    state.state.total_potential = total_potential;
+    return state;
+  };
+  const std::vector<
+      svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+      before{make_state(
+          1u, 101u, 0.5, 2.0, 0.5, 0.25, 2.0, -0.5, 0.25, 1.75)};
+  const std::vector<
+      svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+      after{make_state(
+          2u, 102u, 0.375, 2.25, 0.75, 0.125, 2.25, -0.375,
+          0.125, 2.0)};
+  LevelSetVolumeCorrectionMaintenanceEvent event;
+  event.level_set_field = phi;
+  event.level_set_field_name = "phi";
+  event.completed_step = 4;
+  event.correction.correction_applied = true;
+  event.correction.applied_shift = 0.125;
+  event.correction.total_component_volume_transfer = -0.125;
+  event.correction.negative_component_volume_transfers.push_back(
+      svmp::FE::level_set::LevelSetComponentVolumeTransfer{
+          .component_global_vertex_id = 0,
+          .initial_negative_volume = 0.5,
+          .corrected_negative_volume = 0.375,
+          .volume_transfer = -0.125,
+      });
+  const std::vector<LevelSetVolumeCorrectionMaintenanceEvent> events{event};
+
+  testing::internal::CaptureStdout();
+  ASSERT_NO_THROW(logLevelSetVolumeCorrectionFreeSurfaceWork(
+      sim, events, before, after));
+  const auto output = testing::internal::GetCapturedStdout();
+  EXPECT_NE(output.find("diagnostic=level_set_volume_correction_work"),
+            std::string::npos);
+  EXPECT_NE(output.find("scope=global_shift_only"), std::string::npos);
+  EXPECT_NE(output.find("numerical_work_sign=energy_after_minus_before"),
+            std::string::npos);
+  EXPECT_NE(output.find("free_surface_functional_count=1"),
+            std::string::npos);
+  EXPECT_NE(output.find("initial_snapshot_revision=101"),
+            std::string::npos);
+  EXPECT_NE(output.find("corrected_snapshot_revision=102"),
+            std::string::npos);
+  EXPECT_NE(output.find("surface_energy_change="), std::string::npos);
+  EXPECT_NE(output.find("young_wall_energy_change="), std::string::npos);
+  EXPECT_NE(output.find("volume_constraint_potential_change="),
+            std::string::npos);
+  EXPECT_NE(output.find("liquid_volume_change=-0.125"),
+            std::string::npos);
+  EXPECT_NE(output.find("surface_energy_change=0.25"),
+            std::string::npos);
+  EXPECT_NE(output.find("young_wall_energy_change=0.125"),
+            std::string::npos);
+  EXPECT_NE(output.find("volume_constraint_potential_change=-0.125"),
+            std::string::npos);
+  EXPECT_NE(output.find("numerical_free_surface_work=0.25"),
+            std::string::npos);
+#endif
+}
+
+TEST(ApplicationDriverLevelSetVolumeCorrection,
      CumulativeDisplacementBudgetRejectsBeforeAccountingExcessEvent)
 {
   LevelSetMaintenanceRequest request{};
@@ -4144,11 +4264,22 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
 
   std::vector<LevelSetMaintenanceRequest> successful_requests{
       first_request};
+  std::vector<LevelSetVolumeCorrectionMaintenanceEvent> successful_events;
   testing::internal::CaptureStdout();
-  const bool successful_change =
-      applyLevelSetMaintenance(sim, history, successful_requests);
+  const bool successful_change = applyLevelSetMaintenance(
+      sim,
+      history,
+      successful_requests,
+      {},
+      {},
+      {},
+      &successful_events);
   const auto successful_output = testing::internal::GetCapturedStdout();
   ASSERT_TRUE(successful_change);
+  ASSERT_EQ(successful_events.size(), 1u);
+  EXPECT_EQ(successful_events.front().level_set_field, phi);
+  EXPECT_EQ(successful_events.front().level_set_field_name, "phi");
+  EXPECT_TRUE(successful_events.front().correction.correction_applied);
   EXPECT_NE(successful_output.find(
                 "max_contact_angle_change_radians=0"),
             std::string::npos);
@@ -4183,11 +4314,19 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
   const auto previous_before = gatherFeOrderedSolution(history.uPrev());
   const auto previous2_before = gatherFeOrderedSolution(history.uPrev2());
   const auto rates_before = gatherFeOrderedSolution(history.uDot());
+  auto rejected_events = successful_events;
 
   testing::internal::CaptureStdout();
   std::string rejection_message;
   try {
-    (void)applyLevelSetMaintenance(sim, history, requests);
+    (void)applyLevelSetMaintenance(
+        sim,
+        history,
+        requests,
+        {},
+        {},
+        {},
+        &rejected_events);
   } catch (const std::runtime_error& error) {
     rejection_message = error.what();
   }
@@ -4197,6 +4336,7 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
   EXPECT_EQ(output.find("Level-set volume corrected"), std::string::npos);
   EXPECT_EQ(output.find("Level-set maintenance synchronized"),
             std::string::npos);
+  EXPECT_TRUE(rejected_events.empty());
 
   EXPECT_EQ(gatherFeOrderedSolution(history.u()), current_before);
   EXPECT_EQ(gatherFeOrderedSolution(history.uPrev()), previous_before);
