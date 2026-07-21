@@ -990,7 +990,7 @@ This section converts findings FSR-01 through FSR-18 into an implementation and 
 A work-package box is checked only after its source changes, required tests, and exit evidence below are complete. A qualification box is checked only after the complete predeclared matrix passes and its machine-readable artifacts are archived.
 
 - [x] WP-0: configuration containment and effective-state provenance
-- [ ] WP-1: remove physical dry-domain feedback and bound the transport extension
+- [x] WP-1: remove physical dry-domain feedback and bound the transport extension
 - [ ] WP-2: one authoritative cut/interface/wet-wall/contact geometry snapshot
 - [ ] WP-3: sharply clipped exterior boundary operators
 - [ ] WP-4: balanced capillary pressure, wall energy, and prescribed angle
@@ -1115,6 +1115,14 @@ Simulation exits:
 
 - Re-run wall advection, translating drop, reversible Enright deformation, and the two-island case, plus a reduced deterministic reproducer of the D38 map failure. The reproducer must eliminate the previously observed `10^2`--`10^6` extension amplification and map-refresh velocity spike. Full-horizon D18/D38 runs remain Q5 tests after Q0--Q4, where they must also be independent of unused dry-domain geometry.
 - Preserve a machine-readable per-revision map report, including every fallback and guard rejection. Closure requires both the one-way wet-block result and the replacement cut-conditioning evidence from WP-7.
+
+Qualification evidence recorded on 2026-07-20:
+
+- The frozen `free_surface_wp1_extension_v1` matrix passed 53 distinct low-level tests across five serial/MPI groups at source commit `398a24773be4c2e757aa642ce642a029f8be1381`. The matrix includes the complete current cut-stability suite as the same-revision WP-7 dependency evidence.
+- Serial and two-rank wet-block invariance, zero dry-path coupling between liquid islands, inactive-support constraints, legacy-path rejection, exact frozen-map coupling, wall compatibility, 1/2/4/8-layer bands, reversed node/component numbering, partition changes, and per-revision artifact publication all passed their predeclared gates.
+- The reduced D38 stencil demonstrates an unguarded row `L1` norm above `1e5` and amplification above `1e5`; the accepted map instead takes a nonnegative bounded fallback, has wet-to-dry amplification no greater than one in that fixture, and rebuilds at the same state with zero preview change.
+- The wall-film, separated-drop, translating-drop, and reversible-deformation exits passed. The archived `64^2` translating-drop and `32^3` Enright points are WP-1 exits only; they do not qualify the complete Q3 refinement matrix, and no full-horizon D18/D38 claim is made here.
+- Machine-readable results, exact test lists, declared gates, source/build hashes, every phase-flux ledger row, resource records, and checksums are archived in [the WP-1 qualification record](qualification_logs/free_surface_wp1_extension_20260720_398a2477/record.md) and [summary](qualification_logs/free_surface_wp1_extension_20260720_398a2477/summary.json). The archive commit is `10c711061fd442977d80cccdb8bb63a0fc25abdf`.
 
 ### WP-2: one authoritative cut/interface/wet-wall/contact geometry snapshot
 
