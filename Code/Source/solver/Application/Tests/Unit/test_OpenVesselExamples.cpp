@@ -1027,8 +1027,11 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
       expectText(fluid, "Module_options", expected_jit_options);
       expectText(free_surface, "Active_domain", "LevelSetNegative");
       expectText(free_surface, "Active_domain_method", "CutVolume");
-      expectText(free_surface, "Enable_velocity_extension", "true");
-      expectText(free_surface, "Velocity_extension_diffusivity", "1.0");
+      EXPECT_EQ(free_surface.FirstChildElement("Enable_velocity_extension"),
+                nullptr);
+      EXPECT_EQ(
+          free_surface.FirstChildElement("Velocity_extension_diffusivity"),
+          nullptr);
       expectEigenDirectSolver(fluid);
       EXPECT_EQ(free_surface.FirstChildElement("Kinematic_enforcement"),
                 nullptr);

@@ -142,15 +142,13 @@
     <Volume_quadrature_order>2</Volume_quadrature_order>
     <Active_domain>LevelSetNegative</Active_domain>
     <Active_domain_method>CutVolume</Active_domain_method>
-    <Enable_velocity_extension>true</Enable_velocity_extension>
-    <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
     <Use_cut_metadata_scale>false</Use_cut_metadata_scale>
-    <Cut_cell_velocity_gradient_penalty>0.1</Cut_cell_velocity_gradient_penalty>
-    <Cut_cell_velocity_max_derivative_order>1</Cut_cell_velocity_max_derivative_order>
-    <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
+    <!-- Pressure control remains explicit; physical velocity conditioning is
+         owned by retained-support constraints and aggregation. -->
+    <Cut_cell_pressure_gradient_penalty>100.0</Cut_cell_pressure_gradient_penalty>
     <Cut_cell_pressure_stabilization_policy>DisabledForRefreshedFrozenHighOrder</Cut_cell_pressure_stabilization_policy>
   </Add_BC>
 </Add_equation>

@@ -183,13 +183,11 @@
     <Level_set_isovalue>0.0</Level_set_isovalue>
     <Active_domain>LevelSetNegative</Active_domain>
     <Active_domain_method>CutVolume</Active_domain_method>
-    <Enable_velocity_extension>true</Enable_velocity_extension>
-    <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
     <Use_cut_metadata_scale>false</Use_cut_metadata_scale>
-    <Cut_cell_velocity_gradient_penalty>1.0</Cut_cell_velocity_gradient_penalty>
+    <Small_cut_aggregation>true</Small_cut_aggregation>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
   </Add_BC>
 </Add_equation>
