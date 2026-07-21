@@ -13,7 +13,7 @@
   "notes": [
     "The mesh encodes the 1x rectangular tank and still-water fill level.",
     "The published roll-angle history and pressure records are external benchmark data.",
-    "The pressure_gauge entry is an interior pressure anchor; pressure history comparisons use pressure_sensor."
+    "The pressure_gauge entry is an initial-condition diagnostic sample, not an algebraic pressure constraint; pressure history comparisons use pressure_sensor."
   ],
   "pressure_gauge": {
     "coordinates": [
@@ -26,10 +26,12 @@
     "node_id": 304
   },
   "pressure_gauge_verification": {
-    "current_prescribed_pressure_matches_initial_hydrostatic": true,
-    "initial_pressure_error_after_constraint": 0.0,
-    "previous_surface_target_pressure": 0.0,
-    "previous_surface_target_pressure_error": -553.267323
+    "diagnostic_point_initial_pressure_error": 0.0,
+    "diagnostic_point_initial_pressure_matches_mesh_field": true,
+    "diagnostic_point_pressure": 553.267323,
+    "diagnostic_role": "initial_condition_sample_not_pressure_constraint",
+    "pressure_constraint_enabled": false,
+    "pressure_initialization_source": "mesh_vertex_field"
   },
   "pressure_sensor": {
     "case": "lateral_water_1x",

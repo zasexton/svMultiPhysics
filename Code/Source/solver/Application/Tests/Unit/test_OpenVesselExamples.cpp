@@ -186,6 +186,22 @@ const tinyxml2::XMLElement& childWithAttribute(const tinyxml2::XMLElement& paren
       std::string(attribute_value) + "'");
 }
 
+bool hasChildWithAttribute(const tinyxml2::XMLElement& parent,
+                           const char* child_name,
+                           const char* attribute_name,
+                           std::string_view attribute_value)
+{
+  for (const auto* element = parent.FirstChildElement(child_name);
+       element != nullptr;
+       element = element->NextSiblingElement(child_name)) {
+    const char* value = element->Attribute(attribute_name);
+    if (value != nullptr && attribute_value == value) {
+      return true;
+    }
+  }
+  return false;
+}
+
 tinyxml2::XMLElement& mutableChildWithAttribute(tinyxml2::XMLElement& parent,
                                                 const char* child_name,
                                                 const char* attribute_name,
@@ -230,6 +246,27 @@ void expectText(const tinyxml2::XMLElement& parent,
                 std::string_view expected)
 {
   EXPECT_EQ(text(parent, name), expected) << name;
+}
+
+void expectReviewedP1LevelSetTransportControls(
+    const tinyxml2::XMLElement& level_set)
+{
+  expectText(level_set, "Enable_SUPG", "true");
+  expectText(level_set, "SUPG_tau_scale", "0.5");
+  expectText(level_set, "SUPG_transient_scale", "2.0");
+  expectText(level_set, "Enable_discontinuity_capturing", "true");
+  expectText(level_set, "Discontinuity_capturing_scale", "0.1");
+  expectText(level_set, "Discontinuity_capturing_gradient_epsilon", "1.0e-12");
+  expectText(level_set, "Discontinuity_capturing_max_courant", "0.5");
+  expectText(level_set, "Enable_bound_preserving_limiter", "true");
+  expectText(level_set, "Bound_preserving_maximum_courant", "1.0");
+  expectText(level_set, "Bound_preserving_enforce_courant_limit", "true");
+  expectText(level_set,
+             "Bound_preserving_enforce_impermeable_boundaries",
+             "true");
+  expectText(level_set,
+             "Bound_preserving_impermeable_normal_velocity_tolerance",
+             "1.0e-10");
 }
 
 void setOrAppendText(tinyxml2::XMLDocument& doc,
@@ -583,7 +620,7 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectText(level_set, "Level_set_source", "prescribed_data");
   expectText(level_set, "Velocity_source", "constant");
   expectText(level_set, "Constant_velocity", "0.0 0.0 0.0");
-  expectText(level_set, "Enable_SUPG", "true");
+  expectReviewedP1LevelSetTransportControls(level_set);
   expectText(level_set, "Enable_reinitialization", "true");
   expectText(level_set, "Reinitialization_method", "projection");
   expectText(level_set, "Enable_volume_correction", "true");
@@ -599,9 +636,9 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectText(fluid, "Force_y", "-9.81");
   expectText(fluid, "Force_z", "0.0");
   expectText(fluid, "Hydrostatic_pressure_initialization", "true");
+  expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");
   expectText(fluid, "Hydrostatic_pressure_reference_point", "0.0 0.45 0.0");
-  expectReferencedFileExists(case_dir, child(fluid, "Node_pressure_constraints"),
-                             "Values_file_path");
+  EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
   expectGmresSolver(fluid);
   expectOutputFields(fluid, "Spatial", {"Velocity", "Pressure"});
   expectOutputFields(fluid, "Volume_integral", {"Volume"});
@@ -611,6 +648,7 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectBoundaryCondition(fluid, "wall_bottom", "Dir");
   const auto& free_surface = expectBoundaryCondition(fluid, "free_surface", "Free_surface");
   expectText(free_surface, "Implementation", "UnfittedLevelSet");
+  expectText(free_surface, "Small_cut_aggregation", "true");
   expectText(free_surface, "Level_set_field_name", "phi");
   expectText(free_surface, "Generated_interface_domain_id", "open_vessel_surface");
   expectText(free_surface, "Level_set_isovalue", "0.0");
@@ -618,7 +656,8 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectText(free_surface, "Surface_tension", "0.0");
   expectText(free_surface, "Enable_cut_cell_stabilization", "true");
   expectText(free_surface, "Use_cut_metadata_scale", "false");
-  expectText(free_surface, "Cut_cell_velocity_gradient_penalty", "1.0");
+  EXPECT_EQ(free_surface.FirstChildElement("Cut_cell_velocity_gradient_penalty"),
+            nullptr);
   expectText(free_surface, "Cut_cell_pressure_gradient_penalty", "1.0");
 }
 
@@ -972,9 +1011,11 @@ TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderRejectsNitscheKinematics)
     FAIL() << "Expected unfitted Nitsche kinematics to be rejected";
   } catch (const std::invalid_argument& error) {
     const std::string message = error.what();
-    EXPECT_NE(message.find("one-sided embedded boundaries"), std::string::npos);
-    EXPECT_NE(message.find("Nitsche free-surface kinematics"),
-              std::string::npos);
+    EXPECT_NE(message.find("Eulerian level-set transport"), std::string::npos)
+        << message;
+    EXPECT_NE(message.find("Penalty/Nitsche enforcement"),
+              std::string::npos)
+        << message;
   }
 
   std::error_code ec;
@@ -993,7 +1034,9 @@ TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderRejectsRawCurvatureSurfaceTen
   const auto xml_path = writeUnfittedGuardRegressionXml(
       case_dir,
       "raw_curvature_surface_tension",
-      {{"Surface_tension", "0.0728"}, {"Use_level_set_curvature", "true"}});
+      {{"Surface_tension", "0.0728"},
+       {"Surface_tension_form", "CurvatureTraction"},
+       {"Use_level_set_curvature", "true"}});
 
   Parameters params;
   const ScopedCurrentPath cwd(case_dir);
@@ -1100,25 +1143,25 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
        false,
        true,
        false,
-       true,
-       "coupled_field",
+       false,
+       "prescribed_data",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "wall_top"}},
       {"unfitted_level_set",
        "spheric_test05_wet_bed_d18",
        false,
-       true,
        false,
-       true,
+       false,
+       false,
        "prescribed_data",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "wall_top"}},
       {"unfitted_level_set",
        "spheric_test05_wet_bed_d38",
        false,
-       true,
        false,
-       true,
+       false,
+       false,
        "prescribed_data",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "wall_top"}},
@@ -1127,7 +1170,7 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
        false,
        false,
        true,
-       true,
+       false,
        "prescribed_data",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "wall_top", "obstacle"}},
@@ -1149,6 +1192,10 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
 
     const auto& mesh = childWithAttribute(*root, "Add_mesh", "name", "tank");
     expectReferencedFileExists(case_dir, mesh, "Mesh_file_path");
+    if (expected.case_name == "spheric_test05_wet_bed_d18" ||
+        expected.case_name == "spheric_test05_wet_bed_d38") {
+      expectText(mesh, "Ghost_layers", "3");
+    }
     for (const auto& face : expected.faces) {
       expectFace(case_dir, mesh, face);
     }
@@ -1177,6 +1224,12 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
         expectBoundaryCondition(fluid, face, "Dir");
       }
     }
+    if (!expected.top_wall_bc &&
+        std::find(expected.faces.begin(), expected.faces.end(), "wall_top") !=
+            expected.faces.end()) {
+      EXPECT_FALSE(hasChildWithAttribute(fluid, "Add_BC", "name", "wall_top"))
+          << "wall_top must remain open (natural traction)";
+    }
     if (expected.obstacle_bc) {
       expectBoundaryCondition(fluid, "obstacle", "Dir");
     }
@@ -1191,12 +1244,43 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
     if (is_test05) {
       const auto expected_jit_options =
           std::string("jit=true; jit_specialization=true");
+      // SPHERIC Test 05 is a published two-dimensional benchmark.  The thin
+      // 3-D extrusion must therefore use symmetry/free-slip on its artificial
+      // front/back planes instead of adding spanwise-wall drag.  Retain the
+      // physical end-wall and bottom no-slip assumptions separately.
+      const auto& wall_front =
+          expectBoundaryCondition(fluid, "wall_front", "Dir");
+      const auto& wall_back =
+          expectBoundaryCondition(fluid, "wall_back", "Dir");
+      expectText(wall_front, "Effective_direction", "0 0 1");
+      expectText(wall_back, "Effective_direction", "0 0 1");
+      EXPECT_EQ(expectBoundaryCondition(fluid, "wall_left", "Dir")
+                    .FirstChildElement("Effective_direction"),
+                nullptr);
+      EXPECT_EQ(expectBoundaryCondition(fluid, "wall_right", "Dir")
+                    .FirstChildElement("Effective_direction"),
+                nullptr);
+      EXPECT_EQ(expectBoundaryCondition(fluid, "wall_bottom", "Dir")
+                    .FirstChildElement("Effective_direction"),
+                nullptr);
       const auto& level_set =
           childWithAttribute(*root, "Add_equation", "type", "level_set");
+      expectBoundaryCondition(level_set, "wall_top", "LevelSetOutflow");
       expectText(level_set, "Module_options", expected_jit_options);
+      expectText(level_set,
+                 "Wet_extension_advection_velocity_method",
+                 "wall_compatible_normal");
+      // Curved continuous-P1 redistancing currently fails closed rather than
+      // converging generally, so the production deck leaves it disabled.
+      // Bounded volume repair remains an explicitly monitored fallback.
       expectText(level_set, "Enable_reinitialization", "false");
       expectText(level_set, "Enable_volume_correction", "true");
+      expectText(level_set, "Volume_correction_minimum_relative_error", "1.0e-6");
+      expectText(level_set,
+                 "Volume_correction_maximum_interface_displacement_fraction",
+                 "0.05");
       expectText(fluid, "Module_options", expected_jit_options);
+      expectText(free_surface, "Small_cut_aggregation", "true");
       expectText(free_surface, "Active_domain", "LevelSetNegative");
       expectText(free_surface, "Active_domain_method", "CutVolume");
       EXPECT_EQ(free_surface.FirstChildElement("Enable_velocity_extension"),
@@ -1208,12 +1292,13 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
       EXPECT_EQ(free_surface.FirstChildElement("Kinematic_enforcement"),
                 nullptr);
       expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");
+      EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
       EXPECT_TRUE(fileContains(case_dir / "pressure_gauge.csv",
                                "node_id,pressure"));
       EXPECT_TRUE(fileContains(case_dir / "benchmark.json",
                                "\"pressure_gauge\""));
       EXPECT_TRUE(fileContains(case_dir / "benchmark.json",
-                               "\"current_prescribed_pressure_matches_initial_hydrostatic\": true"));
+                               "\"pressure_constraint_enabled\": false"));
     }
 
     if (expected.fitted) {
@@ -1224,11 +1309,21 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
     } else {
       const auto& level_set =
           childWithAttribute(*root, "Add_equation", "type", "level_set");
+      expectReviewedP1LevelSetTransportControls(level_set);
       expectText(level_set, "Level_set_field_name", "phi");
       expectText(level_set, "Velocity_source",
                  expected.level_set_velocity_source);
+      expectText(level_set, "Volume_correction_minimum_relative_error", "1.0e-6");
+      expectText(level_set,
+                 "Volume_correction_maximum_interface_displacement_fraction",
+                 "0.05");
+      expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");
+      EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
       expectText(free_surface, "Generated_interface_domain_id",
                  "open_vessel_surface");
+      expectText(level_set,
+                 "Wet_extension_advection_velocity_method",
+                 "wall_compatible_normal");
     }
   }
 }

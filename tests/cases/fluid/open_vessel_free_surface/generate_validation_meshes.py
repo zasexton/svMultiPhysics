@@ -46,6 +46,12 @@ TEST05_ADAPTIVE_TIME_LOOP_DECREASE_FACTOR = "0.5"
 TEST05_ADAPTIVE_TIME_LOOP_INCREASE_FACTOR = "1.5"
 TEST05_ADAPTIVE_TIME_LOOP_TARGET_NEWTON_ITERATIONS = "6"
 TEST05_ADAPTIVE_TIME_LOOP_MAX_STEPS_MULTIPLIER = "64"
+# The validation level-set coefficients are length-valued and expressed in
+# metres.  Permit one micrometre of coefficient-level one-ring error while
+# retaining a separate near-roundoff sign invariant.  This is a benchmark-deck
+# contract, not a relaxation of the solver-wide default.
+LEVEL_SET_BOUND_REPRESENTABILITY_TOLERANCE = "1.0e-6"
+LEVEL_SET_BOUND_SIGN_TOLERANCE = "1.0e-12"
 TEST05_PREVIOUS_INVALID_D18_GAUGE = {
     "node_id": 279,
     "initial_phi": -0.001806,
@@ -544,6 +550,25 @@ def dam_break_dry_bed_column_phi(
     return np.maximum(gate_x - points[:, 0], points[:, 1] - dam_height)
 
 
+def dam_break_dry_bed_column_pressure(
+    points: np.ndarray,
+    *,
+    gate_x: float,
+    dam_height: float,
+) -> np.ndarray:
+    """Signed hydrostatic continuation for the retained liquid column.
+
+    The pressure unknown exists only on the retained CutVolume support, but
+    dry vertices of cut cells still provide P1 interpolation coefficients.
+    Continuing the liquid pressure through those vertices makes the trace at
+    the horizontal free surface exactly zero and preserves the liquid-side
+    hydrostatic trace on the newly exposed vertical dam face.  Clipping the
+    dry coefficients to zero would move both traces inside the cut cell.
+    """
+    del gate_x  # The gate selects phi; the liquid-column pressure is vertical.
+    return WATER_DENSITY * GRAVITY * (dam_height - points[:, 1])
+
+
 def dam_break_wet_bed_pressure(
     points: np.ndarray,
     *,
@@ -552,7 +577,9 @@ def dam_break_wet_bed_pressure(
     wet_depth: float,
 ) -> np.ndarray:
     surface_height = np.where(points[:, 0] <= gate_x, dam_height, wet_depth)
-    return WATER_DENSITY * GRAVITY * np.maximum(surface_height - points[:, 1], 0.0)
+    # Retain a signed continuation on the dry vertices of cut cells so P1
+    # interpolation reaches zero at each local horizontal free surface.
+    return WATER_DENSITY * GRAVITY * (surface_height - points[:, 1])
 
 
 def test05_vertical_coordinates(
@@ -635,8 +662,11 @@ def write_solver_xml(
     fill_height: float,
     time_step: float,
     time_steps: int,
+    ghost_layers: int = 0,
     include_top_wall_bc: bool = False,
     include_obstacle_bc: bool = False,
+    level_set_outflow_faces: list[str] | None = None,
+    wall_effective_directions: dict[str, str] | None = None,
     active_domain: str | None = None,
     enable_cut_cell_stabilization: bool = True,
     use_cut_metadata_scale: bool = False,
@@ -650,6 +680,8 @@ def write_solver_xml(
     volume_correction_cadence_steps: str = "5",
     volume_correction_tolerance: str = "1.0e-5",
     volume_correction_max_iterations: str = "50",
+    volume_correction_minimum_relative_error: str = "1.0e-6",
+    volume_correction_maximum_interface_displacement_fraction: str = "0.1",
     momentum_source_file_path: str | None = None,
     rotating_frame_angular_velocity_file_path: str | None = None,
     wet_extension_advection_velocity_method: str | None = None,
@@ -663,7 +695,19 @@ def write_solver_xml(
     adaptive_time_loop_max_steps_multiplier: str = TEST05_ADAPTIVE_TIME_LOOP_MAX_STEPS_MULTIPLIER,
     newton_line_search_fail_on_no_reduction: bool = False,
     newton_line_search_max_iterations: str = "10",
+    bound_preserving_bound_tolerance: str = LEVEL_SET_BOUND_REPRESENTABILITY_TOLERANCE,
+    bound_preserving_sign_tolerance: str = LEVEL_SET_BOUND_SIGN_TOLERANCE,
 ) -> None:
+    if ghost_layers < 0:
+        raise ValueError("ghost_layers must be nonnegative")
+    level_set_outflow_faces = level_set_outflow_faces or []
+    unknown_level_set_outflows = set(level_set_outflow_faces).difference(faces)
+    if unknown_level_set_outflows:
+        raise ValueError(
+            "level_set_outflow_faces must name declared mesh faces: "
+            + ", ".join(sorted(unknown_level_set_outflows))
+        )
+    wall_effective_directions = wall_effective_directions or {}
     face_blocks = "\n".join(
         f"""  <Add_face name="{name}">
     <Face_file_path>{mesh_path.rsplit('/', 1)[0]}/mesh-surfaces/{name}.vtp</Face_file_path>
@@ -677,12 +721,28 @@ def write_solver_xml(
     ]
     if include_obstacle_bc:
         wall_bcs.append("obstacle")
-    wall_bc_blocks = "\n".join(
-        f"""  <Add_BC name="{name}">
+
+    def wall_bc_block(name: str) -> str:
+        direction = wall_effective_directions.get(name)
+        direction_block = (
+            f"\n    <Effective_direction>{direction}</Effective_direction>"
+            if direction is not None
+            else ""
+        )
+        return f"""  <Add_BC name="{name}">
     <Type>Dir</Type>
-    <Value>0.0</Value>
+    <Value>0.0</Value>{direction_block}
   </Add_BC>"""
+
+    wall_bc_blocks = "\n".join(
+        wall_bc_block(name)
         for name in wall_bcs
+    )
+    level_set_outflow_blocks = "\n".join(
+        f"""  <Add_BC name="{name}">
+    <Type>LevelSetOutflow</Type>
+  </Add_BC>"""
+        for name in level_set_outflow_faces
     )
     active_domain_block = ""
     if active_domain is not None:
@@ -887,6 +947,18 @@ def write_solver_xml(
 {level_set_velocity_block}
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
+  <SUPG_transient_scale>2.0</SUPG_transient_scale>
+  <Enable_discontinuity_capturing>true</Enable_discontinuity_capturing>
+  <Discontinuity_capturing_scale>0.1</Discontinuity_capturing_scale>
+  <Discontinuity_capturing_gradient_epsilon>1.0e-12</Discontinuity_capturing_gradient_epsilon>
+  <Discontinuity_capturing_max_courant>0.5</Discontinuity_capturing_max_courant>
+  <Enable_bound_preserving_limiter>true</Enable_bound_preserving_limiter>
+  <Bound_preserving_bound_tolerance>{bound_preserving_bound_tolerance}</Bound_preserving_bound_tolerance>
+  <Bound_preserving_sign_tolerance>{bound_preserving_sign_tolerance}</Bound_preserving_sign_tolerance>
+  <Bound_preserving_maximum_courant>1.0</Bound_preserving_maximum_courant>
+  <Bound_preserving_enforce_courant_limit>true</Bound_preserving_enforce_courant_limit>
+  <Bound_preserving_enforce_impermeable_boundaries>true</Bound_preserving_enforce_impermeable_boundaries>
+  <Bound_preserving_impermeable_normal_velocity_tolerance>1.0e-10</Bound_preserving_impermeable_normal_velocity_tolerance>
   <Enable_reinitialization>{enable_level_set_reinitialization_text}</Enable_reinitialization>
   <Reinitialization_method>projection</Reinitialization_method>
   <Reinitialization_cadence_steps>5</Reinitialization_cadence_steps>
@@ -896,6 +968,8 @@ def write_solver_xml(
   <Volume_correction_cadence_steps>{volume_correction_cadence_steps}</Volume_correction_cadence_steps>
   <Volume_correction_tolerance>{volume_correction_tolerance}</Volume_correction_tolerance>
   <Volume_correction_max_iterations>{volume_correction_max_iterations}</Volume_correction_max_iterations>
+  <Volume_correction_minimum_relative_error>{volume_correction_minimum_relative_error}</Volume_correction_minimum_relative_error>
+  <Volume_correction_maximum_interface_displacement_fraction>{volume_correction_maximum_interface_displacement_fraction}</Volume_correction_maximum_interface_displacement_fraction>
 
   <Output type="Spatial">
     <Level_set>true</Level_set>
@@ -916,6 +990,7 @@ def write_solver_xml(
     <Tolerance>{unfitted_linear_tolerance}</Tolerance>
     <Absolute_tolerance>{LINEAR_SOLVER_ABSOLUTE_TOLERANCE}</Absolute_tolerance>
   </LS>
+{level_set_outflow_blocks}
 </Add_equation>
 
 <Add_equation type="fluid">
@@ -967,7 +1042,7 @@ def write_solver_xml(
     <Surface_tension>{UNFITTED_SURFACE_TENSION}</Surface_tension>
     <Enable_cut_cell_stabilization>{cut_cell_stabilization_text}</Enable_cut_cell_stabilization>
     <Use_cut_metadata_scale>{cut_metadata_scale_text}</Use_cut_metadata_scale>
-    <Cut_cell_velocity_gradient_penalty>1.0</Cut_cell_velocity_gradient_penalty>
+    <Small_cut_aggregation>true</Small_cut_aggregation>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
   </Add_BC>
 </Add_equation>"""
@@ -1017,6 +1092,7 @@ def write_solver_xml(
 
 <Add_mesh name="tank">
   <Mesh_file_path>{mesh_path}</Mesh_file_path>
+  <Ghost_layers>{ghost_layers}</Ghost_layers>
 
 {face_blocks}
 </Add_mesh>
@@ -1063,8 +1139,11 @@ def write_case(
     fitted: bool,
     time_step: float,
     time_steps: int,
+    ghost_layers: int = 0,
     obstacles: list[Box] | None = None,
     include_top_wall_bc: bool = False,
+    level_set_outflow_faces: list[str] | None = None,
+    wall_effective_directions: dict[str, str] | None = None,
     active_domain: str | None = None,
     enable_cut_cell_stabilization: bool = True,
     use_cut_metadata_scale: bool = False,
@@ -1078,6 +1157,8 @@ def write_case(
     volume_correction_cadence_steps: str = "5",
     volume_correction_tolerance: str = "1.0e-5",
     volume_correction_max_iterations: str = "50",
+    volume_correction_minimum_relative_error: str = "1.0e-6",
+    volume_correction_maximum_interface_displacement_fraction: str = "0.1",
     momentum_source_file_path: str | None = None,
     rotating_frame_angular_velocity_file_path: str | None = None,
     wet_extension_advection_velocity_method: str | None = None,
@@ -1135,7 +1216,10 @@ def write_case(
         fill_height=fill_height,
         time_step=time_step,
         time_steps=time_steps,
+        ghost_layers=ghost_layers,
         include_top_wall_bc=include_top_wall_bc,
+        level_set_outflow_faces=level_set_outflow_faces,
+        wall_effective_directions=wall_effective_directions,
         include_obstacle_bc=bool(obstacles),
         active_domain=active_domain,
         enable_cut_cell_stabilization=enable_cut_cell_stabilization,
@@ -1150,6 +1234,10 @@ def write_case(
         volume_correction_cadence_steps=volume_correction_cadence_steps,
         volume_correction_tolerance=volume_correction_tolerance,
         volume_correction_max_iterations=volume_correction_max_iterations,
+        volume_correction_minimum_relative_error=volume_correction_minimum_relative_error,
+        volume_correction_maximum_interface_displacement_fraction=(
+            volume_correction_maximum_interface_displacement_fraction
+        ),
         momentum_source_file_path=momentum_source_file_path,
         rotating_frame_angular_velocity_file_path=rotating_frame_angular_velocity_file_path,
         wet_extension_advection_velocity_method=wet_extension_advection_velocity_method,
@@ -1203,7 +1291,11 @@ def sloshing_metadata(
         "notes": [
             "The mesh encodes the 1x rectangular tank and still-water fill level.",
             "The published roll-angle history and pressure records are external benchmark data.",
-            "The pressure_gauge entry is an interior pressure anchor; pressure history comparisons use pressure_sensor.",
+            (
+                "The pressure_gauge entry is an interior pressure anchor; pressure history comparisons use pressure_sensor."
+                if fitted
+                else "The pressure_gauge entry is an initial-condition diagnostic sample, not an algebraic pressure constraint; pressure history comparisons use pressure_sensor."
+            ),
         ],
         "rotation_axis": {
             "point": [0.45, 0.0, 0.031],
@@ -1221,6 +1313,20 @@ def sloshing_pressure_gauge_verification(gauge_metadata: dict) -> dict:
         "initial_pressure_error_after_constraint": 0.0,
         "previous_surface_target_pressure": 0.0,
         "previous_surface_target_pressure_error": -current_pressure,
+    }
+
+
+def field_initialized_pressure_diagnostic(gauge_metadata: dict) -> dict:
+    """Metadata for a sampled initial pressure that is not an algebraic pin."""
+    return {
+        "pressure_constraint_enabled": False,
+        "pressure_initialization_source": "mesh_vertex_field",
+        "diagnostic_point_initial_pressure_matches_mesh_field": True,
+        "diagnostic_point_initial_pressure_error": 0.0,
+        "diagnostic_point_pressure": float(
+            gauge_metadata["expected_initial_hydrostatic_pressure"]
+        ),
+        "diagnostic_role": "initial_condition_sample_not_pressure_constraint",
     }
 
 
@@ -1294,12 +1400,19 @@ def generate_spheric_test10() -> None:
         mesh_subdir="background",
         domain=tank,
         phi=lambda points: points[:, 1] - lateral_fill,
+        # Retained cut-cell pressure DOFs include the first dry vertex layer.
+        # Use the signed hydrostatic continuation there so the continuous P1
+        # trace interpolates p=0 at the actual phi=0 surface. Far-dry values
+        # are ignored by active-support initialization.
+        pressure=lambda points: WATER_DENSITY
+        * GRAVITY
+        * (lateral_fill - points[:, 1]),
         fill_height=lateral_fill,
         grid_factory=unfitted_grid_factory,
         gauge_point=(0.45, 0.5 * lateral_fill, 0.031),
         gauge_pressure=lambda point: hydrostatic_pressure_at_point(point, lateral_fill),
         record_gauge_metadata=True,
-        pressure_gauge_verification=sloshing_pressure_gauge_verification,
+        pressure_gauge_verification=field_initialized_pressure_diagnostic,
         metadata=sloshing_metadata(
             "SPHERIC Test 10 lateral water 1x",
             False,
@@ -1313,6 +1426,12 @@ def generate_spheric_test10() -> None:
         include_top_wall_bc=True,
         active_domain="LevelSetNegative",
         use_direct_fluid_solver=True,
+        include_pressure_constraints=False,
+        hydrostatic_pressure_field_name="Pressure",
+        enable_level_set_reinitialization=False,
+        volume_correction_minimum_relative_error="1.0e-6",
+        volume_correction_maximum_interface_displacement_fraction="0.05",
+        wet_extension_advection_velocity_method="wall_compatible_normal",
         momentum_source_file_path="bc/test10_lateral_water_1x_roll_body_force.dat",
         rotating_frame_angular_velocity_file_path="bc/test10_lateral_water_1x_roll_angular_velocity.dat",
     )
@@ -1323,17 +1442,19 @@ def test05_pressure_gauge_verification(gauge_metadata: dict) -> dict:
     previous_pressure = TEST05_PREVIOUS_INVALID_D18_GAUGE["full_volume_hydrostatic_pressure"]
     previous_range = TEST05_PREVIOUS_INVALID_D18_GAUGE["hydrostatic_error_range"]
     return {
-        "current_prescribed_pressure_matches_initial_hydrostatic": True,
-        "initial_pressure_error_after_constraint": 0.0,
+        "pressure_constraint_enabled": False,
+        "pressure_initialization_source": "mesh_vertex_field",
+        "diagnostic_point_initial_pressure_matches_mesh_field": True,
+        "diagnostic_point_initial_pressure_error": 0.0,
         "previous_invalid_d18_node_id": TEST05_PREVIOUS_INVALID_D18_GAUGE["node_id"],
         "previous_invalid_d18_initial_phi": TEST05_PREVIOUS_INVALID_D18_GAUGE["initial_phi"],
         "previous_invalid_d18_full_volume_hydrostatic_pressure": previous_pressure,
         "previous_invalid_d18_hydrostatic_error_range": previous_range,
-        "current_pressure_matches_previous_invalid_offset": False,
-        "current_pressure_matches_previous_invalid_error_range": (
+        "diagnostic_pressure_matches_previous_invalid_offset": False,
+        "diagnostic_pressure_matches_previous_invalid_error_range": (
             previous_range[0] <= current_pressure <= previous_range[1]
         ),
-        "current_pressure_minus_previous_invalid_pressure": current_pressure - previous_pressure,
+        "diagnostic_pressure_minus_previous_invalid_pressure": current_pressure - previous_pressure,
     }
 
 
@@ -1429,20 +1550,33 @@ def generate_spheric_test05() -> None:
                 "notes": [
                     "The three-dimensional mesh is a thin extrusion of the published two-dimensional setup.",
                     "The tetrahedral split is mirrored about the extrusion mid-plane to suppress transverse bias.",
+                    "The front/back extrusion planes constrain only z-normal velocity, giving the symmetry/free-slip boundary required to represent the published two-dimensional benchmark without artificial spanwise-wall drag.",
+                    "The full no-slip left/right/bottom conditions and zero surface tension make this a dam-break transport and impermeability benchmark, not a moving-contact-line wetting validation.",
+                    "The wall_top mesh face is an open natural-traction boundary and deliberately has no velocity Dirichlet condition, matching the open top of the published flume.",
+                    "The current initial-value deck approximates the gate as removed instantaneously; the published Test 05 specification instead raises it upward at 1.5 m/s, so profile comparisons are not full benchmark qualification until that moving boundary is represented.",
                     "The initial level-set field is the union of the wet bed and the retained water column.",
                     "Negative level-set values denote the water side for active-domain assembly.",
+                    "Pressure uses the local column-height hydrostatic law continued with sign onto dry cut-support vertices; those coefficients are interpolation data, not gas pressure.",
                 ],
             },
             h=0.006,
             fitted=False,
             time_step=0.0005,
-            time_steps=312,
-            include_top_wall_bc=True,
+            # Reach the first post-onset reference profile at t=0.281 s and
+            # span the historical false-wall-wetting event near t=0.235 s.
+            time_steps=562,
+            ghost_layers=3,
+            include_top_wall_bc=False,
+            level_set_outflow_faces=["wall_top"],
+            wall_effective_directions={
+                "wall_front": "0 0 1",
+                "wall_back": "0 0 1",
+            },
             active_domain="LevelSetNegative",
             enable_cut_cell_stabilization=True,
             use_cut_metadata_scale=False,
             use_direct_fluid_solver=True,
-            include_pressure_constraints=True,
+            include_pressure_constraints=False,
             hydrostatic_pressure_field_name="Pressure",
             enable_level_set_maintenance=False,
             enable_level_set_reinitialization=False,
@@ -1450,7 +1584,9 @@ def generate_spheric_test05() -> None:
             volume_correction_cadence_steps="1",
             volume_correction_tolerance="1.0e-10",
             volume_correction_max_iterations="50",
-            wet_extension_advection_velocity_method="nearest_interface_point",
+            volume_correction_minimum_relative_error="1.0e-6",
+            volume_correction_maximum_interface_displacement_fraction="0.05",
+            wet_extension_advection_velocity_method="wall_compatible_normal",
             enable_adaptive_time_loop=True,
             newton_line_search_fail_on_no_reduction=True,
             newton_line_search_max_iterations="6",
@@ -1500,17 +1636,18 @@ def generate_spheric_test02() -> None:
         phi=lambda points: dam_break_dry_bed_column_phi(
             points, gate_x=TEST02_GATE_X, dam_height=TEST02_INITIAL_COLUMN_HEIGHT
         ),
+        pressure=lambda points: dam_break_dry_bed_column_pressure(
+            points,
+            gate_x=TEST02_GATE_X,
+            dam_height=TEST02_INITIAL_COLUMN_HEIGHT,
+        ),
         fill_height=TEST02_INITIAL_COLUMN_HEIGHT,
         gauge_point=(2.632, 0.10, 0.50),
         gauge_pressure=lambda point: hydrostatic_pressure_at_point(
             point, TEST02_INITIAL_COLUMN_HEIGHT
         ),
         record_gauge_metadata=True,
-        pressure_gauge_verification=lambda gauge_metadata: {
-            "current_prescribed_pressure_matches_initial_hydrostatic": True,
-            "initial_pressure_error_after_constraint": 0.0,
-            "anchor_purpose": "pressure_nullspace_anchor_not_literature_sensor",
-        },
+        pressure_gauge_verification=field_initialized_pressure_diagnostic,
         metadata={
             "benchmark": "SPHERIC Test 02 three-dimensional dam break with obstacle",
             "representation": "unfitted_level_set",
@@ -1549,9 +1686,10 @@ def generate_spheric_test02() -> None:
                 "The structured mesh aligns tank and obstacle geometry while centering the top and gate free-surface cuts between mesh planes.",
                 "The obstacle is represented as an internal no-slip boundary in the background mesh.",
                 "The initial level-set field is negative inside the retained water column and remains negative on contacted tank walls.",
+                "The retained-column hydrostatic pressure is continued through dry cut-support vertices so the top trace is zero and the newly exposed vertical dam face retains its liquid-side initial trace.",
                 "The zero level set is limited to the top and gate-facing air-water interfaces; a closed-box signed distance incorrectly creates free-surface cuts on wet walls.",
                 "Earlier repository metadata used a 0.58 m retained column and swapped obstacle footprint; those settings are not the SPHERIC Test02 benchmark geometry.",
-                "The promoted OOP unfitted case uses nearest-interface-point wet-extension level-set advection; coupled-field level-set advection changes the cut topology during Newton startup on this sharp 3D dam-break initial condition.",
+                "The promoted OOP unfitted case uses wall-compatible normal-band wet-extension level-set advection; coupled-field level-set advection changes the cut topology during Newton startup on this sharp 3D dam-break initial condition.",
             ],
         },
         grid_factory=grid_factory,
@@ -1564,14 +1702,17 @@ def generate_spheric_test02() -> None:
         enable_cut_cell_stabilization=True,
         use_cut_metadata_scale=False,
         use_direct_fluid_solver=True,
-        include_pressure_constraints=True,
+        include_pressure_constraints=False,
+        hydrostatic_pressure_field_name="Pressure",
         enable_level_set_maintenance=False,
         enable_level_set_reinitialization=False,
         enable_level_set_volume_correction=True,
         volume_correction_cadence_steps="1",
         volume_correction_tolerance="1.0e-10",
         volume_correction_max_iterations="50",
-        wet_extension_advection_velocity_method="nearest_interface_point",
+        volume_correction_minimum_relative_error="1.0e-6",
+        volume_correction_maximum_interface_displacement_fraction="0.05",
+        wet_extension_advection_velocity_method="wall_compatible_normal",
         enable_adaptive_time_loop=True,
         adaptive_time_loop_min_dt="1.0e-7",
         adaptive_time_loop_max_dt="1.0e-3",

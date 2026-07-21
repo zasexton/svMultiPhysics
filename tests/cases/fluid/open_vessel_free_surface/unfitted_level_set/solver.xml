@@ -56,6 +56,18 @@
   <Constant_velocity>0.0 0.0 0.0</Constant_velocity>
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
+  <SUPG_transient_scale>2.0</SUPG_transient_scale>
+  <Enable_discontinuity_capturing>true</Enable_discontinuity_capturing>
+  <Discontinuity_capturing_scale>0.1</Discontinuity_capturing_scale>
+  <Discontinuity_capturing_gradient_epsilon>1.0e-12</Discontinuity_capturing_gradient_epsilon>
+  <Discontinuity_capturing_max_courant>0.5</Discontinuity_capturing_max_courant>
+  <Enable_bound_preserving_limiter>true</Enable_bound_preserving_limiter>
+  <Bound_preserving_bound_tolerance>1.0e-6</Bound_preserving_bound_tolerance>
+  <Bound_preserving_sign_tolerance>1.0e-12</Bound_preserving_sign_tolerance>
+  <Bound_preserving_maximum_courant>1.0</Bound_preserving_maximum_courant>
+  <Bound_preserving_enforce_courant_limit>true</Bound_preserving_enforce_courant_limit>
+  <Bound_preserving_enforce_impermeable_boundaries>true</Bound_preserving_enforce_impermeable_boundaries>
+  <Bound_preserving_impermeable_normal_velocity_tolerance>1.0e-10</Bound_preserving_impermeable_normal_velocity_tolerance>
   <Enable_reinitialization>true</Enable_reinitialization>
   <Reinitialization_method>projection</Reinitialization_method>
   <Reinitialization_cadence_steps>5</Reinitialization_cadence_steps>
@@ -65,6 +77,8 @@
   <Volume_correction_cadence_steps>5</Volume_correction_cadence_steps>
   <Volume_correction_tolerance>1.0e-6</Volume_correction_tolerance>
   <Volume_correction_max_iterations>50</Volume_correction_max_iterations>
+  <Volume_correction_minimum_relative_error>1.0e-6</Volume_correction_minimum_relative_error>
+  <Volume_correction_maximum_interface_displacement_fraction>0.05</Volume_correction_maximum_interface_displacement_fraction>
 
   <Output type="Spatial">
     <Level_set>true</Level_set>
@@ -99,12 +113,9 @@
   <Force_y>-9.81</Force_y>
   <Force_z>0.0</Force_z>
   <Hydrostatic_pressure_initialization>true</Hydrostatic_pressure_initialization>
+  <Hydrostatic_pressure_field_name>Pressure</Hydrostatic_pressure_field_name>
   <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
   <Hydrostatic_pressure_reference_point>0.0 0.45 0.0</Hydrostatic_pressure_reference_point>
-  <Node_pressure_constraints>
-    <Id_type>Global_vertex_gid</Id_type>
-    <Values_file_path>pressure_gauge.csv</Values_file_path>
-  </Node_pressure_constraints>
   <Viscosity model="Constant">
     <Value>1.003e-3</Value>
   </Viscosity>
@@ -156,7 +167,7 @@
     <Surface_tension>0.0</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
     <Use_cut_metadata_scale>false</Use_cut_metadata_scale>
-    <Cut_cell_velocity_gradient_penalty>1.0</Cut_cell_velocity_gradient_penalty>
+    <Small_cut_aggregation>true</Small_cut_aggregation>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
   </Add_BC>
 </Add_equation>

@@ -38,9 +38,10 @@
     "The structured mesh aligns tank and obstacle geometry while centering the top and gate free-surface cuts between mesh planes.",
     "The obstacle is represented as an internal no-slip boundary in the background mesh.",
     "The initial level-set field is negative inside the retained water column and remains negative on contacted tank walls.",
+    "The retained-column hydrostatic pressure is continued through dry cut-support vertices so the top trace is zero and the newly exposed vertical dam face retains its liquid-side initial trace.",
     "The zero level set is limited to the top and gate-facing air-water interfaces; a closed-box signed distance incorrectly creates free-surface cuts on wet walls.",
     "Earlier repository metadata used a 0.58 m retained column and swapped obstacle footprint; those settings are not the SPHERIC Test02 benchmark geometry.",
-    "The promoted OOP unfitted case uses nearest-interface-point wet-extension level-set advection; coupled-field level-set advection changes the cut topology during Newton startup on this sharp 3D dam-break initial condition."
+    "The promoted OOP unfitted case uses wall-compatible normal-band wet-extension level-set advection; coupled-field level-set advection changes the cut topology during Newton startup on this sharp 3D dam-break initial condition."
   ],
   "pressure_gauge": {
     "coordinates": [
@@ -53,9 +54,12 @@
     "node_id": 2867
   },
   "pressure_gauge_verification": {
-    "anchor_purpose": "pressure_nullspace_anchor_not_literature_sensor",
-    "current_prescribed_pressure_matches_initial_hydrostatic": true,
-    "initial_pressure_error_after_constraint": 0.0
+    "diagnostic_point_initial_pressure_error": 0.0,
+    "diagnostic_point_initial_pressure_matches_mesh_field": true,
+    "diagnostic_point_pressure": 4597.504569000001,
+    "diagnostic_role": "initial_condition_sample_not_pressure_constraint",
+    "pressure_constraint_enabled": false,
+    "pressure_initialization_source": "mesh_vertex_field"
   },
   "representation": "unfitted_level_set",
   "source_urls": [

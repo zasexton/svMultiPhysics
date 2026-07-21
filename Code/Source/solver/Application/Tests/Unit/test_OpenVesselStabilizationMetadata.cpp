@@ -96,7 +96,10 @@ TEST(OpenVesselStabilizationMetadata, D18D38UseActiveCutMetadataScale)
     // coefficients carry the transient scaling (mu + rho*h^2/dt) directly,
     // and the metadata multiplier is unnecessary on top of it.
     expectText(free_surface, "Use_cut_metadata_scale", "false");
-    expectText(free_surface, "Cut_cell_velocity_gradient_penalty", "1.0");
+    // The velocity ghost penalty is retired (small-cut aggregation replaces
+    // it); only the pressure jump penalty remains configurable.
+    EXPECT_EQ(free_surface.FirstChildElement("Cut_cell_velocity_gradient_penalty"),
+              nullptr);
     expectText(free_surface, "Cut_cell_pressure_gradient_penalty", "1.0");
   }
 }

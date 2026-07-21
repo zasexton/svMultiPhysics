@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check SPHERIC Test05 pressure-gauge benchmark metadata."""
+"""Check SPHERIC Test05 diagnostic-pressure metadata and pressure setup."""
 
 from __future__ import annotations
 
@@ -48,17 +48,19 @@ def _expected_verification(gauge: dict[str, object]) -> dict[str, object]:
     previous_pressure = PREVIOUS_INVALID_D18_GAUGE["full_volume_hydrostatic_pressure"]
     previous_range = PREVIOUS_INVALID_D18_GAUGE["hydrostatic_error_range"]
     return {
-        "current_prescribed_pressure_matches_initial_hydrostatic": True,
-        "initial_pressure_error_after_constraint": 0.0,
+        "pressure_constraint_enabled": False,
+        "pressure_initialization_source": "mesh_vertex_field",
+        "diagnostic_point_initial_pressure_matches_mesh_field": True,
+        "diagnostic_point_initial_pressure_error": 0.0,
         "previous_invalid_d18_node_id": PREVIOUS_INVALID_D18_GAUGE["node_id"],
         "previous_invalid_d18_initial_phi": PREVIOUS_INVALID_D18_GAUGE["initial_phi"],
         "previous_invalid_d18_full_volume_hydrostatic_pressure": previous_pressure,
         "previous_invalid_d18_hydrostatic_error_range": previous_range,
-        "current_pressure_matches_previous_invalid_offset": False,
-        "current_pressure_matches_previous_invalid_error_range": (
+        "diagnostic_pressure_matches_previous_invalid_offset": False,
+        "diagnostic_pressure_matches_previous_invalid_error_range": (
             previous_range[0] <= current_pressure <= previous_range[1]
         ),
-        "current_pressure_minus_previous_invalid_pressure": current_pressure - previous_pressure,
+        "diagnostic_pressure_minus_previous_invalid_pressure": current_pressure - previous_pressure,
     }
 
 
@@ -103,11 +105,15 @@ def check_case(case_dir: Path) -> dict[str, object]:
                 f"expected {expected_value!r}"
             )
 
-    if not verification["current_prescribed_pressure_matches_initial_hydrostatic"]:
-        raise ValueError(f"{metadata_path} does not prescribe the initial hydrostatic gauge pressure")
-    if verification["current_pressure_matches_previous_invalid_offset"]:
+    if verification["pressure_constraint_enabled"]:
+        raise ValueError(f"{metadata_path} still enables the permanent pressure constraint")
+    if verification["pressure_initialization_source"] != "mesh_vertex_field":
+        raise ValueError(f"{metadata_path} does not use the level-set-aware mesh pressure field")
+    if not verification["diagnostic_point_initial_pressure_matches_mesh_field"]:
+        raise ValueError(f"{metadata_path} diagnostic pressure does not match the mesh field")
+    if verification["diagnostic_pressure_matches_previous_invalid_offset"]:
         raise ValueError(f"{metadata_path} still matches the previous invalid D18 pressure offset")
-    if verification["current_pressure_matches_previous_invalid_error_range"]:
+    if verification["diagnostic_pressure_matches_previous_invalid_error_range"]:
         raise ValueError(f"{metadata_path} still lies in the previous invalid D18 error range")
 
     root = ET.parse(solver_path).getroot()
@@ -138,7 +144,20 @@ def check_case(case_dir: Path) -> dict[str, object]:
     _require_text(
         level_set,
         "Wet_extension_advection_velocity_method",
-        "nearest_interface_point",
+        "wall_compatible_normal",
+        solver_path,
+    )
+    _require_text(level_set, "Enable_reinitialization", "false", solver_path)
+    _require_text(
+        level_set,
+        "Volume_correction_minimum_relative_error",
+        "1.0e-6",
+        solver_path,
+    )
+    _require_text(
+        level_set,
+        "Volume_correction_maximum_interface_displacement_fraction",
+        "0.05",
         solver_path,
     )
 
@@ -165,14 +184,9 @@ def check_case(case_dir: Path) -> dict[str, object]:
             f"expected {EXPECTED_FLUID_NONLINEAR_MAX_ITERATIONS}"
         )
     constraints = fluid.find("Node_pressure_constraints")
-    if constraints is None:
-        raise ValueError(f"{solver_path} does not activate Node_pressure_constraints")
-    values_path = constraints.findtext("Values_file_path", "").strip()
-    if values_path != "pressure_gauge.csv":
-        raise ValueError(
-            f"{solver_path} uses Node_pressure_constraints file {values_path!r}, "
-            "expected 'pressure_gauge.csv'"
-        )
+    if constraints is not None:
+        raise ValueError(f"{solver_path} still activates Node_pressure_constraints")
+    _require_text(fluid, "Hydrostatic_pressure_field_name", "Pressure", solver_path)
     fluid_ls = fluid.find("LS")
     if fluid_ls is None or fluid_ls.attrib.get("type", "").strip().lower() != "direct":
         actual = None if fluid_ls is None else fluid_ls.attrib.get("type", "")
@@ -210,7 +224,8 @@ def check_case(case_dir: Path) -> dict[str, object]:
         "node_id": csv_node,
         "pressure": csv_pressure,
         "previous_invalid_pressure": PREVIOUS_INVALID_D18_GAUGE["full_volume_hydrostatic_pressure"],
-        "pressure_difference": verification["current_pressure_minus_previous_invalid_pressure"],
+        "pressure_difference": verification["diagnostic_pressure_minus_previous_invalid_pressure"],
+        "pressure_constraint_enabled": False,
     }
 
 

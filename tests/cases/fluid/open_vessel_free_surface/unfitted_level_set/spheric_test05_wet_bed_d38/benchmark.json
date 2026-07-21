@@ -16,8 +16,13 @@
   "notes": [
     "The three-dimensional mesh is a thin extrusion of the published two-dimensional setup.",
     "The tetrahedral split is mirrored about the extrusion mid-plane to suppress transverse bias.",
+    "The front/back extrusion planes constrain only z-normal velocity, giving the symmetry/free-slip boundary required to represent the published two-dimensional benchmark without artificial spanwise-wall drag.",
+    "The full no-slip left/right/bottom conditions and zero surface tension make this a dam-break transport and impermeability benchmark, not a moving-contact-line wetting validation.",
+    "The wall_top mesh face is an open natural-traction boundary and deliberately has no velocity Dirichlet condition, matching the open top of the published flume.",
+    "The current initial-value deck approximates the gate as removed instantaneously; the published Test 05 specification instead raises it upward at 1.5 m/s, so profile comparisons are not full benchmark qualification until that moving boundary is represented.",
     "The initial level-set field is the union of the wet bed and the retained water column.",
-    "Negative level-set values denote the water side for active-domain assembly."
+    "Negative level-set values denote the water side for active-domain assembly.",
+    "Pressure uses the local column-height hydrostatic law continued with sign onto dry cut-support vertices; those coefficients are interpolation data, not gas pressure."
   ],
   "pressure_gauge": {
     "coordinates": [
@@ -30,11 +35,13 @@
     "node_id": 1875
   },
   "pressure_gauge_verification": {
-    "current_prescribed_pressure_matches_initial_hydrostatic": true,
-    "current_pressure_matches_previous_invalid_error_range": false,
-    "current_pressure_matches_previous_invalid_offset": false,
-    "current_pressure_minus_previous_invalid_pressure": 679.3498078181818,
-    "initial_pressure_error_after_constraint": 0.0,
+    "diagnostic_point_initial_pressure_error": 0.0,
+    "diagnostic_point_initial_pressure_matches_mesh_field": true,
+    "diagnostic_pressure_matches_previous_invalid_error_range": false,
+    "diagnostic_pressure_matches_previous_invalid_offset": false,
+    "diagnostic_pressure_minus_previous_invalid_pressure": 679.3498078181818,
+    "pressure_constraint_enabled": false,
+    "pressure_initialization_source": "mesh_vertex_field",
     "previous_invalid_d18_full_volume_hydrostatic_pressure": 17.6869,
     "previous_invalid_d18_hydrostatic_error_range": [
       -17.6869,
