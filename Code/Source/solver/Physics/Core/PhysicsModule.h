@@ -13,7 +13,9 @@
 #include "FE/Backends/Interfaces/GenericVector.h"
 #include "Physics/Core/PhysicsJITPolicy.h"
 
+#include <optional>
 #include <span>
+#include <string>
 
 namespace svmp {
 namespace FE {
@@ -27,6 +29,11 @@ struct FormInstallOptions;
 } // namespace FE
 
 namespace Physics {
+
+struct EffectiveConfigurationArtifact {
+    std::string component{};
+    std::string json{};
+};
 
 class PhysicsModule {
 public:
@@ -60,6 +67,18 @@ public:
      * @brief Optional quantities-of-interest (QoI) registration hook
      */
     virtual void registerFunctionals(FE::systems::FESystem& /*system*/) const {}
+
+    /**
+     * @brief Validated, defaults-expanded configuration for provenance output
+     *
+     * Modules that expose an artifact return deterministic JSON only after a
+     * successful definition-phase registration.
+     */
+    [[nodiscard]] virtual std::optional<EffectiveConfigurationArtifact>
+    effectiveConfigurationArtifact() const
+    {
+        return std::nullopt;
+    }
 
 protected:
     [[nodiscard]] FE::forms::SymbolicOptions

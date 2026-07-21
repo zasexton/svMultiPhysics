@@ -7,28 +7,66 @@
 #include "FE/Forms/JIT/JITKernelWrapper.h"
 #include "FE/Forms/JIT/LLVMJITBuildInfo.h"
 #include "FE/Systems/FESystem.h"
+#include "Interfaces/GeneratedActiveBoundaryDomain.h"
+#include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Fields/MeshFields.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
 #include "Physics/Core/EquationModuleInput.h"
+#include "Physics/Core/EquationModuleRegistry.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
 #include <vector>
+
+namespace svmp::Physics::formulations::navier_stokes {
+void forceLink_NavierStokesRegister();
+}
 
 namespace {
 
 using svmp::FE::forms::FormExpr;
 using svmp::FE::forms::FormExprNode;
 using svmp::FE::forms::FormExprType;
+
+class ScopedUnsetEnvironmentVariable {
+public:
+  explicit ScopedUnsetEnvironmentVariable(const char* key) : key_(key)
+  {
+    if (const char* value = std::getenv(key_); value != nullptr) {
+      original_ = std::string(value);
+    }
+    unsetenv(key_);
+  }
+
+  ~ScopedUnsetEnvironmentVariable()
+  {
+    if (original_.has_value()) {
+      setenv(key_, original_->c_str(), 1);
+    } else {
+      unsetenv(key_);
+    }
+  }
+
+  ScopedUnsetEnvironmentVariable(const ScopedUnsetEnvironmentVariable&) =
+      delete;
+  ScopedUnsetEnvironmentVariable& operator=(
+      const ScopedUnsetEnvironmentVariable&) = delete;
+
+private:
+  const char* key_;
+  std::optional<std::string> original_{};
+};
 
 bool containsExprType(const FormExprNode* node, FormExprType target)
 {
@@ -63,6 +101,23 @@ bool formulationRecordsContain(const svmp::FE::systems::FESystem& system,
       if (containsExprType(expr.get(), target)) {
         return true;
       }
+    }
+  }
+  return false;
+}
+
+bool containsInterfaceMarker(const FormExprNode* node, int marker)
+{
+  if (node == nullptr) {
+    return false;
+  }
+  const auto found = node->interfaceMarker();
+  if (found.has_value() && *found == marker) {
+    return true;
+  }
+  for (const auto* child : node->children()) {
+    if (containsInterfaceMarker(child, marker)) {
+      return true;
     }
   }
   return false;
@@ -236,6 +291,16 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
       svmp::Physics::ParameterValue{true, "true"};
   input.equation_params["SUPG_tau_scale"] =
       svmp::Physics::ParameterValue{true, "0.25"};
+  input.equation_params["SUPG_transient_scale"] =
+      svmp::Physics::ParameterValue{true, "1.5"};
+  input.equation_params["Enable_discontinuity_capturing"] =
+      svmp::Physics::ParameterValue{true, "true"};
+  input.equation_params["Discontinuity_capturing_scale"] =
+      svmp::Physics::ParameterValue{true, "0.2"};
+  input.equation_params["Discontinuity_capturing_gradient_epsilon"] =
+      svmp::Physics::ParameterValue{true, "1.0e-9"};
+  input.equation_params["Discontinuity_capturing_max_courant"] =
+      svmp::Physics::ParameterValue{true, "0.3"};
   input.equation_params["Interface_kinematic_marker"] =
       svmp::Physics::ParameterValue{true, "77"};
   input.equation_params["Interface_kinematic_weight_scale"] =
@@ -254,6 +319,8 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
       svmp::Physics::ParameterValue{true, "2.75"};
   input.equation_params["Reinitialization_signed_distance_tolerance"] =
       svmp::Physics::ParameterValue{true, "1.0e-4"};
+  input.equation_params["Reinitialization_max_zero_set_displacement"] =
+      svmp::Physics::ParameterValue{true, "2.0e-8"};
   input.equation_params["Enable_volume_correction"] =
       svmp::Physics::ParameterValue{true, "true"};
   input.equation_params["Volume_correction_cadence_steps"] =
@@ -266,6 +333,13 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
       svmp::Physics::ParameterValue{true, "1.0e-7"};
   input.equation_params["Volume_correction_max_iterations"] =
       svmp::Physics::ParameterValue{true, "24"};
+  input.equation_params["Volume_correction_minimum_relative_error"] =
+      svmp::Physics::ParameterValue{true, "2.0e-5"};
+  input.equation_params["Volume_correction_maximum_interface_displacement_fraction"] =
+      svmp::Physics::ParameterValue{true, "0.025"};
+  input.equation_params[
+      "Volume_correction_maximum_cumulative_interface_displacement_fraction"] =
+      svmp::Physics::ParameterValue{true, "0.25"};
 
   svmp::Physics::BoundaryConditionInput inflow{};
   inflow.name = "inlet";
@@ -298,6 +372,12 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellDiameter));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Divergence));
+  const auto artifact = module->effectiveConfigurationArtifact();
+  ASSERT_TRUE(artifact.has_value());
+  EXPECT_EQ(artifact->component, "level_set_transport");
+  constexpr std::string_view expected =
+      R"json({"artifact_schema_version":1,"component":"level_set_transport","capability_label":"one_phase_interface_transport_nonlocal_conservation","units":{"system":"consistent_solver_units","length":"solver_length","time":"solver_time","volume":"solver_volume"},"operator":"transport","transport_form":"ConservativeDivergence","conservation_diagnostic":"volume_corrected_level_set_advection_not_locally_conservative","level_set":{"field":"phi","source":"Unknown","auto_register":true},"advection_velocity":{"field":"advecting_velocity","source":"PrescribedData","auto_register":true,"constant_value":[0,0,0],"algebraic_extension_source_field":"","dependency_direction":"physical_velocity_to_extension_to_level_set","physical_momentum_coupling_allowed":false,"map_guard_policy":"fixed_bounded_application_policy"},"supg":{"enabled":true,"tau_scale":0.25,"velocity_epsilon":9.9999999999999998e-13,"transient_scale":1.5,"discontinuity_capturing_enabled":true,"discontinuity_capturing_scale":0.20000000000000001,"gradient_epsilon":1.0000000000000001e-09,"residual_epsilon":9.9999999999999998e-13,"maximum_courant":0.29999999999999999},"bound_preserving":{"enabled":false,"method":"nodal_rejection_projection_nonconservative","bound_tolerance":9.9999999999999998e-13,"sign_tolerance":9.9999999999999998e-13,"maximum_courant":1,"courant_tolerance":9.9999999999999998e-13,"enforce_courant_limit":true,"enforce_impermeable_boundaries":true,"impermeable_normal_velocity_tolerance":1e-10},"interface_kinematic":{"enabled":true,"interface_marker":77,"weight_scale":1.5},"maintenance_transaction":{"ordering":"transport_then_reinitialization_then_volume_correction_then_geometry_refresh","reinitialization":{"enabled":true,"method":"Projection","cadence_steps":4,"max_iterations":8,"pseudo_time_step_scale":0.125,"interface_band_width":2.75,"signed_distance_tolerance":0.0001,"preserve_band_width":0,"maximum_zero_set_displacement":2e-08},"volume_correction":{"enabled":true,"cadence_steps":5,"use_initial_negative_volume_as_target":false,"target_negative_volume":0.375,"volume_tolerance":9.9999999999999995e-08,"max_iterations":24,"minimum_relative_volume_error":2.0000000000000002e-05,"maximum_interface_displacement_fraction":0.025000000000000001,"maximum_cumulative_interface_displacement_fraction":0.25}},"boundaries":{"inflow":[{"marker":4,"value":0.5,"penalty_scale":2}],"outflow":[{"marker":5}]}})json";
+  EXPECT_EQ(artifact->json, expected);
 #endif
 }
 
@@ -660,6 +740,271 @@ TEST(LevelSetEquationTranslator, RoutesCoupledTransportToEquationsOperator)
 #endif
 }
 
+TEST(LevelSetEquationTranslator,
+     CoupledFreeSurfaceContactAngleUsesTranslatedEquationsOperator)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  constexpr int interface_marker = 242;
+  constexpr int wall_marker = 17;
+  svmp::Physics::formulations::navier_stokes::
+      forceLink_NavierStokesRegister();
+  auto mesh = makeRegistryQuadMesh();
+
+  svmp::Physics::EquationModuleInput level_set_input{};
+  level_set_input.equation_type = "level_set";
+  level_set_input.mesh_name = "quad";
+  level_set_input.mesh = mesh->local_mesh_ptr();
+  level_set_input.equation_params["Coupled"] =
+      svmp::Physics::ParameterValue{true, "true"};
+  level_set_input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi"};
+  level_set_input.equation_params["Velocity_field_name"] =
+      svmp::Physics::ParameterValue{true, "Velocity"};
+  level_set_input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "coupled_field"};
+  level_set_input.equation_params["Auto_register_velocity_field"] =
+      svmp::Physics::ParameterValue{true, "true"};
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto level_set_module =
+      application::translators::level_set::createModule(level_set_input, system);
+  ASSERT_TRUE(level_set_module);
+  const auto phi = system.findFieldByName("phi");
+  ASSERT_NE(phi, svmp::FE::INVALID_FIELD_ID);
+
+  svmp::Physics::EquationModuleInput fluid_input{};
+  fluid_input.equation_type = "fluid";
+  fluid_input.mesh_name = "quad";
+  fluid_input.mesh = mesh->local_mesh_ptr();
+  fluid_input.equation_params["Operator_tag"] =
+      svmp::Physics::ParameterValue{true, "equations"};
+  fluid_input.default_domain.params["Density"] =
+      svmp::Physics::ParameterValue{true, "1.0"};
+  fluid_input.default_domain.params["Viscosity.model"] =
+      svmp::Physics::ParameterValue{true, "Constant"};
+  fluid_input.default_domain.params["Viscosity.Value"] =
+      svmp::Physics::ParameterValue{true, "0.01"};
+
+  svmp::Physics::BoundaryConditionInput free_surface{};
+  free_surface.name = "free_surface";
+  free_surface.boundary_marker = svmp::INVALID_LABEL;
+  free_surface.params["Type"] =
+      svmp::Physics::ParameterValue{true, "Free_surface"};
+  free_surface.params["Implementation"] =
+      svmp::Physics::ParameterValue{true, "UnfittedLevelSet"};
+  free_surface.params["Interface_marker"] =
+      svmp::Physics::ParameterValue{true, std::to_string(interface_marker)};
+  free_surface.params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi"};
+  free_surface.params["Active_domain"] =
+      svmp::Physics::ParameterValue{true, "LevelSetNegative"};
+  free_surface.params["Contact_line_model"] =
+      svmp::Physics::ParameterValue{true, "PrescribedContactAngle"};
+  free_surface.params["Contact_line_wall_marker"] =
+      svmp::Physics::ParameterValue{true, std::to_string(wall_marker)};
+  free_surface.params["Contact_line_wall_normal"] =
+      svmp::Physics::ParameterValue{true, "1.0 0.0 0.0"};
+  free_surface.params["Contact_angle_degrees"] =
+      svmp::Physics::ParameterValue{true, "60.0"};
+  free_surface.params["Contact_angle_penalty"] =
+      svmp::Physics::ParameterValue{true, "4.0"};
+  fluid_input.boundary_conditions.push_back(std::move(free_surface));
+
+  auto fluid_module =
+      svmp::Physics::EquationModuleRegistry::instance().create(
+          "fluid", fluid_input, system);
+  ASSERT_TRUE(fluid_module);
+
+  svmp::FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey key{};
+  key.source =
+      svmp::FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+  key.domain_id = "free_surface";
+  key.isovalue = 0.0;
+  key.interface_marker = interface_marker;
+  key.boundary_marker = wall_marker;
+  const int contact_marker = svmp::FE::interfaces::
+      stableGeneratedInterfaceBoundaryIntersectionMarker(key);
+
+  bool found_contact_residual = false;
+  for (const auto& record : system.formulationRecords()) {
+    if (!containsInterfaceMarker(record.residual_expr.get(), contact_marker)) {
+      continue;
+    }
+    found_contact_residual = true;
+    EXPECT_EQ(record.operator_tag, "equations");
+  }
+  EXPECT_TRUE(found_contact_residual);
+  EXPECT_TRUE(system.hasOperator("equations"));
+  EXPECT_FALSE(system.hasOperator("level_set"));
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     CoupledDynamicContactAngleRoutesContactAndSharpWallGeometry)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  constexpr int interface_marker = 243;
+  constexpr int wall_marker = 18;
+  svmp::Physics::formulations::navier_stokes::
+      forceLink_NavierStokesRegister();
+  auto mesh = makeRegistryQuadMesh();
+  // The production DynamicContactAngle validator audits the complete wall
+  // marker, not merely the BC declaration.  Give this registry fixture the
+  // right-wall topology whose physical outward normal is +x.
+  auto& local_mesh = mesh->local_mesh();
+  local_mesh.register_label("dynamic_contact_wall", wall_marker);
+  for (svmp::index_t face = 0;
+       face < static_cast<svmp::index_t>(local_mesh.n_faces()); ++face) {
+    const auto vertices = local_mesh.face_vertices(face);
+    if (vertices.size() == 2u &&
+        std::all_of(vertices.begin(), vertices.end(), [&](svmp::index_t vertex) {
+          return local_mesh.X_ref().at(
+                     static_cast<std::size_t>(2 * vertex)) == 1.0;
+        })) {
+      local_mesh.set_boundary_label(face, wall_marker);
+    }
+  }
+
+  svmp::Physics::EquationModuleInput level_set_input{};
+  level_set_input.equation_type = "level_set";
+  level_set_input.mesh_name = "quad";
+  level_set_input.mesh = mesh->local_mesh_ptr();
+  level_set_input.equation_params["Coupled"] =
+      svmp::Physics::ParameterValue{true, "true"};
+  level_set_input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi_dynamic"};
+  level_set_input.equation_params["Velocity_field_name"] =
+      svmp::Physics::ParameterValue{true, "Velocity"};
+  level_set_input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "coupled_field"};
+  level_set_input.equation_params["Auto_register_velocity_field"] =
+      svmp::Physics::ParameterValue{true, "true"};
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto level_set_module =
+      application::translators::level_set::createModule(level_set_input, system);
+  ASSERT_TRUE(level_set_module);
+  const auto phi = system.findFieldByName("phi_dynamic");
+  ASSERT_NE(phi, svmp::FE::INVALID_FIELD_ID);
+
+  svmp::Physics::EquationModuleInput fluid_input{};
+  fluid_input.equation_type = "fluid";
+  fluid_input.mesh_name = "quad";
+  fluid_input.mesh = mesh->local_mesh_ptr();
+  fluid_input.equation_params["Operator_tag"] =
+      svmp::Physics::ParameterValue{true, "equations"};
+  fluid_input.default_domain.params["Density"] =
+      svmp::Physics::ParameterValue{true, "1.0"};
+  fluid_input.default_domain.params["Viscosity.model"] =
+      svmp::Physics::ParameterValue{true, "Constant"};
+  fluid_input.default_domain.params["Viscosity.Value"] =
+      svmp::Physics::ParameterValue{true, "0.01"};
+
+  svmp::Physics::BoundaryConditionInput free_surface{};
+  free_surface.name = "free_surface";
+  free_surface.boundary_marker = svmp::INVALID_LABEL;
+  free_surface.params["Type"] =
+      svmp::Physics::ParameterValue{true, "Free_surface"};
+  free_surface.params["Implementation"] =
+      svmp::Physics::ParameterValue{true, "UnfittedLevelSet"};
+  free_surface.params["Interface_marker"] =
+      svmp::Physics::ParameterValue{true, std::to_string(interface_marker)};
+  free_surface.params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi_dynamic"};
+  free_surface.params["Active_domain"] =
+      svmp::Physics::ParameterValue{true, "LevelSetNegative"};
+  free_surface.params["Active_domain_method"] =
+      svmp::Physics::ParameterValue{true, "CutVolume"};
+  free_surface.params["Generated_interface_geometry"] =
+      svmp::Physics::ParameterValue{true, "LinearCorner"};
+  free_surface.params["Small_cut_aggregation"] =
+      svmp::Physics::ParameterValue{true, "false"};
+  free_surface.params["Surface_tension"] =
+      svmp::Physics::ParameterValue{true, "0.8"};
+  free_surface.params["Curvature"] =
+      svmp::Physics::ParameterValue{true, "0.0"};
+  free_surface.params["Use_level_set_curvature"] =
+      svmp::Physics::ParameterValue{true, "false"};
+  free_surface.params["Contact_line_model"] =
+      svmp::Physics::ParameterValue{true, "DynamicContactAngle"};
+  free_surface.params["Contact_line_wall_marker"] =
+      svmp::Physics::ParameterValue{true, std::to_string(wall_marker)};
+  free_surface.params["Contact_line_wall_normal"] =
+      svmp::Physics::ParameterValue{true, "1.0 0.0 0.0"};
+  free_surface.params["Contact_angle_degrees"] =
+      svmp::Physics::ParameterValue{true, "60.0"};
+  free_surface.params["Contact_line_mobility"] =
+      svmp::Physics::ParameterValue{true, "0.5"};
+  free_surface.params["Wall_slip_model"] =
+      svmp::Physics::ParameterValue{true, "Navier"};
+  free_surface.params["Wall_slip_length"] =
+      svmp::Physics::ParameterValue{true, "0.2"};
+  fluid_input.boundary_conditions.push_back(std::move(free_surface));
+
+  svmp::Physics::BoundaryConditionInput wall{};
+  wall.name = "dynamic_contact_wall";
+  wall.boundary_marker = wall_marker;
+  wall.params["Type"] =
+      svmp::Physics::ParameterValue{true, "Dirichlet"};
+  wall.params["Value"] = svmp::Physics::ParameterValue{true, "0.0"};
+  wall.params["Effective_direction"] =
+      svmp::Physics::ParameterValue{true, "1 0"};
+  fluid_input.boundary_conditions.push_back(std::move(wall));
+
+  auto fluid_module =
+      svmp::Physics::EquationModuleRegistry::instance().create(
+          "fluid", fluid_input, system);
+  ASSERT_TRUE(fluid_module);
+  const auto velocity = system.findFieldByName("Velocity");
+  ASSERT_NE(velocity, svmp::FE::INVALID_FIELD_ID);
+
+  svmp::FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey key{};
+  key.source = svmp::FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+  key.domain_id = "free_surface";
+  key.isovalue = 0.0;
+  key.interface_marker = interface_marker;
+  key.boundary_marker = wall_marker;
+  const int contact_marker = svmp::FE::interfaces::
+      stableGeneratedInterfaceBoundaryIntersectionMarker(key);
+  svmp::FE::interfaces::GeneratedActiveBoundaryMarkerKey active_key{};
+  active_key.source =
+      svmp::FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+  active_key.domain_id = "free_surface";
+  active_key.interface_marker = interface_marker;
+  active_key.boundary_marker = wall_marker;
+  active_key.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  const int active_wall_marker =
+      svmp::FE::interfaces::stableGeneratedActiveBoundaryMarker(active_key);
+
+  bool found_contact_residual = false;
+  bool found_sharp_wall_residual = false;
+  bool found_velocity_phi_coupling = false;
+  for (const auto& record : system.formulationRecords()) {
+    if (record.operator_tag != "equations") {
+      continue;
+    }
+    found_contact_residual = found_contact_residual ||
+        containsInterfaceMarker(record.residual_expr.get(), contact_marker);
+    found_sharp_wall_residual = found_sharp_wall_residual ||
+        containsInterfaceMarker(record.residual_expr.get(), active_wall_marker);
+    found_velocity_phi_coupling = found_velocity_phi_coupling ||
+        std::find(record.block_couplings.begin(),
+                  record.block_couplings.end(),
+                  std::pair<svmp::FE::FieldId, svmp::FE::FieldId>{
+                      velocity, phi}) != record.block_couplings.end();
+  }
+  EXPECT_TRUE(found_contact_residual);
+  EXPECT_TRUE(found_sharp_wall_residual);
+  EXPECT_FALSE(found_velocity_phi_coupling);
+  EXPECT_TRUE(system.hasOperator("equations"));
+  EXPECT_FALSE(system.hasOperator("level_set"));
+#endif
+}
+
 TEST(LevelSetEquationTranslator, AutoRegistersProjectedCurvatureField)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -695,6 +1040,44 @@ TEST(LevelSetEquationTranslator, AutoRegistersProjectedCurvatureField)
 #endif
 }
 
+TEST(LevelSetEquationTranslator,
+     InvalidWetExtensionDoesNotRegisterProjectedCurvatureOrTransportFields)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryQuadMesh();
+
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "quad";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi_pending"};
+  input.equation_params["Velocity_field_name"] =
+      svmp::Physics::ParameterValue{true, "extension_pending"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "coupled_field"};
+  input.equation_params["Use_wet_extension_advection_velocity"] =
+      svmp::Physics::ParameterValue{true, "true"};
+  input.equation_params["Projected_curvature_field"] =
+      svmp::Physics::ParameterValue{true, "kappa_pending"};
+
+  svmp::FE::systems::FESystem system(mesh);
+  EXPECT_THROW(
+      (void)application::translators::level_set::createModule(input, system),
+      std::runtime_error);
+  EXPECT_EQ(system.findFieldByName("phi_pending"),
+            svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(system.findFieldByName("extension_pending"),
+            svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(system.findFieldByName("kappa_pending"),
+            svmp::FE::INVALID_FIELD_ID);
+  EXPECT_FALSE(system.hasOperator("level_set"));
+  EXPECT_TRUE(system.formulationRecords().empty());
+#endif
+}
+
 TEST(LevelSetEquationTranslator, TranslatesJITPolicy)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -723,11 +1106,11 @@ TEST(LevelSetEquationTranslator, TranslatesJITPolicy)
     auto input = make_input(mesh, "jit = true; jit_specialization = false");
 
     svmp::FE::systems::FESystem system(mesh);
-    auto module = application::translators::level_set::createModule(input, system);
-
-    ASSERT_TRUE(module);
-    const auto* jit = firstJitKernelInOperator(system, "level_set");
     if (svmp::FE::forms::jit::llvmJITEnabled()) {
+      auto module =
+          application::translators::level_set::createModule(input, system);
+      ASSERT_TRUE(module);
+      const auto* jit = firstJitKernelInOperator(system, "level_set");
       ASSERT_NE(jit, nullptr);
       const auto& options = jit->jitOptions();
       EXPECT_TRUE(options.enable);
@@ -736,7 +1119,16 @@ TEST(LevelSetEquationTranslator, TranslatesJITPolicy)
       EXPECT_TRUE(options.specialization.specialize_n_qpts);
       EXPECT_TRUE(options.specialization.specialize_dofs);
     } else {
-      EXPECT_EQ(jit, nullptr);
+      try {
+        (void)application::translators::level_set::createModule(input, system);
+        FAIL() << "explicit level-set jit=true unexpectedly fell back";
+      } catch (const std::runtime_error& error) {
+        const std::string diagnostic = error.what();
+        EXPECT_NE(diagnostic.find("jit=true was explicitly requested"),
+                  std::string::npos);
+        EXPECT_NE(diagnostic.find("FE_ENABLE_LLVM_JIT"),
+                  std::string::npos);
+      }
     }
   }
 
@@ -749,6 +1141,21 @@ TEST(LevelSetEquationTranslator, TranslatesJITPolicy)
 
     ASSERT_TRUE(module);
     EXPECT_EQ(firstJitKernelInOperator(system, "level_set"), nullptr);
+  }
+
+  {
+    ScopedUnsetEnvironmentVariable oop_jit_env("SVMP_OOP_JIT_ENABLE");
+    ScopedUnsetEnvironmentVariable fe_jit_env("SVMP_FE_JIT_ENABLE");
+    auto mesh = makeRegistryQuadMesh();
+    auto input = make_input(mesh, "");
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto module =
+        application::translators::level_set::createModule(input, system);
+
+    ASSERT_TRUE(module);
+    const auto* jit = firstJitKernelInOperator(system, "level_set");
+    EXPECT_EQ(jit != nullptr, svmp::FE::forms::jit::llvmJITEnabled());
   }
 #endif
 }

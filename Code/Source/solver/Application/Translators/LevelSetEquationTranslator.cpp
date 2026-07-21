@@ -19,8 +19,10 @@
 #include <cmath>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <initializer_list>
 #include <limits>
+#include <locale>
 #include <memory>
 #include <optional>
 #include <span>
@@ -335,6 +337,254 @@ read_level_set_temporal_spatial_inflow_file(const svmp::MeshBase& mesh,
   return out;
 }
 
+std::string json_string(std::string_view value)
+{
+  static constexpr char hex[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(value.size() + 2u);
+  out.push_back('"');
+  for (const unsigned char c : value) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\b': out += "\\b"; break;
+      case '\f': out += "\\f"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (c < 0x20u) {
+          out += "\\u00";
+          out.push_back(hex[(c >> 4u) & 0x0fu]);
+          out.push_back(hex[c & 0x0fu]);
+        } else {
+          out.push_back(static_cast<char>(c));
+        }
+        break;
+    }
+  }
+  out.push_back('"');
+  return out;
+}
+
+std::string json_real(svmp::FE::Real value)
+{
+  if (!std::isfinite(value)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Effective level-set configuration contains a non-finite scalar.");
+  }
+  std::ostringstream out;
+  out.imbue(std::locale::classic());
+  out << std::setprecision(
+             std::numeric_limits<svmp::FE::Real>::max_digits10)
+      << value;
+  return out.str();
+}
+
+constexpr const char* json_bool(bool value) noexcept
+{
+  return value ? "true" : "false";
+}
+
+std::string json_scalar_value(const ls::ScalarValue& value)
+{
+  if (const auto* literal = std::get_if<svmp::FE::Real>(&value)) {
+    return json_real(*literal);
+  }
+  if (std::holds_alternative<svmp::FE::forms::ScalarCoefficient>(value)) {
+    return R"({"kind":"spatial_coefficient"})";
+  }
+  if (std::holds_alternative<svmp::FE::forms::TimeScalarCoefficient>(value)) {
+    return R"({"kind":"time_coefficient"})";
+  }
+  return R"({"kind":"form_expression"})";
+}
+
+const char* level_set_field_source_name(ls::LevelSetFieldSource source) noexcept
+{
+  return source == ls::LevelSetFieldSource::Unknown
+             ? "Unknown"
+             : "PrescribedData";
+}
+
+const char* level_set_velocity_source_name(
+    ls::LevelSetVelocitySource source) noexcept
+{
+  switch (source) {
+    case ls::LevelSetVelocitySource::CoupledField: return "CoupledField";
+    case ls::LevelSetVelocitySource::PrescribedData: return "PrescribedData";
+    case ls::LevelSetVelocitySource::ConstantVector: return "ConstantVector";
+  }
+  return "Unknown";
+}
+
+const char* level_set_transport_form_name(ls::LevelSetTransportForm form) noexcept
+{
+  return form == ls::LevelSetTransportForm::Advective
+             ? "Advective"
+             : "ConservativeDivergence";
+}
+
+const char* reinitialization_method_name(
+    ls::LevelSetReinitializationMethod method) noexcept
+{
+  switch (method) {
+    case ls::LevelSetReinitializationMethod::HamiltonJacobiPDE:
+      return "HamiltonJacobiPDE";
+    case ls::LevelSetReinitializationMethod::FastMarching:
+      return "FastMarching";
+    case ls::LevelSetReinitializationMethod::Projection:
+      return "Projection";
+  }
+  return "Unknown";
+}
+
+svmp::Physics::EffectiveConfigurationArtifact
+make_level_set_effective_configuration(const ls::LevelSetTransportOptions& options)
+{
+  auto inflow = options.boundaries.inflow;
+  auto outflow = options.boundaries.outflow;
+  std::sort(inflow.begin(), inflow.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs.boundary_marker < rhs.boundary_marker;
+  });
+  std::sort(outflow.begin(), outflow.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs.boundary_marker < rhs.boundary_marker;
+  });
+
+  std::ostringstream out;
+  out.imbue(std::locale::classic());
+  out << "{\"artifact_schema_version\":1"
+      << ",\"component\":\"level_set_transport\""
+      << ",\"capability_label\":\"one_phase_interface_transport_nonlocal_conservation\""
+      << ",\"units\":{\"system\":\"consistent_solver_units\",\"length\":\"solver_length\",\"time\":\"solver_time\",\"volume\":\"solver_volume\"}"
+      << ",\"operator\":" << json_string(options.operator_tag)
+      << ",\"transport_form\":"
+      << json_string(level_set_transport_form_name(options.transport_form))
+      << ",\"conservation_diagnostic\":"
+      << json_string(ls::levelSetConservationDiagnosticName(
+             ls::levelSetConservationDiagnostic(options)))
+      << ",\"level_set\":{\"field\":"
+      << json_string(options.level_set.field_name)
+      << ",\"source\":"
+      << json_string(level_set_field_source_name(options.level_set.source))
+      << ",\"auto_register\":"
+      << json_bool(options.level_set.auto_register_field) << '}'
+      << ",\"advection_velocity\":{\"field\":"
+      << json_string(options.velocity.field_name)
+      << ",\"source\":"
+      << json_string(level_set_velocity_source_name(options.velocity.source))
+      << ",\"auto_register\":"
+      << json_bool(options.velocity.auto_register_field)
+      << ",\"constant_value\":["
+      << json_real(options.velocity.constant_value[0]) << ','
+      << json_real(options.velocity.constant_value[1]) << ','
+      << json_real(options.velocity.constant_value[2]) << ']'
+      << ",\"algebraic_extension_source_field\":"
+      << json_string(options.velocity.algebraic_extension_source_field_name)
+      << ",\"dependency_direction\":\"physical_velocity_to_extension_to_level_set\""
+      << ",\"physical_momentum_coupling_allowed\":false"
+      << ",\"map_guard_policy\":\"fixed_bounded_application_policy\"}"
+      << ",\"supg\":{\"enabled\":" << json_bool(options.supg.enabled)
+      << ",\"tau_scale\":" << json_real(options.supg.tau_scale)
+      << ",\"velocity_epsilon\":"
+      << json_real(options.supg.velocity_epsilon)
+      << ",\"transient_scale\":"
+      << json_real(options.supg.transient_scale)
+      << ",\"discontinuity_capturing_enabled\":"
+      << json_bool(options.supg.discontinuity_capturing_enabled)
+      << ",\"discontinuity_capturing_scale\":"
+      << json_real(options.supg.discontinuity_capturing_scale)
+      << ",\"gradient_epsilon\":"
+      << json_real(options.supg.gradient_epsilon)
+      << ",\"residual_epsilon\":"
+      << json_real(options.supg.discontinuity_capturing_residual_epsilon)
+      << ",\"maximum_courant\":"
+      << json_real(options.supg.discontinuity_capturing_max_courant) << '}'
+      << ",\"bound_preserving\":{\"enabled\":"
+      << json_bool(options.bound_preserving.enabled)
+      << ",\"method\":\"nodal_rejection_projection_nonconservative\""
+      << ",\"bound_tolerance\":"
+      << json_real(options.bound_preserving.bound_tolerance)
+      << ",\"sign_tolerance\":"
+      << json_real(options.bound_preserving.sign_tolerance)
+      << ",\"maximum_courant\":"
+      << json_real(options.bound_preserving.maximum_courant)
+      << ",\"courant_tolerance\":"
+      << json_real(options.bound_preserving.courant_tolerance)
+      << ",\"enforce_courant_limit\":"
+      << json_bool(options.bound_preserving.enforce_courant_limit)
+      << ",\"enforce_impermeable_boundaries\":"
+      << json_bool(options.bound_preserving.enforce_impermeable_boundaries)
+      << ",\"impermeable_normal_velocity_tolerance\":"
+      << json_real(
+             options.bound_preserving.impermeable_normal_velocity_tolerance)
+      << '}'
+      << ",\"interface_kinematic\":{\"enabled\":"
+      << json_bool(options.interface_kinematic.enabled)
+      << ",\"interface_marker\":"
+      << options.interface_kinematic.interface_marker
+      << ",\"weight_scale\":"
+      << json_real(options.interface_kinematic.weight_scale) << '}'
+      << ",\"maintenance_transaction\":{\"ordering\":\"transport_then_reinitialization_then_volume_correction_then_geometry_refresh\""
+      << ",\"reinitialization\":{\"enabled\":"
+      << json_bool(options.reinitialization.enabled)
+      << ",\"method\":"
+      << json_string(reinitialization_method_name(
+             options.reinitialization.method))
+      << ",\"cadence_steps\":" << options.reinitialization.cadence_steps
+      << ",\"max_iterations\":" << options.reinitialization.max_iterations
+      << ",\"pseudo_time_step_scale\":"
+      << json_real(options.reinitialization.pseudo_time_step_scale)
+      << ",\"interface_band_width\":"
+      << json_real(options.reinitialization.interface_band_width)
+      << ",\"signed_distance_tolerance\":"
+      << json_real(options.reinitialization.signed_distance_tolerance)
+      << ",\"preserve_band_width\":"
+      << json_real(options.reinitialization.preserve_band_width)
+      << ",\"maximum_zero_set_displacement\":"
+      << json_real(options.reinitialization.max_zero_set_displacement) << '}'
+      << ",\"volume_correction\":{\"enabled\":"
+      << json_bool(options.volume_correction.enabled)
+      << ",\"cadence_steps\":" << options.volume_correction.cadence_steps
+      << ",\"use_initial_negative_volume_as_target\":"
+      << json_bool(
+             options.volume_correction.use_initial_negative_volume_as_target)
+      << ",\"target_negative_volume\":"
+      << json_real(options.volume_correction.target_negative_volume)
+      << ",\"volume_tolerance\":"
+      << json_real(options.volume_correction.volume_tolerance)
+      << ",\"max_iterations\":"
+      << options.volume_correction.max_iterations
+      << ",\"minimum_relative_volume_error\":"
+      << json_real(options.volume_correction.minimum_relative_volume_error)
+      << ",\"maximum_interface_displacement_fraction\":"
+      << json_real(
+             options.volume_correction.maximum_interface_displacement_fraction)
+      << ",\"maximum_cumulative_interface_displacement_fraction\":"
+      << json_real(options.volume_correction
+                       .maximum_cumulative_interface_displacement_fraction)
+      << "}}"
+      << ",\"boundaries\":{\"inflow\":[";
+  for (std::size_t i = 0; i < inflow.size(); ++i) {
+    if (i != 0u) out << ',';
+    out << "{\"marker\":" << inflow[i].boundary_marker
+        << ",\"value\":" << json_scalar_value(inflow[i].value)
+        << ",\"penalty_scale\":" << json_real(inflow[i].penalty_scale)
+        << '}';
+  }
+  out << "],\"outflow\":[";
+  for (std::size_t i = 0; i < outflow.size(); ++i) {
+    if (i != 0u) out << ',';
+    out << "{\"marker\":" << outflow[i].boundary_marker << '}';
+  }
+  out << "]}}";
+
+  return svmp::Physics::EffectiveConfigurationArtifact{
+      .component = "level_set_transport",
+      .json = out.str(),
+  };
+}
+
 class LevelSetTransportInputAdapter final : public svmp::Physics::PhysicsModule {
 public:
   LevelSetTransportInputAdapter(
@@ -349,11 +599,20 @@ public:
 
   void registerOn(svmp::FE::systems::FESystem& system) const override
   {
+    effective_configuration_artifact_.reset();
     (void)ls::installLevelSetTransport(
         system,
         level_set_space_,
         options_,
         install_options_);
+    effective_configuration_artifact_ =
+        make_level_set_effective_configuration(options_);
+  }
+
+  [[nodiscard]] std::optional<svmp::Physics::EffectiveConfigurationArtifact>
+  effectiveConfigurationArtifact() const override
+  {
+    return effective_configuration_artifact_;
   }
 
   void applyInitialConditions(const svmp::FE::systems::FESystem& system,
@@ -474,6 +733,8 @@ private:
   std::shared_ptr<const svmp::FE::spaces::FunctionSpace> level_set_space_{};
   ls::LevelSetTransportOptions options_{};
   svmp::FE::systems::FormInstallOptions install_options_{};
+  mutable std::optional<svmp::Physics::EffectiveConfigurationArtifact>
+      effective_configuration_artifact_{};
 };
 
 std::string trim_copy(std::string s)
@@ -694,7 +955,7 @@ svmp::FE::systems::FormInstallOptions level_set_install_options(
 {
   svmp::FE::systems::FormInstallOptions options{};
   options.compiler_options.jit.enable =
-      policy.enable && svmp::FE::forms::jit::llvmJITEnabled();
+      svmp::Physics::core::effectivePhysicsJITEnable(policy);
   options.compiler_options.jit.optimization_level = policy.optimization_level;
   options.compiler_options.jit.specialization.enable = policy.specialization;
   options.compiler_options.jit.specialization.specialize_n_qpts = policy.specialize_n_qpts;
@@ -935,6 +1196,96 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
           "SUPG_velocity_epsilon")) {
     options.supg.velocity_epsilon = *value;
   }
+  if (const auto value = get_defined_real(
+          params,
+          {"SUPG_transient_scale", "SUPGTransientScale"},
+          "SUPG_transient_scale")) {
+    options.supg.transient_scale = *value;
+  }
+  if (const auto value = get_defined_bool(
+          params,
+          {"Enable_discontinuity_capturing", "EnableDiscontinuityCapturing",
+           "SUPG_discontinuity_capturing", "SUPGDiscontinuityCapturing"})) {
+    options.supg.discontinuity_capturing_enabled = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Discontinuity_capturing_scale", "DiscontinuityCapturingScale",
+           "SUPG_discontinuity_capturing_scale"},
+          "Discontinuity_capturing_scale")) {
+    options.supg.discontinuity_capturing_scale = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Discontinuity_capturing_gradient_epsilon",
+           "DiscontinuityCapturingGradientEpsilon"},
+          "Discontinuity_capturing_gradient_epsilon")) {
+    options.supg.gradient_epsilon = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Discontinuity_capturing_residual_epsilon",
+           "DiscontinuityCapturingResidualEpsilon"},
+          "Discontinuity_capturing_residual_epsilon")) {
+    options.supg.discontinuity_capturing_residual_epsilon = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Discontinuity_capturing_max_courant",
+           "DiscontinuityCapturingMaxCourant"},
+          "Discontinuity_capturing_max_courant")) {
+    options.supg.discontinuity_capturing_max_courant = *value;
+  }
+  if (const auto value = get_defined_bool(
+          params,
+          {"Enable_bound_preserving_limiter", "EnableBoundPreservingLimiter",
+           "Bound_preserving_limiter", "BoundPreservingLimiter"})) {
+    options.bound_preserving.enabled = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Bound_preserving_bound_tolerance", "BoundPreservingBoundTolerance"},
+          "Bound_preserving_bound_tolerance")) {
+    options.bound_preserving.bound_tolerance = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Bound_preserving_sign_tolerance", "BoundPreservingSignTolerance"},
+          "Bound_preserving_sign_tolerance")) {
+    options.bound_preserving.sign_tolerance = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Bound_preserving_courant_tolerance",
+           "BoundPreservingCourantTolerance"},
+          "Bound_preserving_courant_tolerance")) {
+    options.bound_preserving.courant_tolerance = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Bound_preserving_maximum_courant", "BoundPreservingMaximumCourant"},
+          "Bound_preserving_maximum_courant")) {
+    options.bound_preserving.maximum_courant = *value;
+  }
+  if (const auto value = get_defined_bool(
+          params,
+          {"Bound_preserving_enforce_courant_limit",
+           "BoundPreservingEnforceCourantLimit"})) {
+    options.bound_preserving.enforce_courant_limit = *value;
+  }
+  if (const auto value = get_defined_bool(
+          params,
+          {"Bound_preserving_enforce_impermeable_boundaries",
+           "BoundPreservingEnforceImpermeableBoundaries"})) {
+    options.bound_preserving.enforce_impermeable_boundaries = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Bound_preserving_impermeable_normal_velocity_tolerance",
+           "BoundPreservingImpermeableNormalVelocityTolerance"},
+          "Bound_preserving_impermeable_normal_velocity_tolerance")) {
+    options.bound_preserving.impermeable_normal_velocity_tolerance = *value;
+  }
 
   if (const auto value = get_defined_bool(
           params,
@@ -1001,6 +1352,13 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
           "Reinitialization_signed_distance_tolerance")) {
     options.reinitialization.signed_distance_tolerance = *value;
   }
+  if (const auto value = get_defined_real(
+          params,
+          {"Reinitialization_max_zero_set_displacement",
+           "ReinitializationMaxZeroSetDisplacement"},
+          "Reinitialization_max_zero_set_displacement")) {
+    options.reinitialization.max_zero_set_displacement = *value;
+  }
 
   if (const auto value = get_defined_bool(
           params,
@@ -1043,6 +1401,28 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
           "Volume_correction_max_iterations")) {
     options.volume_correction.max_iterations = *value;
   }
+  if (const auto value = get_defined_real(
+          params,
+          {"Volume_correction_minimum_relative_error",
+           "VolumeCorrectionMinimumRelativeError"},
+          "Volume_correction_minimum_relative_error")) {
+    options.volume_correction.minimum_relative_volume_error = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Volume_correction_maximum_interface_displacement_fraction",
+           "VolumeCorrectionMaximumInterfaceDisplacementFraction"},
+          "Volume_correction_maximum_interface_displacement_fraction")) {
+    options.volume_correction.maximum_interface_displacement_fraction = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Volume_correction_maximum_cumulative_interface_displacement_fraction",
+           "VolumeCorrectionMaximumCumulativeInterfaceDisplacementFraction"},
+          "Volume_correction_maximum_cumulative_interface_displacement_fraction")) {
+    options.volume_correction
+        .maximum_cumulative_interface_displacement_fraction = *value;
+  }
 }
 
 std::optional<std::string> projected_curvature_field_name(
@@ -1060,56 +1440,85 @@ std::optional<std::string> projected_curvature_field_name(
        "FreeSurfaceCurvatureField"});
 }
 
-void ensure_projected_curvature_field(
-    svmp::FE::systems::FESystem& system,
-    const std::string& field_name,
-    const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space)
+std::vector<std::string> projected_curvature_fields_from_input(
+    const svmp::Physics::EquationModuleInput& input)
 {
-  if (field_name.empty()) {
-    return;
-  }
-  const auto existing = system.findFieldByName(field_name);
-  if (existing != svmp::FE::INVALID_FIELD_ID) {
-    const auto& rec = system.fieldRecord(existing);
-    if (rec.components != 1 || !rec.space || rec.space->value_dimension() != 1) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Projected curvature field '" +
-          field_name + "' must be scalar.");
+  std::vector<std::string> fields;
+  const auto append = [&fields](const svmp::Physics::ParameterMap& params) {
+    const auto field = projected_curvature_field_name(params);
+    if (!field.has_value()) {
+      return;
     }
-    if (rec.source_kind != svmp::FE::systems::FieldSourceKind::PrescribedData) {
+    const auto name = trim_copy(*field);
+    if (name.empty()) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Projected curvature field '" +
-          field_name + "' must be registered as PrescribedData.");
+          "[svMultiPhysics::Application] Projected curvature field name must be non-empty.");
     }
-    return;
+    if (std::find(fields.begin(), fields.end(), name) == fields.end()) {
+      fields.push_back(name);
+    }
+  };
+  append(input.equation_params);
+  append(input.default_domain.params);
+  for (const auto& domain : input.domains) {
+    append(domain.params);
   }
-  if (!space) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Projected curvature field auto-registration requires a scalar function space.");
-  }
-  system.addField(svmp::FE::systems::FieldSpec{
-      .name = field_name,
-      .space = space,
-      .components = 1,
-      .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
-  });
+  return fields;
 }
 
-void ensure_projected_curvature_fields_from_input(
+void preflight_projected_curvature_fields(
+    const svmp::FE::systems::FESystem& system,
+    const std::vector<std::string>& fields,
+    const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space,
+    std::string_view level_set_field,
+    std::string_view velocity_field)
+{
+  for (const auto& field : fields) {
+    if (field == level_set_field ||
+        (!velocity_field.empty() && field == velocity_field)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Projected curvature field '" +
+          field + "' must be distinct from level-set and velocity fields.");
+    }
+    const auto existing = system.findFieldByName(field);
+    if (existing == svmp::FE::INVALID_FIELD_ID) {
+      if (!space || space->value_dimension() != 1) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Projected curvature field auto-registration requires a scalar function space.");
+      }
+      continue;
+    }
+    const auto& rec = system.fieldRecord(existing);
+    if (rec.components != 1 || !rec.space ||
+        rec.space->value_dimension() != 1) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Projected curvature field '" +
+          field + "' must be scalar.");
+    }
+    if (rec.source_kind !=
+        svmp::FE::systems::FieldSourceKind::PrescribedData) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Projected curvature field '" +
+          field + "' must be registered as PrescribedData.");
+    }
+  }
+}
+
+void register_projected_curvature_fields(
     svmp::FE::systems::FESystem& system,
-    const svmp::Physics::EquationModuleInput& input,
+    const std::vector<std::string>& fields,
     const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space)
 {
-  if (const auto field = projected_curvature_field_name(input.equation_params)) {
-    ensure_projected_curvature_field(system, *field, space);
-  }
-  if (const auto field = projected_curvature_field_name(input.default_domain.params)) {
-    ensure_projected_curvature_field(system, *field, space);
-  }
-  for (const auto& domain : input.domains) {
-    if (const auto field = projected_curvature_field_name(domain.params)) {
-      ensure_projected_curvature_field(system, *field, space);
+  for (const auto& field : fields) {
+    if (system.findFieldByName(field) != svmp::FE::INVALID_FIELD_ID) {
+      continue;
     }
+    system.addField(svmp::FE::systems::FieldSpec{
+        .name = field,
+        .space = space,
+        .components = 1,
+        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
+    });
   }
 }
 
@@ -1223,16 +1632,74 @@ create_level_set_transport_from_input(const svmp::Physics::EquationModuleInput& 
     apply_level_set_params(input.domains.front().params, options);
   }
   apply_level_set_bcs(input, options);
-  ensure_projected_curvature_fields_from_input(
-      system, input, level_set_space);
+
+  const bool wet_extension_enabled =
+      get_defined_bool(
+          input.equation_params,
+          {"Use_wet_extension_advection_velocity",
+           "UseWetExtensionAdvectionVelocity",
+           "Update_advection_velocity_from_wet_region",
+           "UpdateAdvectionVelocityFromWetRegion"})
+          .value_or(false) ||
+      get_defined_string(
+          input.equation_params,
+          {"Advection_velocity_from_field",
+           "AdvectionVelocityFromField",
+           "Source_velocity_field_name",
+           "SourceVelocityFieldName",
+           "Physical_velocity_field_name",
+           "PhysicalVelocityFieldName"})
+          .has_value();
+  if (wet_extension_enabled) {
+    if (options.velocity.source !=
+        ls::LevelSetVelocitySource::PrescribedData) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Wet-extension input must declare "
+          "Velocity_source=prescribed_data; the translator promotes that "
+          "state-dependent coefficient to an algebraic coupled unknown so "
+          "its monolithic velocity tangent is retained.");
+    }
+    const auto source = get_defined_string(
+        input.equation_params,
+        {"Advection_velocity_from_field",
+         "AdvectionVelocityFromField",
+         "Source_velocity_field_name",
+         "SourceVelocityFieldName",
+         "Physical_velocity_field_name",
+         "PhysicalVelocityFieldName"});
+    options.velocity.algebraic_extension_source_field_name =
+        source.has_value() ? trim_copy(*source) : std::string{"Velocity"};
+    if (options.velocity.algebraic_extension_source_field_name.empty() ||
+        options.velocity.algebraic_extension_source_field_name ==
+            options.velocity.field_name) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Wet-extension algebraic source must "
+          "name a distinct physical velocity field.");
+    }
+    options.velocity.source = ls::LevelSetVelocitySource::CoupledField;
+    options.velocity.auto_register_field = true;
+  }
 
   options.velocity.space = velocity_space;
+  const auto projected_curvature_fields =
+      projected_curvature_fields_from_input(input);
+  preflight_projected_curvature_fields(
+      system,
+      projected_curvature_fields,
+      level_set_space,
+      options.level_set.field_name,
+      options.velocity.source == ls::LevelSetVelocitySource::ConstantVector
+          ? std::string_view{}
+          : std::string_view{options.velocity.field_name});
+  const auto projected_curvature_space = level_set_space;
 
   auto module = std::make_unique<LevelSetTransportInputAdapter>(
       std::move(level_set_space),
       std::move(options),
       install_options);
   module->registerOn(system);
+  register_projected_curvature_fields(
+      system, projected_curvature_fields, projected_curvature_space);
   return module;
 }
 

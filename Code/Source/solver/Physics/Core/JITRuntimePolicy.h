@@ -133,11 +133,11 @@ inline std::optional<bool> lookup_module_options_bool(std::string_view module_op
 
 } // namespace detail
 
-inline bool resolveOopJitEnable(const EquationModuleInput& input, bool default_enabled)
+inline std::optional<bool> resolveOopJitEnableOverride(const EquationModuleInput& input)
 {
     if (const auto value = detail::lookup_module_options_bool(input.module_options,
                                                               {"jit", "jit_enable", "enable_jit"})) {
-        return *value;
+        return value;
     }
 
     static constexpr std::string_view kParamKeys[] = {
@@ -147,7 +147,7 @@ inline bool resolveOopJitEnable(const EquationModuleInput& input, bool default_e
     };
     for (const auto key : kParamKeys) {
         if (const auto value = detail::lookup_param_bool(input.equation_params, key)) {
-            return *value;
+            return value;
         }
     }
 
@@ -158,12 +158,17 @@ inline bool resolveOopJitEnable(const EquationModuleInput& input, bool default_e
     for (const char* key : kEnvKeys) {
         if (const char* env = std::getenv(key); env != nullptr) {
             if (const auto value = detail::parse_bool_relaxed(env)) {
-                return *value;
+                return value;
             }
         }
     }
 
-    return default_enabled;
+    return std::nullopt;
+}
+
+inline bool resolveOopJitEnable(const EquationModuleInput& input, bool default_enabled)
+{
+    return resolveOopJitEnableOverride(input).value_or(default_enabled);
 }
 
 inline bool resolveOopJitSpecializationEnable(const EquationModuleInput& input, bool default_enabled)
@@ -204,7 +209,10 @@ inline PhysicsJITPolicy resolveOopJitPolicy(const EquationModuleInput& input,
                                             PhysicsJITPolicy default_policy = {})
 {
     PhysicsJITPolicy policy = default_policy;
-    policy.enable = resolveOopJitEnable(input, default_policy.enable);
+    if (const auto requested = resolveOopJitEnableOverride(input)) {
+        policy.enable = *requested;
+        policy.enable_was_explicitly_set = true;
+    }
     policy.specialization =
         resolveOopJitSpecializationEnable(input, default_policy.specialization);
     return policy;
