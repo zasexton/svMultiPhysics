@@ -175,6 +175,8 @@ MappedCutQuadratureRule mapCutQuadratureRuleToPhysical(
     mapped.source_stable_id = rule.provenance.source_stable_id;
     mapped.cut_topology_revision = rule.provenance.cut_topology_revision;
     mapped.source_value_revision = rule.provenance.source_value_revision;
+    mapped.free_surface_snapshot_revision_key =
+        rule.provenance.free_surface_snapshot_revision_key;
     mapped.reference_measure = rule.measure;
     mapped.points.reserve(rule.points.size());
 

@@ -2820,6 +2820,9 @@ void mixCutVolumeBasisCacheHash(std::uint64_t& h, Real value) noexcept
         mixCutVolumeBasisCacheHash(h, rule.provenance.source_value_revision);
         mixCutVolumeBasisCacheHash(
             h,
+            rule.provenance.free_surface_snapshot_revision_key);
+        mixCutVolumeBasisCacheHash(
+            h,
             static_cast<std::uint64_t>(rule.provenance.construction));
         if (i < metadata.size()) {
             const auto& meta = metadata[i];
@@ -2828,6 +2831,9 @@ void mixCutVolumeBasisCacheHash(std::uint64_t& h, Real value) noexcept
             mixCutVolumeBasisCacheHash(h, meta.cut_topology_revision);
             mixCutVolumeBasisCacheHash(h, meta.quadrature_policy_key);
             mixCutVolumeBasisCacheHash(h, meta.source_value_revision);
+            mixCutVolumeBasisCacheHash(
+                h,
+                meta.free_surface_snapshot_revision_key);
         }
     }
     return h;

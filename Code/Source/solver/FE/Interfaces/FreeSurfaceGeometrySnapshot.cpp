@@ -209,6 +209,8 @@ void mixRuleContent(std::uint64_t& hash,
     mix(hash, static_cast<std::uint64_t>(record.retention));
     mix(hash, static_cast<std::uint64_t>(
                   record.physical_boundary_marker + 1));
+    mix(hash, record.topology_id);
+    mix(hash, static_cast<std::uint64_t>(record.component_id));
     mix(hash, record.reference_rule.provenance.cut_topology_revision);
     mix(hash, static_cast<std::uint64_t>(
                   record.reference_rule.provenance.marker));
@@ -1994,6 +1996,13 @@ buildFreeSurfaceGeometrySnapshot(
     if (!revision.complete()) {
         throw std::invalid_argument(
             "free-surface geometry snapshot revision is incomplete");
+    }
+    for (auto& record : records) {
+        record.reference_rule.provenance
+            .free_surface_snapshot_revision_key =
+            revision.snapshot_revision_key;
+        record.physical_rule.free_surface_snapshot_revision_key =
+            revision.snapshot_revision_key;
     }
     return std::shared_ptr<const FreeSurfaceGeometrySnapshot>(
         new FreeSurfaceGeometrySnapshot(

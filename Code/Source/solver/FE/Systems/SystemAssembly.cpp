@@ -647,6 +647,11 @@ void logCutVolumeRowProvenanceDiagnostics(
             << " source_revision="
             << (rule_metadata == nullptr ? 0u
                                           : rule_metadata->source_value_revision)
+            << " free_surface_snapshot_revision="
+            << (rule_metadata == nullptr
+                    ? 0u
+                    : rule_metadata
+                          ->free_surface_snapshot_revision_key)
             << " cut_topology_revision="
             << (rule_metadata == nullptr ? 0u
                                           : rule_metadata->cut_topology_revision)

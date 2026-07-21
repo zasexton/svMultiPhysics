@@ -862,6 +862,11 @@ TEST(FreeSurfaceGeometrySnapshot,
     }
     for (const auto& record : snapshot->rules()) {
         EXPECT_GE(record.component_id, 0);
+        EXPECT_EQ(record.reference_rule.provenance
+                      .free_surface_snapshot_revision_key,
+                  snapshot->revision().snapshot_revision_key);
+        EXPECT_EQ(record.physical_rule.free_surface_snapshot_revision_key,
+                  snapshot->revision().snapshot_revision_key);
         ASSERT_EQ(record.reference_rule.points.size(),
                   record.physical_rule.points.size());
         EXPECT_GT(record.physical_rule.physical_measure, 0.0);
@@ -1102,11 +1107,36 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_EQ(context.freeSurfaceGeometrySnapshotRevisionForMarker(
                   interface_marker),
               snapshot->revision().snapshot_revision_key);
+    EXPECT_NO_THROW(
+        context.assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+            interface_marker));
+    for (const auto& rule : context.volumeRules()) {
+        EXPECT_EQ(rule.provenance.free_surface_snapshot_revision_key,
+                  snapshot->revision().snapshot_revision_key);
+    }
+    for (const auto& rule : context.interfaceRules()) {
+        EXPECT_EQ(rule.provenance.free_surface_snapshot_revision_key,
+                  snapshot->revision().snapshot_revision_key);
+    }
+    for (const auto& metadata : context.metadata()) {
+        EXPECT_EQ(metadata.free_surface_snapshot_revision_key,
+                  snapshot->revision().snapshot_revision_key);
+    }
+    for (const auto& binding : context.bindings()) {
+        EXPECT_EQ(binding.free_surface_snapshot_revision_key,
+                  snapshot->revision().snapshot_revision_key);
+    }
     for (const auto& active : snapshot->activeBoundaryDomains()) {
         EXPECT_EQ(context.freeSurfaceGeometrySnapshotRevisionForMarker(
                       active.marker()),
                   snapshot->revision().snapshot_revision_key);
+        EXPECT_NO_THROW(
+            context.assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+                active.marker()));
     }
+    context.addGeneratedInterfaceDomain(snapshot->interfaceDomain());
+    EXPECT_THROW((void)context.interfaceRulesForMarker(interface_marker),
+                 std::invalid_argument);
 }
 
 TEST(FreeSurfaceGeometrySnapshot, RejectsStoredOffInterfaceResidual)

@@ -55,6 +55,7 @@ struct CutCellAssemblyMetadata {
     std::uint64_t cut_topology_revision = 0;
     std::uint64_t quadrature_policy_key = 0;
     std::uint64_t source_value_revision = 0;
+    std::uint64_t free_surface_snapshot_revision_key = 0;
 };
 
 struct CutStabilizationHook {
@@ -119,6 +120,7 @@ struct CutIntegrationBinding {
     std::uint64_t quadrature_policy_key = 0;
     std::uint64_t source_value_revision = 0;
     std::vector<CutIntegrationAssemblyPath> visible_to_paths{};
+    std::uint64_t free_surface_snapshot_revision_key = 0;
 };
 
 struct CutScalarOperatorPoint {
@@ -446,6 +448,20 @@ public:
         if (rule.provenance.source_value_revision == 0u) {
             rule.provenance.source_value_revision = metadata.source_value_revision;
         }
+        if (metadata.free_surface_snapshot_revision_key != 0u &&
+            rule.provenance.free_surface_snapshot_revision_key != 0u &&
+            metadata.free_surface_snapshot_revision_key !=
+                rule.provenance.free_surface_snapshot_revision_key) {
+            throw std::invalid_argument(
+                "generated level-set volume rule snapshot revision must match metadata");
+        }
+        if (rule.provenance.free_surface_snapshot_revision_key == 0u) {
+            rule.provenance.free_surface_snapshot_revision_key =
+                metadata.free_surface_snapshot_revision_key;
+        } else if (metadata.free_surface_snapshot_revision_key == 0u) {
+            metadata.free_surface_snapshot_revision_key =
+                rule.provenance.free_surface_snapshot_revision_key;
+        }
         if (shouldPruneGeneratedVolumeRule(rule)) {
             ++generated_pruned_volume_rule_count_;
             if (std::isfinite(rule.measure) && rule.measure > Real{0.0}) {
@@ -483,6 +499,8 @@ public:
             binding.cut_topology_revision = stored_metadata.cut_topology_revision;
             binding.quadrature_policy_key = stored_metadata.quadrature_policy_key;
             binding.source_value_revision = stored_metadata.source_value_revision;
+            binding.free_surface_snapshot_revision_key =
+                stored_metadata.free_surface_snapshot_revision_key;
             binding.visible_to_paths = {
                 CutIntegrationAssemblyPath::Standard,
                 CutIntegrationAssemblyPath::MatrixFree,
@@ -590,6 +608,8 @@ public:
             metadata.cut_topology_revision = rule.provenance.cut_topology_revision;
             metadata.quadrature_policy_key = rule.provenance.predicate_policy_key;
             metadata.source_value_revision = domain.request().source.value_revision;
+            metadata.free_surface_snapshot_revision_key =
+                rule.provenance.free_surface_snapshot_revision_key;
             addGeneratedVolumeRule(marker, std::move(metadata), std::move(rule));
         }
         auto rules = domain.interfaceQuadratureRules();
@@ -742,6 +762,10 @@ public:
         }
         const auto revision_key =
             snapshot->revision().snapshot_revision_key;
+        const auto first_volume_rule = volume_rules_.size();
+        const auto first_interface_rule = interface_rules_.size();
+        const auto first_metadata = metadata_.size();
+        const auto first_binding = bindings_.size();
         const auto bind_marker = [&](int marker) {
             if (marker < 0) {
                 throw std::invalid_argument(
@@ -770,6 +794,26 @@ public:
         }
         for (const auto& active : snapshot->activeBoundaryDomains()) {
             addGeneratedActiveBoundaryDomain(active);
+        }
+        for (std::size_t index = first_volume_rule;
+             index < volume_rules_.size();
+             ++index) {
+            volume_rules_[index]
+                .provenance.free_surface_snapshot_revision_key = revision_key;
+        }
+        for (std::size_t index = first_interface_rule;
+             index < interface_rules_.size();
+             ++index) {
+            interface_rules_[index]
+                .provenance.free_surface_snapshot_revision_key = revision_key;
+        }
+        for (std::size_t index = first_metadata; index < metadata_.size();
+             ++index) {
+            metadata_[index].free_surface_snapshot_revision_key = revision_key;
+        }
+        for (std::size_t index = first_binding; index < bindings_.size();
+             ++index) {
+            bindings_[index].free_surface_snapshot_revision_key = revision_key;
         }
         free_surface_geometry_snapshots_.push_back(std::move(snapshot));
         markModified();
@@ -824,7 +868,11 @@ public:
             for (const auto index : interface_rules->second) {
                 if (index >= interface_rules_.size() ||
                     interface_rules_[index].provenance.source_value_revision !=
-                        expected_source_revision) {
+                        expected_source_revision ||
+                    interface_rules_[index]
+                            .provenance
+                            .free_surface_snapshot_revision_key !=
+                        bound->second) {
                     throw std::invalid_argument(
                         "generated interface rule does not declare its complete free-surface snapshot revision");
                 }
@@ -836,7 +884,15 @@ public:
             for (const auto index : volume_rules->second) {
                 if (index >= volume_rules_.size() ||
                     volume_rules_[index].provenance.source_value_revision !=
-                        expected_source_revision) {
+                        expected_source_revision ||
+                    volume_rules_[index]
+                            .provenance
+                            .free_surface_snapshot_revision_key !=
+                        bound->second ||
+                    index >= metadata_.size() ||
+                    metadata_[index]
+                            .free_surface_snapshot_revision_key !=
+                        bound->second) {
                     throw std::invalid_argument(
                         "generated volume rule does not declare its complete free-surface snapshot revision");
                 }

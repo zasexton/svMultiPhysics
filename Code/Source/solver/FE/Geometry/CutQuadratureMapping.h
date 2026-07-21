@@ -48,6 +48,7 @@ struct MappedCutQuadratureRule {
     std::uint64_t source_stable_id{0};
     std::uint64_t cut_topology_revision{0};
     std::uint64_t source_value_revision{0};
+    std::uint64_t free_surface_snapshot_revision_key{0};
     Real reference_measure{0.0};
     Real physical_measure{0.0};
     std::vector<MappedCutQuadraturePoint> points{};
