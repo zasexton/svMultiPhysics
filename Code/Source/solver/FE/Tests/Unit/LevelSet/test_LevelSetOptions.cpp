@@ -54,6 +54,30 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
         1.0);
     EXPECT_TRUE(options.boundaries.inflow.empty());
     EXPECT_TRUE(options.boundaries.outflow.empty());
+    EXPECT_FALSE(options.conservative_phase.enabled);
+    EXPECT_EQ(options.conservative_phase.liquid_indicator.field_name,
+              "liquid_indicator");
+    EXPECT_EQ(options.conservative_phase.liquid_indicator.source,
+              level_set::LevelSetFieldSource::Unknown);
+    EXPECT_TRUE(
+        options.conservative_phase.liquid_indicator.auto_register_field);
+    EXPECT_EQ(options.conservative_phase.liquid_side,
+              level_set::LevelSetPhaseSide::Negative);
+    EXPECT_DOUBLE_EQ(options.conservative_phase.invariant_tolerance, 1.0e-12);
+    EXPECT_DOUBLE_EQ(options.conservative_phase.maximum_courant, 1.0);
+    EXPECT_TRUE(options.conservative_phase.enforce_courant_limit);
+    EXPECT_TRUE(options.conservative_phase.require_constant_preservation);
+    EXPECT_DOUBLE_EQ(
+        options.conservative_phase.impermeable_normal_velocity_tolerance,
+        1.0e-10);
+    EXPECT_TRUE(options.conservative_phase.reconcile_geometry);
+    EXPECT_DOUBLE_EQ(options.conservative_phase.geometry_measure_tolerance,
+                     1.0e-10);
+    EXPECT_EQ(options.conservative_phase.geometry_correction_max_iterations,
+              50);
+    EXPECT_DOUBLE_EQ(
+        options.conservative_phase.maximum_geometry_displacement_fraction,
+        0.1);
 }
 
 TEST(LevelSetOptions, ExplicitTransportOptions)
@@ -197,6 +221,17 @@ TEST(LevelSetOptions, ConservationDiagnosticsDistinguishRunModes)
             level_set::levelSetConservationDiagnostic(plain)),
         level_set::levelSetConservationDiagnosticName(
             level_set::levelSetConservationDiagnostic(corrected)));
+
+    level_set::LevelSetTransportOptions phase_conservative{};
+    phase_conservative.conservative_phase.enabled = true;
+    EXPECT_EQ(
+        level_set::levelSetConservationDiagnostic(phase_conservative),
+        level_set::LevelSetConservationDiagnostic::
+            ConservativePhaseIndicatorLocallyConservative);
+    EXPECT_STREQ(
+        level_set::levelSetConservationDiagnosticName(
+            level_set::levelSetConservationDiagnostic(phase_conservative)),
+        "conservative_p1_phase_indicator_locally_conservative");
 }
 
 TEST(LevelSetOptions, ReinitializationCadence)

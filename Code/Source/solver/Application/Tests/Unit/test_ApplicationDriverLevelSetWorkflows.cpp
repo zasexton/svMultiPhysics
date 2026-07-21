@@ -3730,6 +3730,360 @@ TEST(ApplicationDriverLevelSetWorkflows,
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 namespace {
 
+class ApplicationDriverConservativePhaseCandidatesTest
+    : public ::testing::Test {
+protected:
+  void SetUp() override
+  {
+    mesh_ = makeWorkflowTriangleMesh();
+    (void)svmp::MeshFields::attach_field(
+        mesh_->local_mesh(),
+        svmp::EntityKind::Vertex,
+        "phi",
+        svmp::FieldScalarType::Float64,
+        1);
+    auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+        svmp::FE::ElementType::Triangle3,
+        /*order=*/1);
+    auto system =
+        std::make_unique<svmp::FE::systems::FESystem>(mesh_);
+    phi_ = system->addField(svmp::FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    phase_ = system->addField(svmp::FE::systems::FieldSpec{
+        .name = "phase",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system->setup({}));
+
+    sim_.primary_mesh = mesh_;
+    sim_.fe_system = std::move(system);
+    sim_.backend = svmp::FE::backends::BackendFactory::create(
+        svmp::FE::backends::BackendKind::FSILS);
+    ASSERT_NE(sim_.backend, nullptr);
+    auto allocated_history =
+        svmp::FE::timestepping::TimeHistory::allocate(
+            *sim_.backend,
+            sim_.fe_system->dofHandler().getNumDofs(),
+            /*history_depth=*/2,
+            /*allocate_second_order_state=*/true);
+    sim_.time_history =
+        std::make_unique<svmp::FE::timestepping::TimeHistory>(
+            std::move(allocated_history));
+    history().setDt(0.05);
+    history().setPrevDt(0.05);
+
+    std::vector<svmp::FE::Real> phi_vertex_values(
+        mesh_->n_vertices(), svmp::FE::Real{0.0});
+    for (std::size_t vertex = 0u; vertex < mesh_->n_vertices(); ++vertex) {
+      phi_vertex_values[vertex] =
+          workflowVertexPoint(*mesh_, vertex)[0] - svmp::FE::Real{0.75};
+    }
+    const auto phi_coefficients = projectWorkflowVertexValues(
+        *sim_.fe_system,
+        phi_,
+        phi_vertex_values,
+        /*components=*/1u,
+        "ApplicationDriver conservative phase phi");
+    std::vector<svmp::FE::Real> initial(solutionSize(),
+                                         svmp::FE::Real{0.0});
+    writeWorkflowFieldSlice(
+        *sim_.fe_system, phi_, phi_coefficients, initial);
+    scatterFeOrderedSolution(history().u(), initial);
+    scatterFeOrderedSolution(history().uPrev(), initial);
+    scatterFeOrderedSolution(history().uPrev2(), initial);
+    std::vector<svmp::FE::Real> initial_rates(
+        solutionSize(), svmp::FE::Real{0.5});
+    scatterFeOrderedSolution(history().uDot(), initial_rates);
+    scatterFeOrderedSolution(history().uDDot(), initial_rates);
+
+    params_ = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Velocity_source>constant</Velocity_source>
+    <Constant_velocity>0.0 0.0 0.0</Constant_velocity>
+    <Enable_conservative_phase_transport>true</Enable_conservative_phase_transport>
+    <Conservative_phase_field_name>phase</Conservative_phase_field_name>
+  </Add_equation>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>conservative_phase_interface</Generated_interface_domain_id>
+      <Interface_marker>911</Interface_marker>
+      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+    active_requests_ = activeCutVolumeRequests(*params_);
+    ASSERT_EQ(active_requests_.size(), 1u);
+    requests_ = levelSetMaintenanceRequests(*params_);
+    ASSERT_EQ(requests_.size(), 1u);
+    ASSERT_TRUE(requests_.front().conservative_phase.enabled);
+    ASSERT_TRUE(requests_.front().volume_cut_request.has_value());
+
+    const auto initial_refresh = refreshActiveCutIntegrationContextCached(
+        sim_,
+        *params_,
+        history().u(),
+        lifecycle_,
+        refresh_cache_,
+        "application-driver-conservative-phase-initial");
+    ASSERT_TRUE(initial_refresh.refreshed);
+    ASSERT_NO_THROW(initializeConservativePhaseStates(sim_, requests_));
+    ASSERT_TRUE(requests_.front().conservative_phase_initialized);
+    initialized_solution_ = gatherFeOrderedSolution(history().u());
+  }
+
+  [[nodiscard]] svmp::FE::timestepping::TimeHistory& history()
+  {
+    return *sim_.time_history;
+  }
+
+  [[nodiscard]] std::size_t solutionSize() const
+  {
+    return static_cast<std::size_t>(
+        sim_.fe_system->dofHandler().getNumDofs());
+  }
+
+  [[nodiscard]] std::size_t fieldOffset(svmp::FE::FieldId field) const
+  {
+    const auto offset = sim_.fe_system->fieldDofOffset(field);
+    if (offset < 0) {
+      throw std::runtime_error(
+          "ApplicationDriver conservative phase test has no field offset");
+    }
+    return static_cast<std::size_t>(offset);
+  }
+
+  [[nodiscard]] std::size_t fieldCount(svmp::FE::FieldId field) const
+  {
+    return static_cast<std::size_t>(
+        sim_.fe_system->fieldDofHandler(field).getNumDofs());
+  }
+
+  [[nodiscard]] std::vector<svmp::FE::Real> fieldSlice(
+      std::span<const svmp::FE::Real> solution,
+      svmp::FE::FieldId field) const
+  {
+    const auto offset = fieldOffset(field);
+    const auto count = fieldCount(field);
+    if (offset + count > solution.size()) {
+      throw std::runtime_error(
+          "ApplicationDriver conservative phase test slice is out of range");
+    }
+    return std::vector<svmp::FE::Real>(
+        solution.begin() + static_cast<std::ptrdiff_t>(offset),
+        solution.begin() + static_cast<std::ptrdiff_t>(offset + count));
+  }
+
+  void refreshCurrentCandidate(const char* provenance)
+  {
+    (void)refreshActiveCutIntegrationContextCached(
+        sim_,
+        *params_,
+        history().u(),
+        lifecycle_,
+        refresh_cache_,
+        provenance);
+  }
+
+  std::shared_ptr<svmp::Mesh> mesh_{};
+  svmp::FE::FieldId phi_{svmp::FE::INVALID_FIELD_ID};
+  svmp::FE::FieldId phase_{svmp::FE::INVALID_FIELD_ID};
+  application::core::SimulationComponents sim_{};
+  std::unique_ptr<Parameters> params_{};
+  std::vector<ActiveCutVolumeRequest> active_requests_{};
+  std::vector<LevelSetMaintenanceRequest> requests_{};
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle_{};
+  ActiveCutContextRefreshCache refresh_cache_{};
+  std::vector<svmp::FE::Real> initialized_solution_{};
+};
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       InitializesEveryHistoryLevelAndOnlyItsRateSlices)
+{
+  const auto current = gatherFeOrderedSolution(history().u());
+  const auto previous = gatherFeOrderedSolution(history().uPrev());
+  const auto older = gatherFeOrderedSolution(history().uPrev2());
+  const auto current_phase = fieldSlice(current, phase_);
+  EXPECT_EQ(current_phase, fieldSlice(previous, phase_));
+  EXPECT_EQ(current_phase, fieldSlice(older, phase_));
+  for (const auto value : current_phase) {
+    EXPECT_GE(value, svmp::FE::Real{0.0});
+    EXPECT_LE(value, svmp::FE::Real{1.0});
+  }
+
+  const auto rate = gatherFeOrderedSolution(history().uDot());
+  const auto acceleration = gatherFeOrderedSolution(history().uDDot());
+  for (const auto value : fieldSlice(rate, phase_)) {
+    EXPECT_DOUBLE_EQ(value, svmp::FE::Real{0.0});
+  }
+  for (const auto value : fieldSlice(acceleration, phase_)) {
+    EXPECT_DOUBLE_EQ(value, svmp::FE::Real{0.0});
+  }
+  for (const auto value : fieldSlice(rate, phi_)) {
+    EXPECT_DOUBLE_EQ(value, svmp::FE::Real{0.5});
+  }
+  for (const auto value : fieldSlice(acceleration, phi_)) {
+    EXPECT_DOUBLE_EQ(value, svmp::FE::Real{0.5});
+  }
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       StagesAndCommitsTheTransportedPhaseAgainstAuthoritativeGeometry)
+{
+  auto raw_candidate = initialized_solution_;
+  const auto phase_offset = fieldOffset(phase_);
+  for (std::size_t i = 0u; i < fieldCount(phase_); ++i) {
+    raw_candidate[phase_offset + i] =
+        svmp::FE::Real{0.9} -
+        svmp::FE::Real{0.05} * static_cast<svmp::FE::Real>(i);
+  }
+  scatterFeOrderedSolution(history().u(), raw_candidate);
+  refreshCurrentCandidate(
+      "application-driver-conservative-phase-commit-raw");
+  const auto previous_phase = fieldSlice(
+      gatherFeOrderedSolution(history().uPrev()), phase_);
+
+  auto result = applyConservativePhaseCandidates(
+      sim_,
+      history(),
+      requests_,
+      *params_,
+      lifecycle_,
+      refresh_cache_,
+      active_requests_);
+  EXPECT_TRUE(result.accept_step);
+  EXPECT_TRUE(result.changed);
+  ASSERT_NE(result.geometry_transaction, nullptr);
+  EXPECT_EQ(fieldSlice(gatherFeOrderedSolution(history().u()), phase_),
+            previous_phase);
+  EXPECT_EQ(fieldSlice(gatherFeOrderedSolution(history().uPrev()), phase_),
+            previous_phase);
+  ASSERT_NO_THROW(result.geometry_transaction->commit());
+  result.geometry_transaction.reset();
+  EXPECT_FALSE(sim_.fe_system->cutIntegrationContextTransactionActive());
+  EXPECT_FALSE(lifecycle_.transactionActive());
+
+  const auto projection = projectCurrentConservativePhaseGeometry(
+      *sim_.fe_system, requests_.front());
+  ASSERT_TRUE(projection.success) << projection.diagnostic;
+  auto& graph = requireCurrentConservativePhaseGraph(
+      *sim_.fe_system, requests_.front());
+  svmp::FE::Real accepted_measure = svmp::FE::Real{0.0};
+  const auto accepted_phase = fieldSlice(
+      gatherFeOrderedSolution(history().u()), phase_);
+  for (std::size_t i = 0u; i < graph.nodes; ++i) {
+    accepted_measure += graph.lumped_control_volume[i] * accepted_phase[i];
+  }
+  EXPECT_NEAR(projection.retained_liquid_measure,
+              accepted_measure,
+              1.0e-10);
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       LaterRejectionRestoresTheRawCandidateAndEveryGeometryRevision)
+{
+  auto raw_candidate = initialized_solution_;
+  raw_candidate[fieldOffset(phi_)] += svmp::FE::Real{0.01};
+  const auto phase_offset = fieldOffset(phase_);
+  for (std::size_t i = 0u; i < fieldCount(phase_); ++i) {
+    raw_candidate[phase_offset + i] = svmp::FE::Real{0.8};
+  }
+  scatterFeOrderedSolution(history().u(), raw_candidate);
+  refreshCurrentCandidate(
+      "application-driver-conservative-phase-rollback-raw");
+  const auto* raw_context = sim_.fe_system->cutIntegrationContext();
+  ASSERT_NE(raw_context, nullptr);
+  const auto lifecycle_revision = lifecycle_.valueRevision();
+  const auto constraint_revision =
+      sim_.fe_system->constraintLayoutRevision();
+  const auto sparsity_revision = sim_.fe_system->sparsityPatternRevision();
+  const auto cache_before = refresh_cache_;
+
+  auto result = applyConservativePhaseCandidates(
+      sim_,
+      history(),
+      requests_,
+      *params_,
+      lifecycle_,
+      refresh_cache_,
+      active_requests_);
+  EXPECT_TRUE(result.accept_step);
+  EXPECT_TRUE(result.changed);
+  ASSERT_NE(result.geometry_transaction, nullptr);
+  EXPECT_TRUE(sim_.fe_system->cutIntegrationContextTransactionActive());
+  EXPECT_TRUE(lifecycle_.transactionActive());
+  EXPECT_NE(sim_.fe_system->cutIntegrationContext(), raw_context);
+
+  ASSERT_NO_THROW(rollbackConservativePhaseCandidate(history(), result));
+  EXPECT_EQ(gatherFeOrderedSolution(history().u()), raw_candidate);
+  EXPECT_EQ(sim_.fe_system->cutIntegrationContext(), raw_context);
+  EXPECT_EQ(lifecycle_.valueRevision(), lifecycle_revision);
+  EXPECT_EQ(sim_.fe_system->constraintLayoutRevision(),
+            constraint_revision);
+  EXPECT_EQ(sim_.fe_system->sparsityPatternRevision(),
+            sparsity_revision);
+  EXPECT_FALSE(sim_.fe_system->cutIntegrationContextTransactionActive());
+  EXPECT_FALSE(lifecycle_.transactionActive());
+  ASSERT_EQ(refresh_cache_.last_signature.has_value(),
+            cache_before.last_signature.has_value());
+  if (refresh_cache_.last_signature.has_value()) {
+    EXPECT_TRUE(*refresh_cache_.last_signature ==
+                *cache_before.last_signature);
+  }
+  ASSERT_EQ(refresh_cache_.last_vector_signature.has_value(),
+            cache_before.last_vector_signature.has_value());
+  if (refresh_cache_.last_vector_signature.has_value()) {
+    EXPECT_TRUE(*refresh_cache_.last_vector_signature ==
+                *cache_before.last_vector_signature);
+  }
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       CourantRejectionLeavesTheRawCandidateAndGeometryUntouched)
+{
+  history().setDt(1.0);
+  auto raw_candidate = initialized_solution_;
+  const auto phase_offset = fieldOffset(phase_);
+  for (std::size_t i = 0u; i < fieldCount(phase_); ++i) {
+    raw_candidate[phase_offset + i] = svmp::FE::Real{0.7};
+  }
+  scatterFeOrderedSolution(history().u(), raw_candidate);
+  refreshCurrentCandidate(
+      "application-driver-conservative-phase-courant-raw");
+  const auto* raw_context = sim_.fe_system->cutIntegrationContext();
+  requests_.front().velocity.constant_value = {
+      svmp::FE::Real{10.0}, svmp::FE::Real{0.0}, svmp::FE::Real{0.0}};
+  requests_.front().conservative_phase
+      .impermeable_normal_velocity_tolerance = svmp::FE::Real{2.0};
+
+  const auto result = applyConservativePhaseCandidates(
+      sim_,
+      history(),
+      requests_,
+      *params_,
+      lifecycle_,
+      refresh_cache_,
+      active_requests_);
+  EXPECT_FALSE(result.accept_step);
+  EXPECT_FALSE(result.changed);
+  EXPECT_EQ(result.geometry_transaction, nullptr);
+  EXPECT_EQ(gatherFeOrderedSolution(history().u()), raw_candidate);
+  EXPECT_EQ(sim_.fe_system->cutIntegrationContext(), raw_context);
+  EXPECT_FALSE(sim_.fe_system->cutIntegrationContextTransactionActive());
+  EXPECT_FALSE(lifecycle_.transactionActive());
+}
+
 class ApplicationDriverBoundPreservingCandidatesTest
     : public ::testing::Test {
 protected:

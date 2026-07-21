@@ -1831,6 +1831,8 @@ TEST(TimeLoopCallbacks, BeforeStepAcceptRejectsConvergedCandidateAndRetries)
         std::make_shared<SimpleStepController>(controller_options);
 
     int candidate_calls = 0;
+    int discarded_candidate_calls = 0;
+    int commit_ready_calls = 0;
     int rejected_calls = 0;
     int accepted_calls = 0;
     std::vector<double> accepted_times;
@@ -1869,6 +1871,17 @@ TEST(TimeLoopCallbacks, BeforeStepAcceptRejectsConvergedCandidateAndRetries)
                     }
                     return true;
                 };
+            callbacks.on_step_candidate_discarded =
+                [&](svmp::FE::timestepping::TimeHistory& h) {
+                    ++discarded_candidate_calls;
+                    EXPECT_EQ(candidate_calls, 1);
+                    EXPECT_EQ(h.stepIndex(), 0);
+                };
+            callbacks.on_step_commit_ready =
+                [&](svmp::FE::timestepping::TimeHistory& h) {
+                    ++commit_ready_calls;
+                    EXPECT_EQ(h.stepIndex(), accepted_calls);
+                };
             callbacks.on_step_rejected =
                 [&](const svmp::FE::timestepping::TimeHistory& h,
                     StepRejectReason reason,
@@ -1896,6 +1909,8 @@ TEST(TimeLoopCallbacks, BeforeStepAcceptRejectsConvergedCandidateAndRetries)
 
     ASSERT_EQ(final_values.size(), 4u);
     EXPECT_EQ(candidate_calls, 3);
+    EXPECT_EQ(discarded_candidate_calls, 1);
+    EXPECT_EQ(commit_ready_calls, 2);
     EXPECT_EQ(rejected_calls, 1);
     EXPECT_EQ(accepted_calls, 2);
     ASSERT_EQ(accepted_times.size(), 2u);

@@ -126,6 +126,21 @@ struct TimeLoopCallbacks {
      * runs throw because there is no retry policy.
      */
     std::function<bool(TimeHistory&, const NewtonReport&)> on_before_step_accept{};
+    /**
+     * @brief Roll back state staged by @ref on_before_step_accept.
+     *
+     * The hook runs before accepted-state regeneration whenever a prepared
+     * candidate is discarded by an adaptive decision or endpoint failure.
+     * It must be safe to call after a partially completed preparation hook.
+     */
+    std::function<void(TimeHistory&)> on_step_candidate_discarded{};
+    /**
+     * @brief Commit state staged by @ref on_before_step_accept.
+     *
+     * This hook runs after every retry decision and endpoint finalization,
+     * immediately before the first irreversible system acceptance operation.
+     */
+    std::function<void(TimeHistory&)> on_step_commit_ready{};
     std::function<void(TimeHistory&)> on_step_accepted{};
 
     std::function<void(const TimeHistory&, StepRejectReason, const NewtonReport&)> on_step_rejected{};

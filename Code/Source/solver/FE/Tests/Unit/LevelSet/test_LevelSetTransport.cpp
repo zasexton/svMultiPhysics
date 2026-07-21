@@ -1081,6 +1081,141 @@ TEST(LevelSetTransport, AutoRegistersConfiguredFields)
     EXPECT_FALSE(kernels.residual.empty());
 }
 
+TEST(LevelSetTransport,
+     RegistersConservativePhaseStateWithAnAlgebraicEndpointHold)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.velocity.source =
+        level_set::LevelSetVelocitySource::ConstantVector;
+    options.conservative_phase.enabled = true;
+    options.conservative_phase.liquid_indicator.field_name = "phase";
+
+    const auto kernels = level_set::installLevelSetTransport(
+        system, phi_space, options);
+
+    const auto phi = system.findFieldByName("phi");
+    const auto phase = system.findFieldByName("phase");
+    ASSERT_NE(phi, FE::INVALID_FIELD_ID);
+    ASSERT_NE(phase, FE::INVALID_FIELD_ID);
+    EXPECT_NE(phi, phase);
+    EXPECT_TRUE(system.fieldParticipatesInUnknownVector(phase));
+    const auto& phase_record = system.fieldRecord(phase);
+    ASSERT_TRUE(phase_record.space);
+    EXPECT_EQ(phase_record.space->space_type(), FE::spaces::SpaceType::H1);
+    EXPECT_EQ(phase_record.space->polynomial_order(), 1);
+    EXPECT_TRUE(formulationRecordsContain(
+        system, FormExprType::PreviousSolutionRef));
+    EXPECT_FALSE(kernels.residual.empty());
+}
+
+TEST(LevelSetTransport,
+     ConservativePhaseEndpointHoldAssemblesOnlyTheCurrentMinusPreviousState)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.velocity.source =
+        level_set::LevelSetVelocitySource::ConstantVector;
+    options.conservative_phase.enabled = true;
+    options.conservative_phase.liquid_indicator.field_name = "phase";
+    (void)level_set::installLevelSetTransport(system, phi_space, options);
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto phase = system.findFieldByName("phase");
+    ASSERT_NE(phase, FE::INVALID_FIELD_ID);
+    const auto phase_offset = static_cast<std::size_t>(
+        system.fieldDofOffset(phase));
+    const auto phase_count = static_cast<std::size_t>(
+        system.fieldDofHandler(phase).getNumDofs());
+    ASSERT_EQ(phase_count, 4u);
+
+    const auto total_dofs = static_cast<std::size_t>(
+        system.dofHandler().getNumDofs());
+    std::vector<FE::Real> previous(total_dofs, FE::Real{0.25});
+    for (std::size_t i = 0u; i < phase_count; ++i) {
+        previous[phase_offset + i] =
+            FE::Real{0.1} + FE::Real{0.2} * static_cast<FE::Real>(i);
+    }
+    auto current = previous;
+    FE::systems::SystemStateView state;
+    state.dt = FE::Real{0.1};
+    state.u = std::span<const FE::Real>(current);
+    state.u_prev = std::span<const FE::Real>(previous);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    const auto held_residual = assembleLevelSetResidual(system, state);
+    for (std::size_t i = 0u; i < phase_count; ++i) {
+        EXPECT_NEAR(held_residual[phase_offset + i], FE::Real{0.0},
+                    FE::Real{1.0e-13});
+    }
+
+    current[phase_offset] += FE::Real{0.4};
+    state.u = std::span<const FE::Real>(current);
+    const auto perturbed_residual = assembleLevelSetResidual(system, state);
+    FE::Real phase_residual_norm = FE::Real{0.0};
+    for (std::size_t i = 0u; i < phase_count; ++i) {
+        const auto value = perturbed_residual[phase_offset + i];
+        phase_residual_norm += value * value;
+    }
+    EXPECT_GT(std::sqrt(phase_residual_norm), FE::Real{1.0e-8});
+}
+
+TEST(LevelSetTransport,
+     ConservativePhaseConfigurationFailsBeforeFieldMutation)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+
+    const auto expect_rejected_without_fields = [&](auto configure) {
+        FE::systems::FESystem system(mesh);
+        level_set::LevelSetTransportOptions options{};
+        options.level_set.field_name = "phi";
+        options.velocity.source =
+            level_set::LevelSetVelocitySource::ConstantVector;
+        options.conservative_phase.enabled = true;
+        configure(options);
+        EXPECT_THROW(
+            (void)level_set::installLevelSetTransport(
+                system, phi_space, options),
+            std::invalid_argument);
+        EXPECT_EQ(system.findFieldByName("phi"), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.findFieldByName("liquid_indicator"),
+                  FE::INVALID_FIELD_ID);
+        EXPECT_FALSE(system.hasOperator(options.operator_tag));
+    };
+
+    expect_rejected_without_fields([](auto& options) {
+        options.conservative_phase.liquid_indicator.field_name = "phi";
+    });
+    expect_rejected_without_fields([](auto& options) {
+        options.boundaries.outflow.push_back(
+            level_set::LevelSetOutflowBoundary{.boundary_marker = 4});
+    });
+    expect_rejected_without_fields([](auto& options) {
+        options.bound_preserving.enabled = true;
+    });
+    expect_rejected_without_fields([](auto& options) {
+        options.volume_correction.enabled = true;
+    });
+    expect_rejected_without_fields([](auto& options) {
+        options.conservative_phase.maximum_courant = 1.01;
+    });
+    expect_rejected_without_fields([](auto& options) {
+        options.conservative_phase.geometry_measure_tolerance = 0.0;
+    });
+}
+
 TEST(LevelSetTransport, InstallsOnConfiguredOperatorTag)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();

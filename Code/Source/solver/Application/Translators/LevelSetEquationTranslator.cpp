@@ -425,6 +425,11 @@ const char* level_set_transport_form_name(ls::LevelSetTransportForm form) noexce
              : "ConservativeDivergence";
 }
 
+const char* level_set_phase_side_name(ls::LevelSetPhaseSide side) noexcept
+{
+  return side == ls::LevelSetPhaseSide::Negative ? "Negative" : "Positive";
+}
+
 const char* reinitialization_method_name(
     ls::LevelSetReinitializationMethod method) noexcept
 {
@@ -455,7 +460,11 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
   out.imbue(std::locale::classic());
   out << "{\"artifact_schema_version\":1"
       << ",\"component\":\"level_set_transport\""
-      << ",\"capability_label\":\"one_phase_interface_transport_nonlocal_conservation\""
+      << ",\"capability_label\":"
+      << json_string(
+             options.conservative_phase.enabled
+                 ? "one_phase_locally_conservative_p1_indicator_transport"
+                 : "one_phase_interface_transport_nonlocal_conservation")
       << ",\"units\":{\"system\":\"consistent_solver_units\",\"length\":\"solver_length\",\"time\":\"solver_time\",\"volume\":\"solver_volume\"}"
       << ",\"operator\":" << json_string(options.operator_tag)
       << ",\"transport_form\":"
@@ -469,6 +478,43 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << json_string(level_set_field_source_name(options.level_set.source))
       << ",\"auto_register\":"
       << json_bool(options.level_set.auto_register_field) << '}'
+      << ",\"conservative_phase\":{\"enabled\":"
+      << json_bool(options.conservative_phase.enabled)
+      << ",\"field\":"
+      << json_string(
+             options.conservative_phase.liquid_indicator.field_name)
+      << ",\"source\":"
+      << json_string(level_set_field_source_name(
+             options.conservative_phase.liquid_indicator.source))
+      << ",\"auto_register\":"
+      << json_bool(
+             options.conservative_phase.liquid_indicator.auto_register_field)
+      << ",\"liquid_side\":"
+      << json_string(level_set_phase_side_name(
+             options.conservative_phase.liquid_side))
+      << ",\"invariant_tolerance\":"
+      << json_real(options.conservative_phase.invariant_tolerance)
+      << ",\"maximum_courant\":"
+      << json_real(options.conservative_phase.maximum_courant)
+      << ",\"enforce_courant_limit\":"
+      << json_bool(options.conservative_phase.enforce_courant_limit)
+      << ",\"require_constant_preservation\":"
+      << json_bool(
+             options.conservative_phase.require_constant_preservation)
+      << ",\"impermeable_normal_velocity_tolerance\":"
+      << json_real(options.conservative_phase
+                       .impermeable_normal_velocity_tolerance)
+      << ",\"reconcile_geometry\":"
+      << json_bool(options.conservative_phase.reconcile_geometry)
+      << ",\"geometry_measure_tolerance\":"
+      << json_real(options.conservative_phase.geometry_measure_tolerance)
+      << ",\"geometry_correction_max_iterations\":"
+      << options.conservative_phase.geometry_correction_max_iterations
+      << ",\"maximum_geometry_displacement_fraction\":"
+      << json_real(options.conservative_phase
+                       .maximum_geometry_displacement_fraction)
+      << ",\"boundary_flux_policy\":\"closed_boundary_only\""
+      << ",\"newton_policy\":\"held_at_previous_accepted_endpoint\"}"
       << ",\"advection_velocity\":{\"field\":"
       << json_string(options.velocity.field_name)
       << ",\"source\":"
@@ -525,7 +571,11 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << options.interface_kinematic.interface_marker
       << ",\"weight_scale\":"
       << json_real(options.interface_kinematic.weight_scale) << '}'
-      << ",\"maintenance_transaction\":{\"ordering\":\"transport_then_reinitialization_then_volume_correction_then_geometry_refresh\""
+      << ",\"maintenance_transaction\":{\"ordering\":"
+      << json_string(
+             options.conservative_phase.enabled
+                 ? "provisional_level_set_then_conservative_phase_then_geometry_reconciliation_then_wall_aware_maintenance"
+                 : "transport_then_reinitialization_then_volume_correction_then_geometry_refresh")
       << ",\"reinitialization\":{\"enabled\":"
       << json_bool(options.reinitialization.enabled)
       << ",\"method\":"
@@ -1103,6 +1153,19 @@ ls::LevelSetTransportForm parse_transport_form(std::string_view raw)
       "[svMultiPhysics::Application] Level-set Transport_form must be one of 'advective' or 'conservative_divergence'.");
 }
 
+ls::LevelSetPhaseSide parse_phase_side(std::string_view raw)
+{
+  const auto value = normalized_token(std::string(raw));
+  if (value == "negative" || value == "minus") {
+    return ls::LevelSetPhaseSide::Negative;
+  }
+  if (value == "positive" || value == "plus") {
+    return ls::LevelSetPhaseSide::Positive;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Conservative_phase_liquid_side must be 'negative' or 'positive'.");
+}
+
 ls::LevelSetReinitializationMethod parse_reinitialization_method(std::string_view raw)
 {
   const auto value = normalized_token(std::string(raw));
@@ -1155,6 +1218,95 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
           params,
           {"Auto_register_level_set_field", "AutoRegisterLevelSetField"})) {
     options.level_set.auto_register_field = *value;
+  }
+
+  if (const auto value = get_defined_bool(
+          params,
+          {"Enable_conservative_phase_transport",
+           "EnableConservativePhaseTransport",
+           "Conservative_phase_transport",
+           "ConservativePhaseTransport"})) {
+    options.conservative_phase.enabled = *value;
+  }
+  if (const auto value = get_defined_string(
+          params,
+          {"Conservative_phase_field_name",
+           "ConservativePhaseFieldName",
+           "Liquid_indicator_field_name",
+           "LiquidIndicatorFieldName"})) {
+    options.conservative_phase.liquid_indicator.field_name = *value;
+  }
+  if (const auto value = get_defined_bool(
+          params,
+          {"Auto_register_conservative_phase_field",
+           "AutoRegisterConservativePhaseField"})) {
+    options.conservative_phase.liquid_indicator.auto_register_field = *value;
+  }
+  if (const auto value = get_defined_string(
+          params,
+          {"Conservative_phase_liquid_side",
+           "ConservativePhaseLiquidSide"})) {
+    options.conservative_phase.liquid_side = parse_phase_side(*value);
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Conservative_phase_invariant_tolerance",
+           "ConservativePhaseInvariantTolerance"},
+          "Conservative_phase_invariant_tolerance")) {
+    options.conservative_phase.invariant_tolerance = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Conservative_phase_maximum_courant",
+           "ConservativePhaseMaximumCourant"},
+          "Conservative_phase_maximum_courant")) {
+    options.conservative_phase.maximum_courant = *value;
+  }
+  if (const auto value = get_defined_bool(
+          params,
+          {"Conservative_phase_enforce_courant_limit",
+           "ConservativePhaseEnforceCourantLimit"})) {
+    options.conservative_phase.enforce_courant_limit = *value;
+  }
+  if (const auto value = get_defined_bool(
+          params,
+          {"Conservative_phase_require_constant_preservation",
+           "ConservativePhaseRequireConstantPreservation"})) {
+    options.conservative_phase.require_constant_preservation = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Conservative_phase_impermeable_normal_velocity_tolerance",
+           "ConservativePhaseImpermeableNormalVelocityTolerance"},
+          "Conservative_phase_impermeable_normal_velocity_tolerance")) {
+    options.conservative_phase.impermeable_normal_velocity_tolerance = *value;
+  }
+  if (const auto value = get_defined_bool(
+          params,
+          {"Conservative_phase_reconcile_geometry",
+           "ConservativePhaseReconcileGeometry"})) {
+    options.conservative_phase.reconcile_geometry = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Conservative_phase_geometry_measure_tolerance",
+           "ConservativePhaseGeometryMeasureTolerance"},
+          "Conservative_phase_geometry_measure_tolerance")) {
+    options.conservative_phase.geometry_measure_tolerance = *value;
+  }
+  if (const auto value = get_defined_positive_int(
+          params,
+          {"Conservative_phase_geometry_correction_max_iterations",
+           "ConservativePhaseGeometryCorrectionMaxIterations"},
+          "Conservative_phase_geometry_correction_max_iterations")) {
+    options.conservative_phase.geometry_correction_max_iterations = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Conservative_phase_maximum_geometry_displacement_fraction",
+           "ConservativePhaseMaximumGeometryDisplacementFraction"},
+          "Conservative_phase_maximum_geometry_displacement_fraction")) {
+    options.conservative_phase.maximum_geometry_displacement_fraction = *value;
   }
 
   if (const auto value = get_defined_string(
@@ -1471,14 +1623,17 @@ void preflight_projected_curvature_fields(
     const std::vector<std::string>& fields,
     const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space,
     std::string_view level_set_field,
-    std::string_view velocity_field)
+    std::string_view velocity_field,
+    std::string_view conservative_phase_field)
 {
   for (const auto& field : fields) {
     if (field == level_set_field ||
-        (!velocity_field.empty() && field == velocity_field)) {
+        (!velocity_field.empty() && field == velocity_field) ||
+        (!conservative_phase_field.empty() &&
+         field == conservative_phase_field)) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Projected curvature field '" +
-          field + "' must be distinct from level-set and velocity fields.");
+          field + "' must be distinct from level-set, velocity, and conservative phase fields.");
     }
     const auto existing = system.findFieldByName(field);
     if (existing == svmp::FE::INVALID_FIELD_ID) {
@@ -1690,7 +1845,11 @@ create_level_set_transport_from_input(const svmp::Physics::EquationModuleInput& 
       options.level_set.field_name,
       options.velocity.source == ls::LevelSetVelocitySource::ConstantVector
           ? std::string_view{}
-          : std::string_view{options.velocity.field_name});
+          : std::string_view{options.velocity.field_name},
+      options.conservative_phase.enabled
+          ? std::string_view{
+                options.conservative_phase.liquid_indicator.field_name}
+          : std::string_view{});
   const auto projected_curvature_space = level_set_space;
 
   auto module = std::make_unique<LevelSetTransportInputAdapter>(

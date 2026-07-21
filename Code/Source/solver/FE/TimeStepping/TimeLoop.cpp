@@ -38,6 +38,49 @@ namespace timestepping {
 
 namespace {
 
+class StepCandidateRollbackGuard {
+public:
+    explicit StepCandidateRollbackGuard(std::function<void()> rollback)
+        : rollback_(std::move(rollback))
+    {
+    }
+
+    StepCandidateRollbackGuard(const StepCandidateRollbackGuard&) = delete;
+    StepCandidateRollbackGuard& operator=(
+        const StepCandidateRollbackGuard&) = delete;
+
+    ~StepCandidateRollbackGuard()
+    {
+        if (!armed_) {
+            return;
+        }
+        try {
+            discard();
+        } catch (...) {
+        }
+    }
+
+    void arm() noexcept { armed_ = true; }
+    [[nodiscard]] bool armed() const noexcept { return armed_; }
+
+    void discard()
+    {
+        if (!armed_) {
+            return;
+        }
+        armed_ = false;
+        if (rollback_) {
+            rollback_();
+        }
+    }
+
+    void release() noexcept { armed_ = false; }
+
+private:
+    std::function<void()> rollback_{};
+    bool armed_{false};
+};
+
 void updateGhostsAndDistributeHistory(const constraints::AffineConstraints& constraints,
                                       TimeHistory& history)
 {
@@ -3060,7 +3103,13 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
             using StateSyncPoint =
                 NewtonOptions::StateSynchronizationPoint;
+            StepCandidateRollbackGuard candidate_rollback_guard([&] {
+                if (callbacks.on_step_candidate_discarded) {
+                    callbacks.on_step_candidate_discarded(history);
+                }
+            });
             auto restoreAcceptedGeneratedState = [&]() {
+                candidate_rollback_guard.discard();
                 if (!options_.newton.synchronize_state) {
                     return;
                 }
@@ -3099,6 +3148,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             if (accept_step) {
                 bool before_step_accept = true;
                 if (callbacks.on_before_step_accept) {
+                    candidate_rollback_guard.arm();
                     try {
                         before_step_accept =
                             callbacks.on_before_step_accept(history, nr);
@@ -3464,6 +3514,18 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 // fatal exception must retain the candidate rate state,
                 // rather than rolling rates back independently of an
                 // accepted or partially accepted system state.
+                if (candidate_rollback_guard.armed()) {
+                    try {
+                        if (callbacks.on_step_commit_ready) {
+                            callbacks.on_step_commit_ready(history);
+                        }
+                        candidate_rollback_guard.release();
+                    } catch (...) {
+                        const auto commit_failure = std::current_exception();
+                        restoreAcceptedGeneratedState();
+                        std::rethrow_exception(commit_failure);
+                    }
+                }
                 attempt_rate_state.commit();
                 transient.system().acceptGeometricNonlinearityState(
                     accepted_time_step_state,

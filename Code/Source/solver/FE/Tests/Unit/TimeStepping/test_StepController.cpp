@@ -850,9 +850,31 @@ TEST(TimeLoopCallbacks, CallsStepRejectedWithErrorTooLargeReasonWhenControllerRe
     opts.step_controller = std::make_shared<RejectOnAcceptController>();
 
     int rejected_calls = 0;
+    int prepared_calls = 0;
+    int discarded_candidate_calls = 0;
+    int commit_ready_calls = 0;
+    bool candidate_staged = false;
     std::optional<svmp::FE::timestepping::StepRejectReason> last_reason;
 
     svmp::FE::timestepping::TimeLoopCallbacks callbacks;
+    callbacks.on_before_step_accept =
+        [&](svmp::FE::timestepping::TimeHistory&,
+            const svmp::FE::timestepping::NewtonReport&) {
+            ++prepared_calls;
+            candidate_staged = true;
+            return true;
+        };
+    callbacks.on_step_candidate_discarded =
+        [&](svmp::FE::timestepping::TimeHistory&) {
+            ++discarded_candidate_calls;
+            EXPECT_TRUE(candidate_staged);
+            candidate_staged = false;
+        };
+    callbacks.on_step_commit_ready =
+        [&](svmp::FE::timestepping::TimeHistory&) {
+            ++commit_ready_calls;
+            candidate_staged = false;
+        };
     callbacks.on_step_rejected = [&rejected_calls, &last_reason](const svmp::FE::timestepping::TimeHistory&,
                                                                  svmp::FE::timestepping::StepRejectReason reason,
                                                                  const svmp::FE::timestepping::NewtonReport&) {
@@ -863,6 +885,10 @@ TEST(TimeLoopCallbacks, CallsStepRejectedWithErrorTooLargeReasonWhenControllerRe
     svmp::FE::timestepping::TimeLoop loop(opts);
     const auto rep = loop.run(transient, *factory, *linear, history, callbacks);
     EXPECT_FALSE(rep.success);
+    EXPECT_EQ(prepared_calls, 1);
+    EXPECT_EQ(discarded_candidate_calls, 1);
+    EXPECT_EQ(commit_ready_calls, 0);
+    EXPECT_FALSE(candidate_staged);
     EXPECT_EQ(rejected_calls, 1);
     ASSERT_TRUE(last_reason.has_value());
     EXPECT_EQ(*last_reason, svmp::FE::timestepping::StepRejectReason::ErrorTooLarge);

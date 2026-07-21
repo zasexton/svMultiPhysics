@@ -630,6 +630,79 @@ void validateBoundaryOptions(const LevelSetBoundaryOptions& boundaries)
     }
 }
 
+[[nodiscard]] bool isFixedP1ScalarH1(
+    const PendingTransportField& field) noexcept
+{
+    return field.components == 1 && field.space &&
+           field.space->space_type() == spaces::SpaceType::H1 &&
+           field.space->field_type() == FieldType::Scalar &&
+           field.space->continuity() == Continuity::C0 &&
+           field.space->value_dimension() == 1 &&
+           !field.space->is_variable_order() &&
+           field.space->polynomial_order() == 1;
+}
+
+void validateConservativePhaseOptions(
+    const LevelSetTransportOptions& options)
+{
+    const auto& phase = options.conservative_phase;
+    if (!phase.enabled) {
+        return;
+    }
+    if (phase.liquid_indicator.field_name.empty()) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase field name must be non-empty");
+    }
+    if (phase.liquid_indicator.source != LevelSetFieldSource::Unknown) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase field must be an unknown state");
+    }
+    if (!std::isfinite(phase.invariant_tolerance) ||
+        phase.invariant_tolerance < Real{0.0}) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase invariant tolerance must be finite and nonnegative");
+    }
+    if (!std::isfinite(phase.maximum_courant) ||
+        !(phase.maximum_courant > Real{0.0}) ||
+        phase.maximum_courant > Real{1.0}) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase maximum Courant number must be in (0, 1]");
+    }
+    if (!std::isfinite(phase.impermeable_normal_velocity_tolerance) ||
+        phase.impermeable_normal_velocity_tolerance < Real{0.0}) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase wall-normal velocity tolerance must be finite and nonnegative");
+    }
+    if (!std::isfinite(phase.geometry_measure_tolerance) ||
+        !(phase.geometry_measure_tolerance > Real{0.0})) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase geometry measure tolerance must be positive and finite");
+    }
+    if (phase.geometry_correction_max_iterations <= 0) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase geometry correction requires positive max iterations");
+    }
+    if (!std::isfinite(phase.maximum_geometry_displacement_fraction) ||
+        !(phase.maximum_geometry_displacement_fraction > Real{0.0}) ||
+        phase.maximum_geometry_displacement_fraction > Real{1.0}) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase geometry displacement fraction must be in (0, 1]");
+    }
+    if (!options.boundaries.inflow.empty() ||
+        !options.boundaries.outflow.empty()) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase transport currently requires a closed boundary; conservative phase boundary flux data are not configured");
+    }
+    if (options.bound_preserving.enabled) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase transport is incompatible with the legacy nonconservative level-set limiter");
+    }
+    if (options.volume_correction.enabled) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase transport owns geometry reconciliation and is incompatible with legacy target-volume correction");
+    }
+}
+
 void validateBoundPreservingOptions(
     const LevelSetBoundPreservingOptions& options)
 {
@@ -1350,6 +1423,10 @@ LevelSetConservationDiagnostic levelSetConservationDiagnostic(
 LevelSetConservationDiagnostic levelSetConservationDiagnostic(
     const LevelSetTransportOptions& options) noexcept
 {
+    if (options.conservative_phase.enabled) {
+        return LevelSetConservationDiagnostic::
+            ConservativePhaseIndicatorLocallyConservative;
+    }
     return levelSetConservationDiagnostic(
         options.transport_form,
         options.reinitialization,
@@ -1368,6 +1445,8 @@ const char* levelSetConservationDiagnosticName(
         return "reinitialized_level_set_advection_not_conservative";
     case LevelSetConservationDiagnostic::VolumeCorrectedAdvectionNotLocallyConservative:
         return "volume_corrected_level_set_advection_not_locally_conservative";
+    case LevelSetConservationDiagnostic::ConservativePhaseIndicatorLocallyConservative:
+        return "conservative_p1_phase_indicator_locally_conservative";
     }
     return "unknown_level_set_conservation";
 }
@@ -1454,6 +1533,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
     validateInterfaceKinematicOptions(options.interface_kinematic);
     validateBoundaryOptions(options.boundaries);
     validateBoundPreservingOptions(options.bound_preserving);
+    validateConservativePhaseOptions(options);
     if (options.operator_tag.empty()) {
         throw std::invalid_argument(
             "installLevelSetTransport: operator_tag must be non-empty");
@@ -1463,6 +1543,19 @@ systems::CoupledResidualKernels installLevelSetTransport(
         options.level_set.field_name == options.velocity.field_name) {
         throw std::invalid_argument(
             "installLevelSetTransport: level-set and velocity fields must be distinct");
+    }
+    if (options.conservative_phase.enabled &&
+        options.conservative_phase.liquid_indicator.field_name ==
+            options.level_set.field_name) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: level-set and conservative phase fields must be distinct");
+    }
+    if (options.conservative_phase.enabled &&
+        options.velocity.source != LevelSetVelocitySource::ConstantVector &&
+        options.conservative_phase.liquid_indicator.field_name ==
+            options.velocity.field_name) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase and velocity fields must be distinct");
     }
 
     // Complete the definition preflight before adding either field.  In
@@ -1476,6 +1569,20 @@ systems::CoupledResidualKernels installLevelSetTransport(
     if (dimension < 1 || dimension > 3) {
         throw std::invalid_argument(
             "installLevelSetTransport: level-set space dimension must be in [1, 3]");
+    }
+
+    std::optional<PendingTransportField> pending_phase;
+    if (options.conservative_phase.enabled) {
+        pending_phase = preflightLevelSetField(
+            system,
+            options.conservative_phase.liquid_indicator,
+            pending_phi.space);
+        if (!isFixedP1ScalarH1(pending_phi) ||
+            !isFixedP1ScalarH1(*pending_phase) ||
+            pending_phase->space->topological_dimension() != dimension) {
+            throw std::invalid_argument(
+                "installLevelSetTransport: conservative phase transport requires fixed scalar P1 H1 level-set and phase fields on the same mesh dimension");
+        }
     }
 
     std::optional<PendingTransportField> pending_velocity;
@@ -1494,6 +1601,12 @@ systems::CoupledResidualKernels installLevelSetTransport(
             options.velocity.field_name) {
             throw std::invalid_argument(
                 "installLevelSetTransport: algebraic extension and physical velocity fields must be distinct");
+        }
+        if (options.conservative_phase.enabled &&
+            options.velocity.algebraic_extension_source_field_name ==
+                options.conservative_phase.liquid_indicator.field_name) {
+            throw std::invalid_argument(
+                "installLevelSetTransport: conservative phase and physical velocity fields must be distinct");
         }
         algebraic_extension_source_id = system.findFieldByName(
             options.velocity.algebraic_extension_source_field_name);
@@ -1535,6 +1648,14 @@ systems::CoupledResidualKernels installLevelSetTransport(
 
     const auto phi_id = ensureLevelSetField(
         system, options.level_set, std::move(level_set_space));
+
+    FieldId phase_id = INVALID_FIELD_ID;
+    if (options.conservative_phase.enabled) {
+        phase_id = ensureLevelSetField(
+            system,
+            options.conservative_phase.liquid_indicator,
+            pending_phase->space);
+    }
 
     FieldId velocity_id = INVALID_FIELD_ID;
     if (options.velocity.source != LevelSetVelocitySource::ConstantVector) {
@@ -1637,6 +1758,21 @@ systems::CoupledResidualKernels installLevelSetTransport(
                        .dI(options.interface_kinematic.interface_marker);
     }
 
+    if (phase_id != INVALID_FIELD_ID) {
+        const auto& phase_record = system.fieldRecord(phase_id);
+        const auto phase = StateField(
+            phase_id,
+            *phase_record.space,
+            options.conservative_phase.liquid_indicator.field_name);
+        const auto phase_test = TestField(
+            phase_id, *phase_record.space, "phase_test");
+        // The conservative stage is an explicit accepted-candidate operation.
+        // This algebraic equation keeps q at its previous accepted endpoint
+        // during Newton without classifying q as a time-derivative field.
+        residual = residual +
+                   ((phase - FormExpr::previousSolution(1)) * phase_test).dx();
+    }
+
     for (const auto& bc : options.boundaries.inflow) {
         const int marker = forms::bc::detail::boundaryMarkerOrThrow(
             bc,
@@ -1660,10 +1796,14 @@ systems::CoupledResidualKernels installLevelSetTransport(
     if (options.velocity.source == LevelSetVelocitySource::CoupledField) {
         install.extra_trial_fields.push_back(velocity_id);
     }
+    std::vector<FieldId> residual_fields{phi_id};
+    if (phase_id != INVALID_FIELD_ID) {
+        residual_fields.push_back(phase_id);
+    }
     auto kernels = systems::installFormulation(
         system,
         options.operator_tag,
-        {phi_id},
+        residual_fields,
         residual,
         install);
     if (algebraic_extension_source_id != INVALID_FIELD_ID) {

@@ -375,8 +375,14 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
   const auto artifact = module->effectiveConfigurationArtifact();
   ASSERT_TRUE(artifact.has_value());
   EXPECT_EQ(artifact->component, "level_set_transport");
-  constexpr std::string_view expected =
+  constexpr std::string_view expected_without_phase =
       R"json({"artifact_schema_version":1,"component":"level_set_transport","capability_label":"one_phase_interface_transport_nonlocal_conservation","units":{"system":"consistent_solver_units","length":"solver_length","time":"solver_time","volume":"solver_volume"},"operator":"transport","transport_form":"ConservativeDivergence","conservation_diagnostic":"volume_corrected_level_set_advection_not_locally_conservative","level_set":{"field":"phi","source":"Unknown","auto_register":true},"advection_velocity":{"field":"advecting_velocity","source":"PrescribedData","auto_register":true,"constant_value":[0,0,0],"algebraic_extension_source_field":"","dependency_direction":"physical_velocity_to_extension_to_level_set","physical_momentum_coupling_allowed":false,"map_guard_policy":"fixed_bounded_application_policy"},"supg":{"enabled":true,"tau_scale":0.25,"velocity_epsilon":9.9999999999999998e-13,"transient_scale":1.5,"discontinuity_capturing_enabled":true,"discontinuity_capturing_scale":0.20000000000000001,"gradient_epsilon":1.0000000000000001e-09,"residual_epsilon":9.9999999999999998e-13,"maximum_courant":0.29999999999999999},"bound_preserving":{"enabled":false,"method":"nodal_rejection_projection_nonconservative","bound_tolerance":9.9999999999999998e-13,"sign_tolerance":9.9999999999999998e-13,"maximum_courant":1,"courant_tolerance":9.9999999999999998e-13,"enforce_courant_limit":true,"enforce_impermeable_boundaries":true,"impermeable_normal_velocity_tolerance":1e-10},"interface_kinematic":{"enabled":true,"interface_marker":77,"weight_scale":1.5},"maintenance_transaction":{"ordering":"transport_then_reinitialization_then_volume_correction_then_geometry_refresh","reinitialization":{"enabled":true,"method":"Projection","cadence_steps":4,"max_iterations":8,"pseudo_time_step_scale":0.125,"interface_band_width":2.75,"signed_distance_tolerance":0.0001,"preserve_band_width":0,"maximum_zero_set_displacement":2e-08},"volume_correction":{"enabled":true,"cadence_steps":5,"use_initial_negative_volume_as_target":false,"target_negative_volume":0.375,"volume_tolerance":9.9999999999999995e-08,"max_iterations":24,"minimum_relative_volume_error":2.0000000000000002e-05,"maximum_interface_displacement_fraction":0.025000000000000001,"maximum_cumulative_interface_displacement_fraction":0.25}},"boundaries":{"inflow":[{"marker":4,"value":0.5,"penalty_scale":2}],"outflow":[{"marker":5}]}})json";
+  std::string expected{expected_without_phase};
+  const auto phase_insertion = expected.find(",\"advection_velocity\"");
+  ASSERT_NE(phase_insertion, std::string::npos);
+  expected.insert(
+      phase_insertion,
+      R"json(,"conservative_phase":{"enabled":false,"field":"liquid_indicator","source":"Unknown","auto_register":true,"liquid_side":"Negative","invariant_tolerance":9.9999999999999998e-13,"maximum_courant":1,"enforce_courant_limit":true,"require_constant_preservation":true,"impermeable_normal_velocity_tolerance":1e-10,"reconcile_geometry":true,"geometry_measure_tolerance":1e-10,"geometry_correction_max_iterations":50,"maximum_geometry_displacement_fraction":0.10000000000000001,"boundary_flux_policy":"closed_boundary_only","newton_policy":"held_at_previous_accepted_endpoint"})json");
   EXPECT_EQ(artifact->json, expected);
 #endif
 }
@@ -427,6 +433,90 @@ TEST(LevelSetEquationTranslator, TranslatesTemporalSpatialInflowBoundary)
   EXPECT_TRUE(system.hasOperator("level_set"));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Coefficient));
+#endif
+}
+
+TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryQuadMesh();
+
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "quad";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "constant"};
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
+  input.equation_params["Enable_conservative_phase_transport"] =
+      svmp::Physics::ParameterValue{true, "true"};
+  input.equation_params["Conservative_phase_field_name"] =
+      svmp::Physics::ParameterValue{true, "phase_fraction"};
+  input.equation_params["Conservative_phase_liquid_side"] =
+      svmp::Physics::ParameterValue{true, "positive"};
+  input.equation_params["Conservative_phase_invariant_tolerance"] =
+      svmp::Physics::ParameterValue{true, "3.0e-11"};
+  input.equation_params["Conservative_phase_maximum_courant"] =
+      svmp::Physics::ParameterValue{true, "0.45"};
+  input.equation_params["Conservative_phase_enforce_courant_limit"] =
+      svmp::Physics::ParameterValue{true, "false"};
+  input.equation_params[
+      "Conservative_phase_require_constant_preservation"] =
+      svmp::Physics::ParameterValue{true, "false"};
+  input.equation_params[
+      "Conservative_phase_impermeable_normal_velocity_tolerance"] =
+      svmp::Physics::ParameterValue{true, "7.0e-9"};
+  input.equation_params["Conservative_phase_reconcile_geometry"] =
+      svmp::Physics::ParameterValue{true, "false"};
+  input.equation_params[
+      "Conservative_phase_geometry_measure_tolerance"] =
+      svmp::Physics::ParameterValue{true, "2.0e-9"};
+  input.equation_params[
+      "Conservative_phase_geometry_correction_max_iterations"] =
+      svmp::Physics::ParameterValue{true, "19"};
+  input.equation_params[
+      "Conservative_phase_maximum_geometry_displacement_fraction"] =
+      svmp::Physics::ParameterValue{true, "0.075"};
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto module = application::translators::level_set::createModule(input, system);
+
+  ASSERT_TRUE(module);
+  const auto phase = system.findFieldByName("phase_fraction");
+  ASSERT_NE(phase, svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(system.fieldRecord(phase).source_kind,
+            svmp::FE::systems::FieldSourceKind::Unknown);
+  EXPECT_TRUE(system.fieldParticipatesInUnknownVector(phase));
+  EXPECT_TRUE(formulationRecordsContain(
+      system, FormExprType::PreviousSolutionRef));
+
+  const auto artifact = module->effectiveConfigurationArtifact();
+  ASSERT_TRUE(artifact.has_value());
+  EXPECT_NE(artifact->json.find(
+                "\"capability_label\":\"one_phase_locally_conservative_p1_indicator_transport\""),
+            std::string::npos);
+  EXPECT_NE(artifact->json.find(
+                "\"conservative_phase\":{\"enabled\":true,\"field\":\"phase_fraction\""),
+            std::string::npos);
+  EXPECT_NE(artifact->json.find("\"liquid_side\":\"Positive\""),
+            std::string::npos);
+  EXPECT_NE(artifact->json.find("\"maximum_courant\":0.45000000000000001"),
+            std::string::npos);
+  EXPECT_NE(artifact->json.find("\"enforce_courant_limit\":false"),
+            std::string::npos);
+  EXPECT_NE(artifact->json.find("\"reconcile_geometry\":false"),
+            std::string::npos);
+  EXPECT_NE(artifact->json.find(
+                "\"geometry_correction_max_iterations\":19"),
+            std::string::npos);
+  EXPECT_NE(artifact->json.find(
+                "\"ordering\":\"provisional_level_set_then_conservative_phase_then_geometry_reconciliation_then_wall_aware_maintenance\""),
+            std::string::npos);
 #endif
 }
 

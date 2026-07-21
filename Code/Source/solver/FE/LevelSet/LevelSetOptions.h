@@ -35,6 +35,11 @@ enum class LevelSetTransportForm {
     ConservativeDivergence
 };
 
+enum class LevelSetPhaseSide {
+    Negative,
+    Positive
+};
+
 struct LevelSetFieldOptions {
     std::string field_name{"level_set"};
     LevelSetFieldSource source{LevelSetFieldSource::Unknown};
@@ -174,6 +179,33 @@ struct LevelSetBoundaryOptions {
     std::vector<LevelSetOutflowBoundary> outflow{};
 };
 
+/**
+ * @brief Explicit conservative P1 phase state coupled to level-set geometry.
+ *
+ * The level set remains a provisional geometry representation. The additional
+ * scalar indicator is held at its previous accepted value during the
+ * monolithic solve, advanced by a conservative graph stage before acceptance,
+ * and then used as the phase-measure authority for geometry reconciliation.
+ */
+struct LevelSetConservativePhaseOptions {
+    bool enabled{false};
+    LevelSetFieldOptions liquid_indicator{
+        .field_name = "liquid_indicator",
+        .source = LevelSetFieldSource::Unknown,
+        .auto_register_field = true,
+    };
+    LevelSetPhaseSide liquid_side{LevelSetPhaseSide::Negative};
+    Real invariant_tolerance{1.0e-12};
+    Real maximum_courant{1.0};
+    bool enforce_courant_limit{true};
+    bool require_constant_preservation{true};
+    Real impermeable_normal_velocity_tolerance{1.0e-10};
+    bool reconcile_geometry{true};
+    Real geometry_measure_tolerance{1.0e-10};
+    int geometry_correction_max_iterations{50};
+    Real maximum_geometry_displacement_fraction{0.1};
+};
+
 struct LevelSetTransportOptions {
     std::string operator_tag{"level_set"};
     LevelSetTransportForm transport_form{LevelSetTransportForm::Advective};
@@ -185,13 +217,15 @@ struct LevelSetTransportOptions {
     LevelSetReinitializationOptions reinitialization{};
     LevelSetVolumeCorrectionOptions volume_correction{};
     LevelSetBoundaryOptions boundaries{};
+    LevelSetConservativePhaseOptions conservative_phase{};
 };
 
 enum class LevelSetConservationDiagnostic {
     PlainAdvectionNotConservative,
     ConservativeDivergenceAdvectionNotLocallyConservative,
     ReinitializedAdvectionNotConservative,
-    VolumeCorrectedAdvectionNotLocallyConservative
+    VolumeCorrectedAdvectionNotLocallyConservative,
+    ConservativePhaseIndicatorLocallyConservative
 };
 
 [[nodiscard]] LevelSetConservationDiagnostic levelSetConservationDiagnostic(
