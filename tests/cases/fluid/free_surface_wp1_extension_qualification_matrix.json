@@ -10,6 +10,7 @@
       "id": "application_serial",
       "binary": "application",
       "mpi_ranks": 1,
+      "gtest_output_copies": 1,
       "tests": [
         "ApplicationDriverLevelSetWorkflows.FrozenExtensionWithoutCutRefreshReportsFixedJacobianCheckGeometry",
         "ApplicationDriverLevelSetWorkflows.VelocityExtensionProjectsHierarchicalTargetCoefficients",
@@ -49,6 +50,7 @@
       "id": "application_mpi",
       "binary": "application_mpi",
       "mpi_ranks": 2,
+      "gtest_output_copies": 2,
       "tests": [
         "ApplicationDriverLevelSetWorkflowsMPI.ActiveSystemCommunicatorUsesFESystemCommunicator",
         "ApplicationDriverLevelSetWorkflowsMPI.TraceSupportMaskPromotesRemotelyDiscoveredOwnerSourceRows",
@@ -67,6 +69,7 @@
       "id": "physics_serial",
       "binary": "physics",
       "mpi_ranks": 1,
+      "gtest_output_copies": 1,
       "tests": [
         "NavierStokesLegacyBCs.UnfittedFreeSurfaceLegacyVelocityExtensionFailsClosed",
         "NavierStokesLegacyBCs.DisabledVelocityExtensionRejectsUnusedDiffusivity",
@@ -88,6 +91,7 @@
       "id": "physics_mpi",
       "binary": "physics",
       "mpi_ranks": 2,
+      "gtest_output_copies": 1,
       "tests": [
         "FreeSurfaceCutStabilityMPI.PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData",
         "FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport",
@@ -103,6 +107,7 @@
       "id": "level_set_serial",
       "binary": "level_set",
       "mpi_ranks": 1,
+      "gtest_output_copies": 1,
       "tests": [
         "LevelSetConservativePhaseBenchmarks.TranslatingDiskConservesAndRefines",
         "LevelSetConservativePhaseBenchmarks.ThreeDimensionalReversibleDeformationSmoke",

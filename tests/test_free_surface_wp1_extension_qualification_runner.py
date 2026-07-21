@@ -50,6 +50,16 @@ def test_frozen_wp1_registry_has_exact_groups_and_counts():
         "physics_mpi",
         "level_set_serial",
     ]
+    assert {
+        group["id"]: group["gtest_output_copies"]
+        for group in registry["groups"]
+    } == {
+        "application_serial": 1,
+        "application_mpi": 2,
+        "physics_serial": 1,
+        "physics_mpi": 1,
+        "level_set_serial": 1,
+    }
     tests = [name for group in registry["groups"] for name in group["tests"]]
     assert len(tests) == 53
     assert len(set(tests)) == 53
@@ -101,7 +111,7 @@ def test_serial_result_gate_requires_exact_complete_test_set():
     )["passed"]
 
 
-def test_mpi_result_gate_requires_every_test_on_every_rank():
+def test_mpi_result_gate_requires_every_declared_gtest_output_copy():
     runner = _load_runner()
     expected = ["Suite.One", "Suite.Two"]
     one_rank = "\n".join(
@@ -128,6 +138,11 @@ def test_mpi_result_gate_requires_every_test_on_every_rank():
         for check in rejected
         if check["metric"] == "pass_multiplicity:Suite.Two"
     )["passed"]
+
+    coordinated_driver = runner.evaluate_mpi_result(
+        expected, 1, one_rank, "", 0, None
+    )
+    assert all(check["passed"] for check in coordinated_driver)
 
 
 def test_registry_rejects_duplicate_test(tmp_path):

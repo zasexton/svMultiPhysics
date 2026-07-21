@@ -103,6 +103,19 @@ def load_registry(path: Path) -> dict[str, Any]:
         ranks = group.get("mpi_ranks")
         if not isinstance(ranks, int) or ranks <= 0:
             raise ValueError(f"group {group_id} needs positive mpi_ranks")
+        output_copies = group.get("gtest_output_copies")
+        if (
+            not isinstance(output_copies, int)
+            or output_copies <= 0
+            or output_copies > ranks
+        ):
+            raise ValueError(
+                f"group {group_id} needs gtest_output_copies in [1, mpi_ranks]"
+            )
+        if ranks == 1 and output_copies != 1:
+            raise ValueError(
+                f"serial group {group_id} must have one GoogleTest output copy"
+            )
         tests = group.get("tests")
         if not isinstance(tests, list) or not tests:
             raise ValueError(f"group {group_id} has no tests")
@@ -202,7 +215,7 @@ def evaluate_serial_result(
 
 def evaluate_mpi_result(
     expected_tests: list[str],
-    ranks: int,
+    expected_output_copies: int,
     stdout: str,
     stderr: str,
     return_code: int,
@@ -231,10 +244,18 @@ def evaluate_mpi_result(
     ]
     for name in expected_tests:
         checks.append(
-            equal_check(f"run_multiplicity:{name}", observed_runs.count(name), ranks)
+            equal_check(
+                f"run_multiplicity:{name}",
+                observed_runs.count(name),
+                expected_output_copies,
+            )
         )
         checks.append(
-            equal_check(f"pass_multiplicity:{name}", observed_ok.count(name), ranks)
+            equal_check(
+                f"pass_multiplicity:{name}",
+                observed_ok.count(name),
+                expected_output_copies,
+            )
         )
     return checks
 
@@ -463,7 +484,7 @@ def run_gtest_group(
     else:
         checks = evaluate_mpi_result(
             group["tests"],
-            ranks,
+            group["gtest_output_copies"],
             stdout,
             stderr,
             resources["return_code"],
@@ -474,6 +495,7 @@ def run_gtest_group(
         "group_id": group["id"],
         "command": command,
         "mpi_ranks": ranks,
+        "gtest_output_copies": group["gtest_output_copies"],
         "expected_tests": group["tests"],
         "execution": execution,
         "resources": resources,
