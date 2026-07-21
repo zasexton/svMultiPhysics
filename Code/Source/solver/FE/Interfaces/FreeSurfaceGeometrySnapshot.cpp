@@ -520,6 +520,56 @@ void requireActiveBoundaryRevision(
     }
 }
 
+void validateCompleteContactTrace(
+    const GeneratedInterfaceBoundaryIntersectionDomain& contact,
+    const LevelSetInterfaceDomain& interface_domain,
+    const assembly::IMeshAccess& mesh,
+    FreeSurfaceGeometryValidationLedger& ledger)
+{
+    using TraceIdentity =
+        std::tuple<std::uint64_t, GlobalIndex, std::uint8_t>;
+    const auto identity = [](const auto& fragment) {
+        const auto face =
+            fragment.parent_face_global_id != INVALID_GLOBAL_INDEX
+                ? fragment.parent_face_global_id
+                : static_cast<GlobalIndex>(fragment.parent_face);
+        return TraceIdentity{
+            fragment.source_interface_stable_id,
+            face,
+            static_cast<std::uint8_t>(fragment.kind)};
+    };
+
+    const auto expected =
+        buildGeneratedInterfaceBoundaryIntersectionDomain(
+            contact.request(), interface_domain, mesh);
+    std::map<TraceIdentity, std::ptrdiff_t> trace_balance;
+    for (const auto& fragment : expected.fragments()) {
+        if (fragment.active()) {
+            ++trace_balance[identity(fragment)];
+        }
+    }
+    for (const auto& fragment : contact.fragments()) {
+        if (fragment.active()) {
+            --trace_balance[identity(fragment)];
+        }
+    }
+    for (const auto& [key, balance] : trace_balance) {
+        (void)key;
+        if (balance > 0) {
+            ledger.missing_contact_fragment_count +=
+                static_cast<std::size_t>(balance);
+        } else if (balance < 0) {
+            ledger.orphan_contact_fragment_count +=
+                static_cast<std::size_t>(-balance);
+        }
+    }
+    if (ledger.missing_contact_fragment_count != 0u ||
+        ledger.orphan_contact_fragment_count != 0u) {
+        throw std::invalid_argument(
+            "free-surface snapshot contact rules do not match the complete authoritative surface trace");
+    }
+}
+
 [[nodiscard]] std::vector<std::uint64_t> sourceIdsForActiveRule(
     const GeneratedActiveBoundaryDomain& domain,
     std::uint64_t stable_id)
@@ -1775,6 +1825,8 @@ buildFreeSurfaceGeometrySnapshot(
         ledger.orphan_contact_fragment_count +=
             provenance.orphan_contact_fragment_count;
         ledger.stale_revision_count += provenance.stale_revision_count;
+        validateCompleteContactTrace(
+            contact, interface_domain, mesh, ledger);
         auto rules = contact.intersectionQuadratureRules();
         for (auto& rule : rules) {
             addRule(records,
@@ -1787,6 +1839,7 @@ buildFreeSurfaceGeometrySnapshot(
         }
     }
     if (ledger.orphan_contact_fragment_count != 0u ||
+        ledger.missing_contact_fragment_count != 0u ||
         ledger.stale_revision_count != 0u) {
         throw std::invalid_argument(
             "free-surface snapshot rejected stale or orphan contact geometry");

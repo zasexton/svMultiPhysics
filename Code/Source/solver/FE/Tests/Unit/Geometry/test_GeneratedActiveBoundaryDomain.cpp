@@ -1404,6 +1404,26 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsStaleAndDuplicateContactDomains)
         std::invalid_argument);
 }
 
+TEST(FreeSurfaceGeometrySnapshot, RejectsMissingExpectedContactTrace)
+{
+    constexpr int interface_marker = 118;
+    constexpr int wall_marker = 11;
+    const SingleQuadBoundaryMesh mesh(wall_marker);
+    interfaces::GeneratedInterfaceBoundaryIntersectionDomain missing_contact(
+        contactRequest(interface_marker, wall_marker));
+
+    EXPECT_THROW(
+        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+            verticalInterfaceWithVolumes(interface_marker),
+            {std::move(missing_contact)},
+            {},
+            mesh,
+            snapshotPolicyWithoutBoundary(),
+            verticalScalar(),
+            "missing_contact_trace"),
+        std::invalid_argument);
+}
+
 TEST(FreeSurfaceGeometrySnapshotCache,
      HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease)
 {

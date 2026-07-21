@@ -133,6 +133,7 @@ struct FreeSurfaceGeometryValidationLedger {
     std::size_t contact_fragment_count{0};
     std::size_t referenced_surface_fragment_count{0};
     std::size_t orphan_contact_fragment_count{0};
+    std::size_t missing_contact_fragment_count{0};
     std::size_t stale_revision_count{0};
     std::size_t invalid_phase_point_count{0};
     std::size_t outside_parent_point_count{0};
