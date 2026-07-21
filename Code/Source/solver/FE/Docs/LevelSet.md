@@ -60,6 +60,56 @@ for prescribed-data level-set advection; reusable PDE-based velocity-extension
 algorithms should be added to `FE::level_set` before being exposed as general
 transport services.
 
+## Production Transport Contract
+
+The production transport operator is Galerkin advection with optional SUPG. Its
+directional, transient scale is
+
+`tau = c_tau / sqrt((c_t / dt_eff)^2 + u . G u + epsilon_u)`,
+`G = J^-T J^-1`.
+
+This metric responds to the streamline direction on anisotropic cells and stays
+finite as the velocity tends to zero. Residual-based discontinuity capturing is
+an explicit opt-in and requires SUPG to be enabled. It adds isotropic diffusion
+with
+
+`nu_dc = min(c_dc h |R| / sqrt(|grad(phi)|^2 + epsilon_g),
+             c_C (h |u| + h^2 / dt_eff))`.
+
+The bound-preserving candidate gate is also an explicit opt-in. It currently
+supports only unconstrained scalar P1 H1 level-set unknowns. After a nonlinear
+solve converges and before the time step is accepted, it computes whether any
+candidate coefficient lies outside the minimum and maximum of the previous
+accepted solution over that node's one-ring cell patch. Literal inflow data
+enlarge the corresponding patch bounds; callback/nonliteral inflow data,
+constrained level-set DOFs, and higher-order or unsupported spaces fail closed.
+If a correction would be required, the converged candidate and all time-history
+vectors are left unchanged and the step is rejected. An adaptive time loop may
+then reduce `dt` and solve the coupled nonlinear problem again; a fixed-step run
+fails closed. No post-Newton coefficient clamp is accepted as a solution.
+
+When this bound gate is active, the pre-accept safety check evaluates a nodal/center
+velocity Courant estimate and may reject an adaptive step for retry when the
+configured maximum is exceeded; a fixed-step run fails closed because it cannot
+reduce `dt`. Every exterior marker not declared as level-set inflow or outflow is
+treated as impermeable. Wall compatibility is checked at the face centroid and
+every reference face node using the maximum normalized normal flux
+`|u . n| / max(1, |u|)`. A wall-flux violation fails immediately because a time
+step retry cannot repair incompatible boundary data.
+
+All safety reductions, one-ring bound exchanges, and correction counts use the
+active `FESystem`/DOF-handler communicator, never `MPI_COMM_WORLD`. The
+application's graph-based wet-side velocity extension uses the same communicator
+and performs a rank-synchronous owner-authoritative exchange after every graph
+layer, so propagation is not limited to one pre-existing ghost halo.
+
+This retry gate is not a conservative FCT method and does not prove an invariant
+domain or high-order bounded-transport property. It prevents acceptance of a
+candidate that violates the supported P1 one-ring bounds, but it does not alter
+the fluxes or nonlinear operator that produced that candidate. Production
+validation must therefore track interface position, convergence under time-step
+refinement, and phase volume in addition to nodal bounds.
+
 ## Equation-Level Active Domains
 
 An equation-level active-domain request means that volume forms owned by that
@@ -189,6 +239,61 @@ no complete minus/plus parent-cell binding. This provides the form-kernel
 dispatch contract for parent-cell H1 fields; production two-phase formulations
 must still declare the side-specific field availability and MPI ownership rules
 they require.
+
+## Generated Interface-Boundary Intersections
+
+`FE::interfaces::GeneratedInterfaceBoundaryIntersectionDomain` derives a
+lower-dimensional integration domain from an implicit scalar field, an existing
+generated interface marker, and a mesh boundary marker. It is physics-neutral
+and contains only parent cell identity, generated-interface marker,
+mesh-boundary marker, point/segment quadrature, implicit-field normal,
+boundary normal, tangent, and deterministic summary data.
+
+The production builder restricts the current scalar field to each marked
+boundary subentity and delegates point/segment rule construction to
+`FE::quadrature::buildImplicitBoundaryIntersectionQuadrature(...)`. Linear 2D
+cells produce 0D intersection-point rules on boundary edges. Linear 3D
+tetrahedron, hexahedron, wedge, and pyramid parents produce 1D segment rules on
+boundary faces. These are true codimension-two rules: the rule stores an
+explicit geometric dimension of zero in 2D and one in 3D. The only supported
+data contract is parent-reference coordinates, parent-reference normals and
+tangents, and a reference d-2 weight. During assembly, a 2D point keeps unit
+counting measure and a 3D line receives the single factor `|J t_ref|`. No
+codimension-one surface Jacobian is applied and no physical quantity is mapped
+twice. Domain/rule `measure` summaries are reference measures; physical
+length/angle diagnostics must use mapped assembly geometry or
+`mapReferenceCutCodimensionTwoGeometry(...)`, never raw rule directions.
+
+High-order parent cells are rejected until curved/isoparametric contact
+intersection reconstruction is implemented. Increasing Gaussian order on a
+corner-linear segment is not reported as high-order geometry. Requested and
+achieved quadrature orders are recorded separately and the linear-corner
+construction is named in rule provenance.
+
+Unsupported geometry, vertex touches, edge-aligned intersections, fully
+degenerate boundary subentities, and ambiguous multi-root (for example bilinear
+saddle-face) topology are retained as explicit diagnostics but are not active
+assembly rules. There is no fallback to the full generated interface and no
+arbitrary edge-order pairing. This fail-closed behavior prevents duplicate or
+topologically invented contact measure; aligned/shared entities require a
+future global ownership rule, and saddle faces require a deterministic topology
+decider before they can be enabled.
+
+Application active-cut context refresh builds these intersection domains for
+the mesh boundary markers visible through `IMeshAccess`, imports their
+quadrature through `CutIntegrationContext`, and logs per-marker and aggregate
+fragment, quadrature-point, and measure counts alongside the
+generated-interface active-domain diagnostic.
+Markers are generated with
+`stableGeneratedInterfaceBoundaryIntersectionMarker(...)` from the level-set
+source, generated-domain id, isovalue, interface marker, and boundary marker.
+`CutIntegrationContext` also registers the complete marker key and rejects a
+duplicate import, a collision with a generated-interface marker, or two
+different intersection keys that resolve to the same integer marker.
+Physics code should use that marker with the form measure alias
+`dInterfaceBoundary(expr, marker)`. It shares `.dI(marker)` dispatch, while the
+imported rule's explicit geometric dimension selects codimension-two mapping in
+the assembler.
 
 Generated cut-interface material state is stored separately from fitted face
 state and parent-cell volume state. `MaterialStateProvider` keys this storage by
@@ -346,7 +451,7 @@ For unfitted generated interfaces, curvature inputs are signed with the
 generated-interface normal `grad(phi) / |grad(phi)|`, pointing from the negative
 side to the positive side. Navier-Stokes converts that scalar to the outward
 normal of the configured active fluid side before forming
-`(-p_ext + gamma*kappa)n`. Therefore `Active_domain=LevelSetPositive` flips
+`(-p_ext - gamma*kappa)n`. Therefore `Active_domain=LevelSetPositive` flips
 both the interface normal and the traction curvature relative to the raw
 level-set convention. This keeps the capillary force vector invariant under
 active-side selection while preserving a single input convention for projected

@@ -526,6 +526,19 @@ def write_solver_xml(args: argparse.Namespace) -> None:
     level_set_coupled = "false" if args.level_set_only else "true"
     level_set_operator_tag = "  <Operator_tag>equations</Operator_tag>\n"
     enable_reinitialization = "false" if args.disable_reinitialization else "true"
+    p1_transport_safety_block = ""
+    if args.enable_p1_transport_safety:
+        p1_transport_safety_block = """  <SUPG_transient_scale>2.0</SUPG_transient_scale>
+  <Enable_discontinuity_capturing>true</Enable_discontinuity_capturing>
+  <Discontinuity_capturing_scale>0.1</Discontinuity_capturing_scale>
+  <Discontinuity_capturing_gradient_epsilon>1.0e-12</Discontinuity_capturing_gradient_epsilon>
+  <Discontinuity_capturing_max_courant>0.5</Discontinuity_capturing_max_courant>
+  <Enable_bound_preserving_limiter>true</Enable_bound_preserving_limiter>
+  <Bound_preserving_maximum_courant>1.0</Bound_preserving_maximum_courant>
+  <Bound_preserving_enforce_courant_limit>true</Bound_preserving_enforce_courant_limit>
+  <Bound_preserving_enforce_impermeable_boundaries>true</Bound_preserving_enforce_impermeable_boundaries>
+  <Bound_preserving_impermeable_normal_velocity_tolerance>1.0e-12</Bound_preserving_impermeable_normal_velocity_tolerance>
+"""
     fluid_equation_block = ""
     if not args.level_set_only:
         fluid_equation_block = f"""
@@ -661,7 +674,7 @@ def write_solver_xml(args: argparse.Namespace) -> None:
 {level_set_velocity_block}
   <Enable_SUPG>{str(not args.disable_level_set_supg).lower()}</Enable_SUPG>
   <SUPG_tau_scale>{args.level_set_supg_tau_scale:.12g}</SUPG_tau_scale>
-  <Enable_reinitialization>{enable_reinitialization}</Enable_reinitialization>
+{p1_transport_safety_block}  <Enable_reinitialization>{enable_reinitialization}</Enable_reinitialization>
   <Reinitialization_method>projection</Reinitialization_method>
   <Reinitialization_cadence_steps>{args.reinitialization_cadence_steps}</Reinitialization_cadence_steps>
   <Reinitialization_max_iterations>4</Reinitialization_max_iterations>
@@ -1200,6 +1213,15 @@ def parse_args() -> argparse.Namespace:
         help="SUPG tau scale used when level-set SUPG is enabled.",
     )
     parser.add_argument(
+        "--enable-p1-transport-safety",
+        action="store_true",
+        help=(
+            "enable the P1 SUPG transient, discontinuity-capturing, bound, "
+            "Courant, and impermeable-wall candidate gates; intended for "
+            "explicit production-path transport qualifications"
+        ),
+    )
+    parser.add_argument(
         "--disable-reinitialization",
         action="store_true",
         help=(
@@ -1247,6 +1269,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--nx and --ny must be at least 2")
     if args.element_order not in (1, 2):
         raise ValueError("--element-order must be 1 or 2")
+    if args.enable_p1_transport_safety and args.element_order != 1:
+        raise ValueError("--enable-p1-transport-safety requires --element-order 1")
     if args.depth <= 0.0 or args.tank_height <= args.depth + args.amplitude:
         raise ValueError("--tank-height must leave dry space above the free surface")
     if args.viscosity <= 0.0:
