@@ -525,6 +525,103 @@ public:
     return create_mesh(std::move(base));
 }
 
+struct WetBlockQuadStripArrays {
+    std::vector<real_t> coordinates{};
+    std::vector<offset_t> cell_offsets{};
+    std::vector<index_t> cell_vertices{};
+    std::vector<CellShape> cell_shapes{};
+    std::vector<real_t> level_set{};
+};
+
+[[nodiscard]] WetBlockQuadStripArrays makeWetBlockQuadStripArrays(
+    std::span<const FE::Real> x_coordinates,
+    std::span<const FE::Real> level_set_by_plane)
+{
+    if (x_coordinates.size() < 3u ||
+        x_coordinates.size() != level_set_by_plane.size()) {
+        throw std::invalid_argument(
+            "wet-block strip requires matching coordinates and level-set values on at least three planes");
+    }
+    for (std::size_t plane = 0u; plane < x_coordinates.size(); ++plane) {
+        if (!std::isfinite(x_coordinates[plane]) ||
+            !std::isfinite(level_set_by_plane[plane]) ||
+            (plane != 0u &&
+             !(x_coordinates[plane] > x_coordinates[plane - 1u]))) {
+            throw std::invalid_argument(
+                "wet-block strip coordinates and level-set values must be finite with strictly increasing coordinates");
+        }
+    }
+
+    WetBlockQuadStripArrays arrays;
+    arrays.coordinates.reserve(2u * x_coordinates.size() * 2u);
+    arrays.level_set.reserve(2u * level_set_by_plane.size());
+    for (std::size_t plane = 0u; plane < x_coordinates.size(); ++plane) {
+        for (int y = 0; y < 2; ++y) {
+            arrays.coordinates.push_back(
+                static_cast<real_t>(x_coordinates[plane]));
+            arrays.coordinates.push_back(static_cast<real_t>(y));
+            arrays.level_set.push_back(
+                static_cast<real_t>(level_set_by_plane[plane]));
+        }
+    }
+
+    arrays.cell_offsets.push_back(0);
+    arrays.cell_vertices.reserve(4u * (x_coordinates.size() - 1u));
+    arrays.cell_shapes.reserve(x_coordinates.size() - 1u);
+    const CellShape shape{CellFamily::Quad, 4, 1};
+    for (std::size_t cell = 0u; cell + 1u < x_coordinates.size(); ++cell) {
+        const auto left = static_cast<index_t>(2u * cell);
+        const auto right = static_cast<index_t>(2u * (cell + 1u));
+        arrays.cell_vertices.insert(
+            arrays.cell_vertices.end(),
+            {left, right, static_cast<index_t>(right + 1),
+             static_cast<index_t>(left + 1)});
+        arrays.cell_offsets.push_back(
+            static_cast<offset_t>(arrays.cell_vertices.size()));
+        arrays.cell_shapes.push_back(shape);
+    }
+    return arrays;
+}
+
+void attachWetBlockLevelSet(MeshBase& mesh,
+                            std::span<const real_t> level_set)
+{
+    if (level_set.size() != mesh.n_vertices()) {
+        throw std::invalid_argument(
+            "wet-block level-set data does not match the mesh vertices");
+    }
+    const auto handle = MeshFields::attach_field(
+        mesh,
+        EntityKind::Vertex,
+        "phi",
+        FieldScalarType::Float64,
+        1);
+    auto* values = MeshFields::field_data_as<real_t>(mesh, handle);
+    if (values == nullptr) {
+        throw std::runtime_error(
+            "failed to allocate wet-block level-set field");
+    }
+    std::copy(level_set.begin(), level_set.end(), values);
+}
+
+[[nodiscard]] std::shared_ptr<Mesh> makeWetBlockQuadStrip(
+    std::span<const FE::Real> x_coordinates,
+    std::span<const FE::Real> level_set_by_plane)
+{
+    const auto arrays = makeWetBlockQuadStripArrays(
+        x_coordinates, level_set_by_plane);
+    auto base = std::make_shared<MeshBase>();
+    base->build_from_arrays(
+        /*spatial_dim=*/2,
+        arrays.coordinates,
+        arrays.cell_offsets,
+        arrays.cell_vertices,
+        arrays.cell_shapes);
+    base->finalize();
+    attachWetBlockLevelSet(*base, arrays.level_set);
+    return create_mesh(std::move(base));
+}
+
 #if defined(FE_HAS_MPI) && defined(MESH_HAS_MPI)
 
 struct TetraStripArrays {
@@ -634,6 +731,49 @@ struct TetraStripArrays {
                         static_cast<FE::Real>(x[1]),
                         static_cast<FE::Real>(x[2])}}));
     }
+    return mesh;
+}
+
+[[nodiscard]] std::shared_ptr<Mesh> makeDistributedWetBlockQuadStrip(
+    std::span<const FE::Real> x_coordinates,
+    std::span<const FE::Real> level_set_by_plane,
+    MPI_Comm comm,
+    std::string_view partition_method)
+{
+    const auto arrays = makeWetBlockQuadStripArrays(
+        x_coordinates, level_set_by_plane);
+    auto mesh = std::make_shared<Mesh>(MeshComm(comm));
+    mesh->build_from_arrays_global_and_partition(
+        /*spatial_dim=*/2,
+        arrays.coordinates,
+        arrays.cell_offsets,
+        arrays.cell_vertices,
+        arrays.cell_shapes,
+        PartitionHint::Cells,
+        static_cast<int>(arrays.cell_shapes.size()),
+        {{"partition_method", std::string(partition_method)}});
+    if (mesh->global_n_cells() != arrays.cell_shapes.size() ||
+        mesh->n_owned_cells() == 0u ||
+        mesh->n_owned_cells() >= mesh->global_n_cells()) {
+        throw std::runtime_error(
+            "distributed wet-block strip is not genuinely partitioned");
+    }
+
+    const auto& gids = mesh->base().vertex_gids();
+    std::vector<real_t> local_level_set(mesh->base().n_vertices(), 0.0);
+    for (index_t vertex = 0;
+         vertex < static_cast<index_t>(mesh->base().n_vertices());
+         ++vertex) {
+        const auto gid = gids.at(static_cast<std::size_t>(vertex));
+        if (gid < 0 ||
+            static_cast<std::size_t>(gid) >= arrays.level_set.size()) {
+            throw std::runtime_error(
+                "distributed wet-block vertex GID cannot resolve level-set data");
+        }
+        local_level_set[static_cast<std::size_t>(vertex)] =
+            arrays.level_set[static_cast<std::size_t>(gid)];
+    }
+    attachWetBlockLevelSet(mesh->base(), local_level_set);
     return mesh;
 }
 
@@ -1596,6 +1736,479 @@ void equilibrate(std::vector<FE::Real>& matrix, std::size_t n)
     return options;
 }
 
+struct CanonicalWetBlockDof {
+    int field{0};
+    gid_t vertex_gid{INVALID_GID};
+    std::size_t component{0u};
+    FE::GlobalIndex global_dof{FE::INVALID_GLOBAL_INDEX};
+    std::array<FE::Real, 3> point{};
+};
+
+struct WetBlockAssemblySample {
+    std::vector<CanonicalWetBlockDof> dofs{};
+    std::vector<FE::Real> current_state{};
+    std::vector<FE::Real> solved_state{};
+    std::vector<FE::Real> residual{};
+    std::vector<FE::Real> jacobian{};
+    FE::Real dry_column_coupling_norm{0.0};
+    std::size_t retained_vertices{0u};
+    std::size_t constrained_dry_velocity_dofs{0u};
+    std::size_t constrained_dry_pressure_dofs{0u};
+};
+
+struct ScaledWetBlockDifference {
+    FE::Real residual{0.0};
+    FE::Real jacobian{0.0};
+    FE::Real solved_state{0.0};
+    FE::Real residual_absolute{0.0};
+    FE::Real jacobian_absolute{0.0};
+    FE::Real solved_state_absolute{0.0};
+};
+
+[[nodiscard]] FE::Real vectorL2Norm(std::span<const FE::Real> values)
+{
+    long double squared = 0.0L;
+    for (const auto value : values) {
+        squared += static_cast<long double>(value) *
+                   static_cast<long double>(value);
+    }
+    return static_cast<FE::Real>(std::sqrt(squared));
+}
+
+[[nodiscard]] FE::Real vectorDifferenceL2Norm(
+    std::span<const FE::Real> lhs,
+    std::span<const FE::Real> rhs)
+{
+    if (lhs.size() != rhs.size()) {
+        throw std::invalid_argument(
+            "wet-block comparison requires equal vector sizes");
+    }
+    long double squared = 0.0L;
+    for (std::size_t index = 0u; index < lhs.size(); ++index) {
+        const auto difference = static_cast<long double>(lhs[index]) -
+                                static_cast<long double>(rhs[index]);
+        squared += difference * difference;
+    }
+    return static_cast<FE::Real>(std::sqrt(squared));
+}
+
+[[nodiscard]] bool sameWetBlockDofIdentity(
+    const CanonicalWetBlockDof& lhs,
+    const CanonicalWetBlockDof& rhs) noexcept
+{
+    return lhs.field == rhs.field && lhs.vertex_gid == rhs.vertex_gid &&
+           lhs.component == rhs.component && lhs.point == rhs.point;
+}
+
+[[nodiscard]] ScaledWetBlockDifference compareWetBlockSamples(
+    const WetBlockAssemblySample& baseline,
+    const WetBlockAssemblySample& candidate)
+{
+    if (baseline.dofs.size() != candidate.dofs.size() ||
+        baseline.current_state.size() != candidate.current_state.size() ||
+        baseline.solved_state.size() != candidate.solved_state.size() ||
+        baseline.residual.size() != candidate.residual.size() ||
+        baseline.jacobian.size() != candidate.jacobian.size()) {
+        throw std::invalid_argument(
+            "wet-block comparison requires matching canonical block sizes");
+    }
+    for (std::size_t index = 0u; index < baseline.dofs.size(); ++index) {
+        if (!sameWetBlockDofIdentity(
+                baseline.dofs[index], candidate.dofs[index])) {
+            throw std::invalid_argument(
+                "wet-block comparison encountered different canonical DOF identities");
+        }
+    }
+
+    // The fixture is nondimensional.  These absolute floors prevent an
+    // accidentally tiny reference block from making a roundoff-sized delta
+    // appear large; the relative gates below are the predeclared WP-1 values.
+    constexpr FE::Real residual_absolute_floor = FE::Real{1.0e-12};
+    constexpr FE::Real jacobian_absolute_floor = FE::Real{1.0e-12};
+    constexpr FE::Real solved_state_absolute_floor = FE::Real{1.0e-12};
+    ScaledWetBlockDifference difference;
+    difference.residual_absolute = vectorDifferenceL2Norm(
+        baseline.residual, candidate.residual);
+    difference.jacobian_absolute = vectorDifferenceL2Norm(
+        baseline.jacobian, candidate.jacobian);
+    difference.solved_state_absolute = vectorDifferenceL2Norm(
+        baseline.solved_state, candidate.solved_state);
+    difference.residual = difference.residual_absolute /
+        (residual_absolute_floor +
+         std::max(vectorL2Norm(baseline.residual),
+                  vectorL2Norm(candidate.residual)));
+    difference.jacobian = difference.jacobian_absolute /
+        (jacobian_absolute_floor +
+         std::max(vectorL2Norm(baseline.jacobian),
+                  vectorL2Norm(candidate.jacobian)));
+    difference.solved_state = difference.solved_state_absolute /
+        (solved_state_absolute_floor +
+         std::max(vectorL2Norm(baseline.solved_state),
+                  vectorL2Norm(candidate.solved_state)));
+    return difference;
+}
+
+[[nodiscard]] std::set<gid_t> retainedWetBlockVertexGids(
+    const Mesh& mesh,
+    const FE::assembly::CutIntegrationContext& context,
+    int marker)
+{
+    const auto cells = retainedCells(context, marker, /*cut_only=*/false);
+    const auto& base = mesh.base();
+    const auto& vertex_gids = base.vertex_gids();
+    if (vertex_gids.size() != base.n_vertices()) {
+        throw std::runtime_error(
+            "wet-block mesh has incomplete vertex global identities");
+    }
+    std::set<gid_t> retained;
+    for (const auto cell : cells) {
+        if (cell < 0 ||
+            static_cast<std::size_t>(cell) >= base.n_cells()) {
+            throw std::runtime_error(
+                "wet-block retained cell is outside the local mesh");
+        }
+        for (const auto vertex : base.cell_vertices(
+                 static_cast<index_t>(cell))) {
+            retained.insert(vertex_gids.at(
+                static_cast<std::size_t>(vertex)));
+        }
+    }
+    if (retained.empty()) {
+        throw std::runtime_error("wet-block retained vertex set is empty");
+    }
+    return retained;
+}
+
+void setWetBlockP1Field(
+    std::vector<FE::Real>& state,
+    const Mesh& mesh,
+    const FE::systems::FESystem& system,
+    FE::FieldId field,
+    std::size_t components,
+    const std::set<gid_t>& retained,
+    FE::Real dry_state_scale,
+    bool previous_state)
+{
+    const auto* entity_map =
+        system.fieldDofHandler(field).getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::runtime_error(
+            "wet-block P1 field has no entity DOF map");
+    }
+    const auto offset = system.fieldDofOffset(field);
+    const auto& base = mesh.base();
+    const auto& vertex_gids = base.vertex_gids();
+    for (index_t vertex = 0;
+         vertex < static_cast<index_t>(base.n_vertices());
+         ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(
+            static_cast<FE::GlobalIndex>(vertex));
+        if (dofs.size() != components) {
+            throw std::runtime_error(
+                "wet-block field does not have the expected P1 components");
+        }
+        const auto point = system.meshAccess().getNodeCoordinates(vertex);
+        const bool wet_supported = retained.contains(
+            vertex_gids.at(static_cast<std::size_t>(vertex)));
+        for (std::size_t component = 0u; component < components; ++component) {
+            FE::Real value = 0.0;
+            if (wet_supported) {
+                if (components == 1u) {
+                    value = FE::Real{0.21} - FE::Real{0.07} * point[0] +
+                            FE::Real{0.09} * point[1];
+                } else if (component == 0u) {
+                    value = FE::Real{0.73} + FE::Real{0.16} * point[0] -
+                            FE::Real{0.08} * point[1];
+                } else {
+                    value = -FE::Real{0.31} + FE::Real{0.11} * point[0] +
+                            FE::Real{0.17} * point[1];
+                }
+                if (previous_state && components > 1u) {
+                    value -= FE::Real{0.03} *
+                             static_cast<FE::Real>(component + 1u);
+                }
+            } else {
+                value = dry_state_scale *
+                    (FE::Real{1.0} + FE::Real{0.13} * point[0] +
+                     FE::Real{0.19} * point[1] +
+                     FE::Real{0.07} * static_cast<FE::Real>(component));
+                if (previous_state) {
+                    value *= FE::Real{-0.4};
+                }
+            }
+            state.at(static_cast<std::size_t>(offset + dofs[component])) =
+                value;
+        }
+    }
+}
+
+[[nodiscard]] WetBlockAssemblySample assembleSerialWetBlockSample(
+    std::span<const FE::Real> x_coordinates,
+    std::span<const FE::Real> level_set_by_plane,
+    FE::Real dry_state_scale)
+{
+    constexpr int interface_marker = 27305;
+    constexpr std::string_view domain_id =
+        "wp1_serial_physical_wet_block_invariance";
+    auto mesh = makeWetBlockQuadStrip(x_coordinates, level_set_by_plane);
+    auto scalar_space = FE::spaces::SpaceFactory::create_h1(
+        FE::ElementType::Quad4, /*order=*/1);
+    auto velocity_space = FE::spaces::SpaceFactory::create_vector_h1(
+        FE::ElementType::Quad4, /*order=*/1, /*components=*/2);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::Unknown,
+    });
+
+    ns::IncompressibleNavierStokesVMSOptions options;
+    options.velocity_field_name = "u";
+    options.pressure_field_name = "p";
+    options.density = FE::Real{1.2};
+    options.viscosity = FE::Real{0.07};
+    options.enable_convection = false;
+    options.enable_vms = true;
+    ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary free_surface;
+    free_surface.implementation =
+        ns::FreeSurfaceImplementation::UnfittedLevelSet;
+    free_surface.interface_marker = interface_marker;
+    free_surface.level_set_field_name = "phi";
+    free_surface.generated_interface_domain_id = std::string(domain_id);
+    free_surface.active_domain =
+        ns::FreeSurfaceActiveDomain::LevelSetNegative;
+    free_surface.active_domain_method =
+        ns::FreeSurfaceActiveDomainMethod::CutVolume;
+    free_surface.external_pressure = FE::Real{0.0};
+    free_surface.surface_tension = FE::Real{0.0};
+    free_surface.use_level_set_curvature = false;
+    free_surface.cut_cell_stabilization.enabled = false;
+    free_surface.small_cut_aggregation = false;
+    free_surface.velocity_extension.enabled = false;
+    options.free_surface.push_back(std::move(free_surface));
+
+    ns::IncompressibleNavierStokesVMSModule module(
+        velocity_space, scalar_space, options);
+    module.registerOn(system);
+    system.setup({});
+    const auto velocity = system.findFieldByName("u");
+    const auto pressure = system.findFieldByName("p");
+    if (phi == FE::INVALID_FIELD_ID || velocity == FE::INVALID_FIELD_ID ||
+        pressure == FE::INVALID_FIELD_ID) {
+        throw std::runtime_error(
+            "wet-block Navier--Stokes fields were not registered");
+    }
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    std::vector<FE::Real> previous = solution;
+    const auto phi_handle = MeshFields::get_field_handle(
+        mesh->base(), EntityKind::Vertex, "phi");
+    const auto* mesh_phi = MeshFields::field_data_as<real_t>(
+        mesh->base(), phi_handle);
+    const auto* phi_map = system.fieldDofHandler(phi).getEntityDofMap();
+    if (mesh_phi == nullptr || phi_map == nullptr) {
+        throw std::runtime_error(
+            "wet-block level-set field is unavailable after setup");
+    }
+    const auto phi_offset = system.fieldDofOffset(phi);
+    for (index_t vertex = 0;
+         vertex < static_cast<index_t>(mesh->base().n_vertices());
+         ++vertex) {
+        const auto dofs = phi_map->getVertexDofs(vertex);
+        if (dofs.size() != 1u) {
+            throw std::runtime_error(
+                "wet-block level set is not scalar P1");
+        }
+        const auto value = mesh_phi[static_cast<std::size_t>(vertex)];
+        solution.at(static_cast<std::size_t>(phi_offset + dofs.front())) =
+            value;
+        previous.at(static_cast<std::size_t>(phi_offset + dofs.front())) =
+            value;
+    }
+
+    FE::level_set::LevelSetGeneratedInterfaceOptions cut_options;
+    cut_options.level_set_field_name = "phi";
+    cut_options.domain_id = std::string(domain_id);
+    cut_options.requested_interface_marker = interface_marker;
+    cut_options.tolerance = FE::Real{1.0e-12};
+    cut_options.quadrature_order = 2;
+    cut_options.interface_quadrature_order = 2;
+    cut_options.volume_quadrature_order = 2;
+    FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto generated = lifecycle.build(system, cut_options, solution);
+    if (!generated.success) {
+        throw std::runtime_error(generated.diagnostic);
+    }
+    auto context = std::make_shared<FE::assembly::CutIntegrationContext>();
+    context->addGeneratedInterfaceDomain(generated.domain);
+    system.setCutIntegrationContext(context);
+    system.rebuildConstraintState();
+
+    const auto retained = retainedWetBlockVertexGids(
+        *mesh, *context, interface_marker);
+    setWetBlockP1Field(
+        solution,
+        *mesh,
+        system,
+        velocity,
+        /*components=*/2u,
+        retained,
+        dry_state_scale,
+        /*previous_state=*/false);
+    setWetBlockP1Field(
+        previous,
+        *mesh,
+        system,
+        velocity,
+        /*components=*/2u,
+        retained,
+        dry_state_scale,
+        /*previous_state=*/true);
+    setWetBlockP1Field(
+        solution,
+        *mesh,
+        system,
+        pressure,
+        /*components=*/1u,
+        retained,
+        dry_state_scale,
+        /*previous_state=*/false);
+    setWetBlockP1Field(
+        previous,
+        *mesh,
+        system,
+        pressure,
+        /*components=*/1u,
+        retained,
+        dry_state_scale,
+        /*previous_state=*/true);
+
+    FE::systems::SystemStateView state;
+    state.dt = FE::Real{0.125};
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+    const auto matrix = assembleOperatorMatrix(system, state, "equations");
+    const auto residual =
+        assembleOperatorResidual(system, state, "equations");
+
+    WetBlockAssemblySample sample;
+    sample.retained_vertices = retained.size();
+    const auto& base = mesh->base();
+    const auto& gids = base.vertex_gids();
+    std::vector<FE::GlobalIndex> dry_columns;
+    const auto append_field = [&](FE::FieldId field,
+                                  int field_index,
+                                  std::size_t components,
+                                  std::size_t& dry_constraint_count) {
+        const auto* entity_map =
+            system.fieldDofHandler(field).getEntityDofMap();
+        if (entity_map == nullptr) {
+            throw std::runtime_error(
+                "wet-block canonical field has no entity map");
+        }
+        const auto offset = system.fieldDofOffset(field);
+        for (index_t vertex = 0;
+             vertex < static_cast<index_t>(base.n_vertices());
+             ++vertex) {
+            const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+            if (vertex_dofs.size() != components) {
+                throw std::runtime_error(
+                    "wet-block canonical field has an unexpected component count");
+            }
+            const auto gid = gids.at(static_cast<std::size_t>(vertex));
+            const bool wet_supported = retained.contains(gid);
+            for (std::size_t component = 0u;
+                 component < components;
+                 ++component) {
+                const auto global = offset + vertex_dofs[component];
+                if (wet_supported) {
+                    if (system.constraints().isConstrained(global)) {
+                        throw std::runtime_error(
+                            "wet-supported physical DOF was constrained");
+                    }
+                    sample.dofs.push_back(CanonicalWetBlockDof{
+                        .field = field_index,
+                        .vertex_gid = gid,
+                        .component = component,
+                        .global_dof = global,
+                        .point = system.meshAccess().getNodeCoordinates(vertex),
+                    });
+                } else {
+                    const auto line =
+                        system.constraints().getConstraint(global);
+                    if (!line.has_value() || !line->isDirichlet() ||
+                        line->inhomogeneity != FE::Real{0.0}) {
+                        throw std::runtime_error(
+                            "dry-only physical DOF was not homogeneously constrained");
+                    }
+                    ++dry_constraint_count;
+                    dry_columns.push_back(global);
+                }
+            }
+        }
+    };
+    append_field(
+        velocity,
+        /*field_index=*/0,
+        /*components=*/2u,
+        sample.constrained_dry_velocity_dofs);
+    append_field(
+        pressure,
+        /*field_index=*/1,
+        /*components=*/1u,
+        sample.constrained_dry_pressure_dofs);
+    std::sort(
+        sample.dofs.begin(),
+        sample.dofs.end(),
+        [](const CanonicalWetBlockDof& lhs,
+           const CanonicalWetBlockDof& rhs) {
+            if (lhs.field != rhs.field) {
+                return lhs.field < rhs.field;
+            }
+            if (lhs.vertex_gid != rhs.vertex_gid) {
+                return lhs.vertex_gid < rhs.vertex_gid;
+            }
+            return lhs.component < rhs.component;
+        });
+    std::vector<FE::GlobalIndex> wet_dofs;
+    wet_dofs.reserve(sample.dofs.size());
+    sample.current_state.reserve(sample.dofs.size());
+    sample.residual.reserve(sample.dofs.size());
+    for (const auto& dof : sample.dofs) {
+        wet_dofs.push_back(dof.global_dof);
+        sample.current_state.push_back(
+            solution.at(static_cast<std::size_t>(dof.global_dof)));
+        sample.residual.push_back(
+            residual.at(static_cast<std::size_t>(dof.global_dof)));
+    }
+    sample.jacobian = extractRectangularMatrix(
+        matrix, wet_dofs, wet_dofs);
+    auto correction = sample.residual;
+    for (auto& value : correction) {
+        value = -value;
+    }
+    auto solver = FE::math::factor_dense_matrix(
+        sample.jacobian,
+        sample.dofs.size(),
+        "serial WP-1 physical wet-block Jacobian");
+    solver.solve_in_place(correction, /*right_hand_sides=*/1u);
+    sample.solved_state = sample.current_state;
+    for (std::size_t index = 0u;
+         index < sample.solved_state.size();
+         ++index) {
+        sample.solved_state[index] += correction[index];
+    }
+    sample.dry_column_coupling_norm = selectedFrobeniusNorm(
+        matrix, wet_dofs, dry_columns);
+    return sample;
+}
+
 struct ManufacturedAffineBalanceSample {
     FE::Real unconstrained_residual_norm{0.0};
     FE::Real repeated_residual_difference_norm{0.0};
@@ -2249,6 +2862,39 @@ private:
     return result;
 }
 
+[[nodiscard]] std::vector<FE::Real> globalizeOwnedResidual(
+    std::span<const FE::Real> local,
+    const FE::systems::FESystem& system,
+    MPI_Comm comm)
+{
+    const auto n = system.dofHandler().getNumDofs();
+    if (n < 0 || local.size() != static_cast<std::size_t>(n) ||
+        static_cast<unsigned long long>(n) >
+            static_cast<unsigned long long>(
+                std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            "distributed wet-block residual has an invalid size");
+    }
+    std::vector<FE::Real> owned(local.size(), FE::Real{0.0});
+    for (const auto row : system.dofHandler().getPartition().locallyOwned()) {
+        if (row < 0 || row >= n) {
+            throw std::runtime_error(
+                "distributed wet-block owned residual row is out of range");
+        }
+        owned[static_cast<std::size_t>(row)] =
+            local[static_cast<std::size_t>(row)];
+    }
+    std::vector<FE::Real> global(local.size(), FE::Real{0.0});
+    MPI_Allreduce(
+        owned.data(),
+        global.data(),
+        static_cast<int>(n),
+        stabilityMpiRealType(),
+        MPI_SUM,
+        comm);
+    return global;
+}
+
 [[nodiscard]] std::vector<int> globalConstraintMask(
     const FE::systems::FESystem& system,
     MPI_Comm comm)
@@ -2446,6 +3092,328 @@ struct DenseOperatorDifference {
         .homogeneous_pins = static_cast<std::size_t>(
             allreduceSumUnsigned(local_homogeneous, comm)),
     };
+}
+
+[[nodiscard]] WetBlockAssemblySample assembleDistributedWetBlockSample(
+    std::span<const FE::Real> x_coordinates,
+    std::span<const FE::Real> level_set_by_plane,
+    FE::Real dry_state_scale,
+    MPI_Comm comm,
+    std::string_view partition_method)
+{
+    constexpr int interface_marker = 27315;
+    constexpr std::string_view domain_id =
+        "wp1_distributed_physical_wet_block_invariance";
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+    if (size != 2) {
+        throw std::runtime_error(
+            "distributed wet-block sample requires exactly two ranks");
+    }
+    auto mesh = makeDistributedWetBlockQuadStrip(
+        x_coordinates, level_set_by_plane, comm, partition_method);
+    auto scalar_space = FE::spaces::SpaceFactory::create_h1(
+        FE::ElementType::Quad4, /*order=*/1);
+    auto velocity_space = FE::spaces::SpaceFactory::create_vector_h1(
+        FE::ElementType::Quad4, /*order=*/1, /*components=*/2);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::Unknown,
+    });
+
+    ns::IncompressibleNavierStokesVMSOptions options;
+    options.velocity_field_name = "u";
+    options.pressure_field_name = "p";
+    options.density = FE::Real{1.2};
+    options.viscosity = FE::Real{0.07};
+    options.enable_convection = false;
+    options.enable_vms = true;
+    ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary free_surface;
+    free_surface.implementation =
+        ns::FreeSurfaceImplementation::UnfittedLevelSet;
+    free_surface.interface_marker = interface_marker;
+    free_surface.level_set_field_name = "phi";
+    free_surface.generated_interface_domain_id = std::string(domain_id);
+    free_surface.active_domain =
+        ns::FreeSurfaceActiveDomain::LevelSetNegative;
+    free_surface.active_domain_method =
+        ns::FreeSurfaceActiveDomainMethod::CutVolume;
+    free_surface.external_pressure = FE::Real{0.0};
+    free_surface.surface_tension = FE::Real{0.0};
+    free_surface.use_level_set_curvature = false;
+    free_surface.cut_cell_stabilization.enabled = false;
+    free_surface.small_cut_aggregation = false;
+    free_surface.velocity_extension.enabled = false;
+    options.free_surface.push_back(std::move(free_surface));
+    ns::IncompressibleNavierStokesVMSModule module(
+        velocity_space, scalar_space, options);
+    module.registerOn(system);
+
+    FE::systems::SetupOptions setup;
+    setup.use_backend_row_ownership_for_assembly = true;
+    setup.dof_options.global_numbering =
+        FE::dofs::GlobalNumberingMode::OwnerContiguous;
+    setup.dof_options.ownership = FE::dofs::OwnershipStrategy::VertexGID;
+    setup.dof_options.my_rank = rank;
+    setup.dof_options.world_size = size;
+    setup.dof_options.mpi_comm = comm;
+    system.setup(setup);
+    const auto velocity = system.findFieldByName("u");
+    const auto pressure = system.findFieldByName("p");
+    if (phi == FE::INVALID_FIELD_ID || velocity == FE::INVALID_FIELD_ID ||
+        pressure == FE::INVALID_FIELD_ID) {
+        throw std::runtime_error(
+            "distributed wet-block fields were not registered");
+    }
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    std::vector<FE::Real> previous = solution;
+    const auto phi_handle = MeshFields::get_field_handle(
+        mesh->base(), EntityKind::Vertex, "phi");
+    const auto* mesh_phi = MeshFields::field_data_as<real_t>(
+        mesh->base(), phi_handle);
+    const auto* phi_map = system.fieldDofHandler(phi).getEntityDofMap();
+    if (mesh_phi == nullptr || phi_map == nullptr) {
+        throw std::runtime_error(
+            "distributed wet-block level set is unavailable after setup");
+    }
+    const auto phi_offset = system.fieldDofOffset(phi);
+    for (index_t vertex = 0;
+         vertex < static_cast<index_t>(mesh->base().n_vertices());
+         ++vertex) {
+        const auto dofs = phi_map->getVertexDofs(vertex);
+        if (dofs.size() != 1u) {
+            throw std::runtime_error(
+                "distributed wet-block level set is not scalar P1");
+        }
+        const auto value = mesh_phi[static_cast<std::size_t>(vertex)];
+        solution.at(static_cast<std::size_t>(phi_offset + dofs.front())) =
+            value;
+        previous.at(static_cast<std::size_t>(phi_offset + dofs.front())) =
+            value;
+    }
+
+    FE::level_set::LevelSetGeneratedInterfaceOptions cut_options;
+    cut_options.level_set_field_name = "phi";
+    cut_options.domain_id = std::string(domain_id);
+    cut_options.requested_interface_marker = interface_marker;
+    cut_options.tolerance = FE::Real{1.0e-12};
+    cut_options.quadrature_order = 2;
+    cut_options.interface_quadrature_order = 2;
+    cut_options.volume_quadrature_order = 2;
+    FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto generated = lifecycle.build(system, cut_options, solution);
+    if (!generated.success) {
+        throw std::runtime_error(generated.diagnostic);
+    }
+    auto context = std::make_shared<FE::assembly::CutIntegrationContext>();
+    context->addGeneratedInterfaceDomain(generated.domain);
+    system.setCutIntegrationContext(context);
+    system.rebuildConstraintState();
+    const auto retained = retainedWetBlockVertexGids(
+        *mesh, *context, interface_marker);
+    std::uint64_t retained_hash = 1469598103934665603ull;
+    for (const auto gid : retained) {
+        retained_hash ^= static_cast<std::uint64_t>(gid + 1);
+        retained_hash *= 1099511628211ull;
+    }
+    unsigned long long minimum_retained_hash = 0u;
+    unsigned long long maximum_retained_hash = 0u;
+    const auto local_retained_hash =
+        static_cast<unsigned long long>(retained_hash);
+    MPI_Allreduce(
+        &local_retained_hash,
+        &minimum_retained_hash,
+        1,
+        MPI_UNSIGNED_LONG_LONG,
+        MPI_MIN,
+        comm);
+    MPI_Allreduce(
+        &local_retained_hash,
+        &maximum_retained_hash,
+        1,
+        MPI_UNSIGNED_LONG_LONG,
+        MPI_MAX,
+        comm);
+    if (minimum_retained_hash != maximum_retained_hash) {
+        throw std::runtime_error(
+            "distributed wet-block ranks disagree on retained physical support");
+    }
+
+    setWetBlockP1Field(
+        solution,
+        *mesh,
+        system,
+        velocity,
+        /*components=*/2u,
+        retained,
+        dry_state_scale,
+        /*previous_state=*/false);
+    setWetBlockP1Field(
+        previous,
+        *mesh,
+        system,
+        velocity,
+        /*components=*/2u,
+        retained,
+        dry_state_scale,
+        /*previous_state=*/true);
+    setWetBlockP1Field(
+        solution,
+        *mesh,
+        system,
+        pressure,
+        /*components=*/1u,
+        retained,
+        dry_state_scale,
+        /*previous_state=*/false);
+    setWetBlockP1Field(
+        previous,
+        *mesh,
+        system,
+        pressure,
+        /*components=*/1u,
+        retained,
+        dry_state_scale,
+        /*previous_state=*/true);
+
+    FE::systems::SystemStateView state;
+    state.dt = FE::Real{0.125};
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+    const auto local_matrix =
+        assembleOperatorMatrix(system, state, "equations");
+    const auto local_residual =
+        assembleOperatorResidual(system, state, "equations");
+    const auto matrix = globalizeOwnedRows(local_matrix, system, comm);
+    const auto residual =
+        globalizeOwnedResidual(local_residual, system, comm);
+    const auto constrained = globalConstraintMask(system, comm);
+
+    WetBlockAssemblySample sample;
+    sample.retained_vertices = retained.size();
+    const auto& base = mesh->base();
+    const auto& gids = base.vertex_gids();
+    std::vector<FE::GlobalIndex> dry_columns;
+    const auto append_field = [&](FE::FieldId field,
+                                  int field_index,
+                                  std::size_t components,
+                                  std::size_t& dry_constraint_count) {
+        const auto* entity_map =
+            system.fieldDofHandler(field).getEntityDofMap();
+        if (entity_map == nullptr) {
+            throw std::runtime_error(
+                "distributed wet-block canonical field has no entity map");
+        }
+        const auto offset = system.fieldDofOffset(field);
+        for (index_t vertex = 0;
+             vertex < static_cast<index_t>(base.n_vertices());
+             ++vertex) {
+            const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+            if (vertex_dofs.size() != components) {
+                throw std::runtime_error(
+                    "distributed wet-block field has an unexpected component count");
+            }
+            const auto gid = gids.at(static_cast<std::size_t>(vertex));
+            const bool wet_supported = retained.contains(gid);
+            for (std::size_t component = 0u;
+                 component < components;
+                 ++component) {
+                const auto global = offset + vertex_dofs[component];
+                if (global < 0 ||
+                    static_cast<std::size_t>(global) >= constrained.size()) {
+                    throw std::runtime_error(
+                        "distributed wet-block DOF is outside the global constraint mask");
+                }
+                const bool is_constrained =
+                    constrained[static_cast<std::size_t>(global)] != 0;
+                if (wet_supported) {
+                    if (is_constrained) {
+                        throw std::runtime_error(
+                            "distributed wet-supported physical DOF was constrained");
+                    }
+                    sample.dofs.push_back(CanonicalWetBlockDof{
+                        .field = field_index,
+                        .vertex_gid = gid,
+                        .component = component,
+                        .global_dof = global,
+                        .point = system.meshAccess().getNodeCoordinates(vertex),
+                    });
+                } else {
+                    if (!is_constrained) {
+                        throw std::runtime_error(
+                            "distributed dry-only physical DOF was not constrained");
+                    }
+                    ++dry_constraint_count;
+                    dry_columns.push_back(global);
+                }
+            }
+        }
+    };
+    append_field(
+        velocity,
+        /*field_index=*/0,
+        /*components=*/2u,
+        sample.constrained_dry_velocity_dofs);
+    append_field(
+        pressure,
+        /*field_index=*/1,
+        /*components=*/1u,
+        sample.constrained_dry_pressure_dofs);
+    std::sort(
+        sample.dofs.begin(),
+        sample.dofs.end(),
+        [](const CanonicalWetBlockDof& lhs,
+           const CanonicalWetBlockDof& rhs) {
+            if (lhs.field != rhs.field) {
+                return lhs.field < rhs.field;
+            }
+            if (lhs.vertex_gid != rhs.vertex_gid) {
+                return lhs.vertex_gid < rhs.vertex_gid;
+            }
+            return lhs.component < rhs.component;
+        });
+    std::vector<FE::GlobalIndex> wet_dofs;
+    wet_dofs.reserve(sample.dofs.size());
+    sample.current_state.reserve(sample.dofs.size());
+    sample.residual.reserve(sample.dofs.size());
+    for (const auto& dof : sample.dofs) {
+        wet_dofs.push_back(dof.global_dof);
+        sample.current_state.push_back(
+            solution.at(static_cast<std::size_t>(dof.global_dof)));
+        sample.residual.push_back(
+            residual.at(static_cast<std::size_t>(dof.global_dof)));
+    }
+    sample.jacobian = extractRectangularMatrix(
+        matrix, wet_dofs, wet_dofs);
+    auto correction = sample.residual;
+    for (auto& value : correction) {
+        value = -value;
+    }
+    auto solver = FE::math::factor_dense_matrix(
+        sample.jacobian,
+        sample.dofs.size(),
+        "distributed WP-1 physical wet-block Jacobian");
+    solver.solve_in_place(correction, /*right_hand_sides=*/1u);
+    sample.solved_state = sample.current_state;
+    for (std::size_t index = 0u;
+         index < sample.solved_state.size();
+         ++index) {
+        sample.solved_state[index] += correction[index];
+    }
+    sample.dry_column_coupling_norm = selectedFrobeniusNorm(
+        matrix, wet_dofs, dry_columns);
+    return sample;
 }
 
 [[nodiscard]] std::uint64_t distributedCellOwnerHash(
@@ -2814,6 +3782,175 @@ private:
 #endif
 
 } // namespace
+
+TEST(FreeSurfaceCutStability,
+     PhysicalWetBlocksAreInvariantToDryDepthAndState)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Wet-block invariance requires native mesh support.";
+#else
+    constexpr std::array<FE::Real, 4> baseline_x = {
+        FE::Real{-1.0}, FE::Real{0.0}, FE::Real{1.0}, FE::Real{2.0}};
+    constexpr std::array<FE::Real, 4> baseline_phi = {
+        FE::Real{-1.25}, FE::Real{-0.25}, FE::Real{0.75},
+        FE::Real{1.75}};
+    constexpr std::array<FE::Real, 7> deep_x = {
+        FE::Real{-1.0}, FE::Real{0.0}, FE::Real{1.0}, FE::Real{2.0},
+        FE::Real{3.0}, FE::Real{4.0}, FE::Real{5.0}};
+    constexpr std::array<FE::Real, 7> deep_phi = {
+        FE::Real{-1.25}, FE::Real{-0.25}, FE::Real{0.75},
+        FE::Real{1.75}, FE::Real{2.75}, FE::Real{3.75},
+        FE::Real{4.75}};
+    constexpr FE::Real serial_gate = FE::Real{1.0e-11};
+    constexpr FE::Real serial_solved_gate = FE::Real{1.0e-10};
+    constexpr FE::Real norm_floor = FE::Real{1.0e-12};
+
+    const auto baseline = assembleSerialWetBlockSample(
+        baseline_x,
+        baseline_phi,
+        /*dry_state_scale=*/FE::Real{3.0});
+    const auto depth = assembleSerialWetBlockSample(
+        deep_x,
+        deep_phi,
+        /*dry_state_scale=*/FE::Real{3.0});
+    const auto dry_state = assembleSerialWetBlockSample(
+        baseline_x,
+        baseline_phi,
+        // This changes every dry-only coefficient, including the exterior
+        // right-boundary vertices, while preserving every retained-support
+        // coefficient.
+        /*dry_state_scale=*/FE::Real{1.0e6});
+
+    ASSERT_EQ(baseline.retained_vertices, 6u);
+    EXPECT_EQ(depth.retained_vertices, baseline.retained_vertices);
+    EXPECT_EQ(baseline.constrained_dry_velocity_dofs, 4u);
+    EXPECT_EQ(baseline.constrained_dry_pressure_dofs, 2u);
+    EXPECT_EQ(depth.constrained_dry_velocity_dofs, 16u);
+    EXPECT_EQ(depth.constrained_dry_pressure_dofs, 8u);
+    EXPECT_GT(vectorL2Norm(baseline.residual), FE::Real{0.0});
+    EXPECT_GT(vectorL2Norm(baseline.jacobian), FE::Real{0.0});
+
+    const std::array<std::pair<std::string_view, ScaledWetBlockDifference>, 2>
+        comparisons = {{
+            {"dry_depth", compareWetBlockSamples(baseline, depth)},
+            {"exterior_dry_values",
+             compareWetBlockSamples(baseline, dry_state)},
+        }};
+    // The retired same-field diffusivity is intentionally absent from this
+    // numerical matrix: NavierStokesLegacyBCs has separate negative tests
+    // proving that enabling it, or specifying its coefficient while disabled,
+    // fails before fields or assembly are created.
+    for (const auto& [factor, difference] : comparisons) {
+        SCOPED_TRACE(factor);
+        EXPECT_LE(difference.residual, serial_gate);
+        EXPECT_LE(difference.jacobian, serial_gate);
+        EXPECT_LE(difference.solved_state, serial_solved_gate);
+        std::cout << std::setprecision(17)
+                  << "WP1_wet_block_invariance"
+                  << " scope=serial"
+                  << " factor=" << factor
+                  << " residual_absolute_floor=" << norm_floor
+                  << " jacobian_absolute_floor=" << norm_floor
+                  << " scaled_residual_difference=" << difference.residual
+                  << " scaled_jacobian_difference=" << difference.jacobian
+                  << " scaled_solved_state_difference="
+                  << difference.solved_state
+                  << " residual_absolute_difference="
+                  << difference.residual_absolute
+                  << " jacobian_absolute_difference="
+                  << difference.jacobian_absolute
+                  << " solved_state_absolute_difference="
+                  << difference.solved_state_absolute
+                  << " accepted_gate=" << serial_gate
+                  << " solved_state_gate=" << serial_solved_gate << '\n';
+    }
+
+    for (const auto* sample : {&baseline, &depth, &dry_state}) {
+        const auto scaled_dry_coupling = sample->dry_column_coupling_norm /
+            (norm_floor + vectorL2Norm(sample->jacobian));
+        EXPECT_LE(scaled_dry_coupling, serial_gate);
+    }
+#endif
+}
+
+TEST(FreeSurfaceCutStability,
+     DisconnectedLiquidIslandsHaveZeroPhysicalCrossCouplingThroughDryStrip)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Wet-block island decoupling requires native mesh support.";
+#else
+    constexpr std::array<FE::Real, 7> x = {
+        FE::Real{0.0}, FE::Real{1.0}, FE::Real{2.0}, FE::Real{3.0},
+        FE::Real{4.0}, FE::Real{5.0}, FE::Real{6.0}};
+    constexpr std::array<FE::Real, 7> phi = {
+        FE::Real{-1.0}, FE::Real{-1.0}, FE::Real{1.0}, FE::Real{1.0},
+        FE::Real{1.0}, FE::Real{-1.0}, FE::Real{-1.0}};
+    constexpr FE::Real serial_gate = FE::Real{1.0e-11};
+    constexpr FE::Real serial_solved_gate = FE::Real{1.0e-10};
+    constexpr FE::Real norm_floor = FE::Real{1.0e-12};
+    const auto baseline = assembleSerialWetBlockSample(
+        x,
+        phi,
+        /*dry_state_scale=*/FE::Real{2.0});
+    const auto changed_dry_path = assembleSerialWetBlockSample(
+        x,
+        phi,
+        /*dry_state_scale=*/FE::Real{1.0e6});
+    ASSERT_EQ(baseline.retained_vertices, 12u);
+    ASSERT_EQ(baseline.dofs.size(), 36u);
+    const auto dry_path_difference = compareWetBlockSamples(
+        baseline, changed_dry_path);
+    EXPECT_LE(dry_path_difference.residual, serial_gate);
+    EXPECT_LE(dry_path_difference.jacobian, serial_gate);
+    EXPECT_LE(dry_path_difference.solved_state, serial_solved_gate);
+
+    long double cross_squared = 0.0L;
+    const auto n = baseline.dofs.size();
+    for (std::size_t row = 0u; row < n; ++row) {
+        const bool left_row = baseline.dofs[row].point[0] <= FE::Real{2.0};
+        const bool right_row = baseline.dofs[row].point[0] >= FE::Real{4.0};
+        ASSERT_TRUE(left_row || right_row);
+        for (std::size_t column = 0u; column < n; ++column) {
+            const bool left_column =
+                baseline.dofs[column].point[0] <= FE::Real{2.0};
+            const bool right_column =
+                baseline.dofs[column].point[0] >= FE::Real{4.0};
+            ASSERT_TRUE(left_column || right_column);
+            if ((left_row && right_column) ||
+                (right_row && left_column)) {
+                const auto value = static_cast<long double>(
+                    baseline.jacobian[row * n + column]);
+                cross_squared += value * value;
+            }
+        }
+    }
+    const auto cross_norm =
+        static_cast<FE::Real>(std::sqrt(cross_squared));
+    const auto scaled_cross = cross_norm /
+        (norm_floor + vectorL2Norm(baseline.jacobian));
+    EXPECT_LE(scaled_cross, serial_gate);
+    EXPECT_LE(baseline.dry_column_coupling_norm /
+                  (norm_floor + vectorL2Norm(baseline.jacobian)),
+              serial_gate);
+    std::cout << std::setprecision(17)
+              << "WP1_two_island_decoupling"
+              << " scope=serial"
+              << " retained_vertices=" << baseline.retained_vertices
+              << " dry_velocity_constraints="
+              << baseline.constrained_dry_velocity_dofs
+              << " dry_pressure_constraints="
+              << baseline.constrained_dry_pressure_dofs
+              << " scaled_cross_jacobian=" << scaled_cross
+              << " scaled_dry_path_residual_difference="
+              << dry_path_difference.residual
+              << " scaled_dry_path_jacobian_difference="
+              << dry_path_difference.jacobian
+              << " scaled_dry_path_solved_state_difference="
+              << dry_path_difference.solved_state
+              << " accepted_gate=" << serial_gate
+              << " solved_state_gate=" << serial_solved_gate << '\n';
+#endif
+}
 
 TEST(FreeSurfaceCutStability,
      ProductionSmallCutAggregationPreservesPartialWallDirichletPerComponent)
@@ -3685,6 +4822,188 @@ TEST(FreeSurfaceCutStability,
               << " maximum_accepted_stabilized_control_spread="
               << maximum_accepted_stabilized_control_spread
               << '\n';
+#endif
+}
+
+TEST(FreeSurfaceCutStabilityMPI,
+     PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH && \
+      defined(FE_HAS_MPI) && defined(MESH_HAS_MPI))
+    GTEST_SKIP() << "Distributed wet-block invariance requires MPI-enabled FE and Mesh.";
+#else
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized == 0) {
+        GTEST_SKIP() << "Run this test under mpiexec.";
+    }
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly two MPI ranks.";
+    }
+
+    constexpr std::array<FE::Real, 4> baseline_x = {
+        FE::Real{-1.0}, FE::Real{0.0}, FE::Real{1.0}, FE::Real{2.0}};
+    constexpr std::array<FE::Real, 4> baseline_phi = {
+        FE::Real{-1.25}, FE::Real{-0.25}, FE::Real{0.75},
+        FE::Real{1.75}};
+    constexpr std::array<FE::Real, 7> deep_x = {
+        FE::Real{-1.0}, FE::Real{0.0}, FE::Real{1.0}, FE::Real{2.0},
+        FE::Real{3.0}, FE::Real{4.0}, FE::Real{5.0}};
+    constexpr std::array<FE::Real, 7> deep_phi = {
+        FE::Real{-1.25}, FE::Real{-0.25}, FE::Real{0.75},
+        FE::Real{1.75}, FE::Real{2.75}, FE::Real{3.75},
+        FE::Real{4.75}};
+    constexpr std::array<FE::Real, 7> island_x = {
+        FE::Real{0.0}, FE::Real{1.0}, FE::Real{2.0}, FE::Real{3.0},
+        FE::Real{4.0}, FE::Real{5.0}, FE::Real{6.0}};
+    constexpr std::array<FE::Real, 7> island_phi = {
+        FE::Real{-1.0}, FE::Real{-1.0}, FE::Real{1.0}, FE::Real{1.0},
+        FE::Real{1.0}, FE::Real{-1.0}, FE::Real{-1.0}};
+    constexpr FE::Real mpi_gate = FE::Real{1.0e-9};
+    constexpr FE::Real mpi_solved_gate = FE::Real{1.0e-8};
+    constexpr FE::Real norm_floor = FE::Real{1.0e-12};
+    constexpr std::string_view partition_method = "block";
+
+    const auto baseline = assembleDistributedWetBlockSample(
+        baseline_x,
+        baseline_phi,
+        /*dry_state_scale=*/FE::Real{3.0},
+        comm,
+        partition_method);
+    const auto depth = assembleDistributedWetBlockSample(
+        deep_x,
+        deep_phi,
+        /*dry_state_scale=*/FE::Real{3.0},
+        comm,
+        partition_method);
+    const auto dry_state = assembleDistributedWetBlockSample(
+        baseline_x,
+        baseline_phi,
+        // Includes the dry-only exterior vertices on both MPI owners.
+        /*dry_state_scale=*/FE::Real{1.0e6},
+        comm,
+        partition_method);
+    ASSERT_EQ(baseline.retained_vertices, 6u);
+    ASSERT_EQ(depth.retained_vertices, baseline.retained_vertices);
+    EXPECT_EQ(baseline.constrained_dry_velocity_dofs, 4u);
+    EXPECT_EQ(baseline.constrained_dry_pressure_dofs, 2u);
+    EXPECT_EQ(depth.constrained_dry_velocity_dofs, 16u);
+    EXPECT_EQ(depth.constrained_dry_pressure_dofs, 8u);
+    EXPECT_GT(vectorL2Norm(baseline.residual), FE::Real{0.0});
+    EXPECT_GT(vectorL2Norm(baseline.jacobian), FE::Real{0.0});
+
+    const std::array<std::pair<std::string_view, ScaledWetBlockDifference>, 2>
+        comparisons = {{
+            {"dry_depth", compareWetBlockSamples(baseline, depth)},
+            {"exterior_dry_values",
+             compareWetBlockSamples(baseline, dry_state)},
+        }};
+    for (const auto& [factor, difference] : comparisons) {
+        SCOPED_TRACE(factor);
+        EXPECT_LE(difference.residual, mpi_gate);
+        EXPECT_LE(difference.jacobian, mpi_gate);
+        EXPECT_LE(difference.solved_state, mpi_solved_gate);
+        if (rank == 0) {
+            std::cout << std::setprecision(17)
+                      << "WP1_wet_block_invariance"
+                      << " scope=mpi"
+                      << " ranks=" << size
+                      << " partition=" << partition_method
+                      << " factor=" << factor
+                      << " residual_absolute_floor=" << norm_floor
+                      << " jacobian_absolute_floor=" << norm_floor
+                      << " scaled_residual_difference="
+                      << difference.residual
+                      << " scaled_jacobian_difference="
+                      << difference.jacobian
+                      << " scaled_solved_state_difference="
+                      << difference.solved_state
+                      << " residual_absolute_difference="
+                      << difference.residual_absolute
+                      << " jacobian_absolute_difference="
+                      << difference.jacobian_absolute
+                      << " solved_state_absolute_difference="
+                      << difference.solved_state_absolute
+                      << " accepted_gate=" << mpi_gate
+                      << " solved_state_gate=" << mpi_solved_gate << '\n';
+        }
+    }
+    for (const auto* sample : {&baseline, &depth, &dry_state}) {
+        EXPECT_LE(sample->dry_column_coupling_norm /
+                      (norm_floor + vectorL2Norm(sample->jacobian)),
+                  mpi_gate);
+    }
+
+    const auto islands = assembleDistributedWetBlockSample(
+        island_x,
+        island_phi,
+        /*dry_state_scale=*/FE::Real{2.0},
+        comm,
+        partition_method);
+    const auto changed_dry_path = assembleDistributedWetBlockSample(
+        island_x,
+        island_phi,
+        /*dry_state_scale=*/FE::Real{1.0e6},
+        comm,
+        partition_method);
+    ASSERT_EQ(islands.retained_vertices, 12u);
+    ASSERT_EQ(islands.dofs.size(), 36u);
+    const auto dry_path_difference = compareWetBlockSamples(
+        islands, changed_dry_path);
+    EXPECT_LE(dry_path_difference.residual, mpi_gate);
+    EXPECT_LE(dry_path_difference.jacobian, mpi_gate);
+    EXPECT_LE(dry_path_difference.solved_state, mpi_solved_gate);
+
+    long double cross_squared = 0.0L;
+    const auto n = islands.dofs.size();
+    for (std::size_t row = 0u; row < n; ++row) {
+        const bool left_row = islands.dofs[row].point[0] <= FE::Real{2.0};
+        const bool right_row = islands.dofs[row].point[0] >= FE::Real{4.0};
+        ASSERT_TRUE(left_row || right_row);
+        for (std::size_t column = 0u; column < n; ++column) {
+            const bool left_column =
+                islands.dofs[column].point[0] <= FE::Real{2.0};
+            const bool right_column =
+                islands.dofs[column].point[0] >= FE::Real{4.0};
+            ASSERT_TRUE(left_column || right_column);
+            if ((left_row && right_column) ||
+                (right_row && left_column)) {
+                const auto value = static_cast<long double>(
+                    islands.jacobian[row * n + column]);
+                cross_squared += value * value;
+            }
+        }
+    }
+    const auto cross_norm =
+        static_cast<FE::Real>(std::sqrt(cross_squared));
+    const auto scaled_cross = cross_norm /
+        (norm_floor + vectorL2Norm(islands.jacobian));
+    EXPECT_LE(scaled_cross, mpi_gate);
+    EXPECT_LE(islands.dry_column_coupling_norm /
+                  (norm_floor + vectorL2Norm(islands.jacobian)),
+              mpi_gate);
+    if (rank == 0) {
+        std::cout << std::setprecision(17)
+                  << "WP1_two_island_decoupling"
+                  << " scope=mpi"
+                  << " ranks=" << size
+                  << " partition=" << partition_method
+                  << " retained_vertices=" << islands.retained_vertices
+                  << " scaled_cross_jacobian=" << scaled_cross
+                  << " scaled_dry_path_residual_difference="
+                  << dry_path_difference.residual
+                  << " scaled_dry_path_jacobian_difference="
+                  << dry_path_difference.jacobian
+                  << " scaled_dry_path_solved_state_difference="
+                  << dry_path_difference.solved_state
+                  << " accepted_gate=" << mpi_gate
+                  << " solved_state_gate=" << mpi_solved_gate << '\n';
+    }
 #endif
 }
 
