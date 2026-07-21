@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "matrix_id": "level_set_phase_transport_release_v1",
+  "status": "FROZEN_BEFORE_COMPLETE_MATRIX",
+  "common": {
+    "cfl_values": [0.5, 0.25, 0.125],
+    "threads": 1,
+    "mpi_ranks": 1,
+    "gates": {
+      "maximum_accounted_balance_error": 2e-11,
+      "minimum_indicator": -2e-12,
+      "maximum_indicator": 1.000000000002,
+      "maximum_local_balance_residual": 2e-12,
+      "achieved_cfl_excess": 2e-12
+    }
+  },
+  "cases": {
+    "translating_drop_2d": {
+      "dimension": 2,
+      "resolutions": [64, 128, 256],
+      "diameter": 0.25,
+      "diameter_over_dx": [16, 32, 64],
+      "fixed_cfl_for_space_study": 0.125,
+      "fixed_resolution_for_time_study": 256,
+      "gates": {
+        "maximum_raw_measure_error": 1e-8,
+        "maximum_interface_l1": 0.12,
+        "minimum_finest_spatial_order": 0.8,
+        "minimum_finest_temporal_order": 0.5
+      },
+      "resource_envelopes": {
+        "64": {"wall_time_seconds": 600, "memory_mib": 2048, "output_mib": 256},
+        "128": {"wall_time_seconds": 1800, "memory_mib": 4096, "output_mib": 1024},
+        "256": {"wall_time_seconds": 7200, "memory_mib": 8192, "output_mib": 4096}
+      }
+    },
+    "enright_3d": {
+      "dimension": 3,
+      "resolutions": [32, 64, 128],
+      "fixed_cfl_for_space_study": 0.125,
+      "fixed_resolution_for_time_study": 128,
+      "gates": {
+        "maximum_raw_measure_error": 0.0005,
+        "maximum_interface_l1": 0.35,
+        "minimum_finest_spatial_order": 0.8,
+        "minimum_finest_temporal_order": 0.5
+      },
+      "resource_envelopes": {
+        "32": {"wall_time_seconds": 1800, "memory_mib": 4096, "output_mib": 4096},
+        "64": {"wall_time_seconds": 14400, "memory_mib": 16384, "output_mib": 32768},
+        "128": {"wall_time_seconds": 86400, "memory_mib": 65536, "output_mib": 262144}
+      }
+    }
+  },
+  "qualification_rule": {
+    "required_points": "cartesian_product_of_each_case_resolutions_and_common_cfl_values",
+    "release_pass_requires": [
+      "all_18_points_complete",
+      "all_point_gates_pass",
+      "independent_fixed_cfl_space_studies_pass",
+      "independent_fixed_resolution_time_studies_pass",
+      "every_point_has_history_and_final_flux_ledgers"
+    ],
+    "single_point_release_disposition": "INCONCLUSIVE_RESOLUTION"
+  }
+}

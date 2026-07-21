@@ -730,6 +730,7 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
         std::map<std::pair<GlobalIndex, GlobalIndex>, MutableGradientEdge>
             assembled_edges;
         std::vector<Vector3> assembled_row_sum(result.nodes, Vector3{});
+        long double local_physical_measure_accumulator = 0.0L;
         Real maximum_gradient_coefficient{0.0};
         Real maximum_physical_basis_gradient{0.0};
 
@@ -798,7 +799,8 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
                     result.minimum_jacobian_determinant = std::min(
                         result.minimum_jacobian_determinant, determinant);
                     const Real weight = determinant * quadrature_weight;
-                    result.physical_measure += weight;
+                    local_physical_measure_accumulator +=
+                        static_cast<long double>(weight);
 
                     basis.evaluate_values(xi, values);
                     basis.evaluate_gradients(xi, reference_gradients);
@@ -914,6 +916,8 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
             return result;
         }
         result.local_owned_cells = result.cells;
+        result.physical_measure = static_cast<Real>(
+            local_physical_measure_accumulator);
 
         const auto global_cell_count = allReduceUnsigned64Sum(
             collective, static_cast<std::uint64_t>(result.cells));

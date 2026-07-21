@@ -304,6 +304,52 @@ predeclared geometry classifiers or observer boxes and the declared
 translation, rotation, wall, Zalesak, Enright, jet, and filament refinement
 matrices.
 
+## Frozen transport release matrix
+
+The transport-only release matrix is versioned in
+`tests/cases/fluid/level_set_phase_transport_release_matrix.json`. It contains
+the Cartesian product of:
+
+- translating drops at `D/dx=16,32,64` and graph CFL
+  `0.5,0.25,0.125`; and
+- three-dimensional reversible Enright deformation on approximately
+  `32^3,64^3,128^3` cells at the same three CFL values.
+
+The fixed-CFL spatial and fixed-resolution temporal subsets are declared in
+the registry. The temporal order is computed from the weighted differences
+between all three final control-volume states, while the spatial study uses
+the exact return/translation error. The registry fixes point gates, observed
+order gates, and per-resolution wall-time, memory, and output envelopes. Its
+`FROZEN_BEFORE_COMPLETE_MATRIX` status records that small feasibility points
+were run before freezing, but the complete 18-point matrix has not yet been
+claimed or used to check WP-6.
+
+`run_level_set_phase_transport_release.py list` lists the 18 immutable points.
+Its `run` action accepts exactly one registered case, resolution, and CFL. It
+requires a clean tracked source tree, removes inherited release variables,
+uses one thread and one rank, samples resident memory, enforces resource
+limits, refuses an existing output directory, and records source, binary,
+build, library, machine, registry, gate, and resource provenance. Each point
+contains full-step phase history and final per-control-volume, algebraic-edge,
+and connected-component flux ledgers. Every artifact is checksummed. A point
+can pass its local gates but retains the release disposition
+`INCONCLUSIVE_RESOLUTION`.
+
+The `summarize` action verifies all point checksums, requires a single source
+commit and executable hash, rejects missing/duplicate/unregistered points,
+and evaluates both independent convergence studies. It is the only harness
+action that can issue a release `PASS`, and it can do so only when all 18
+points and both convergence gates pass. A missing point is
+`INFRASTRUCTURE_FAILURE`; a completed but nonconvergent matrix is
+`FAIL_METHOD`.
+
+The first `32^3` graph feasibility run exposed ordinary-precision drift from
+accumulating millions of mapped quadrature weights. Local physical measure is
+now accumulated in extended precision before any communicator reduction. A
+default `32^3` graph regression closes mapped and lumped unit-cube measure to
+`2e-14`; it prevents a resolution-dependent false rejection before the
+scheduled transport work begins.
+
 ## Primary method references
 
 - D. Kuzmin and M. Quezada de Luna, “Algebraic entropy fixes and convex
