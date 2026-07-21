@@ -279,6 +279,18 @@ void mixRuleContent(std::uint64_t& hash,
     for (const auto id : record.source_fragment_stable_ids) {
         mix(hash, id);
     }
+    mix(hash, static_cast<std::uint64_t>(
+                  record.moment_certificate.polynomial_order + 1));
+    mix(hash, static_cast<std::uint64_t>(
+                  record.moment_certificate.ambient_dimension));
+    mix(hash, static_cast<std::uint64_t>(
+                  record.moment_certificate.source));
+    for (const auto& moment : record.moment_certificate.moments) {
+        for (const auto exponent : moment.exponents) {
+            mix(hash, static_cast<std::uint64_t>(exponent));
+        }
+        mix(hash, moment.value);
+    }
 }
 
 [[nodiscard]] std::uint64_t ruleContentDigest(
@@ -618,6 +630,40 @@ void validateCompleteContactTrace(
     return stableComponentId({}, stable_id);
 }
 
+[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+makeParentCellMomentCertificate(const assembly::IMeshAccess& mesh,
+                                const geometry::CutQuadratureRule& rule);
+
+[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+makeVolumeRegionMomentCertificate(
+    const CutInterfaceVolumeRegion& region,
+    const geometry::CutQuadratureRule& rule,
+    int ambient_dimension);
+
+[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+makeInterfaceFragmentMomentCertificate(
+    const CutInterfaceFragment& fragment,
+    const geometry::CutQuadratureRule& rule,
+    int ambient_dimension);
+
+[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+makeContactFragmentMomentCertificate(
+    const GeneratedInterfaceBoundaryIntersectionFragment& fragment,
+    const geometry::CutQuadratureRule& rule,
+    int ambient_dimension);
+
+[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+makeActiveBoundaryFragmentMomentCertificate(
+    const GeneratedActiveBoundaryFragment& fragment,
+    const geometry::CutQuadratureRule& rule,
+    int ambient_dimension);
+
+void validateRuleMomentCertificate(
+    const FreeSurfaceGeometryRuleRecord& record,
+    const assembly::IMeshAccess& mesh,
+    const FreeSurfaceGeometrySnapshotPolicy& policy,
+    FreeSurfaceGeometryValidationLedger& ledger);
+
 void completeAndValidateRuleIdentity(
     geometry::CutQuadratureRule& rule,
     const assembly::IMeshAccess& mesh,
@@ -687,6 +733,7 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
              FreeSurfaceGeometryRuleRole role,
              const assembly::IMeshAccess& mesh,
              const FreeSurfaceGeometrySnapshotPolicy& policy,
+             FreeSurfaceGeometryMomentCertificate moment_certificate,
              int physical_boundary_marker = -1,
              std::vector<std::uint64_t> source_ids = {},
              std::int64_t component_id = -1)
@@ -768,6 +815,7 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
             ? component_id
             : stableComponentId(record.source_fragment_stable_ids,
                                 rule.provenance.cut_topology_revision);
+    record.moment_certificate = std::move(moment_certificate);
     record.physical_rule =
         geometry::mapCutQuadratureRuleToPhysical(mesh, rule);
     record.reference_rule = std::move(rule);
@@ -935,6 +983,7 @@ void validateRule(
         throw std::invalid_argument(
             "retained free-surface quadrature does not integrate constants to its declared measure");
     }
+    validateRuleMomentCertificate(record, mesh, policy, ledger);
 }
 
 void accumulateLedger(const FreeSurfaceGeometryRuleRecord& record,
@@ -1049,6 +1098,403 @@ void accumulateLedger(const FreeSurfaceGeometryRuleRecord& record,
     default:
         throw std::invalid_argument(
             "free-surface volume moment validation does not support the parent cell type");
+    }
+}
+
+struct MomentCertificateSample {
+    std::array<Real, 3> point{{0.0, 0.0, 0.0}};
+    Real weight{0.0};
+};
+
+[[nodiscard]] std::vector<std::array<int, 3>> monomialExponents(
+    int ambient_dimension,
+    int polynomial_order)
+{
+    if (ambient_dimension < 1 || ambient_dimension > 3 ||
+        polynomial_order < 0) {
+        throw std::invalid_argument(
+            "free-surface moment certificate has an invalid dimension or order");
+    }
+    std::vector<std::array<int, 3>> exponents;
+    for (int total_order = 0; total_order <= polynomial_order;
+         ++total_order) {
+        for (int px = 0; px <= total_order; ++px) {
+            if (ambient_dimension == 1) {
+                if (px == total_order) {
+                    exponents.push_back({{px, 0, 0}});
+                }
+                continue;
+            }
+            for (int py = 0; py <= total_order - px; ++py) {
+                if (ambient_dimension == 2) {
+                    if (px + py == total_order) {
+                        exponents.push_back({{px, py, 0}});
+                    }
+                    continue;
+                }
+                exponents.push_back(
+                    {{px, py, total_order - px - py}});
+            }
+        }
+    }
+    return exponents;
+}
+
+[[nodiscard]] Real evaluateMonomial(const std::array<Real, 3>& point,
+                                    const std::array<int, 3>& exponents)
+    noexcept
+{
+    return integerPower(point[0], exponents[0]) *
+           integerPower(point[1], exponents[1]) *
+           integerPower(point[2], exponents[2]);
+}
+
+[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+makeMomentCertificateFromSamples(
+    std::span<const MomentCertificateSample> samples,
+    int ambient_dimension,
+    int polynomial_order,
+    FreeSurfaceGeometryMomentCertificateSource source)
+{
+    FreeSurfaceGeometryMomentCertificate certificate;
+    certificate.polynomial_order = polynomial_order;
+    certificate.ambient_dimension = ambient_dimension;
+    certificate.source = source;
+    for (const auto& exponents :
+         monomialExponents(ambient_dimension, polynomial_order)) {
+        Real value{0.0};
+        for (const auto& sample : samples) {
+            value += sample.weight *
+                     evaluateMonomial(sample.point, exponents);
+        }
+        certificate.moments.push_back(
+            FreeSurfaceGeometryMonomialMoment{
+                .exponents = exponents,
+                .value = value});
+    }
+    return certificate;
+}
+
+[[nodiscard]] std::array<Real, 3> subtractPoint(
+    const std::array<Real, 3>& a,
+    const std::array<Real, 3>& b) noexcept
+{
+    return {{a[0] - b[0], a[1] - b[1], a[2] - b[2]}};
+}
+
+[[nodiscard]] std::array<Real, 3> crossPoint(
+    const std::array<Real, 3>& a,
+    const std::array<Real, 3>& b) noexcept
+{
+    return {{a[1] * b[2] - a[2] * b[1],
+             a[2] * b[0] - a[0] * b[2],
+             a[0] * b[1] - a[1] * b[0]}};
+}
+
+[[nodiscard]] std::vector<MomentCertificateSample>
+piecewiseAffineMomentSamples(
+    std::span<const std::array<Real, 3>> vertices,
+    int geometric_dimension,
+    int polynomial_order)
+{
+    std::vector<MomentCertificateSample> samples;
+    if (geometric_dimension == 0) {
+        if (vertices.size() != 1u) {
+            throw std::invalid_argument(
+                "point moment certificate requires exactly one authoritative vertex");
+        }
+        samples.push_back({.point = vertices.front(), .weight = Real{1.0}});
+        return samples;
+    }
+    if (geometric_dimension == 1) {
+        if (vertices.size() < 2u) {
+            throw std::invalid_argument(
+                "line moment certificate requires authoritative endpoints");
+        }
+        const auto quadrature = quadrature::QuadratureFactory::create(
+            ElementType::Line2, polynomial_order);
+        samples.reserve((vertices.size() - 1u) * quadrature->num_points());
+        for (std::size_t segment = 0; segment + 1u < vertices.size();
+             ++segment) {
+            const auto& a = vertices[segment];
+            const auto& b = vertices[segment + 1u];
+            const Real length = norm(subtractPoint(b, a));
+            if (!(length > Real{0.0}) || !std::isfinite(length)) {
+                throw std::invalid_argument(
+                    "line moment certificate has a degenerate authoritative segment");
+            }
+            for (std::size_t q = 0; q < quadrature->num_points(); ++q) {
+                const Real coordinate = quadrature->point(q)[0];
+                const Real t = Real{0.5} * (coordinate + Real{1.0});
+                samples.push_back(MomentCertificateSample{
+                    .point = {{
+                        (Real{1.0} - t) * a[0] + t * b[0],
+                        (Real{1.0} - t) * a[1] + t * b[1],
+                        (Real{1.0} - t) * a[2] + t * b[2],
+                    }},
+                    .weight = Real{0.5} * length * quadrature->weight(q)});
+            }
+        }
+        return samples;
+    }
+    if (geometric_dimension == 2) {
+        if (vertices.size() < 3u) {
+            throw std::invalid_argument(
+                "surface moment certificate requires an authoritative polygon");
+        }
+        const auto quadrature = quadrature::QuadratureFactory::create(
+            ElementType::Triangle3, polynomial_order);
+        samples.reserve((vertices.size() - 2u) * quadrature->num_points());
+        const auto& a = vertices.front();
+        for (std::size_t triangle = 1u; triangle + 1u < vertices.size();
+             ++triangle) {
+            const auto& b = vertices[triangle];
+            const auto& c = vertices[triangle + 1u];
+            const auto ab = subtractPoint(b, a);
+            const auto ac = subtractPoint(c, a);
+            const Real jacobian = norm(crossPoint(ab, ac));
+            if (!(jacobian > Real{0.0}) || !std::isfinite(jacobian)) {
+                throw std::invalid_argument(
+                    "surface moment certificate has a degenerate authoritative triangle");
+            }
+            for (std::size_t q = 0; q < quadrature->num_points(); ++q) {
+                const auto point = quadrature->point(q);
+                samples.push_back(MomentCertificateSample{
+                    .point = {{a[0] + point[0] * ab[0] + point[1] * ac[0],
+                               a[1] + point[0] * ab[1] + point[1] * ac[1],
+                               a[2] + point[0] * ab[2] + point[1] * ac[2]}},
+                    .weight = jacobian * quadrature->weight(q)});
+            }
+        }
+        return samples;
+    }
+    throw std::invalid_argument(
+        "piecewise-affine moment certification supports codimension-zero parent rules and geometric dimensions zero through two");
+}
+
+[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+makePiecewiseAffineMomentCertificate(
+    std::span<const std::array<Real, 3>> vertices,
+    int geometric_dimension,
+    const geometry::CutQuadratureRule& rule,
+    int ambient_dimension)
+{
+    auto samples = piecewiseAffineMomentSamples(
+        vertices, geometric_dimension, rule.exact_polynomial_order);
+    if (geometric_dimension == 0) {
+        samples.front().weight = rule.measure;
+    }
+    return makeMomentCertificateFromSamples(
+        samples,
+        ambient_dimension,
+        rule.exact_polynomial_order,
+        FreeSurfaceGeometryMomentCertificateSource::PiecewiseAffineGeometry);
+}
+
+[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+makeStoredGeneratedMomentCertificate(
+    const geometry::CutQuadratureRule& rule,
+    int ambient_dimension)
+{
+    std::vector<MomentCertificateSample> samples;
+    samples.reserve(rule.points.size());
+    for (const auto& point : rule.points) {
+        samples.push_back(MomentCertificateSample{
+            .point = rule.frame == geometry::CutGeometryFrame::Reference
+                         ? point.point
+                         : point.parent_coordinate,
+            .weight = point.weight});
+    }
+    return makeMomentCertificateFromSamples(
+        samples,
+        ambient_dimension,
+        rule.exact_polynomial_order,
+        FreeSurfaceGeometryMomentCertificateSource::StoredGeneratedGeometry);
+}
+
+[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+makeParentCellMomentCertificate(const assembly::IMeshAccess& mesh,
+                                const geometry::CutQuadratureRule& rule)
+{
+    const auto parent =
+        static_cast<GlobalIndex>(rule.provenance.parent_entity);
+    if (parent < 0 || parent >= mesh.numCells()) {
+        throw std::invalid_argument(
+            "parent-cell moment certificate has an invalid local cell");
+    }
+    const auto quadrature = quadrature::QuadratureFactory::create(
+        mesh.getCellType(parent), rule.exact_polynomial_order);
+    std::vector<MomentCertificateSample> samples;
+    samples.reserve(quadrature->num_points());
+    for (std::size_t q = 0; q < quadrature->num_points(); ++q) {
+        const auto point = quadrature->point(q);
+        samples.push_back(MomentCertificateSample{
+            .point = {{point[0], point[1], point[2]}},
+            .weight = quadrature->weight(q)});
+    }
+    return makeMomentCertificateFromSamples(
+        samples,
+        mesh.dimension(),
+        rule.exact_polynomial_order,
+        FreeSurfaceGeometryMomentCertificateSource::ParentReferenceCell);
+}
+
+[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+makeVolumeRegionMomentCertificate(
+    const CutInterfaceVolumeRegion& region,
+    const geometry::CutQuadratureRule& rule,
+    int ambient_dimension)
+{
+    if (rule.full_cell_equivalent) {
+        throw std::invalid_argument(
+            "full-cell moment certificates require the parent reference element");
+    }
+    if (rule.frame == geometry::CutGeometryFrame::Reference &&
+        rule.exact_polynomial_order <= 1) {
+        const std::array<MomentCertificateSample, 1> samples{{
+            MomentCertificateSample{
+                .point = region.centroid,
+                .weight = region.measure}}};
+        return makeMomentCertificateFromSamples(
+            samples,
+            ambient_dimension,
+            rule.exact_polynomial_order,
+            FreeSurfaceGeometryMomentCertificateSource::RegionMeasureCentroid);
+    }
+    return makeStoredGeneratedMomentCertificate(rule, ambient_dimension);
+}
+
+[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+makeInterfaceFragmentMomentCertificate(
+    const CutInterfaceFragment& fragment,
+    const geometry::CutQuadratureRule& rule,
+    int ambient_dimension)
+{
+    if (rule.frame == geometry::CutGeometryFrame::Reference &&
+        fragment.kind != CutInterfaceFragmentKind::CurvedPatch) {
+        std::vector<std::array<Real, 3>> vertices;
+        vertices.reserve(fragment.vertices.size());
+        for (const auto& vertex : fragment.vertices) {
+            vertices.push_back(vertex.parent_coordinate);
+        }
+        return makePiecewiseAffineMomentCertificate(
+            vertices,
+            std::max(0, ambient_dimension - 1),
+            rule,
+            ambient_dimension);
+    }
+    return makeStoredGeneratedMomentCertificate(rule, ambient_dimension);
+}
+
+[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+makeContactFragmentMomentCertificate(
+    const GeneratedInterfaceBoundaryIntersectionFragment& fragment,
+    const geometry::CutQuadratureRule& rule,
+    int ambient_dimension)
+{
+    if (rule.frame == geometry::CutGeometryFrame::Reference &&
+        !fragment.vertices.empty()) {
+        return makePiecewiseAffineMomentCertificate(
+            fragment.vertices,
+            fragment.kind ==
+                    GeneratedInterfaceBoundaryIntersectionKind::Point
+                ? 0
+                : 1,
+            rule,
+            ambient_dimension);
+    }
+    return makeStoredGeneratedMomentCertificate(rule, ambient_dimension);
+}
+
+[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+makeActiveBoundaryFragmentMomentCertificate(
+    const GeneratedActiveBoundaryFragment& fragment,
+    const geometry::CutQuadratureRule& rule,
+    int ambient_dimension)
+{
+    if (rule.frame == geometry::CutGeometryFrame::Reference &&
+        !fragment.vertices.empty()) {
+        return makePiecewiseAffineMomentCertificate(
+            fragment.vertices,
+            std::max(0, ambient_dimension - 1),
+            rule,
+            ambient_dimension);
+    }
+    return makeStoredGeneratedMomentCertificate(rule, ambient_dimension);
+}
+
+void validateRuleMomentCertificate(
+    const FreeSurfaceGeometryRuleRecord& record,
+    const assembly::IMeshAccess& mesh,
+    const FreeSurfaceGeometrySnapshotPolicy& policy,
+    FreeSurfaceGeometryValidationLedger& ledger)
+{
+    const auto& rule = record.reference_rule;
+    const auto& certificate = record.moment_certificate;
+    const auto expected_exponents = monomialExponents(
+        mesh.dimension(), rule.exact_polynomial_order);
+    if (certificate.polynomial_order != rule.exact_polynomial_order ||
+        certificate.ambient_dimension != mesh.dimension() ||
+        certificate.moments.size() != expected_exponents.size()) {
+        ++ledger.false_achieved_order_count;
+        throw std::invalid_argument(
+            "retained free-surface rule has an incomplete polynomial-moment certificate");
+    }
+    ++ledger.certified_rule_count;
+    switch (certificate.source) {
+    case FreeSurfaceGeometryMomentCertificateSource::ParentReferenceCell:
+        ++ledger.parent_cell_moment_certificate_count;
+        break;
+    case FreeSurfaceGeometryMomentCertificateSource::RegionMeasureCentroid:
+        ++ledger.centroid_moment_certificate_count;
+        break;
+    case FreeSurfaceGeometryMomentCertificateSource::PiecewiseAffineGeometry:
+        ++ledger.piecewise_affine_moment_certificate_count;
+        break;
+    case FreeSurfaceGeometryMomentCertificateSource::StoredGeneratedGeometry:
+        ++ledger.stored_generated_moment_certificate_count;
+        break;
+    }
+
+    for (std::size_t moment_index = 0u;
+         moment_index < certificate.moments.size();
+         ++moment_index) {
+        const auto& certified = certificate.moments[moment_index];
+        if (certified.exponents != expected_exponents[moment_index] ||
+            !std::isfinite(certified.value)) {
+            ++ledger.false_achieved_order_count;
+            throw std::invalid_argument(
+                "retained free-surface rule has a malformed polynomial-moment certificate");
+        }
+        Real actual{0.0};
+        Real absolute_sum{0.0};
+        for (std::size_t q = 0; q < rule.points.size(); ++q) {
+            const Real contribution =
+                rule.points[q].weight *
+                evaluateMonomial(
+                    record.physical_rule.points[q].reference_point,
+                    certified.exponents);
+            actual += contribution;
+            absolute_sum += std::abs(contribution);
+        }
+        const Real error = std::abs(actual - certified.value);
+        const Real scale = std::max(
+            {Real{1.0}, std::abs(certified.value), absolute_sum});
+        const Real tolerance =
+            Real{4096.0} * std::numeric_limits<Real>::epsilon() * scale +
+            policy.tolerance;
+        ++ledger.validated_rule_polynomial_moment_count;
+        ++ledger.validated_polynomial_moment_count;
+        ledger.maximum_polynomial_moment_error = std::max(
+            ledger.maximum_polynomial_moment_error, error);
+        ledger.maximum_polynomial_moment_scaled_error = std::max(
+            ledger.maximum_polynomial_moment_scaled_error,
+            error / tolerance);
+        if (error > tolerance) {
+            ++ledger.false_achieved_order_count;
+            throw std::invalid_argument(
+                "retained free-surface quadrature does not reproduce its authoritative polynomial-moment certificate");
+        }
     }
 }
 
@@ -1978,6 +2424,8 @@ std::size_t FreeSurfaceGeometrySnapshot::residentBytes() const noexcept
                  sizeof(geometry::MappedCutQuadraturePoint);
         bytes += rule.source_fragment_stable_ids.capacity() *
                  sizeof(std::uint64_t);
+        bytes += rule.moment_certificate.moments.capacity() *
+                 sizeof(FreeSurfaceGeometryMonomialMoment);
         bytes += rule.topology_id.capacity();
         bytes += rule.reference_rule.policy.name.capacity();
         bytes += rule.reference_rule.provenance.embedded_geometry_id.capacity();
@@ -2025,20 +2473,51 @@ buildFreeSurfaceGeometrySnapshot(
     auto interface_rules = interface_domain.interfaceQuadratureRules();
     records.reserve(volume_rules.size() + interface_rules.size());
     for (auto& rule : volume_rules) {
+        const auto region = std::find_if(
+            interface_domain.volumeRegions().begin(),
+            interface_domain.volumeRegions().end(),
+            [&rule](const CutInterfaceVolumeRegion& candidate) {
+                return candidate.stable_id ==
+                       rule.provenance.cut_topology_revision;
+            });
+        if (region == interface_domain.volumeRegions().end()) {
+            throw std::invalid_argument(
+                "free-surface volume rule has no authoritative source region");
+        }
+        auto moment_certificate =
+            rule.full_cell_equivalent
+                ? makeParentCellMomentCertificate(mesh, rule)
+                : makeVolumeRegionMomentCertificate(
+                      *region, rule, mesh.dimension());
         addRule(records,
                 ledger,
                 std::move(rule),
                 FreeSurfaceGeometryRuleRole::Interface,
                 mesh,
-                policy);
+                policy,
+                std::move(moment_certificate));
     }
     for (auto& rule : interface_rules) {
+        const auto fragment = std::find_if(
+            interface_domain.fragments().begin(),
+            interface_domain.fragments().end(),
+            [&rule](const CutInterfaceFragment& candidate) {
+                return candidate.stable_id ==
+                       rule.provenance.cut_topology_revision;
+            });
+        if (fragment == interface_domain.fragments().end()) {
+            throw std::invalid_argument(
+                "free-surface interface rule has no authoritative source fragment");
+        }
+        auto moment_certificate = makeInterfaceFragmentMomentCertificate(
+            *fragment, rule, mesh.dimension());
         addRule(records,
                 ledger,
                 std::move(rule),
                 FreeSurfaceGeometryRuleRole::Interface,
                 mesh,
-                policy);
+                policy,
+                std::move(moment_certificate));
     }
 
     std::map<int, const GeneratedInterfaceBoundaryIntersectionDomain*>
@@ -2066,12 +2545,29 @@ buildFreeSurfaceGeometrySnapshot(
             contact, interface_domain, mesh, ledger);
         auto rules = contact.intersectionQuadratureRules();
         for (auto& rule : rules) {
+            const auto fragment = std::find_if(
+                contact.fragments().begin(),
+                contact.fragments().end(),
+                [&rule](
+                    const GeneratedInterfaceBoundaryIntersectionFragment&
+                        candidate) {
+                    return candidate.stable_id ==
+                           rule.provenance.cut_topology_revision;
+                });
+            if (fragment == contact.fragments().end()) {
+                throw std::invalid_argument(
+                    "free-surface contact rule has no authoritative source fragment");
+            }
+            auto moment_certificate =
+                makeContactFragmentMomentCertificate(
+                    *fragment, rule, mesh.dimension());
             addRule(records,
                     ledger,
                     std::move(rule),
                     FreeSurfaceGeometryRuleRole::Contact,
                     mesh,
                     policy,
+                    std::move(moment_certificate),
                     contact.boundaryMarker());
         }
     }
@@ -2101,6 +2597,17 @@ buildFreeSurfaceGeometrySnapshot(
         slot = &active;
         auto rules = active.boundaryQuadratureRules();
         for (auto& rule : rules) {
+            const auto fragment = std::find_if(
+                active.fragments().begin(),
+                active.fragments().end(),
+                [&rule](const GeneratedActiveBoundaryFragment& candidate) {
+                    return candidate.stable_id ==
+                           rule.provenance.cut_topology_revision;
+                });
+            if (fragment == active.fragments().end()) {
+                throw std::invalid_argument(
+                    "free-surface active-boundary rule has no authoritative source fragment");
+            }
             const auto role = active.request().side ==
                                       geometry::CutIntegrationSide::Negative
                                   ? FreeSurfaceGeometryRuleRole::
@@ -2109,12 +2616,16 @@ buildFreeSurfaceGeometrySnapshot(
                                         PositiveExteriorBoundary;
             const auto stable_id = rule.provenance.cut_topology_revision;
             auto source_ids = sourceIdsForActiveRule(active, stable_id);
+            auto moment_certificate =
+                makeActiveBoundaryFragmentMomentCertificate(
+                    *fragment, rule, mesh.dimension());
             addRule(records,
                     ledger,
                     std::move(rule),
                     role,
                     mesh,
                     policy,
+                    std::move(moment_certificate),
                     active.request().boundary_marker,
                     std::move(source_ids),
                     componentIdForActiveRule(active, stable_id));

@@ -9997,6 +9997,18 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << geometry_ledger.maximum_normal_angular_error
         << " max_constant_moment_error="
         << geometry_ledger.maximum_constant_moment_error
+        << " certified_rules="
+        << geometry_ledger.certified_rule_count
+        << " parent_cell_moment_certificates="
+        << geometry_ledger.parent_cell_moment_certificate_count
+        << " centroid_moment_certificates="
+        << geometry_ledger.centroid_moment_certificate_count
+        << " piecewise_affine_moment_certificates="
+        << geometry_ledger.piecewise_affine_moment_certificate_count
+        << " stored_generated_moment_certificates="
+        << geometry_ledger.stored_generated_moment_certificate_count
+        << " validated_rule_polynomial_moments="
+        << geometry_ledger.validated_rule_polynomial_moment_count
         << " validated_polynomial_moments="
         << geometry_ledger.validated_polynomial_moment_count
         << " max_polynomial_moment_error="

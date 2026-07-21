@@ -51,6 +51,26 @@ enum class FreeSurfaceGeometryRetention : std::uint8_t {
     PrunedSmallVolume
 };
 
+enum class FreeSurfaceGeometryMomentCertificateSource : std::uint8_t {
+    ParentReferenceCell,
+    RegionMeasureCentroid,
+    PiecewiseAffineGeometry,
+    StoredGeneratedGeometry
+};
+
+struct FreeSurfaceGeometryMonomialMoment {
+    std::array<int, 3> exponents{{0, 0, 0}};
+    Real value{0.0};
+};
+
+struct FreeSurfaceGeometryMomentCertificate {
+    int polynomial_order{-1};
+    int ambient_dimension{0};
+    FreeSurfaceGeometryMomentCertificateSource source{
+        FreeSurfaceGeometryMomentCertificateSource::RegionMeasureCentroid};
+    std::vector<FreeSurfaceGeometryMonomialMoment> moments{};
+};
+
 struct FreeSurfaceGeometryRevision {
     std::string source_id{};
     std::string domain_id{};
@@ -81,6 +101,7 @@ struct FreeSurfaceGeometryRuleRecord {
     std::vector<std::uint64_t> source_fragment_stable_ids{};
     std::string topology_id{};
     std::int64_t component_id{-1};
+    FreeSurfaceGeometryMomentCertificate moment_certificate{};
 };
 
 struct FreeSurfaceGeometrySnapshotPolicy {
@@ -139,6 +160,12 @@ struct FreeSurfaceGeometryValidationLedger {
     std::size_t outside_parent_point_count{0};
     std::size_t invalid_weight_count{0};
     std::size_t false_achieved_order_count{0};
+    std::size_t certified_rule_count{0};
+    std::size_t parent_cell_moment_certificate_count{0};
+    std::size_t centroid_moment_certificate_count{0};
+    std::size_t piecewise_affine_moment_certificate_count{0};
+    std::size_t stored_generated_moment_certificate_count{0};
+    std::size_t validated_rule_polynomial_moment_count{0};
     std::size_t validated_polynomial_moment_count{0};
     std::size_t invalid_global_identity_count{0};
     std::size_t duplicate_rule_identity_count{0};

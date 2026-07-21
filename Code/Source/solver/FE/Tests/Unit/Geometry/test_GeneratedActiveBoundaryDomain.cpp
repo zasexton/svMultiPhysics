@@ -844,6 +844,21 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_EQ(snapshot->revision().source_value_revision, 9u);
     EXPECT_EQ(snapshot->ledger().rule_count, 6u);
     EXPECT_EQ(snapshot->ledger().retained_rule_count, 6u);
+    EXPECT_EQ(snapshot->ledger().certified_rule_count,
+              snapshot->ledger().rule_count);
+    EXPECT_EQ(snapshot->ledger().parent_cell_moment_certificate_count +
+                  snapshot->ledger().centroid_moment_certificate_count +
+                  snapshot->ledger()
+                      .piecewise_affine_moment_certificate_count +
+                  snapshot->ledger()
+                      .stored_generated_moment_certificate_count,
+              snapshot->ledger().rule_count);
+    EXPECT_EQ(snapshot->ledger().stored_generated_moment_certificate_count,
+              0u);
+    EXPECT_GT(snapshot->ledger().validated_rule_polynomial_moment_count,
+              snapshot->ledger().rule_count);
+    EXPECT_LE(snapshot->ledger().maximum_polynomial_moment_scaled_error,
+              1.0);
     EXPECT_EQ(snapshot->ledger().global_owned_rule_count,
               snapshot->ledger().owned_rule_count);
     EXPECT_EQ(snapshot->ledger().orphan_contact_fragment_count, 0u);
@@ -887,6 +902,11 @@ TEST(FreeSurfaceGeometrySnapshot,
     }
     for (const auto& record : snapshot->rules()) {
         EXPECT_GE(record.component_id, 0);
+        EXPECT_EQ(record.moment_certificate.polynomial_order,
+                  record.reference_rule.exact_polynomial_order);
+        EXPECT_EQ(record.moment_certificate.ambient_dimension,
+                  mesh.dimension());
+        EXPECT_FALSE(record.moment_certificate.moments.empty());
         EXPECT_EQ(record.reference_rule.provenance
                       .free_surface_snapshot_revision_key,
                   snapshot->revision().snapshot_revision_key);
@@ -1509,6 +1529,67 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsIncorrectLinearPartitionMoment)
 }
 
 TEST(FreeSurfaceGeometrySnapshot,
+     RejectsCompensatingPerPhaseMomentDefects)
+{
+    constexpr int interface_marker = 122;
+    const SingleQuadBoundaryMesh mesh;
+    const auto source = verticalInterfaceWithVolumes(interface_marker);
+    interfaces::LevelSetInterfaceDomain defect(source.request());
+    for (auto fragment : source.fragments()) {
+        defect.addFragment(std::move(fragment));
+    }
+    for (auto region : source.volumeRegions()) {
+        ASSERT_EQ(region.quadrature_points.size(), 1u);
+        const FE::Real shifted_x =
+            region.side == FE::geometry::CutIntegrationSide::Negative
+                ? FE::Real{-0.25}
+                : FE::Real{0.25};
+        region.quadrature_points.front().point[0] = shifted_x;
+        region.quadrature_points.front().parent_coordinate[0] = shifted_x;
+        defect.addVolumeRegion(std::move(region));
+    }
+    EXPECT_THROW(
+        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+            std::move(defect),
+            {},
+            {},
+            mesh,
+            snapshotPolicyWithoutBoundary(),
+            verticalScalar(),
+            "compensating_phase_moment_defects"),
+        std::invalid_argument);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
+     RejectsInterfaceMomentDefectWithValidRootsAndMeasure)
+{
+    constexpr int interface_marker = 123;
+    const SingleQuadBoundaryMesh mesh;
+    const auto source = verticalInterfaceWithVolumes(interface_marker);
+    interfaces::LevelSetInterfaceDomain defect(source.request());
+    for (auto fragment : source.fragments()) {
+        for (auto& point : fragment.quadrature_points) {
+            point.point[1] += FE::Real{0.125};
+            point.parent_coordinate[1] += FE::Real{0.125};
+        }
+        defect.addFragment(std::move(fragment));
+    }
+    for (auto region : source.volumeRegions()) {
+        defect.addVolumeRegion(std::move(region));
+    }
+    EXPECT_THROW(
+        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+            std::move(defect),
+            {},
+            {},
+            mesh,
+            snapshotPolicyWithoutBoundary(),
+            verticalScalar(),
+            "interface_moment_defect"),
+        std::invalid_argument);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
      MaterializesFullCurvedCellRuleForMappingAndMomentValidation)
 {
     constexpr int interface_marker = 121;
@@ -1558,7 +1639,10 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_NEAR(snapshot->ledger().retained_negative_physical_volume,
                 rules.front()->physical_rule.physical_measure,
                 1.0e-14);
-    EXPECT_EQ(snapshot->ledger().validated_polynomial_moment_count, 6u);
+    EXPECT_EQ(snapshot->ledger().certified_rule_count, 1u);
+    EXPECT_EQ(snapshot->ledger().parent_cell_moment_certificate_count, 1u);
+    EXPECT_EQ(snapshot->ledger().validated_rule_polynomial_moment_count, 6u);
+    EXPECT_EQ(snapshot->ledger().validated_polynomial_moment_count, 12u);
     EXPECT_LE(snapshot->ledger().maximum_polynomial_moment_scaled_error,
               1.0);
 }
