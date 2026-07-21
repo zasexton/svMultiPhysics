@@ -9,8 +9,10 @@
 #include "Spaces/H1Space.h"
 #include "tinyxml2.h"
 
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -20,6 +22,36 @@ namespace {
 
 namespace fs = std::filesystem;
 namespace level_set = svmp::FE::level_set;
+
+class ScopedEnvironmentVariable {
+public:
+  ScopedEnvironmentVariable(const char* name, const char* value)
+      : name_(name)
+  {
+    if (const char* previous = std::getenv(name); previous != nullptr) {
+      previous_ = std::string(previous);
+    }
+    if (::setenv(name, value, 1) != 0) {
+      throw std::runtime_error("failed to set test environment variable");
+    }
+  }
+
+  ~ScopedEnvironmentVariable()
+  {
+    if (previous_.has_value()) {
+      (void)::setenv(name_.c_str(), previous_->c_str(), 1);
+    } else {
+      (void)::unsetenv(name_.c_str());
+    }
+  }
+
+  ScopedEnvironmentVariable(const ScopedEnvironmentVariable&) = delete;
+  ScopedEnvironmentVariable& operator=(const ScopedEnvironmentVariable&) = delete;
+
+private:
+  std::string name_;
+  std::optional<std::string> previous_;
+};
 
 std::unique_ptr<Parameters> parseParametersXml(const char* xml)
 {
@@ -127,7 +159,7 @@ TEST(LevelSetCutConfiguration, DefaultsUseLinearCornerPath)
   EXPECT_EQ(request.implicit_cut_fallback_policy,
             level_set::ImplicitCutFallbackPolicy::Fail);
   EXPECT_EQ(request.geometry_tangent_policy,
-            level_set::GeometryTangentPolicy::DifferentiatedQuadrature);
+            level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
   EXPECT_FALSE(request.quadrature_order.has_value());
   EXPECT_FALSE(request.interface_quadrature_order.has_value());
   EXPECT_FALSE(request.volume_quadrature_order.has_value());
@@ -139,9 +171,104 @@ TEST(LevelSetCutConfiguration, DefaultsUseLinearCornerPath)
   EXPECT_FALSE(request.allow_corner_linearized_geometry);
   EXPECT_FALSE(request.require_production_qualified_implicit_cut_backend);
   EXPECT_EQ(request.volume_retention,
-            application::core::ActiveCutVolumeRetention::ActiveOnly);
+            application::core::ActiveCutVolumeRetention::ActiveAndInactive);
   EXPECT_FALSE(application::core::hasHighOrderGeneratedInterfaceGeometry(
       requests));
+}
+
+TEST(LevelSetCutConfiguration,
+     EveryPhysicsUnfittedImplementationAliasBuildsTwoSidedCutRequest)
+{
+  for (const std::string_view implementation :
+       {"Unfitted", "UnfittedLevelSet", "LevelSet", "EmbeddedLevelSet"}) {
+    const auto xml = std::string(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>)xml") +
+                     std::string(implementation) + R"xml(</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml";
+    auto params = parseParametersXml(xml.c_str());
+    const auto requests = application::core::activeCutVolumeRequests(*params);
+    ASSERT_EQ(requests.size(), 1u) << implementation;
+    EXPECT_EQ(requests.front().origin,
+              application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary)
+        << implementation;
+    EXPECT_EQ(requests.front().volume_retention,
+              application::core::ActiveCutVolumeRetention::ActiveAndInactive)
+        << implementation;
+  }
+}
+
+TEST(LevelSetCutConfiguration,
+     EverySmallCutAggregationDisableAliasPermitsActiveOnlyRetention)
+{
+  for (const std::string_view parameter :
+       {"<Small_cut_aggregation>false</Small_cut_aggregation>",
+        "<SmallCutAggregation>false</SmallCutAggregation>",
+        "<Enable_small_cut_aggregation>false</Enable_small_cut_aggregation>",
+        "<EnableSmallCutAggregation>false</EnableSmallCutAggregation>"}) {
+    const auto xml = std::string(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+)xml") + std::string(parameter) + R"xml(
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml";
+
+    auto params = parseParametersXml(xml.c_str());
+    const auto requests = application::core::activeCutVolumeRequests(*params);
+    ASSERT_EQ(requests.size(), 1u) << parameter;
+    EXPECT_EQ(requests.front().volume_retention,
+              application::core::ActiveCutVolumeRetention::ActiveOnly)
+        << parameter;
+  }
+}
+
+TEST(LevelSetCutConfiguration,
+     ActiveOnlyRetentionOverrideRejectsEnabledSmallCutAggregation)
+{
+  const ScopedEnvironmentVariable force_retention(
+      "SVMP_CUT_RETENTION_FORCE", "active_only");
+  auto params = parseParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  try {
+    (void)application::core::activeCutVolumeRequests(*params);
+    FAIL() << "Expected incompatible retention/aggregation diagnostic";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find(
+                  "SVMP_CUT_RETENTION_FORCE=active_only is incompatible"),
+              std::string::npos);
+  }
 }
 
 TEST(LevelSetCutConfiguration, VelocityExtensionRetainsInactiveCutVolumeSide)
@@ -156,6 +283,7 @@ TEST(LevelSetCutConfiguration, VelocityExtensionRetainsInactiveCutVolumeSide)
       <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
       <Active_domain>LevelSetNegative</Active_domain>
       <Active_domain_method>CutVolume</Active_domain_method>
+      <Small_cut_aggregation>false</Small_cut_aggregation>
       <Enable_velocity_extension>true</Enable_velocity_extension>
       <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>
     </Add_BC>
@@ -167,6 +295,54 @@ TEST(LevelSetCutConfiguration, VelocityExtensionRetainsInactiveCutVolumeSide)
   ASSERT_EQ(requests.size(), 1u);
   EXPECT_EQ(requests.front().volume_retention,
             application::core::ActiveCutVolumeRetention::ActiveAndInactive);
+  EXPECT_EQ(requests.front().geometry_tangent_policy,
+            level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
+}
+
+TEST(LevelSetCutConfiguration,
+     VelocityExtensionRetentionMatchesPhysicsAliasesAndImplicitEnableRule)
+{
+  struct Case {
+    std::string_view parameters;
+    application::core::ActiveCutVolumeRetention expected;
+  };
+  const std::vector<Case> cases{
+      {"<Enable_velocity_extension>true</Enable_velocity_extension>",
+       application::core::ActiveCutVolumeRetention::ActiveAndInactive},
+      {"<Extend_velocity_to_inactive_domain>true</Extend_velocity_to_inactive_domain>",
+       application::core::ActiveCutVolumeRetention::ActiveAndInactive},
+      {"<Free_surface_velocity_extension>true</Free_surface_velocity_extension>",
+       application::core::ActiveCutVolumeRetention::ActiveAndInactive},
+      {"<Inactive_velocity_extension_diffusivity>2.0</Inactive_velocity_extension_diffusivity>",
+       application::core::ActiveCutVolumeRetention::ActiveAndInactive},
+      {"<Enable_velocity_extension>false</Enable_velocity_extension>"
+       "<Velocity_extension_diffusivity>2.0</Velocity_extension_diffusivity>",
+       application::core::ActiveCutVolumeRetention::ActiveOnly},
+  };
+
+  for (const auto& item : cases) {
+    const auto xml = std::string(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+      <Small_cut_aggregation>false</Small_cut_aggregation>
+)xml") + std::string(item.parameters) + R"xml(
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml";
+    auto params = parseParametersXml(xml.c_str());
+    const auto requests = application::core::activeCutVolumeRequests(*params);
+    ASSERT_EQ(requests.size(), 1u) << item.parameters;
+    EXPECT_EQ(requests.front().volume_retention, item.expected)
+        << item.parameters;
+  }
 }
 
 TEST(LevelSetCutConfiguration, ParsesEquationLevelNonFluidCutDomain)
@@ -204,6 +380,8 @@ TEST(LevelSetCutConfiguration, ParsesEquationLevelNonFluidCutDomain)
             level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
   EXPECT_EQ(request.geometry_tangent_policy,
             level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
+  EXPECT_EQ(request.volume_retention,
+            application::core::ActiveCutVolumeRetention::ActiveOnly);
 }
 
 TEST(LevelSetCutConfiguration, EquationLevelCutDomainValidationRequiresConsumer)
@@ -444,12 +622,15 @@ TEST(LevelSetCutConfiguration, ParsesActiveDomainAliasesAndOffTokens)
   const std::vector<Case> cases = {
       {"LevelSetNegative", true, application::core::LevelSetActiveSide::Negative},
       {"negative", true, application::core::LevelSetActiveSide::Negative},
+      {"negativeLevelSet", true, application::core::LevelSetActiveSide::Negative},
       {"phiNegative", true, application::core::LevelSetActiveSide::Negative},
       {"LevelSetPositive", true, application::core::LevelSetActiveSide::Positive},
       {"positive", true, application::core::LevelSetActiveSide::Positive},
+      {"positiveLevelSet", true, application::core::LevelSetActiveSide::Positive},
       {"phiPositive", true, application::core::LevelSetActiveSide::Positive},
       {"None", false, application::core::LevelSetActiveSide::Negative},
       {"off", false, application::core::LevelSetActiveSide::Negative},
+      {"disabled", false, application::core::LevelSetActiveSide::Negative},
       {"inactive", false, application::core::LevelSetActiveSide::Negative},
   };
 
@@ -614,7 +795,72 @@ TEST(LevelSetCutConfiguration, DeduplicatesEquationAndFreeSurfaceCutRequests)
             application::core::ActiveCutVolumeRequestOrigin::Equation);
   EXPECT_EQ(requests.front().equation_type, "fluid");
   EXPECT_EQ(requests.front().volume_retention,
-            application::core::ActiveCutVolumeRetention::ActiveOnly);
+            application::core::ActiveCutVolumeRetention::ActiveAndInactive);
+  EXPECT_EQ(requests.front().geometry_tangent_policy,
+            level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
+}
+
+TEST(LevelSetCutConfiguration,
+     DeduplicatesFreeSurfaceAndLaterEquationCutRequestsIndependentlyOfOrder)
+{
+  auto params = parseParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+    </Add_BC>
+  </Add_equation>
+  <Add_equation type="level_set">
+    <Enable_level_set_cut_domain>true</Enable_level_set_cut_domain>
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+    <Active_domain>LevelSetNegative</Active_domain>
+    <Active_domain_method>CutVolume</Active_domain_method>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  const auto requests = application::core::activeCutVolumeRequests(*params);
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_EQ(requests.front().origin,
+            application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary);
+  EXPECT_EQ(requests.front().volume_retention,
+            application::core::ActiveCutVolumeRetention::ActiveAndInactive);
+  EXPECT_EQ(requests.front().geometry_tangent_policy,
+            level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
+}
+
+TEST(LevelSetCutConfiguration,
+     RejectsExplicitEquationAndFreeSurfaceTangentPolicyConflict)
+{
+  auto params = parseParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Enable_level_set_cut_domain>true</Enable_level_set_cut_domain>
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+    <Active_domain>LevelSetNegative</Active_domain>
+    <Active_domain_method>CutVolume</Active_domain_method>
+    <Geometry_tangent_policy>DifferentiatedQuadrature</Geometry_tangent_policy>
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  EXPECT_THROW((void)application::core::activeCutVolumeRequests(*params),
+               std::runtime_error);
 }
 
 TEST(LevelSetCutConfiguration, DeduplicatedRequestMergesVelocityExtensionRetention)
@@ -803,6 +1049,29 @@ TEST(LevelSetCutConfiguration, ActiveCutRequestPolicyKeyTracksBackendOptions)
 
 TEST(LevelSetCutConfiguration, IgnoresSmoothedIndicatorRequests)
 {
+  for (const std::string_view method :
+       {"SmoothedIndicator", "SmoothIndicator", "Indicator"}) {
+    const auto xml = std::string(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>)xml") + std::string(method) + R"xml(</Active_domain_method>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml";
+
+    auto params = parseParametersXml(xml.c_str());
+    EXPECT_TRUE(application::core::activeCutVolumeRequests(*params).empty())
+        << method;
+  }
+}
+
+TEST(LevelSetCutConfiguration, RejectsUnknownActiveDomainMethod)
+{
   auto params = parseParametersXml(R"xml(
 <svMultiPhysicsFile>
   <Add_equation type="fluid">
@@ -810,13 +1079,14 @@ TEST(LevelSetCutConfiguration, IgnoresSmoothedIndicatorRequests)
       <Type>Free_surface</Type>
       <Implementation>UnfittedLevelSet</Implementation>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>SmoothedIndicator</Active_domain_method>
+      <Active_domain_method>not-a-method</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
 
-  EXPECT_TRUE(application::core::activeCutVolumeRequests(*params).empty());
+  EXPECT_THROW((void)application::core::activeCutVolumeRequests(*params),
+               std::runtime_error);
 }
 
 TEST(LevelSetCutConfiguration, TrackedProductionFixturesStayOnLinearPath)

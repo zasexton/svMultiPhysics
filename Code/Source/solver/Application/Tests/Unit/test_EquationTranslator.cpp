@@ -332,6 +332,7 @@ TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
     <Volume_quadrature_order>2</Volume_quadrature_order>
     <Active_domain>LevelSetNegative</Active_domain>
     <Active_domain_method>CutVolume</Active_domain_method>
+    <Surface_tension_form>SurfaceStress</Surface_tension_form>
     <Active_domain_smoothing_width>0.02</Active_domain_smoothing_width>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
   </Add_BC>
@@ -361,8 +362,68 @@ TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
   EXPECT_EQ(bc.params.at("Volume_quadrature_order").value, "2");
   EXPECT_EQ(bc.params.at("Active_domain").value, "LevelSetNegative");
   EXPECT_EQ(bc.params.at("Active_domain_method").value, "CutVolume");
+  EXPECT_EQ(bc.params.at("Surface_tension_form").value, "SurfaceStress");
   EXPECT_EQ(bc.params.at("Active_domain_smoothing_width").value, "0.02");
   EXPECT_EQ(bc.params.at("Enable_cut_cell_stabilization").value, "true");
+}
+
+TEST(EquationTranslatorFreeSurface, BuildInputResolvesUnfittedContactLineWallFaces)
+{
+  auto mesh = buildTranslatorMesh();
+  mesh->base().register_label("wall_left", 11);
+  mesh->base().register_label("wall_right", 12);
+
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="fluid">
+  <Add_BC name="free_surface">
+    <Type>Free_surface</Type>
+    <Implementation>UnfittedLevelSet</Implementation>
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Active_domain>LevelSetNegative</Active_domain>
+    <Active_domain_method>CutVolume</Active_domain_method>
+    <Contact_line_model>PrescribedContactAngle</Contact_line_model>
+    <Contact_angle_degrees>90.0</Contact_angle_degrees>
+    <Contact_line_wall_faces>wall_left; wall_right</Contact_line_wall_faces>
+    <Contact_line_wall_normals>-1.0 0.0 0.0; 1.0 0.0 0.0</Contact_line_wall_normals>
+  </Add_BC>
+</Add_equation>
+)xml");
+
+  const auto input = application::translators::EquationTranslator::buildInput(*params, singleMeshMap(mesh));
+
+  ASSERT_EQ(input.boundary_conditions.size(), 1u);
+  const auto& bc = input.boundary_conditions.front();
+  ASSERT_TRUE(bc.params.at("Contact_line_wall_markers").defined);
+  EXPECT_EQ(bc.params.at("Contact_line_wall_markers").value, "11;12");
+  EXPECT_EQ(bc.params.at("Contact_line_wall_normals").value,
+            "-1.0 0.0 0.0; 1.0 0.0 0.0");
+}
+
+TEST(EquationTranslatorFreeSurface, BuildInputRejectsContactLineFacesAndMarkersTogether)
+{
+  auto mesh = buildTranslatorMesh();
+  mesh->base().register_label("wall_left", 11);
+
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="fluid">
+  <Add_BC name="free_surface">
+    <Type>Free_surface</Type>
+    <Implementation>UnfittedLevelSet</Implementation>
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Active_domain>LevelSetNegative</Active_domain>
+    <Active_domain_method>CutVolume</Active_domain_method>
+    <Contact_line_model>PrescribedContactAngle</Contact_line_model>
+    <Contact_angle_degrees>90.0</Contact_angle_degrees>
+    <Contact_line_wall_faces>wall_left</Contact_line_wall_faces>
+    <Contact_line_wall_markers>11</Contact_line_wall_markers>
+    <Contact_line_wall_normals>-1.0 0.0 0.0</Contact_line_wall_normals>
+  </Add_BC>
+</Add_equation>
+)xml");
+
+  EXPECT_THROW((void)application::translators::EquationTranslator::buildInput(
+                   *params, singleMeshMap(mesh)),
+               std::runtime_error);
 }
 
 TEST(EquationTranslatorNodePressureConstraints, BuildInputRejectsUnsupportedIdType)

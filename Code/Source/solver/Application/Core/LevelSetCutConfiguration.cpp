@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <map>
@@ -14,6 +15,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace application {
@@ -185,8 +187,9 @@ bool activeCutDomainIsExplicitlyEnabled(
          token == "implicitcut" || token == "generatedinterface";
 }
 
-bool requestMatches(const ActiveCutVolumeRequest& a,
-                    const ActiveCutVolumeRequest& b) noexcept
+bool requestMatchesExceptGeometryTangentPolicy(
+    const ActiveCutVolumeRequest& a,
+    const ActiveCutVolumeRequest& b) noexcept
 {
   return a.level_set_field_name == b.level_set_field_name &&
          a.domain_id == b.domain_id &&
@@ -198,7 +201,6 @@ bool requestMatches(const ActiveCutVolumeRequest& a,
          a.geometry_mode == b.geometry_mode &&
          a.implicit_cut_backend == b.implicit_cut_backend &&
          a.implicit_cut_fallback_policy == b.implicit_cut_fallback_policy &&
-         a.geometry_tangent_policy == b.geometry_tangent_policy &&
          a.implicit_cut_root_tolerance == b.implicit_cut_root_tolerance &&
          a.implicit_cut_root_coordinate_tolerance ==
              b.implicit_cut_root_coordinate_tolerance &&
@@ -215,6 +217,13 @@ bool requestMatches(const ActiveCutVolumeRequest& a,
              b.require_production_qualified_implicit_cut_backend;
 }
 
+bool requestMatches(const ActiveCutVolumeRequest& a,
+                    const ActiveCutVolumeRequest& b) noexcept
+{
+  return requestMatchesExceptGeometryTangentPolicy(a, b) &&
+         a.geometry_tangent_policy == b.geometry_tangent_policy;
+}
+
 void mergeRequestRetention(ActiveCutVolumeRequest& target,
                            const ActiveCutVolumeRequest& source) noexcept
 {
@@ -223,6 +232,9 @@ void mergeRequestRetention(ActiveCutVolumeRequest& target,
     target.volume_retention =
         ActiveCutVolumeRetention::ActiveAndInactive;
   }
+  target.geometry_tangent_policy_explicit =
+      target.geometry_tangent_policy_explicit ||
+      source.geometry_tangent_policy_explicit;
 }
 
 void appendUniqueRequest(std::vector<ActiveCutVolumeRequest>& requests,
@@ -239,12 +251,71 @@ void appendUniqueRequest(std::vector<ActiveCutVolumeRequest>& requests,
     mergeRequestRetention(*existing, request);
     return;
   }
+
+  // A fluid equation-level cut declaration and its unfitted free-surface BC
+  // commonly name the same generated domain. The generic equation default is
+  // differentiated LinearCorner geometry, whereas the SurfaceStress default
+  // must be refreshed-frozen because complete shape tangents are unsupported.
+  // Resolve that one default/default (or default/explicit-frozen) pairing to
+  // the free-surface policy. Never silently override an explicit equation
+  // policy or two genuinely conflicting declarations.
+  const auto same_domain_different_tangent =
+      std::find_if(
+          requests.begin(),
+          requests.end(),
+          [&](const ActiveCutVolumeRequest& candidate) {
+            return requestMatchesExceptGeometryTangentPolicy(
+                       candidate, request) &&
+                   candidate.geometry_tangent_policy !=
+                       request.geometry_tangent_policy;
+          });
+  if (same_domain_different_tangent != requests.end()) {
+    using Policy = svmp::FE::level_set::GeometryTangentPolicy;
+    const auto is_implicit_equation_differentiated =
+        [](const ActiveCutVolumeRequest& candidate) {
+          return candidate.origin ==
+                     ActiveCutVolumeRequestOrigin::Equation &&
+                 !candidate.geometry_tangent_policy_explicit &&
+                 candidate.geometry_tangent_policy ==
+                     Policy::DifferentiatedQuadrature;
+        };
+    const auto is_free_surface_frozen =
+        [](const ActiveCutVolumeRequest& candidate) {
+          return candidate.origin ==
+                     ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary &&
+                 candidate.geometry_tangent_policy ==
+                     Policy::RefreshedFrozenQuadrature;
+        };
+    const bool existing_equation_then_free_surface =
+        is_implicit_equation_differentiated(
+            *same_domain_different_tangent) &&
+        is_free_surface_frozen(request);
+    const bool existing_free_surface_then_equation =
+        is_free_surface_frozen(*same_domain_different_tangent) &&
+        is_implicit_equation_differentiated(request);
+    if (existing_equation_then_free_surface ||
+        existing_free_surface_then_equation) {
+      if (existing_equation_then_free_surface) {
+        same_domain_different_tangent->geometry_tangent_policy =
+            request.geometry_tangent_policy;
+        same_domain_different_tangent->geometry_tangent_policy_explicit =
+            request.geometry_tangent_policy_explicit;
+      }
+      mergeRequestRetention(*same_domain_different_tangent, request);
+      return;
+    }
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conflicting Geometry_tangent_policy "
+        "declarations target the same generated level-set domain. Use one "
+        "resolved policy for the equation cut domain and free-surface BC.");
+  }
   requests.push_back(std::move(request));
 }
 
 std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
     const std::map<std::string, std::string>& cut_params,
-    bool require_active_domain)
+    bool require_active_domain,
+    bool default_linear_corner_to_differentiated)
 {
   const auto active_domain =
       firstDefinedParameter(cut_params,
@@ -260,8 +331,9 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
     return std::nullopt;
   }
   const auto active_token = normalizedToken(*active_domain);
-  if (active_token == "none" || active_token == "off" ||
-      active_token == "inactive") {
+  if (active_token.empty() || active_token == "none" ||
+      active_token == "off" ||
+      active_token == "disabled" || active_token == "inactive") {
     return std::nullopt;
   }
 
@@ -271,17 +343,32 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
                              "ActiveDomainMethod",
                              "Free_surface_active_domain_method",
                              "FreeSurfaceActiveDomainMethod"});
-  if (method && normalizedToken(*method) == "smoothedindicator") {
-    return std::nullopt;
+  if (method.has_value()) {
+    const auto method_token = normalizedToken(*method);
+    if (method_token == "smoothedindicator" ||
+        method_token == "smoothindicator" ||
+        method_token == "indicator") {
+      return std::nullopt;
+    }
+    if (!method_token.empty() && method_token != "cutvolume" &&
+        method_token != "cutcellvolume" &&
+        method_token != "exactcutvolume") {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Unknown Active_domain_method '" +
+          trimCopy(*method) +
+          "'. Supported values: CutVolume or SmoothedIndicator.");
+    }
   }
 
   ActiveCutVolumeRequest request{};
   if (active_token == "levelsetnegative" ||
       active_token == "negative" ||
+      active_token == "negativelevelset" ||
       active_token == "phinegative") {
     request.active_side = LevelSetActiveSide::Negative;
   } else if (active_token == "levelsetpositive" ||
              active_token == "positive" ||
+             active_token == "positivelevelset" ||
              active_token == "phipositive") {
     request.active_side = LevelSetActiveSide::Positive;
   } else {
@@ -393,6 +480,7 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
   if (tangent_policy.has_value()) {
     request.geometry_tangent_policy =
         parseGeometryTangentPolicy(*tangent_policy);
+    request.geometry_tangent_policy_explicit = true;
   }
   if (const auto root_tolerance =
           firstDefinedDoubleParameter(
@@ -456,18 +544,50 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
                "AllowCornerLinearizedGeometry"})) {
     request.allow_corner_linearized_geometry = *allow_corner_linearized;
   }
-  if (const auto velocity_extension =
-          firstDefinedBoolParameter(
-              cut_params,
-              {"Enable_velocity_extension",
-               "EnableVelocityExtension",
-               "Velocity_extension",
-               "VelocityExtension",
-               "Free_surface_velocity_extension",
-               "FreeSurfaceVelocityExtension"})) {
-    if (*velocity_extension) {
-      request.volume_retention =
-          ActiveCutVolumeRetention::ActiveAndInactive;
+  // Keep the aliases and diffusivity-implies-enable rule synchronized with
+  // NavierStokesRegister.cpp. The Application must retain the inactive-side
+  // cut rules whenever Physics will construct the extension problem.
+  const auto velocity_extension =
+      firstDefinedBoolParameter(
+          cut_params,
+          {"Enable_velocity_extension",
+           "EnableVelocityExtension",
+           "Velocity_extension",
+           "VelocityExtension",
+           "Extend_velocity_to_inactive_domain",
+           "ExtendVelocityToInactiveDomain",
+           "Free_surface_velocity_extension",
+           "FreeSurfaceVelocityExtension"});
+  const bool velocity_extension_explicitly_disabled =
+      velocity_extension.has_value() && !*velocity_extension;
+  bool velocity_extension_enabled =
+      velocity_extension.value_or(false);
+  if (firstDefinedDoubleParameter(
+          cut_params,
+          {"Velocity_extension_diffusivity",
+           "VelocityExtensionDiffusivity",
+           "Inactive_velocity_extension_diffusivity",
+           "InactiveVelocityExtensionDiffusivity"})
+          .has_value() &&
+      !velocity_extension_explicitly_disabled) {
+    velocity_extension_enabled = true;
+  }
+  if (velocity_extension_enabled) {
+    request.volume_retention =
+        ActiveCutVolumeRetention::ActiveAndInactive;
+  }
+  // Retention A/B experiment knob: request the retained generated-volume
+  // sides regardless of the velocity-extension-driven default. Inactive-side
+  // rules are metadata consumers' concern (aggregation classification,
+  // diagnostics). The free-surface post-processing below rejects the
+  // active-only request when small-cut aggregation is enabled, because that
+  // consumer requires a complete two-sided cell classification.
+  if (const char* force = std::getenv("SVMP_CUT_RETENTION_FORCE")) {
+    const std::string_view mode(force);
+    if (mode == "active_and_inactive") {
+      request.volume_retention = ActiveCutVolumeRetention::ActiveAndInactive;
+    } else if (mode == "active_only") {
+      request.volume_retention = ActiveCutVolumeRetention::ActiveOnly;
     }
   }
   if (const auto required_qualification =
@@ -494,7 +614,8 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
           *required_qualification + "'. Supported values: ProductionQualified or none.");
     }
   }
-  if (!tangent_policy.has_value() &&
+  if (default_linear_corner_to_differentiated &&
+      !tangent_policy.has_value() &&
       request.geometry_mode ==
           svmp::FE::level_set::GeneratedInterfaceGeometryMode::LinearCorner &&
       request.implicit_cut_backend ==
@@ -615,7 +736,10 @@ activeCutVolumeRequests(const EquationParameters& equation)
   const auto eq_params = mutable_equation.get_parameter_list();
   if (activeCutDomainIsExplicitlyEnabled(eq_params)) {
     const auto request =
-        activeCutVolumeRequestFromParameters(eq_params, true);
+        activeCutVolumeRequestFromParameters(
+            eq_params,
+            true,
+            /*default_linear_corner_to_differentiated=*/true);
     if (request.has_value()) {
       auto explicit_request = *request;
       explicit_request.origin = ActiveCutVolumeRequestOrigin::Equation;
@@ -642,14 +766,59 @@ activeCutVolumeRequests(const EquationParameters& equation)
         firstDefinedParameter(bc_params, {"Implementation",
                                          "Free_surface_implementation",
                                          "FreeSurfaceImplementation"});
-    if (!implementation ||
-        normalizedToken(*implementation) != "unfittedlevelset") {
+    const auto implementation_token =
+        implementation.has_value() ? normalizedToken(*implementation)
+                                   : std::string{};
+    // Keep the accepted unfitted aliases synchronized with
+    // NavierStokesRegister.cpp::parse_free_surface_implementation. Otherwise
+    // Physics can install an active-domain/aggregation consumer for a BC that
+    // Application silently omits from generated cut-context construction.
+    if (implementation_token != "unfitted" &&
+        implementation_token != "unfittedlevelset" &&
+        implementation_token != "levelset" &&
+        implementation_token != "embeddedlevelset") {
       continue;
     }
     const auto request =
-        activeCutVolumeRequestFromParameters(bc_params, false);
+        activeCutVolumeRequestFromParameters(
+            bc_params,
+            false,
+            // SurfaceStress is the unfitted Navier--Stokes default and its
+            // complete differentiated geometry tangent is not implemented.
+            // Keep the shared Physics/Application default refreshed-frozen;
+            // an explicit differentiated request is preserved and rejected by
+            // Physics when a SurfaceStress residual is active.
+            /*default_linear_corner_to_differentiated=*/false);
     if (request.has_value()) {
       auto free_surface_request = *request;
+      // IncompressibleNavierStokesVMSModule enables small-cut aggregation by
+      // default for unfitted free surfaces.  Aggregation must classify the
+      // complete cell graph (full active, cut, and full inactive cells) in
+      // order to prove that every small-cut candidate reaches a valid
+      // full-active root.  Retaining only the active cut-volume side makes
+      // that proof impossible and can hide roots across an inactive/cut band.
+      // Keep these aliases and the default-true behavior synchronized with
+      // NavierStokesRegister.cpp and FreeSurfaceOptions.
+      const bool small_cut_aggregation =
+          firstDefinedBoolParameter(
+              bc_params,
+              {"Small_cut_aggregation", "SmallCutAggregation",
+               "Enable_small_cut_aggregation", "EnableSmallCutAggregation"})
+              .value_or(true);
+      if (small_cut_aggregation) {
+        if (const char* force = std::getenv("SVMP_CUT_RETENTION_FORCE");
+            force != nullptr &&
+            std::string_view(force) == "active_only") {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] "
+              "SVMP_CUT_RETENTION_FORCE=active_only is incompatible with "
+              "enabled small-cut aggregation. Disable small-cut aggregation "
+              "for the retention A/B experiment, or retain both generated "
+              "cut-volume sides.");
+        }
+        free_surface_request.volume_retention =
+            ActiveCutVolumeRetention::ActiveAndInactive;
+      }
       free_surface_request.origin =
           ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary;
       free_surface_request.equation_type = trimCopy(equation.type.value());

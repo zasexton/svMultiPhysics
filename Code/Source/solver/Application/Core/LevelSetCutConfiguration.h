@@ -46,6 +46,10 @@ struct ActiveCutVolumeRequest {
       svmp::FE::level_set::ImplicitCutFallbackPolicy::Fail};
   svmp::FE::level_set::GeometryTangentPolicy geometry_tangent_policy{
       svmp::FE::level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature};
+  // Parsing provenance, used only to resolve or reject two declarations of
+  // the same generated domain. It is deliberately not part of the generated
+  // cut policy key: equal resolved policies have equal numerical semantics.
+  bool geometry_tangent_policy_explicit{false};
   double implicit_cut_root_tolerance{1.0e-10};
   double implicit_cut_root_coordinate_tolerance{1.0e-12};
   int implicit_cut_root_max_iterations{48};
