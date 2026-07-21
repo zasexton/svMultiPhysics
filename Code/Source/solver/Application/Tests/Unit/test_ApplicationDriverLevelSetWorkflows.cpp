@@ -1181,7 +1181,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     ConsumedContactMarkerRejectsUnsupportedHighOrderFragments)
+     ConsumedContactMarkerAcceptsCurvedHighOrderFragments)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -1228,9 +1228,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
   std::vector<svmp::FE::Real> phi_vertex_values(mesh->n_vertices(), 0.0);
   for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
     const auto point = workflowVertexPoint(*mesh, vertex);
-    // The interface crosses a curved-geometry cell whose contact trace is not
-    // supported by the linear boundary-intersection builder.  A consumed
-    // marker must reject that skipped fragment before assembly.
+    // The interface crosses curved parent geometry.  The generated contact
+    // trace must remain available to a registered consumer without falling
+    // back to a skipped fragment.
     phi_vertex_values[vertex] = point[0] - 0.45;
   }
   const auto coefficients = projectWorkflowVertexValues(
@@ -1265,25 +1265,27 @@ TEST(ApplicationDriverLevelSetWorkflows,
 )xml");
 
   svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
-  try {
-    (void)refreshActiveCutIntegrationContextFromSolution(
-        sim,
-        *params,
-        std::span<const svmp::FE::Real>(solution.data(), solution.size()),
-        lifecycle,
-        "application-driver-degenerate-contact-test");
-    FAIL() << "Expected a consumed contact marker to reject skipped fragments";
-  } catch (const std::runtime_error& error) {
-    const std::string message = error.what();
-    EXPECT_NE(message.find("rejected a degenerate contact fragment"),
-              std::string::npos)
-        << message;
-    EXPECT_NE(message.find("contact_marker_consumed=true"),
-              std::string::npos)
-        << message;
-    EXPECT_NE(message.find("skipped_fragments="), std::string::npos)
-        << message;
-  }
+  ASSERT_NO_THROW((void)refreshActiveCutIntegrationContextFromSolution(
+      sim,
+      *params,
+      std::span<const svmp::FE::Real>(solution.data(), solution.size()),
+      lifecycle,
+      "application-driver-curved-contact-test"));
+
+  const auto* context = sim.fe_system->cutIntegrationContext();
+  ASSERT_NE(context, nullptr);
+  ASSERT_TRUE(context->hasFreeSurfaceGeometrySnapshotForMarker(contact_marker));
+  ASSERT_EQ(context->freeSurfaceGeometrySnapshots().size(), 1u);
+  const auto& snapshot = context->freeSurfaceGeometrySnapshots().front();
+  ASSERT_NE(snapshot, nullptr);
+  ASSERT_EQ(snapshot->contactDomains().size(), 1u);
+  EXPECT_EQ(snapshot->contactDomains().front().marker(), contact_marker);
+  const auto summary = snapshot->contactDomains().front().summary();
+  EXPECT_EQ(summary.fragment_count, 2u);
+  EXPECT_EQ(summary.active_fragment_count, 2u);
+  EXPECT_EQ(summary.skipped_fragment_count, 0u);
+  EXPECT_EQ(snapshot->ledger().orphan_contact_fragment_count, 0u);
+  EXPECT_EQ(snapshot->ledger().stale_revision_count, 0u);
 #endif
 }
 
