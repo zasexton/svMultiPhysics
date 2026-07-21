@@ -10643,7 +10643,8 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         const CutVolumeBasisCacheEntry* cut_volume_basis_cache_entry = nullptr;
         const CutVolumeGeometryCacheEntry* cut_volume_geometry_cache_entry = nullptr;
         bool active_rule_is_partial_cut = false;
-        if (isFullSideVolumeRule(rule)) {
+        if (isFullSideVolumeRule(rule) &&
+            rule.provenance.free_surface_snapshot_revision_key == 0u) {
             const auto type_key = static_cast<std::size_t>(cell_type);
             if (type_key < full_cell_rule_cache.size()) {
                 auto& cached_rule = full_cell_rule_cache[type_key];
@@ -11248,7 +11249,9 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
         std::optional<CutVolumeQuadratureRule> cut_rule;
         const quadrature::QuadratureRule* active_rule = nullptr;
         const CutVolumeGeometryCacheEntry* cut_volume_geometry_cache_entry = nullptr;
-        const bool active_rule_is_full_side = isFullSideVolumeRule(rule);
+        const bool active_rule_is_full_side =
+            isFullSideVolumeRule(rule) &&
+            rule.provenance.free_surface_snapshot_revision_key == 0u;
         bool active_rule_is_partial_cut = false;
         if (active_rule_is_full_side) {
             const auto type_key = static_cast<std::size_t>(cell_type);

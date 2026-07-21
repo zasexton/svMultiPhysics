@@ -1,6 +1,8 @@
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 
 #include "Assembly/Assembler.h"
+#include "Quadrature/QuadratureFactory.h"
+#include "Quadrature/ReferenceMonomialIntegrals.h"
 
 #include <algorithm>
 #include <cmath>
@@ -689,6 +691,50 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
              std::vector<std::uint64_t> source_ids = {},
              std::int64_t component_id = -1)
 {
+    if (rule.kind == geometry::CutQuadratureKind::Volume &&
+        rule.full_cell_equivalent) {
+        if (rule.frame != geometry::CutGeometryFrame::Reference) {
+            throw std::invalid_argument(
+                "authoritative full-cell free-surface rules require a reference-frame representation");
+        }
+        const auto parent =
+            static_cast<GlobalIndex>(rule.provenance.parent_entity);
+        if (parent < 0 || parent >= mesh.numCells()) {
+            throw std::invalid_argument(
+                "authoritative full-cell free-surface rule has an invalid parent cell");
+        }
+        const int geometry_order =
+            std::max(1, mesh.getCellGeometryOrder(parent));
+        const int materialization_order = std::max(
+            rule.exact_polynomial_order,
+            mesh.dimension() * geometry_order);
+        const auto full_rule = quadrature::QuadratureFactory::create(
+            mesh.getCellType(parent), materialization_order);
+        rule.points.clear();
+        rule.points.reserve(full_rule->num_points());
+        Real reference_measure{0.0};
+        for (std::size_t q = 0; q < full_rule->num_points(); ++q) {
+            const auto point = full_rule->point(q);
+            const Real weight = full_rule->weight(q);
+            geometry::CutQuadraturePoint cut_point;
+            cut_point.point = {{point[0], point[1], point[2]}};
+            cut_point.parent_coordinate = cut_point.point;
+            cut_point.weight = weight;
+            cut_point.reference_measure_factor = weight;
+            rule.points.push_back(cut_point);
+            reference_measure += weight;
+        }
+        const Real tolerance =
+            Real{512.0} * std::numeric_limits<Real>::epsilon() *
+                std::max(Real{1.0}, std::abs(rule.parent_measure)) +
+            policy.tolerance;
+        if (std::abs(reference_measure - rule.parent_measure) > tolerance ||
+            std::abs(rule.measure - rule.parent_measure) > tolerance ||
+            std::abs(rule.volume_fraction - Real{1.0}) > tolerance) {
+            throw std::invalid_argument(
+                "authoritative full-cell free-surface rule does not match its parent reference measure");
+        }
+    }
     completeAndValidateRuleIdentity(rule, mesh, ledger);
     FreeSurfaceGeometryRuleRecord record;
     record.role = roleFor(rule, role);
@@ -944,8 +990,71 @@ void accumulateLedger(const FreeSurfaceGeometryRuleRecord& record,
     }
 }
 
+[[nodiscard]] Real integerPower(Real value, int exponent) noexcept
+{
+    Real result{1.0};
+    for (int i = 0; i < exponent; ++i) {
+        result *= value;
+    }
+    return result;
+}
+
+[[nodiscard]] Real factorial(int value) noexcept
+{
+    Real result{1.0};
+    for (int i = 2; i <= value; ++i) {
+        result *= static_cast<Real>(i);
+    }
+    return result;
+}
+
+[[nodiscard]] Real referenceCellMonomialMoment(ElementType type,
+                                               int px,
+                                               int py,
+                                               int pz)
+{
+    using namespace quadrature::reference_integrals;
+    switch (type) {
+    case ElementType::Line2:
+    case ElementType::Line3:
+        return integral_monomial_1d(px);
+    case ElementType::Quad4:
+    case ElementType::Quad8:
+    case ElementType::Quad9:
+        return integral_monomial_1d(px) * integral_monomial_1d(py);
+    case ElementType::Hex8:
+    case ElementType::Hex20:
+    case ElementType::Hex27:
+        return integral_monomial_1d(px) * integral_monomial_1d(py) *
+               integral_monomial_1d(pz);
+    case ElementType::Triangle3:
+    case ElementType::Triangle6:
+        return integral_triangle_monomial(px, py);
+    case ElementType::Tetra4:
+    case ElementType::Tetra10:
+        return integral_tetra_monomial(px, py, pz);
+    case ElementType::Wedge6:
+    case ElementType::Wedge15:
+    case ElementType::Wedge18:
+        return integral_wedge_monomial(px, py, pz);
+    case ElementType::Pyramid5:
+    case ElementType::Pyramid13:
+    case ElementType::Pyramid14:
+        if ((px % 2) != 0 || (py % 2) != 0) {
+            return Real{0.0};
+        }
+        return Real{4.0} * factorial(pz) * factorial(px + py + 2) /
+               (static_cast<Real>((px + 1) * (py + 1)) *
+                factorial(px + py + pz + 3));
+    default:
+        throw std::invalid_argument(
+            "free-surface volume moment validation does not support the parent cell type");
+    }
+}
+
 void validateVolumePartition(
     const std::vector<FreeSurfaceGeometryRuleRecord>& records,
+    const assembly::IMeshAccess& mesh,
     const FreeSurfaceGeometrySnapshotPolicy& policy,
     FreeSurfaceGeometryValidationLedger& ledger)
 {
@@ -953,6 +1062,9 @@ void validateVolumePartition(
         Real negative{0.0};
         Real positive{0.0};
         Real parent{0.0};
+        GlobalIndex local_parent{INVALID_GLOBAL_INDEX};
+        int common_exact_order{std::numeric_limits<int>::max()};
+        std::vector<const FreeSurfaceGeometryRuleRecord*> rules{};
     };
     std::map<GlobalIndex, Measures> by_cell;
     for (const auto& record : records) {
@@ -961,6 +1073,18 @@ void validateVolumePartition(
         }
         auto& measures =
             by_cell[record.reference_rule.provenance.parent_entity_global_id];
+        const auto local_parent = static_cast<GlobalIndex>(
+            record.reference_rule.provenance.parent_entity);
+        if (measures.local_parent != INVALID_GLOBAL_INDEX &&
+            measures.local_parent != local_parent) {
+            throw std::invalid_argument(
+                "free-surface volume partition aliases one global cell to multiple local parents");
+        }
+        measures.local_parent = local_parent;
+        measures.common_exact_order = std::min(
+            measures.common_exact_order,
+            record.reference_rule.exact_polynomial_order);
+        measures.rules.push_back(&record);
         if (record.role == FreeSurfaceGeometryRuleRole::NegativeVolume) {
             measures.negative += record.reference_rule.measure;
         } else {
@@ -982,6 +1106,70 @@ void validateVolumePartition(
         if (error > tolerance) {
             throw std::invalid_argument(
                 "positive and negative cut volumes do not partition their parent cell");
+        }
+
+        if (measures.local_parent < 0 ||
+            measures.local_parent >= mesh.numCells() ||
+            measures.common_exact_order < 0) {
+            throw std::invalid_argument(
+                "free-surface volume partition has incomplete polynomial-moment provenance");
+        }
+        const int dimension = mesh.dimension();
+        const auto type = mesh.getCellType(measures.local_parent);
+        for (int total_order = 0;
+             total_order <= measures.common_exact_order;
+             ++total_order) {
+            for (int px = 0; px <= total_order; ++px) {
+                const int maximum_py = dimension >= 2
+                                           ? total_order - px
+                                           : 0;
+                for (int py = 0; py <= maximum_py; ++py) {
+                    const int pz = dimension >= 3
+                                       ? total_order - px - py
+                                       : 0;
+                    if (dimension < 3 && px + py != total_order) {
+                        continue;
+                    }
+                    Real actual{0.0};
+                    Real absolute_sum{0.0};
+                    for (const auto* record : measures.rules) {
+                        const auto& rule = record->reference_rule;
+                        for (std::size_t q = 0; q < rule.points.size(); ++q) {
+                            const auto& point =
+                                record->physical_rule.points[q].reference_point;
+                            const Real integrand =
+                                integerPower(point[0], px) *
+                                integerPower(point[1], py) *
+                                integerPower(point[2], pz);
+                            const Real contribution =
+                                rule.points[q].weight * integrand;
+                            actual += contribution;
+                            absolute_sum += std::abs(contribution);
+                        }
+                    }
+                    const Real expected =
+                        referenceCellMonomialMoment(type, px, py, pz);
+                    const Real moment_error = std::abs(actual - expected);
+                    const Real scale = std::max(
+                        {Real{1.0}, std::abs(expected), absolute_sum});
+                    const Real moment_tolerance =
+                        Real{4096.0} *
+                            std::numeric_limits<Real>::epsilon() * scale +
+                        policy.tolerance;
+                    ++ledger.validated_polynomial_moment_count;
+                    ledger.maximum_polynomial_moment_error = std::max(
+                        ledger.maximum_polynomial_moment_error,
+                        moment_error);
+                    ledger.maximum_polynomial_moment_scaled_error = std::max(
+                        ledger.maximum_polynomial_moment_scaled_error,
+                        moment_error / moment_tolerance);
+                    if (moment_error > moment_tolerance) {
+                        ++ledger.false_achieved_order_count;
+                        throw std::invalid_argument(
+                            "positive and negative cut rules do not reproduce a parent-cell polynomial moment through their common claimed order");
+                    }
+                }
+            }
         }
     }
 }
@@ -1986,7 +2174,7 @@ buildFreeSurfaceGeometrySnapshot(
                      ledger);
         accumulateLedger(record, ledger);
     }
-    validateVolumePartition(records, policy, ledger);
+    validateVolumePartition(records, mesh, policy, ledger);
     const auto globally_owned_rule_digests = validateUniqueRuleOwnership(
         records, mesh, ownership_collective, ledger);
     canonicalizeDistributedRevision(

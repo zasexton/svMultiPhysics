@@ -9997,6 +9997,12 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << geometry_ledger.maximum_normal_angular_error
         << " max_constant_moment_error="
         << geometry_ledger.maximum_constant_moment_error
+        << " validated_polynomial_moments="
+        << geometry_ledger.validated_polynomial_moment_count
+        << " max_polynomial_moment_error="
+        << geometry_ledger.maximum_polynomial_moment_error
+        << " max_polynomial_moment_scaled_error="
+        << geometry_ledger.maximum_polynomial_moment_scaled_error
         << " max_volume_partition_error="
         << geometry_ledger.maximum_volume_partition_error
         << " max_boundary_partition_error="

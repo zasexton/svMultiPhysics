@@ -240,18 +240,22 @@ interfaces::LevelSetInterfaceDomain verticalInterfaceWithVolumes(
     int marker,
     FE::Real negative_point_x = -0.5,
     FE::Real negative_weight = 2.0,
-    int negative_achieved_order = 1)
+    int negative_achieved_order = 1,
+    FE::Real positive_point_x = 0.5)
 {
     auto domain = verticalInterface(marker);
     const auto add_volume = [&domain,
                              negative_point_x,
                              negative_weight,
-                             negative_achieved_order](
+                             negative_achieved_order,
+                             positive_point_x](
                                 FE::geometry::CutIntegrationSide side,
                                 FE::Real x,
                                 FE::LocalIndex local_index) {
         if (side == FE::geometry::CutIntegrationSide::Negative) {
             x = negative_point_x;
+        } else {
+            x = positive_point_x;
         }
         interfaces::CutInterfaceVolumeRegion region;
         region.parent_cell = 0;
@@ -360,6 +364,27 @@ interfaces::LevelSetInterfaceDomain verticalInterfaceWithTinyNegativeVolume(
                1.0 - negative_fraction,
                0.0,
                1u);
+    return domain;
+}
+
+interfaces::LevelSetInterfaceDomain fullNegativeCell(int marker)
+{
+    interfaces::LevelSetInterfaceDomain domain(interfaceRequest(marker));
+    interfaces::CutInterfaceVolumeRegion region;
+    region.parent_cell = 0;
+    region.local_region_index = 0u;
+    region.side = FE::geometry::CutIntegrationSide::Negative;
+    region.centroid = {{0.0, 0.0, 0.0}};
+    region.normal = {{1.0, 0.0, 0.0}};
+    region.parent_measure = 4.0;
+    region.measure = 4.0;
+    region.volume_fraction = 1.0;
+    region.min_level_set_value = -1.0;
+    region.max_level_set_value = -1.0;
+    region.topology_id = "full-negative-cell";
+    region.full_cell_equivalent = true;
+    region.achieved_quadrature_order = 2;
+    domain.addVolumeRegion(std::move(region));
     return domain;
 }
 
@@ -1464,6 +1489,80 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsIncorrectConstantMoment)
         std::invalid_argument);
 }
 
+TEST(FreeSurfaceGeometrySnapshot, RejectsIncorrectLinearPartitionMoment)
+{
+    constexpr int interface_marker = 120;
+    const SingleQuadBoundaryMesh mesh;
+    auto domain = verticalInterfaceWithVolumes(
+        interface_marker,
+        /*negative_point_x=*/-0.25);
+    EXPECT_THROW(
+        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+            std::move(domain),
+            {},
+            {},
+            mesh,
+            snapshotPolicyWithoutBoundary(),
+            verticalScalar(),
+            "wrong_linear_partition_moment"),
+        std::invalid_argument);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
+     MaterializesFullCurvedCellRuleForMappingAndMomentValidation)
+{
+    constexpr int interface_marker = 121;
+    std::vector<std::array<FE::Real, 3>> coordinates;
+    coordinates.reserve(9u);
+    for (std::size_t node = 0u; node < 9u; ++node) {
+        const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(
+            FE::ElementType::Quad9, node);
+        coordinates.push_back({{
+            xi[0],
+            xi[1] + FE::Real{0.1} *
+                        (FE::Real{1.0} - xi[0] * xi[0]) *
+                        (FE::Real{1.0} - xi[1]),
+            0.0,
+        }});
+    }
+    const SingleQuadBoundaryMesh mesh(
+        /*marker=*/7,
+        /*rank=*/0,
+        /*size=*/1,
+        /*owner_rank=*/0,
+        /*owned=*/true,
+        FE::ElementType::Quad9,
+        std::move(coordinates));
+    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    scalar.value = [](FE::GlobalIndex,
+                      const std::array<FE::Real, 3>&,
+                      const FE::geometry::CutQuadratureProvenance&) {
+        return FE::Real{-1.0};
+    };
+
+    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        fullNegativeCell(interface_marker),
+        {},
+        {},
+        mesh,
+        snapshotPolicyWithoutBoundary(),
+        std::move(scalar),
+        "curved_full_cell");
+    const auto rules = snapshot->retainedRules(
+        interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume);
+    ASSERT_EQ(rules.size(), 1u);
+    EXPECT_GT(rules.front()->reference_rule.points.size(), 1u);
+    EXPECT_NEAR(rules.front()->physical_rule.physical_measure,
+                FE::Real{56.0} / FE::Real{15.0},
+                1.0e-12);
+    EXPECT_NEAR(snapshot->ledger().retained_negative_physical_volume,
+                rules.front()->physical_rule.physical_measure,
+                1.0e-14);
+    EXPECT_EQ(snapshot->ledger().validated_polynomial_moment_count, 6u);
+    EXPECT_LE(snapshot->ledger().maximum_polynomial_moment_scaled_error,
+              1.0);
+}
+
 TEST(FreeSurfaceGeometrySnapshot, RejectsImpossibleClaimedQuadraticOrder)
 {
     constexpr int interface_marker = 110;
@@ -1615,7 +1714,10 @@ TEST(FreeSurfaceGeometrySnapshotCache,
     const auto second = interfaces::buildFreeSurfaceGeometrySnapshot(
         verticalInterfaceWithVolumes(
             interface_marker,
-            /*negative_point_x=*/-0.25),
+            /*negative_point_x=*/-0.25,
+            /*negative_weight=*/2.0,
+            /*negative_achieved_order=*/1,
+            /*positive_point_x=*/0.25),
         {},
         {},
         mesh,

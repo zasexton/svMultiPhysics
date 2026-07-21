@@ -139,6 +139,7 @@ struct FreeSurfaceGeometryValidationLedger {
     std::size_t outside_parent_point_count{0};
     std::size_t invalid_weight_count{0};
     std::size_t false_achieved_order_count{0};
+    std::size_t validated_polynomial_moment_count{0};
     std::size_t invalid_global_identity_count{0};
     std::size_t duplicate_rule_identity_count{0};
     Real unpruned_negative_reference_volume{0.0};
@@ -164,6 +165,8 @@ struct FreeSurfaceGeometryValidationLedger {
     Real maximum_root_residual{0.0};
     Real maximum_normal_angular_error{0.0};
     Real maximum_constant_moment_error{0.0};
+    Real maximum_polynomial_moment_error{0.0};
+    Real maximum_polynomial_moment_scaled_error{0.0};
     Real maximum_volume_partition_error{0.0};
     Real maximum_boundary_partition_error{0.0};
 };
