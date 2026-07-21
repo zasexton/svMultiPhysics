@@ -1384,7 +1384,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
     // The interface crosses curved parent geometry.  The generated contact
     // trace must remain available to a registered consumer without falling
     // back to a skipped fragment.
-    phi_vertex_values[vertex] = point[0] - 0.45;
+    phi_vertex_values[vertex] =
+        svmp::FE::Real{2.0} * (point[0] - svmp::FE::Real{0.45});
   }
   const auto coefficients = projectWorkflowVertexValues(
       *system,
@@ -1435,7 +1436,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   ASSERT_NE(context, nullptr);
   ASSERT_TRUE(context->hasFreeSurfaceGeometrySnapshotForMarker(contact_marker));
   ASSERT_EQ(context->freeSurfaceGeometrySnapshots().size(), 1u);
-  const auto& snapshot = context->freeSurfaceGeometrySnapshots().front();
+  const auto snapshot = context->freeSurfaceGeometrySnapshots().front();
   ASSERT_NE(snapshot, nullptr);
   ASSERT_EQ(snapshot->contactDomains().size(), 1u);
   EXPECT_EQ(snapshot->contactDomains().front().marker(), contact_marker);
@@ -1446,23 +1447,134 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(snapshot->ledger().orphan_contact_fragment_count, 0u);
   EXPECT_EQ(snapshot->ledger().stale_revision_count, 0u);
 
+  auto endpoint_solution = solution;
+  auto previous_solution = solution;
+  const auto phi_offset =
+      static_cast<std::size_t>(sim.fe_system->fieldDofOffset(phi));
+  const auto phi_dof_count = static_cast<std::size_t>(
+      sim.fe_system->fieldDofHandler(phi).getNumDofs());
+  ASSERT_LE(phi_offset + phi_dof_count, solution.size());
+  for (std::size_t i = 0; i < phi_dof_count; ++i) {
+    endpoint_solution[phi_offset + i] *= svmp::FE::Real{1.1};
+    previous_solution[phi_offset + i] *= svmp::FE::Real{0.9};
+  }
+  auto factory = svmp::FE::backends::BackendFactory::create(
+      svmp::FE::backends::BackendKind::FSILS);
+  ASSERT_NE(factory, nullptr);
+  auto time_history = svmp::FE::timestepping::TimeHistory::allocate(
+      *factory,
+      sim.fe_system->dofHandler().getNumDofs(),
+      /*history_depth=*/2,
+      /*allocate_second_order_state=*/false);
+  time_history.setTime(0.10);
+  time_history.setDt(0.05);
+  time_history.setPrevDt(0.05);
+  time_history.setStepIndex(2);
+  scatterFeOrderedSolution(time_history.u(), endpoint_solution);
+  scatterFeOrderedSolution(time_history.uPrev(), previous_solution);
+  scatterFeOrderedSolution(time_history.uPrev2(), previous_solution);
+
   const auto contact_stages = evaluateAcceptedFreeSurfaceContactStages(
       sim,
       svmp::FE::Real{0.075},
       svmp::FE::Real{0.5},
-      /*previous_state_revision=*/11u,
-      /*endpoint_state_revision=*/12u,
+      time_history.uPrev().valueRevision(),
+      time_history.u().valueRevision(),
       std::span<const svmp::FE::Real>(solution.data(), solution.size()));
   ASSERT_EQ(contact_stages.size(), 1u);
   ASSERT_EQ(contact_stages.front().state.walls.size(), 1u);
   EXPECT_GT(contact_stages.front().state.owned_contact_measure, 0.0);
   EXPECT_GT(contact_stages.front().state.line_friction_dissipation, 0.0);
+  const auto contact_stage_constraints =
+      captureAcceptedContactStageWallConstraints(sim, contact_stages);
+  time_history.updateGhosts();
+  EXPECT_NE(contact_stages.front().endpoint_state_revision,
+            time_history.u().valueRevision());
+  ASSERT_NO_THROW((void)refreshActiveCutIntegrationContextFromSolution(
+      sim,
+      *params,
+      std::span<const svmp::FE::Real>(endpoint_solution.data(),
+                                      endpoint_solution.size()),
+      lifecycle,
+      "application-driver-contact-endpoint-finalization-test"));
+  const auto endpoint_snapshot_revision =
+      sim.fe_system->cutIntegrationContext()
+          ->freeSurfaceGeometrySnapshotRevisionForMarker(interface_marker);
+  EXPECT_NE(endpoint_snapshot_revision,
+            snapshot->revision().snapshot_revision_key);
+
+  LevelSetMaintenanceRequest maintenance_request{};
+  maintenance_request.level_set_field_name = "phi";
+  maintenance_request.reinitialization.enabled = true;
+  maintenance_request.reinitialization.cadence_steps = 1;
+  maintenance_request.reinitialization.max_iterations = 100;
+  maintenance_request.reinitialization.signed_distance_tolerance = 1.0e-10;
+  std::vector<LevelSetMaintenanceRequest> maintenance_requests{
+      maintenance_request};
+  auto missing_stage_requests = maintenance_requests;
+  EXPECT_THROW(
+      (void)applyLevelSetMaintenance(
+          sim, time_history, missing_stage_requests),
+      std::runtime_error);
+  EXPECT_EQ(gatherFeOrderedSolution(time_history.u()), endpoint_solution);
+  EXPECT_EQ(gatherFeOrderedSolution(time_history.uPrev()), previous_solution);
+  testing::internal::CaptureStdout();
+  const bool maintenance_changed = applyLevelSetMaintenance(
+      sim,
+      time_history,
+      maintenance_requests,
+      contact_stages,
+      contact_stage_constraints,
+      std::span<const svmp::FE::Real>(solution.data(), solution.size()));
+  const auto maintenance_output = testing::internal::GetCapturedStdout();
+  ASSERT_TRUE(maintenance_changed);
+  EXPECT_NE(maintenance_output.find(
+                "wall_contact_model=accepted_dynamic_stage"),
+            std::string::npos);
+  EXPECT_NE(maintenance_output.find("wall_contact_constraints=1"),
+            std::string::npos);
+  EXPECT_NE(maintenance_output.find("max_contact_line_displacement=0"),
+            std::string::npos);
+  EXPECT_NE(maintenance_output.find("max_contact_angle_change_radians=0"),
+            std::string::npos);
+
+  const auto endpoint_after = gatherFeOrderedSolution(time_history.u());
+  const auto previous_after = gatherFeOrderedSolution(time_history.uPrev());
+  ASSERT_EQ(endpoint_after.size(), endpoint_solution.size());
+  for (std::size_t i = 0; i < phi_dof_count; ++i) {
+    const auto index = phi_offset + i;
+    EXPECT_NEAR(endpoint_after[index] - endpoint_solution[index],
+                previous_after[index] - previous_solution[index],
+                1.0e-12);
+    const auto accepted_stage_after =
+        svmp::FE::Real{0.5} *
+        (endpoint_after[index] + previous_after[index]);
+    EXPECT_NEAR(accepted_stage_after,
+                svmp::FE::Real{0.5} * solution[index],
+                1.0e-10);
+  }
+  ASSERT_NO_THROW((void)refreshActiveCutIntegrationContextFromSolution(
+      sim,
+      *params,
+      std::span<const svmp::FE::Real>(endpoint_after.data(),
+                                      endpoint_after.size()),
+      lifecycle,
+      "application-driver-wall-aware-maintenance-test"));
+  const auto* maintained_context = sim.fe_system->cutIntegrationContext();
+  ASSERT_NE(maintained_context, nullptr);
+  const auto maintained_snapshot_revision =
+      maintained_context->freeSurfaceGeometrySnapshotRevisionForMarker(
+          interface_marker);
+  EXPECT_NE(maintained_snapshot_revision,
+            snapshot->revision().snapshot_revision_key);
+  EXPECT_NE(maintained_snapshot_revision, endpoint_snapshot_revision);
+
   ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
       sim,
       /*accepted_step=*/2u,
       svmp::FE::Real{0.10},
       svmp::FE::Real{0.05},
-      /*state_revision=*/13u,
+      time_history.u().valueRevision(),
       contact_stages));
   const auto history =
       sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
@@ -1475,6 +1587,158 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(history.front().contact_stage->geometry_revision
                 .snapshot_revision_key,
             snapshot->revision().snapshot_revision_key);
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     PrescribedWallSnapshotDrivesEndpointReinitialization)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  constexpr int wall_marker = 29;
+  constexpr int interface_marker = 706;
+  auto mesh = makeWorkflowQuadPatch2x2Mesh();
+  for (const auto face : mesh->local_mesh().boundary_faces()) {
+    mesh->local_mesh().set_boundary_label(face, wall_marker);
+  }
+  const auto mesh_field = svmp::MeshFields::attach_field(
+      mesh->local_mesh(),
+      svmp::EntityKind::Vertex,
+      "phi",
+      svmp::FieldScalarType::Float64,
+      1);
+  ASSERT_NE(svmp::MeshFields::field_data_as<svmp::real_t>(
+                mesh->local_mesh(), mesh_field),
+            nullptr);
+
+  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+      svmp::FE::ElementType::Quad4,
+      /*order=*/1);
+  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "phi",
+      .space = scalar_space,
+      .components = 1});
+  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+  parameters.liquid_side =
+      svmp::FE::geometry::CutIntegrationSide::Negative;
+  parameters.surface_tension = svmp::FE::Real{1.0};
+  parameters.young_wall_coefficients.push_back(
+      svmp::FE::interfaces::FreeSurfaceYoungWallCoefficient{
+          .boundary_marker = wall_marker,
+          .equilibrium_contact_angle_radians =
+              svmp::FE::Real{1.57079632679489661923132169163975144},
+      });
+  system->declareFreeSurfaceDiscreteFunctional(
+      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+          .interface_marker = interface_marker,
+          .level_set_field = phi,
+          .geometry_domain_id = "prescribed_wall_maintenance",
+          .parameters = parameters,
+          .owner_component =
+              "ApplicationDriverLevelSetWorkflows.PrescribedWallFixture",
+      });
+  svmp::FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey key{};
+  key.source =
+      svmp::FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+  key.domain_id = "prescribed_wall_maintenance";
+  key.isovalue = 0.0;
+  key.interface_marker = interface_marker;
+  key.boundary_marker = wall_marker;
+  system->registerGeneratedEmbeddedInterfaceMarker(
+      svmp::FE::interfaces::
+          stableGeneratedInterfaceBoundaryIntersectionMarker(key));
+  ASSERT_NO_THROW(system->setup({}));
+
+  std::vector<svmp::FE::Real> vertex_values(mesh->n_vertices(), 0.0);
+  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+    vertex_values[vertex] =
+        svmp::FE::Real{2.0} *
+        (workflowVertexPoint(*mesh, vertex)[0] - svmp::FE::Real{0.8});
+  }
+  const auto coefficients = projectWorkflowVertexValues(
+      *system,
+      phi,
+      vertex_values,
+      /*components=*/1u,
+      "ApplicationDriver prescribed-wall maintenance phi");
+  std::vector<svmp::FE::Real> solution(
+      static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
+  writeWorkflowFieldSlice(*system, phi, coefficients, solution);
+
+  application::core::SimulationComponents sim;
+  sim.primary_mesh = mesh;
+  sim.fe_system = std::move(system);
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>prescribed_wall_maintenance</Generated_interface_domain_id>
+      <Interface_marker>706</Interface_marker>
+      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+  ASSERT_NO_THROW((void)refreshActiveCutIntegrationContextFromSolution(
+      sim,
+      *params,
+      std::span<const svmp::FE::Real>(solution.data(), solution.size()),
+      lifecycle,
+      "application-driver-prescribed-wall-maintenance-test"));
+
+  auto factory = svmp::FE::backends::BackendFactory::create(
+      svmp::FE::backends::BackendKind::FSILS);
+  ASSERT_NE(factory, nullptr);
+  auto history = svmp::FE::timestepping::TimeHistory::allocate(
+      *factory, sim.fe_system->dofHandler().getNumDofs());
+  history.setTime(0.1);
+  history.setDt(0.05);
+  history.setPrevDt(0.05);
+  history.setStepIndex(1);
+  scatterFeOrderedSolution(history.u(), solution);
+  scatterFeOrderedSolution(history.uPrev(), solution);
+  scatterFeOrderedSolution(history.uPrev2(), solution);
+
+  LevelSetMaintenanceRequest request{};
+  request.level_set_field_name = "phi";
+  request.reinitialization.enabled = true;
+  request.reinitialization.cadence_steps = 1;
+  request.reinitialization.max_iterations = 100;
+  request.reinitialization.signed_distance_tolerance = 1.0e-10;
+  std::vector<LevelSetMaintenanceRequest> requests{request};
+  testing::internal::CaptureStdout();
+  const bool changed = applyLevelSetMaintenance(sim, history, requests);
+  const auto output = testing::internal::GetCapturedStdout();
+  ASSERT_TRUE(changed);
+  EXPECT_NE(output.find("wall_contact_model=prescribed_angle"),
+            std::string::npos);
+  EXPECT_NE(output.find("prescribed_contact_rules=2"),
+            std::string::npos);
+  EXPECT_NE(output.find("dynamic_contact_rules=0"), std::string::npos);
+  EXPECT_NE(output.find("max_contact_line_displacement=0"),
+            std::string::npos);
+  EXPECT_NE(output.find("max_contact_angle_change_radians=0"),
+            std::string::npos);
+
+  const auto repaired = gatherFeOrderedSolution(history.u());
+  const auto field_offset =
+      static_cast<std::size_t>(sim.fe_system->fieldDofOffset(phi));
+  const auto field_dofs = static_cast<std::size_t>(
+      sim.fe_system->fieldDofHandler(phi).getNumDofs());
+  ASSERT_LE(field_offset + field_dofs, repaired.size());
+  for (std::size_t i = 0; i < field_dofs; ++i) {
+    EXPECT_NEAR(repaired[field_offset + i],
+                svmp::FE::Real{0.5} * solution[field_offset + i],
+                1.0e-10);
+  }
 #endif
 }
 

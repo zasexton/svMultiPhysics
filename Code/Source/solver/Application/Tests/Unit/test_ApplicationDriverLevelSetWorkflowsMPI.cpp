@@ -1725,8 +1725,9 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       const auto index = static_cast<std::size_t>(field_offset + dof);
       ASSERT_LT(index, local_solution.size());
       local_solution[index] =
-          static_cast<svmp::FE::Real>(coordinates[2u * vertex + 1u]) -
-          svmp::FE::Real{0.5};
+          svmp::FE::Real{2.0} *
+          (static_cast<svmp::FE::Real>(coordinates[2u * vertex + 1u]) -
+           svmp::FE::Real{0.5});
     }
   }
   const auto& velocity_dofs = system->fieldDofHandler(velocity);
@@ -1798,27 +1799,109 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   EXPECT_NEAR(report.negative_physical_volume, 4.0, 1.0e-12);
   EXPECT_NEAR(report.positive_physical_volume, 4.0, 1.0e-12);
 
+  ASSERT_TRUE(sim.fe_system->dofPermutation());
+  svmp::FE::backends::FsilsFactory maintenance_factory(
+      /*dofs_per_node=*/3,
+      sim.fe_system->dofPermutation(),
+      MPI_COMM_WORLD);
+  auto time_history = svmp::FE::timestepping::TimeHistory::allocate(
+      maintenance_factory,
+      sim.fe_system->dofHandler().getNumDofs(),
+      /*history_depth=*/2,
+      /*allocate_second_order_state=*/false);
+  time_history.setTime(0.10);
+  time_history.setDt(0.05);
+  time_history.setPrevDt(0.05);
+  time_history.setStepIndex(2);
+  scatterFeOrderedSolution(time_history.u(), solution);
+  scatterFeOrderedSolution(time_history.uPrev(), solution);
+  scatterFeOrderedSolution(time_history.uPrev2(), solution);
+
   const auto contact_stages = evaluateAcceptedFreeSurfaceContactStages(
       sim,
       svmp::FE::Real{0.075},
       svmp::FE::Real{0.5},
-      /*previous_state_revision=*/29u,
-      /*endpoint_state_revision=*/30u,
+      time_history.uPrev().valueRevision(),
+      time_history.u().valueRevision(),
       std::span<const svmp::FE::Real>(solution.data(), solution.size()));
   ASSERT_EQ(contact_stages.size(), 1u);
+  const auto contact_stage_constraints =
+      captureAcceptedContactStageWallConstraints(sim, contact_stages);
+  time_history.updateGhosts();
+  EXPECT_NE(contact_stages.front().endpoint_state_revision,
+            time_history.u().valueRevision());
+  ActiveCutContextRefreshReport endpoint_report{};
+  ASSERT_NO_THROW(
+      endpoint_report = refreshActiveCutIntegrationContextFromSolution(
+          sim,
+          *params,
+          std::span<const svmp::FE::Real>(solution.data(), solution.size()),
+          lifecycle,
+          "application-driver-mpi-contact-endpoint-finalization-test"));
+  EXPECT_TRUE(endpoint_report.refreshed);
+  const auto endpoint_snapshot_revision =
+      sim.fe_system->cutIntegrationContext()
+          ->freeSurfaceGeometrySnapshotRevisionForMarker(721);
+  EXPECT_NE(endpoint_snapshot_revision,
+            contact_stages.front()
+                .geometry_revision.snapshot_revision_key);
+
+  LevelSetMaintenanceRequest maintenance_request{};
+  maintenance_request.level_set_field_name = "phi";
+  maintenance_request.reinitialization.enabled = true;
+  maintenance_request.reinitialization.cadence_steps = 1;
+  maintenance_request.reinitialization.max_iterations = 100;
+  maintenance_request.reinitialization.signed_distance_tolerance = 1.0e-10;
+  std::vector<LevelSetMaintenanceRequest> maintenance_requests{
+      maintenance_request};
+  ASSERT_TRUE(applyLevelSetMaintenance(
+      sim,
+      time_history,
+      maintenance_requests,
+      contact_stages,
+      contact_stage_constraints,
+      std::span<const svmp::FE::Real>(solution.data(), solution.size())));
+  const auto maintained_solution =
+      gatherFeOrderedSolution(time_history.u());
+  ASSERT_EQ(maintained_solution.size(), solution.size());
+  for (std::size_t i = 0;
+       i < static_cast<std::size_t>(field_dofs.getNumDofs());
+       ++i) {
+    const auto index = static_cast<std::size_t>(field_offset) + i;
+    ASSERT_LT(index, maintained_solution.size());
+    EXPECT_NEAR(maintained_solution[index],
+                svmp::FE::Real{0.5} * solution[index],
+                1.0e-10)
+        << "rank=" << rank << " field_dof=" << i;
+  }
+  ActiveCutContextRefreshReport maintained_report{};
+  ASSERT_NO_THROW(
+      maintained_report = refreshActiveCutIntegrationContextFromSolution(
+          sim,
+          *params,
+          std::span<const svmp::FE::Real>(maintained_solution.data(),
+                                          maintained_solution.size()),
+          lifecycle,
+          "application-driver-mpi-wall-aware-maintenance-test"));
+  EXPECT_TRUE(maintained_report.refreshed);
+  EXPECT_NE(
+      sim.fe_system->cutIntegrationContext()
+          ->freeSurfaceGeometrySnapshotRevisionForMarker(721),
+      endpoint_snapshot_revision);
   ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
       sim,
       /*accepted_step=*/2u,
       svmp::FE::Real{0.10},
       svmp::FE::Real{0.05},
-      /*state_revision=*/31u,
+      time_history.u().valueRevision(),
       contact_stages));
   const auto functional_history =
       sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
   ASSERT_EQ(functional_history.size(), 1u);
   const auto& functional_record = functional_history.front();
   EXPECT_EQ(functional_record.accepted_step, 2u);
-  EXPECT_EQ(functional_record.state_revision, 31u);
+  EXPECT_EQ(functional_record.state_revision,
+            time_history.u().valueRevision());
   EXPECT_NEAR(functional_record.state.owned_liquid_volume, 4.0, 1.0e-12);
   EXPECT_NEAR(functional_record.state.owned_liquid_gas_area, 8.0, 1.0e-12);
   EXPECT_NEAR(functional_record.state.liquid_gas_surface_energy,

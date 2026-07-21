@@ -5166,10 +5166,588 @@ void accountAppliedLevelSetVolumeCorrection(
       next_contact_line_displacement;
 }
 
+std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
+captureAcceptedContactStageWallConstraints(
+    application::core::SimulationComponents& sim,
+    std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+        accepted_contact_stages)
+{
+  std::vector<svmp::FE::level_set::LevelSetWallContactConstraint> captured;
+  const auto declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto* context = sim.fe_system->cutIntegrationContext();
+  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact-stage constraint capture requires an authoritative geometry snapshot on every rank.");
+  }
+  std::map<
+      int,
+      const svmp::FE::systems::FreeSurfaceAcceptedContactStageState*>
+      stage_by_interface;
+  bool local_stage_map_valid = true;
+  for (const auto& stage : accepted_contact_stages) {
+    const int marker = stage.geometry_revision.interface_marker;
+    local_stage_map_valid =
+        marker >= 0 && stage_by_interface.emplace(marker, &stage).second &&
+        local_stage_map_valid;
+  }
+  if (globalMinDouble(local_stage_map_valid ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact-stage constraint capture requires unique nonnegative interface markers.");
+  }
+
+  for (const auto& declaration : declarations) {
+    if (declaration.parameters.dynamic_contact_coefficients.empty()) {
+      continue;
+    }
+    const auto stage_it = stage_by_interface.find(declaration.interface_marker);
+    const bool local_stage_available = stage_it != stage_by_interface.end();
+    if (globalMinDouble(local_stage_available ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage constraint capture is missing interface marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    const auto& stage = *stage_it->second;
+    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto snapshot_it = std::find_if(
+        snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+          return candidate &&
+                 candidate->revision().snapshot_revision_key ==
+                     stage.geometry_revision.snapshot_revision_key;
+        });
+    if (globalMinDouble(snapshot_it != snapshots.end() ? 1.0 : 0.0, comm) !=
+        1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage constraint capture cannot retain the stage geometry for interface marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    const auto& snapshot = **snapshot_it;
+    const bool local_revision_valid =
+        stage.geometry_revision.complete() &&
+        snapshot.revision().snapshot_revision_key ==
+            stage.geometry_revision.snapshot_revision_key &&
+        snapshot.revision().interface_marker == declaration.interface_marker;
+    if (globalMinDouble(local_revision_valid ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage constraint capture found mismatched stage geometry provenance.");
+    }
+
+    std::map<int, svmp::FE::level_set::LevelSetWallContactConstraintKind>
+        contact_law_by_wall;
+    for (const auto& coefficient :
+         declaration.parameters.young_wall_coefficients) {
+      contact_law_by_wall.emplace(
+          coefficient.boundary_marker,
+          svmp::FE::level_set::LevelSetWallContactConstraintKind::
+              PrescribedAngle);
+    }
+    for (const auto& coefficient :
+         declaration.parameters.dynamic_contact_coefficients) {
+      contact_law_by_wall[coefficient.boundary_marker] =
+          svmp::FE::level_set::LevelSetWallContactConstraintKind::
+              AcceptedDynamicAngle;
+    }
+    bool local_parent_ids_valid = true;
+    for (const auto& record : snapshot.rules()) {
+      if (record.role != svmp::FE::interfaces::
+                             FreeSurfaceGeometryRuleRole::Contact ||
+          record.retention != svmp::FE::interfaces::
+                                  FreeSurfaceGeometryRetention::Retained ||
+          !record.locally_owned) {
+        continue;
+      }
+      const auto law =
+          contact_law_by_wall.find(record.physical_boundary_marker);
+      if (law == contact_law_by_wall.end()) {
+        continue;
+      }
+      const auto parent =
+          record.reference_rule.provenance.parent_entity_global_id;
+      local_parent_ids_valid =
+          parent != svmp::FE::INVALID_GLOBAL_INDEX &&
+          local_parent_ids_valid;
+      if (parent == svmp::FE::INVALID_GLOBAL_INDEX) {
+        continue;
+      }
+      captured.push_back(
+          svmp::FE::level_set::LevelSetWallContactConstraint{
+              .kind = law->second,
+              .interface_marker = declaration.interface_marker,
+              .boundary_marker = record.physical_boundary_marker,
+              .parent_cell_global_id = parent,
+              .geometry_revision =
+                  stage.geometry_revision.snapshot_revision_key,
+          });
+    }
+    if (globalMinDouble(local_parent_ids_valid ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage constraint capture found a rule without a partition-independent parent identity.");
+    }
+  }
+  return captured;
+}
+
+struct LevelSetWallAwareMaintenanceContext {
+  std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
+      local_constraints{};
+  bool requires_accepted_dynamic_stage{false};
+  bool has_global_contact_constraints{false};
+  std::size_t global_prescribed_contact_rules{0u};
+  std::size_t global_dynamic_contact_rules{0u};
+  svmp::FE::Real stage_time{0.0};
+  svmp::FE::Real stage_alpha_f{1.0};
+  std::uint64_t previous_state_revision{0u};
+  std::uint64_t endpoint_state_revision{0u};
+  std::uint64_t stage_state_revision{0u};
+};
+
+LevelSetWallAwareMaintenanceContext
+resolveLevelSetWallAwareMaintenanceContext(
+    application::core::SimulationComponents& sim,
+    svmp::FE::timestepping::TimeHistory& history,
+    svmp::FE::FieldId level_set_field,
+    std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+        accepted_contact_stages,
+    std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>
+        accepted_contact_stage_constraints)
+{
+  LevelSetWallAwareMaintenanceContext resolved;
+  const auto declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  std::uint64_t declaration_signature = 1469598103934665603ull;
+  const auto mix_declaration_value = [&declaration_signature](
+                                         std::uint64_t value) {
+    declaration_signature ^= value;
+    declaration_signature *= 1099511628211ull;
+  };
+  mix_declaration_value(static_cast<std::uint64_t>(declarations.size()));
+  for (const auto& declaration : declarations) {
+    mix_declaration_value(static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(declaration.level_set_field)));
+    mix_declaration_value(static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(declaration.interface_marker)));
+    mix_declaration_value(static_cast<std::uint64_t>(
+        declaration.parameters.young_wall_coefficients.size()));
+    for (const auto& coefficient :
+         declaration.parameters.young_wall_coefficients) {
+      mix_declaration_value(static_cast<std::uint64_t>(
+          static_cast<std::int64_t>(coefficient.boundary_marker)));
+    }
+    mix_declaration_value(static_cast<std::uint64_t>(
+        declaration.parameters.dynamic_contact_coefficients.size()));
+    for (const auto& coefficient :
+         declaration.parameters.dynamic_contact_coefficients) {
+      mix_declaration_value(static_cast<std::uint64_t>(
+          static_cast<std::int64_t>(coefficient.boundary_marker)));
+    }
+  }
+  const auto [minimum_declaration_signature,
+              maximum_declaration_signature] =
+      globalMinMaxUint64(declaration_signature, comm);
+  if (minimum_declaration_signature != maximum_declaration_signature) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wall-aware level-set maintenance declarations differ across the FE communicator.");
+  }
+  const bool has_matching_wall_law = std::any_of(
+      declarations.begin(), declarations.end(), [&](const auto& declaration) {
+        return declaration.level_set_field == level_set_field &&
+               (!declaration.parameters.young_wall_coefficients.empty() ||
+                !declaration.parameters.dynamic_contact_coefficients.empty());
+      });
+  if (globalMinDouble(has_matching_wall_law ? 1.0 : 0.0, comm) !=
+      globalMaxDouble(has_matching_wall_law ? 1.0 : 0.0, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wall-aware level-set maintenance field coverage differs across the FE communicator.");
+  }
+  if (!has_matching_wall_law) {
+    return resolved;
+  }
+
+  const auto* context = sim.fe_system->cutIntegrationContext();
+  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wall-aware level-set maintenance requires an authoritative geometry snapshot on every rank.");
+  }
+  const double local_stage_count =
+      static_cast<double>(accepted_contact_stages.size());
+  if (globalMinDouble(local_stage_count, comm) !=
+      globalMaxDouble(local_stage_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wall-aware level-set maintenance received inconsistent accepted contact-stage coverage.");
+  }
+  std::map<
+      int,
+      const svmp::FE::systems::FreeSurfaceAcceptedContactStageState*>
+      stage_by_interface;
+  bool local_stage_map_valid = true;
+  for (const auto& stage : accepted_contact_stages) {
+    const int marker = stage.geometry_revision.interface_marker;
+    local_stage_map_valid =
+        marker >= 0 && stage_by_interface.emplace(marker, &stage).second &&
+        local_stage_map_valid;
+  }
+  if (globalMinDouble(local_stage_map_valid ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wall-aware level-set maintenance requires unique accepted contact stages with nonnegative interface markers.");
+  }
+
+  bool dynamic_stage_initialized = false;
+  for (const auto& declaration : declarations) {
+    if (declaration.level_set_field != level_set_field) {
+      continue;
+    }
+    std::map<int, svmp::FE::level_set::LevelSetWallContactConstraintKind>
+        contact_law_by_wall;
+    for (const auto& coefficient :
+         declaration.parameters.young_wall_coefficients) {
+      contact_law_by_wall.emplace(
+          coefficient.boundary_marker,
+          svmp::FE::level_set::LevelSetWallContactConstraintKind::
+              PrescribedAngle);
+    }
+    for (const auto& coefficient :
+         declaration.parameters.dynamic_contact_coefficients) {
+      // A dynamic law supersedes the equilibrium Young datum on the same
+      // wall.  The latter remains the momentum-side energy coefficient; the
+      // accepted stage owns the redistancing geometry.
+      contact_law_by_wall[coefficient.boundary_marker] =
+          svmp::FE::level_set::LevelSetWallContactConstraintKind::
+              AcceptedDynamicAngle;
+    }
+    if (contact_law_by_wall.empty()) {
+      continue;
+    }
+
+    if (!declaration.parameters.dynamic_contact_coefficients.empty()) {
+      const auto stage_it =
+          stage_by_interface.find(declaration.interface_marker);
+      const auto* accepted_dynamic_stage =
+          stage_it != stage_by_interface.end() ? stage_it->second : nullptr;
+      const auto expected_stage_time =
+          static_cast<svmp::FE::Real>(history.time()) -
+          (svmp::FE::Real{1.0} -
+           (accepted_dynamic_stage != nullptr
+                ? accepted_dynamic_stage->stage_alpha_f
+                : svmp::FE::Real{0.0})) *
+              static_cast<svmp::FE::Real>(history.dt());
+      const auto stage_time_tolerance =
+          svmp::FE::Real{256.0} *
+          std::numeric_limits<svmp::FE::Real>::epsilon() *
+          std::max(
+              {svmp::FE::Real{1.0},
+               std::abs(expected_stage_time),
+               accepted_dynamic_stage != nullptr
+                   ? std::abs(accepted_dynamic_stage->stage_time)
+                   : svmp::FE::Real{0.0}});
+      const bool local_stage_valid =
+          accepted_dynamic_stage != nullptr &&
+          std::isfinite(accepted_dynamic_stage->stage_time) &&
+          std::isfinite(accepted_dynamic_stage->stage_alpha_f) &&
+          accepted_dynamic_stage->stage_alpha_f > svmp::FE::Real{0.0} &&
+          accepted_dynamic_stage->stage_alpha_f <= svmp::FE::Real{1.0} &&
+          accepted_dynamic_stage->previous_state_revision != 0u &&
+          accepted_dynamic_stage->endpoint_state_revision != 0u &&
+          accepted_dynamic_stage->stage_state_revision != 0u &&
+          accepted_dynamic_stage->geometry_revision.complete() &&
+          accepted_dynamic_stage->geometry_revision.interface_marker ==
+              declaration.interface_marker &&
+          accepted_dynamic_stage->state.snapshot_revision_key ==
+              accepted_dynamic_stage->geometry_revision
+                  .snapshot_revision_key &&
+          std::abs(accepted_dynamic_stage->stage_time -
+                   expected_stage_time) <= stage_time_tolerance;
+      if (globalMinDouble(local_stage_valid ? 1.0 : 0.0, comm) != 1.0) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Wall-aware level-set maintenance rejected incomplete, stale, or time-inconsistent accepted dynamic contact provenance for interface marker " +
+            std::to_string(declaration.interface_marker) + ".");
+      }
+      const auto [minimum_stage_revision, maximum_stage_revision] =
+          globalMinMaxUint64(
+              accepted_dynamic_stage->stage_state_revision, comm);
+      const auto [minimum_previous_revision, maximum_previous_revision] =
+          globalMinMaxUint64(
+              accepted_dynamic_stage->previous_state_revision, comm);
+      const auto [minimum_endpoint_revision, maximum_endpoint_revision] =
+          globalMinMaxUint64(
+              accepted_dynamic_stage->endpoint_state_revision, comm);
+      const auto minimum_stage_time = globalMinDouble(
+          static_cast<double>(accepted_dynamic_stage->stage_time), comm);
+      const auto maximum_stage_time = globalMaxDouble(
+          static_cast<double>(accepted_dynamic_stage->stage_time), comm);
+      const auto minimum_stage_alpha = globalMinDouble(
+          static_cast<double>(accepted_dynamic_stage->stage_alpha_f), comm);
+      const auto maximum_stage_alpha = globalMaxDouble(
+          static_cast<double>(accepted_dynamic_stage->stage_alpha_f), comm);
+      if (minimum_stage_revision != maximum_stage_revision ||
+          minimum_previous_revision != maximum_previous_revision ||
+          minimum_endpoint_revision != maximum_endpoint_revision ||
+          minimum_stage_time != maximum_stage_time ||
+          minimum_stage_alpha != maximum_stage_alpha) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Wall-aware level-set maintenance received different accepted dynamic stages across ranks for interface marker " +
+            std::to_string(declaration.interface_marker) + ".");
+      }
+      if (!dynamic_stage_initialized) {
+        resolved.stage_time = accepted_dynamic_stage->stage_time;
+        resolved.stage_alpha_f = accepted_dynamic_stage->stage_alpha_f;
+        resolved.previous_state_revision =
+            accepted_dynamic_stage->previous_state_revision;
+        resolved.endpoint_state_revision =
+            accepted_dynamic_stage->endpoint_state_revision;
+        resolved.stage_state_revision =
+            accepted_dynamic_stage->stage_state_revision;
+        dynamic_stage_initialized = true;
+      } else {
+        const bool local_same_stage_provenance =
+            resolved.stage_time == accepted_dynamic_stage->stage_time &&
+            resolved.stage_alpha_f ==
+                accepted_dynamic_stage->stage_alpha_f &&
+            resolved.previous_state_revision ==
+                accepted_dynamic_stage->previous_state_revision &&
+            resolved.endpoint_state_revision ==
+                accepted_dynamic_stage->endpoint_state_revision;
+        if (globalMinDouble(local_same_stage_provenance ? 1.0 : 0.0, comm) !=
+            1.0) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] One maintained level-set field cannot use multiple accepted dynamic contact stages.");
+        }
+      }
+      resolved.requires_accepted_dynamic_stage = true;
+      std::map<int, std::size_t> local_rule_count_by_wall;
+      bool local_constraints_valid = true;
+      for (const auto& constraint : accepted_contact_stage_constraints) {
+        if (constraint.interface_marker != declaration.interface_marker) {
+          continue;
+        }
+        const auto law =
+            contact_law_by_wall.find(constraint.boundary_marker);
+        local_constraints_valid =
+            law != contact_law_by_wall.end() &&
+            law->second == constraint.kind &&
+            constraint.parent_cell_global_id !=
+                svmp::FE::INVALID_GLOBAL_INDEX &&
+            constraint.geometry_revision ==
+                accepted_dynamic_stage->geometry_revision
+                    .snapshot_revision_key &&
+            local_constraints_valid;
+        if (law == contact_law_by_wall.end() ||
+            law->second != constraint.kind ||
+            constraint.parent_cell_global_id ==
+                svmp::FE::INVALID_GLOBAL_INDEX ||
+            constraint.geometry_revision !=
+                accepted_dynamic_stage->geometry_revision
+                    .snapshot_revision_key) {
+          continue;
+        }
+        resolved.local_constraints.push_back(constraint);
+        ++local_rule_count_by_wall[constraint.boundary_marker];
+      }
+      if (globalMinDouble(local_constraints_valid ? 1.0 : 0.0, comm) !=
+          1.0) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Wall-aware level-set maintenance rejected a captured contact constraint that does not match its accepted stage.");
+      }
+      for (const auto& [boundary_marker, kind] : contact_law_by_wall) {
+        const auto global_rule_count = globalSumSize(
+            local_rule_count_by_wall[boundary_marker], comm);
+        resolved.has_global_contact_constraints =
+            resolved.has_global_contact_constraints || global_rule_count > 0u;
+        if (kind == svmp::FE::level_set::
+                        LevelSetWallContactConstraintKind::PrescribedAngle) {
+          resolved.global_prescribed_contact_rules += global_rule_count;
+          continue;
+        }
+        resolved.global_dynamic_contact_rules += global_rule_count;
+        const int dynamic_boundary_marker = boundary_marker;
+        const auto wall_count = static_cast<std::size_t>(std::count_if(
+            accepted_dynamic_stage->state.walls.begin(),
+            accepted_dynamic_stage->state.walls.end(),
+            [dynamic_boundary_marker](const auto& wall) {
+              return wall.boundary_marker == dynamic_boundary_marker;
+            }));
+        const auto wall_it = std::find_if(
+            accepted_dynamic_stage->state.walls.begin(),
+            accepted_dynamic_stage->state.walls.end(),
+            [dynamic_boundary_marker](const auto& wall) {
+              return wall.boundary_marker == dynamic_boundary_marker;
+            });
+        const bool local_wall_state_valid =
+            wall_count == 1u &&
+            wall_it != accepted_dynamic_stage->state.walls.end() &&
+            std::isfinite(wall_it->owned_contact_measure) &&
+            wall_it->owned_contact_measure >= svmp::FE::Real{0.0};
+        if (globalMinDouble(local_wall_state_valid ? 1.0 : 0.0, comm) !=
+            1.0) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Wall-aware level-set maintenance is missing the accepted dynamic wall state for boundary marker " +
+              std::to_string(boundary_marker) + ".");
+        }
+        const bool dynamic_state_has_contact =
+            wall_it->owned_quadrature_point_count > 0u ||
+            wall_it->owned_contact_measure > svmp::FE::Real{0.0};
+        if (dynamic_state_has_contact != (global_rule_count > 0u)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Wall-aware level-set maintenance contact-rule coverage disagrees with the accepted dynamic wall state for boundary marker " +
+              std::to_string(boundary_marker) + ".");
+        }
+      }
+      continue;
+    }
+
+    const bool local_marker_available =
+        context->hasFreeSurfaceGeometrySnapshotForMarker(
+            declaration.interface_marker);
+    if (globalMinDouble(local_marker_available ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Wall-aware level-set maintenance is missing the authoritative snapshot for interface marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    const auto snapshot_revision =
+        context->freeSurfaceGeometrySnapshotRevisionForMarker(
+            declaration.interface_marker);
+    const auto [minimum_revision, maximum_revision] =
+        globalMinMaxUint64(snapshot_revision, comm);
+    if (minimum_revision != maximum_revision) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Wall-aware level-set maintenance found different geometry revisions across ranks for interface marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto snapshot_it = std::find_if(
+        snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+          return candidate &&
+                 candidate->revision().snapshot_revision_key ==
+                     snapshot_revision;
+        });
+    if (globalMinDouble(snapshot_it != snapshots.end() ? 1.0 : 0.0, comm) !=
+        1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Wall-aware level-set maintenance found incomplete snapshot storage for interface marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    bool local_snapshot_current = true;
+    try {
+      context->assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+          declaration.interface_marker);
+    } catch (const std::exception&) {
+      local_snapshot_current = false;
+    }
+    if (globalMinDouble(local_snapshot_current ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Wall-aware level-set maintenance rejected a stale geometry snapshot for interface marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    const auto& snapshot = **snapshot_it;
+    const bool local_snapshot_matches_declaration =
+        snapshot.revision().complete() &&
+        snapshot.revision().interface_marker == declaration.interface_marker &&
+        snapshot.revision().snapshot_revision_key == snapshot_revision;
+    if (globalMinDouble(local_snapshot_matches_declaration ? 1.0 : 0.0,
+                        comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Wall-aware level-set maintenance snapshot provenance does not match interface marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    for (const auto& [boundary_marker, kind] : contact_law_by_wall) {
+      std::size_t local_rule_count = 0u;
+      bool local_parent_ids_valid = true;
+      for (const auto& record : snapshot.rules()) {
+        if (record.role != svmp::FE::interfaces::
+                               FreeSurfaceGeometryRuleRole::Contact ||
+            record.retention != svmp::FE::interfaces::
+                                    FreeSurfaceGeometryRetention::Retained ||
+            record.physical_boundary_marker != boundary_marker ||
+            !record.locally_owned) {
+          continue;
+        }
+        const auto parent =
+            record.reference_rule.provenance.parent_entity_global_id;
+        local_parent_ids_valid =
+            parent != svmp::FE::INVALID_GLOBAL_INDEX &&
+            local_parent_ids_valid;
+        if (parent == svmp::FE::INVALID_GLOBAL_INDEX) {
+          continue;
+        }
+        resolved.local_constraints.push_back(
+            svmp::FE::level_set::LevelSetWallContactConstraint{
+                .kind = kind,
+                .interface_marker = declaration.interface_marker,
+                .boundary_marker = boundary_marker,
+                .parent_cell_global_id = parent,
+                .geometry_revision = snapshot_revision,
+            });
+        ++local_rule_count;
+      }
+      if (globalMinDouble(local_parent_ids_valid ? 1.0 : 0.0, comm) != 1.0) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Wall-aware level-set maintenance found a contact rule without a partition-independent parent identity.");
+      }
+      const auto global_rule_count = globalSumSize(local_rule_count, comm);
+      resolved.has_global_contact_constraints =
+          resolved.has_global_contact_constraints || global_rule_count > 0u;
+      resolved.global_prescribed_contact_rules += global_rule_count;
+    }
+  }
+  return resolved;
+}
+
+void assertCollectiveWallAwareRepairResult(
+    const svmp::FE::level_set::LevelSetSignedDistanceRepairResult& result,
+    const svmp::MeshComm& comm,
+    std::string_view field_name)
+{
+  const auto require_consistent_count = [&](std::size_t value) {
+    const auto [minimum, maximum] = globalMinMaxUint64(
+        static_cast<std::uint64_t>(value), comm);
+    return minimum == maximum;
+  };
+  bool metadata_consistent =
+      require_consistent_count(result.success ? 1u : 0u) &&
+      require_consistent_count(result.converged ? 1u : 0u) &&
+      require_consistent_count(
+          result.wall_contact_constraints_satisfied ? 1u : 0u) &&
+      require_consistent_count(result.wall_contact_constraints) &&
+      require_consistent_count(result.wall_contact_cells) &&
+      require_consistent_count(result.wall_contact_dofs);
+  const std::array<svmp::FE::Real, 6> metrics{
+      result.max_wall_contact_scale_residual,
+      result.max_contact_line_displacement,
+      result.max_contact_angle_change_radians,
+      result.max_unconstrained_signed_distance_error,
+      result.max_wall_constrained_signed_distance_error,
+      result.max_iteration_residual};
+  for (const auto metric : metrics) {
+    const bool local_finite = std::isfinite(metric);
+    if (globalMinDouble(local_finite ? 1.0 : 0.0, comm) != 1.0) {
+      metadata_consistent = false;
+      continue;
+    }
+    const auto minimum = globalMinDouble(static_cast<double>(metric), comm);
+    const auto maximum = globalMaxDouble(static_cast<double>(metric), comm);
+    const auto tolerance =
+        4096.0 * std::numeric_limits<double>::epsilon() *
+        std::max({1.0, std::abs(minimum), std::abs(maximum)});
+    metadata_consistent =
+        std::abs(maximum - minimum) <= tolerance && metadata_consistent;
+  }
+  if (!metadata_consistent) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wall-aware level-set reinitialization produced rank-dependent convergence or contact-geometry results for field '" +
+        std::string(field_name) + "'.");
+  }
+}
+
 bool applyLevelSetMaintenance(
     application::core::SimulationComponents& sim,
     svmp::FE::timestepping::TimeHistory& history,
-    std::vector<LevelSetMaintenanceRequest>& requests)
+    std::vector<LevelSetMaintenanceRequest>& requests,
+    std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+        accepted_contact_stages = {},
+    std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>
+        accepted_contact_stage_constraints = {},
+    std::span<const svmp::FE::Real> accepted_contact_stage_solution = {})
 {
   if (!sim.fe_system || requests.empty()) {
     return false;
@@ -5213,14 +5791,49 @@ bool applyLevelSetMaintenance(
         throw std::runtime_error(
             "[svMultiPhysics::Application] Runtime level-set reinitialization currently supports Projection only.");
       }
+      const auto wall_context =
+          resolveLevelSetWallAwareMaintenanceContext(
+              sim,
+              history,
+              field,
+              accepted_contact_stages,
+              accepted_contact_stage_constraints);
+      const auto comm = activeFESystemCommunicator(*sim.fe_system);
+      std::span<const svmp::FE::Real> reinitialization_input(fe_solution);
+      if (wall_context.requires_accepted_dynamic_stage) {
+        const bool local_stage_layout_valid =
+            accepted_contact_stage_solution.size() == fe_solution.size();
+        if (globalMinDouble(local_stage_layout_valid ? 1.0 : 0.0, comm) !=
+            1.0) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance requires the exact accepted contact-stage solution on every rank.");
+        }
+        const double local_stage_solution_size =
+            static_cast<double>(accepted_contact_stage_solution.size());
+        if (globalMinDouble(local_stage_solution_size, comm) !=
+            globalMaxDouble(local_stage_solution_size, comm)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance received inconsistent contact-stage solution layouts.");
+        }
+        reinitialization_input = accepted_contact_stage_solution;
+      }
       std::vector<svmp::FE::Real> repaired;
       auto result =
           svmp::FE::level_set::repairLevelSetSignedDistanceByProjection(
               *sim.fe_system,
               field,
               request.reinitialization,
-              fe_solution,
-              repaired);
+              reinitialization_input,
+              repaired,
+              wall_context.local_constraints);
+      assertCollectiveWallAwareRepairResult(
+          result, comm, request.level_set_field_name);
+      if ((result.wall_contact_constraints > 0u) !=
+          wall_context.has_global_contact_constraints) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Wall-aware level-set reinitialization did not retain the complete accepted contact constraint set for field '" +
+            request.level_set_field_name + "'.");
+      }
       if (!result.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Level-set reinitialization failed for field '" +
@@ -5241,12 +5854,47 @@ bool applyLevelSetMaintenance(
             << result.max_iteration_residual
             << " max_signed_distance_error="
             << result.max_signed_distance_error
+            << " max_unconstrained_signed_distance_error="
+            << result.max_unconstrained_signed_distance_error
+            << " max_wall_constrained_signed_distance_error="
+            << result.max_wall_constrained_signed_distance_error
+            << " wall_contact_constraints="
+            << result.wall_contact_constraints
+            << " wall_contact_cells=" << result.wall_contact_cells
+            << " wall_contact_dofs=" << result.wall_contact_dofs
+            << " wall_contact_constraints_satisfied="
+            << (result.wall_contact_constraints_satisfied ? "true" : "false")
+            << " max_wall_contact_scale_residual="
+            << result.max_wall_contact_scale_residual
+            << " max_contact_line_displacement="
+            << result.max_contact_line_displacement
+            << " max_contact_angle_change_radians="
+            << result.max_contact_angle_change_radians
             << " max_interface_displacement="
             << result.max_interface_displacement
             << " diagnostic='" << result.diagnostic << "'";
         staged_commit_logs.push_back(log.str());
       } else {
-        fe_solution = std::move(repaired);
+        const auto field_offset = static_cast<std::size_t>(
+            sim.fe_system->fieldDofOffset(field));
+        const auto field_dof_count = static_cast<std::size_t>(
+            sim.fe_system->fieldDofHandler(field).getNumDofs());
+        if (field_offset + field_dof_count > fe_solution.size() ||
+            field_offset + field_dof_count > repaired.size() ||
+            field_offset + field_dof_count > reinitialization_input.size()) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Wall-aware level-set reinitialization returned an incompatible field slice.");
+        }
+        // For a generalized-alpha contact law, repaired is the accepted stage
+        // representation.  Apply only its field delta to the endpoint.  The
+        // common history update below applies that same representation delta
+        // to every older level, so the accepted stage becomes repaired while
+        // all temporal increments remain exact.
+        for (std::size_t i = 0; i < field_dof_count; ++i) {
+          const auto index = field_offset + i;
+          fe_solution[index] +=
+              repaired[index] - reinitialization_input[index];
+        }
         changed = true;
         modified_level_set_fields.insert(field);
         std::ostringstream log;
@@ -5271,6 +5919,38 @@ bool applyLevelSetMaintenance(
           << result.max_iteration_residual
           << " max_signed_distance_error="
           << result.max_signed_distance_error
+          << " max_unconstrained_signed_distance_error="
+          << result.max_unconstrained_signed_distance_error
+          << " max_wall_constrained_signed_distance_error="
+          << result.max_wall_constrained_signed_distance_error
+          << " wall_contact_model="
+          << (wall_context.requires_accepted_dynamic_stage
+                  ? "accepted_dynamic_stage"
+                  : (wall_context.has_global_contact_constraints
+                         ? "prescribed_angle"
+                         : "none"))
+          << " accepted_contact_stage_alpha_f="
+          << (wall_context.requires_accepted_dynamic_stage
+                  ? wall_context.stage_alpha_f
+                  : svmp::FE::Real{1.0})
+          << " accepted_contact_stage_revision="
+          << wall_context.stage_state_revision
+          << " prescribed_contact_rules="
+          << wall_context.global_prescribed_contact_rules
+          << " dynamic_contact_rules="
+          << wall_context.global_dynamic_contact_rules
+          << " wall_contact_constraints="
+          << result.wall_contact_constraints
+          << " wall_contact_cells=" << result.wall_contact_cells
+          << " wall_contact_dofs=" << result.wall_contact_dofs
+          << " wall_contact_constraints_satisfied="
+          << (result.wall_contact_constraints_satisfied ? "true" : "false")
+          << " max_wall_contact_scale_residual="
+          << result.max_wall_contact_scale_residual
+          << " max_contact_line_displacement="
+          << result.max_contact_line_displacement
+          << " max_contact_angle_change_radians="
+          << result.max_contact_angle_change_radians
           << " max_abs_update=" << result.max_abs_update;
         staged_commit_logs.push_back(log.str());
       }
@@ -10270,11 +10950,16 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   }
   std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
       pending_contact_stages;
+  std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
+      pending_contact_stage_constraints;
+  std::vector<svmp::FE::Real> pending_contact_stage_solution;
   callbacks.on_before_step_accept =
       [&](svmp::FE::timestepping::TimeHistory& h,
           const svmp::FE::timestepping::NewtonReport& nr) {
         (void)nr;
         pending_contact_stages.clear();
+        pending_contact_stage_constraints.clear();
+        pending_contact_stage_solution.clear();
         if (activePressureUpdateRejectOnTriggerEnabled() &&
             acceptedPressureUpdateDiagnosticEnabled() &&
             !accepted_pressure_update_previous_solution.empty()) {
@@ -10327,6 +11012,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   h.u().valueRevision(),
                   std::span<const svmp::FE::Real>(stage_solution.data(),
                                                   stage_solution.size()));
+          pending_contact_stage_constraints =
+              captureAcceptedContactStageWallConstraints(
+                  sim, pending_contact_stages);
+          pending_contact_stage_solution = std::move(stage_solution);
         }
         const auto bound_result = applyLevelSetBoundPreservingCandidates(
             sim,
@@ -10358,7 +11047,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           /*honor_fail_on_trigger=*/true);
     }
     const bool level_set_maintenance_changed =
-        applyLevelSetMaintenance(sim, h, level_set_maintenance);
+        applyLevelSetMaintenance(
+            sim,
+            h,
+            level_set_maintenance,
+            pending_contact_stages,
+            pending_contact_stage_constraints,
+            pending_contact_stage_solution);
     const auto cut_report = refreshActiveCutIntegrationContextCached(
         sim, params, h.u(), *cut_lifecycle, *cut_refresh_cache,
         "accepted_step");
@@ -10384,6 +11079,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         h.u().valueRevision(),
         pending_contact_stages);
     pending_contact_stages.clear();
+    pending_contact_stage_constraints.clear();
+    pending_contact_stage_solution.clear();
     sim.fe_system->recordAcceptedMeshTangentialBoundaryPolicies(
         static_cast<std::uint64_t>(h.stepIndex()),
         h.time(),
