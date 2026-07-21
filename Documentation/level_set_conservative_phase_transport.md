@@ -149,6 +149,18 @@ replaced by the positive bounded fallback. These are CI-level isolation gates;
 they do not replace the required independent release-scale space/time,
 maintenance, and extension matrices.
 
+The CI transport benchmark now keeps the spatial and temporal studies
+independent. Its fixed-step spatial sequence uses `N=16,32,64`; its fixed
+`N=48` temporal sequence uses 32, 64, and 128 steps and compares each result
+with a separately computed 256-step reference. The test emits full-precision
+string properties for interface error, centroid displacement, raw phase drift,
+accounted balance residual, Courant number, and observed order. Coupled
+`h`/`dt` results remain under separate property names so they cannot be
+mistaken for an independent refinement study. Zalesak rotation, reversible
+deformation, wall-film advection, and separated-drop component tests likewise
+emit their raw transport metrics. These small two-dimensional runs are
+regressions, not substitutes for the frozen release matrix.
+
 ## Fully discrete edge update
 
 Each interior algebraic edge is stored once in canonical orientation `i<j`.

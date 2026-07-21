@@ -13,9 +13,11 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <numbers>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -445,6 +447,49 @@ struct TransportRun {
     return static_cast<FE::Real>(error / normalization);
 }
 
+[[nodiscard]] FE::Real weightedL1Difference(
+    const StructuredPhaseFixture& fixture,
+    const std::vector<FE::Real>& first,
+    const std::vector<FE::Real>& second)
+{
+    if (first.size() != fixture.graph.nodes ||
+        second.size() != fixture.graph.nodes) {
+        return std::numeric_limits<FE::Real>::infinity();
+    }
+    long double difference = 0.0L;
+    long double normalization = 0.0L;
+    for (std::size_t node = 0u; node < fixture.graph.nodes; ++node) {
+        const FE::Real weight = fixture.graph.lumped_control_volume[node];
+        difference += static_cast<long double>(
+            weight * std::abs(first[node] - second[node]));
+        normalization += static_cast<long double>(weight);
+    }
+    return static_cast<FE::Real>(difference / normalization);
+}
+
+[[nodiscard]] FE::Real observedOrder(
+    FE::Real coarse_error,
+    FE::Real fine_error,
+    FE::Real refinement_ratio = FE::Real{2.0})
+{
+    if (!(coarse_error > FE::Real{0.0}) ||
+        !(fine_error > FE::Real{0.0}) ||
+        !(refinement_ratio > FE::Real{1.0})) {
+        return std::numeric_limits<FE::Real>::quiet_NaN();
+    }
+    return std::log(coarse_error / fine_error) /
+           std::log(refinement_ratio);
+}
+
+[[nodiscard]] std::string serializeReal(FE::Real value)
+{
+    std::ostringstream stream;
+    stream << std::setprecision(
+                  std::numeric_limits<FE::Real>::max_digits10)
+           << value;
+    return stream.str();
+}
+
 [[nodiscard]] std::array<FE::Real, 2> phaseCentroid(
     const StructuredPhaseFixture& fixture,
     const std::vector<FE::Real>& phase)
@@ -524,6 +569,16 @@ TEST(LevelSetConservativePhaseBenchmarks,
         centroid_errors.push_back(std::abs(
             final_centroid[0] - initial_centroid[0] -
             speed * final_time));
+        const std::string suffix = "_N" +
+                                   std::to_string(cells_per_axis);
+        RecordProperty("coupled_l1" + suffix,
+                       serializeReal(errors.back()));
+        RecordProperty("coupled_centroid_error" + suffix,
+                       serializeReal(centroid_errors.back()));
+        RecordProperty("coupled_measure_error" + suffix,
+                       serializeReal(run.maximum_measure_error));
+        RecordProperty("coupled_accounted_balance_error" + suffix,
+                       serializeReal(run.maximum_accounted_balance_error));
         EXPECT_EQ(run.minimum_components, 1u);
         EXPECT_EQ(run.maximum_components, 1u);
     }
@@ -534,6 +589,121 @@ TEST(LevelSetConservativePhaseBenchmarks,
     EXPECT_LT(centroid_errors[2], centroid_errors[1]);
     EXPECT_LT(errors.back(), 0.08);
     EXPECT_LT(centroid_errors.back(), 0.01);
+}
+
+TEST(LevelSetConservativePhaseBenchmarks,
+     TranslatingDiskSeparatesSpaceAndTimeRefinement)
+{
+    constexpr FE::Real speed = 0.2;
+    constexpr FE::Real final_time = 0.5;
+    const auto initial = disk(0.30, 0.50, 0.14);
+    const auto exact = disk(
+        0.30 + speed * final_time, 0.50, 0.14);
+    const VelocityField velocity = [](
+        FE::Real /*time*/,
+        const std::array<FE::Real, 3>& /*point*/) {
+        return std::array<FE::Real, 3>{speed, 0.0, 0.0};
+    };
+
+    constexpr int fixed_space_steps = 64;
+    std::vector<FE::Real> space_errors;
+    std::vector<FE::Real> space_centroid_errors;
+    for (const std::size_t cells_per_axis : {16u, 32u, 64u}) {
+        StructuredPhaseFixture fixture(cells_per_axis);
+        ASSERT_TRUE(fixture.graph.success) << fixture.graph.diagnostic;
+        const auto run = runTransport(
+            fixture,
+            initial,
+            velocity,
+            final_time,
+            fixed_space_steps);
+        expectConservativeRun(run);
+        const FE::Real error = weightedL1Error(
+            fixture, run.final_phase, exact);
+        const auto initial_centroid = phaseCentroid(
+            fixture, run.initial_phase);
+        const auto final_centroid = phaseCentroid(
+            fixture, run.final_phase);
+        const FE::Real centroid_error = std::abs(
+            final_centroid[0] - initial_centroid[0] -
+            speed * final_time);
+        space_errors.push_back(error);
+        space_centroid_errors.push_back(centroid_error);
+        const std::string suffix = "_N" +
+                                   std::to_string(cells_per_axis);
+        RecordProperty("space_l1" + suffix, serializeReal(error));
+        RecordProperty("space_centroid_error" + suffix,
+                       serializeReal(centroid_error));
+        RecordProperty("space_measure_error" + suffix,
+                       serializeReal(run.maximum_measure_error));
+        RecordProperty("space_accounted_balance_error" + suffix,
+                       serializeReal(run.maximum_accounted_balance_error));
+        RecordProperty("space_maximum_courant" + suffix,
+                       serializeReal(run.maximum_courant));
+    }
+    ASSERT_EQ(space_errors.size(), 3u);
+    EXPECT_LT(space_errors[1], space_errors[0]);
+    EXPECT_LT(space_errors[2], space_errors[1]);
+    EXPECT_LT(space_centroid_errors[1], space_centroid_errors[0]);
+    EXPECT_LT(space_centroid_errors[2], space_centroid_errors[1]);
+    const FE::Real first_space_order = observedOrder(
+        space_errors[0], space_errors[1]);
+    const FE::Real second_space_order = observedOrder(
+        space_errors[1], space_errors[2]);
+    RecordProperty("space_l1_order_16_to_32",
+                   serializeReal(first_space_order));
+    RecordProperty("space_l1_order_32_to_64",
+                   serializeReal(second_space_order));
+    EXPECT_GT(first_space_order, 0.35);
+    EXPECT_GT(second_space_order, 0.35);
+
+    StructuredPhaseFixture time_fixture(48u);
+    ASSERT_TRUE(time_fixture.graph.success)
+        << time_fixture.graph.diagnostic;
+    const auto temporal_reference = runTransport(
+        time_fixture,
+        initial,
+        velocity,
+        final_time,
+        256);
+    expectConservativeRun(temporal_reference);
+    std::vector<FE::Real> time_errors;
+    for (const int steps : {32, 64, 128}) {
+        const auto run = runTransport(
+            time_fixture,
+            initial,
+            velocity,
+            final_time,
+            steps);
+        expectConservativeRun(run);
+        const FE::Real error = weightedL1Difference(
+            time_fixture,
+            run.final_phase,
+            temporal_reference.final_phase);
+        time_errors.push_back(error);
+        const std::string suffix = "_steps" + std::to_string(steps);
+        RecordProperty("time_reference_l1" + suffix,
+                       serializeReal(error));
+        RecordProperty("time_measure_error" + suffix,
+                       serializeReal(run.maximum_measure_error));
+        RecordProperty("time_accounted_balance_error" + suffix,
+                       serializeReal(run.maximum_accounted_balance_error));
+        RecordProperty("time_maximum_courant" + suffix,
+                       serializeReal(run.maximum_courant));
+    }
+    ASSERT_EQ(time_errors.size(), 3u);
+    EXPECT_LT(time_errors[1], time_errors[0]);
+    EXPECT_LT(time_errors[2], time_errors[1]);
+    const FE::Real first_time_order = observedOrder(
+        time_errors[0], time_errors[1]);
+    const FE::Real second_time_order = observedOrder(
+        time_errors[1], time_errors[2]);
+    RecordProperty("time_l1_order_32_to_64_steps",
+                   serializeReal(first_time_order));
+    RecordProperty("time_l1_order_64_to_128_steps",
+                   serializeReal(second_time_order));
+    EXPECT_GT(first_time_order, 0.5);
+    EXPECT_GT(second_time_order, 0.5);
 }
 
 TEST(LevelSetConservativePhaseBenchmarks,
@@ -566,9 +736,18 @@ TEST(LevelSetConservativePhaseBenchmarks,
     expectConservativeRun(run);
     EXPECT_LE(run.maximum_measure_error, 1.0e-4);
     EXPECT_GE(run.minimum_components, 1u);
-    EXPECT_LT(weightedL1Error(
-                  fixture, run.final_phase, slotted_disk),
-              0.12);
+    const FE::Real l1_error = weightedL1Error(
+        fixture, run.final_phase, slotted_disk);
+    RecordProperty("zalesak_l1", serializeReal(l1_error));
+    RecordProperty("zalesak_measure_error",
+                   serializeReal(run.maximum_measure_error));
+    RecordProperty("zalesak_accounted_balance_error",
+                   serializeReal(run.maximum_accounted_balance_error));
+    RecordProperty("zalesak_minimum_components",
+                   std::to_string(run.minimum_components));
+    RecordProperty("zalesak_maximum_components",
+                   std::to_string(run.maximum_components));
+    EXPECT_LT(l1_error, 0.12);
 }
 
 TEST(LevelSetConservativePhaseBenchmarks,
@@ -600,9 +779,14 @@ TEST(LevelSetConservativePhaseBenchmarks,
     EXPECT_LE(run.maximum_measure_error, 1.0e-8);
     EXPECT_EQ(run.minimum_components, 1u);
     EXPECT_EQ(run.maximum_components, 1u);
-    EXPECT_LT(weightedL1Error(
-                  fixture, run.final_phase, initial),
-              0.10);
+    const FE::Real l1_error = weightedL1Error(
+        fixture, run.final_phase, initial);
+    RecordProperty("deformation_l1", serializeReal(l1_error));
+    RecordProperty("deformation_measure_error",
+                   serializeReal(run.maximum_measure_error));
+    RecordProperty("deformation_accounted_balance_error",
+                   serializeReal(run.maximum_accounted_balance_error));
+    EXPECT_LT(l1_error, 0.10);
 }
 
 TEST(LevelSetConservativePhaseBenchmarks,
@@ -640,7 +824,9 @@ TEST(LevelSetConservativePhaseBenchmarks,
     EXPECT_LE(run.maximum_measure_error, 1.0e-7);
     EXPECT_EQ(run.minimum_components, 1u);
     EXPECT_EQ(run.maximum_components, 1u);
-    EXPECT_LT(weightedL1Error(fixture, run.final_phase, exact), 0.06);
+    const FE::Real l1_error = weightedL1Error(
+        fixture, run.final_phase, exact);
+    EXPECT_LT(l1_error, 0.06);
     const auto initial_centroid = phaseCentroid(
         fixture, run.initial_phase);
     const auto final_centroid = phaseCentroid(
@@ -648,6 +834,16 @@ TEST(LevelSetConservativePhaseBenchmarks,
     EXPECT_NEAR(final_centroid[0] - initial_centroid[0],
                 speed * final_time, 0.015);
     EXPECT_NEAR(final_centroid[1], initial_centroid[1], 0.002);
+    RecordProperty("wall_film_l1", serializeReal(l1_error));
+    RecordProperty("wall_film_measure_error",
+                   serializeReal(run.maximum_measure_error));
+    RecordProperty("wall_film_centroid_x_error",
+                   serializeReal(std::abs(
+                       final_centroid[0] - initial_centroid[0] -
+                       speed * final_time)));
+    RecordProperty("wall_film_centroid_y_error",
+                   serializeReal(std::abs(
+                       final_centroid[1] - initial_centroid[1])));
 }
 
 TEST(LevelSetConservativePhaseBenchmarks,
@@ -688,6 +884,18 @@ TEST(LevelSetConservativePhaseBenchmarks,
     EXPECT_NEAR(final_centroid[0] - initial_centroid[0],
                 speed * final_time, 0.015);
     EXPECT_NEAR(final_centroid[1], initial_centroid[1], 2.0e-12);
+    RecordProperty("separated_drops_measure_error",
+                   serializeReal(run.maximum_measure_error));
+    RecordProperty("separated_drops_accounted_balance_error",
+                   serializeReal(run.maximum_accounted_balance_error));
+    RecordProperty("separated_drops_minimum_components",
+                   std::to_string(run.minimum_components));
+    RecordProperty("separated_drops_maximum_components",
+                   std::to_string(run.maximum_components));
+    RecordProperty("separated_drops_centroid_x_error",
+                   serializeReal(std::abs(
+                       final_centroid[0] - initial_centroid[0] -
+                       speed * final_time)));
 }
 
 } // namespace
