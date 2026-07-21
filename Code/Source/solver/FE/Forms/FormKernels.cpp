@@ -16728,6 +16728,21 @@ void SymbolicNonlinearFormKernel::rewriteResidualTrialToState()
     residual_scalar_ready_ = true;
 }
 
+void SymbolicNonlinearFormKernel::refreshMatrixStateIndependence()
+{
+    // Symbolic residual kernels own a separately compiled bilinear tangent.
+    // Advertise a reusable matrix only when that tangent passes the same
+    // conservative IR proof used by FormKernel/LinearFormKernel.  Material
+    // state and update programs are excluded explicitly because they can make
+    // an otherwise state-free expression depend on assembly history.
+    matrix_state_independent_ =
+        output_ != NonlinearKernelOutput::VectorOnly &&
+        tangent_ready_ && tangent_ir_.isCompiled() &&
+        material_state_spec_.bytes_per_qpt == 0u &&
+        inlined_state_updates_.empty() &&
+        bilinearMatrixStateIndependent(tangent_ir_);
+}
+
 void SymbolicNonlinearFormKernel::resolveInlinableConstitutives()
 {
     if (inlinable_constitutives_resolved_) {
@@ -16749,6 +16764,7 @@ void SymbolicNonlinearFormKernel::resolveInlinableConstitutives()
     // Rewrite TrialFunction -> StateField(CURRENT_SOLUTION_FIELD_ID) to represent the current solution u.
     rewriteResidualTrialToState();
 
+    refreshMatrixStateIndependence();
     inlinable_constitutives_resolved_ = true;
 }
 
@@ -16785,6 +16801,8 @@ void SymbolicNonlinearFormKernel::resolveParameterSlots(
     }
     rewrite_updates(inlined_state_updates_.interior_face);
     rewrite_updates(inlined_state_updates_.interface_face);
+
+    refreshMatrixStateIndependence();
 }
 
 bool SymbolicNonlinearFormKernel::hasCell() const noexcept

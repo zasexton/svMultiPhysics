@@ -331,7 +331,6 @@ public:
     [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override {
         return residual_ir_.hasExplicitTimeDependency();
     }
-
     [[nodiscard]] bool hasCell() const noexcept override;
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
@@ -418,6 +417,9 @@ public:
     [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override {
         return residual_ir_.hasExplicitTimeDependency();
     }
+    [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override {
+        return matrix_state_independent_;
+    }
 
     [[nodiscard]] bool hasCell() const noexcept override;
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
@@ -461,6 +463,7 @@ public:
 private:
     void rebuildTangentIR();
     void rewriteResidualTrialToState();
+    void refreshMatrixStateIndependence();
     void ensureInterpreterLoweredIndexedAccess();
 
     FormIR residual_ir_;
@@ -468,6 +471,7 @@ private:
     bool tangent_ready_{false};
     bool residual_scalar_ready_{false};
     bool inlinable_constitutives_resolved_{false};
+    bool matrix_state_independent_{false};
     NonlinearKernelOutput output_{NonlinearKernelOutput::Both};
     std::vector<params::Spec> parameter_specs_{};
     std::shared_ptr<const ConstitutiveStateLayout> constitutive_state_{};

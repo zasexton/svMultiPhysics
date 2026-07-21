@@ -1679,6 +1679,51 @@ TEST(FormsInstaller, FormsInstaller_TimeDerivativeFieldsIncludeCutVolumeKernels)
     EXPECT_EQ(all_fields.front(), u_field);
 }
 
+TEST(FormsInstaller, TimeDerivativeFieldsIncludeTransientFieldInsideFusedCoupledKernel)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+    auto vector_space = std::make_shared<svmp::FE::spaces::ProductSpace>(
+        scalar_space, /*components=*/3);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto phi_field = sys.addField(svmp::FE::systems::FieldSpec{
+        .name = "phi", .space = scalar_space, .components = 1});
+    const auto extension_field = sys.addField(svmp::FE::systems::FieldSpec{
+        .name = "extension_velocity", .space = vector_space, .components = 3});
+    sys.addOperator("op");
+
+    const auto phi = svmp::FE::forms::FormExpr::stateField(
+        phi_field, *scalar_space, "phi");
+    const auto extension = svmp::FE::forms::FormExpr::stateField(
+        extension_field, *vector_space, "extension_velocity");
+    const auto eta = svmp::FE::forms::FormExpr::testFunction(
+        phi_field, *scalar_space, "eta");
+    const auto residual =
+        (svmp::FE::forms::dt(phi) * eta +
+         svmp::FE::forms::dot(extension, svmp::FE::forms::grad(phi)) * eta)
+            .dx();
+
+    svmp::FE::systems::FormInstallOptions install;
+    install.compiler_options.jit.enable = true;
+    install.compiler_options.use_symbolic_tangent = true;
+    install.extra_trial_fields.push_back(extension_field);
+    const auto installed = svmp::FE::systems::installFormulation(
+        sys, "op", {phi_field}, residual, install);
+
+    ASSERT_NE(installed.mixed_plan, nullptr);
+    ASSERT_TRUE(installed.mixed_plan->usesMonolithicCellKernel());
+
+    const auto op_fields = sys.timeDerivativeFields("op");
+    ASSERT_EQ(op_fields.size(), 1u);
+    EXPECT_EQ(op_fields.front(), phi_field);
+
+    const auto all_fields = sys.timeDerivativeFields();
+    ASSERT_EQ(all_fields.size(), 1u);
+    EXPECT_EQ(all_fields.front(), phi_field);
+}
+
 TEST(FormsInstaller, FormsInstaller_AssemblesCutVolumeKernelThroughSystem)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
@@ -2834,6 +2879,122 @@ TEST(FormsInstaller, OperatorMatrixStateIndependenceDetectedFromInstalledForms)
     (void)svmp::FE::systems::installFormulation(nonlinear_sys, "op", {nonlinear_u}, nonlinear_residual);
     nonlinear_sys.setup({}, inputs);
     EXPECT_FALSE(nonlinear_sys.operatorMatrixStateIndependent("op"));
+}
+
+TEST(FormsInstaller,
+     OperatorMatrixStateIndependenceDetectedForMixedSymbolicCutVolumePair)
+{
+    auto mesh =
+        std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+    auto velocity_space = std::make_shared<svmp::FE::spaces::ProductSpace>(
+        scalar_space, /*components=*/3);
+
+    constexpr int marker = 812;
+    constexpr auto side = svmp::FE::forms::CutVolumeSide::Negative;
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+
+    svmp::FE::systems::FormInstallOptions symbolic_options;
+    symbolic_options.compiler_options.use_symbolic_tangent = true;
+    symbolic_options.compiler_options.jit.enable = false;
+
+    // Reproduce the pressure/velocity adjoint pair used by the free-surface
+    // pressure-representability diagnostic.  On fixed cut geometry both
+    // off-diagonal tangents contain only test/trial functions and constants.
+    svmp::FE::systems::FESystem pair_sys(mesh);
+    const auto velocity_field = pair_sys.addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "velocity", .space = velocity_space, .components = 3});
+    const auto pressure_field = pair_sys.addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "pressure", .space = scalar_space, .components = 1});
+    pair_sys.addOperator("pair");
+
+    const auto velocity = svmp::FE::forms::FormExpr::stateField(
+        velocity_field, *velocity_space, "velocity");
+    const auto pressure = svmp::FE::forms::FormExpr::stateField(
+        pressure_field, *scalar_space, "pressure");
+    const auto velocity_test = svmp::FE::forms::FormExpr::testFunction(
+        velocity_field, *velocity_space, "v");
+    const auto pressure_test = svmp::FE::forms::FormExpr::testFunction(
+        pressure_field, *scalar_space, "q");
+    const auto pair_residual =
+        (-pressure * svmp::FE::forms::div(velocity_test))
+            .dCutVolume(marker, side) -
+        (pressure_test * svmp::FE::forms::div(velocity))
+            .dCutVolume(marker, side);
+
+    const auto installed_pair = svmp::FE::systems::installFormulation(
+        pair_sys,
+        "pair",
+        {velocity_field, pressure_field},
+        pair_residual,
+        symbolic_options);
+    ASSERT_EQ(installed_pair.jacobian_blocks.size(), 2u);
+    ASSERT_EQ(installed_pair.jacobian_blocks[0].size(), 2u);
+    ASSERT_EQ(installed_pair.jacobian_blocks[1].size(), 2u);
+    ASSERT_NE(installed_pair.jacobian_blocks[0][1], nullptr);
+    ASSERT_NE(installed_pair.jacobian_blocks[1][0], nullptr);
+
+    pair_sys.setup({}, inputs);
+    EXPECT_TRUE(
+        installed_pair.jacobian_blocks[0][1]->hasStateIndependentMatrix());
+    EXPECT_TRUE(
+        installed_pair.jacobian_blocks[1][0]->hasStateIndependentMatrix());
+    EXPECT_TRUE(pair_sys.operatorMatrixStateIndependent("pair"));
+
+    // A state-dependent coefficient in either block must keep the entire
+    // mixed operator conservative (false), even though its adjoint block is
+    // still state independent.
+    svmp::FE::systems::FESystem nonlinear_sys(mesh);
+    const auto nonlinear_velocity_field = nonlinear_sys.addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "velocity", .space = velocity_space, .components = 3});
+    const auto nonlinear_pressure_field = nonlinear_sys.addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "pressure", .space = scalar_space, .components = 1});
+    nonlinear_sys.addOperator("pair");
+
+    const auto nonlinear_velocity = svmp::FE::forms::FormExpr::stateField(
+        nonlinear_velocity_field, *velocity_space, "velocity");
+    const auto nonlinear_pressure = svmp::FE::forms::FormExpr::stateField(
+        nonlinear_pressure_field, *scalar_space, "pressure");
+    const auto nonlinear_velocity_test =
+        svmp::FE::forms::FormExpr::testFunction(
+            nonlinear_velocity_field, *velocity_space, "v");
+    const auto nonlinear_pressure_test =
+        svmp::FE::forms::FormExpr::testFunction(
+            nonlinear_pressure_field, *scalar_space, "q");
+    const auto nonlinear_residual =
+        (-(nonlinear_pressure * nonlinear_pressure) *
+         svmp::FE::forms::div(nonlinear_velocity_test))
+            .dCutVolume(marker, side) -
+        (nonlinear_pressure_test *
+         svmp::FE::forms::div(nonlinear_velocity))
+            .dCutVolume(marker, side);
+
+    const auto installed_nonlinear = svmp::FE::systems::installFormulation(
+        nonlinear_sys,
+        "pair",
+        {nonlinear_velocity_field, nonlinear_pressure_field},
+        nonlinear_residual,
+        symbolic_options);
+    ASSERT_EQ(installed_nonlinear.jacobian_blocks.size(), 2u);
+    ASSERT_EQ(installed_nonlinear.jacobian_blocks[0].size(), 2u);
+    ASSERT_EQ(installed_nonlinear.jacobian_blocks[1].size(), 2u);
+    ASSERT_NE(installed_nonlinear.jacobian_blocks[0][1], nullptr);
+    ASSERT_NE(installed_nonlinear.jacobian_blocks[1][0], nullptr);
+
+    nonlinear_sys.setup({}, inputs);
+    EXPECT_FALSE(
+        installed_nonlinear.jacobian_blocks[0][1]
+            ->hasStateIndependentMatrix());
+    EXPECT_TRUE(
+        installed_nonlinear.jacobian_blocks[1][0]
+            ->hasStateIndependentMatrix());
+    EXPECT_FALSE(nonlinear_sys.operatorMatrixStateIndependent("pair"));
 }
 
 TEST(FormsInstaller, FormsInstaller_InstallFormulation_MultiOpInstallsConstraintsOnce)

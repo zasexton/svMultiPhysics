@@ -195,6 +195,27 @@ struct RequestedKernelOutputs {
             ctx.cutVolumeSide() == geometry::CutIntegrationSide::Positive);
 }
 
+void computeCellBatchWithFallback(
+    assembly::AssemblyKernel& fallback,
+    std::span<const assembly::AssemblyContext* const> contexts,
+    std::span<assembly::KernelOutput> outputs,
+    std::size_t count)
+{
+    if (fallback.supportsCellBatch()) {
+        fallback.computeCellBatch(
+            std::span<const assembly::AssemblyContext* const>(
+                contexts.data(), count),
+            std::span<assembly::KernelOutput>(outputs.data(), count));
+        return;
+    }
+
+    for (std::size_t index = 0; index < count; ++index) {
+        if (contexts[index] != nullptr) {
+            fallback.computeCell(*contexts[index], outputs[index]);
+        }
+    }
+}
+
 [[nodiscard]] std::uint64_t cutVolumeDispatchKey(int marker, CutVolumeSide side) noexcept
 {
     const auto marker_bits =
@@ -811,35 +832,11 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
     maybeCompile();
     if (!canUseJIT()) {
-        if (fallback_->supportsCellBatch()) {
-            fallback_->computeCellBatch(
-                std::span<const assembly::AssemblyContext* const>(contexts.data(), n),
-                std::span<assembly::KernelOutput>(outputs.data(), n));
-            return;
-        }
-
-        for (std::size_t idx = 0; idx < n; ++idx) {
-            if (contexts[idx] == nullptr) {
-                continue;
-            }
-            fallback_->computeCell(*contexts[idx], outputs[idx]);
-        }
+        computeCellBatchWithFallback(*fallback_, contexts, outputs, n);
         return;
     }
     if (wrappedKernelHasCutVolumeTerms(*fallback_)) {
-        if (fallback_->supportsCellBatch()) {
-            fallback_->computeCellBatch(
-                std::span<const assembly::AssemblyContext* const>(contexts.data(), n),
-                std::span<assembly::KernelOutput>(outputs.data(), n));
-            return;
-        }
-
-        for (std::size_t idx = 0; idx < n; ++idx) {
-            if (contexts[idx] == nullptr) {
-                continue;
-            }
-            fallback_->computeCell(*contexts[idx], outputs[idx]);
-        }
+        computeCellBatchWithFallback(*fallback_, contexts, outputs, n);
         return;
     }
 

@@ -20,6 +20,7 @@
 #include "Systems/TimeIntegrator.h"
 #include "Systems/TransientSystem.h"
 
+#include "Assembly/AssemblyKernel.h"
 #include "Dofs/DofMap.h"
 #include "TimeStepping/GeneralizedAlpha.h"
 #include "TimeStepping/TimeSteppingUtils.h"
@@ -42,6 +43,7 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 
 using svmp::FE::ElementType;
@@ -701,6 +703,77 @@ TEST(MixedFormPerformance, Setup_ResolvesNestedSymbolicFallbacks_ForMonolithicCe
         ASSERT_NE(symbolic, nullptr) << "block " << bi;
         EXPECT_TRUE(symbolic->tangentIR().isCompiled()) << "block " << bi;
     }
+}
+
+TEST(MixedFormPerformance, MultiTermMonolithicPlanPreservesEveryCrossBlock)
+{
+    auto mesh =
+        std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space =
+        std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_f =
+        sys.addField({.name = "u", .space = space, .components = 1});
+    const auto p_f =
+        sys.addField({.name = "p", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u =
+        svmp::FE::forms::FormExpr::stateField(u_f, *space, "u");
+    const auto p =
+        svmp::FE::forms::FormExpr::stateField(p_f, *space, "p");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(u_f, *space, "v");
+    const auto q =
+        svmp::FE::forms::FormExpr::testFunction(p_f, *space, "q");
+    const auto residual =
+        (u * v + p * v).dx() + (u * q).dx();
+
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.jit.enable = true;
+    opts.compiler_options.use_symbolic_tangent = true;
+    const auto installed = svmp::FE::systems::installFormulation(
+        sys, "op", {u_f, p_f}, residual, opts);
+    ASSERT_NE(installed.mixed_plan, nullptr);
+    ASSERT_TRUE(installed.mixed_plan->usesMonolithicCellKernel());
+
+    // Coexistence with an ordinary cell term forces the setup plan through
+    // the generic multi-term assembler.  Every semantic monolithic block must
+    // be expanded before that transition; otherwise only block zero executes.
+    sys.addCellKernel(
+        "op", u_f,
+        std::make_shared<svmp::FE::assembly::MassKernel>(Real{2.0}));
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    const auto n = sys.dofHandler().getNumDofs();
+    ASSERT_EQ(n, 8);
+    std::vector<Real> state_values(static_cast<std::size_t>(n), Real{0.25});
+    svmp::FE::systems::SystemStateView state;
+    state.u = state_values;
+
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+
+    svmp::FE::assembly::DenseMatrixView matrix(n);
+    matrix.zero();
+    const auto assembled = sys.assemble(req, state, &matrix, nullptr);
+    ASSERT_TRUE(assembled.success);
+
+    Real up_norm = 0.0;
+    Real pu_norm = 0.0;
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            up_norm += std::abs(matrix.getMatrixEntry(i, 4 + j));
+            pu_norm += std::abs(matrix.getMatrixEntry(4 + i, j));
+        }
+    }
+    EXPECT_GT(up_norm, Real{0.0}) << "dR_u/dp block was dropped";
+    EXPECT_GT(pu_norm, Real{0.0}) << "dR_p/du block was dropped";
 }
 
 TEST(MixedFormPerformance, Setup_ResolvesNestedSymbolicFallbacks_ForMixedBlockKernelSet)
