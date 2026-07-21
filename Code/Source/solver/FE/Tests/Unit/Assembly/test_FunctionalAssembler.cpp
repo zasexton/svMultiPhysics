@@ -303,6 +303,25 @@ TEST(FunctionalAssemblerBoundaryTest, IntegrateConstantOverBoundaryFace)
     EXPECT_NEAR(area, 0.5, 1e-12);
 }
 
+TEST(FunctionalAssemblerBoundaryTest, UniformlyTinyValidBoundaryFacePreservesMeasure)
+{
+    constexpr Real scale = 1e-16;
+    forms::test::SingleTetraOneBoundaryFaceMeshAccess mesh(
+        /*boundary_marker=*/2, scale);
+    auto dof_map = forms::test::createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    FunctionalAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setDofMap(dof_map);
+    assembler.setSpace(space);
+
+    BoundaryMeasureKernel kernel;
+    const Real area = assembler.assembleBoundaryScalar(kernel, /*boundary_marker=*/2);
+    ASSERT_TRUE(std::isfinite(area));
+    EXPECT_NEAR(area / (scale * scale), 0.5, 1e-12);
+}
+
 TEST(FunctionalAssemblerBoundaryTest, BoundaryFluxUsesElementLocalCoefficients)
 {
     forms::test::SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);

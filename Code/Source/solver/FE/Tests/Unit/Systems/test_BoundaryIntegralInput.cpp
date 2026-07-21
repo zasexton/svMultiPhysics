@@ -2157,6 +2157,49 @@ TEST(FEQuantityExplicit, GeometryOnlyConstantIntegral)
     EXPECT_NEAR(sys.auxiliaryInputRegistryIfPresent()->get(area.registryName()), 0.5, 1e-10);
 }
 
+TEST(FEQuantityExplicit, UniformlyTinyRCRFluxReductionPreservesPhysicalScale)
+{
+    constexpr int marker = 5;
+    constexpr Real scale = 1e-16;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(
+        marker, scale);
+    auto u_space = svmp::FE::spaces::VectorSpace(
+        svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        FieldSpec{.name = "u", .space = u_space, .components = 3});
+    sys.addOperator("op");
+
+    const auto u_disc = FormExpr::discreteField(u_field, *u_space, "u");
+    const auto flux = sys.boundaryIntegral(
+        inner(u_disc, FormExpr::normal()), marker,
+        BoundaryFunctional::Reduction::Sum,
+        AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+
+    const auto u = FormExpr::stateField(u_field, *u_space, "u");
+    const auto v = FormExpr::testFunction(*u_space, "v");
+    (void)installFormulation(sys, "op", {u_field}, inner(u, v).dx());
+
+    { SetupInputs si; si.topology_override = singleTetraTopology(); sys.setup({}, si); }
+
+    std::vector<Real> sol(static_cast<std::size_t>(sys.dofHandler().getNumDofs()), 0.0);
+    for (svmp::FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        // Face 0 has outward normal -e_z; u=-2e_z gives unit scaled flux.
+        setFieldComponent(sol, sys, u_field, vertex, /*component=*/2, -2.0);
+    }
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+    sys.prepareAuxiliaryForAssembly(state, false);
+
+    const Real Q = sys.auxiliaryInputRegistryIfPresent()->get(flux.registryName());
+    ASSERT_TRUE(std::isfinite(Q));
+    EXPECT_NEAR(Q / (scale * scale), 1.0, 1e-11);
+}
+
 // ===========================================================================
 //  WS9.2: dF/dinputs generation test
 // ===========================================================================

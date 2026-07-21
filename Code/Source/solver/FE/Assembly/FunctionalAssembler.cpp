@@ -16,6 +16,7 @@
 #include "Quadrature/QuadratureRule.h"
 #include "Geometry/MappingFactory.h"
 #include "Geometry/GeometryMapping.h"
+#include "Geometry/FrameGeometry.h"
 #include "Math/Vector.h"
 #include "Basis/BasisCache.h"
 #include "Basis/BasisFunction.h"
@@ -345,7 +346,7 @@ void prepareCellContext(AssemblyContext& context,
         const auto& qpt0 = quad_points[0];
         const math::Vector<Real, 3> xi0{qpt0[0], qpt0[1], qpt0[2]};
         const auto J = mapping->jacobian(xi0);
-        const auto J_inv = J.inverse();
+        const auto J_inv = geometry::scaleConditionedJacobianInverse(J);
         const Real det_J = J.determinant();
         const Real abs_det_J = std::abs(det_J);
 
@@ -389,7 +390,7 @@ void prepareCellContext(AssemblyContext& context,
             }
 
             const auto J = mapping->jacobian(xi);
-            const auto J_inv = mapping->jacobian_inverse(xi);
+            const auto J_inv = geometry::scaleConditionedJacobianInverse(J);
             const Real det_J = mapping->jacobian_determinant(xi);
 
             for (int i = 0; i < 3; ++i) {
@@ -701,7 +702,7 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
         scratch.phys_points[q] = {x_phys[0], x_phys[1], x_phys[2]};
 
         const auto J = mapping->jacobian(xi);
-        const auto J_inv = mapping->jacobian_inverse(xi);
+        const auto J_inv = geometry::scaleConditionedJacobianInverse(J);
         const Real det_J = mapping->jacobian_determinant(xi);
 
         for (int i = 0; i < 3; ++i) {
