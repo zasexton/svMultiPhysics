@@ -296,14 +296,15 @@ private:
 
 class SingleTetraOneBoundaryFaceMeshAccess final : public assembly::IMeshAccess {
 public:
-    explicit SingleTetraOneBoundaryFaceMeshAccess(int boundary_marker)
+    explicit SingleTetraOneBoundaryFaceMeshAccess(int boundary_marker,
+                                                  Real coordinate_scale = Real(1))
         : boundary_marker_(boundary_marker)
     {
         nodes_ = {
             {0.0, 0.0, 0.0},  // 0
-            {1.0, 0.0, 0.0},  // 1
-            {0.0, 1.0, 0.0},  // 2
-            {0.0, 0.0, 1.0}   // 3
+            {coordinate_scale, 0.0, 0.0},  // 1
+            {0.0, coordinate_scale, 0.0},  // 2
+            {0.0, 0.0, coordinate_scale}   // 3
         };
         cell_ = {0, 1, 2, 3};
     }
