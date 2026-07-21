@@ -1100,6 +1100,8 @@ TEST(FreeSurfaceGeometrySnapshot,
     const auto ghost_state =
         interfaces::evaluateFreeSurfaceDiscreteFunctional(
             *ghost_snapshot, parameters);
+    EXPECT_EQ(ghost_snapshot->revision().snapshot_revision_key,
+              owner_snapshot->revision().snapshot_revision_key);
     EXPECT_EQ(ghost_state.owned_liquid_volume, 0.0);
     EXPECT_EQ(ghost_state.owned_liquid_gas_area, 0.0);
     EXPECT_EQ(ghost_state.owned_wetted_wall_area, 0.0);

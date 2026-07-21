@@ -105,8 +105,8 @@ struct FreeSurfaceGeometryScalarEvaluator {
 /**
  * Rank-local adapter used by the snapshot validator to gather the identities
  * of rules owned anywhere in the communicator.  The FE geometry layer owns
- * the identity and uniqueness checks; callers only provide the byte-free
- * collective operation needed to exchange unsigned integer values.
+ * the identity, content, and uniqueness checks; callers only provide the
+ * byte-free collective operation needed to exchange unsigned integer values.
  */
 struct FreeSurfaceGeometryOwnershipCollective {
     int rank{0};

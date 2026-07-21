@@ -166,6 +166,11 @@ void mix(std::uint64_t& hash, Real value) noexcept
 
 using OwnershipRuleIdentity = std::array<std::uint64_t, 5>;
 
+struct OwnedRuleDigest {
+    OwnershipRuleIdentity identity{};
+    std::uint64_t content_digest{0};
+};
+
 [[nodiscard]] OwnershipRuleIdentity ownershipRuleIdentity(
     const FreeSurfaceGeometryRuleRecord& record) noexcept
 {
@@ -179,14 +184,98 @@ using OwnershipRuleIdentity = std::array<std::uint64_t, 5>;
             provenance.parent_boundary_entity_global_id)}};
 }
 
-void validateUniqueRuleOwnership(
+void mixRuleContent(std::uint64_t& hash,
+                    const FreeSurfaceGeometryRuleRecord& record) noexcept
+{
+    mix(hash, static_cast<std::uint64_t>(record.role));
+    mix(hash, static_cast<std::uint64_t>(record.retention));
+    mix(hash, static_cast<std::uint64_t>(
+                  record.physical_boundary_marker + 1));
+    mix(hash, record.reference_rule.provenance.cut_topology_revision);
+    mix(hash, static_cast<std::uint64_t>(
+                  record.reference_rule.provenance.marker));
+    mix(hash, static_cast<std::uint64_t>(
+                  record.reference_rule.provenance.parent_entity_global_id));
+    mix(hash, static_cast<std::uint64_t>(
+                  record.reference_rule.provenance
+                      .parent_boundary_entity_global_id));
+    mix(hash, static_cast<std::uint64_t>(
+                  record.reference_rule.provenance.owner_rank + 1));
+    mix(hash, record.reference_rule.provenance.cut_topology_id);
+    mix(hash,
+        record.reference_rule.provenance
+            .selected_implicit_quadrature_backend);
+    mix(hash, record.reference_rule.provenance.implicit_fallback_status);
+    mix(hash, static_cast<std::uint64_t>(record.reference_rule.kind));
+    mix(hash, static_cast<std::uint64_t>(record.reference_rule.side));
+    mix(hash, static_cast<std::uint64_t>(
+                  record.reference_rule.geometric_dimension + 1));
+    mix(hash, record.reference_rule.measure);
+    mix(hash, record.reference_rule.parent_measure);
+    mix(hash, record.reference_rule.volume_fraction);
+    mix(hash, static_cast<std::uint64_t>(
+                  record.reference_rule.exact_polynomial_order + 1));
+    for (const auto& point : record.reference_rule.points) {
+        for (const auto value : point.parent_coordinate) {
+            mix(hash, value);
+        }
+        for (const auto value : point.normal) {
+            mix(hash, value);
+        }
+        for (const auto value : point.boundary_normal) {
+            mix(hash, value);
+        }
+        for (const auto value : point.tangent) {
+            mix(hash, value);
+        }
+        mix(hash, point.weight);
+        mix(hash, point.reference_measure_factor);
+        mix(hash, point.level_set_residual);
+        mix(hash, point.gradient_norm);
+    }
+    mix(hash, record.physical_rule.physical_measure);
+    for (const auto& point : record.physical_rule.points) {
+        for (const auto value : point.reference_point) {
+            mix(hash, value);
+        }
+        for (const auto value : point.physical_point) {
+            mix(hash, value);
+        }
+        for (const auto value : point.normal) {
+            mix(hash, value);
+        }
+        for (const auto value : point.boundary_normal) {
+            mix(hash, value);
+        }
+        for (const auto value : point.tangent) {
+            mix(hash, value);
+        }
+        mix(hash, point.absolute_jacobian_determinant);
+        mix(hash, point.reference_weight);
+        mix(hash, point.physical_weight);
+    }
+    for (const auto id : record.source_fragment_stable_ids) {
+        mix(hash, id);
+    }
+}
+
+[[nodiscard]] std::uint64_t ruleContentDigest(
+    const FreeSurfaceGeometryRuleRecord& record) noexcept
+{
+    std::uint64_t hash = kHashOffset;
+    mixRuleContent(hash, record);
+    return hash == 0u ? 1u : hash;
+}
+
+[[nodiscard]] std::vector<OwnedRuleDigest> validateUniqueRuleOwnership(
     const std::vector<FreeSurfaceGeometryRuleRecord>& records,
     const assembly::IMeshAccess& mesh,
     const FreeSurfaceGeometryOwnershipCollective& collective,
     FreeSurfaceGeometryValidationLedger& ledger)
 {
-    constexpr std::size_t width =
+    constexpr std::size_t identity_width =
         std::tuple_size_v<OwnershipRuleIdentity>;
+    constexpr std::size_t width = identity_width + 1u;
     if (collective.rank != mesh.parallelRank() ||
         collective.size != mesh.parallelSize() || collective.rank < 0 ||
         collective.size < 1 || collective.rank >= collective.size ||
@@ -206,6 +295,7 @@ void validateUniqueRuleOwnership(
         local_owned_values.insert(local_owned_values.end(),
                                   identity.begin(),
                                   identity.end());
+        local_owned_values.push_back(ruleContentDigest(record));
     }
 
     std::vector<std::uint64_t> global_owned_values = local_owned_values;
@@ -219,8 +309,7 @@ void validateUniqueRuleOwnership(
             "free-surface snapshot ownership collective returned a malformed identity stream");
     }
 
-    std::vector<OwnershipRuleIdentity> globally_owned;
-    globally_owned.reserve(global_owned_values.size() / width);
+    std::map<OwnershipRuleIdentity, std::uint64_t> globally_owned_by_identity;
     for (std::size_t offset = 0; offset < global_owned_values.size();
          offset += width) {
         OwnershipRuleIdentity identity{};
@@ -228,25 +317,40 @@ void validateUniqueRuleOwnership(
                         static_cast<std::ptrdiff_t>(offset),
                     static_cast<std::ptrdiff_t>(width),
                     identity.begin());
-        globally_owned.push_back(identity);
-    }
-    std::sort(globally_owned.begin(), globally_owned.end());
-    if (std::adjacent_find(globally_owned.begin(), globally_owned.end()) !=
-        globally_owned.end()) {
-        ++ledger.duplicate_rule_identity_count;
-        throw std::invalid_argument(
-            "free-surface snapshot found a rule owned by more than one rank");
+        const auto content_digest =
+            global_owned_values[offset + identity_width];
+        if (!globally_owned_by_identity.emplace(identity, content_digest)
+                 .second) {
+            ++ledger.duplicate_rule_identity_count;
+            throw std::invalid_argument(
+                "free-surface snapshot found a rule owned by more than one rank");
+        }
     }
     for (const auto& record : records) {
-        if (!std::binary_search(globally_owned.begin(),
-                                globally_owned.end(),
-                                ownershipRuleIdentity(record))) {
+        const auto found = globally_owned_by_identity.find(
+            ownershipRuleIdentity(record));
+        if (found == globally_owned_by_identity.end()) {
             ++ledger.invalid_global_identity_count;
             throw std::invalid_argument(
                 "free-surface snapshot found a local rule without one global owner");
         }
+        if (found->second != ruleContentDigest(record)) {
+            ++ledger.invalid_global_identity_count;
+            throw std::invalid_argument(
+                "free-surface snapshot found local rule content that differs from its global owner");
+        }
     }
-    ledger.global_owned_rule_count = globally_owned.size();
+    ledger.global_owned_rule_count = globally_owned_by_identity.size();
+    std::vector<OwnedRuleDigest> globally_owned;
+    globally_owned.reserve(globally_owned_by_identity.size());
+    for (const auto& [identity, content_digest] :
+         globally_owned_by_identity) {
+        globally_owned.push_back(OwnedRuleDigest{
+            .identity = identity,
+            .content_digest = content_digest,
+        });
+    }
+    return globally_owned;
 }
 
 [[nodiscard]] FreeSurfaceGeometryRevision makeRevision(
@@ -679,7 +783,7 @@ void validateVolumePartition(
 [[nodiscard]] std::uint64_t finalizeRevisionKey(
     const FreeSurfaceGeometryRevision& revision,
     const FreeSurfaceGeometrySnapshotPolicy& policy,
-    const std::vector<FreeSurfaceGeometryRuleRecord>& records) noexcept
+    std::span<const OwnedRuleDigest> globally_owned_rules) noexcept
 {
     std::uint64_t hash = kHashOffset;
     mix(hash, revision.source_id);
@@ -699,64 +803,11 @@ void validateVolumePartition(
                   policy.minimum_achieved_quadrature_order));
     mix(hash, static_cast<std::uint64_t>(
                   policy.require_complete_exterior_boundary_partition));
-    for (const auto& record : records) {
-        mix(hash, static_cast<std::uint64_t>(record.role));
-        mix(hash, static_cast<std::uint64_t>(record.retention));
-        mix(hash, static_cast<std::uint64_t>(
-                      record.physical_boundary_marker + 1));
-        mix(hash, static_cast<std::uint64_t>(record.locally_owned));
-        mix(hash, record.reference_rule.provenance.cut_topology_revision);
-        mix(hash, static_cast<std::uint64_t>(
-                      record.reference_rule.provenance.marker));
-        mix(hash, static_cast<std::uint64_t>(
-                      record.reference_rule.provenance.parent_entity));
-        mix(hash, static_cast<std::uint64_t>(
-                      record.reference_rule.provenance
-                          .parent_boundary_entity));
-        mix(hash, static_cast<std::uint64_t>(
-                      record.reference_rule.provenance
-                          .parent_entity_global_id));
-        mix(hash, static_cast<std::uint64_t>(
-                      record.reference_rule.provenance
-                          .parent_boundary_entity_global_id));
-        mix(hash, static_cast<std::uint64_t>(
-                      record.reference_rule.provenance.owner_rank + 1));
-        mix(hash, record.reference_rule.provenance.cut_topology_id);
-        mix(hash,
-            record.reference_rule.provenance
-                .selected_implicit_quadrature_backend);
-        mix(hash,
-            record.reference_rule.provenance.implicit_fallback_status);
-        mix(hash, static_cast<std::uint64_t>(record.reference_rule.kind));
-        mix(hash, static_cast<std::uint64_t>(record.reference_rule.side));
-        mix(hash, static_cast<std::uint64_t>(
-                      record.reference_rule.geometric_dimension + 1));
-        mix(hash, record.reference_rule.measure);
-        mix(hash, record.reference_rule.parent_measure);
-        mix(hash, record.reference_rule.volume_fraction);
-        mix(hash, static_cast<std::uint64_t>(
-                      record.reference_rule.exact_polynomial_order + 1));
-        for (const auto& point : record.reference_rule.points) {
-            for (const auto value : point.parent_coordinate) {
-                mix(hash, value);
-            }
-            for (const auto value : point.normal) {
-                mix(hash, value);
-            }
-            for (const auto value : point.boundary_normal) {
-                mix(hash, value);
-            }
-            for (const auto value : point.tangent) {
-                mix(hash, value);
-            }
-            mix(hash, point.weight);
-            mix(hash, point.reference_measure_factor);
-            mix(hash, point.level_set_residual);
-            mix(hash, point.gradient_norm);
+    for (const auto& rule : globally_owned_rules) {
+        for (const auto value : rule.identity) {
+            mix(hash, value);
         }
-        for (const auto id : record.source_fragment_stable_ids) {
-            mix(hash, id);
-        }
+        mix(hash, rule.content_digest);
     }
     return hash == 0u ? 1u : hash;
 }
@@ -880,6 +931,16 @@ FreeSurfaceDiscreteFunctionalState evaluateFreeSurfaceDiscreteFunctional(
             throw std::invalid_argument(
                 "free-surface functional has duplicate coefficients for one physical boundary");
         }
+    }
+    const auto ensure_geometry_wall = [&walls](int boundary_marker) {
+        auto& wall = walls[boundary_marker];
+        wall.boundary_marker = boundary_marker;
+    };
+    for (const auto& contact : snapshot.contactDomains()) {
+        ensure_geometry_wall(contact.boundaryMarker());
+    }
+    for (const auto& active : snapshot.activeBoundaryDomains()) {
+        ensure_geometry_wall(active.request().boundary_marker);
     }
 
     const auto volume_role =
@@ -1267,10 +1328,10 @@ buildFreeSurfaceGeometrySnapshot(
         accumulateLedger(record, ledger);
     }
     validateVolumePartition(records, policy, ledger);
-    validateUniqueRuleOwnership(
+    const auto globally_owned_rule_digests = validateUniqueRuleOwnership(
         records, mesh, ownership_collective, ledger);
     revision.snapshot_revision_key =
-        finalizeRevisionKey(revision, policy, records);
+        finalizeRevisionKey(revision, policy, globally_owned_rule_digests);
     if (!revision.complete()) {
         throw std::invalid_argument(
             "free-surface geometry snapshot revision is incomplete");
