@@ -2135,6 +2135,56 @@ void validateGeneratedFreeSurfaceMarkerUniqueness(
     return *real;
 }
 
+void declareFreeSurfaceDiscreteFunctionals(
+    const std::vector<FreeSurfaceBoundary>& free_surfaces,
+    FE::systems::FESystem& system)
+{
+    for (const auto& bc : free_surfaces) {
+        if (!isUnfittedLevelSet(bc) || !usesSurfaceStress(bc) ||
+            bc.active_domain == FreeSurfaceActiveDomain::None) {
+            continue;
+        }
+        FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+        parameters.liquid_side =
+            bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive
+                ? FE::geometry::CutIntegrationSide::Positive
+                : FE::geometry::CutIntegrationSide::Negative;
+        parameters.surface_tension = constantScalarValueOrThrow(
+            bc.surface_tension,
+            "free-surface discrete-functional surface tension");
+        // The pressure unknown is spatially varying and is not the scalar
+        // volume multiplier in the capillary functional.  Preserve V_h as a
+        // separately reported measure until a scalar multiplier is declared.
+        parameters.volume_multiplier = FE::Real{0.0};
+        for (const auto& contact_line : bc.contact_lines) {
+            const auto kind = contactLineKind(contact_line);
+            if (kind != ContactLineKind::PrescribedAngle &&
+                kind != ContactLineKind::DynamicRenE) {
+                continue;
+            }
+            parameters.young_wall_coefficients.push_back(
+                FE::interfaces::FreeSurfaceYoungWallCoefficient{
+                    .boundary_marker =
+                        contactLineWallBoundaryMarker(contact_line),
+                    .equilibrium_contact_angle_radians =
+                        constantScalarValueOrThrow(
+                            contactLineAngleRadians(contact_line),
+                            "free-surface discrete-functional equilibrium "
+                            "contact angle"),
+                });
+        }
+        system.declareFreeSurfaceDiscreteFunctional(
+            FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+                .interface_marker = bc.interface_marker,
+                .level_set_field = resolveLevelSetFieldId(bc, system),
+                .geometry_domain_id = bc.generated_interface_domain_id,
+                .parameters = std::move(parameters),
+                .owner_component =
+                    "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary",
+            });
+    }
+}
+
 [[nodiscard]] std::array<FE::Real, 3> normalizedWallNormal(
     const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine& contact_line)
 {
@@ -6969,6 +7019,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             options_.auto_register_body_force_field,
             "IncompressibleNavierStokesVMSModule::registerOn momentum source");
     }
+
+    declareFreeSurfaceDiscreteFunctionals(
+        effective_free_surfaces, system);
 
     const auto generated_active_boundary_for =
         [&system, &effective_free_surfaces](int physical_boundary_marker)

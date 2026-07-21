@@ -590,11 +590,19 @@ void GeneratedInterfaceBoundaryIntersectionDomain::addFragment(
                                  : request_.source.value_revision);
     }
     if (fragment.topology_id.empty()) {
+        const auto cell_identity =
+            fragment.parent_cell_global_id != INVALID_GLOBAL_INDEX
+                ? fragment.parent_cell_global_id
+                : static_cast<GlobalIndex>(fragment.parent_cell);
+        const auto face_identity =
+            fragment.parent_face_global_id != INVALID_GLOBAL_INDEX
+                ? fragment.parent_face_global_id
+                : static_cast<GlobalIndex>(fragment.parent_face);
         fragment.topology_id =
             "interface_boundary:" + std::to_string(fragment.interface_marker) +
             ":" + std::to_string(fragment.boundary_marker) + ":" +
-            std::to_string(fragment.parent_cell) + ":" +
-            std::to_string(fragment.parent_face) + ":" +
+            std::to_string(cell_identity) + ":" +
+            std::to_string(face_identity) + ":" +
             std::to_string(fragment.local_fragment_index);
     }
     fragments_.push_back(std::move(fragment));

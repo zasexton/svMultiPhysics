@@ -758,6 +758,25 @@ struct GeneratedInterfaceTwoSidedBinding {
     return h;
 }
 
+[[nodiscard]] inline std::string canonicalGeneratedCellTopologyId(
+    std::string topology_id,
+    MeshIndex local_parent_cell,
+    GlobalIndex global_parent_cell)
+{
+    if (topology_id.empty() ||
+        global_parent_cell == INVALID_GLOBAL_INDEX ||
+        global_parent_cell == static_cast<GlobalIndex>(local_parent_cell)) {
+        return topology_id;
+    }
+    const std::string local_prefix =
+        "cell-" + std::to_string(local_parent_cell) + "-";
+    if (topology_id.compare(0u, local_prefix.size(), local_prefix) != 0) {
+        return topology_id;
+    }
+    return "cell-" + std::to_string(global_parent_cell) + "-" +
+           topology_id.substr(local_prefix.size());
+}
+
 [[nodiscard]] inline bool cutQuadratureRuleDeterministicLess(
     const geometry::CutQuadratureRule& a,
     const geometry::CutQuadratureRule& b) noexcept {
@@ -859,6 +878,14 @@ public:
         if (fragment.local_fragment_index == INVALID_LOCAL_INDEX) {
             fragment.local_fragment_index = static_cast<LocalIndex>(fragments_.size());
         }
+        fragment.topology_id = canonicalGeneratedCellTopologyId(
+            std::move(fragment.topology_id),
+            fragment.parent_cell,
+            fragment.parent_cell_global_id);
+        fragment.branch_id = canonicalGeneratedCellTopologyId(
+            std::move(fragment.branch_id),
+            fragment.parent_cell,
+            fragment.parent_cell_global_id);
         if (fragment.stable_id == 0) {
             const auto parent_identity =
                 fragment.parent_cell_global_id != INVALID_GLOBAL_INDEX
@@ -880,6 +907,10 @@ public:
         if (region.local_region_index == INVALID_LOCAL_INDEX) {
             region.local_region_index = static_cast<LocalIndex>(volume_regions_.size());
         }
+        region.topology_id = canonicalGeneratedCellTopologyId(
+            std::move(region.topology_id),
+            region.parent_cell,
+            region.parent_cell_global_id);
         if (region.stable_id == 0) {
             const auto parent_identity =
                 region.parent_cell_global_id != INVALID_GLOBAL_INDEX

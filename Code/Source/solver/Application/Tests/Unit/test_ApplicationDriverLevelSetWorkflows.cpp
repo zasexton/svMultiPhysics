@@ -1181,6 +1181,122 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     AcceptedFunctionalUsesAuthoritativeSnapshotAndRecordsGlobalState)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  constexpr int interface_marker = 707;
+  constexpr svmp::FE::Real gamma = svmp::FE::Real{0.65};
+  auto mesh = makeWorkflowBiquadraticQuadMesh();
+  const auto mesh_field = svmp::MeshFields::attach_field(
+      mesh->local_mesh(),
+      svmp::EntityKind::Vertex,
+      "phi",
+      svmp::FieldScalarType::Float64,
+      1);
+  ASSERT_NE(svmp::MeshFields::field_data_as<svmp::real_t>(
+                mesh->local_mesh(), mesh_field),
+            nullptr);
+  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+      svmp::FE::ElementType::Quad4,
+      /*order=*/2);
+  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "phi",
+      .space = scalar_space,
+      .components = 1});
+  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+  parameters.liquid_side =
+      svmp::FE::geometry::CutIntegrationSide::Negative;
+  parameters.surface_tension = gamma;
+  system->declareFreeSurfaceDiscreteFunctional(
+      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+          .interface_marker = interface_marker,
+          .level_set_field = phi,
+          .geometry_domain_id = "functional_interface",
+          .parameters = parameters,
+          .owner_component =
+              "ApplicationDriverLevelSetWorkflows.FunctionalFixture",
+      });
+  ASSERT_NO_THROW(system->setup({}));
+
+  std::vector<svmp::FE::Real> phi_vertex_values(mesh->n_vertices(), 0.0);
+  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+    phi_vertex_values[vertex] = workflowPhi(*mesh, vertex);
+  }
+  const auto phi_coefficients = projectWorkflowVertexValues(
+      *system,
+      phi,
+      std::span<const svmp::FE::Real>(phi_vertex_values.data(),
+                                      phi_vertex_values.size()),
+      1u,
+      "ApplicationDriver accepted functional phi");
+  std::vector<svmp::FE::Real> solution(
+      static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
+  writeWorkflowFieldSlice(*system, phi, phi_coefficients, solution);
+
+  application::core::SimulationComponents sim;
+  sim.primary_mesh = mesh;
+  sim.fe_system = std::move(system);
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>functional_interface</Generated_interface_domain_id>
+      <Interface_marker>707</Interface_marker>
+      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+  const auto report = refreshActiveCutIntegrationContextFromSolution(
+      sim,
+      *params,
+      std::span<const svmp::FE::Real>(solution.data(), solution.size()),
+      lifecycle,
+      "application-driver-accepted-functional-test");
+  ASSERT_TRUE(report.refreshed);
+  ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
+      sim,
+      /*accepted_step=*/3u,
+      svmp::FE::Real{0.15},
+      svmp::FE::Real{0.05},
+      /*state_revision=*/23u));
+
+  const auto history = sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+  ASSERT_EQ(history.size(), 1u);
+  const auto& record = history.front();
+  EXPECT_EQ(record.accepted_step, 3u);
+  EXPECT_EQ(record.state_revision, 23u);
+  EXPECT_TRUE(record.geometry_revision.complete());
+  EXPECT_EQ(record.geometry_revision.interface_marker, interface_marker);
+  EXPECT_EQ(record.geometry_revision.domain_id, "functional_interface");
+  EXPECT_GT(record.state.owned_liquid_volume, 0.0);
+  EXPECT_GT(record.state.owned_liquid_gas_area, 0.0);
+  EXPECT_NEAR(record.state.liquid_gas_surface_energy,
+              gamma * record.state.owned_liquid_gas_area,
+              1.0e-13);
+  EXPECT_NEAR(record.state.total_potential,
+              record.state.liquid_gas_surface_energy,
+              1.0e-13);
+  ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
+      sim,
+      /*accepted_step=*/3u,
+      svmp::FE::Real{0.15},
+      svmp::FE::Real{0.05},
+      /*state_revision=*/23u));
+  EXPECT_EQ(sim.fe_system->freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      ConsumedContactMarkerAcceptsCurvedHighOrderFragments)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)

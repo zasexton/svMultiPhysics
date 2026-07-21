@@ -33,12 +33,30 @@ void mix(std::uint64_t& hash, std::string_view value) noexcept
     }
 }
 
-void mix(std::uint64_t& hash, Real value) noexcept
+[[nodiscard]] std::uint64_t canonicalRealBits(Real value) noexcept
 {
+    // IEEE signed zero is numerically identical geometry.  Canonicalize it so
+    // rank-local orientation arithmetic cannot give owner and ghost copies
+    // different content keys solely through +0 versus -0.
+    if (value == Real{0.0}) {
+        value = Real{0.0};
+    }
     std::uint64_t bits{0};
     static_assert(sizeof(value) <= sizeof(bits));
     std::memcpy(&bits, &value, sizeof(value));
-    mix(hash, bits);
+    return bits;
+}
+
+void mix(std::uint64_t& hash, Real value) noexcept
+{
+    mix(hash, canonicalRealBits(value));
+}
+
+[[nodiscard]] std::uint64_t stringDigest(std::string_view value) noexcept
+{
+    std::uint64_t hash = kHashOffset;
+    mix(hash, value);
+    return hash == 0u ? 1u : hash;
 }
 
 [[nodiscard]] bool finitePoint(const std::array<Real, 3>& point) noexcept
@@ -337,7 +355,23 @@ void mixRuleContent(std::uint64_t& hash,
         if (found->second != ruleContentDigest(record)) {
             ++ledger.invalid_global_identity_count;
             throw std::invalid_argument(
-                "free-surface snapshot found local rule content that differs from its global owner");
+                "free-surface snapshot found local rule content that differs "
+                "from its global owner: rank=" +
+                std::to_string(collective.rank) + " role=" +
+                std::to_string(static_cast<int>(record.role)) +
+                " marker=" +
+                std::to_string(record.reference_rule.provenance.marker) +
+                " parent_global_id=" +
+                std::to_string(
+                    record.reference_rule.provenance
+                        .parent_entity_global_id) +
+                " boundary_parent_global_id=" +
+                std::to_string(
+                    record.reference_rule.provenance
+                        .parent_boundary_entity_global_id) +
+                " owner_digest=" + std::to_string(found->second) +
+                " local_digest=" +
+                std::to_string(ruleContentDigest(record)));
         }
     }
     ledger.global_owned_rule_count = globally_owned_by_identity.size();
@@ -373,6 +407,79 @@ void mixRuleContent(std::uint64_t& hash,
     revision.numbering_revision = mesh.numberingRevision();
     revision.quadrature_policy_key = request.quadrature_policy_key;
     return revision;
+}
+
+void canonicalizeDistributedRevision(
+    FreeSurfaceGeometryRevision& revision,
+    const FreeSurfaceGeometrySnapshotPolicy& policy,
+    const FreeSurfaceGeometryOwnershipCollective& collective)
+{
+    if (collective.size == 1) {
+        return;
+    }
+    if (!collective.all_gather_revision_values) {
+        throw std::invalid_argument(
+            "distributed free-surface snapshot requires a revision collective");
+    }
+
+    constexpr std::size_t common_value_count = 11u;
+    constexpr std::size_t value_count = 15u;
+    const std::array<std::uint64_t, value_count> local_values{{
+        stringDigest(revision.source_id),
+        stringDigest(revision.domain_id),
+        static_cast<std::uint64_t>(revision.interface_marker),
+        canonicalRealBits(revision.isovalue),
+        revision.source_layout_revision,
+        revision.source_value_revision,
+        revision.quadrature_policy_key,
+        canonicalRealBits(policy.tolerance),
+        canonicalRealBits(policy.minimum_retained_volume_fraction),
+        static_cast<std::uint64_t>(
+            policy.minimum_achieved_quadrature_order),
+        static_cast<std::uint64_t>(
+            policy.require_complete_exterior_boundary_partition),
+        revision.mesh_geometry_revision,
+        revision.mesh_topology_revision,
+        revision.ownership_revision,
+        revision.numbering_revision,
+    }};
+    const auto gathered =
+        collective.all_gather_revision_values(local_values);
+    const auto expected_count =
+        static_cast<std::size_t>(collective.size) * value_count;
+    if (gathered.size() != expected_count) {
+        throw std::invalid_argument(
+            "free-surface snapshot revision collective returned a malformed value stream");
+    }
+    for (int rank = 1; rank < collective.size; ++rank) {
+        const auto offset = static_cast<std::size_t>(rank) * value_count;
+        if (!std::equal(gathered.begin(),
+                        gathered.begin() +
+                            static_cast<std::ptrdiff_t>(common_value_count),
+                        gathered.begin() +
+                            static_cast<std::ptrdiff_t>(offset))) {
+            throw std::invalid_argument(
+                "free-surface snapshot source or policy differs across ranks");
+        }
+    }
+
+    const auto distributed_key = [&](std::size_t field,
+                                     std::uint64_t tag) {
+        std::uint64_t hash = kHashOffset;
+        mix(hash, tag);
+        mix(hash, static_cast<std::uint64_t>(collective.size));
+        for (int rank = 0; rank < collective.size; ++rank) {
+            mix(hash, static_cast<std::uint64_t>(rank));
+            mix(hash,
+                gathered[static_cast<std::size_t>(rank) * value_count +
+                         field]);
+        }
+        return hash == 0u ? std::uint64_t{1u} : hash;
+    };
+    revision.mesh_geometry_revision = distributed_key(11u, 1u);
+    revision.mesh_topology_revision = distributed_key(12u, 2u);
+    revision.ownership_revision = distributed_key(13u, 3u);
+    revision.numbering_revision = distributed_key(14u, 4u);
 }
 
 void requireContactRevision(
@@ -1330,6 +1437,8 @@ buildFreeSurfaceGeometrySnapshot(
     validateVolumePartition(records, policy, ledger);
     const auto globally_owned_rule_digests = validateUniqueRuleOwnership(
         records, mesh, ownership_collective, ledger);
+    canonicalizeDistributedRevision(
+        revision, policy, ownership_collective);
     revision.snapshot_revision_key =
         finalizeRevisionKey(revision, policy, globally_owned_rule_digests);
     if (!revision.complete()) {

@@ -1337,6 +1337,8 @@ struct DynamicContactAngleAssembly {
     std::vector<FE::Real> conservative_balance_residual{};
     std::vector<FE::Real> pressure_representability_pair_jacobian{};
     std::vector<FE::Real> jacobian{};
+    std::vector<FE::systems::FreeSurfaceDiscreteFunctionalDeclaration>
+        discrete_functional_declarations{};
 };
 
 DynamicContactAngleAssembly assembleDynamicContactAngleCase(
@@ -1480,6 +1482,9 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     out.velocity_dofs = system.fieldDofHandler(velocity).getNumDofs();
     out.pressure_offset = system.fieldDofOffset(pressure);
     out.pressure_dofs = system.fieldDofHandler(pressure).getNumDofs();
+    out.discrete_functional_declarations.assign(
+        system.freeSurfaceDiscreteFunctionalDeclarations().begin(),
+        system.freeSurfaceDiscreteFunctionalDeclarations().end());
     out.solution.assign(static_cast<std::size_t>(out.total_dofs), 0.0);
 
     const std::array<FE::Real, 3> scaled_level_set_gradient{
@@ -3912,6 +3917,151 @@ TEST(MovingDomainPhysics,
     EXPECT_THROW(system.recordAcceptedMeshTangentialBoundaryPolicies(
                      6u, FE::Real{0.30}, FE::Real{0.05}, 12u),
                  FE::InvalidArgumentException);
+}
+
+TEST(MovingDomainPhysics,
+     FreeSurfaceDiscreteFunctionalHistoryIsValidatedAndReplaySafe)
+{
+    constexpr int interface_marker = 91;
+    constexpr int wall_marker = 17;
+    constexpr FE::Real gamma = FE::Real{0.8};
+    constexpr FE::Real theta =
+        FE::Real{1.04719755119659774615421446109316763};
+    auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi_functional_history",
+        .space = scalar_space,
+        .components = 1,
+    });
+    system.addOperator("equations");
+    const auto phi_state =
+        FE::forms::StateField(phi, *scalar_space, "phi_history_owner");
+    const auto eta =
+        FE::forms::TestField(phi, *scalar_space, "eta_history_owner");
+    (void)FE::systems::installFormulation(
+        system,
+        "equations",
+        {phi},
+        (FE::forms::dt(phi_state) * eta).dx());
+    system.gaugeRegistry().addAnchoring(FE::gauge::AnchoringEvidence{
+        .field = phi,
+        .component = -1,
+        .region = -1,
+        .family = FE::gauge::NullspaceModeFamily::ScalarConstant,
+        .verdict = FE::gauge::AnchoringVerdict::Anchored,
+        .source = "Transient scalar owner for functional history fixture",
+    });
+
+    FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+    parameters.liquid_side =
+        FE::geometry::CutIntegrationSide::Negative;
+    parameters.surface_tension = gamma;
+    parameters.young_wall_coefficients.push_back(
+        FE::interfaces::FreeSurfaceYoungWallCoefficient{
+            .boundary_marker = wall_marker,
+            .equilibrium_contact_angle_radians = theta,
+        });
+    const FE::systems::FreeSurfaceDiscreteFunctionalDeclaration declaration{
+        .interface_marker = interface_marker,
+        .level_set_field = phi,
+        .geometry_domain_id = "history_surface",
+        .parameters = parameters,
+        .owner_component = "MovingDomainPhysics.FunctionalHistoryFixture",
+    };
+    ASSERT_NO_THROW(system.declareFreeSurfaceDiscreteFunctional(declaration));
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    constexpr FE::Real liquid_volume = FE::Real{0.25};
+    constexpr FE::Real liquid_gas_area = FE::Real{0.4};
+    constexpr FE::Real wetted_wall_area = FE::Real{0.3};
+    constexpr FE::Real contact_measure = FE::Real{0.1};
+    const FE::Real liquid_gas_energy = gamma * liquid_gas_area;
+    const FE::Real wall_energy =
+        -gamma * std::cos(theta) * wetted_wall_area;
+    const FE::Real total_potential = liquid_gas_energy + wall_energy;
+    FE::interfaces::FreeSurfaceGeometryRevision geometry_revision{
+        .source_id = "field:" + std::to_string(phi),
+        .domain_id = "history_surface",
+        .interface_marker = interface_marker,
+        .isovalue = FE::Real{0.0},
+        .source_layout_revision = 3u,
+        .source_value_revision = 9u,
+        .mesh_geometry_revision = 4u,
+        .mesh_topology_revision = 5u,
+        .ownership_revision = 6u,
+        .numbering_revision = 7u,
+        .quadrature_policy_key = 8u,
+        .snapshot_revision_key = 101u,
+    };
+    FE::interfaces::FreeSurfaceDiscreteFunctionalState functional_state{
+        .snapshot_revision_key = 101u,
+        .liquid_side = FE::geometry::CutIntegrationSide::Negative,
+        .surface_tension = gamma,
+        .volume_multiplier = FE::Real{0.0},
+        .walls = {
+            FE::interfaces::FreeSurfaceDiscreteWallFunctionalState{
+                .boundary_marker = wall_marker,
+                .equilibrium_contact_angle_radians = theta,
+                .owned_wetted_wall_area = wetted_wall_area,
+                .owned_contact_measure = contact_measure,
+                .young_wall_energy = wall_energy,
+            }},
+        .owned_liquid_volume = liquid_volume,
+        .owned_liquid_gas_area = liquid_gas_area,
+        .owned_wetted_wall_area = wetted_wall_area,
+        .owned_contact_measure = contact_measure,
+        .liquid_gas_surface_energy = liquid_gas_energy,
+        .young_wall_energy = wall_energy,
+        .volume_constraint_potential = FE::Real{0.0},
+        .total_potential = total_potential,
+    };
+    std::vector<FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+        accepted_states{
+            FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState{
+                .interface_marker = interface_marker,
+                .geometry_revision = geometry_revision,
+                .state = functional_state,
+            }};
+
+    ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        7u, FE::Real{0.35}, FE::Real{0.05}, 13u, accepted_states));
+    auto history = system.freeSurfaceDiscreteFunctionalHistory();
+    ASSERT_EQ(history.size(), 1u);
+    EXPECT_EQ(history.front().accepted_step, 7u);
+    EXPECT_DOUBLE_EQ(history.front().accepted_time, FE::Real{0.35});
+    EXPECT_EQ(history.front().state_revision, 13u);
+    EXPECT_EQ(history.front().geometry_revision.snapshot_revision_key, 101u);
+    EXPECT_DOUBLE_EQ(history.front().state.total_potential, total_potential);
+
+    ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        7u, FE::Real{0.35}, FE::Real{0.05}, 13u, accepted_states));
+    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+    auto conflicting_states = accepted_states;
+    conflicting_states.front().geometry_revision.source_value_revision = 10u;
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            7u,
+            FE::Real{0.35},
+            FE::Real{0.05},
+            13u,
+            conflicting_states),
+        FE::InvalidArgumentException);
+    ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        8u, FE::Real{0.40}, FE::Real{0.05}, 14u, accepted_states));
+    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 2u);
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            6u,
+            FE::Real{0.30},
+            FE::Real{0.05},
+            12u,
+            accepted_states),
+        FE::InvalidArgumentException);
+    EXPECT_THROW(
+        system.declareFreeSurfaceDiscreteFunctional(declaration),
+        FE::InvalidArgumentException);
 }
 
 TEST(MovingDomainPhysics, FreeSurfaceContactLineOptionsAreExplicit)
@@ -7001,6 +7151,60 @@ TEST(MovingDomainPhysics,
             }
         }
         ++angle_index;
+    }
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesSurfaceStressDeclaresSnapshotFunctionalForBothLiquidSides)
+{
+    constexpr FE::Real theta =
+        FE::Real{1.04719755119659774615421446109316763};
+    constexpr FE::Real gamma = FE::Real{0.8};
+    constexpr int interface_marker = 167;
+    constexpr int wall_marker = 57;
+    constexpr std::array<FE::Real, 4> zero_velocity{
+        FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}};
+
+    for (const auto active_domain : {
+             ns::FreeSurfaceActiveDomain::LevelSetNegative,
+             ns::FreeSurfaceActiveDomain::LevelSetPositive}) {
+        const auto result = assembleDynamicContactAngleCase(
+            theta,
+            theta,
+            zero_velocity,
+            /*include_dynamic_contact_angle=*/true,
+            /*assemble_jacobian=*/false,
+            std::array<FE::Real, 4>{0.0, 0.0, 0.0, 0.0},
+            std::array<FE::Real, 3>{0.0, 0.0, -1.0},
+            /*level_set_scale=*/1.0,
+            /*level_set_shift=*/0.0,
+            /*velocity_component=*/0,
+            active_domain,
+            ns::FreeSurfaceSurfaceTensionForm::SurfaceStress);
+        ASSERT_EQ(result.discrete_functional_declarations.size(), 1u);
+        const auto& declaration =
+            result.discrete_functional_declarations.front();
+        EXPECT_EQ(declaration.interface_marker, interface_marker);
+        EXPECT_EQ(declaration.level_set_field, result.level_set_field);
+        EXPECT_EQ(declaration.geometry_domain_id, "free_surface");
+        EXPECT_EQ(
+            declaration.parameters.liquid_side,
+            active_domain == ns::FreeSurfaceActiveDomain::LevelSetNegative
+                ? FE::geometry::CutIntegrationSide::Negative
+                : FE::geometry::CutIntegrationSide::Positive);
+        EXPECT_DOUBLE_EQ(declaration.parameters.surface_tension, gamma);
+        EXPECT_DOUBLE_EQ(declaration.parameters.volume_multiplier, 0.0);
+        ASSERT_EQ(
+            declaration.parameters.young_wall_coefficients.size(), 1u);
+        EXPECT_EQ(
+            declaration.parameters.young_wall_coefficients.front()
+                .boundary_marker,
+            wall_marker);
+        EXPECT_DOUBLE_EQ(
+            declaration.parameters.young_wall_coefficients.front()
+                .equilibrium_contact_angle_radians,
+            theta);
+        EXPECT_FALSE(declaration.owner_component.empty());
     }
 }
 

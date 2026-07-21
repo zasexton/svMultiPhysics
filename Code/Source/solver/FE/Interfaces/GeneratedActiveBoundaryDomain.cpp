@@ -909,7 +909,8 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                     ? std::min(req.quadrature_order, 5)
                     : std::min(req.quadrature_order, 2);
             fragment.topology_id =
-                "active-boundary:" + std::to_string(face) + ":" +
+                "active-boundary:" +
+                std::to_string(fragment.parent_face_global_id) + ":" +
                 std::to_string(static_cast<int>(req.side));
             fragment.vertices = clipped;
             for (const auto* contact : contacts) {

@@ -31,6 +31,7 @@
 #include "Systems/SystemSetup.h"
 #include "PostProcessing/DerivedResultOutput.h"
 #include "PostProcessing/DerivedResultRegistry.h"
+#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 
 #include "Assembly/Assembler.h"
 
@@ -220,6 +221,30 @@ struct MeshTangentialBoundaryPolicyHistoryRecord {
     std::string owner_component{};
 };
 
+struct FreeSurfaceDiscreteFunctionalDeclaration {
+    int interface_marker{-1};
+    FieldId level_set_field{INVALID_FIELD_ID};
+    std::string geometry_domain_id{};
+    interfaces::FreeSurfaceDiscreteFunctionalParameters parameters{};
+    std::string owner_component{};
+};
+
+struct AcceptedFreeSurfaceDiscreteFunctionalState {
+    int interface_marker{-1};
+    interfaces::FreeSurfaceGeometryRevision geometry_revision{};
+    interfaces::FreeSurfaceDiscreteFunctionalState state{};
+};
+
+struct FreeSurfaceDiscreteFunctionalHistoryRecord {
+    std::uint64_t accepted_step{0};
+    Real accepted_time{0.0};
+    Real dt{0.0};
+    std::uint64_t state_revision{0};
+    FreeSurfaceDiscreteFunctionalDeclaration declaration{};
+    interfaces::FreeSurfaceGeometryRevision geometry_revision{};
+    interfaces::FreeSurfaceDiscreteFunctionalState state{};
+};
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 enum class MeshCoordinateUpdateMode : std::uint8_t {
     AbsoluteFromReference,
@@ -393,6 +418,24 @@ public:
         const MeshTangentialBoundaryPolicyHistoryRecord>
     meshTangentialBoundaryPolicyHistory() const noexcept {
         return mesh_tangential_boundary_policy_history_;
+    }
+    void declareFreeSurfaceDiscreteFunctional(
+        FreeSurfaceDiscreteFunctionalDeclaration declaration);
+    [[nodiscard]] std::span<
+        const FreeSurfaceDiscreteFunctionalDeclaration>
+    freeSurfaceDiscreteFunctionalDeclarations() const noexcept {
+        return free_surface_discrete_functional_declarations_;
+    }
+    void recordAcceptedFreeSurfaceDiscreteFunctionals(
+        std::uint64_t accepted_step,
+        Real accepted_time,
+        Real dt,
+        std::uint64_t state_revision,
+        std::span<const AcceptedFreeSurfaceDiscreteFunctionalState> states);
+    [[nodiscard]] std::span<
+        const FreeSurfaceDiscreteFunctionalHistoryRecord>
+    freeSurfaceDiscreteFunctionalHistory() const noexcept {
+        return free_surface_discrete_functional_history_;
     }
     void setGeometricNonlinearityPolicy(GeometricNonlinearityPolicy policy);
     [[nodiscard]] const GeometricNonlinearityPolicy& geometricNonlinearityPolicy() const noexcept;
@@ -1808,6 +1851,10 @@ private:
         mesh_tangential_boundary_policies_{};
     std::vector<MeshTangentialBoundaryPolicyHistoryRecord>
         mesh_tangential_boundary_policy_history_{};
+    std::vector<FreeSurfaceDiscreteFunctionalDeclaration>
+        free_surface_discrete_functional_declarations_{};
+    std::vector<FreeSurfaceDiscreteFunctionalHistoryRecord>
+        free_surface_discrete_functional_history_{};
     GeometricNonlinearityPolicy geometric_nonlinearity_policy_{};
 
 		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>> sparsity_by_op_{};

@@ -1641,6 +1641,20 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
   const auto phi = system->addField(svmp::FE::systems::FieldSpec{
       .name = "phi", .space = scalar_space, .components = 1});
+  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
+      functional_parameters;
+  functional_parameters.liquid_side =
+      svmp::FE::geometry::CutIntegrationSide::Negative;
+  functional_parameters.surface_tension = svmp::FE::Real{0.75};
+  system->declareFreeSurfaceDiscreteFunctional(
+      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+          .interface_marker = 721,
+          .level_set_field = phi,
+          .geometry_domain_id = "mpi_disjoint_wall_interface",
+          .parameters = functional_parameters,
+          .owner_component =
+              "ApplicationDriverLevelSetWorkflowsMPI.FunctionalFixture",
+      });
 
   svmp::FE::systems::SetupOptions setup_options;
   setup_options.dof_options.global_numbering =
@@ -1743,6 +1757,29 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   EXPECT_NEAR(report.positive_volume, 16.0, 1.0e-12);
   EXPECT_NEAR(report.negative_physical_volume, 4.0, 1.0e-12);
   EXPECT_NEAR(report.positive_physical_volume, 4.0, 1.0e-12);
+
+  ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
+      sim,
+      /*accepted_step=*/2u,
+      svmp::FE::Real{0.10},
+      svmp::FE::Real{0.05},
+      /*state_revision=*/31u));
+  const auto functional_history =
+      sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+  ASSERT_EQ(functional_history.size(), 1u);
+  const auto& functional_record = functional_history.front();
+  EXPECT_EQ(functional_record.accepted_step, 2u);
+  EXPECT_EQ(functional_record.state_revision, 31u);
+  EXPECT_NEAR(functional_record.state.owned_liquid_volume, 4.0, 1.0e-12);
+  EXPECT_NEAR(functional_record.state.owned_liquid_gas_area, 8.0, 1.0e-12);
+  EXPECT_NEAR(functional_record.state.liquid_gas_surface_energy,
+              6.0,
+              1.0e-12);
+  EXPECT_NEAR(functional_record.state.total_potential, 6.0, 1.0e-12);
+  ASSERT_EQ(functional_record.state.walls.size(), 3u);
+  for (const auto& wall : functional_record.state.walls) {
+    EXPECT_FALSE(wall.equilibrium_contact_angle_radians.has_value());
+  }
 
   const auto* cut_context = sim.fe_system->cutIntegrationContext();
   ASSERT_NE(cut_context, nullptr);

@@ -103,10 +103,11 @@ struct FreeSurfaceGeometryScalarEvaluator {
 };
 
 /**
- * Rank-local adapter used by the snapshot validator to gather the identities
- * of rules owned anywhere in the communicator.  The FE geometry layer owns
- * the identity, content, and uniqueness checks; callers only provide the
- * byte-free collective operation needed to exchange unsigned integer values.
+ * Rank-local adapter used by the snapshot validator to gather owned-rule
+ * identities and revision components across the communicator.  The FE
+ * geometry layer owns the identity, content, uniqueness, and canonicalization
+ * checks; callers only provide the byte-free collective operation needed to
+ * exchange unsigned integer values.
  */
 struct FreeSurfaceGeometryOwnershipCollective {
     int rank{0};
@@ -114,6 +115,9 @@ struct FreeSurfaceGeometryOwnershipCollective {
     std::function<std::vector<std::uint64_t>(
         std::span<const std::uint64_t>)>
         all_gather_owned_rule_identity_values{};
+    std::function<std::vector<std::uint64_t>(
+        std::span<const std::uint64_t>)>
+        all_gather_revision_values{};
 };
 
 struct FreeSurfaceGeometryValidationLedger {

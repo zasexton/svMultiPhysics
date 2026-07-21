@@ -6451,6 +6451,81 @@ MeshCoordinateUpdateStage toMeshCoordinateUpdateStage(
 }
 #endif
 
+bool sameFreeSurfaceGeometryRevision(
+    const interfaces::FreeSurfaceGeometryRevision& lhs,
+    const interfaces::FreeSurfaceGeometryRevision& rhs) noexcept
+{
+    return lhs.sameSourceState(rhs) &&
+           lhs.snapshot_revision_key == rhs.snapshot_revision_key;
+}
+
+bool sameFreeSurfaceFunctionalParameters(
+    const interfaces::FreeSurfaceDiscreteFunctionalParameters& lhs,
+    const interfaces::FreeSurfaceDiscreteFunctionalParameters& rhs) noexcept
+{
+    if (lhs.liquid_side != rhs.liquid_side ||
+        lhs.surface_tension != rhs.surface_tension ||
+        lhs.volume_multiplier != rhs.volume_multiplier ||
+        lhs.young_wall_coefficients.size() !=
+            rhs.young_wall_coefficients.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < lhs.young_wall_coefficients.size(); ++i) {
+        const auto& left = lhs.young_wall_coefficients[i];
+        const auto& right = rhs.young_wall_coefficients[i];
+        if (left.boundary_marker != right.boundary_marker ||
+            left.equilibrium_contact_angle_radians !=
+                right.equilibrium_contact_angle_radians) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool sameFreeSurfaceFunctionalState(
+    const interfaces::FreeSurfaceDiscreteFunctionalState& lhs,
+    const interfaces::FreeSurfaceDiscreteFunctionalState& rhs) noexcept
+{
+    if (lhs.snapshot_revision_key != rhs.snapshot_revision_key ||
+        lhs.liquid_side != rhs.liquid_side ||
+        lhs.surface_tension != rhs.surface_tension ||
+        lhs.volume_multiplier != rhs.volume_multiplier ||
+        lhs.owned_liquid_volume != rhs.owned_liquid_volume ||
+        lhs.owned_liquid_gas_area != rhs.owned_liquid_gas_area ||
+        lhs.owned_wetted_wall_area != rhs.owned_wetted_wall_area ||
+        lhs.owned_contact_measure != rhs.owned_contact_measure ||
+        lhs.liquid_gas_surface_energy != rhs.liquid_gas_surface_energy ||
+        lhs.young_wall_energy != rhs.young_wall_energy ||
+        lhs.volume_constraint_potential !=
+            rhs.volume_constraint_potential ||
+        lhs.total_potential != rhs.total_potential ||
+        lhs.walls.size() != rhs.walls.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < lhs.walls.size(); ++i) {
+        const auto& left = lhs.walls[i];
+        const auto& right = rhs.walls[i];
+        if (left.boundary_marker != right.boundary_marker ||
+            left.equilibrium_contact_angle_radians !=
+                right.equilibrium_contact_angle_radians ||
+            left.owned_wetted_wall_area !=
+                right.owned_wetted_wall_area ||
+            left.owned_contact_measure != right.owned_contact_measure ||
+            left.young_wall_energy != right.young_wall_energy) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool freeSurfaceFunctionalValueNear(Real actual, Real expected) noexcept
+{
+    const auto scale = std::max(
+        {Real{1.0}, std::abs(actual), std::abs(expected)});
+    return std::abs(actual - expected) <=
+           Real{512.0} * std::numeric_limits<Real>::epsilon() * scale;
+}
+
 } // namespace
 
 void FESystem::bindMeshMotionField(MeshMotionFieldRole role, FieldId field)
@@ -6643,6 +6718,472 @@ void FESystem::recordAcceptedMeshTangentialBoundaryPolicies(
                 << " boundary_marker=" << declaration.boundary_marker
                 << " policy=" << policy_name
                 << " owner='" << declaration.owner_component << "'";
+        FE_LOG_INFO(message.str());
+    }
+}
+
+void FESystem::declareFreeSurfaceDiscreteFunctional(
+    FreeSurfaceDiscreteFunctionalDeclaration declaration)
+{
+    FE_THROW_IF(
+        !free_surface_discrete_functional_history_.empty(),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: declarations "
+        "cannot change after accepted history has begun");
+    FE_THROW_IF(
+        declaration.interface_marker < 0,
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: interface marker "
+        "must be nonnegative");
+    FE_THROW_IF(
+        !field_registry_.has(declaration.level_set_field),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: unknown level-set "
+        "field");
+    const auto& level_set = field_registry_.get(declaration.level_set_field);
+    FE_THROW_IF(
+        level_set.scope != FieldScope::VolumeCell || level_set.space == nullptr ||
+            level_set.components != 1 ||
+            level_set.space->value_dimension() != 1,
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: level-set field "
+        "must be a scalar volume field");
+    FE_THROW_IF(
+        declaration.geometry_domain_id.empty(),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: geometry domain "
+        "identifier must be nonempty");
+    FE_THROW_IF(
+        declaration.owner_component.empty(),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: owner component "
+        "must be nonempty");
+    auto& parameters = declaration.parameters;
+    FE_THROW_IF(
+        parameters.liquid_side != geometry::CutIntegrationSide::Negative &&
+            parameters.liquid_side != geometry::CutIntegrationSide::Positive,
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: liquid side must "
+        "be Negative or Positive");
+    FE_THROW_IF(
+        !std::isfinite(parameters.surface_tension) ||
+            parameters.surface_tension < Real{0.0},
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: surface tension "
+        "must be finite and nonnegative");
+    FE_THROW_IF(
+        !std::isfinite(parameters.volume_multiplier),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: volume multiplier "
+        "must be finite");
+    std::sort(
+        parameters.young_wall_coefficients.begin(),
+        parameters.young_wall_coefficients.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return lhs.boundary_marker < rhs.boundary_marker;
+        });
+    constexpr Real pi = Real{3.141592653589793238462643383279502884};
+    for (std::size_t i = 0; i < parameters.young_wall_coefficients.size();
+         ++i) {
+        const auto& coefficient = parameters.young_wall_coefficients[i];
+        FE_THROW_IF(
+            coefficient.boundary_marker < 0 ||
+                !std::isfinite(
+                    coefficient.equilibrium_contact_angle_radians) ||
+                !(coefficient.equilibrium_contact_angle_radians >
+                  Real{0.0}) ||
+                !(coefficient.equilibrium_contact_angle_radians < pi),
+            InvalidArgumentException,
+            "FESystem::declareFreeSurfaceDiscreteFunctional: every Young "
+            "wall coefficient requires a nonnegative marker and a finite "
+            "angle strictly in (0, pi)");
+        FE_THROW_IF(
+            i != 0u &&
+                parameters.young_wall_coefficients[i - 1u]
+                        .boundary_marker == coefficient.boundary_marker,
+            InvalidArgumentException,
+            "FESystem::declareFreeSurfaceDiscreteFunctional: duplicate "
+            "Young wall coefficient marker");
+    }
+    const auto conflict = std::find_if(
+        free_surface_discrete_functional_declarations_.begin(),
+        free_surface_discrete_functional_declarations_.end(),
+        [&](const auto& existing) {
+            return existing.interface_marker == declaration.interface_marker;
+        });
+    FE_THROW_IF(
+        conflict != free_surface_discrete_functional_declarations_.end(),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: interface marker " +
+            std::to_string(declaration.interface_marker) +
+            " already has functional owner '" + conflict->owner_component +
+            "'");
+
+    const int declared_marker = declaration.interface_marker;
+    invalidateSetup();
+    free_surface_discrete_functional_declarations_.push_back(
+        std::move(declaration));
+    std::sort(
+        free_surface_discrete_functional_declarations_.begin(),
+        free_surface_discrete_functional_declarations_.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return lhs.interface_marker < rhs.interface_marker;
+        });
+    const auto& stored = *std::find_if(
+        free_surface_discrete_functional_declarations_.begin(),
+        free_surface_discrete_functional_declarations_.end(),
+        [&](const auto& candidate) {
+            return candidate.interface_marker ==
+                   declared_marker;
+        });
+    std::ostringstream message;
+    message << std::setprecision(17)
+            << "FESystem: declared free-surface discrete functional"
+            << " diagnostic=free_surface_discrete_functional_declaration"
+            << " interface_marker=" << stored.interface_marker
+            << " level_set_field=" << stored.level_set_field
+            << " geometry_domain_id='" << stored.geometry_domain_id << "'"
+            << " liquid_side="
+            << (stored.parameters.liquid_side ==
+                        geometry::CutIntegrationSide::Negative
+                    ? "Negative"
+                    : "Positive")
+            << " surface_tension=" << stored.parameters.surface_tension
+            << " volume_multiplier=" << stored.parameters.volume_multiplier
+            << " young_wall_count="
+            << stored.parameters.young_wall_coefficients.size()
+            << " owner='" << stored.owner_component << "'";
+    for (const auto& wall : stored.parameters.young_wall_coefficients) {
+        message << " young_wall_marker=" << wall.boundary_marker
+                << " equilibrium_contact_angle_radians="
+                << wall.equilibrium_contact_angle_radians;
+    }
+    FE_LOG_INFO(message.str());
+}
+
+void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
+    std::uint64_t accepted_step,
+    Real accepted_time,
+    Real dt,
+    std::uint64_t state_revision,
+    std::span<const AcceptedFreeSurfaceDiscreteFunctionalState> states)
+{
+    if (free_surface_discrete_functional_declarations_.empty()) {
+        FE_THROW_IF(
+            !states.empty(),
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+            "states were supplied without declarations");
+        return;
+    }
+    FE_THROW_IF(
+        !isSetup(),
+        InvalidArgumentException,
+        "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: system "
+        "setup must be complete");
+    FE_THROW_IF(
+        !std::isfinite(accepted_time) || !std::isfinite(dt) ||
+            dt < Real{0.0} || state_revision == 0u,
+        InvalidArgumentException,
+        "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: accepted "
+        "time and dt must be finite, dt must be nonnegative, and the state "
+        "revision must be nonzero");
+    FE_THROW_IF(
+        states.size() !=
+            free_surface_discrete_functional_declarations_.size(),
+        InvalidArgumentException,
+        "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: expected "
+        "exactly one state for every declaration");
+
+    const auto require_near = [](Real actual,
+                                 Real expected,
+                                 std::string_view quantity) {
+        FE_THROW_IF(
+            !freeSurfaceFunctionalValueNear(actual, expected),
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: " +
+                std::string(quantity) + " is inconsistent");
+    };
+    for (std::size_t i = 0; i < states.size(); ++i) {
+        const auto& accepted = states[i];
+        const auto& declaration =
+            free_surface_discrete_functional_declarations_[i];
+        FE_THROW_IF(
+            accepted.interface_marker != declaration.interface_marker,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+            "states must be unique and sorted by declared interface marker");
+        const auto& revision = accepted.geometry_revision;
+        const auto& state = accepted.state;
+        FE_THROW_IF(
+            !revision.complete(),
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+            "geometry revision is incomplete");
+        const auto expected_source =
+            "field:" + std::to_string(declaration.level_set_field);
+        FE_THROW_IF(
+            revision.interface_marker != declaration.interface_marker ||
+                revision.source_id != expected_source ||
+                revision.domain_id != declaration.geometry_domain_id ||
+                revision.snapshot_revision_key !=
+                    state.snapshot_revision_key,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+            "geometry provenance does not match the declaration and state");
+        FE_THROW_IF(
+            state.liquid_side != declaration.parameters.liquid_side ||
+                state.surface_tension !=
+                    declaration.parameters.surface_tension ||
+                state.volume_multiplier !=
+                    declaration.parameters.volume_multiplier,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: state "
+            "coefficients do not match the declaration");
+        const auto finite_nonnegative = [](Real value) {
+            return std::isfinite(value) && value >= Real{0.0};
+        };
+        FE_THROW_IF(
+            !finite_nonnegative(state.owned_liquid_volume) ||
+                !finite_nonnegative(state.owned_liquid_gas_area) ||
+                !finite_nonnegative(state.owned_wetted_wall_area) ||
+                !finite_nonnegative(state.owned_contact_measure) ||
+                !std::isfinite(state.liquid_gas_surface_energy) ||
+                !std::isfinite(state.young_wall_energy) ||
+                !std::isfinite(state.volume_constraint_potential) ||
+                !std::isfinite(state.total_potential),
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: state "
+            "contains a non-finite value or a negative measure");
+
+        Real wetted_area_sum = Real{0.0};
+        Real contact_measure_sum = Real{0.0};
+        Real wall_energy_sum = Real{0.0};
+        std::size_t configured_wall_count = 0u;
+        for (std::size_t wall_index = 0; wall_index < state.walls.size();
+             ++wall_index) {
+            const auto& wall = state.walls[wall_index];
+            FE_THROW_IF(
+                wall.boundary_marker < 0 ||
+                    (wall_index != 0u &&
+                     state.walls[wall_index - 1u].boundary_marker >=
+                         wall.boundary_marker) ||
+                    !finite_nonnegative(wall.owned_wetted_wall_area) ||
+                    !finite_nonnegative(wall.owned_contact_measure) ||
+                    !std::isfinite(wall.young_wall_energy),
+                InvalidArgumentException,
+                "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                "wall states must be finite, nonnegative in measure, unique, "
+                "and sorted by marker");
+            const auto coefficient = std::lower_bound(
+                declaration.parameters.young_wall_coefficients.begin(),
+                declaration.parameters.young_wall_coefficients.end(),
+                wall.boundary_marker,
+                [](const auto& candidate, int marker) {
+                    return candidate.boundary_marker < marker;
+                });
+            const bool configured =
+                coefficient !=
+                    declaration.parameters.young_wall_coefficients.end() &&
+                coefficient->boundary_marker == wall.boundary_marker;
+            FE_THROW_IF(
+                configured !=
+                    wall.equilibrium_contact_angle_radians.has_value(),
+                InvalidArgumentException,
+                "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                "wall angle presence does not match the declaration");
+            Real expected_wall_energy = Real{0.0};
+            if (configured) {
+                ++configured_wall_count;
+                FE_THROW_IF(
+                    *wall.equilibrium_contact_angle_radians !=
+                        coefficient->equilibrium_contact_angle_radians,
+                    InvalidArgumentException,
+                    "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                    "wall angle does not match the declaration");
+                expected_wall_energy =
+                    -state.surface_tension *
+                    std::cos(*wall.equilibrium_contact_angle_radians) *
+                    wall.owned_wetted_wall_area;
+            }
+            require_near(wall.young_wall_energy,
+                         expected_wall_energy,
+                         "per-wall Young energy");
+            wetted_area_sum += wall.owned_wetted_wall_area;
+            contact_measure_sum += wall.owned_contact_measure;
+            wall_energy_sum += wall.young_wall_energy;
+        }
+        FE_THROW_IF(
+            configured_wall_count !=
+                declaration.parameters.young_wall_coefficients.size(),
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: a "
+            "configured Young wall is absent from the state");
+        require_near(state.owned_wetted_wall_area,
+                     wetted_area_sum,
+                     "total wetted-wall area");
+        require_near(state.owned_contact_measure,
+                     contact_measure_sum,
+                     "total contact measure");
+        require_near(state.liquid_gas_surface_energy,
+                     state.surface_tension *
+                         state.owned_liquid_gas_area,
+                     "liquid-gas surface energy");
+        require_near(state.young_wall_energy,
+                     wall_energy_sum,
+                     "total Young wall energy");
+        require_near(state.volume_constraint_potential,
+                     state.volume_multiplier *
+                         state.owned_liquid_volume,
+                     "volume-constraint potential");
+        require_near(state.total_potential,
+                     state.liquid_gas_surface_energy +
+                         state.young_wall_energy +
+                         state.volume_constraint_potential,
+                     "total potential");
+    }
+
+    const auto declaration_count =
+        free_surface_discrete_functional_declarations_.size();
+    if (!free_surface_discrete_functional_history_.empty()) {
+        FE_THROW_IF(
+            free_surface_discrete_functional_history_.size() <
+                declaration_count,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+            "accepted history is incomplete");
+        const auto history_begin =
+            free_surface_discrete_functional_history_.size() -
+            declaration_count;
+        const auto& latest =
+            free_surface_discrete_functional_history_[history_begin];
+        FE_THROW_IF(
+            accepted_step < latest.accepted_step ||
+                accepted_time < latest.accepted_time,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+            "accepted history must be monotone");
+        if (accepted_step == latest.accepted_step) {
+            FE_THROW_IF(
+                accepted_time != latest.accepted_time || dt != latest.dt ||
+                    state_revision != latest.state_revision,
+                InvalidArgumentException,
+                "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                "an accepted step cannot be recorded with conflicting "
+                "provenance");
+            for (std::size_t i = 0; i < declaration_count; ++i) {
+                const auto& record =
+                    free_surface_discrete_functional_history_[history_begin +
+                                                              i];
+                FE_THROW_IF(
+                    record.declaration.interface_marker !=
+                            free_surface_discrete_functional_declarations_[i]
+                                .interface_marker ||
+                        record.declaration.level_set_field !=
+                            free_surface_discrete_functional_declarations_[i]
+                                .level_set_field ||
+                        record.declaration.geometry_domain_id !=
+                            free_surface_discrete_functional_declarations_[i]
+                                .geometry_domain_id ||
+                        record.declaration.owner_component !=
+                            free_surface_discrete_functional_declarations_[i]
+                                .owner_component ||
+                        !sameFreeSurfaceFunctionalParameters(
+                            record.declaration.parameters,
+                            free_surface_discrete_functional_declarations_[i]
+                                .parameters) ||
+                        !sameFreeSurfaceGeometryRevision(
+                            record.geometry_revision,
+                            states[i].geometry_revision) ||
+                        !sameFreeSurfaceFunctionalState(
+                            record.state, states[i].state),
+                    InvalidArgumentException,
+                    "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                    "an accepted step cannot be replayed with different "
+                    "functional state");
+            }
+            return;
+        }
+    }
+
+    free_surface_discrete_functional_history_.reserve(
+        free_surface_discrete_functional_history_.size() + states.size());
+    for (std::size_t i = 0; i < states.size(); ++i) {
+        const auto& accepted = states[i];
+        const auto& declaration =
+            free_surface_discrete_functional_declarations_[i];
+        free_surface_discrete_functional_history_.push_back(
+            FreeSurfaceDiscreteFunctionalHistoryRecord{
+                .accepted_step = accepted_step,
+                .accepted_time = accepted_time,
+                .dt = dt,
+                .state_revision = state_revision,
+                .declaration = declaration,
+                .geometry_revision = accepted.geometry_revision,
+                .state = accepted.state,
+            });
+        const auto& revision = accepted.geometry_revision;
+        const auto& state = accepted.state;
+        std::ostringstream message;
+        message << std::setprecision(17)
+                << "FESystem: accepted free-surface discrete functional"
+                << " diagnostic=free_surface_discrete_functional_history"
+                << " accepted_step=" << accepted_step
+                << " accepted_time=" << accepted_time
+                << " dt=" << dt
+                << " state_revision=" << state_revision
+                << " interface_marker=" << declaration.interface_marker
+                << " level_set_field=" << declaration.level_set_field
+                << " geometry_source_id='" << revision.source_id << "'"
+                << " geometry_domain_id='" << revision.domain_id << "'"
+                << " geometry_isovalue=" << revision.isovalue
+                << " source_layout_revision="
+                << revision.source_layout_revision
+                << " source_value_revision="
+                << revision.source_value_revision
+                << " mesh_geometry_revision="
+                << revision.mesh_geometry_revision
+                << " mesh_topology_revision="
+                << revision.mesh_topology_revision
+                << " ownership_revision=" << revision.ownership_revision
+                << " numbering_revision=" << revision.numbering_revision
+                << " quadrature_policy_key="
+                << revision.quadrature_policy_key
+                << " snapshot_revision="
+                << revision.snapshot_revision_key
+                << " liquid_side="
+                << (state.liquid_side ==
+                            geometry::CutIntegrationSide::Negative
+                        ? "Negative"
+                        : "Positive")
+                << " surface_tension=" << state.surface_tension
+                << " volume_multiplier=" << state.volume_multiplier
+                << " liquid_volume=" << state.owned_liquid_volume
+                << " liquid_gas_area=" << state.owned_liquid_gas_area
+                << " wetted_wall_area=" << state.owned_wetted_wall_area
+                << " contact_measure=" << state.owned_contact_measure
+                << " liquid_gas_surface_energy="
+                << state.liquid_gas_surface_energy
+                << " young_wall_energy=" << state.young_wall_energy
+                << " volume_constraint_potential="
+                << state.volume_constraint_potential
+                << " total_potential=" << state.total_potential
+                << " wall_count=" << state.walls.size()
+                << " owner='" << declaration.owner_component << "'";
+        for (const auto& wall : state.walls) {
+            message << " wall_marker=" << wall.boundary_marker;
+            if (wall.equilibrium_contact_angle_radians.has_value()) {
+                message << " wall_equilibrium_contact_angle_radians="
+                        << *wall.equilibrium_contact_angle_radians;
+            } else {
+                message << " wall_equilibrium_contact_angle_radians=none";
+            }
+            message << " wall_wetted_area="
+                    << wall.owned_wetted_wall_area
+                    << " wall_contact_measure="
+                    << wall.owned_contact_measure
+                    << " wall_young_energy=" << wall.young_wall_energy;
+        }
         FE_LOG_INFO(message.str());
     }
 }

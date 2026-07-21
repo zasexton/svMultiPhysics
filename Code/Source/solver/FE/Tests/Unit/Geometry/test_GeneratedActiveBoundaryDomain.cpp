@@ -1009,6 +1009,12 @@ TEST(FreeSurfaceGeometrySnapshot,
         [](std::span<const std::uint64_t> local) {
             return std::vector<std::uint64_t>(local.begin(), local.end());
         };
+    valid.all_gather_revision_values =
+        [](std::span<const std::uint64_t> local) {
+            std::vector<std::uint64_t> gathered(local.begin(), local.end());
+            gathered.insert(gathered.end(), local.begin(), local.end());
+            return gathered;
+        };
     const auto snapshot = build(valid, "valid_distributed_ownership");
     ASSERT_TRUE(snapshot);
     EXPECT_EQ(snapshot->ledger().global_owned_rule_count,
@@ -1053,6 +1059,12 @@ TEST(FreeSurfaceGeometrySnapshot,
             owned_identities.assign(local.begin(), local.end());
             return owned_identities;
         };
+    owner_collective.all_gather_revision_values =
+        [](std::span<const std::uint64_t> local) {
+            std::vector<std::uint64_t> gathered(local.begin(), local.end());
+            gathered.insert(gathered.end(), local.begin(), local.end());
+            return gathered;
+        };
     const auto owner_snapshot =
         interfaces::buildFreeSurfaceGeometrySnapshot(
             distributedVerticalInterfaceWithVolumes(interface_marker),
@@ -1086,6 +1098,12 @@ TEST(FreeSurfaceGeometrySnapshot,
         [&owned_identities](std::span<const std::uint64_t> local) {
             EXPECT_TRUE(local.empty());
             return owned_identities;
+        };
+    ghost_collective.all_gather_revision_values =
+        [](std::span<const std::uint64_t> local) {
+            std::vector<std::uint64_t> gathered(local.begin(), local.end());
+            gathered.insert(gathered.end(), local.begin(), local.end());
+            return gathered;
         };
     const auto ghost_snapshot =
         interfaces::buildFreeSurfaceGeometrySnapshot(

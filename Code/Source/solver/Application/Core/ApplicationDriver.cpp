@@ -428,6 +428,8 @@ snapshotOwnershipCollective(
 #endif
         return gathered;
       };
+  collective.all_gather_revision_values =
+      collective.all_gather_owned_rule_identity_values;
   return collective;
 }
 
@@ -4025,6 +4027,32 @@ double globalMaxDouble(double local, const svmp::MeshComm& comm)
   return local;
 }
 
+std::pair<std::uint64_t, std::uint64_t> globalMinMaxUint64(
+    std::uint64_t local,
+    const svmp::MeshComm& comm)
+{
+#ifdef MESH_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized && comm.size() > 1) {
+    std::uint64_t minimum = 0u;
+    std::uint64_t maximum = 0u;
+#ifdef MPI_UINT64_T
+    const MPI_Datatype datatype = MPI_UINT64_T;
+#else
+    const MPI_Datatype datatype = MPI_UNSIGNED_LONG_LONG;
+#endif
+    MPI_Allreduce(&local, &minimum, 1, datatype, MPI_MIN, comm.native());
+    MPI_Allreduce(&local, &maximum, 1, datatype, MPI_MAX, comm.native());
+    return {minimum, maximum};
+  }
+#else
+  (void)comm;
+#endif
+
+  return {local, local};
+}
+
 std::size_t globalSumSize(std::size_t local, const svmp::MeshComm& comm)
 {
   auto local_count = static_cast<long long>(local);
@@ -4060,6 +4088,170 @@ bool globalAnyBool(bool local, const svmp::MeshComm& comm)
 #endif
 
   return local;
+}
+
+void recordAcceptedFreeSurfaceDiscreteFunctionals(
+    application::core::SimulationComponents& sim,
+    std::uint64_t accepted_step,
+    svmp::FE::Real accepted_time,
+    svmp::FE::Real dt,
+    std::uint64_t state_revision)
+{
+  const auto declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+  if (declarations.empty()) {
+    return;
+  }
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto local_declaration_count =
+      static_cast<double>(declarations.size());
+  if (globalMinDouble(local_declaration_count, comm) !=
+          globalMaxDouble(local_declaration_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Free-surface functional declarations differ across the FE communicator.");
+  }
+  const auto* context = sim.fe_system->cutIntegrationContext();
+  const auto context_available = context != nullptr ? 1.0 : 0.0;
+  if (globalMinDouble(context_available, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted free-surface functional recording requires an authoritative cut-integration context on every rank.");
+  }
+
+  std::vector<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+      accepted_states;
+  accepted_states.reserve(declarations.size());
+  for (const auto& declaration : declarations) {
+    const bool local_marker_available =
+        context->hasFreeSurfaceGeometrySnapshotForMarker(
+            declaration.interface_marker);
+    if (globalMinDouble(local_marker_available ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted free-surface functional marker " +
+          std::to_string(declaration.interface_marker) +
+          " is missing an authoritative geometry snapshot on at least one rank.");
+    }
+    const auto snapshot_revision =
+        context->freeSurfaceGeometrySnapshotRevisionForMarker(
+            declaration.interface_marker);
+    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto found = std::find_if(
+        snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+          return candidate &&
+                 candidate->revision().snapshot_revision_key ==
+                     snapshot_revision;
+        });
+    const auto [minimum_revision, maximum_revision] =
+        globalMinMaxUint64(snapshot_revision, comm);
+    if (minimum_revision != maximum_revision) {
+      std::ostringstream diagnostic;
+      diagnostic
+          << "[svMultiPhysics::Application] Accepted free-surface geometry revision differs across the FE communicator for marker "
+          << declaration.interface_marker
+          << ": local=" << snapshot_revision
+          << " minimum=" << minimum_revision
+          << " maximum=" << maximum_revision;
+      if (found != snapshots.end()) {
+        const auto& revision = (*found)->revision();
+        diagnostic
+            << " source_layout=" << revision.source_layout_revision
+            << " source_value=" << revision.source_value_revision
+            << " mesh_geometry=" << revision.mesh_geometry_revision
+            << " mesh_topology=" << revision.mesh_topology_revision
+            << " ownership=" << revision.ownership_revision
+            << " numbering=" << revision.numbering_revision
+            << " quadrature_policy=" << revision.quadrature_policy_key;
+      }
+      diagnostic << ".";
+      throw std::runtime_error(
+          diagnostic.str());
+    }
+    const bool local_snapshot_available = found != snapshots.end();
+    if (globalMinDouble(local_snapshot_available ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted free-surface geometry snapshot storage is incomplete across the FE communicator for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    context->assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+        declaration.interface_marker);
+    const auto& snapshot = **found;
+    auto global_state =
+        svmp::FE::interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            snapshot, declaration.parameters);
+
+    const auto wall_count = static_cast<double>(global_state.walls.size());
+    if (globalMinDouble(wall_count, comm) !=
+        globalMaxDouble(wall_count, comm)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Free-surface functional wall sets differ across the FE communicator for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    for (const auto& wall : global_state.walls) {
+      const auto marker = static_cast<double>(wall.boundary_marker);
+      if (globalMinDouble(marker, comm) != globalMaxDouble(marker, comm)) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Free-surface functional wall ordering differs across the FE communicator for marker " +
+            std::to_string(declaration.interface_marker) + ".");
+      }
+      const auto angle_present =
+          wall.equilibrium_contact_angle_radians.has_value() ? 1.0 : 0.0;
+      if (globalMinDouble(angle_present, comm) !=
+          globalMaxDouble(angle_present, comm)) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Free-surface functional wall coefficient presence differs across the FE communicator for marker " +
+            std::to_string(declaration.interface_marker) + ".");
+      }
+      if (wall.equilibrium_contact_angle_radians.has_value()) {
+        const auto angle = static_cast<double>(
+            *wall.equilibrium_contact_angle_radians);
+        if (globalMinDouble(angle, comm) != globalMaxDouble(angle, comm)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Free-surface functional wall angles differ across the FE communicator for marker " +
+              std::to_string(declaration.interface_marker) + ".");
+        }
+      }
+    }
+
+    const auto global_sum = [&comm](svmp::FE::Real local) {
+      return static_cast<svmp::FE::Real>(
+          globalSumDouble(static_cast<double>(local), comm));
+    };
+    global_state.owned_liquid_volume =
+        global_sum(global_state.owned_liquid_volume);
+    global_state.owned_liquid_gas_area =
+        global_sum(global_state.owned_liquid_gas_area);
+    global_state.owned_wetted_wall_area =
+        global_sum(global_state.owned_wetted_wall_area);
+    global_state.owned_contact_measure =
+        global_sum(global_state.owned_contact_measure);
+    global_state.liquid_gas_surface_energy =
+        global_sum(global_state.liquid_gas_surface_energy);
+    global_state.young_wall_energy =
+        global_sum(global_state.young_wall_energy);
+    global_state.volume_constraint_potential =
+        global_sum(global_state.volume_constraint_potential);
+    global_state.total_potential =
+        global_sum(global_state.total_potential);
+    for (auto& wall : global_state.walls) {
+      wall.owned_wetted_wall_area =
+          global_sum(wall.owned_wetted_wall_area);
+      wall.owned_contact_measure =
+          global_sum(wall.owned_contact_measure);
+      wall.young_wall_energy = global_sum(wall.young_wall_energy);
+    }
+    accepted_states.push_back(
+        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState{
+            .interface_marker = declaration.interface_marker,
+            .geometry_revision = snapshot.revision(),
+            .state = std::move(global_state),
+        });
+  }
+
+  sim.fe_system->recordAcceptedFreeSurfaceDiscreteFunctionals(
+      accepted_step,
+      accepted_time,
+      dt,
+      state_revision,
+      accepted_states);
 }
 
 std::string formatImplicitCutBackendCounts(
@@ -9236,6 +9428,12 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       /*reuse_cached_on_projection_failure=*/false);
   (void)updateLevelSetAdvectionVelocities(
       sim, *sim.time_history, steady_level_set_advection_velocity);
+  recordAcceptedFreeSurfaceDiscreteFunctionals(
+      sim,
+      /*accepted_step=*/1u,
+      solve_time,
+      sim.time_history->dt(),
+      sim.time_history->u().valueRevision());
   sim.fe_system->recordAcceptedMeshTangentialBoundaryPolicies(
       /*accepted_step=*/1u,
       solve_time,
@@ -9746,6 +9944,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         /*reuse_cached_on_projection_failure=*/false);
     (void)updateLevelSetAdvectionVelocities(
         sim, h, level_set_advection_velocity);
+    recordAcceptedFreeSurfaceDiscreteFunctionals(
+        sim,
+        static_cast<std::uint64_t>(h.stepIndex()),
+        h.time(),
+        h.dt(),
+        h.u().valueRevision());
     sim.fe_system->recordAcceptedMeshTangentialBoundaryPolicies(
         static_cast<std::uint64_t>(h.stepIndex()),
         h.time(),
