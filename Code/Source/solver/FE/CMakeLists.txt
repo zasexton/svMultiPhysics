@@ -895,6 +895,7 @@ set(FE_GEOMETRY_SOURCES
 
 set(FE_LEVELSET_HEADERS
     LevelSet/LevelSet.h
+    LevelSet/LevelSetConservativePhaseTransport.h
     LevelSet/LevelSetOptions.h
     LevelSet/LevelSetTransport.h
     LevelSet/LevelSetVelocityExtensionConstraint.h
@@ -909,6 +910,7 @@ set(FE_LEVELSET_HEADERS
 )
 
 set(FE_LEVELSET_SOURCES
+    LevelSet/LevelSetConservativePhaseTransport.cpp
     LevelSet/LevelSetTransport.cpp
     LevelSet/LevelSetVelocityExtensionConstraint.cpp
     LevelSet/LevelSetCellEvaluator.cpp
@@ -2315,6 +2317,7 @@ if(FE_BUILD_TESTS)
     # Level-set module tests
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/LevelSet/test_main.cpp)
         set(FE_LEVELSET_TEST_SOURCES
+            Tests/Unit/LevelSet/test_LevelSetConservativePhaseTransport.cpp
             Tests/Unit/LevelSet/test_LevelSetDiagnostics.cpp
             Tests/Unit/LevelSet/test_LevelSetCurvatureProjection.cpp
             Tests/Unit/LevelSet/test_LevelSetHeaders.cpp
