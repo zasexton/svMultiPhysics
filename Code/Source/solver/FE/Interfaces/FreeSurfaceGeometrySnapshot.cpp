@@ -588,6 +588,32 @@ void validateCompleteContactTrace(
     return {};
 }
 
+[[nodiscard]] std::int64_t stableComponentId(
+    std::span<const std::uint64_t> source_ids,
+    std::uint64_t fallback_id) noexcept
+{
+    std::uint64_t stable_id = fallback_id;
+    if (!source_ids.empty()) {
+        stable_id = *std::min_element(source_ids.begin(), source_ids.end());
+    }
+    stable_id &= static_cast<std::uint64_t>(
+        std::numeric_limits<std::int64_t>::max());
+    return static_cast<std::int64_t>(stable_id == 0u ? 1u : stable_id);
+}
+
+[[nodiscard]] std::int64_t componentIdForActiveRule(
+    const GeneratedActiveBoundaryDomain& domain,
+    std::uint64_t stable_id) noexcept
+{
+    for (const auto& fragment : domain.fragments()) {
+        if (fragment.stable_id == stable_id) {
+            return stableComponentId(
+                fragment.source_interface_stable_ids, stable_id);
+        }
+    }
+    return stableComponentId({}, stable_id);
+}
+
 void completeAndValidateRuleIdentity(
     geometry::CutQuadratureRule& rule,
     const assembly::IMeshAccess& mesh,
@@ -658,7 +684,8 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
              const assembly::IMeshAccess& mesh,
              const FreeSurfaceGeometrySnapshotPolicy& policy,
              int physical_boundary_marker = -1,
-             std::vector<std::uint64_t> source_ids = {})
+             std::vector<std::uint64_t> source_ids = {},
+             std::int64_t component_id = -1)
 {
     completeAndValidateRuleIdentity(rule, mesh, ledger);
     FreeSurfaceGeometryRuleRecord record;
@@ -688,6 +715,11 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
             rule.provenance.source_stable_id);
     }
     record.topology_id = rule.provenance.cut_topology_id;
+    record.component_id =
+        component_id >= 0
+            ? component_id
+            : stableComponentId(record.source_fragment_stable_ids,
+                                rule.provenance.cut_topology_revision);
     record.physical_rule =
         geometry::mapCutQuadratureRuleToPhysical(mesh, rule);
     record.reference_rule = std::move(rule);
@@ -860,11 +892,26 @@ void validateRule(
 void accumulateLedger(const FreeSurfaceGeometryRuleRecord& record,
                       FreeSurfaceGeometryValidationLedger& ledger) noexcept
 {
+    const Real reference = record.reference_rule.measure;
+    const Real physical = record.physical_rule.physical_measure;
+    if (record.role == FreeSurfaceGeometryRuleRole::NegativeVolume) {
+        ledger.unpruned_negative_reference_volume += reference;
+        ledger.unpruned_negative_physical_volume += physical;
+        if (record.locally_owned) {
+            ledger.owned_unpruned_negative_reference_volume += reference;
+            ledger.owned_unpruned_negative_physical_volume += physical;
+        }
+    } else if (record.role == FreeSurfaceGeometryRuleRole::PositiveVolume) {
+        ledger.unpruned_positive_reference_volume += reference;
+        ledger.unpruned_positive_physical_volume += physical;
+        if (record.locally_owned) {
+            ledger.owned_unpruned_positive_reference_volume += reference;
+            ledger.owned_unpruned_positive_physical_volume += physical;
+        }
+    }
     if (record.retention != FreeSurfaceGeometryRetention::Retained) {
         return;
     }
-    const Real reference = record.reference_rule.measure;
-    const Real physical = record.physical_rule.physical_measure;
     switch (record.role) {
     case FreeSurfaceGeometryRuleRole::NegativeVolume:
         ledger.retained_negative_reference_volume += reference;
@@ -1871,6 +1918,7 @@ buildFreeSurfaceGeometrySnapshot(
                                   : FreeSurfaceGeometryRuleRole::
                                         PositiveExteriorBoundary;
             const auto stable_id = rule.provenance.cut_topology_revision;
+            auto source_ids = sourceIdsForActiveRule(active, stable_id);
             addRule(records,
                     ledger,
                     std::move(rule),
@@ -1878,7 +1926,8 @@ buildFreeSurfaceGeometrySnapshot(
                     mesh,
                     policy,
                     active.request().boundary_marker,
-                    sourceIdsForActiveRule(active, stable_id));
+                    std::move(source_ids),
+                    componentIdForActiveRule(active, stable_id));
         }
     }
     for (const auto& [boundary, contact] : contact_by_boundary) {

@@ -141,6 +141,14 @@ struct FreeSurfaceGeometryValidationLedger {
     std::size_t false_achieved_order_count{0};
     std::size_t invalid_global_identity_count{0};
     std::size_t duplicate_rule_identity_count{0};
+    Real unpruned_negative_reference_volume{0.0};
+    Real unpruned_positive_reference_volume{0.0};
+    Real unpruned_negative_physical_volume{0.0};
+    Real unpruned_positive_physical_volume{0.0};
+    Real owned_unpruned_negative_reference_volume{0.0};
+    Real owned_unpruned_positive_reference_volume{0.0};
+    Real owned_unpruned_negative_physical_volume{0.0};
+    Real owned_unpruned_positive_physical_volume{0.0};
     Real retained_negative_reference_volume{0.0};
     Real retained_positive_reference_volume{0.0};
     Real retained_negative_physical_volume{0.0};

@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <map>
 #include <memory>
 #include <numbers>
 #include <utility>
@@ -311,6 +312,55 @@ interfaces::LevelSetInterfaceDomain distributedVerticalInterfaceWithVolumes(
         distributed.addVolumeRegion(std::move(region));
     }
     return distributed;
+}
+
+interfaces::LevelSetInterfaceDomain verticalInterfaceWithTinyNegativeVolume(
+    int marker,
+    FE::Real negative_fraction)
+{
+    auto domain = verticalInterface(marker);
+    const auto add_volume = [&](FE::geometry::CutIntegrationSide side,
+                                FE::Real fraction,
+                                FE::Real x,
+                                FE::LocalIndex local_index) {
+        interfaces::CutInterfaceVolumeRegion region;
+        region.parent_cell = 0;
+        region.local_region_index = local_index;
+        region.side = side;
+        region.centroid = {{x, 0.0, 0.0}};
+        region.normal = side == FE::geometry::CutIntegrationSide::Negative
+                            ? std::array<FE::Real, 3>{{1.0, 0.0, 0.0}}
+                            : std::array<FE::Real, 3>{{-1.0, 0.0, 0.0}};
+        region.parent_measure = 4.0;
+        region.measure = 4.0 * fraction;
+        region.volume_fraction = fraction;
+        region.min_level_set_value =
+            side == FE::geometry::CutIntegrationSide::Negative ? -1.0 : 0.0;
+        region.max_level_set_value =
+            side == FE::geometry::CutIntegrationSide::Negative ? 0.0 : 1.0;
+        region.topology_id =
+            side == FE::geometry::CutIntegrationSide::Negative
+                ? "tiny-negative"
+                : "positive-complement";
+        region.achieved_quadrature_order = 0;
+        region.quadrature_points = {
+            FE::geometry::CutQuadraturePoint{
+                .point = {{x, 0.0, 0.0}},
+                .normal = region.normal,
+                .weight = region.measure,
+                .parent_coordinate = {{x, 0.0, 0.0}},
+                .reference_measure_factor = region.measure}};
+        domain.addVolumeRegion(std::move(region));
+    };
+    add_volume(FE::geometry::CutIntegrationSide::Negative,
+               negative_fraction,
+               -0.999,
+               0u);
+    add_volume(FE::geometry::CutIntegrationSide::Positive,
+               1.0 - negative_fraction,
+               0.0,
+               1u);
+    return domain;
 }
 
 interfaces::FreeSurfaceGeometrySnapshotPolicy snapshotPolicyWithoutBoundary()
@@ -801,7 +851,17 @@ TEST(FreeSurfaceGeometrySnapshot,
 
     FE::Real expected_negative_wall_area{0.0};
     FE::Real expected_contact_measure{0.0};
+    std::map<std::uint64_t, std::int64_t> surface_component_by_source;
     for (const auto& record : snapshot->rules()) {
+        if (record.role == interfaces::FreeSurfaceGeometryRuleRole::Interface) {
+            ASSERT_EQ(record.source_fragment_stable_ids.size(), 1u);
+            surface_component_by_source.emplace(
+                record.source_fragment_stable_ids.front(),
+                record.component_id);
+        }
+    }
+    for (const auto& record : snapshot->rules()) {
+        EXPECT_GE(record.component_id, 0);
         ASSERT_EQ(record.reference_rule.points.size(),
                   record.physical_rule.points.size());
         EXPECT_GT(record.physical_rule.physical_measure, 0.0);
@@ -816,6 +876,11 @@ TEST(FreeSurfaceGeometrySnapshot,
             } else if (record.role ==
                        interfaces::FreeSurfaceGeometryRuleRole::Contact) {
                 EXPECT_EQ(record.physical_boundary_marker, 10);
+                ASSERT_EQ(record.source_fragment_stable_ids.size(), 1u);
+                const auto source = surface_component_by_source.find(
+                    record.source_fragment_stable_ids.front());
+                ASSERT_NE(source, surface_component_by_source.end());
+                EXPECT_EQ(record.component_id, source->second);
                 expected_contact_measure +=
                     record.physical_rule.physical_measure;
             } else if (record.role == interfaces::FreeSurfaceGeometryRuleRole::
@@ -1059,6 +1124,50 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsStoredOffInterfaceResidual)
             {},
             "bad_root"),
         std::invalid_argument);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
+     SeparatesUnprunedLifecycleVolumeFromRetainedAssemblyVolume)
+{
+    constexpr int interface_marker = 119;
+    constexpr FE::Real negative_fraction = 1.0e-8;
+    const SingleQuadBoundaryMesh mesh;
+    auto policy = snapshotPolicyWithoutBoundary();
+    policy.minimum_retained_volume_fraction = 1.0e-6;
+
+    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        verticalInterfaceWithTinyNegativeVolume(
+            interface_marker, negative_fraction),
+        {},
+        {},
+        mesh,
+        policy,
+        verticalScalar(),
+        "unpruned_volume_ledger");
+    ASSERT_TRUE(snapshot);
+    EXPECT_EQ(snapshot->ledger().pruned_rule_count, 1u);
+    EXPECT_NEAR(snapshot->ledger().unpruned_negative_reference_volume,
+                4.0 * negative_fraction,
+                1.0e-15);
+    EXPECT_NEAR(snapshot->ledger().unpruned_positive_reference_volume,
+                4.0 * (1.0 - negative_fraction),
+                1.0e-14);
+    EXPECT_NEAR(snapshot->ledger().unpruned_negative_physical_volume,
+                negative_fraction,
+                1.0e-15);
+    EXPECT_NEAR(snapshot->ledger().unpruned_positive_physical_volume,
+                1.0 - negative_fraction,
+                1.0e-14);
+    EXPECT_EQ(snapshot->ledger().retained_negative_reference_volume, 0.0);
+    EXPECT_EQ(snapshot->ledger().retained_negative_physical_volume, 0.0);
+    EXPECT_NEAR(
+        snapshot->ledger().owned_unpruned_negative_physical_volume,
+        snapshot->ledger().unpruned_negative_physical_volume,
+        1.0e-15);
+    EXPECT_NEAR(
+        snapshot->ledger().owned_unpruned_positive_physical_volume,
+        snapshot->ledger().unpruned_positive_physical_volume,
+        1.0e-14);
 }
 
 TEST(FreeSurfaceGeometrySnapshot, RejectsStaleGlobalIdentityAndOwner)

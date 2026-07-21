@@ -372,6 +372,7 @@ struct CutInterfaceVolumeRegion {
         rule.provenance.owner_rank = owner_rank;
         rule.provenance.marker = interface_marker;
         rule.provenance.cut_topology_revision = stable_id;
+        rule.provenance.source_stable_id = stable_id;
         rule.provenance.predicate_policy_key = request.quadrature_policy_key;
         rule.provenance.source_value_revision = request.source.value_revision;
         rule.provenance.construction = rule.policy.kind;
@@ -563,6 +564,7 @@ struct CutInterfaceFragment {
         rule.provenance.owner_rank = owner_rank;
         rule.provenance.marker = interface_marker;
         rule.provenance.cut_topology_revision = stable_id;
+        rule.provenance.source_stable_id = stable_id;
         rule.provenance.predicate_policy_key = request.quadrature_policy_key;
         rule.provenance.source_value_revision = request.source.value_revision;
         rule.provenance.construction = rule.policy.kind;
