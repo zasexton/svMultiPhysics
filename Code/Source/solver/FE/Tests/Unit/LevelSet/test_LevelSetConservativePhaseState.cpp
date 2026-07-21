@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -227,6 +228,41 @@ struct PhaseStateFixture {
                      static_cast<std::size_t>(phi_dofs[i])] = phi_values[i];
         }
 
+        installCutContext();
+    }
+
+    void setPhiValues(std::span<const FE::Real> values)
+    {
+        const auto phi_offset = static_cast<std::size_t>(
+            system.fieldDofOffset(phi));
+        const auto phi_dofs = system.fieldDofHandler(phi).getCellDofs(0);
+        if (values.size() != phi_dofs.size()) {
+            throw std::invalid_argument(
+                "phase-state fixture received an incompatible level-set slice");
+        }
+        for (std::size_t i = 0; i < phi_dofs.size(); ++i) {
+            solution[phi_offset +
+                     static_cast<std::size_t>(phi_dofs[i])] = values[i];
+        }
+        installCutContext();
+    }
+
+    [[nodiscard]] std::vector<FE::Real> phiValues() const
+    {
+        const auto phi_offset = static_cast<std::size_t>(
+            system.fieldDofOffset(phi));
+        const auto count = static_cast<std::size_t>(
+            system.fieldDofHandler(phi).getNumDofs());
+        return std::vector<FE::Real>(
+            solution.begin() + static_cast<std::ptrdiff_t>(phi_offset),
+            solution.begin() +
+                static_cast<std::ptrdiff_t>(phi_offset + count));
+    }
+
+private:
+    void installCutContext()
+    {
+
         level_set::LevelSetGeneratedInterfaceOptions options;
         options.level_set_field_name = "phi";
         options.domain_id = "phase_state_projection";
@@ -373,6 +409,202 @@ TEST(LevelSetConservativePhaseState,
                         positive.liquid_phase_mass[i],
                     graph.lumped_control_volume[i], 2.0e-13);
     }
+}
+
+TEST(LevelSetConservativePhaseState,
+     InterfaceSensitivityMatchesFiniteDifferencesAndItsScalingNullMode)
+{
+    PhaseStateFixture fixture;
+    const auto graph = level_set::buildLevelSetP1PhaseTransportGraph(
+        fixture.system, fixture.indicator);
+    ASSERT_TRUE(graph.success) << graph.diagnostic;
+
+    level_set::LevelSetP1PhaseProjectionOptions options;
+    options.interface_marker = PhaseStateFixture::interface_marker;
+    const auto baseline =
+        level_set::projectLevelSetP1PhaseIndicatorFromCutContext(
+            fixture.system, fixture.indicator, graph, options);
+    ASSERT_TRUE(baseline.success) << baseline.diagnostic;
+    const auto sensitivity =
+        level_set::buildLevelSetP1PhaseGeometrySensitivity(
+            fixture.system,
+            fixture.phi,
+            fixture.indicator,
+            graph,
+            options,
+            fixture.solution);
+    ASSERT_TRUE(sensitivity.success) << sensitivity.diagnostic;
+    EXPECT_TRUE(sensitivity.field_layouts_identical);
+    EXPECT_TRUE(sensitivity.level_set_null_space_satisfied);
+    EXPECT_TRUE(sensitivity.positive_diagonal_satisfied);
+    EXPECT_EQ(sensitivity.nodes, 3u);
+    EXPECT_EQ(sensitivity.active_nodes, 3u);
+    EXPECT_EQ(sensitivity.owned_rules, 1u);
+    EXPECT_GT(sensitivity.quadrature_points, 0u);
+    EXPECT_NEAR(sensitivity.interface_measure, std::sqrt(0.125),
+                2.0e-14);
+    EXPECT_NEAR(sensitivity.minimum_level_set_gradient, std::sqrt(2.0),
+                2.0e-14);
+    EXPECT_NEAR(sensitivity.minimum_cell_node_distance, 1.0,
+                2.0e-14);
+    EXPECT_LT(sensitivity.maximum_level_set_null_residual, 2.0e-14);
+
+    std::vector<std::vector<FE::Real>> matrix(
+        graph.nodes, std::vector<FE::Real>(graph.nodes, FE::Real{0.0}));
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        matrix[node][node] = sensitivity.diagonal[node];
+    }
+    for (const auto& edge : sensitivity.edges) {
+        const auto first = static_cast<std::size_t>(edge.first_node);
+        const auto second = static_cast<std::size_t>(edge.second_node);
+        matrix[first][second] = edge.coefficient;
+        matrix[second][first] = edge.coefficient;
+    }
+    const auto baseline_phi = fixture.phiValues();
+    for (std::size_t column = 0u; column < graph.nodes; ++column) {
+        auto perturbed_phi = baseline_phi;
+        constexpr FE::Real epsilon = 1.0e-6;
+        perturbed_phi[column] += epsilon;
+        fixture.setPhiValues(perturbed_phi);
+        const auto perturbed =
+            level_set::projectLevelSetP1PhaseIndicatorFromCutContext(
+                fixture.system, fixture.indicator, graph, options);
+        ASSERT_TRUE(perturbed.success) << perturbed.diagnostic;
+        for (std::size_t row = 0u; row < graph.nodes; ++row) {
+            const FE::Real finite_difference =
+                (perturbed.liquid_phase_mass[row] -
+                 baseline.liquid_phase_mass[row]) /
+                epsilon;
+            EXPECT_NEAR(finite_difference, -matrix[row][column],
+                        8.0e-7);
+        }
+        fixture.setPhiValues(baseline_phi);
+    }
+}
+
+TEST(LevelSetConservativePhaseState,
+     SolvesTheRepresentableLocalMomentUpdateAndRejectsAPureScalingTarget)
+{
+    PhaseStateFixture fixture;
+    const auto graph = level_set::buildLevelSetP1PhaseTransportGraph(
+        fixture.system, fixture.indicator);
+    ASSERT_TRUE(graph.success) << graph.diagnostic;
+
+    level_set::LevelSetP1PhaseProjectionOptions options;
+    options.interface_marker = PhaseStateFixture::interface_marker;
+    const auto projection =
+        level_set::projectLevelSetP1PhaseIndicatorFromCutContext(
+            fixture.system, fixture.indicator, graph, options);
+    ASSERT_TRUE(projection.success) << projection.diagnostic;
+    const auto sensitivity =
+        level_set::buildLevelSetP1PhaseGeometrySensitivity(
+            fixture.system,
+            fixture.phi,
+            fixture.indicator,
+            graph,
+            options,
+            fixture.solution);
+    ASSERT_TRUE(sensitivity.success) << sensitivity.diagnostic;
+
+    const auto phi = fixture.phiValues();
+    std::vector<FE::Real> expected_increment{0.02, -0.01, 0.015};
+    FE::Real projection_on_scaling_mode{0.0};
+    FE::Real scaling_norm_squared{0.0};
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        projection_on_scaling_mode += expected_increment[node] * phi[node];
+        scaling_norm_squared += phi[node] * phi[node];
+    }
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        expected_increment[node] -=
+            projection_on_scaling_mode / scaling_norm_squared * phi[node];
+    }
+
+    std::vector<FE::Real> matrix_increment(graph.nodes, FE::Real{0.0});
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        matrix_increment[node] =
+            sensitivity.diagonal[node] * expected_increment[node];
+    }
+    for (const auto& edge : sensitivity.edges) {
+        const auto first = static_cast<std::size_t>(edge.first_node);
+        const auto second = static_cast<std::size_t>(edge.second_node);
+        matrix_increment[first] +=
+            edge.coefficient * expected_increment[second];
+        matrix_increment[second] +=
+            edge.coefficient * expected_increment[first];
+    }
+    auto target_mass = projection.liquid_phase_mass;
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        target_mass[node] -= matrix_increment[node];
+    }
+
+    const auto correction =
+        level_set::solveLevelSetP1PhaseGeometryCorrection(
+            sensitivity,
+            FE::geometry::CutIntegrationSide::Negative,
+            phi,
+            projection.liquid_phase_mass,
+            target_mass);
+    ASSERT_TRUE(correction.success) << correction.diagnostic;
+    EXPECT_TRUE(correction.target_compatible);
+    EXPECT_TRUE(correction.linear_solve_converged);
+    EXPECT_EQ(correction.interface_components, 1u);
+    ASSERT_EQ(correction.level_set_increment.size(), graph.nodes);
+    ASSERT_EQ(correction.predicted_liquid_mass_change.size(), graph.nodes);
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        EXPECT_NEAR(correction.level_set_increment[node],
+                    expected_increment[node], 2.0e-11);
+        EXPECT_NEAR(correction.predicted_liquid_mass_change[node],
+                    target_mass[node] - projection.liquid_phase_mass[node],
+                    2.0e-12);
+    }
+    EXPECT_LT(correction.maximum_predicted_mass_residual, 2.0e-12);
+
+    auto positive_options = options;
+    positive_options.liquid_side =
+        FE::geometry::CutIntegrationSide::Positive;
+    const auto positive_projection =
+        level_set::projectLevelSetP1PhaseIndicatorFromCutContext(
+            fixture.system, fixture.indicator, graph, positive_options);
+    ASSERT_TRUE(positive_projection.success)
+        << positive_projection.diagnostic;
+    auto positive_target = positive_projection.liquid_phase_mass;
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        positive_target[node] += matrix_increment[node];
+    }
+    const auto positive_correction =
+        level_set::solveLevelSetP1PhaseGeometryCorrection(
+            sensitivity,
+            FE::geometry::CutIntegrationSide::Positive,
+            phi,
+            positive_projection.liquid_phase_mass,
+            positive_target);
+    ASSERT_TRUE(positive_correction.success)
+        << positive_correction.diagnostic;
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        EXPECT_NEAR(positive_correction.level_set_increment[node],
+                    expected_increment[node], 2.0e-11);
+        EXPECT_NEAR(
+            positive_correction.predicted_liquid_mass_change[node],
+            positive_target[node] -
+                positive_projection.liquid_phase_mass[node],
+            2.0e-12);
+    }
+
+    auto incompatible_target = projection.liquid_phase_mass;
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        incompatible_target[node] += FE::Real{1.0e-3} * phi[node];
+    }
+    const auto incompatible =
+        level_set::solveLevelSetP1PhaseGeometryCorrection(
+            sensitivity,
+            FE::geometry::CutIntegrationSide::Negative,
+            phi,
+            projection.liquid_phase_mass,
+            incompatible_target);
+    EXPECT_FALSE(incompatible.success);
+    EXPECT_FALSE(incompatible.target_compatible);
+    EXPECT_NE(incompatible.diagnostic.find("no interface-supported"),
+              std::string::npos);
 }
 
 } // namespace

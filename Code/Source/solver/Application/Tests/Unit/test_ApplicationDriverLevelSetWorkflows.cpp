@@ -4025,6 +4025,35 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   EXPECT_TRUE(lifecycle_.transactionActive());
   EXPECT_NE(sim_.fe_system->cutIntegrationContext(), raw_context);
 
+  const auto staged_solution = gatherFeOrderedSolution(history().u());
+  const auto staged_phi = fieldSlice(staged_solution, phi_);
+  const auto raw_phi = fieldSlice(raw_candidate, phi_);
+  ASSERT_EQ(staged_phi.size(), raw_phi.size());
+  std::vector<svmp::FE::Real> coefficient_updates(staged_phi.size());
+  for (std::size_t node = 0u; node < staged_phi.size(); ++node) {
+    coefficient_updates[node] = staged_phi[node] - raw_phi[node];
+  }
+  const auto [minimum_update, maximum_update] = std::minmax_element(
+      coefficient_updates.begin(), coefficient_updates.end());
+  ASSERT_NE(minimum_update, coefficient_updates.end());
+  ASSERT_NE(maximum_update, coefficient_updates.end());
+  EXPECT_GT(*maximum_update - *minimum_update,
+            svmp::FE::Real{1.0e-5});
+
+  const auto staged_projection = projectCurrentConservativePhaseGeometry(
+      *sim_.fe_system, requests_.front());
+  ASSERT_TRUE(staged_projection.success) << staged_projection.diagnostic;
+  auto& graph = requireCurrentConservativePhaseGraph(
+      *sim_.fe_system, requests_.front());
+  const auto staged_phase = fieldSlice(staged_solution, phase_);
+  ASSERT_EQ(staged_projection.liquid_phase_mass.size(), graph.nodes);
+  ASSERT_EQ(staged_phase.size(), graph.nodes);
+  for (std::size_t node = 0u; node < graph.nodes; ++node) {
+    EXPECT_NEAR(staged_projection.liquid_phase_mass[node],
+                graph.lumped_control_volume[node] * staged_phase[node],
+                svmp::FE::Real{1.0e-10});
+  }
+
   ASSERT_NO_THROW(rollbackConservativePhaseCandidate(history(), result));
   EXPECT_EQ(gatherFeOrderedSolution(history().u()), raw_candidate);
   EXPECT_EQ(sim_.fe_system->cutIntegrationContext(), raw_context);
@@ -4080,6 +4109,36 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   EXPECT_EQ(result.geometry_transaction, nullptr);
   EXPECT_EQ(gatherFeOrderedSolution(history().u()), raw_candidate);
   EXPECT_EQ(sim_.fe_system->cutIntegrationContext(), raw_context);
+  EXPECT_FALSE(sim_.fe_system->cutIntegrationContextTransactionActive());
+  EXPECT_FALSE(lifecycle_.transactionActive());
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       GeometryDisplacementRejectionLeavesTheRawCandidateAndGeometryUntouched)
+{
+  auto raw_candidate = initialized_solution_;
+  raw_candidate[fieldOffset(phi_)] += svmp::FE::Real{0.5};
+  scatterFeOrderedSolution(history().u(), raw_candidate);
+  refreshCurrentCandidate(
+      "application-driver-conservative-phase-displacement-raw");
+  const auto* raw_context = sim_.fe_system->cutIntegrationContext();
+  ASSERT_NE(raw_context, nullptr);
+  const auto lifecycle_revision = lifecycle_.valueRevision();
+
+  const auto result = applyConservativePhaseCandidates(
+      sim_,
+      history(),
+      requests_,
+      *params_,
+      lifecycle_,
+      refresh_cache_,
+      active_requests_);
+  EXPECT_FALSE(result.accept_step);
+  EXPECT_FALSE(result.changed);
+  EXPECT_EQ(result.geometry_transaction, nullptr);
+  EXPECT_EQ(gatherFeOrderedSolution(history().u()), raw_candidate);
+  EXPECT_EQ(sim_.fe_system->cutIntegrationContext(), raw_context);
+  EXPECT_EQ(lifecycle_.valueRevision(), lifecycle_revision);
   EXPECT_FALSE(sim_.fe_system->cutIntegrationContextTransactionActive());
   EXPECT_FALSE(lifecycle_.transactionActive());
 }

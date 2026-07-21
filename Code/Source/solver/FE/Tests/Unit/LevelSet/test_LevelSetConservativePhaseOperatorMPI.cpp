@@ -321,6 +321,110 @@ TEST(LevelSetConservativePhaseOperatorMPI,
     EXPECT_NEAR(projection.retained_liquid_measure, 0.75, 3.0e-14);
     EXPECT_NEAR(projection.projected_liquid_measure, 0.75, 3.0e-14);
 
+    const auto sensitivity =
+        level_set::buildLevelSetP1PhaseGeometrySensitivity(
+            system,
+            phi_field,
+            indicator_field,
+            graph,
+            projection_options,
+            solution);
+    ASSERT_TRUE(sensitivity.success) << sensitivity.diagnostic;
+    EXPECT_TRUE(sensitivity.field_layouts_identical);
+    EXPECT_TRUE(sensitivity.level_set_null_space_satisfied);
+    EXPECT_EQ(sensitivity.owned_rules, 1u);
+    EXPECT_EQ(sensitivity.active_nodes, 4u);
+    EXPECT_NEAR(sensitivity.interface_measure, 1.0, 3.0e-14);
+    EXPECT_NEAR(sensitivity.minimum_level_set_gradient, 1.0, 3.0e-14);
+    EXPECT_NEAR(sensitivity.minimum_cell_node_distance, 1.0, 3.0e-14);
+
+    std::vector<FE::Real> sensitivity_values = sensitivity.diagonal;
+    for (const auto& edge : sensitivity.edges) {
+        sensitivity_values.push_back(edge.coefficient);
+    }
+    std::vector<FE::Real> minimum_sensitivity(
+        sensitivity_values.size(), 0.0);
+    std::vector<FE::Real> maximum_sensitivity(
+        sensitivity_values.size(), 0.0);
+    MPI_Allreduce(sensitivity_values.data(), minimum_sensitivity.data(),
+                  static_cast<int>(sensitivity_values.size()), MPI_DOUBLE,
+                  MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(sensitivity_values.data(), maximum_sensitivity.data(),
+                  static_cast<int>(sensitivity_values.size()), MPI_DOUBLE,
+                  MPI_MAX, MPI_COMM_WORLD);
+    EXPECT_EQ(minimum_sensitivity, maximum_sensitivity);
+
+    std::vector<FE::Real> phi(graph.nodes, 0.0);
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        phi[node] = solution[phi_offset + node];
+    }
+    std::vector<FE::Real> expected_increment(
+        graph.nodes, FE::Real{0.0});
+    expected_increment[0] = FE::Real{0.01};
+    expected_increment[1] = FE::Real{-0.02};
+    expected_increment[3] = FE::Real{0.015};
+    expected_increment[4] = FE::Real{-0.005};
+    FE::Real scaling_projection{0.0};
+    FE::Real scaling_norm_squared{0.0};
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        if (sensitivity.diagonal[node] > FE::Real{0.0}) {
+            scaling_projection += expected_increment[node] * phi[node];
+            scaling_norm_squared += phi[node] * phi[node];
+        }
+    }
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        if (sensitivity.diagonal[node] > FE::Real{0.0}) {
+            expected_increment[node] -=
+                scaling_projection / scaling_norm_squared * phi[node];
+        }
+    }
+    std::vector<FE::Real> matrix_increment(
+        graph.nodes, FE::Real{0.0});
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        matrix_increment[node] =
+            sensitivity.diagonal[node] * expected_increment[node];
+    }
+    for (const auto& edge : sensitivity.edges) {
+        const auto first = static_cast<std::size_t>(edge.first_node);
+        const auto second = static_cast<std::size_t>(edge.second_node);
+        matrix_increment[first] +=
+            edge.coefficient * expected_increment[second];
+        matrix_increment[second] +=
+            edge.coefficient * expected_increment[first];
+    }
+    auto target_mass = projection.liquid_phase_mass;
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        target_mass[node] -= matrix_increment[node];
+    }
+    const auto geometry_correction =
+        level_set::solveLevelSetP1PhaseGeometryCorrection(
+            sensitivity,
+            FE::geometry::CutIntegrationSide::Negative,
+            phi,
+            projection.liquid_phase_mass,
+            target_mass);
+    ASSERT_TRUE(geometry_correction.success)
+        << geometry_correction.diagnostic;
+    EXPECT_TRUE(geometry_correction.linear_solve_converged);
+    EXPECT_EQ(geometry_correction.interface_components, 1u);
+    ASSERT_EQ(geometry_correction.level_set_increment.size(), graph.nodes);
+    ASSERT_EQ(geometry_correction.predicted_liquid_mass_change.size(),
+              graph.nodes);
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        EXPECT_NEAR(geometry_correction.predicted_liquid_mass_change[node],
+                    target_mass[node] - projection.liquid_phase_mass[node],
+                    3.0e-12);
+    }
+    std::vector<FE::Real> minimum_increment(graph.nodes, 0.0);
+    std::vector<FE::Real> maximum_increment(graph.nodes, 0.0);
+    MPI_Allreduce(geometry_correction.level_set_increment.data(),
+                  minimum_increment.data(), static_cast<int>(graph.nodes),
+                  MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(geometry_correction.level_set_increment.data(),
+                  maximum_increment.data(), static_cast<int>(graph.nodes),
+                  MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+    EXPECT_EQ(minimum_increment, maximum_increment);
+
     const auto& dofs = system.fieldDofHandler(indicator_field);
     std::vector<FE::Real> indicator = projection.liquid_indicator;
     std::vector<FE::Real> lower(graph.nodes, 0.0);

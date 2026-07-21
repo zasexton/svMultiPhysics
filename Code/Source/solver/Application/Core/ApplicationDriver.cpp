@@ -65,6 +65,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <span>
@@ -10929,6 +10930,26 @@ requireCurrentConservativePhaseGraph(
   return *request.conservative_phase_graph;
 }
 
+svmp::FE::level_set::LevelSetP1PhaseProjectionOptions
+conservativePhaseProjectionOptions(
+    const svmp::FE::systems::FESystem& system,
+    const LevelSetMaintenanceRequest& request)
+{
+  const auto marker = generatedCutContextMarkerForMaintenance(
+      system, request);
+  if (!marker.has_value()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase projection could not resolve its generated interface marker.");
+  }
+  svmp::FE::level_set::LevelSetP1PhaseProjectionOptions options;
+  options.interface_marker = *marker;
+  options.liquid_side = conservativePhaseSide(
+      request.conservative_phase);
+  options.invariant_tolerance =
+      request.conservative_phase.invariant_tolerance;
+  return options;
+}
+
 svmp::FE::level_set::LevelSetP1PhaseProjectionResult
 projectCurrentConservativePhaseGeometry(
     svmp::FE::systems::FESystem& system,
@@ -10938,14 +10959,8 @@ projectCurrentConservativePhaseGeometry(
   auto& graph = requireCurrentConservativePhaseGraph(system, request);
   const auto phase_field = system.findFieldByName(
       request.conservative_phase.liquid_indicator.field_name);
-  const auto marker = generatedCutContextMarkerForMaintenance(
+  const auto projection_options = conservativePhaseProjectionOptions(
       system, request);
-  svmp::FE::level_set::LevelSetP1PhaseProjectionOptions projection_options;
-  projection_options.interface_marker = *marker;
-  projection_options.liquid_side = conservativePhaseSide(
-      request.conservative_phase);
-  projection_options.invariant_tolerance =
-      request.conservative_phase.invariant_tolerance;
   return svmp::FE::level_set::
       projectLevelSetP1PhaseIndicatorFromCutContext(
           system, phase_field, graph, projection_options);
@@ -11225,6 +11240,332 @@ struct ConservativePhaseCandidateResult {
       geometry_transaction{};
 };
 
+struct ConservativePhaseMomentMismatch {
+  svmp::FE::Real maximum_nodal_residual{0.0};
+  svmp::FE::Real residual_norm{0.0};
+  svmp::FE::Real total_residual{0.0};
+};
+
+ConservativePhaseMomentMismatch conservativePhaseMomentMismatch(
+    std::span<const svmp::FE::Real> current,
+    std::span<const svmp::FE::Real> target)
+{
+  if (current.size() != target.size()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase moment vectors have incompatible layouts.");
+  }
+  ConservativePhaseMomentMismatch mismatch;
+  svmp::FE::Real squared_norm{0.0};
+  for (std::size_t node = 0u; node < current.size(); ++node) {
+    const auto residual = target[node] - current[node];
+    if (!std::isfinite(residual)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase geometry reconciliation found a non-finite local moment residual.");
+    }
+    mismatch.maximum_nodal_residual = std::max(
+        mismatch.maximum_nodal_residual, std::abs(residual));
+    squared_norm += residual * residual;
+    mismatch.total_residual += residual;
+  }
+  mismatch.residual_norm = std::sqrt(squared_norm);
+  return mismatch;
+}
+
+struct ConservativePhaseGeometryReconciliationResult {
+  bool success{false};
+  bool target_reached{false};
+  bool limited_by_displacement{false};
+  bool limited_by_topology{false};
+  int iterations{0};
+  int line_search_evaluations{0};
+  int geometry_refresh_requests{0};
+  int geometry_rebuilds{0};
+  int rejected_geometry_trials{0};
+  svmp::FE::Real allowed_interface_displacement{0.0};
+  svmp::FE::Real accumulated_interface_displacement_bound{0.0};
+  svmp::FE::Real initial_residual_norm{0.0};
+  svmp::FE::Real final_residual_norm{0.0};
+  svmp::FE::Real maximum_final_nodal_residual{0.0};
+  svmp::FE::Real final_total_residual{0.0};
+  std::string last_rejected_trial_diagnostic{};
+  std::string diagnostic{};
+};
+
+ConservativePhaseGeometryReconciliationResult
+reconcileConservativePhaseGeometry(
+    application::core::SimulationComponents& sim,
+    LevelSetMaintenanceRequest& request,
+    const Parameters& params,
+    std::span<const svmp::FE::Real> target_liquid_phase_mass,
+    std::vector<svmp::FE::Real>& candidate,
+    LevelSetMaintenanceGeometryTransaction& transaction)
+{
+  ConservativePhaseGeometryReconciliationResult result;
+  if (!sim.fe_system) {
+    result.diagnostic =
+        "Conservative phase geometry reconciliation requires an FE system";
+    return result;
+  }
+  auto& system = *sim.fe_system;
+  auto& graph = requireCurrentConservativePhaseGraph(system, request);
+  if (target_liquid_phase_mass.size() != graph.nodes) {
+    result.diagnostic =
+        "Conservative phase geometry reconciliation target does not match the phase graph";
+    return result;
+  }
+  const auto phase_field = system.findFieldByName(
+      request.conservative_phase.liquid_indicator.field_name);
+  const auto level_set_field = system.findFieldByName(
+      request.level_set_field_name);
+  if (phase_field == svmp::FE::INVALID_FIELD_ID ||
+      level_set_field == svmp::FE::INVALID_FIELD_ID) {
+    result.diagnostic =
+        "Conservative phase geometry reconciliation could not resolve its phase or level-set field";
+    return result;
+  }
+  const auto level_set_offset = static_cast<std::size_t>(
+      system.fieldDofOffset(level_set_field));
+  const auto level_set_count = static_cast<std::size_t>(
+      system.fieldDofHandler(level_set_field).getNumDofs());
+  if (level_set_count != graph.nodes ||
+      level_set_offset + level_set_count > candidate.size()) {
+    result.diagnostic =
+        "Conservative phase geometry reconciliation requires identical P1 phase and level-set layouts";
+    return result;
+  }
+
+  const auto projection_options = conservativePhaseProjectionOptions(
+      system, request);
+  const auto volume_options = levelSetVolumeOptionsForMaintenance(request);
+  const auto moment_tolerance =
+      request.conservative_phase.geometry_measure_tolerance *
+      std::max({svmp::FE::Real{1.0}, graph.physical_measure,
+                std::accumulate(target_liquid_phase_mass.begin(),
+                                target_liquid_phase_mass.end(),
+                                svmp::FE::Real{0.0})});
+  if (!std::isfinite(moment_tolerance) ||
+      !(moment_tolerance > svmp::FE::Real{0.0})) {
+    result.diagnostic =
+        "Conservative phase geometry reconciliation has an invalid local moment tolerance";
+    return result;
+  }
+
+  ++result.geometry_refresh_requests;
+  result.geometry_rebuilds +=
+      transaction.refresh(params, candidate).refreshed ? 1 : 0;
+  for (int iteration = 0;
+       iteration <
+       request.conservative_phase.geometry_correction_max_iterations;
+       ++iteration) {
+    const auto projection = projectCurrentConservativePhaseGeometry(
+        system, request);
+    if (!projection.success) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase local geometry projection failed: " +
+          projection.diagnostic);
+    }
+    const auto mismatch = conservativePhaseMomentMismatch(
+        projection.liquid_phase_mass, target_liquid_phase_mass);
+    if (iteration == 0) {
+      result.initial_residual_norm = mismatch.residual_norm;
+    }
+    result.final_residual_norm = mismatch.residual_norm;
+    result.maximum_final_nodal_residual =
+        mismatch.maximum_nodal_residual;
+    result.final_total_residual = mismatch.total_residual;
+    if (mismatch.maximum_nodal_residual <= moment_tolerance &&
+        std::abs(mismatch.total_residual) <= moment_tolerance) {
+      result.success = true;
+      result.target_reached = true;
+      result.diagnostic = "ok";
+      return result;
+    }
+
+    const auto sensitivity =
+        svmp::FE::level_set::buildLevelSetP1PhaseGeometrySensitivity(
+            system,
+            level_set_field,
+            phase_field,
+            graph,
+            projection_options,
+            candidate);
+    if (!sensitivity.success) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase local geometry sensitivity failed: " +
+          sensitivity.diagnostic);
+    }
+    if (iteration == 0) {
+      result.allowed_interface_displacement =
+          request.conservative_phase
+              .maximum_geometry_displacement_fraction *
+          sensitivity.minimum_cell_node_distance;
+    }
+    const auto current_level_set = std::span<const svmp::FE::Real>(
+        candidate.data() + level_set_offset, level_set_count);
+    svmp::FE::level_set::LevelSetP1PhaseGeometryCorrectionOptions
+        correction_options;
+    correction_options.invariant_tolerance =
+        request.conservative_phase.invariant_tolerance;
+    correction_options.relative_linear_tolerance = std::max(
+        request.conservative_phase.invariant_tolerance,
+        std::min(svmp::FE::Real{1.0e-8},
+                 request.conservative_phase.geometry_measure_tolerance));
+    const auto correction =
+        svmp::FE::level_set::solveLevelSetP1PhaseGeometryCorrection(
+            sensitivity,
+            projection_options.liquid_side,
+            current_level_set,
+            projection.liquid_phase_mass,
+            target_liquid_phase_mass,
+            correction_options);
+    if (!correction.success) {
+      result.diagnostic =
+          "Conservative phase local geometry correction has no admissible shape update: " +
+          correction.diagnostic;
+      return result;
+    }
+
+    svmp::FE::Real maximum_increment{0.0};
+    for (const auto increment : correction.level_set_increment) {
+      maximum_increment = std::max(
+          maximum_increment, std::abs(increment));
+    }
+    if (!(maximum_increment > svmp::FE::Real{0.0}) ||
+        !std::isfinite(maximum_increment)) {
+      result.diagnostic =
+          "Conservative phase local geometry correction produced a zero or non-finite update";
+      return result;
+    }
+    const auto full_step_displacement =
+        maximum_increment / sensitivity.minimum_level_set_gradient;
+    const auto remaining_displacement =
+        result.allowed_interface_displacement -
+        result.accumulated_interface_displacement_bound;
+    if (!(remaining_displacement > svmp::FE::Real{0.0})) {
+      result.limited_by_displacement = true;
+      result.diagnostic =
+          "Conservative phase local geometry correction exhausted its cumulative displacement contract";
+      return result;
+    }
+    svmp::FE::Real step_scale = std::min(
+        svmp::FE::Real{1.0},
+        remaining_displacement / full_step_displacement);
+    if (step_scale < svmp::FE::Real{1.0}) {
+      result.limited_by_displacement = true;
+    }
+
+    const auto sign_margin =
+        request.conservative_phase.invariant_tolerance *
+        std::max(svmp::FE::Real{1.0},
+                 std::abs(*std::max_element(
+                     current_level_set.begin(), current_level_set.end(),
+                     [](svmp::FE::Real first, svmp::FE::Real second) {
+                       return std::abs(first) < std::abs(second);
+                     })));
+    for (std::size_t node = 0u; node < level_set_count; ++node) {
+      const auto signed_value =
+          current_level_set[node] - volume_options.isovalue;
+      const auto increment = correction.level_set_increment[node];
+      if (signed_value * increment < svmp::FE::Real{0.0}) {
+        const auto safe_magnitude =
+            std::abs(signed_value) - sign_margin;
+        if (!(safe_magnitude > svmp::FE::Real{0.0})) {
+          result.limited_by_topology = true;
+          result.diagnostic =
+              "Conservative phase local geometry correction encountered a level-set node inside its topology margin";
+          return result;
+        }
+        step_scale = std::min(
+            step_scale,
+            svmp::FE::Real{0.9} * safe_magnitude /
+                std::abs(increment));
+      }
+    }
+    if (!(step_scale > svmp::FE::Real{0.0}) ||
+        !std::isfinite(step_scale)) {
+      result.limited_by_topology = true;
+      result.diagnostic =
+          "Conservative phase local geometry correction has no topology-stable step";
+      return result;
+    }
+
+    bool accepted_line_search = false;
+    constexpr int maximum_line_search_evaluations = 16;
+    for (int line_search = 0;
+         line_search < maximum_line_search_evaluations;
+         ++line_search) {
+      ++result.line_search_evaluations;
+      auto trial = candidate;
+      for (std::size_t node = 0u; node < level_set_count; ++node) {
+        trial[level_set_offset + node] =
+            current_level_set[node] +
+            step_scale * correction.level_set_increment[node];
+      }
+      svmp::FE::level_set::LevelSetP1PhaseProjectionResult
+          trial_projection;
+      try {
+        ++result.geometry_refresh_requests;
+        result.geometry_rebuilds +=
+            transaction.refresh(params, trial).refreshed ? 1 : 0;
+        trial_projection = projectCurrentConservativePhaseGeometry(
+            system, request);
+      } catch (const std::exception& exception) {
+        ++result.rejected_geometry_trials;
+        result.last_rejected_trial_diagnostic = exception.what();
+        step_scale *= svmp::FE::Real{0.5};
+        continue;
+      }
+      if (!trial_projection.success) {
+        ++result.rejected_geometry_trials;
+        result.last_rejected_trial_diagnostic =
+            trial_projection.diagnostic;
+        step_scale *= svmp::FE::Real{0.5};
+        continue;
+      }
+      const auto trial_mismatch = conservativePhaseMomentMismatch(
+          trial_projection.liquid_phase_mass,
+          target_liquid_phase_mass);
+      const bool trial_reached =
+          trial_mismatch.maximum_nodal_residual <= moment_tolerance &&
+          std::abs(trial_mismatch.total_residual) <= moment_tolerance;
+      const bool sufficient_decrease =
+          trial_mismatch.residual_norm <
+          mismatch.residual_norm *
+              (svmp::FE::Real{1.0} -
+               svmp::FE::Real{1.0e-4} * step_scale);
+      if (trial_reached || sufficient_decrease) {
+        candidate = std::move(trial);
+        result.accumulated_interface_displacement_bound +=
+            step_scale * full_step_displacement;
+        result.final_residual_norm = trial_mismatch.residual_norm;
+        result.maximum_final_nodal_residual =
+            trial_mismatch.maximum_nodal_residual;
+        result.final_total_residual = trial_mismatch.total_residual;
+        result.iterations = iteration + 1;
+        accepted_line_search = true;
+        break;
+      }
+      step_scale *= svmp::FE::Real{0.5};
+    }
+    if (!accepted_line_search) {
+      ++result.geometry_refresh_requests;
+      result.geometry_rebuilds +=
+          transaction.refresh(params, candidate).refreshed ? 1 : 0;
+      result.diagnostic =
+          "Conservative phase local geometry correction line search did not reduce the nodal moment residual";
+      if (!result.last_rejected_trial_diagnostic.empty()) {
+        result.diagnostic += ": " +
+                             result.last_rejected_trial_diagnostic;
+      }
+      return result;
+    }
+  }
+
+  result.diagnostic =
+      "Conservative phase local geometry correction did not reach its nodal moment tolerance within the bounded iteration count";
+  return result;
+}
+
 ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     application::core::SimulationComponents& sim,
     svmp::FE::timestepping::TimeHistory& history,
@@ -11260,6 +11601,10 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
   auto candidate = result.original_solution;
   std::vector<svmp::FE::Real> accepted_phase_measures(
       requests.size(), std::numeric_limits<svmp::FE::Real>::quiet_NaN());
+  std::vector<std::vector<svmp::FE::Real>> accepted_phase_masses(
+      requests.size());
+  std::vector<ConservativePhaseGeometryReconciliationResult>
+      reconciliation_reports(requests.size());
 
   for (std::size_t request_index = 0u;
        request_index < requests.size(); ++request_index) {
@@ -11396,64 +11741,11 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           "[svMultiPhysics::Application] Conservative phase stage produced an invalid liquid measure.");
     }
     accepted_phase_measures[request_index] = phase_measure;
-
-    if (request.conservative_phase.reconcile_geometry) {
-      const auto level_set_field = system.findFieldByName(
-          request.level_set_field_name);
-      if (level_set_field == svmp::FE::INVALID_FIELD_ID) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Conservative phase geometry reconciliation could not find level-set field '" +
-            request.level_set_field_name + "'.");
-      }
-      const auto bounded_liquid_measure = std::clamp(
-          phase_measure, svmp::FE::Real{0.0}, graph.physical_measure);
-      svmp::FE::level_set::LevelSetGlobalShiftCorrectionOptions
-          correction_options;
-      correction_options.target_negative_volume =
-          request.conservative_phase.liquid_side ==
-                  svmp::FE::level_set::LevelSetPhaseSide::Negative
-              ? bounded_liquid_measure
-              : graph.physical_measure - bounded_liquid_measure;
-      correction_options.volume_tolerance =
-          request.conservative_phase.geometry_measure_tolerance;
-      correction_options.max_iterations =
-          request.conservative_phase.geometry_correction_max_iterations;
-      correction_options.minimum_relative_volume_error =
-          svmp::FE::Real{0.0};
-      correction_options.maximum_interface_displacement_fraction =
-          request.conservative_phase.maximum_geometry_displacement_fraction;
-      std::vector<svmp::FE::Real> corrected_candidate;
-      const auto correction =
-          svmp::FE::level_set::applyGlobalLevelSetShiftCorrection(
-              system,
-              level_set_field,
-              levelSetVolumeOptionsForMaintenance(request),
-              correction_options,
-              candidate,
-              corrected_candidate);
-      if (!correction.success) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Conservative phase geometry reconciliation failed for level-set field '" +
-            request.level_set_field_name + "': " +
-            correction.diagnostic);
-      }
-      if (!correction.target_reached) {
-        application::core::oopCout()
-            << "[svMultiPhysics::Application] Conservative phase candidate rejected"
-            << " field='"
-            << request.conservative_phase.liquid_indicator.field_name
-            << "' reason=geometry_displacement_contract"
-            << " target_negative_measure="
-            << correction.target_negative_volume
-            << " corrected_negative_measure="
-            << correction.corrected_negative_volume
-            << " max_interface_displacement="
-            << correction.max_interface_displacement
-            << " dt=" << history.dt() << std::endl;
-        result.accept_step = false;
-        return result;
-      }
-      candidate = std::move(corrected_candidate);
+    accepted_phase_masses[request_index].resize(
+        graph.nodes, svmp::FE::Real{0.0});
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+      accepted_phase_masses[request_index][node] =
+          graph.lumped_control_volume[node] * limited_phase[node];
     }
 
     application::core::oopCout()
@@ -11484,6 +11776,59 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     for (std::size_t request_index = 0u;
          request_index < requests.size(); ++request_index) {
       auto& request = requests[request_index];
+      if (!request.conservative_phase.enabled ||
+          !request.conservative_phase.reconcile_geometry) {
+        continue;
+      }
+      auto reconciliation = reconcileConservativePhaseGeometry(
+          sim,
+          request,
+          params,
+          accepted_phase_masses[request_index],
+          candidate,
+          *transaction);
+      reconciliation_reports[request_index] = reconciliation;
+      if (!reconciliation.success || !reconciliation.target_reached) {
+        application::core::oopCout()
+            << "[svMultiPhysics::Application] Conservative phase candidate rejected"
+            << " field='"
+            << request.conservative_phase.liquid_indicator.field_name
+            << "' reason=local_geometry_reconciliation_contract"
+            << " iterations=" << reconciliation.iterations
+            << " line_search_evaluations="
+            << reconciliation.line_search_evaluations
+            << " geometry_refresh_requests="
+            << reconciliation.geometry_refresh_requests
+            << " geometry_rebuilds="
+            << reconciliation.geometry_rebuilds
+            << " rejected_geometry_trials="
+            << reconciliation.rejected_geometry_trials
+            << " initial_local_residual_norm="
+            << reconciliation.initial_residual_norm
+            << " final_local_residual_norm="
+            << reconciliation.final_residual_norm
+            << " max_final_nodal_residual="
+            << reconciliation.maximum_final_nodal_residual
+            << " total_final_residual="
+            << reconciliation.final_total_residual
+            << " accumulated_interface_displacement_bound="
+            << reconciliation.accumulated_interface_displacement_bound
+            << " allowed_interface_displacement="
+            << reconciliation.allowed_interface_displacement
+            << " limited_by_displacement="
+            << (reconciliation.limited_by_displacement ? "true" : "false")
+            << " limited_by_topology="
+            << (reconciliation.limited_by_topology ? "true" : "false")
+            << " diagnostic='" << reconciliation.diagnostic << "'"
+            << " dt=" << history.dt() << std::endl;
+        transaction->rollback();
+        result.accept_step = false;
+        return result;
+      }
+    }
+    for (std::size_t request_index = 0u;
+         request_index < requests.size(); ++request_index) {
+      auto& request = requests[request_index];
       if (!request.conservative_phase.enabled) {
         continue;
       }
@@ -11503,13 +11848,20 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           std::max({svmp::FE::Real{1.0},
                     std::abs(projection.retained_liquid_measure),
                     std::abs(phase_measure)});
+      const auto local_mismatch = conservativePhaseMomentMismatch(
+          projection.liquid_phase_mass,
+          accepted_phase_masses[request_index]);
       if (request.conservative_phase.reconcile_geometry &&
-          mismatch > tolerance) {
+          (mismatch > tolerance ||
+           local_mismatch.maximum_nodal_residual > tolerance ||
+           std::abs(local_mismatch.total_residual) > tolerance)) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] Conservative phase geometry reconciliation did not match the transported phase measure for field '" +
+            "[svMultiPhysics::Application] Conservative phase local geometry reconciliation did not match the transported nodal moments for field '" +
             request.conservative_phase.liquid_indicator.field_name +
             "'.");
       }
+      const auto& reconciliation =
+          reconciliation_reports[request_index];
       application::core::oopCout()
           << "[svMultiPhysics::Application] Conservative phase geometry validated"
           << " field='"
@@ -11519,6 +11871,24 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           << " retained_geometry_measure="
           << projection.retained_liquid_measure
           << " measure_mismatch=" << mismatch
+          << " max_nodal_moment_mismatch="
+          << local_mismatch.maximum_nodal_residual
+          << " nodal_moment_residual_norm="
+          << local_mismatch.residual_norm
+          << " reconciliation_iterations="
+          << reconciliation.iterations
+          << " reconciliation_line_search_evaluations="
+          << reconciliation.line_search_evaluations
+          << " reconciliation_geometry_refresh_requests="
+          << reconciliation.geometry_refresh_requests
+          << " reconciliation_geometry_rebuilds="
+          << reconciliation.geometry_rebuilds
+          << " reconciliation_rejected_geometry_trials="
+          << reconciliation.rejected_geometry_trials
+          << " interface_displacement_bound="
+          << reconciliation.accumulated_interface_displacement_bound
+          << " interface_displacement_limit="
+          << reconciliation.allowed_interface_displacement
           << " tolerance=" << tolerance
           << " reconciliation_enabled="
           << (request.conservative_phase.reconcile_geometry ? "true"
@@ -11526,7 +11896,10 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           << " cut_context_revision="
           << projection.cut_context_revision
           << " cut_context_refreshed="
-          << (refresh_report.refreshed ? "true" : "false")
+          << (refresh_report.refreshed ||
+                      reconciliation.geometry_rebuilds > 0
+                  ? "true"
+                  : "false")
           << std::endl;
     }
     result.changed = candidate != result.original_solution;
