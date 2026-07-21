@@ -5486,6 +5486,7 @@ resolveLevelSetWallAwareMaintenanceContext(
     application::core::SimulationComponents& sim,
     svmp::FE::timestepping::TimeHistory& history,
     svmp::FE::FieldId level_set_field,
+    svmp::FE::Real endpoint_time,
     std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
         accepted_contact_stages,
     std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>
@@ -5605,7 +5606,7 @@ resolveLevelSetWallAwareMaintenanceContext(
       const auto* accepted_dynamic_stage =
           stage_it != stage_by_interface.end() ? stage_it->second : nullptr;
       const auto expected_stage_time =
-          static_cast<svmp::FE::Real>(history.time()) -
+          endpoint_time -
           (svmp::FE::Real{1.0} -
            (accepted_dynamic_stage != nullptr
                 ? accepted_dynamic_stage->stage_alpha_f
@@ -5918,6 +5919,113 @@ void assertCollectiveWallAwareRepairResult(
   }
 }
 
+struct LevelSetProjectionReinitializationCandidate {
+  bool applied{false};
+  svmp::FE::level_set::LevelSetSignedDistanceRepairResult repair{};
+  LevelSetWallAwareMaintenanceContext wall_context{};
+};
+
+LevelSetProjectionReinitializationCandidate
+stageLevelSetProjectionReinitialization(
+    application::core::SimulationComponents& sim,
+    svmp::FE::timestepping::TimeHistory& history,
+    const LevelSetMaintenanceRequest& request,
+    svmp::FE::FieldId field,
+    svmp::FE::Real endpoint_time,
+    std::vector<svmp::FE::Real>& candidate,
+    std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+        accepted_contact_stages,
+    std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>
+        accepted_contact_stage_constraints,
+    std::span<const svmp::FE::Real> accepted_contact_stage_solution)
+{
+  if (request.reinitialization.method !=
+      svmp::FE::level_set::LevelSetReinitializationMethod::Projection) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Runtime level-set reinitialization currently supports Projection only.");
+  }
+
+  LevelSetProjectionReinitializationCandidate staged;
+  staged.wall_context = resolveLevelSetWallAwareMaintenanceContext(
+      sim,
+      history,
+      field,
+      endpoint_time,
+      accepted_contact_stages,
+      accepted_contact_stage_constraints);
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  std::span<const svmp::FE::Real> reinitialization_input(candidate);
+  if (staged.wall_context.requires_accepted_dynamic_stage) {
+    const bool local_stage_layout_valid =
+        accepted_contact_stage_solution.size() == candidate.size();
+    if (globalMinDouble(local_stage_layout_valid ? 1.0 : 0.0, comm) !=
+        1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance requires the exact accepted contact-stage solution on every rank.");
+    }
+    const double local_stage_solution_size =
+        static_cast<double>(accepted_contact_stage_solution.size());
+    if (globalMinDouble(local_stage_solution_size, comm) !=
+        globalMaxDouble(local_stage_solution_size, comm)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance received inconsistent contact-stage solution layouts.");
+    }
+    reinitialization_input = accepted_contact_stage_solution;
+  }
+
+  std::vector<svmp::FE::Real> repaired;
+  staged.repair =
+      svmp::FE::level_set::repairLevelSetSignedDistanceByProjection(
+          *sim.fe_system,
+          field,
+          request.reinitialization,
+          reinitialization_input,
+          repaired,
+          staged.wall_context.local_constraints);
+  assertCollectiveWallAwareRepairResult(
+      staged.repair, comm, request.level_set_field_name);
+  if ((staged.repair.wall_contact_constraints > 0u) !=
+      staged.wall_context.has_global_contact_constraints) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wall-aware level-set reinitialization did not retain the complete accepted contact constraint set for field '" +
+        request.level_set_field_name + "'.");
+  }
+  if (!staged.repair.success) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Level-set reinitialization failed for field '" +
+        request.level_set_field_name + "': " + staged.repair.diagnostic);
+  }
+  if (!staged.repair.converged) {
+    return staged;
+  }
+
+  const auto raw_field_offset = sim.fe_system->fieldDofOffset(field);
+  const auto raw_field_dof_count =
+      sim.fe_system->fieldDofHandler(field).getNumDofs();
+  if (raw_field_offset < 0 || raw_field_dof_count < 0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wall-aware level-set reinitialization returned an invalid field layout.");
+  }
+  const auto field_offset = static_cast<std::size_t>(raw_field_offset);
+  const auto field_dof_count =
+      static_cast<std::size_t>(raw_field_dof_count);
+  const auto slice_fits = [&](std::size_t extent) {
+    return field_offset <= extent &&
+           field_dof_count <= extent - field_offset;
+  };
+  if (!slice_fits(candidate.size()) || !slice_fits(repaired.size()) ||
+      !slice_fits(reinitialization_input.size())) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wall-aware level-set reinitialization returned an incompatible field slice.");
+  }
+  for (std::size_t i = 0; i < field_dof_count; ++i) {
+    const auto index = field_offset + i;
+    candidate[index] += repaired[index] - reinitialization_input[index];
+  }
+  staged.applied = true;
+  return staged;
+}
+
 struct LevelSetVolumeCorrectionMaintenanceEvent {
   svmp::FE::FieldId level_set_field{svmp::FE::INVALID_FIELD_ID};
   std::string level_set_field_name{};
@@ -5963,6 +6071,13 @@ bool applyLevelSetMaintenance(
   const auto accepted_solution_before_maintenance = fe_solution;
   std::set<svmp::FE::FieldId> modified_level_set_fields;
   for (auto& request : staged_requests) {
+    // Conservative requests own reinitialization inside their prospective
+    // step transaction.  Repeating it here after acceptance would expose an
+    // intermediate geometry and apply a second representation change outside
+    // the phase-mass reconciliation contract.
+    if (request.conservative_phase.enabled) {
+      continue;
+    }
     const int completed_step = history.stepIndex();
     const bool do_reinit =
         svmp::FE::level_set::shouldReinitializeLevelSet(
@@ -5985,59 +6100,19 @@ bool applyLevelSetMaintenance(
     }
 
     if (do_reinit) {
-      if (request.reinitialization.method !=
-          svmp::FE::level_set::LevelSetReinitializationMethod::Projection) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Runtime level-set reinitialization currently supports Projection only.");
-      }
-      const auto wall_context =
-          resolveLevelSetWallAwareMaintenanceContext(
+      const auto staged_reinitialization =
+          stageLevelSetProjectionReinitialization(
               sim,
               history,
+              request,
               field,
+              static_cast<svmp::FE::Real>(history.time()),
+              fe_solution,
               accepted_contact_stages,
-              accepted_contact_stage_constraints);
-      const auto comm = activeFESystemCommunicator(*sim.fe_system);
-      std::span<const svmp::FE::Real> reinitialization_input(fe_solution);
-      if (wall_context.requires_accepted_dynamic_stage) {
-        const bool local_stage_layout_valid =
-            accepted_contact_stage_solution.size() == fe_solution.size();
-        if (globalMinDouble(local_stage_layout_valid ? 1.0 : 0.0, comm) !=
-            1.0) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance requires the exact accepted contact-stage solution on every rank.");
-        }
-        const double local_stage_solution_size =
-            static_cast<double>(accepted_contact_stage_solution.size());
-        if (globalMinDouble(local_stage_solution_size, comm) !=
-            globalMaxDouble(local_stage_solution_size, comm)) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance received inconsistent contact-stage solution layouts.");
-        }
-        reinitialization_input = accepted_contact_stage_solution;
-      }
-      std::vector<svmp::FE::Real> repaired;
-      auto result =
-          svmp::FE::level_set::repairLevelSetSignedDistanceByProjection(
-              *sim.fe_system,
-              field,
-              request.reinitialization,
-              reinitialization_input,
-              repaired,
-              wall_context.local_constraints);
-      assertCollectiveWallAwareRepairResult(
-          result, comm, request.level_set_field_name);
-      if ((result.wall_contact_constraints > 0u) !=
-          wall_context.has_global_contact_constraints) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Wall-aware level-set reinitialization did not retain the complete accepted contact constraint set for field '" +
-            request.level_set_field_name + "'.");
-      }
-      if (!result.success) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set reinitialization failed for field '" +
-            request.level_set_field_name + "': " + result.diagnostic);
-      }
+              accepted_contact_stage_constraints,
+              accepted_contact_stage_solution);
+      const auto& result = staged_reinitialization.repair;
+      const auto& wall_context = staged_reinitialization.wall_context;
       if (!result.converged) {
         // A geometrically bounded partial candidate is useful diagnostics, but
         // applying it would silently turn max_iterations into an uncontrolled
@@ -6074,25 +6149,14 @@ bool applyLevelSetMaintenance(
             << " diagnostic='" << result.diagnostic << "'";
         staged_commit_logs.push_back(log.str());
       } else {
-        const auto field_offset = static_cast<std::size_t>(
-            sim.fe_system->fieldDofOffset(field));
-        const auto field_dof_count = static_cast<std::size_t>(
-            sim.fe_system->fieldDofHandler(field).getNumDofs());
-        if (field_offset + field_dof_count > fe_solution.size() ||
-            field_offset + field_dof_count > repaired.size() ||
-            field_offset + field_dof_count > reinitialization_input.size()) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Wall-aware level-set reinitialization returned an incompatible field slice.");
-        }
         // For a generalized-alpha contact law, repaired is the accepted stage
         // representation.  Apply only its field delta to the endpoint.  The
         // common history update below applies that same representation delta
         // to every older level, so the accepted stage becomes repaired while
         // all temporal increments remain exact.
-        for (std::size_t i = 0; i < field_dof_count; ++i) {
-          const auto index = field_offset + i;
-          fe_solution[index] +=
-              repaired[index] - reinitialization_input[index];
+        if (!staged_reinitialization.applied) {
+          throw std::logic_error(
+              "[svMultiPhysics::Application] A converged level-set reinitialization was not applied to its staged candidate.");
         }
         changed = true;
         modified_level_set_fields.insert(field);
@@ -11232,13 +11296,105 @@ conservativePhaseOneRingBounds(
   return {std::move(lower), std::move(upper)};
 }
 
-struct ConservativePhaseCandidateResult {
-  bool accept_step{true};
-  bool changed{false};
-  std::vector<svmp::FE::Real> original_solution{};
-  std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
-      geometry_transaction{};
+std::vector<std::uint8_t> conservativePhaseContactProtectedNodes(
+    const svmp::FE::systems::FESystem& system,
+    const LevelSetMaintenanceRequest& request,
+    const svmp::FE::level_set::LevelSetP1PhaseTransportGraph& graph,
+    std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>
+        constraints)
+{
+  std::vector<std::uint8_t> protected_nodes(graph.nodes, 0u);
+  const auto comm = activeFESystemCommunicator(system);
+  if (globalSumSize(constraints.size(), comm) == 0u) {
+    return protected_nodes;
+  }
+  const auto phase_field = system.findFieldByName(
+      request.conservative_phase.liquid_indicator.field_name);
+  if (phase_field == svmp::FE::INVALID_FIELD_ID) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase contact protection could not resolve the phase field.");
+  }
+  const auto& phase_dofs = system.fieldDofHandler(phase_field);
+  const auto& mesh = system.meshAccess();
+  const bool local_identity_available =
+      mesh.parallelSize() == 1 || mesh.globalEntityIdsAvailable();
+  if (globalMinDouble(local_identity_available ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase contact protection requires globally unique parent-cell identities in a distributed run.");
+  }
+
+  std::set<svmp::FE::GlobalIndex> local_parent_ids;
+  bool local_constraints_valid = true;
+  for (const auto& constraint : constraints) {
+    local_constraints_valid =
+        constraint.parent_cell_global_id !=
+            svmp::FE::INVALID_GLOBAL_INDEX &&
+        local_constraints_valid;
+    if (constraint.parent_cell_global_id !=
+        svmp::FE::INVALID_GLOBAL_INDEX) {
+      local_parent_ids.insert(constraint.parent_cell_global_id);
+    }
+  }
+  std::vector<svmp::FE::Real> global_mask(graph.nodes,
+                                           svmp::FE::Real{0.0});
+  std::set<svmp::FE::GlobalIndex> matched_parent_ids;
+  try {
+    mesh.forEachOwnedCell([&](svmp::FE::GlobalIndex cell) {
+      const auto global_cell = mesh.globalEntityIdsAvailable()
+          ? mesh.getCellGlobalId(cell)
+          : cell;
+      if (!local_parent_ids.contains(global_cell)) {
+        return;
+      }
+      const auto cell_dofs = phase_dofs.getCellDofs(cell);
+      if (cell_dofs.empty()) {
+        throw std::runtime_error(
+            "a protected contact parent has no phase DOFs");
+      }
+      for (const auto dof : cell_dofs) {
+        if (dof < 0 || static_cast<std::size_t>(dof) >= graph.nodes) {
+          throw std::runtime_error(
+              "a protected contact parent has an out-of-range phase DOF");
+        }
+        global_mask[static_cast<std::size_t>(dof)] =
+            svmp::FE::Real{1.0};
+      }
+      matched_parent_ids.insert(global_cell);
+    });
+    local_constraints_valid =
+        matched_parent_ids == local_parent_ids && local_constraints_valid;
+  } catch (const std::exception&) {
+    local_constraints_valid = false;
+  }
+  if (globalMinDouble(local_constraints_valid ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase contact protection could not map every accepted contact parent to its phase DOFs.");
+  }
+  allReduceConservativePhaseBuffer(global_mask, comm);
+  for (std::size_t node = 0u; node < graph.nodes; ++node) {
+    if (!std::isfinite(global_mask[node]) ||
+        global_mask[node] < svmp::FE::Real{0.0}) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase contact protection produced an invalid distributed node mask.");
+    }
+    protected_nodes[node] = global_mask[node] > svmp::FE::Real{0.0}
+        ? 1u
+        : 0u;
+  }
+  return protected_nodes;
+}
+
+struct ConservativePhaseContactStageCandidate {
+  std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+      stages{};
+  std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
+      constraints{};
+  std::vector<svmp::FE::Real> stage_solution{};
 };
+
+using ConservativePhaseContactStageBuilder = std::function<
+    ConservativePhaseContactStageCandidate(
+        std::span<const svmp::FE::Real>)>;
 
 struct ConservativePhaseMomentMismatch {
   svmp::FE::Real maximum_nodal_residual{0.0};
@@ -11281,14 +11437,42 @@ struct ConservativePhaseGeometryReconciliationResult {
   int geometry_refresh_requests{0};
   int geometry_rebuilds{0};
   int rejected_geometry_trials{0};
+  std::size_t contact_protected_nodes{0u};
   svmp::FE::Real allowed_interface_displacement{0.0};
   svmp::FE::Real accumulated_interface_displacement_bound{0.0};
   svmp::FE::Real initial_residual_norm{0.0};
   svmp::FE::Real final_residual_norm{0.0};
   svmp::FE::Real maximum_final_nodal_residual{0.0};
   svmp::FE::Real final_total_residual{0.0};
+  svmp::FE::Real maximum_removed_contact_increment{0.0};
   std::string last_rejected_trial_diagnostic{};
   std::string diagnostic{};
+};
+
+struct ConservativePhaseMaintenanceStageLedger {
+  bool reinitialization_due{false};
+  bool reinitialization_applied{false};
+  svmp::FE::Real raw_post_transport_phase_measure{0.0};
+  svmp::FE::Real post_limit_phase_measure{0.0};
+  svmp::FE::Real raw_post_transport_geometry_measure{0.0};
+  svmp::FE::Real post_reinitialization_geometry_measure{0.0};
+  svmp::FE::Real post_correction_geometry_measure{0.0};
+  ConservativePhaseMomentMismatch post_reinitialization_mismatch{};
+  ConservativePhaseMomentMismatch post_correction_mismatch{};
+  svmp::FE::level_set::LevelSetSignedDistanceRepairResult
+      reinitialization{};
+  ConservativePhaseGeometryReconciliationResult reconciliation{};
+};
+
+struct ConservativePhaseCandidateResult {
+  bool accept_step{true};
+  bool changed{false};
+  std::vector<svmp::FE::Real> original_solution{};
+  ConservativePhaseContactStageCandidate contact_stage{};
+  std::vector<ConservativePhaseMaintenanceStageLedger>
+      maintenance_ledgers{};
+  std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
+      geometry_transaction{};
 };
 
 ConservativePhaseGeometryReconciliationResult
@@ -11298,7 +11482,8 @@ reconcileConservativePhaseGeometry(
     const Parameters& params,
     std::span<const svmp::FE::Real> target_liquid_phase_mass,
     std::vector<svmp::FE::Real>& candidate,
-    LevelSetMaintenanceGeometryTransaction& transaction)
+    LevelSetMaintenanceGeometryTransaction& transaction,
+    std::span<const std::uint8_t> contact_protected_nodes = {})
 {
   ConservativePhaseGeometryReconciliationResult result;
   if (!sim.fe_system) {
@@ -11313,6 +11498,16 @@ reconcileConservativePhaseGeometry(
         "Conservative phase geometry reconciliation target does not match the phase graph";
     return result;
   }
+  if (!contact_protected_nodes.empty() &&
+      contact_protected_nodes.size() != graph.nodes) {
+    result.diagnostic =
+        "Conservative phase geometry reconciliation contact mask does not match the phase graph";
+    return result;
+  }
+  result.contact_protected_nodes = static_cast<std::size_t>(std::count_if(
+      contact_protected_nodes.begin(),
+      contact_protected_nodes.end(),
+      [](std::uint8_t value) { return value != 0u; }));
   const auto phase_field = system.findFieldByName(
       request.conservative_phase.liquid_indicator.field_name);
   const auto level_set_field = system.findFieldByName(
@@ -11323,12 +11518,22 @@ reconcileConservativePhaseGeometry(
         "Conservative phase geometry reconciliation could not resolve its phase or level-set field";
     return result;
   }
-  const auto level_set_offset = static_cast<std::size_t>(
-      system.fieldDofOffset(level_set_field));
-  const auto level_set_count = static_cast<std::size_t>(
-      system.fieldDofHandler(level_set_field).getNumDofs());
+  const auto raw_level_set_offset =
+      system.fieldDofOffset(level_set_field);
+  const auto raw_level_set_count =
+      system.fieldDofHandler(level_set_field).getNumDofs();
+  if (raw_level_set_offset < 0 || raw_level_set_count < 0) {
+    result.diagnostic =
+        "Conservative phase geometry reconciliation found an invalid level-set layout";
+    return result;
+  }
+  const auto level_set_offset =
+      static_cast<std::size_t>(raw_level_set_offset);
+  const auto level_set_count =
+      static_cast<std::size_t>(raw_level_set_count);
   if (level_set_count != graph.nodes ||
-      level_set_offset + level_set_count > candidate.size()) {
+      level_set_offset > candidate.size() ||
+      level_set_count > candidate.size() - level_set_offset) {
     result.diagnostic =
         "Conservative phase geometry reconciliation requires identical P1 phase and level-set layouts";
     return result;
@@ -11410,7 +11615,7 @@ reconcileConservativePhaseGeometry(
         request.conservative_phase.invariant_tolerance,
         std::min(svmp::FE::Real{1.0e-8},
                  request.conservative_phase.geometry_measure_tolerance));
-    const auto correction =
+    auto correction =
         svmp::FE::level_set::solveLevelSetP1PhaseGeometryCorrection(
             sensitivity,
             projection_options.liquid_side,
@@ -11425,6 +11630,17 @@ reconcileConservativePhaseGeometry(
       return result;
     }
 
+    for (std::size_t node = 0u;
+         node < correction.level_set_increment.size(); ++node) {
+      if (!contact_protected_nodes.empty() &&
+          contact_protected_nodes[node] != 0u) {
+        result.maximum_removed_contact_increment = std::max(
+            result.maximum_removed_contact_increment,
+            std::abs(correction.level_set_increment[node]));
+        correction.level_set_increment[node] = svmp::FE::Real{0.0};
+      }
+    }
+
     svmp::FE::Real maximum_increment{0.0};
     for (const auto increment : correction.level_set_increment) {
       maximum_increment = std::max(
@@ -11432,8 +11648,9 @@ reconcileConservativePhaseGeometry(
     }
     if (!(maximum_increment > svmp::FE::Real{0.0}) ||
         !std::isfinite(maximum_increment)) {
-      result.diagnostic =
-          "Conservative phase local geometry correction produced a zero or non-finite update";
+      result.diagnostic = result.contact_protected_nodes > 0u
+          ? "Conservative phase local geometry correction cannot close the nodal moments without changing accepted wall-contact parent cells"
+          : "Conservative phase local geometry correction produced a zero or non-finite update";
       return result;
     }
     const auto full_step_displacement =
@@ -11573,7 +11790,8 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     const Parameters& params,
     svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
     ActiveCutContextRefreshCache& refresh_cache,
-    const std::vector<ActiveCutVolumeRequest>& active_cut_requests)
+    const std::vector<ActiveCutVolumeRequest>& active_cut_requests,
+    const ConservativePhaseContactStageBuilder& contact_stage_builder = {})
 {
   ConservativePhaseCandidateResult result;
   if (!sim.fe_system || requests.empty()) {
@@ -11605,6 +11823,9 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       requests.size());
   std::vector<ConservativePhaseGeometryReconciliationResult>
       reconciliation_reports(requests.size());
+  std::vector<std::vector<std::uint8_t>> contact_protected_nodes(
+      requests.size());
+  result.maintenance_ledgers.resize(requests.size());
 
   for (std::size_t request_index = 0u;
        request_index < requests.size(); ++request_index) {
@@ -11620,13 +11841,20 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     auto& graph = requireCurrentConservativePhaseGraph(system, request);
     const auto phase_field = system.findFieldByName(
         request.conservative_phase.liquid_indicator.field_name);
-    const auto phase_offset = static_cast<std::size_t>(
-        system.fieldDofOffset(phase_field));
-    const auto phase_count = static_cast<std::size_t>(
-        system.fieldDofHandler(phase_field).getNumDofs());
+    const auto raw_phase_offset = system.fieldDofOffset(phase_field);
+    const auto raw_phase_count =
+        system.fieldDofHandler(phase_field).getNumDofs();
+    if (raw_phase_offset < 0 || raw_phase_count < 0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase graph found an invalid FE solution layout.");
+    }
+    const auto phase_offset = static_cast<std::size_t>(raw_phase_offset);
+    const auto phase_count = static_cast<std::size_t>(raw_phase_count);
     if (phase_count != graph.nodes ||
-        phase_offset + phase_count > previous_solution.size() ||
-        phase_offset + phase_count > candidate.size()) {
+        phase_offset > previous_solution.size() ||
+        phase_count > previous_solution.size() - phase_offset ||
+        phase_offset > candidate.size() ||
+        phase_count > candidate.size() - phase_offset) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase graph does not match the FE solution layout.");
     }
@@ -11741,6 +11969,11 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           "[svMultiPhysics::Application] Conservative phase stage produced an invalid liquid measure.");
     }
     accepted_phase_measures[request_index] = phase_measure;
+    auto& maintenance_ledger =
+        result.maintenance_ledgers[request_index];
+    maintenance_ledger.raw_post_transport_phase_measure =
+        stage.correction.total_raw_target_liquid_measure;
+    maintenance_ledger.post_limit_phase_measure = phase_measure;
     accepted_phase_masses[request_index].resize(
         graph.nodes, svmp::FE::Real{0.0});
     for (std::size_t node = 0u; node < graph.nodes; ++node) {
@@ -11772,7 +12005,139 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       std::make_unique<LevelSetMaintenanceGeometryTransaction>(
           sim, lifecycle, refresh_cache, active_cut_requests);
   try {
-    const auto refresh_report = transaction->refresh(params, candidate);
+    const auto raw_transport_refresh_report =
+        transaction->refresh(params, candidate);
+    for (std::size_t request_index = 0u;
+         request_index < requests.size(); ++request_index) {
+      auto& request = requests[request_index];
+      if (!request.conservative_phase.enabled) {
+        continue;
+      }
+      const auto projection = projectCurrentConservativePhaseGeometry(
+          system, request);
+      if (!projection.success) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase raw post-transport geometry projection failed for field '" +
+            request.conservative_phase.liquid_indicator.field_name +
+            "': " + projection.diagnostic);
+      }
+      result.maintenance_ledgers[request_index]
+          .raw_post_transport_geometry_measure =
+          projection.retained_liquid_measure;
+    }
+
+    if (contact_stage_builder) {
+      result.contact_stage = contact_stage_builder(candidate);
+    }
+
+    for (std::size_t request_index = 0u;
+         request_index < requests.size(); ++request_index) {
+      auto& request = requests[request_index];
+      if (!request.conservative_phase.enabled) {
+        continue;
+      }
+      auto& maintenance_ledger =
+          result.maintenance_ledgers[request_index];
+      maintenance_ledger.reinitialization_due =
+          svmp::FE::level_set::shouldReinitializeLevelSet(
+              request.reinitialization,
+              history.stepIndex() + 1);
+      const auto field =
+          system.findFieldByName(request.level_set_field_name);
+      if (field == svmp::FE::INVALID_FIELD_ID) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase maintenance could not find level-set field '" +
+            request.level_set_field_name + "'.");
+      }
+      const auto wall_context = resolveLevelSetWallAwareMaintenanceContext(
+          sim,
+          history,
+          field,
+          static_cast<svmp::FE::Real>(history.time() + history.dt()),
+          result.contact_stage.stages,
+          result.contact_stage.constraints);
+      auto& graph = requireCurrentConservativePhaseGraph(system, request);
+      contact_protected_nodes[request_index] =
+          conservativePhaseContactProtectedNodes(
+              system,
+              request,
+              graph,
+              wall_context.local_constraints);
+      if (!maintenance_ledger.reinitialization_due) {
+        continue;
+      }
+      const auto staged_reinitialization =
+          stageLevelSetProjectionReinitialization(
+              sim,
+              history,
+              request,
+              field,
+              static_cast<svmp::FE::Real>(history.time() + history.dt()),
+              candidate,
+              result.contact_stage.stages,
+              result.contact_stage.constraints,
+              result.contact_stage.stage_solution);
+      maintenance_ledger.reinitialization =
+          staged_reinitialization.repair;
+      maintenance_ledger.reinitialization_applied =
+          staged_reinitialization.applied;
+      if (!staged_reinitialization.repair.converged) {
+        application::core::oopCout()
+            << "[svMultiPhysics::Application] Conservative phase candidate rejected"
+            << " field='"
+            << request.conservative_phase.liquid_indicator.field_name
+            << "' reason=reinitialization_nonconverged"
+            << " iterations="
+            << staged_reinitialization.repair.iterations
+            << " max_iteration_residual="
+            << staged_reinitialization.repair.max_iteration_residual
+            << " max_signed_distance_error="
+            << staged_reinitialization.repair.max_signed_distance_error
+            << " max_wall_constrained_signed_distance_error="
+            << staged_reinitialization.repair
+                   .max_wall_constrained_signed_distance_error
+            << " max_interface_displacement="
+            << staged_reinitialization.repair.max_interface_displacement
+            << " max_contact_line_displacement="
+            << staged_reinitialization.repair.max_contact_line_displacement
+            << " max_contact_angle_change_radians="
+            << staged_reinitialization.repair
+                   .max_contact_angle_change_radians
+            << " diagnostic='"
+            << staged_reinitialization.repair.diagnostic << "'"
+            << " dt=" << history.dt() << std::endl;
+        transaction->rollback();
+        result.accept_step = false;
+        return result;
+      }
+    }
+
+    const auto post_reinitialization_refresh_report =
+        transaction->refresh(params, candidate);
+    for (std::size_t request_index = 0u;
+         request_index < requests.size(); ++request_index) {
+      auto& request = requests[request_index];
+      if (!request.conservative_phase.enabled) {
+        continue;
+      }
+      const auto projection = projectCurrentConservativePhaseGeometry(
+          system, request);
+      if (!projection.success) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase post-reinitialization geometry projection failed for field '" +
+            request.conservative_phase.liquid_indicator.field_name +
+            "': " + projection.diagnostic);
+      }
+      auto& maintenance_ledger =
+          result.maintenance_ledgers[request_index];
+      maintenance_ledger.post_reinitialization_geometry_measure =
+          projection.retained_liquid_measure;
+      maintenance_ledger.post_reinitialization_mismatch =
+          conservativePhaseMomentMismatch(
+              projection.liquid_phase_mass,
+              accepted_phase_masses[request_index]);
+    }
+
     for (std::size_t request_index = 0u;
          request_index < requests.size(); ++request_index) {
       auto& request = requests[request_index];
@@ -11786,8 +12151,11 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           params,
           accepted_phase_masses[request_index],
           candidate,
-          *transaction);
+          *transaction,
+          contact_protected_nodes[request_index]);
       reconciliation_reports[request_index] = reconciliation;
+      result.maintenance_ledgers[request_index].reconciliation =
+          reconciliation;
       if (!reconciliation.success || !reconciliation.target_reached) {
         application::core::oopCout()
             << "[svMultiPhysics::Application] Conservative phase candidate rejected"
@@ -11803,6 +12171,10 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             << reconciliation.geometry_rebuilds
             << " rejected_geometry_trials="
             << reconciliation.rejected_geometry_trials
+            << " contact_protected_nodes="
+            << reconciliation.contact_protected_nodes
+            << " maximum_removed_contact_increment="
+            << reconciliation.maximum_removed_contact_increment
             << " initial_local_residual_norm="
             << reconciliation.initial_residual_norm
             << " final_local_residual_norm="
@@ -11851,6 +12223,11 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       const auto local_mismatch = conservativePhaseMomentMismatch(
           projection.liquid_phase_mass,
           accepted_phase_masses[request_index]);
+      auto& maintenance_ledger =
+          result.maintenance_ledgers[request_index];
+      maintenance_ledger.post_correction_geometry_measure =
+          projection.retained_liquid_measure;
+      maintenance_ledger.post_correction_mismatch = local_mismatch;
       if (request.conservative_phase.reconcile_geometry &&
           (mismatch > tolerance ||
            local_mismatch.maximum_nodal_residual > tolerance ||
@@ -11896,10 +12273,68 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           << " cut_context_revision="
           << projection.cut_context_revision
           << " cut_context_refreshed="
-          << (refresh_report.refreshed ||
+          << (raw_transport_refresh_report.refreshed ||
+                      post_reinitialization_refresh_report.refreshed ||
                       reconciliation.geometry_rebuilds > 0
                   ? "true"
                   : "false")
+          << std::endl;
+      const auto& repair = maintenance_ledger.reinitialization;
+      application::core::oopCout()
+          << std::setprecision(17)
+          << "[svMultiPhysics::Application] Conservative phase maintenance ledger"
+          << " diagnostic=conservative_phase_maintenance_ledger"
+          << " field='"
+          << request.conservative_phase.liquid_indicator.field_name << "'"
+          << " step=" << history.stepIndex() + 1
+          << " raw_post_transport_phase_measure="
+          << maintenance_ledger.raw_post_transport_phase_measure
+          << " post_limit_phase_measure="
+          << maintenance_ledger.post_limit_phase_measure
+          << " raw_post_transport_geometry_measure="
+          << maintenance_ledger.raw_post_transport_geometry_measure
+          << " post_reinitialization_phase_measure="
+          << maintenance_ledger.post_limit_phase_measure
+          << " post_reinitialization_geometry_measure="
+          << maintenance_ledger.post_reinitialization_geometry_measure
+          << " post_reinitialization_max_nodal_mismatch="
+          << maintenance_ledger.post_reinitialization_mismatch
+                 .maximum_nodal_residual
+          << " post_correction_phase_measure="
+          << maintenance_ledger.post_limit_phase_measure
+          << " post_correction_geometry_measure="
+          << maintenance_ledger.post_correction_geometry_measure
+          << " post_correction_max_nodal_mismatch="
+          << maintenance_ledger.post_correction_mismatch
+                 .maximum_nodal_residual
+          << " retained_assembly_measure="
+          << projection.retained_liquid_measure
+          << " reinitialization_due="
+          << (maintenance_ledger.reinitialization_due ? "true" : "false")
+          << " reinitialization_applied="
+          << (maintenance_ledger.reinitialization_applied ? "true"
+                                                           : "false")
+          << " reinitialization_converged="
+          << (repair.converged ? "true" : "false")
+          << " reinitialization_iterations=" << repair.iterations
+          << " reinitialization_max_abs_update="
+          << repair.max_abs_update
+          << " reinitialization_max_interface_displacement="
+          << repair.max_interface_displacement
+          << " reinitialization_wall_contact_constraints="
+          << repair.wall_contact_constraints
+          << " reinitialization_max_contact_line_displacement="
+          << repair.max_contact_line_displacement
+          << " reinitialization_max_contact_angle_change_radians="
+          << repair.max_contact_angle_change_radians
+          << " reconciliation_iterations="
+          << reconciliation.iterations
+          << " reconciliation_interface_displacement_bound="
+          << reconciliation.accumulated_interface_displacement_bound
+          << " reconciliation_contact_protected_nodes="
+          << reconciliation.contact_protected_nodes
+          << " reconciliation_maximum_removed_contact_increment="
+          << reconciliation.maximum_removed_contact_increment
           << std::endl;
     }
     result.changed = candidate != result.original_solution;
@@ -12869,6 +13304,52 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         }
         pending_phase_candidate = ConservativePhaseCandidateResult{};
         try {
+          const auto build_contact_stage_candidate =
+              [&](std::span<const svmp::FE::Real> endpoint_solution) {
+                ConservativePhaseContactStageCandidate contact_stage;
+                if (!has_dynamic_contact_stage) {
+                  return contact_stage;
+                }
+                const svmp::FE::Real alpha_f =
+                    opts.scheme == svmp::FE::timestepping::SchemeKind::
+                                       GeneralizedAlpha
+                    ? static_cast<svmp::FE::Real>(
+                          generalized_alpha_first_order.alpha_f)
+                    : svmp::FE::Real{1.0};
+                const auto previous_solution =
+                    gatherFeOrderedSolution(h.uPrev());
+                if (endpoint_solution.size() != previous_solution.size()) {
+                  throw std::runtime_error(
+                      "[svMultiPhysics::Application] Contact-stage reconstruction requires equal endpoint and previous solution layouts.");
+                }
+                contact_stage.stage_solution.assign(
+                    endpoint_solution.size(), svmp::FE::Real{0.0});
+                for (std::size_t i = 0;
+                     i < contact_stage.stage_solution.size(); ++i) {
+                  contact_stage.stage_solution[i] =
+                      (svmp::FE::Real{1.0} - alpha_f) *
+                          previous_solution[i] +
+                      alpha_f * endpoint_solution[i];
+                }
+                contact_stage.stages =
+                    evaluateAcceptedFreeSurfaceContactStages(
+                        sim,
+                        static_cast<svmp::FE::Real>(h.time()) +
+                            alpha_f *
+                                static_cast<svmp::FE::Real>(h.dt()),
+                        alpha_f,
+                        h.uPrev().valueRevision(),
+                        h.u().valueRevision(),
+                        contact_stage.stage_solution);
+                contact_stage.constraints =
+                    captureAcceptedContactStageWallConstraints(
+                        sim, contact_stage.stages);
+                return contact_stage;
+              };
+          ConservativePhaseContactStageBuilder contact_stage_builder;
+          if (has_dynamic_contact_stage) {
+            contact_stage_builder = build_contact_stage_candidate;
+          }
           pending_phase_candidate = applyConservativePhaseCandidates(
               sim,
               h,
@@ -12876,7 +13357,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               params,
               *cut_lifecycle,
               *cut_refresh_cache,
-              transient_active_cut_requests);
+              transient_active_cut_requests,
+              contact_stage_builder);
           if (!pending_phase_candidate.accept_step) {
             rollbackConservativePhaseCandidate(
                 h, pending_phase_candidate);
@@ -12907,39 +13389,19 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             }
           }
           if (has_dynamic_contact_stage) {
-            const svmp::FE::Real alpha_f =
-                opts.scheme ==
-                        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha
-                    ? static_cast<svmp::FE::Real>(
-                          generalized_alpha_first_order.alpha_f)
-                    : svmp::FE::Real{1.0};
-            const auto endpoint_solution = gatherFeOrderedSolution(h.u());
-            const auto previous_solution = gatherFeOrderedSolution(h.uPrev());
-            if (endpoint_solution.size() != previous_solution.size()) {
-              throw std::runtime_error(
-                  "[svMultiPhysics::Application] Contact-stage reconstruction requires equal endpoint and previous solution layouts.");
+            auto contact_stage =
+                std::move(pending_phase_candidate.contact_stage);
+            if (contact_stage.stages.empty()) {
+              const auto endpoint_solution =
+                  gatherFeOrderedSolution(h.u());
+              contact_stage = build_contact_stage_candidate(
+                  endpoint_solution);
             }
-            std::vector<svmp::FE::Real> stage_solution(
-                endpoint_solution.size(), svmp::FE::Real{0.0});
-            for (std::size_t i = 0; i < stage_solution.size(); ++i) {
-              stage_solution[i] =
-                  (svmp::FE::Real{1.0} - alpha_f) * previous_solution[i] +
-                  alpha_f * endpoint_solution[i];
-            }
-            pending_contact_stages =
-                evaluateAcceptedFreeSurfaceContactStages(
-                    sim,
-                    static_cast<svmp::FE::Real>(h.time()) +
-                        alpha_f * static_cast<svmp::FE::Real>(h.dt()),
-                    alpha_f,
-                    h.uPrev().valueRevision(),
-                    h.u().valueRevision(),
-                    std::span<const svmp::FE::Real>(stage_solution.data(),
-                                                    stage_solution.size()));
+            pending_contact_stages = std::move(contact_stage.stages);
             pending_contact_stage_constraints =
-                captureAcceptedContactStageWallConstraints(
-                    sim, pending_contact_stages);
-            pending_contact_stage_solution = std::move(stage_solution);
+                std::move(contact_stage.constraints);
+            pending_contact_stage_solution =
+                std::move(contact_stage.stage_solution);
           }
           const auto bound_result = applyLevelSetBoundPreservingCandidates(
               sim,

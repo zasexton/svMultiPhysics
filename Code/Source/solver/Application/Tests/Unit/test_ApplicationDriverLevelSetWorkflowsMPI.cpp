@@ -1960,6 +1960,39 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   ASSERT_EQ(contact_stages.size(), 1u);
   const auto contact_stage_constraints =
       captureAcceptedContactStageWallConstraints(sim, contact_stages);
+  LevelSetMaintenanceRequest contact_protection_request{};
+  contact_protection_request.conservative_phase.liquid_indicator.field_name =
+      "phi";
+  svmp::FE::level_set::LevelSetP1PhaseTransportGraph contact_graph{};
+  contact_graph.nodes =
+      static_cast<std::size_t>(field_dofs.getNumDofs());
+  const auto contact_protected_nodes =
+      conservativePhaseContactProtectedNodes(
+          *sim.fe_system,
+          contact_protection_request,
+          contact_graph,
+          contact_stage_constraints);
+  ASSERT_EQ(contact_protected_nodes.size(), contact_graph.nodes);
+  const auto protected_count = static_cast<unsigned long long>(std::count(
+      contact_protected_nodes.begin(),
+      contact_protected_nodes.end(),
+      std::uint8_t{1u}));
+  EXPECT_EQ(protected_count, 8u);
+  unsigned long long minimum_protected_count = 0u;
+  unsigned long long maximum_protected_count = 0u;
+  MPI_Allreduce(&protected_count,
+                &minimum_protected_count,
+                1,
+                MPI_UNSIGNED_LONG_LONG,
+                MPI_MIN,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(&protected_count,
+                &maximum_protected_count,
+                1,
+                MPI_UNSIGNED_LONG_LONG,
+                MPI_MAX,
+                MPI_COMM_WORLD);
+  EXPECT_EQ(minimum_protected_count, maximum_protected_count);
   time_history.updateGhosts();
   EXPECT_NE(contact_stages.front().endpoint_state_revision,
             time_history.u().valueRevision());

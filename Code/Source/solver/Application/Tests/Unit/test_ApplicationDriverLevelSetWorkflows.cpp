@@ -1511,6 +1511,31 @@ TEST(ApplicationDriverLevelSetWorkflows,
   maintenance_request.reinitialization.signed_distance_tolerance = 1.0e-10;
   std::vector<LevelSetMaintenanceRequest> maintenance_requests{
       maintenance_request};
+  auto candidate_only_solution = endpoint_solution;
+  time_history.setTime(0.05);
+  const auto candidate_only_reinitialization =
+      stageLevelSetProjectionReinitialization(
+          sim,
+          time_history,
+          maintenance_request,
+          phi,
+          svmp::FE::Real{0.10},
+          candidate_only_solution,
+          contact_stages,
+          contact_stage_constraints,
+          std::span<const svmp::FE::Real>(solution.data(), solution.size()));
+  time_history.setTime(0.10);
+  EXPECT_TRUE(candidate_only_reinitialization.applied);
+  EXPECT_TRUE(candidate_only_reinitialization.repair.converged);
+  EXPECT_EQ(candidate_only_reinitialization.repair.wall_contact_constraints,
+            1u);
+  EXPECT_DOUBLE_EQ(
+      candidate_only_reinitialization.repair.max_contact_line_displacement,
+      svmp::FE::Real{0.0});
+  EXPECT_DOUBLE_EQ(
+      candidate_only_reinitialization.repair
+          .max_contact_angle_change_radians,
+      svmp::FE::Real{0.0});
   auto missing_stage_requests = maintenance_requests;
   EXPECT_THROW(
       (void)applyLevelSetMaintenance(
@@ -1541,6 +1566,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const auto endpoint_after = gatherFeOrderedSolution(time_history.u());
   const auto previous_after = gatherFeOrderedSolution(time_history.uPrev());
   ASSERT_EQ(endpoint_after.size(), endpoint_solution.size());
+  EXPECT_EQ(endpoint_after, candidate_only_solution);
   for (std::size_t i = 0; i < phi_dof_count; ++i) {
     const auto index = phi_offset + i;
     EXPECT_NEAR(endpoint_after[index] - endpoint_solution[index],
@@ -3991,6 +4017,206 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 }
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       ReinitializesBeforeLocalReconciliationAndRetainsEveryStage)
+{
+  auto raw_candidate = initialized_solution_;
+  const auto phi_offset = fieldOffset(phi_);
+  for (std::size_t i = 0u; i < fieldCount(phi_); ++i) {
+    raw_candidate[phi_offset + i] *= svmp::FE::Real{2.0};
+  }
+  raw_candidate[phi_offset] += svmp::FE::Real{0.01};
+  scatterFeOrderedSolution(history().u(), raw_candidate);
+  refreshCurrentCandidate(
+      "application-driver-conservative-phase-reinitialization-raw");
+
+  auto& reinitialization = requests_.front().reinitialization;
+  reinitialization.enabled = true;
+  reinitialization.cadence_steps = 1;
+  reinitialization.max_iterations = 100;
+  reinitialization.signed_distance_tolerance = 1.0e-10;
+
+  testing::internal::CaptureStdout();
+  auto result = applyConservativePhaseCandidates(
+      sim_,
+      history(),
+      requests_,
+      *params_,
+      lifecycle_,
+      refresh_cache_,
+      active_requests_);
+  const auto output = testing::internal::GetCapturedStdout();
+
+  ASSERT_TRUE(result.accept_step);
+  ASSERT_TRUE(result.changed);
+  ASSERT_NE(result.geometry_transaction, nullptr);
+  ASSERT_EQ(result.maintenance_ledgers.size(), requests_.size());
+  const auto& ledger = result.maintenance_ledgers.front();
+  EXPECT_TRUE(ledger.reinitialization_due);
+  EXPECT_TRUE(ledger.reinitialization_applied);
+  EXPECT_TRUE(ledger.reinitialization.success);
+  EXPECT_TRUE(ledger.reinitialization.converged);
+  EXPECT_GT(ledger.reinitialization.max_abs_update,
+            svmp::FE::Real{0.0});
+  EXPECT_NEAR(ledger.raw_post_transport_phase_measure,
+              ledger.post_limit_phase_measure,
+              svmp::FE::Real{1.0e-12});
+  EXPECT_GT(
+      ledger.post_reinitialization_mismatch.maximum_nodal_residual,
+      ledger.post_correction_mismatch.maximum_nodal_residual +
+          svmp::FE::Real{1.0e-8});
+  EXPECT_LE(ledger.post_correction_mismatch.maximum_nodal_residual,
+            svmp::FE::Real{1.0e-10});
+  EXPECT_NE(output.find("raw_post_transport_phase_measure="),
+            std::string::npos);
+  EXPECT_NE(output.find("post_limit_phase_measure="),
+            std::string::npos);
+  EXPECT_NE(output.find("post_reinitialization_geometry_measure="),
+            std::string::npos);
+  EXPECT_NE(output.find("post_correction_geometry_measure="),
+            std::string::npos);
+
+  const auto projection = projectCurrentConservativePhaseGeometry(
+      *sim_.fe_system, requests_.front());
+  ASSERT_TRUE(projection.success) << projection.diagnostic;
+  auto& graph = requireCurrentConservativePhaseGraph(
+      *sim_.fe_system, requests_.front());
+  const auto accepted_phase = fieldSlice(
+      gatherFeOrderedSolution(history().u()), phase_);
+  ASSERT_EQ(projection.liquid_phase_mass.size(), graph.nodes);
+  for (std::size_t node = 0u; node < graph.nodes; ++node) {
+    EXPECT_NEAR(projection.liquid_phase_mass[node],
+                graph.lumped_control_volume[node] * accepted_phase[node],
+                svmp::FE::Real{1.0e-10});
+  }
+
+  ASSERT_NO_THROW(result.geometry_transaction->commit());
+  result.geometry_transaction.reset();
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       NonconvergedReinitializationRejectsAndRestoresGeometry)
+{
+  auto raw_candidate = initialized_solution_;
+  const auto phi_offset = fieldOffset(phi_);
+  for (std::size_t i = 0u; i < fieldCount(phi_); ++i) {
+    raw_candidate[phi_offset + i] *= svmp::FE::Real{4.0};
+  }
+  scatterFeOrderedSolution(history().u(), raw_candidate);
+  refreshCurrentCandidate(
+      "application-driver-conservative-phase-reinitialization-reject-raw");
+  const auto* raw_context = sim_.fe_system->cutIntegrationContext();
+  ASSERT_NE(raw_context, nullptr);
+  const auto lifecycle_revision = lifecycle_.valueRevision();
+
+  auto& reinitialization = requests_.front().reinitialization;
+  reinitialization.enabled = true;
+  reinitialization.cadence_steps = 1;
+  reinitialization.max_iterations = 1;
+  reinitialization.pseudo_time_step_scale = 1.0e-3;
+  reinitialization.signed_distance_tolerance = 1.0e-14;
+
+  const auto result = applyConservativePhaseCandidates(
+      sim_,
+      history(),
+      requests_,
+      *params_,
+      lifecycle_,
+      refresh_cache_,
+      active_requests_);
+  EXPECT_FALSE(result.accept_step);
+  EXPECT_FALSE(result.changed);
+  EXPECT_EQ(result.geometry_transaction, nullptr);
+  ASSERT_EQ(result.maintenance_ledgers.size(), requests_.size());
+  EXPECT_TRUE(result.maintenance_ledgers.front().reinitialization_due);
+  EXPECT_TRUE(result.maintenance_ledgers.front().reinitialization.success);
+  EXPECT_FALSE(result.maintenance_ledgers.front().reinitialization.converged);
+  EXPECT_EQ(gatherFeOrderedSolution(history().u()), raw_candidate);
+  EXPECT_EQ(sim_.fe_system->cutIntegrationContext(), raw_context);
+  EXPECT_EQ(lifecycle_.valueRevision(), lifecycle_revision);
+  EXPECT_FALSE(sim_.fe_system->cutIntegrationContextTransactionActive());
+  EXPECT_FALSE(lifecycle_.transactionActive());
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       PostAcceptanceMaintenanceDoesNotRepeatCandidateOwnedRepair)
+{
+  requests_.front().reinitialization.enabled = true;
+  requests_.front().reinitialization.cadence_steps = 1;
+  const auto before = gatherFeOrderedSolution(history().u());
+
+  EXPECT_FALSE(applyLevelSetMaintenance(sim_, history(), requests_));
+  EXPECT_EQ(gatherFeOrderedSolution(history().u()), before);
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       ContactParentProtectionRejectsAnIncompatibleGeometryTarget)
+{
+  auto& graph = requireCurrentConservativePhaseGraph(
+      *sim_.fe_system, requests_.front());
+  const auto& mesh_access = sim_.fe_system->meshAccess();
+  const auto parent_global_id = mesh_access.globalEntityIdsAvailable()
+      ? mesh_access.getCellGlobalId(0)
+      : svmp::FE::GlobalIndex{0};
+  const std::array<
+      svmp::FE::level_set::LevelSetWallContactConstraint, 1>
+      constraints{{
+          svmp::FE::level_set::LevelSetWallContactConstraint{
+              .kind = svmp::FE::level_set::
+                  LevelSetWallContactConstraintKind::PrescribedAngle,
+              .interface_marker = 911,
+              .boundary_marker = 41,
+              .parent_cell_global_id = parent_global_id,
+              .geometry_revision = 1u,
+          },
+      }};
+  const auto protected_nodes = conservativePhaseContactProtectedNodes(
+      *sim_.fe_system,
+      requests_.front(),
+      graph,
+      constraints);
+  ASSERT_EQ(protected_nodes.size(), graph.nodes);
+  EXPECT_EQ(std::count(protected_nodes.begin(), protected_nodes.end(), 1u),
+            static_cast<std::ptrdiff_t>(graph.nodes));
+
+  auto raw_candidate = initialized_solution_;
+  raw_candidate[fieldOffset(phi_)] += svmp::FE::Real{0.01};
+  scatterFeOrderedSolution(history().u(), raw_candidate);
+  refreshCurrentCandidate(
+      "application-driver-conservative-phase-contact-protection-raw");
+  auto candidate = gatherFeOrderedSolution(history().u());
+  const auto candidate_before = candidate;
+  const auto previous_phase = fieldSlice(
+      gatherFeOrderedSolution(history().uPrev()), phase_);
+  std::vector<svmp::FE::Real> target_mass(
+      graph.nodes, svmp::FE::Real{0.0});
+  for (std::size_t node = 0u; node < graph.nodes; ++node) {
+    target_mass[node] =
+        graph.lumped_control_volume[node] * previous_phase[node];
+  }
+
+  LevelSetMaintenanceGeometryTransaction transaction(
+      sim_, lifecycle_, refresh_cache_, active_requests_);
+  const auto reconciliation = reconcileConservativePhaseGeometry(
+      sim_,
+      requests_.front(),
+      *params_,
+      target_mass,
+      candidate,
+      transaction,
+      protected_nodes);
+  EXPECT_FALSE(reconciliation.success);
+  EXPECT_FALSE(reconciliation.target_reached);
+  EXPECT_EQ(reconciliation.contact_protected_nodes, graph.nodes);
+  EXPECT_GT(reconciliation.maximum_removed_contact_increment,
+            svmp::FE::Real{0.0});
+  EXPECT_NE(reconciliation.diagnostic.find(
+                "without changing accepted wall-contact parent cells"),
+            std::string::npos);
+  EXPECT_EQ(candidate, candidate_before);
+  ASSERT_NO_THROW(transaction.rollback());
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        LaterRejectionRestoresTheRawCandidateAndEveryGeometryRevision)
 {
   auto raw_candidate = initialized_solution_;
@@ -4009,6 +4235,10 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
       sim_.fe_system->constraintLayoutRevision();
   const auto sparsity_revision = sim_.fe_system->sparsityPatternRevision();
   const auto cache_before = refresh_cache_;
+  requests_.front().reinitialization.enabled = true;
+  requests_.front().reinitialization.cadence_steps = 1;
+  requests_.front().reinitialization.max_iterations = 100;
+  requests_.front().reinitialization.signed_distance_tolerance = 1.0e-10;
 
   auto result = applyConservativePhaseCandidates(
       sim_,
@@ -4021,6 +4251,10 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   EXPECT_TRUE(result.accept_step);
   EXPECT_TRUE(result.changed);
   ASSERT_NE(result.geometry_transaction, nullptr);
+  ASSERT_EQ(result.maintenance_ledgers.size(), requests_.size());
+  EXPECT_TRUE(result.maintenance_ledgers.front().reinitialization_due);
+  EXPECT_TRUE(result.maintenance_ledgers.front().reinitialization_applied);
+  EXPECT_TRUE(result.maintenance_ledgers.front().reinitialization.converged);
   EXPECT_TRUE(sim_.fe_system->cutIntegrationContextTransactionActive());
   EXPECT_TRUE(lifecycle_.transactionActive());
   EXPECT_NE(sim_.fe_system->cutIntegrationContext(), raw_context);
