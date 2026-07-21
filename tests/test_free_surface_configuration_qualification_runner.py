@@ -101,3 +101,32 @@ def test_registry_rejects_duplicate_test_names(tmp_path):
     invalid_path.write_text(json.dumps(registry), encoding="utf-8")
     with pytest.raises(ValueError, match="unique"):
         runner.load_registry(invalid_path)
+
+
+def test_explicit_source_state_accepts_exact_supplement_set(tmp_path):
+    runner = load_runner()
+    subprocess = pytest.importorskip("subprocess")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Qualification Test"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "qualification@example.invalid"],
+        cwd=tmp_path,
+        check=True,
+    )
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "fixture"], cwd=tmp_path, check=True
+    )
+    supplement = tmp_path / "supplement.txt"
+    supplement.write_text("supplement\n", encoding="utf-8")
+    state = runner.explicit_source_state(tmp_path, [Path("supplement.txt")])
+    assert state["tracked_sources_clean"] is True
+    assert state["supplemental_sources"][0]["path"] == "supplement.txt"
+    with pytest.raises(ValueError, match="does not match"):
+        runner.explicit_source_state(tmp_path, [])

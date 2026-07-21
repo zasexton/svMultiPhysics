@@ -12,6 +12,11 @@
     "memory_mib": 2048,
     "output_mib": 16
   },
+  "provenance_policy": {
+    "tracked_sources_must_be_clean": true,
+    "untracked_sources_must_be_explicit_and_hashed": true,
+    "ignored_build_products_are_excluded": true
+  },
   "gates": {
     "expected_test_count": 24,
     "expected_failures": 0,

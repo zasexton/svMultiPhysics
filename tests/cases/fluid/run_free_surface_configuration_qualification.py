@@ -56,6 +56,64 @@ def git_bytes(source_root: Path, *arguments: str) -> bytes:
     return result.stdout
 
 
+def explicit_source_state(
+    source_root: Path, supplemental_paths: list[Path]
+) -> dict[str, Any]:
+    tracked_status = git_bytes(
+        source_root, "status", "--porcelain=v1", "--untracked-files=no"
+    )
+    if tracked_status:
+        raise ValueError("qualification requires clean tracked sources")
+
+    untracked = {
+        path.decode("utf-8", "surrogateescape")
+        for path in git_bytes(
+            source_root, "ls-files", "--others", "--exclude-standard", "-z"
+        ).split(b"\0")
+        if path
+    }
+    supplied: dict[str, Path] = {}
+    for path in supplemental_paths:
+        resolved = path if path.is_absolute() else source_root / path
+        resolved = resolved.resolve()
+        try:
+            relative = resolved.relative_to(source_root).as_posix()
+        except ValueError as error:
+            raise ValueError(
+                f"supplemental source is outside the source root: {path}"
+            ) from error
+        if relative in supplied:
+            raise ValueError(f"duplicate supplemental source: {relative}")
+        if not resolved.is_file() or resolved.is_symlink():
+            raise ValueError(f"supplemental source is not a regular file: {relative}")
+        supplied[relative] = resolved
+    if set(supplied) != untracked:
+        missing = sorted(untracked - set(supplied))
+        unexpected = sorted(set(supplied) - untracked)
+        raise ValueError(
+            "supplemental source declaration does not match untracked sources; "
+            f"undeclared={missing}, not_untracked={unexpected}"
+        )
+    supplements = [
+        {
+            "path": relative,
+            "sha256": sha256_file(resolved),
+            "size_bytes": resolved.stat().st_size,
+        }
+        for relative, resolved in sorted(supplied.items())
+    ]
+    canonical = json.dumps(
+        {"tracked_status": "clean", "supplements": supplements},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "tracked_sources_clean": True,
+        "supplemental_sources": supplements,
+        "source_state_sha256": sha256_bytes(canonical),
+    }
+
+
 def load_registry(path: Path) -> dict[str, Any]:
     registry = json.loads(path.read_text(encoding="utf-8"))
     if registry.get("schema_version") != 1:
@@ -298,6 +356,13 @@ def main() -> int:
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument("--test-binary", type=Path, required=True)
     parser.add_argument("--source-root", type=Path, default=SCRIPT_PATH.parents[3])
+    parser.add_argument(
+        "--supplemental-source",
+        action="append",
+        type=Path,
+        default=[],
+        help="Declare one otherwise untracked source input; repeat as needed.",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -311,13 +376,12 @@ def main() -> int:
     if output_directory.exists():
         raise SystemExit(f"refusing to replace output directory: {output_directory}")
 
-    status = git_bytes(
-        source_root, "status", "--porcelain=v1", "--untracked-files=all"
-    )
-    if status:
-        raise SystemExit(
-            "qualification requires a worktree with no tracked or untracked changes"
+    try:
+        source_state = explicit_source_state(
+            source_root, args.supplemental_source
         )
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
 
     output_directory.mkdir(parents=True, exist_ok=False)
     source_commit = git_bytes(source_root, "rev-parse", "HEAD").decode().strip()
@@ -346,6 +410,8 @@ def main() -> int:
             "model_envelope": registry["model_envelope"],
             "source_commit": source_commit,
             "source_tree": source_tree,
+            "source_state_sha256": source_state["source_state_sha256"],
+            "supplemental_sources": source_state["supplemental_sources"],
             "tests": registry["tests"],
             "exit_contract": registry["exit_contract"],
         },
@@ -356,7 +422,7 @@ def main() -> int:
             "source_commit": source_commit,
             "source_tree": source_tree,
             "tracked_diff_sha256": sha256_bytes(tracked_diff),
-            "worktree_clean_including_untracked": True,
+            **source_state,
             "test_binary": str(test_binary.relative_to(source_root)),
             "test_binary_sha256": sha256_file(test_binary),
             "cmake_cache": selected_cmake_cache(cmake_cache),
