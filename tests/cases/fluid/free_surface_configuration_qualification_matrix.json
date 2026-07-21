@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "matrix_id": "free_surface_configuration_containment_v1",
+  "status": "FROZEN_BEFORE_QUALIFICATION",
+  "work_package": "WP-0",
+  "findings": ["FSR-10", "FSR-11", "FSR-12"],
+  "model_envelope": "one_phase_liquid_sharp_interface_configuration",
+  "execution": {
+    "mpi_ranks": 1,
+    "threads": 1,
+    "wall_time_seconds": 120,
+    "memory_mib": 2048,
+    "output_mib": 16
+  },
+  "gates": {
+    "expected_test_count": 24,
+    "expected_failures": 0,
+    "expected_errors": 0,
+    "expected_disabled": 0,
+    "unexpected_tests_allowed": false,
+    "skipped_tests_allowed": false
+  },
+  "tests": [
+    "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedTangentialMeshPolicyTranslation",
+    "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedAngleTranslationFailsClosed",
+    "NavierStokesLegacyBCs.FreeSurfaceContactAliasesFailClosedWhenIncomplete",
+    "NavierStokesLegacyBCs.FreeSurfaceContactConfigurationRejectsAmbiguityAndCrossModelFields",
+    "NavierStokesLegacyBCs.FreeSurfaceConfigurationSchemaAliasesAreExplicitAndUnambiguous",
+    "NavierStokesLegacyBCs.FreeSurfaceContactNoneIsExplicitAndComplete",
+    "NavierStokesLegacyBCs.FreeSurfacePinnedIsExplicitAndComplete",
+    "NavierStokesLegacyBCs.UnfittedFreeSurfaceContactLinePluralMarkersTranslation_AddsGeneratedMarkers",
+    "NavierStokesLegacyBCs.UnfittedDynamicContactAngleTranslationRoutesLineAndSharpWallGeometry",
+    "MovingDomainPhysics.FittedFreeSurfaceNitschePoliciesAreBoundaryLocalAndOrderInvariant",
+    "MovingDomainPhysics.FittedFreeSurfaceKinematicPolicyOptionsAreExplicit",
+    "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership",
+    "MovingDomainPhysics.FittedFreeSurfacePrescribedTangentialVelocityRequiresCoupledDisplacement",
+    "MovingDomainPhysics.FittedFreeSurfaceRejectsMeshMotionTangentialOwnerInEitherOrder",
+    "MovingDomainPhysics.FittedFreeSurfacePrescribedTangentialVelocityProjectsOutNormalTarget",
+    "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal",
+    "MovingDomainPhysics.FittedPrescribedContactAngleFailsClosedWithoutContactLineIntegration",
+    "MovingDomainPhysics.NavierStokesFittedSurfaceStressFailsClosed",
+    "MovingDomainPhysics.NavierStokesRejectsBoundaryConflictBeforeFluidMutation",
+    "MovingDomainPhysics.NavierStokesConfigurationSchemaRejectsBeforeSystemMutation",
+    "MovingDomainPhysics.NavierStokesLegacySchemaIsExplicitAndLosesCurrentCapabilityLabel",
+    "MovingDomainPhysics.NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults",
+    "MovingDomainPhysics.NavierStokesRejectsDuplicatePrescribedWallOwnershipWithUniqueMarkers",
+    "MovingDomainPhysics.FreeSurfaceContactAlternativesExcludeCrossModelState"
+  ],
+  "exit_contract": [
+    "all_contact_aliases_fail_when_incomplete",
+    "all_four_contact_alternatives_are_explicit_and_validated",
+    "ambiguous_unknown_and_cross_model_keys_fail_before_mutation",
+    "schema_migration_is_explicit_and_legacy_inputs_lose_current_capability",
+    "boundary_local_nitsche_assembly_is_registration_order_invariant",
+    "unrelated_generic_weak_velocity_policy_remains_independent",
+    "fitted_tangential_mesh_policies_have_distinct_owners_and_operators",
+    "unsupported_fitted_surface_stress_and_contact_angle_combinations_fail_closed",
+    "effective_configuration_expands_every_supported_boundary_default"
+  ]
+}
