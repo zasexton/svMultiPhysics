@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -103,6 +104,13 @@ struct RootedLineValidation {
     const char* reason{"unknown"};
 };
 
+struct AggregationLineGuardValidation {
+    bool valid{false};
+    const char* reason{"unknown"};
+    Real maximum_absolute_coefficient{0.0};
+    Real row_l1_norm{0.0};
+};
+
 // Aggregation is a polynomial extension, so it must reproduce constants.
 // Validate this after duplicate masters have been merged: validating before
 // merge misses cancellation to an empty line and can silently turn a rooted
@@ -145,6 +153,36 @@ struct RootedLineValidation {
         return {false, "partition_of_unity"};
     }
     return {true, "valid"};
+}
+
+[[nodiscard]] AggregationLineGuardValidation validateAggregationLineGuards(
+    const ConstraintLine& line,
+    const SmallCutAggregationGuardOptions& guards)
+{
+    AggregationLineGuardValidation result;
+    result.valid = true;
+    result.reason = "valid";
+    for (const auto& entry : line.entries) {
+        const auto magnitude = std::abs(static_cast<Real>(entry.weight));
+        result.maximum_absolute_coefficient =
+            std::max(result.maximum_absolute_coefficient, magnitude);
+        result.row_l1_norm += magnitude;
+    }
+    const auto tolerance =
+        Real{128.0} * std::numeric_limits<Real>::epsilon() *
+        std::max({Real{1.0},
+                  guards.maximum_absolute_coefficient,
+                  guards.maximum_row_l1_norm});
+    if (result.maximum_absolute_coefficient >
+        guards.maximum_absolute_coefficient + tolerance) {
+        result.valid = false;
+        result.reason = "maximum_absolute_coefficient";
+    } else if (result.row_l1_norm >
+               guards.maximum_row_l1_norm + tolerance) {
+        result.valid = false;
+        result.reason = "maximum_row_l1_norm";
+    }
+    return result;
 }
 
 // Classify a public/mesh-local reference node against the affine hull of a
@@ -1836,6 +1874,114 @@ resolveDistributedAggregationDeclarations(
     return false;
 }
 
+[[nodiscard]] Real unitSimplexExtrapolationDistance(
+    const Vector<Real, 3>& xi,
+    int dimension)
+{
+    std::array<Real, 3> projected{{0.0, 0.0, 0.0}};
+    Real positive_sum = 0.0;
+    for (int d = 0; d < dimension; ++d) {
+        projected[static_cast<std::size_t>(d)] =
+            std::max(xi[static_cast<std::size_t>(d)], Real{0.0});
+        positive_sum += projected[static_cast<std::size_t>(d)];
+    }
+    if (positive_sum > Real{1.0}) {
+        std::array<Real, 3> sorted{{xi[0], xi[1], xi[2]}};
+        std::sort(sorted.begin(), sorted.begin() + dimension,
+                  std::greater<Real>{});
+        Real prefix = 0.0;
+        Real theta = 0.0;
+        for (int i = 0; i < dimension; ++i) {
+            prefix += sorted[static_cast<std::size_t>(i)];
+            const Real candidate =
+                (prefix - Real{1.0}) / static_cast<Real>(i + 1);
+            if (i + 1 == dimension ||
+                sorted[static_cast<std::size_t>(i + 1)] <= candidate) {
+                theta = candidate;
+                break;
+            }
+        }
+        for (int d = 0; d < dimension; ++d) {
+            projected[static_cast<std::size_t>(d)] =
+                std::max(xi[static_cast<std::size_t>(d)] - theta, Real{0.0});
+        }
+    }
+
+    Real squared_distance = 0.0;
+    for (int d = 0; d < dimension; ++d) {
+        const Real delta =
+            xi[static_cast<std::size_t>(d)] -
+            projected[static_cast<std::size_t>(d)];
+        squared_distance += delta * delta;
+    }
+    return std::sqrt(squared_distance);
+}
+
+[[nodiscard]] Real normalizedReferenceExtrapolationDistance(
+    ElementType element_type,
+    const Vector<Real, 3>& xi)
+{
+    const auto type = linearElementType(element_type);
+    auto tensor_distance = [&](int dimension) {
+        Real squared_distance = 0.0;
+        for (int d = 0; d < dimension; ++d) {
+            const Real projected = std::clamp(
+                xi[static_cast<std::size_t>(d)], Real{-1.0}, Real{1.0});
+            const Real delta =
+                xi[static_cast<std::size_t>(d)] - projected;
+            squared_distance += delta * delta;
+        }
+        return std::sqrt(squared_distance);
+    };
+
+    switch (type) {
+    case ElementType::Line2:
+        return tensor_distance(1);
+    case ElementType::Quad4:
+        return tensor_distance(2);
+    case ElementType::Hex8:
+        return tensor_distance(3);
+    case ElementType::Triangle3:
+        return unitSimplexExtrapolationDistance(xi, 2);
+    case ElementType::Tetra4:
+        return unitSimplexExtrapolationDistance(xi, 3);
+    case ElementType::Wedge6: {
+        const Real in_plane = unitSimplexExtrapolationDistance(xi, 2);
+        const Real projected_z =
+            std::clamp(xi[2], Real{-1.0}, Real{1.0});
+        const Real dz = xi[2] - projected_z;
+        return std::sqrt(in_plane * in_plane + dz * dz);
+    }
+    case ElementType::Pyramid5: {
+        const Real abs_x = std::abs(xi[0]);
+        const Real abs_y = std::abs(xi[1]);
+        const auto squared_distance_at_z = [&](Real z) {
+            const Real half_width = Real{1.0} - z;
+            const Real dx = std::max(abs_x - half_width, Real{0.0});
+            const Real dy = std::max(abs_y - half_width, Real{0.0});
+            const Real dz = xi[2] - z;
+            return dx * dx + dy * dy + dz * dz;
+        };
+        Real lower = 0.0;
+        Real upper = 1.0;
+        for (int iteration = 0; iteration < 80; ++iteration) {
+            const Real left = (Real{2.0} * lower + upper) / Real{3.0};
+            const Real right = (lower + Real{2.0} * upper) / Real{3.0};
+            if (squared_distance_at_z(left) <=
+                squared_distance_at_z(right)) {
+                upper = right;
+            } else {
+                lower = left;
+            }
+        }
+        const Real z = Real{0.5} * (lower + upper);
+        return std::sqrt(squared_distance_at_z(z));
+    }
+    default:
+        return std::numeric_limits<Real>::infinity();
+    }
+}
+
 } // namespace
 
 SmallCutAggregationConstraint::SmallCutAggregationConstraint(
@@ -1843,12 +1989,14 @@ SmallCutAggregationConstraint::SmallCutAggregationConstraint(
     geometry::CutIntegrationSide active_side,
     int interface_marker,
     std::vector<int> excluded_boundary_markers,
-    std::vector<GlobalIndex> excluded_vertices)
+    std::vector<GlobalIndex> excluded_vertices,
+    SmallCutAggregationGuardOptions guards)
     : field_(field),
       active_side_(active_side),
       interface_marker_(interface_marker),
       excluded_boundary_markers_(std::move(excluded_boundary_markers)),
-      excluded_vertices_(std::move(excluded_vertices))
+      excluded_vertices_(std::move(excluded_vertices)),
+      guards_(guards)
 {
     if (interface_marker_ < 0) {
         throw std::invalid_argument(
@@ -1860,6 +2008,21 @@ SmallCutAggregationConstraint::SmallCutAggregationConstraint(
         throw std::invalid_argument(
             "SmallCutAggregationConstraint: active side must be Negative or "
             "Positive");
+    }
+    if (guards_.maximum_root_path_length == 0u ||
+        !(guards_.maximum_reference_extrapolation_distance >= Real{0.0}) ||
+        !std::isfinite(guards_.maximum_reference_extrapolation_distance) ||
+        !(guards_.maximum_absolute_coefficient >= Real{1.0}) ||
+        !std::isfinite(guards_.maximum_absolute_coefficient) ||
+        !(guards_.maximum_row_l1_norm >= Real{1.0}) ||
+        !std::isfinite(guards_.maximum_row_l1_norm) ||
+        guards_.maximum_row_l1_norm <
+            guards_.maximum_absolute_coefficient) {
+        throw std::invalid_argument(
+            "SmallCutAggregationConstraint: guard limits require a positive "
+            "root path, finite nonnegative extrapolation distance, finite "
+            "coefficient and row L1 limits at least one, and a row L1 limit "
+            "no smaller than the coefficient limit");
     }
 }
 
@@ -2005,6 +2168,42 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                           MPI_UINT64_T,
                           MPI_MAX,
                           comm);
+            const auto local_root_path = static_cast<std::uint64_t>(
+                guards_.maximum_root_path_length);
+            std::uint64_t minimum_root_path = 0u;
+            std::uint64_t maximum_root_path = 0u;
+            MPI_Allreduce(&local_root_path,
+                          &minimum_root_path,
+                          1,
+                          MPI_UINT64_T,
+                          MPI_MIN,
+                          comm);
+            MPI_Allreduce(&local_root_path,
+                          &maximum_root_path,
+                          1,
+                          MPI_UINT64_T,
+                          MPI_MAX,
+                          comm);
+            const std::array<double, 3> local_guard_values{{
+                static_cast<double>(
+                    guards_.maximum_reference_extrapolation_distance),
+                static_cast<double>(guards_.maximum_absolute_coefficient),
+                static_cast<double>(guards_.maximum_row_l1_norm),
+            }};
+            std::array<double, 3> minimum_guard_values{};
+            std::array<double, 3> maximum_guard_values{};
+            MPI_Allreduce(local_guard_values.data(),
+                          minimum_guard_values.data(),
+                          static_cast<int>(local_guard_values.size()),
+                          MPI_DOUBLE,
+                          MPI_MIN,
+                          comm);
+            MPI_Allreduce(local_guard_values.data(),
+                          maximum_guard_values.data(),
+                          static_cast<int>(local_guard_values.size()),
+                          MPI_DOUBLE,
+                          MPI_MAX,
+                          comm);
             if (all_valid == 0) {
                 throw std::invalid_argument(
                     "SmallCutAggregationConstraint: aggregation boolean "
@@ -2013,12 +2212,14 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     "integer in the local size_t range on every rank");
             }
             if (minimum_flags != maximum_flags ||
-                minimum_max_lines != maximum_max_lines) {
+                minimum_max_lines != maximum_max_lines ||
+                minimum_root_path != maximum_root_path ||
+                minimum_guard_values != maximum_guard_values) {
                 throw std::runtime_error(
                     "SmallCutAggregationConstraint: diagnostic="
                     "inconsistent_distributed_runtime_options; aggregation "
-                    "environment knobs must have identical values on every "
-                    "field-communicator rank");
+                    "environment knobs and guard limits must have identical "
+                    "values on every field-communicator rank");
             }
         }
     }
@@ -2900,6 +3101,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     std::set<GlobalIndex> all_candidate_component_dofs;
     std::map<GlobalIndex, std::vector<GlobalRootCandidate>>
         global_roots_by_candidate;
+    std::size_t maximum_observed_root_path = 0u;
+    std::size_t root_path_guard_rejections = 0u;
     std::exception_ptr local_global_graph_exception;
     try {
     for (const auto& [dof, support] : global_candidates) {
@@ -2972,6 +3175,27 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                             return a.key == b.key;
                         }),
                     roots.end());
+        const bool had_unguarded_root = !roots.empty();
+        for (const auto& root : roots) {
+            maximum_observed_root_path =
+                std::max(maximum_observed_root_path, root.distance);
+        }
+        const auto first_rejected = std::remove_if(
+            roots.begin(), roots.end(), [&](const auto& root) {
+                return root.distance > guards_.maximum_root_path_length;
+            });
+        root_path_guard_rejections += static_cast<std::size_t>(
+            std::distance(first_rejected, roots.end()));
+        roots.erase(first_rejected, roots.end());
+        if (had_unguarded_root && roots.empty()) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: diagnostic="
+                "root_path_guard_rejection candidate_dof=" +
+                std::to_string(dof) + " maximum_observed_path=" +
+                std::to_string(maximum_observed_root_path) +
+                " maximum_allowed_path=" +
+                std::to_string(guards_.maximum_root_path_length));
+        }
         support.globally_rooted = !roots.empty();
     }
 
@@ -2988,6 +3212,11 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     std::size_t inversion_failed = 0u;
     std::size_t non_field_nodes = 0u;
     std::size_t empty_lines = 0u;
+    std::size_t extrapolation_guard_rejections = 0u;
+    std::size_t line_guard_rejections = 0u;
+    Real maximum_observed_reference_extrapolation = 0.0;
+    Real maximum_observed_absolute_coefficient = 0.0;
+    Real maximum_observed_row_l1_norm = 0.0;
     std::vector<Real> values;
     std::vector<std::pair<GlobalIndex, double>> pending_entries;
     std::vector<GlobalIndex> current_slaves;
@@ -3114,6 +3343,23 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 ++inversion_failed;
                 continue;
             }
+            const Real reference_extrapolation =
+                normalizedReferenceExtrapolationDistance(
+                    mesh.getCellType(root), xi);
+            maximum_observed_reference_extrapolation = std::max(
+                maximum_observed_reference_extrapolation,
+                reference_extrapolation);
+            if (!std::isfinite(reference_extrapolation) ||
+                reference_extrapolation >
+                    guards_.maximum_reference_extrapolation_distance +
+                        Real{128.0} * std::numeric_limits<Real>::epsilon() *
+                            std::max(
+                                Real{1.0},
+                                guards_
+                                    .maximum_reference_extrapolation_distance)) {
+                ++extrapolation_guard_rejections;
+                continue;
+            }
             extension_basis.evaluate_values(xi, values);
             mesh.getCellNodes(root, cell_nodes);
             const auto n_root_field_nodes = std::min(
@@ -3161,6 +3407,19 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     proposal_valid = false;
                     break;
                 }
+                const auto line_guard =
+                    validateAggregationLineGuards(line, guards_);
+                maximum_observed_absolute_coefficient = std::max(
+                    maximum_observed_absolute_coefficient,
+                    line_guard.maximum_absolute_coefficient);
+                maximum_observed_row_l1_norm = std::max(
+                    maximum_observed_row_l1_norm,
+                    line_guard.row_l1_norm);
+                if (!line_guard.valid) {
+                    ++line_guard_rejections;
+                    proposal_valid = false;
+                    break;
+                }
                 declaration.lines.push_back(std::move(line));
             }
             if (!proposal_valid ||
@@ -3183,7 +3442,11 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                 "root_proposal_construction");
 
     std::size_t communicator_root_proposal_failures =
-        inversion_failed + empty_lines;
+        inversion_failed + empty_lines + extrapolation_guard_rejections +
+        line_guard_rejections;
+    std::size_t communicator_extrapolation_guard_rejections =
+        extrapolation_guard_rejections;
+    std::size_t communicator_line_guard_rejections = line_guard_rejections;
 #if FE_HAS_MPI
     if (mpi_initialized != 0) {
         const auto comm = system.dofHandler().mpiComm();
@@ -3201,6 +3464,41 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                           comm);
             communicator_root_proposal_failures =
                 static_cast<std::size_t>(summed_failures);
+            const std::array<std::uint64_t, 2> local_guard_rejections{{
+                static_cast<std::uint64_t>(
+                    extrapolation_guard_rejections),
+                static_cast<std::uint64_t>(line_guard_rejections),
+            }};
+            std::array<std::uint64_t, 2> summed_guard_rejections{};
+            MPI_Allreduce(local_guard_rejections.data(),
+                          summed_guard_rejections.data(),
+                          static_cast<int>(summed_guard_rejections.size()),
+                          MPI_UINT64_T,
+                          MPI_SUM,
+                          comm);
+            communicator_extrapolation_guard_rejections =
+                static_cast<std::size_t>(summed_guard_rejections[0]);
+            communicator_line_guard_rejections =
+                static_cast<std::size_t>(summed_guard_rejections[1]);
+            const std::array<double, 3> local_guard_maxima{{
+                static_cast<double>(
+                    maximum_observed_reference_extrapolation),
+                static_cast<double>(maximum_observed_absolute_coefficient),
+                static_cast<double>(maximum_observed_row_l1_norm),
+            }};
+            std::array<double, 3> global_guard_maxima{};
+            MPI_Allreduce(local_guard_maxima.data(),
+                          global_guard_maxima.data(),
+                          static_cast<int>(global_guard_maxima.size()),
+                          MPI_DOUBLE,
+                          MPI_MAX,
+                          comm);
+            maximum_observed_reference_extrapolation =
+                static_cast<Real>(global_guard_maxima[0]);
+            maximum_observed_absolute_coefficient =
+                static_cast<Real>(global_guard_maxima[1]);
+            maximum_observed_row_l1_norm =
+                static_cast<Real>(global_guard_maxima[2]);
         }
     }
 #endif
@@ -3241,6 +3539,17 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     for (const auto& line : distributed_result.relevant_lines) {
         if (constraints.isConstrained(line.slave_dof)) {
             continue;
+        }
+        if (!line.entries.empty()) {
+            const auto guard =
+                validateAggregationLineGuards(line, guards_);
+            if (!guard.valid) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "canonical_line_guard_rejection slave_dof=" +
+                    std::to_string(line.slave_dof) + " reason=" +
+                    guard.reason);
+            }
         }
         constraints.addConstraintLine(line);
         current_slaves.push_back(line.slave_dof);
@@ -3298,6 +3607,28 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         << " local_root_proposal_line_failures=" << empty_lines
         << " communicator_root_proposal_failures="
         << communicator_root_proposal_failures
+        << " maximum_root_path_length="
+        << guards_.maximum_root_path_length
+        << " maximum_observed_root_path="
+        << maximum_observed_root_path
+        << " root_path_guard_rejections="
+        << root_path_guard_rejections
+        << " maximum_reference_extrapolation_distance="
+        << guards_.maximum_reference_extrapolation_distance
+        << " maximum_observed_reference_extrapolation="
+        << maximum_observed_reference_extrapolation
+        << " communicator_extrapolation_guard_rejections="
+        << communicator_extrapolation_guard_rejections
+        << " maximum_absolute_coefficient="
+        << guards_.maximum_absolute_coefficient
+        << " maximum_observed_absolute_coefficient="
+        << maximum_observed_absolute_coefficient
+        << " maximum_row_l1_norm="
+        << guards_.maximum_row_l1_norm
+        << " maximum_observed_row_l1_norm="
+        << maximum_observed_row_l1_norm
+        << " communicator_line_guard_rejections="
+        << communicator_line_guard_rejections
         << " canonical_candidate_vertices="
         << distributed_result.canonical_candidate_vertices
         << " canonical_rooted_candidate_vertices="

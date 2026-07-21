@@ -522,6 +522,28 @@ TEST(SmallCutAggregationConstraint, RejectsInvalidMarkerAndInterfaceActiveSide)
             FieldId{0}, geometry::CutIntegrationSide::Interface,
             kInterfaceMarker)),
         std::invalid_argument);
+    auto invalid_guards = SmallCutAggregationGuardOptions{};
+    invalid_guards.maximum_root_path_length = 0u;
+    EXPECT_THROW(
+        (SmallCutAggregationConstraint(
+            FieldId{0},
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker,
+            {},
+            {},
+            invalid_guards)),
+        std::invalid_argument);
+    invalid_guards = SmallCutAggregationGuardOptions{};
+    invalid_guards.maximum_row_l1_norm = 0.5;
+    EXPECT_THROW(
+        (SmallCutAggregationConstraint(
+            FieldId{0},
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker,
+            {},
+            {},
+            invalid_guards)),
+        std::invalid_argument);
 }
 
 TEST(SmallCutAggregationConstraint,
@@ -675,6 +697,17 @@ TEST(SmallCutAggregationConstraint, SlavesOnlyUnsupportedCutVerticesWithExtrapol
     EXPECT_NE(log_output.find("aggregated_vertices=2"), std::string::npos);
     EXPECT_NE(log_output.find("vertices_without_root=0"), std::string::npos);
     EXPECT_NE(log_output.find("empty_line_failures=0"), std::string::npos);
+    EXPECT_NE(log_output.find("maximum_root_path_length=8"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("maximum_observed_root_path=1"),
+              std::string::npos);
+    EXPECT_NE(log_output.find(
+                  "maximum_observed_reference_extrapolation=2"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("maximum_observed_absolute_coefficient=2"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("maximum_observed_row_l1_norm=3"),
+              std::string::npos);
     EXPECT_NE(log_output.find("pruned_volume_rules=0"), std::string::npos);
 #endif
 }
@@ -761,6 +794,90 @@ TEST(SmallCutAggregationConstraint, RootSearchTraversesCutCellsToNearestFullActi
     expectEntries(lineEntries(system, vertexDof(system, pressure, 0)),
                   {{vertexDof(system, pressure, 2), 3.0},
                    {vertexDof(system, pressure, 3), -2.0}});
+#endif
+}
+
+TEST(SmallCutAggregationConstraint, RootPathGuardRejectsLongCutBand)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto mesh = buildQuadStrip(3);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    auto guards = SmallCutAggregationGuardOptions{};
+    guards.maximum_root_path_length = 1u;
+    system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+        pressure,
+        geometry::CutIntegrationSide::Negative,
+        kInterfaceMarker,
+        std::vector<int>{},
+        std::vector<GlobalIndex>{},
+        guards));
+    ASSERT_NO_THROW(system.setup());
+    system.setCutIntegrationContext(makeCutContext({
+        {.cell = 0, .volume_fraction = Real{0.2}, .full_cell_equivalent = false},
+        {.cell = 1, .volume_fraction = Real{0.5}, .full_cell_equivalent = false},
+        {.cell = 2, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+    }));
+    try {
+        system.rebuildConstraintState();
+        FAIL() << "a root beyond the fixed path guard must fail closed";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find(
+                      "root_path_guard_rejection"),
+                  std::string::npos);
+        EXPECT_NE(std::string(error.what()).find("maximum_allowed_path=1"),
+                  std::string::npos);
+    }
+    EXPECT_EQ(system.constraints().numConstraints(), 0u);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
+     ExtrapolationAndCoefficientGuardsRejectAmplifyingRows)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const auto run_rejection = [](SmallCutAggregationGuardOptions guards) {
+        auto mesh = buildQuadStrip(2);
+        auto space = std::make_shared<spaces::H1Space>(
+            ElementType::Quad4, /*order=*/1);
+        systems::FESystem system(mesh);
+        const auto pressure = system.addField(systems::FieldSpec{
+            .name = "p", .space = space, .components = 1});
+        system.addOperator("pressure");
+        system.addSystemConstraint(
+            std::make_unique<SmallCutAggregationConstraint>(
+                pressure,
+                geometry::CutIntegrationSide::Negative,
+                kInterfaceMarker,
+                std::vector<int>{},
+                std::vector<GlobalIndex>{},
+                guards));
+        EXPECT_NO_THROW(system.setup());
+        system.setCutIntegrationContext(makeCutContext({
+            {.cell = 0,
+             .volume_fraction = Real{0.3},
+             .full_cell_equivalent = false},
+            {.cell = 1,
+             .volume_fraction = Real{1.0},
+             .full_cell_equivalent = true},
+        }));
+        EXPECT_THROW(system.rebuildConstraintState(), std::runtime_error);
+        EXPECT_EQ(system.constraints().numConstraints(), 0u);
+    };
+
+    auto extrapolation_guards = SmallCutAggregationGuardOptions{};
+    extrapolation_guards.maximum_reference_extrapolation_distance = 1.0;
+    run_rejection(extrapolation_guards);
+
+    auto coefficient_guards = SmallCutAggregationGuardOptions{};
+    coefficient_guards.maximum_absolute_coefficient = 1.5;
+    run_rejection(coefficient_guards);
 #endif
 }
 

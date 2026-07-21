@@ -22,10 +22,13 @@
  *
  *   u(x_v) = sum_k N_k^{root}(xi_root(x_v)) * u_k(root)
  *
- * evaluated per field component. The construction is parameter-free: cell
- * classification comes from the retained cut-context volume rules, root
- * selection is a deterministic breadth-first search, and the weights are the
- * root cell's own basis functions extrapolated to the constrained vertex.
+ * evaluated per field component. Cell classification comes from the retained
+ * cut-context volume rules, root selection is a deterministic breadth-first
+ * search, and the weights are the root cell's own basis functions
+ * extrapolated to the constrained vertex. A fixed guard contract bounds graph
+ * path length, reference-domain extrapolation, individual coefficients, and
+ * row L1 amplification; a globally rooted candidate with no guarded proposal
+ * fails closed.
  * With aggregation active the velocity ghost penalty is unnecessary for
  * conditioning (see
  * Documentation/plan_ghost_penalty_eigen_calibration_20260611.md).
@@ -99,12 +102,20 @@
 #include "Core/Types.h"
 #include "Geometry/CutQuadrature.h"
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
 namespace svmp {
 namespace FE {
 namespace constraints {
+
+struct SmallCutAggregationGuardOptions {
+    std::size_t maximum_root_path_length{8u};
+    Real maximum_reference_extrapolation_distance{4.0};
+    Real maximum_absolute_coefficient{16.0};
+    Real maximum_row_l1_norm{32.0};
+};
 
 class SmallCutAggregationConstraint final : public ISystemConstraint {
 public:
@@ -120,7 +131,8 @@ public:
                                   geometry::CutIntegrationSide active_side,
                                   int interface_marker,
                                   std::vector<int> excluded_boundary_markers = {},
-                                  std::vector<GlobalIndex> excluded_vertices = {});
+                                  std::vector<GlobalIndex> excluded_vertices = {},
+                                  SmallCutAggregationGuardOptions guards = {});
 
     void apply(const systems::FESystem& system, AffineConstraints& constraints) override;
 
@@ -141,6 +153,7 @@ private:
     int interface_marker_{-1};
     std::vector<int> excluded_boundary_markers_{};
     std::vector<GlobalIndex> excluded_vertices_{};
+    SmallCutAggregationGuardOptions guards_{};
     // Constraint-instance state avoids the stale address/pointer-reuse hazard
     // of a process-global churn cache keyed by &FESystem.
     std::vector<GlobalIndex> previous_canonical_slaves_{};
