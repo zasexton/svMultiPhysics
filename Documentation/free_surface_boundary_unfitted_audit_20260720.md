@@ -1,0 +1,1617 @@
+# Rigorous audit of free-surface boundary conditions, wall wetting, and unfitted level-set methods
+
+- **Audit date:** 2026-07-20
+- **Repository:** `svMultiPhysics`
+- **Branch:** `issue-449-modern-mesh-core`
+- **Reviewed HEAD:** `7aaadf5ad1dc1b56e25323ca994df03635ad4c5b`
+- **Mode:** read-only source, input, prior-result, and literature review; no solver source was modified, no build or new physical simulation was run, and no commit was made.
+
+## Executive verdict
+
+The free-surface implementation is **not yet a fully robust or quantitatively qualified method** for incompressible Navier--Stokes flow with an unfitted level set, particularly for moving contact lines and splashing.
+
+The narrow supported sharp-P1 path has several important pieces implemented with the correct continuum signs:
+
+- the liquid-outward interface normal is used consistently;
+- the bulk pressure virtual-work sign is correct;
+- the constant-surface-tension `SurfaceStress` weak form has the correct external-pressure and surface-divergence signs;
+- the surface conormal is not double counted in the supported dynamic-contact path;
+- the through-liquid contact-angle convention is correct;
+- wall-normal impermeability and side-wall tangential frames are oriented correctly; and
+- the Ren--E line-friction and Navier wall-slip terms are dissipative with the intended signs.
+
+No new sign reversal, normal reversal, or duplicate capillary-conormal defect was found in the supported
+`UnfittedLevelSet + CutVolume + LinearCorner + SurfaceStress` configuration. The observed side-wall errors are therefore not explained by a simple rotation or wall-normal bug.
+
+There are, however, multiple high-severity method and infrastructure problems:
+
+1. The option called free-surface velocity extension adds a dry-domain Laplacian of the **same physical velocity unknown** directly to momentum. It is not passive postprocessing and not a one-way extension. It changes wet-supported cut-cell rows, adds an artificial dry-side interface flux, couples disconnected liquid components through the fictitious dry domain, and makes exterior wall data feed back into liquid momentum.
+2. The separate algebraic velocity-extension map used by level-set transport has no conditioning, coefficient, row-norm, partition-of-unity, or amplification bounds. Existing D38 evidence shows amplification by orders of magnitude.
+3. Generic LinearCorner curved interfaces are not exactly balanced by the current pressure/surface-force pair. A current sessile Q1/Q1 artifact retains a 1.3328% residual after minimization over the entire admissible pressure space. The existing pressure-representability diagnostic deliberately applies no physical-distance gate.
+4. Prescribed contact angle is imposed through an unscaled codimension-two penalty on the level-set residual. It has no mesh, time, trace, or dimensional scaling rule and is not paired with a contact-angle-compatible redistancing wall condition.
+5. The dynamic contact model is mathematically plausible but fails its present quantitative evidence: three of four completed advancing/receding side-wall Ren--E speed gates fail, including one wrong-sign result. The wet-wall friction is also integrated with a regularized wall indicator instead of a sharp wetted-wall cut.
+6. Level-set transport is continuous Galerkin SUPG/discontinuity-capturing transport, not locally conservative interface transport. The optional limiter is explicitly nonconservative and not FCT/AFC; production rejects a converged candidate if the limiter would alter it. Global volume correction can conceal transport loss while moving every interface and contact line.
+7. General cut-position-independent mixed stability has not been established. Pressure-only ghost penalty, empirical scaling, aggregation, and sliver pruning do not by themselves prove uniform inf-sup stability or conditioning for the actual equal-order VMS/PSPG spaces.
+8. The present physics is a one-phase liquid with prescribed external gas pressure. It cannot physically validate air cushioning, gas inertia/viscosity/compressibility, entrained or trapped air, aerodynamic sheet breakup, or gas-pressure-dependent dry-wall splash thresholds.
+9. Surface geometry is refreshed and then frozen during a nonlinear solve. There is no complete shape derivative or demonstrated fully discrete capillary/wetting energy law.
+10. Fitted-ALE tangential free-surface controls are parsed and validated but never consumed by production assembly or mesh motion.
+11. Generic exterior traction, Robin, outflow, and weak-Nitsche forms use whole background boundary faces rather than the sharply wetted part of a cut face. Boundary work on the dry portion can enter shared cut-cell rows and the same-field dry extension.
+
+The most defensible present characterization is:
+
+> The code contains a narrowly supported, sign-consistent sharp-P1 free-surface/contact weak form, but the overall unfitted method is not well balanced, conservatively transported, uniformly cut stable, or quantitatively validated for moving wetting and splashing. Two distinct velocity-extension mechanisms each have unresolved feedback or stability defects.
+
+## Review scope and evidence rules
+
+This audit covers:
+
+- incompressible Navier--Stokes volume residuals and stabilization;
+- fitted and unfitted free-surface traction paths;
+- `SurfaceStress`, legacy curvature traction, and external pressure;
+- generated interface and contact-line quadrature;
+- dynamic and prescribed contact-angle implementations;
+- side-wall impermeability, wet-wall Navier slip, and contact-line friction;
+- level-set transport, algebraic velocity extension, dry-domain PDE extension, limiting, reinitialization, and volume correction;
+- curvature projection, cut-cell stabilization, aggregation, pruning, and pressure support;
+- nonlinear geometry refresh and generalized-alpha state coupling;
+- D18/D38, sessile-cap, moving-contact, capillary-wave, and wall-advection evidence already present in the repository; and
+- finite-element, CutFEM, moving-contact-line, free-surface, dam-break, sloshing, and splash literature.
+
+Finding labels used below are:
+
+- **Confirmed defect:** source or existing numerical evidence directly demonstrates behavior inconsistent with the advertised or necessary contract.
+- **Method deficiency:** the implementation performs what it was coded to perform, but that formulation lacks consistency, stability, conservation, or physical completeness needed for the target problem.
+- **Qualification gap:** no failure is proved, but the required theorem, diagnostic, or converged validation evidence is absent.
+- **Model limitation:** behavior lies outside the governing physics, even if the numerics were exact.
+
+This report does not treat a passed unit test as proof of a continuum property. It also does not infer that a source-level risk is the unique cause of a particular failed run unless an ablation establishes that causal link.
+
+### Exact source snapshot
+
+The working tree was already heavily modified before this review. Consequently, the findings apply to the files as read, not merely to the named Git commit. Relevant working-tree SHA-256 values are:
+
+| Component | SHA-256 |
+|---|---|
+| `IncompressibleNavierStokesVMSModule.cpp` | `71d418eec790fdcdd65de664f3fce78aa7d8f756556fc3420cbce7247c537850` |
+| `NavierStokesRegister.cpp` | `f926918fcd1a2d3ce9c1507d6aa46fa618208151c98ce3b0ab681e1e8854e5a3` |
+| `ApplicationDriver.cpp` | `716be9218e81c3b7c04f6bc8c2b8ce13a862f9f88cb02b7a65ee9cabf9721552` |
+| `LevelSetTransport.cpp` | `4babe16f4862540fad78ac6880dc0324a8b1bc7d7311cc39a4c2613cfa91fc56` |
+| `LevelSetVelocityExtensionConstraint.cpp` | `82d358a0eb467efef12f96528da7a179ea53be17a6ef1a5628e06cf268dad08a` |
+| `LevelSetReinitialization.cpp` | `4fc96c9c45011e438391c600c9fd30c6b8c76073977c8aa697866e0f8a38030c` |
+| `LevelSetVolume.cpp` | `ce0b086bb3ec5b4cc73d55d30400ee8b54b2a6dd0657e657ef480641830e66b1` |
+| `LevelSetImplicitCutQuadratureBackend.cpp` | `66826216b22b292d9a920bd14d74fb07a28d4fd01d016c227f2a788fc3ab8c5f` |
+
+The detailed earlier implementation and qualification history remains in
+[free_surface_level_set_review_20260713.md](free_surface_level_set_review_20260713.md). This report re-audits the current mechanisms and uses those recorded artifacts only where explicitly identified.
+
+## Mathematical contract
+
+Let \(\Omega_l(t)\) be the liquid domain, \(\Gamma(t)\) its liquid--gas boundary, and \(n\) the unit normal pointing out of the liquid. With
+
+\[
+\sigma_l = -pI + 2\mu D(u), \qquad
+D(u)=\tfrac12(\nabla u+\nabla u^T),
+\]
+
+constant surface tension \(\gamma\), prescribed external pressure \(p_{ext}\), and the convention that a convex liquid surface has positive curvature \(\kappa\), the intended traction is
+
+\[
+\sigma_l n = (-p_{ext}-\gamma\kappa)n.
+\]
+
+After integration by parts, a curvature-free surface-divergence form contributes
+
+\[
++\int_\Gamma p_{ext}\,n\cdot v\,dS
++\gamma\int_\Gamma (I-n\otimes n):\nabla v\,dS
+\]
+
+to the residual when the volume pressure term is
+
+\[
+-\int_{\Omega_l}p\,\nabla\cdot v\,dV.
+\]
+
+For a wall with unit normal \(n_w\), and a contact angle measured through the liquid, equilibrium Young geometry is
+
+\[
+n\cdot n_w = -\cos\theta_e.
+\]
+
+The surface energy for a closed isothermal one-phase wetting problem can be written, up to constants, as
+
+\[
+\mathcal E =
+\frac12\int_{\Omega_l}\rho |u|^2dV
++\gamma A_{lg}
+-\gamma\cos\theta_e A_{sl}
++\int_{\Omega_l}\rho g z\,dV.
+\]
+
+For Navier slip length \(l_s>0\) and line friction \(\xi>0\), the expected dissipation contains
+
+\[
+2\mu\int_{\Omega_l}|D(u)|^2dV
++\frac{\mu}{l_s}\int_{\Gamma_{sl}}|u_t|^2dS
++\xi\int_C V_{CL}^2d\ell.
+\]
+
+The Ren--E-type constitutive relation used by this repository is
+
+\[
+\xi V_{CL}=\gamma(\cos\theta_e-\cos\theta_d),
+\qquad \xi=1/M.
+\]
+
+A robust finite-element implementation must preserve the relationship between the surface virtual work, Young wall energy, wall slip, contact-line dissipation, and interface transport. Correct signs in each isolated term are necessary but not sufficient: discrete geometry, pressure space, time integration, maintenance operations, and cut stabilization must also be compatible.
+
+## Prioritized findings
+
+| ID | Severity | Classification | Finding | Immediate implication |
+|---|---:|---|---|---|
+| FSR-01 | High | Confirmed method defect | Dry-domain “velocity extension” is a Laplacian of the physical velocity in the same momentum system. | Artificial dry-side traction/stiffness feeds into liquid rows and can couple separate liquid bodies. |
+| FSR-02 | High | Confirmed defect | Algebraic wet-extension map has no conditioning or amplification bounds; D38 maps amplify tiny velocities into very large extension values. | Level-set advection can be dominated by map artifacts even when its frozen-map Jacobian is exact. |
+| FSR-03 | High | Confirmed method deficiency | Generic LinearCorner surface loads are not exactly representable by the pressure-gradient range; a current sessile case retains a 1.3328% best-space residual. | Static caps generate irreducible parasitic forcing; the current diagnostic has no acceptance threshold. |
+| FSR-04 | High | Method deficiency | Prescribed contact angle is an unscaled codimension-two level-set penalty with no compatible reinitialization wall condition. | Mesh/time dependence and angle drift are expected; the penalty can conflict with momentum-side wall energy. |
+| FSR-05 | High | Failed qualification | Three of four completed side-wall Ren--E speed gates fail, including one wrong sign. | The dynamic wetting law is not calibrated or mesh independent despite correct wall orientation. |
+| FSR-06 | High | Method deficiency | Continuous-Galerkin level-set transport, limiter, and global shift are not locally conservative. | Thin sheets, rims, droplets, and contact-line volume can be created, lost, or globally redistributed. |
+| FSR-07 | High | Qualification gap | Uniform inf-sup stability and cut-position-independent conditioning are not established for the actual equal-order cut formulation. | Tiny cuts and topology changes can produce pressure modes, ill conditioning, or feature deletion. |
+| FSR-08 | High | Model limitation | Gas is only a prescribed exterior pressure, not a solved phase. | Full dry splash, air cushioning, entrainment, trapped gas, and aerodynamic breakup cannot be validated physically. |
+| FSR-09 | High | Qualification gap | Refreshed-frozen geometry lacks the complete shape tangent and a demonstrated fully discrete energy law. | Nonlinear convergence and capillary energy exchange depend on outer refresh and time-step policy. |
+| FSR-10 | High | Confirmed defect | Fitted-ALE tangential mesh policies are parsed but unused. | `Free`, `SmoothingOnly`, and `Prescribed` do not implement their advertised motion. |
+| FSR-11 | Medium | Confirmed configuration defect | Per-free-surface Nitsche values overwrite module-global Nitsche policy. | Multiple fitted surfaces and unrelated weak velocity BCs are last-one-wins/order dependent. |
+| FSR-12 | Medium | Confirmed configuration defect | Partial contact-line input can be silently ignored. | Typographical or incomplete wetting configurations can run without the requested physics. |
+| FSR-13 | Medium | Generality defect | Generated physical phase volume uses one parent-cell scale instead of pointwise geometry mapping. | Distorted/nonaffine and high-order-cell volume diagnostics/correction can disagree with assembly measure. |
+| FSR-14 | Medium | Validation gap | Cut-backend checks do not fully verify root accuracy, normal accuracy, volume-point containment, or phase side. | A backend defect can pass structural validation and contaminate residuals or diagnostics. |
+| FSR-15 | Medium | Coupling risk | Scalar contact reconstruction ignores the supplied interface-domain object and rebuilds roots independently. | Contact and surface rules lack an enforced same-revision/same-parent geometry invariant. |
+| FSR-16 | High | Confirmed method defect | Generic exterior boundary weak forms are not clipped to the active wetted part of a cut face. | Nitsche penalty, traction, Robin, or outflow work can act on fictitious dry boundary and feed wet rows. |
+| FSR-17 | Medium | Confirmed generality defect | Supplemental high-order curvature samples pair a value at one reference point with a separately averaged physical point. | Curvature least squares receives inconsistent `(x,phi)` data on nonaffine/isoparametric cells. |
+| FSR-18 | Medium | Robustness defect | Colliding algebraic extension bands choose the smaller component ID and use cell-node clique adjacency. | Splash components can receive numbering-dependent extension partitions with broad, non-geometric graph communication. |
+
+## FSR-01: the dry-domain PDE extension changes physical momentum
+
+The routine `applyFreeSurfaceVelocityExtension` in
+[`IncompressibleNavierStokesVMSModule.cpp`](../Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp)
+adds, on the inactive/dry part of the mesh,
+
+\[
+\alpha\int_{\Omega_{dry}}\nabla u:\nabla v\,dV
+\]
+
+using the **same** velocity coefficients and test functions as the liquid momentum equation. The key implementation is at lines 4564--4620. Cut-cell weights are multiplied by
+
+\[
+\max(r_{dry},10^{-3}),
+\]
+
+while fully dry cells receive full strength \(\alpha\). The ordinary physical momentum residual is wet-volume-only at lines 6615--6626. Inactive velocity pins are disabled when this extension is enabled at lines 6000--6041.
+
+This is not a passive or one-way extension. A continuous finite-element basis function supported by a cut cell spans both wet and dry subregions, so the dry term necessarily changes wet-supported matrix rows. In continuum terms it creates a dry harmonic field coupled to liquid velocity at the interface. Its interface transmission balance includes an artificial dry-side flux \(\alpha\partial_n u_{dry}\), which is an artificial traction on the physical problem.
+
+### Scale analysis
+
+The D18/D38 configurations use approximately
+
+\[
+\mu_l=0.001003\ \mathrm{Pa\,s}, \qquad \alpha=1.
+\]
+
+Therefore:
+
+- a full dry cell has extension stiffness about \(997\mu_l\);
+- the hard-coded cut floor gives \(\alpha_{eff}=10^{-3}\), approximately the liquid viscosity;
+- a half-dry cut cell can receive a dry extension term hundreds of times the corresponding physical viscous coefficient; and
+- a tiny wet sliver can receive nearly full-cell liquid-scale stiffness from the dry floor.
+
+The coefficient also has the units of a viscosity-like diffusion coefficient but is configured as a dimensionless-looking value without a physical or mesh/time scaling contract.
+
+### Consequences
+
+1. Exterior dry-wall Dirichlet data can pull on the free-surface velocity through the dry harmonic problem.
+2. Separate droplets or liquid regions can communicate through a connected fictitious dry domain.
+3. Interface velocity can depend on the size and topology of the unused exterior mesh.
+4. A dry-domain energy term is added to the nonlinear system, but it is not part of the physical liquid energy or a demonstrated consistent CutFEM stabilization.
+5. The term can delay, accelerate, or damp side-wall run-up depending on the dry field and its boundary constraints.
+
+This is a high-risk plausible contributor to wetting/run-up error. Source inspection alone does not prove that it dominates D18/D38: a previously documented Test02 toggle changed the front by only `+0.00130 m` at `t=0.2`. The required conclusion is narrower and firm: the option is inaccurately described if it is intended to be a no-feedback velocity extension.
+
+### Required replacement or proof
+
+A defensible implementation should use one of the following:
+
+- a distinct auxiliary extension field solved after, or block-triangularly from, liquid velocity;
+- a one-way normal/constant-along-normal extension in a narrow band;
+- an aggregation/discrete-extension operator whose slave values cannot modify master liquid equations; or
+- a mathematically consistent ghost penalty with the correct field, scaling, support, consistency result, and cut-independent stability proof.
+
+Before replacement, isolate the effect with:
+
+- \(\alpha\), floor, \(h\), \(\Delta t\), and \(\mu\) sweeps;
+- wet-block residual and matrix differences with the option on/off;
+- a manufactured wet solution while dry-domain size and boundary data vary;
+- two disconnected liquid islands separated by dry cells;
+- full no-slip versus normal-only dry-wall constraints; and
+- explicit dry-extension energy and interface-flux telemetry.
+
+## FSR-02: the algebraic transport extension is exact at a frozen map but the map is unbounded
+
+This mechanism is distinct from FSR-01. The level-set transport infrastructure introduces an algebraic extension unknown \(E\) and constraints of the form
+
+\[
+E_i-\sum_jP_{ij}(\phi)u_j-\sum_kL_{ik}(\phi)E_k=0.
+\]
+
+[`LevelSetVelocityExtensionConstraint.cpp`](../Code/Source/solver/FE/LevelSet/LevelSetVelocityExtensionConstraint.cpp)
+assembles the frozen-map residual and Jacobian consistently at lines 237--270. The fixed-map chain
+
+\[
+u\rightarrow E\rightarrow \phi
+\]
+
+is therefore algebraically sound for the supported P1 trace contract.
+
+The problem is construction of \(P(\phi)\). [`ApplicationDriver.cpp`](../Code/Source/solver/Application/Core/ApplicationDriver.cpp)
+uses a small dense tangential regression, accepts a solve based principally on pivot success, converts the result directly to graph weights, and applies it. There is no enforced:
+
+- numerical rank or condition estimate;
+- maximum coefficient or row-\(L^1\) norm;
+- partition-of-unity/constant-reproduction check;
+- negative-weight or convex-hull check;
+- preview ratio \(\|E\|/\|u\|\);
+- bound on map change between geometry revisions; or
+- bounded nearest/normal/convex fallback.
+
+Existing D38 artifacts show the result. Early extension norms are approximately
+
+\[
+135.759,\ 51.2615,\ 0.2225
+\]
+
+while physical velocity norms are only about `0.0404--0.0447`. Rebuilding the map at the same state changes the total residual to about `169.862`. Later extension values reach millions and the level-set residual reaches about `112433`.
+
+On refresh, production replaces the extension constraint rows but retains the previous \(E\) coefficients as a warm start; it does not project them onto the newly built algebraic map in this branch. That explains part of the immediate post-refresh residual jump and is independently worth correcting for nonlinear robustness. Reprojecting \(E\) would not, however, cure an unstable map whose coefficients turn a `0.04` physical velocity into values of order `10^2--10^6`.
+
+This is a confirmed numerical stability defect in a supported infrastructure path. Correct rollback and a correct frozen-map Jacobian cannot make an ill-conditioned refreshed map safe.
+
+Required production guards are:
+
+1. rank and condition estimation before accepting a regression;
+2. coefficient and row-\(L^1\) limits;
+3. exact or tolerance-based constant reproduction;
+4. negative-weight/convexity policy;
+5. preview amplification and map-change limits;
+6. per-revision telemetry keyed to accepted time, state, and nonlinear phase; and
+7. a bounded fallback that preserves wall-normal compatibility.
+
+The multi-component policy also needs correction. When two extension bands collide, production silently selects the smaller connected-component label and records only a collision count. Existing tests intentionally encode that minimum-ID choice. Component numbering is not a physical criterion, so swapping IDs can change the extension partition. Moreover, band adjacency is built as a complete clique among all nodes of a cell rather than from mesh edges or geometric distance. This can transmit information across diagonals and create a wider/non-geometric extension graph. These behaviors are especially risky for colliding droplets, crown fingers, or nearby sheets and motivate FSR-18.
+
+## FSR-16: ordinary exterior boundary forms are not clipped to the wet boundary
+
+Cut-volume momentum is restricted to the liquid, but generic exterior-boundary operators are still assembled using ordinary full-face measures such as `.ds(marker)`. The generic boundary manager is invoked in
+[`IncompressibleNavierStokesVMSModule.cpp`](../Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp), lines 6813--6832, and weak velocity Nitsche forms in
+[`NavierStokesBCFactories.h`](../Code/Source/solver/Physics/Formulations/NavierStokes/NavierStokesBCFactories.h), lines 358--419, use the uncut background face. Nitsche installation occurs around line 6864 of the NS module.
+
+For a background boundary face that is partly liquid and partly dry, the physical boundary integral should be restricted to its wetted subset. The reviewed generic traction, Robin, outflow, and weak-Nitsche paths have no active-side factor and no generated wet `(d-1)` boundary quadrature. They can therefore apply stress, consistency, symmetry, or penalty work over the dry part. Because cut-cell basis functions are shared, and because FSR-01 solves the same velocity in the dry domain, this fictitious boundary work can feed into liquid momentum.
+
+Strong wall constraints are a special case: applying them to the whole background wall can be interpreted as also specifying the dry extension field, although full no slip then prevents a physical sharp contact line from moving. The dynamic-contact Navier term is another special case; it uses the smoothed wet-wall indicator discussed above. Neither exception makes the generic weak/natural operators sharply correct.
+
+Required tests are:
+
+- a manufactured half-wet boundary-face integral with an analytic wetted measure;
+- a dry-only boundary whose weak operator contributes exactly zero to wet rows;
+- active-side Nitsche consistency/coercivity versus cut fraction;
+- traction and Robin/outflow wet-fraction sweeps; and
+- a coupled surface/wall energy balance at a moving contact line.
+
+## FSR-03: pressure is representable, but capillary equilibrium is not well balanced
+
+The current one-phase model must not be misdiagnosed as requiring a two-phase pressure jump enrichment in every case. Gas pressure is prescribed on the boundary and no gas-pressure field is solved. Constants belong to the liquid pressure space.
+
+The factory creates a vector H1 velocity space and scalar H1 pressure space. Unless Taylor--Hood is explicitly selected, pressure order equals velocity order. The current sessile/free-surface generators use continuous equal-order Q1/Q1 on linear quads, with analogous P1/P1 behavior on linear tetrahedra. Constant pressure is retained on active cut support, and small-cut aggregation explicitly preserves constants. Constant pressure also nulls PSPG and pressure ghost-gradient terms.
+
+The discrete residual is nevertheless not generally well balanced. It contains
+
+\[
+-\int_{\Omega_h}p_h\nabla\cdot v_h
++\int_{\Gamma_h}p_{ext}n_h\cdot v_h
++\gamma\int_{\Gamma_h}(I-n_h\otimes n_h):\nabla v_h
+-\gamma\cos\theta_e\int_{\partial\Gamma_h}v_h\cdot m_h.
+\]
+
+Exact equilibrium requires \(\Gamma_h\) to be a stationary point of the **discrete** surface-plus-wall energy under the **discrete** volume constraint: a discrete constant-mean-curvature and Young-angle identity. Sampling a continuum circle or cap at Q1/P1 vertices and converting it to LinearCorner chords does not generally satisfy that identity.
+
+The repository already forms the complete constrained pressure-gradient operator \(G\) and uses LSQR to minimize
+
+\[
+\|Gp+f_{surface}\|.
+\]
+
+In a current `theta90_n16` sessile artifact, the normal equations converge to relative normal residual `1.45e-11`, yet the primal relative residual remains `0.013328`, or **1.3328%**. Thus not even an arbitrary pressure in the full Q1 pressure space exactly spans the discrete surface-plus-wall load. Other recorded static caps retain roughly 1.2--4.4% best-space residuals.
+
+This proves a method-level discrete compatibility deficiency. It is not evidence of a wrong pressure sign; the signs and wall-energy ownership are correct. A flat interface or specially constructed discrete constant-mean-curvature surface can still balance.
+
+There is also a qualification defect. Telemetry explicitly reports that the representability-distance gate is not applied and not claimed. The runner checks finite LSQR behavior and normal-equation convergence, not whether the primal residual is physically small. A “green” diagnostic therefore does not qualify balanced force.
+
+Required remedies should be evaluated rather than assumed:
+
+- construct surface and wall forces as the exact variation of a discrete geometric energy with matching discrete volume;
+- use a geometry/pressure pair with a provable equilibrium property;
+- consider appropriate pressure enrichment for future two-phase jump problems;
+- use a stabilized mean-curvature vector or parametric interface treatment with a compatible energy identity;
+- gate the actual best-space residual, pressure error, force residual, and parasitic kinetic energy; and
+- sweep mesh refinement, interface position, interface orientation, and contact angle.
+
+## Free-surface traction audit
+
+### Components found correct within the supported contract
+
+1. **Bulk pressure sign.** The Galerkin term is `-p div(v)` in
+   [`IncompressibleNavierStokesVMSModule.cpp`](../Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp), lines 6217--6228.
+2. **External pressure and surface tension.** `SurfaceStress` adds \(p_{ext}n\cdot v\) and \(\gamma(I-nn):\nabla v\) at lines 5443--5494.
+3. **Legacy traction consistency.** The explicit curvature path constructs the same declared traction sign at line 5504.
+4. **Active-side orientation.** Generated outward normals are oriented consistently with the chosen active liquid side near line 1663.
+5. **Zero-load behavior.** With zero external pressure and zero surface tension, the interface has natural zero traction and no artificial residual at lines 5399--5409.
+6. **One conormal owner.** Under `SurfaceStress`, the surface-divergence term owns the capillary conormal. The contact contribution adds line friction and equilibrium Young wall energy, not a second dynamic conormal, at lines 4350--4360.
+
+### Remaining limitations
+
+- `SurfaceStress` rejects differentiated quadrature. Geometry is refreshed outside the solve and frozen during each nonlinear solve.
+- There is no derivative of projector, normal, point, surface measure, contact geometry, or topology transition in the monolithic Jacobian.
+- The outer process is therefore Picard/quasi-Newton with respect to shape even when the field Jacobian is otherwise exact.
+- No complete fully discrete identity shows that capillary work equals change in surface-plus-wall energy at the generalized-alpha stage.
+- Legacy raw-curvature traction is more sensitive to curvature recovery; the default `SurfaceStress` choice is preferable for constant \(\gamma\), but it does not by itself solve FSR-03.
+
+## Side-wall wetting and contact-line audit
+
+### Geometry and orientation are correct
+
+The true vertical-sidewall case uses:
+
+- wall `x=0`;
+- outward liquid-to-solid wall normal `(-1,0,0)`;
+- tangential contact-line motion in `y`; and
+- strong zero normal-only `x` velocity.
+
+The module rejects a dynamic moving contact line if the wall is given a tangential/full no-slip strong constraint, and it verifies mapped physical wall normals and interface/wall transversality. Rotation-equivalent bottom-wall and side-wall tests differ only at roundoff-to-small discretization scale. The side-wall frame, configured normal, contact tangent, and postprocessing orientation are therefore not the observed root problem.
+
+### Dynamic line-law structure is sign consistent
+
+The implemented gap uses
+
+\[
+\cos\theta_d=-n\cdot n_w,
+\]
+
+and the residual combines:
+
+- positive line friction \(\xi V_{CL}\);
+- equilibrium wall energy \(-\gamma\cos\theta_e\); and
+- positive Navier wall dissipation \((\mu/l_s)u_t\cdot v_t\).
+
+This is structurally consistent with the selected Ren--E convention and with a decreasing total energy. It is also invariant to a positive rescaling of \(\phi\) in the normal construction.
+
+### Quantitative qualification fails
+
+All four current advancing/receding vertical-wall cases complete 20/20 fixed steps to `t=0.02`, with zero rejected step and converged recorded solves. Only the `n=32` receding case passes the fixed direct constitutive-speed gate. Relative errors are:
+
+| Resolution/regime | Relative speed error | Disposition |
+|---|---:|---|
+| `n=16`, advancing | `15.8991` | Fails; measured sign is wrong |
+| `n=32`, advancing | `0.60010` | Fails |
+| `n=16`, receding | `6.11871` | Fails |
+| `n=32`, receding | `0.338382` | Passes the current gate only |
+
+The same mismatch after rotating to the bottom wall proves that the main discrepancy is orientation independent.
+
+### Likely contributors to the moving-contact mismatch
+
+1. **Wet-wall integration is regularized.** Navier friction is multiplied by a compact C1 cubic wetted-wall indicator over a width based on \(h\) or a configured width, rather than integrated over the exact sharp wetted footprint. The construction has a dry tail and is homogeneous in \(\phi\), but it introduces width- and mesh-dependent dissipation and does not inherit the sharp-interface energy estimate without analysis.
+2. **Contact observables are not stage-paired.** Operator-angle telemetry lacks accepted time, state revision, nonlinear phase, and generalized-alpha stage identity. It cannot be paired exactly with stage-based contact speed.
+3. **Geometry is refreshed-frozen.** Dynamic angle, contact point, and velocity do not share a complete monolithic shape tangent.
+4. **Extension feedback.** FSR-01 and FSR-02 can alter the velocity transported to the interface or the level-set geometry used to measure angle.
+5. **Redistancing has no wetting wall condition.** Maintenance can change the near-wall normal and hence angle.
+
+Required isolations are sharp-versus-smeared wetted-wall quadrature, width and slip-length refinement, stage-synchronized angle/speed telemetry, and a benchmark whose slip scale is resolved independently of mesh size.
+
+### Prescribed contact angle is not a robust wall boundary condition
+
+The prescribed-angle residual is essentially
+
+\[
+\int_C \beta_\theta
+\left(n\cdot n_w+\cos\theta_e\right)\eta\,d\ell.
+\]
+
+It is implemented as a scalar level-set residual over a codimension-two contact rule. The penalty has no documented dependence on \(h\), \(\Delta t\), advection scale, trace inequality, level-set scaling, or spatial dimension. The same literal number therefore represents different enforcement strength in 2D and 3D and as the mesh changes.
+
+This term is not derived as a consistent weak boundary condition for the hyperbolic level-set transport equation. It can also enforce geometry while momentum separately contains Young wall energy, without a proof that both are compatible at the discrete stage. Existing static refinement failures are consistent with this weakness, although they do not isolate it uniquely.
+
+A robust alternative needs a derived wall condition or constrained geometric update, consistent with advection and reinitialization, plus a penalty/Nitsche scaling and convergence result.
+
+### Unsupported wetting regimes
+
+The current dynamic path is deliberately narrow:
+
+- continuous scalar P1 level set;
+- first-order parent geometry and `LinearCorner` contact construction;
+- stationary axis-aligned planar wall;
+- strong zero normal-only impermeability;
+- positive literal constant \(\gamma\), mobility, and slip length;
+- no complete-wetting endpoints;
+- no contact-angle hysteresis, roughness law, moving wall, general curved wall, or variable-\(\gamma\)/Marangoni model.
+
+These fail-closed restrictions are preferable to silently wrong generality, but they define a research envelope rather than a general production wetting method.
+
+### D18/D38 are not wetting validation cases
+
+D18/D38 set surface tension and contact-line physics off and impose full no-slip on physical side/bottom walls. On a vertical wall, no slip removes the tangential wall velocity required for a material contact line to run upward. Classical sharp-interface theory also makes a moving no-slip contact line singular.
+
+Any apparent wall motion of \(\phi\) in those configurations can arise from numerical diffusion, discontinuity capturing, extension, redistancing, or global shift. It is not evidence of physically correct wetting. D18/D38 should be labeled bulk violent-transport/false-wet tests only.
+
+## Level-set transport audit
+
+### Discretization actually implemented
+
+[`LevelSetTransport.cpp`](../Code/Source/solver/FE/LevelSet/LevelSetTransport.cpp), approximately lines 1240--1575, implements a continuous scalar H1 equation on the background mesh with either:
+
+- advective form \(\partial_t\phi+u\cdot\nabla\phi=0\); or
+- strong conservative form \(\partial_t\phi+\nabla\cdot(\phi u)=0\).
+
+The latter differs from the advective form by \(\phi\nabla\cdot u\), which is not identically zero for a discretely divergence-free VMS/PSPG velocity. Multiplying that strong form by continuous tests does not make it locally conservative in finite-volume/DG flux balance.
+
+SUPG uses a metric/time-based parameter. Residual discontinuity capturing adds approximately
+
+\[
+\nu_{DC}\sim h\frac{|R_\phi|}{|\nabla\phi|},
+\]
+
+capped by a combination of \(h|u|\) and \(h^2/\Delta t\). This is empirical nonlinear diffusion. It has no discrete maximum principle and can thicken or erase thin interface features.
+
+### The limiter is a rejection gate, not a conservative transport method
+
+The optional one-ring nodal limiter is documented as non-FCT and nonconservative. Production computes a limited candidate, but if limiting would change a converged Newton solution, it rejects the step and requests a smaller time step rather than accepting a state that was never a coupled solution. That rejection policy is logically sound, but it does not make the accepted CG/SUPG operator invariant-domain or locally conservative.
+
+For splash problems this distinction is critical. Crown sheets, rims, satellite droplets, and thin wall films can be only a few elements thick. A method can retain global volume after correction while losing the correct local sheet mass and breakup time.
+
+### Reinitialization
+
+The option enum advertises Hamilton--Jacobi, fast marching, and projection methods, but the production parser supports projection only and rejects the other names. Projection repair is serial and uses displacement/topology safeguards; production accepts only a converged candidate, which is good defensive behavior.
+
+Limitations remain:
+
+- an arbitrary curved P1 zero set is not generally exactly redistancable in the same space;
+- there is no contact-angle-aware wall condition;
+- the original-crossing guard records only edges whose endpoints have strict opposite signs outside tolerance;
+- zero vertices, zero edges, tangential contacts, and some contact/topology degeneracies are not represented by that crossing sample; and
+- the method must be qualified on contact-angle error and contact-line displacement, not only \(|\nabla\phi|-1\).
+
+The missing wall condition is a direct literature concern: redistancing near a contact line must extend or enforce the appropriate dynamic angle along the wall.
+
+### Global volume correction
+
+The supported correction adds one scalar shift to all level-set coefficients. Per-event and cumulative interface/contact displacement bounds and topology guards are valuable. The operation is nevertheless intrinsically nonlocal:
+
+- it moves every interface and contact line;
+- it redistributes local transport error between disconnected components;
+- it can change a well-resolved region to compensate for an underresolved one; and
+- it can make a global volume history look accurate while local mass, film thickness, and breakup are wrong.
+
+Report both raw pre-maintenance volume and corrected post-maintenance volume. Treat the shift as a bounded fallback, not proof of conservative transport.
+
+### Physical-volume mapping defect outside the affine envelope
+
+Generated phase volume in [`LevelSetVolume.cpp`](../Code/Source/solver/FE/LevelSet/LevelSetVolume.cpp), lines 1218--1263, multiplies each reference-region measure by one per-cell ratio of corner-based physical parent measure to reference parent measure. Assembly instead maps generated quadrature pointwise using the Jacobian/determinant in
+[`StandardAssembler.cpp`](../Code/Source/solver/FE/Assembly/StandardAssembler.cpp), lines 2891--2965.
+
+One constant scale is exact for affine cells. It is not generally exact for distorted bilinear/trilinear or curved high-order parents whose Jacobian varies. Therefore volume diagnostics, volume targets, and correction can disagree with the measure actually used by the PDE. This is a confirmed generality defect, although rectangular affine Q1 and linear simplex cases avoid it.
+
+There is a second measure mismatch: lifecycle phase-volume diagnostics can sum generated regions that PDE assembly later removes through the cut-rule pruning threshold. In that circumstance, the quantity labeled conserved/target volume is not exactly the volume of the domain on which the momentum and continuity equations were assembled. Volume accounting must consume the identical retained rule set, or report lifecycle and assembled measures separately.
+
+## Interface geometry and cut quadrature audit
+
+### Supported and experimental backends
+
+- `LinearCorner` is the production first-order interface path.
+- In 3D, its reported interface order is at most one and volume order at most two.
+- Saye high-order production support is limited principally to 2D quadrilaterals; other combinations are experimental or rejected.
+- `HighOrderSubcell` is experimental.
+- `MomentFit` is unavailable.
+- High-order contact geometry fails closed instead of silently claiming high order.
+
+These restrictions are honest, but splash surfaces contain high curvature, very thin sheets, and frequent topology transitions. First-order faceting and topology-dependent quadrature changes can dominate capillary and breakup errors unless refinement is extremely aggressive.
+
+### Sliver pruning and feature loss
+
+The default tiny-fragment fraction is about `1e-8`. Pruning can be necessary for conditioning, but it introduces a topology-dependent deletion operation. A sheet, neck, satellite droplet, or contact fragment below the threshold can disappear discontinuously. Aggregation can likewise pin or eliminate a component with no well-resolved root cell.
+
+Every splash validation should record:
+
+- number and volume of pruned fragments by phase;
+- number of components without an aggregation root;
+- deleted liquid volume and surface area;
+- minimum sheet/neck thickness in cells; and
+- sensitivity to the prune/aggregation threshold.
+
+The current D38 geometry also requested interface quadrature order 2 but achieved order 1 on all recorded interface cells. The backend reports this as a capability downgrade rather than a fallback, and there is no minimum-achieved-order acceptance policy. Requested order must not be treated as achieved accuracy.
+
+### Backend validation is incomplete
+
+The validator in
+[`LevelSetImplicitCutQuadratureBackend.cpp`](../Code/Source/solver/FE/LevelSet/LevelSetImplicitCutQuadratureBackend.cpp), lines 5389--5524, checks finiteness, positive weights, weight sums, markers, side labels, and some metadata. It does not fully establish geometric correctness:
+
+- root residual is enforced only when the backend marks a fragment `root_polished`;
+- normal validation requires only nonnegative alignment with the evaluated gradient, so a nearly orthogonal normal is not rejected;
+- volume quadrature points are not independently checked for parent-cell containment; and
+- their level-set sign is not evaluated to verify the declared negative/positive phase.
+
+This does not prove that current backend points are wrong. It proves that the common validation layer cannot detect several consequential backend errors.
+
+### Contact reconstruction revision risk
+
+The scalar-field overload of
+[`GeneratedInterfaceBoundaryIntersectionDomain.cpp`](../Code/Source/solver/FE/Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.cpp), lines 902--1003, explicitly ignores the supplied `interface_domain` object and reconstructs boundary roots from scalar nodal values. There is no enforced invariant that contact points use the same parent fragments, geometry revision, active-side decision, and topology as the surface quadrature used for capillary work.
+
+Independent reconstruction may be intentional, but the consistency contract is unqualified. Add same-revision and same-parent correspondence checks, plus tests at vertices, edges, nearly tangent intersections, and MPI ownership boundaries.
+
+### High-order curvature sampling is geometrically inconsistent
+
+The application curvature workflow constructs a supplemental reference point as the mean of reference nodes and independently constructs its purported physical location as the mean of physical nodes. It evaluates \(\phi\) at the former and stores the latter with that value. On a nonaffine or curved mapping,
+
+\[
+x\!\left(\frac{1}{N}\sum_i\xi_i\right)
+\ne
+\frac{1}{N}\sum_i x(\xi_i),
+\]
+
+so the least-squares sample is an inconsistent `(physical position, level-set value)` pair. The relevant implementation is in
+[`ApplicationDriver.cpp`](../Code/Source/solver/Application/Core/ApplicationDriver.cpp), lines 6291--6337 and 6511--6589. Cut-rule curvature samples map their points correctly in
+[`LevelSetCurvatureSamples.cpp`](../Code/Source/solver/Application/Core/LevelSetCurvatureSamples.cpp), lines 250--292.
+
+The high-order inclusion screen also uses nodal coefficient extrema plus only one interior sample. Lagrange shape functions can be negative inside an element, so this is not a certificate of the polynomial range or interface absence.
+
+The curvature projection itself is nodal recovery followed optionally by volumetric graph smoothing, not an interface finite-element \(L^2\) projection. Its `MassStiffness` mode estimates measures from primary corners and builds heuristic graph weights rather than using the actual cut-surface metric. These limitations are mostly outside the supported affine-P1 `SurfaceStress` path, which avoids explicit curvature, but they make high-order legacy-curvature and diagnostic claims unqualified and establish FSR-17.
+
+## Cut-cell mixed stability and conditioning
+
+The current method combines equal-order VMS/PSPG stabilization with pressure ghost penalty or small-cut aggregation. The pressure ghost term uses empirical scaling of the form
+
+\[
+0.01\frac{h^3}{\mu+\rho h^2/\Delta t}
+\]
+
+for first derivative jumps, with an \(h^5\) second-derivative option. Velocity ghost penalty is retired in the reviewed path; aggregation may constrain both velocity and pressure. Cut-metadata scaling is optional and not the universal default.
+
+This is not automatically equivalent to CutFEM analyses that prove cut-independent coercivity, inf-sup stability, or condition-number bounds for a particular velocity/pressure pair with both velocity and pressure stabilization. Nor is it automatically equivalent to AgFEM theory for a different aggregate space and pressure choice.
+
+Existing rank evidence is mixed: one fixed `n=2` coupling is rank `6/8` without stabilization, while larger or stabilized samples can be full rank. That is useful diagnostic evidence, not a uniform theorem.
+
+Small-cut aggregation preserves constants through a scaled partition check, but otherwise accepts finite positive or negative extrapolation weights without a uniform row-\(L^1\), path-length, or conditioning bound. A rootless disconnected active island may be pinned/deleted to keep the algebraic system solvable. That is a feature-deletion policy, not conservation of a small physical droplet, and must be exposed in splash telemetry.
+
+Required qualification is a systematic family over:
+
+- cut fraction from roughly `1e-8` through `0.5`;
+- subcell position and orientation;
+- mesh refinement and polynomial order;
+- viscosity, density, and time-step limits;
+- serial and multiple MPI partitions;
+- pressure-only ghost penalty, aggregation, and any combined mode; and
+- connected and subresolution disconnected liquid components.
+
+Record smallest relevant singular values or inf-sup surrogates, condition estimates, Krylov iterations, divergence norm, pressure error, velocity error, and constraint amplification.
+
+## Nonlinear and temporal coupling
+
+The interface geometry and extension maps are refreshed around nonlinear solves. `SurfaceStress` does not accept differentiated cut quadrature. As a result:
+
+- field derivatives at fixed geometry can be exact;
+- the overall coupled update is not a monolithic Newton method in shape;
+- map refresh can cause a residual jump unrelated to the frozen-map tangent;
+- contact-angle observations can refer to a different state/stage than velocity observations; and
+- an energy decrease cannot be inferred solely from positive individual dissipation terms.
+
+The minimum required telemetry key is
+
+`(accepted_step, accepted_time, dt, state_revision, geometry_revision, map_revision, nonlinear_iteration, nonlinear_phase, generalized_alpha_stage)`.
+
+At each accepted step, record kinetic, gravitational, liquid--gas surface, and Young wetted-wall energies, plus bulk viscous, wall-slip, and line-friction dissipation. Check a residual form of the complete energy balance, including maintenance and stabilization work.
+
+## Fitted-ALE free-surface audit
+
+The public fitted-free-surface interface declares tangential mesh policies `Free`, `SmoothingOnly`, and `Prescribed`, including a prescribed tangential velocity. These are parsed in
+[`NavierStokesRegister.cpp`](../Code/Source/solver/Physics/Formulations/NavierStokes/NavierStokesRegister.cpp), around line 2832, and checked for finite values in
+[`IncompressibleNavierStokesVMSModule.cpp`](../Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp), around line 3204. No production consumer applies the selected policy or velocity.
+
+This is a confirmed user-visible defect: all three settings currently have the same behavior.
+
+Other fitted-path limitations are explicit:
+
+- `SurfaceStress` is not the fitted production contact formulation;
+- fitted dynamic and prescribed contact angle are unsupported;
+- only a pinned/kinematic subset is available; and
+- local free-surface Nitsche settings are written into module-global values.
+
+Per-BC Nitsche parsing at `NavierStokesRegister.cpp` around line 2869 mutates global `options.nitsche_*`. Those globals control all fitted free surfaces, mesh-side penalties, and unrelated weak velocity conditions. Multiple BCs are therefore last-one-wins and registration-order dependent.
+
+## Configuration and lifecycle defects
+
+### Incomplete contact input can be ignored
+
+The parser decides that contact-line configuration is present using only a subset of model/angle keys. A wall marker/normal, mobility, slip law/length, or penalty provided without the detected keys can be discarded by an early return rather than rejected as an incomplete configuration. Every contact-related key should participate in one all-or-none schema with explicit diagnostics.
+
+### Custom operator registration can misroute the angle residual
+
+The default unified `equations` flow registers the correct level-set row owner. A custom registration sequence can install the prescribed-angle residual on the NS operator when no phi owner exists yet; a later differently tagged level-set owner is not reconciled. This is a custom-path lifecycle defect, not a failure of the default route.
+
+### Advertised but unavailable reinitialization modes
+
+Options enumerate Hamilton--Jacobi and fast-marching redistancing, but production parsing rejects both. Documentation/schema should distinguish planned enum values from supported runtime methods.
+
+## Existing numerical evidence and what it does not prove
+
+### Static sessile caps
+
+The corrected initializer samples the analytic cap directly at Q1 vertices. All six `60/90/120 degree` cases at `n=16,32` complete three steps. Every `n=32` row passes its per-mesh gates, while `n=16` angle gates fail at 90 and 120 degrees. Refinement fails:
+
+- the 60-degree pressure rate: `-2.8226`; and
+- the 90-degree capillary-number rate: `-0.4569`.
+
+Static pressure and parasitic-current behavior is therefore not balanced or convergent under the fixed matrix. The best-pressure-space residual in FSR-03 provides a direct mechanism.
+
+Artifacts: [free_surface_review_completion_20260717_static_initializer_correction](qualification_logs/free_surface_review_completion_20260717_static_initializer_correction/).
+
+### Moving side-wall contact
+
+The true side-wall matrix establishes correct orientation and completed horizons, but only one of four Ren--E speed gates passes. It is moving-wetting evidence and currently negative evidence.
+
+Artifacts are the four directories beginning with
+`qualification_logs/free_surface_review_completion_20260717_vertical_sidewall_physical_`.
+
+### Capillary wave
+
+The recorded `n=16` capillary-wave run completes 100 steps and passes its scoped gates:
+
+- maximum relative liquid-volume drift `9.25622e-7`;
+- frequency error about `1.2%`; and
+- profile-amplitude error about `1.50241%`.
+
+This is useful single-resolution smooth-interface evidence. It does not establish spatial convergence, moving contact, static balance, topological robustness, or a complete energy law.
+
+Artifact: [capillary_wave_n16.json](qualification_logs/free_surface_review_completion_20260717_final_entity_measures_wave/capillary_wave_n16.json).
+
+### Impermeable-wall advection
+
+The `n=8,16` wall-advection isolation completes 512 steps at each resolution, has zero false-liquid wall nodes/sign flips, and reports RMS rate `2.04184`. It validates prescribed-velocity transport in that smooth setup, not dynamic wetting or momentum/geometry feedback.
+
+Artifact: [qualification_summary.json](qualification_logs/free_surface_review_completion_20260717_final_entity_measures_wall_advection/qualification_summary.json).
+
+### D18/D38
+
+D18 accepts one reduced step to `1.5625e-5`; D38 accepts two reduced steps to `3.75e-4`. Neither reaches the nominal `5e-4` gate or the required long horizon `t>=0.281`. D38 exhibits the severe map amplification described in FSR-02.
+
+Artifacts:
+
+- [D18 one-step diagnostic](qualification_logs/free_surface_review_completion_20260717_final_d18_d38_one_step/d18/d18.json)
+- [D38 one-step diagnostic](qualification_logs/free_surface_review_completion_20260717_final_d18_d38_one_step/d38/d38.json)
+
+These are not wetting tests because `gamma=0`, there is no contact law, and the physical walls are no-slip.
+
+## Literature synthesis for finite-element implementation
+
+### Surface tension and balanced force
+
+| Reference | Relevant result | Consequence for this code |
+|---|---|---|
+| [Bänsch, 2001](https://doi.org/10.1007/PL00005443) | Finite-element surface-tension treatment tied to interface evolution can improve stability. | Surface virtual work, interface update, and time discretization must be analyzed together. |
+| [Groß & Reusken, 2007](https://doi.org/10.1137/060667530) | Analyzes FE error in surface-tension forces and pressure/interface compatibility. | Correct continuum traction is insufficient; measure the discrete pressure-range distance and parasitic velocity. |
+| [Buscaglia & Ausas, 2011](https://doi.org/10.1016/j.cma.2011.06.002) | Variational surface tension avoids explicit curvature but retains discrete-geometry requirements. | `SurfaceStress` is the right family of formulation, but FSR-03 still needs a compatible discrete equilibrium. |
+| [Barrett, Garcke & Nürnberg, 2013](https://arxiv.org/abs/1306.2192) | Stable parametric FE methods and pressure enrichment can achieve strong energy/volume/equilibrium properties. | Treat exact balance as a property of the entire space/geometry/time pair, not one force term. |
+| [Popinet, 2009](https://doi.org/10.1016/j.jcp.2009.04.042) | Machine-accurate static droplet balance and capillary-wave/breakup benchmarks are used as stringent surface-tension tests. | Static parasitic currents and translating-drop/capillary-wave tests should be release gates. |
+| [Zahedi et al., 2012](https://doi.org/10.1002/fld.2643) | FE level-set study specifically examines spurious currents. | Report pressure, velocity, curvature, and cut-position convergence together. |
+
+### Unfitted FE stability and extension
+
+| Reference | Relevant result | Consequence for this code |
+|---|---|---|
+| [Massing et al., 2014](https://doi.org/10.1007/s10915-014-9838-9) | A particular CutFEM Stokes formulation uses ghost penalties to obtain stability and cut-independent conditioning. | Pressure-only empirical stabilization in a different equal-order formulation does not inherit this theorem. |
+| [Burman & Hansbo, 2014](https://doi.org/10.1051/m2an/2013123) | Fictitious-domain/CutFEM analysis demonstrates why extension and stabilization must be consistent. | Replace same-velocity dry diffusion with a proven stabilization or a genuinely separate extension. |
+| [Frachon & Zahedi, 2019](https://doi.org/10.1016/j.jcp.2019.01.028) | Space-time CutFEM captures pressure/velocity discontinuities with stabilization designed for cut-independent conditioning and stabilized curvature. | Use it as a comparison target for pressure, velocity, and geometry stabilization, not as evidence the current scheme is equivalent. |
+| [Badia et al., 2018/2019](https://arxiv.org/abs/1805.01727) | Aggregated unfitted FE spaces can avoid small-cut ill conditioning under a defined aggregate-space construction. | Prove constant reproduction, approximation, stability, and component policy for the actual aggregate constraints. |
+| [Burman, Hansbo & Larson, 2022](https://arxiv.org/abs/2205.01340) | Relates locking-free ghost penalties to discrete-extension spaces. | A stable discrete extension has a defined kernel and bounds; arbitrary dry diffusion or regression does not. |
+| [Olshanskii, Reusken & Schwering, 2025](https://doi.org/10.1137/24M1674182) | A narrow-band FE level-set method constructs extension through an analyzed \(L^2\)/\(H^1\) projection plus ghost penalty. | This is a direct design comparison for replacing unchecked regression and same-field dry diffusion with a stable auxiliary extension. |
+| [Saye, 2022](https://arxiv.org/abs/2105.08857) | High-order quadrature over polynomial implicit surfaces/volumes attains high-order convergence with explicit geometric algorithms. | High-order configuration must require demonstrated achieved order, pointwise mapping, root accuracy, and topology handling. |
+
+### Moving contact lines and wetting
+
+| Reference | Relevant result | Consequence for this code |
+|---|---|---|
+| [Huh & Scriven, 1971](https://doi.org/10.1016/0021-9797(71)90188-3) | A sharp moving contact line with no slip is singular. | D18/D38 no-slip wall motion cannot be treated as physical wetting. |
+| [Ren & E, 2007](https://doi.org/10.1063/1.2646754) | Effective wall/contact-line conditions couple dynamic angle, wall slip, and contact speed. | Verify advancing/receding sign, mobility/friction scaling, and resolved slip length as a coupled law. |
+| [Sprittles & Shikhmurzaev, 2012](https://doi.org/10.1002/fld.2603) | Develops a consistent FEM framework and shows the importance of resolving contact-line scales. | Use resolved-slip convergence rather than tuning one mesh-dependent wall width. |
+| [Reusken, Xu & Zhang, 2017](https://doi.org/10.1002/fld.4349) | Derives a variational sharp-interface MCL formulation, energy estimate, XFEM pressure, Nitsche wall slip, and validation caps. | This is the closest full FE contract for surface, wall, and line energy ownership. |
+| [Zhao & Ren, 2020](https://doi.org/10.1016/j.jcp.2020.109582) | Energy-aware moving-mesh FE coupling of Navier slip and dynamic contact angle. | Establish the corresponding discrete energy residual for this unfitted/time-integrated method rather than assuming transfer of stability. |
+| [Xu & Ren, 2016](https://doi.org/10.4208/cicp.210815.180316a) | Redistancing at a contact line requires a compatible wall/contact-angle treatment. | Add contact-angle and line-displacement gates to reinitialization. |
+| [Della Rocca & Blanquart, 2014](https://doi.org/10.1016/j.jcp.2014.01.040) | Identifies a contact-line redistancing “blind spot” and tests wall-aware repair on wedges/arcs and moving drops. | Interior distance error alone cannot qualify wall redistancing; near-wall distortion and parasitic currents need direct gates. |
+| [Gründing et al., 2020](https://doi.org/10.1016/j.apm.2020.04.020) | Capillary-rise benchmark compares multiple methods and shows strong dependence on physical versus numerical slip. | Capillary rise between plates is a high-value side-wall wetting benchmark with public data. |
+
+### Interface transport and maintenance
+
+| Reference | Relevant result | Consequence for this code |
+|---|---|---|
+| [Sussman, Smereka & Osher, 1994](https://doi.org/10.1006/jcph.1994.1155) | Classical level-set advection/redistancing framework. | Redistancing and interface displacement must be measured separately from transport. |
+| [Enright et al., 2002](https://doi.org/10.1006/jcph.2002.7166) | Reversible 3D deformation test exposes interface loss under extreme stretching. | Use it to quantify raw volume, shape recovery, topology, and maintenance error. |
+| [Rider & Kothe, 1998](https://doi.org/10.1006/jcph.1998.5906) | Deformation-field tests emphasize geometric transport and mass conservation. | CG boundedness alone is not sufficient; local interface mass and reversibility must converge. |
+| [Kuzmin & Quezada de Luna, 2020](https://arxiv.org/abs/2003.12007) | Convex limiting for continuous FE scalar conservation laws can enforce invariant domains, local bounds, and entropy conditions through constrained fluxes. | If continuous FE transport is retained, compare against an actual AFC/convex-limited conservative formulation rather than a post-solve nodal preview. |
+
+## Recommended validation hierarchy
+
+Validation should proceed from exact operator tests to smooth physics, then wetting, then violent free surfaces, and only then splashing. Passing a later visually plausible case must never override a failed earlier balance or conservation gate.
+
+### Tier 0: algebraic, geometric, and manufactured verification
+
+#### 0A. Flat free surface with hydrostatics
+
+Use a box with
+
+\[
+u=0,\quad \phi=y-h,\quad p=p_{ext}+\rho g(h-y),\quad \theta=90^\circ.
+\]
+
+Repeat for every coordinate direction, gravity sign, active-side sign, wall orientation, and several arbitrary cut offsets. Required metrics:
+
+- assembled residual at the exact field;
+- pressure and velocity error;
+- surface-force/pressure-range residual;
+- parasitic kinetic energy;
+- volume before/after maintenance; and
+- invariance under positive scaling of \(\phi\).
+
+This is the first release gate because curvature is zero and geometry ambiguity is minimal.
+
+#### 0B. Static closed circle/sphere and sessile cap
+
+For a sphere of radius \(R\), use
+
+\[
+p_l=p_{ext}+\gamma(d-1)/R,
+\]
+
+and zero velocity. A published Groß--Reusken example uses a 3D sphere with `R=2/3`, `gamma=1`, and pressure jump `3`. Measure the best pressure-space residual, pressure jump, parasitic currents, area, curvature, and energy over at least three mesh levels and many cut translations.
+
+For contact, reproduce the [Reusken--Xu--Zhang](https://doi.org/10.1002/fld.4349) stationary cap: cube `(0,0.5)^3`, `R=0.1`, `theta=60 degrees`, `gamma=0.5`, equal density/viscosity 1, gravity 0, wall-friction parameter as published, and expected pressure jump `10`. Their finest reported velocity is near `1e-8`; use the paper's angle/base-radius convergence as comparison. Rotate the cap to every wall and test `30/60/90/120/150 degrees` plus phase-sign and mirror transformations.
+
+#### 0C. Extension invariance suite
+
+Use a manufactured liquid velocity and vary only:
+
+- dry-domain width;
+- dry-wall value and boundary type;
+- number and spacing of disconnected liquid components;
+- cut location;
+- \(\alpha\) and the cut floor; and
+- algebraic map reconstruction.
+
+The liquid residual and solution must be invariant to irrelevant dry-domain changes to tolerance. Record row-block deltas, interface flux, map condition, max coefficient, row-\(L^1\), constant reproduction, and \(\|E\|/\|u\|\).
+
+#### 0D. Cut-position stability sweep
+
+Translate a planar interface through one element so retained fractions range from about `1e-8` to `0.5`. Repeat with rotations, refinements, MPI partitions, and all stabilization modes. At each `h`, require conditioning and preconditioned iterations to remain cut-position independent relative to the fitted/reference system; across `h`, require the theoretically expected canonically scaled condition-number trend plus convergent pressure, velocity, divergence, and force residual.
+
+#### 0E. Reversible level-set deformation
+
+Use the Enright 3D sphere of radius `0.15` centered at `(0.35,0.35,0.35)`, reversing at period `T=3`, with
+
+\[
+u=2\sin^2(\pi x)\sin(2\pi y)\sin(2\pi z)\cos(\pi t/3),
+\]
+\[
+v=-\sin(2\pi x)\sin^2(\pi y)\sin(2\pi z)\cos(\pi t/3),
+\]
+\[
+w=-\sin(2\pi x)\sin(2\pi y)\sin^2(\pi z)\cos(\pi t/3).
+\]
+
+Report raw and maintained volume, symmetric-difference volume, Hausdorff/interface distance, component count, minimum sheet thickness, and final shape recovery over at least three `h` and `dt` levels.
+
+### Tier 1: smooth capillary and wetting physics
+
+#### 1A. Translating equilibrium drop
+
+Use the Popinet translating-drop test (`D=0.4` in a unit square, prescribed translation, `We=0.4`, and several Laplace numbers). A correct method should translate without deformation, pressure drift, or growing parasitic currents. This simultaneously tests transport, pressure/surface balance, and Galilean behavior.
+
+#### 1B. Linear capillary wave
+
+Compare amplitude and phase against Prosperetti's viscous theory:
+
+- [one viscous fluid, 1976](https://doi.org/10.1063/1.861446);
+- [two superposed viscous fluids, 1981](https://doi.org/10.1063/1.863522), for a future two-phase solver.
+
+Extend the existing single `n=16` pass to at least three spatial and temporal levels. Gate frequency, damping, phase, pressure amplitude, raw volume, maintained volume, and total-energy residual.
+
+#### 1C. Droplet oscillation
+
+For an inviscid one-phase spherical droplet, the Rayleigh `l=2` frequency is
+
+\[
+\omega^2=\frac{8\gamma}{\rho R^3}.
+\]
+
+Use small initial deformation first, then viscous damping comparisons from [Prosperetti](https://doi.org/10.1017/S0022112080001188) and [Miller & Scriven](https://doi.org/10.1017/S0022112068000832). Measure frequency, damping, mode purity, volume, pressure, and energy.
+
+#### 1D. Spreading and contracting sessile drop
+
+Reproduce Reusken--Xu--Zhang relaxation from `theta0=90 degrees` to equilibrium `30/60/120 degrees`. For their spherical-cap volume, the equilibrium radius relation is
+
+\[
+R=R_0\left[
+\frac{2}{2-2\cos\theta-\sin^2\theta\cos\theta}
+\right]^{1/3},\qquad r=R\sin\theta.
+\]
+
+Published base radii are approximately `0.169384`, `0.127619`, and `0.0727416`. Gate equilibrium radius/angle, line speed versus constitutive prediction, monotone energy decay, wall-slip and line-friction dissipation, and independence from wall-indicator width.
+
+#### 1E. Resolved moving-contact benchmark
+
+Use the finite-element framework of [Sprittles & Shikhmurzaev](https://doi.org/10.1002/fld.2603), including cases around `Re=10`, `Ca=0.01`, large nondimensional slip parameter, and `30-degree` contact angle. The slip length must be spatially resolved; run independent slip, mesh, and time refinement. Compare interface shape, contact speed, pressure, and stress rather than angle alone.
+
+#### 1F. Capillary rise between parallel plates
+
+Use the public [Gründing et al. benchmark](https://arxiv.org/abs/1907.05054) and [associated data](https://doi.org/10.25534/tudatalib-173). Compare rise height, overshoot, oscillation period, damping, equilibrium height, and contact-line evolution. This is the highest-priority new side-wall wetting validation because it distinguishes physical Navier slip from numerical slip.
+
+#### 1G. Linear sloshing
+
+Use analytical linear sloshing frequencies and [NASA SP-106](https://ntrs.nasa.gov/citations/19670006555) as references. Gate elevation histories at multiple probes, phase, damping, pressure, volume, and energy. Then proceed to nonlinear sloshing only after linear convergence.
+
+### Tier 2: violent one-phase free-surface flow
+
+#### 2A. Dam break and wall impact
+
+- [Martin & Moyce, 1952](https://doi.org/10.1098/rsta.1952.0006): classical front-position/collapse history.
+- [Lobovský et al., 2014](https://arxiv.org/abs/1308.0115): statistically characterized wall-impact pressure histories.
+- [Kleefsman et al., 2005](https://doi.org/10.1016/j.jcp.2004.12.007): 3D dam break with obstacle, free-surface gauges and loads.
+- [SPHERIC Test 02](https://www.spheric-sph.org/tests/test-02): 3D dam-break free-surface evolution.
+- [SPHERIC Test 05](https://www.spheric-sph.org/tests/test-05): wet-bed dam-break evolution.
+
+Use experimental distributions and impulse, not a single pressure peak. Report front/run-up, gauge histories, component topology, raw/corrected mass, impact impulse, and mesh/time uncertainty.
+
+#### 2B. Solitary-wave run-up
+
+Use [Synolakis, 1987](https://doi.org/10.1017/S002211208700329X) for nonbreaking and breaking run-up. Compare shoreline/contact position, maximum run-up, reflected wave, and mass. Interpret wall/beach contact carefully because a mathematical shoreline model is required.
+
+#### 2C. Nonlinear sloshing and impacts
+
+Use [Faltinsen et al.](https://doi.org/10.1017/S0022112099007569), [Cruchaga et al.](https://doi.org/10.1007/s00466-013-0877-0), and [SPHERIC Test 10](https://www.spheric-sph.org/tests/test-10). Test 10 supplies repeated lateral/roof impact histories for water and oil, but the tank is closed and contains air. A one-phase solver can compare bulk elevation and early liquid kinematics; roof pressure and trapped-air effects require a gas model and should not be acceptance gates for the present physics.
+
+### Tier 3: splash, sheet, rim, and breakup validation
+
+#### 3A. Wet-film crown splash: recommended first splash benchmark
+
+Use splash onto an existing liquid film before dry-wall splash. It avoids a moving dry contact line during the earliest crown formation and is closer to the current one-phase physics while gas effects remain modest.
+
+Recommended data:
+
+- [Cossali et al., 2004](https://doi.org/10.1007/s00348-003-0772-0): time-resolved crown diameter, height, thickness, rim jets, and secondary drops.
+- [Geppert et al., 2017](https://doi.org/10.1007/s00348-017-2447-2): quantitative one- and two-component crown benchmark over Weber number and film thickness, including base/top diameter, height, wall angle, fingers, and secondary droplets.
+- [Bagheri et al., 2026 open dataset](https://tudatalib.ulb.tu-darmstadt.de/items/c83209b0-090c-4f4c-a3dc-c53fe58534f7): drop impact on `h=0.4 mm` and `0.5 mm` films, with time-resolved `D_Base`, `D_Mid`, `D_Rim`, and `H_Rim`, experimental standard deviations from 10--14 repeats, simulation sheet/film thickness, and videos.
+- [Yarin & Weiss, 1995](https://doi.org/10.1017/S0022112095002266): kinematic crown-spreading theory and scaling.
+
+Compare against uncertainty bands, not only center curves. Minimum outputs are:
+
+- crown base, mid, and rim diameter;
+- rim height and speed;
+- sheet thickness versus height/time;
+- residual film thickness;
+- rim radius and finger count;
+- secondary-droplet size/count when resolved;
+- raw and corrected liquid volume;
+- surface area and energy histories; and
+- pruned/aggregated feature statistics.
+
+The current P1/LinearCorner method should first target the smooth pre-breakup crown interval. Secondary atomization is not credible until sheet thickness and rim wavelength are independently resolved and a gas phase is available.
+
+#### 3B. Contracting liquid filament and capillary breakup
+
+Use [Notz & Basaran, 2004](https://doi.org/10.1017/S0022112004009759) for contracting filaments and [Castrejón-Pita et al., 2012](https://doi.org/10.1103/PhysRevLett.108.074506) for breakup dynamics. Measure minimum neck radius, end-pinching time, satellite volume, component count, and similarity scaling. This is an exacting topology and local-conservation test without a wall contact line.
+
+#### 3C. Capillary jet breakup
+
+Use the jet breakup cases in [Popinet, 2009](https://doi.org/10.1016/j.jcp.2009.04.042). Compare Rayleigh--Plateau growth rates, breakup wavelength/time, and satellite size. This directly exposes nonconservative loss and sliver deletion.
+
+#### 3D. Dry-wall splash: future two-phase target
+
+Dry-wall splashing is strongly affected by gas pressure and air cushioning:
+
+- [Mundo et al., 1995](https://doi.org/10.1016/0301-9322(94)00069-V);
+- [Xu, Zhang & Nagel, 2005](https://doi.org/10.1103/PhysRevLett.94.184505); and
+- [Mani, Mandre & Brenner, 2010](https://doi.org/10.1017/S0022112009993594).
+
+These are not fair quantitative acceptance tests for the current one-phase model. They should be deferred until gas inertia/viscosity and, where relevant, compressibility and dynamic wetting are represented. The present solver may use them only for qualitative topology experiments explicitly labeled outside-model.
+
+### Tier 4: future two-phase validation
+
+The [Hysing et al. bubble benchmark](https://doi.org/10.1002/fld.1934) is a standard future test for density/viscosity jumps, surface tension, and topology. It uses `[0,1] x [0,2]`, initial radius `0.25` centered at `(0.5,0.5)`, and reports circularity, center of mass, and mean rise velocity. Case 1 has robust intercode reference quantities; Case 2 agrees only before breakup and should not be assigned a single exact post-breakup shape.
+
+A current one-phase free-surface solver cannot represent this benchmark's second fluid. The same applies to trapped-bubble and air-entrainment splash cases.
+
+## Acceptance protocol
+
+Every production qualification should meet the following protocol.
+
+1. **Predeclare gates.** Fix errors/tolerances before running; do not tune them to observed results.
+2. **Refine space and time independently.** Use at least three meaningful `h` levels and three `dt` levels, including a fixed-`h` time study and fixed-`dt` space study.
+3. **Sweep cut geometry.** Translate and rotate the same physical interface relative to the background mesh.
+4. **Sweep partitions.** Repeat representative cases in serial and multiple MPI decompositions.
+5. **Expose maintenance.** Report raw post-transport and final post-reinitialization/post-correction values separately.
+6. **Measure local conservation.** Track per-component volume, wall-film mass, crown-sheet mass, and flux balance, not only total volume.
+7. **Measure force balance.** Report best pressure-space residual, pressure error, surface-force residual, divergence, and parasitic kinetic energy.
+8. **Measure energy.** Report all physical energy and dissipation terms plus stabilization, extension, pruning, and maintenance work.
+9. **Resolve regularization scales.** Slip length, wall smoothing width, film thickness, sheet thickness, and neck/rim radius must be resolved independently of the grid.
+10. **Quantify numerical interventions.** Record step rejection, dt reduction, limiter requests, map fallback, aggregation, pruning, reinitialization displacement, and volume shift.
+11. **Use experimental uncertainty.** Compare histories and distributions against repeatability bands; do not gate a chaotic impact by one peak.
+12. **Respect the physics envelope.** Do not claim validation of gas-dependent splash using prescribed external pressure.
+
+## Recommended remediation order
+
+### P0: eliminate formulation feedback and establish exact low-level gates
+
+1. Replace or rigorously reformulate the same-velocity dry-domain Laplacian. Add wet-block invariance and two-island tests first.
+2. Guard the algebraic extension map with rank/condition, coefficient, row-norm, constant-reproduction, negative-weight, and preview-amplification limits plus a bounded fallback.
+3. Turn the pressure best-space residual into a fixed physical acceptance gate; establish flat-interface and discrete static-cap balance before further wetting tuning.
+4. Derive and implement a contact-angle wall treatment that is consistent across level-set transport, surface/wall energy, and reinitialization. Remove the unscaled penalty or supply a defensible scaling and convergence result.
+
+### P1: close dynamic wetting
+
+5. Add accepted-state/stage/revision provenance to angle and contact-speed telemetry.
+6. Compare exact sharp wetted-wall integration against the current smoothed indicator; refine wall width and slip length independently.
+7. Re-run advancing/receding and sessile relaxation matrices until sign, speed, equilibrium, and energy gates pass at multiple meshes.
+8. Add the public capillary-rise benchmark as the primary side-wall physical validation.
+
+### P2: conservation, cut stability, and energy
+
+9. Select a locally conservative or demonstrably mass-preserving interface-transport strategy suitable for sheets and breakup; keep raw conservation visible even if global correction remains.
+10. Establish cut-position-independent stability/conditioning for the actual velocity/pressure spaces and stabilization, including disconnected components.
+11. Make volume measurement use the same pointwise physical mapping as assembly on nonaffine/high-order cells.
+12. Clip every generic exterior weak/natural boundary form to the sharp wetted boundary and verify cut-fraction consistency.
+13. Strengthen cut backend validation, fix high-order curvature sampling, and enforce common geometry revision between surface and contact rules.
+14. Derive and gate a complete discrete energy residual, including extension and maintenance work.
+
+### P3: broader methods and splash
+
+15. Wire or remove fitted-ALE tangential mesh options and make Nitsche policy BC-local.
+16. Complete smooth Tier 0/1 validation, then dam-break/sloshing Tier 2.
+17. Begin splash qualification with the 2026 wet-film crown dataset over its smooth pre-breakup interval.
+18. Add a solved gas phase before claiming dry-wall splash, trapped-air impact, entrainment, or secondary atomization accuracy.
+
+## Detailed implementation and qualification execution notes
+
+This section converts findings FSR-01 through FSR-18 into an implementation and test program. It is a plan, not a record that the changes or simulations have already been completed. The source should be changed only through separately reviewed work, and each method change should be qualified before a later benchmark is allowed to mask an earlier defect.
+
+### Implementation and qualification status
+
+A work-package box is checked only after its source changes, required tests, and exit evidence below are complete. A qualification box is checked only after the complete predeclared matrix passes and its machine-readable artifacts are archived.
+
+- [x] WP-0: configuration containment and effective-state provenance
+- [ ] WP-1: remove physical dry-domain feedback and bound the transport extension
+- [ ] WP-2: one authoritative cut/interface/wet-wall/contact geometry snapshot
+- [ ] WP-3: sharply clipped exterior boundary operators
+- [ ] WP-4: balanced capillary pressure, wall energy, and prescribed angle
+- [ ] WP-5: side-wall contact-line dynamics and wall-aware maintenance
+- [ ] WP-6: locally conservative interface transport and maintenance transaction
+- [ ] WP-7: coherent small-cut stability and conditioning
+- [ ] WP-8: geometry coupling, nonlinear convergence, and a complete energy law
+- [ ] WP-9: fitted-ALE free-surface policies
+- [ ] WP-10: explicit one-phase boundary and a staged two-phase extension
+- [ ] Q0: harness, provenance, and negative configuration tests
+- [ ] Q1: exact algebra, geometry, boundary, transport, and cut tests
+- [ ] Q2: hydrostatic, capillary-equilibrium, and contact-equilibrium tests
+- [ ] Q3: pure transport and smooth free-surface dynamics
+- [ ] Q4: dynamic wetting and side-wall qualification
+- [ ] Q5: violent but one-phase-compatible free-surface motion
+- [ ] Q6: film, filament, jet, and pre-breakup crown motion
+- [ ] Q7: two-phase and gas-sensitive phenomena
+
+The objective is not to make one splash image look plausible. The objective is to establish a reproducible chain from discrete identities and cut-cell invariants through static capillarity, moving wetting, smooth dynamics, violent one-phase motion, and only then breakup or gas-dependent splash. A finding is closed only when all of the following exist:
+
+1. a derivation or design decision that states the discrete contract and its applicability limits;
+2. a source implementation with unsupported legacy paths disabled or clearly isolated;
+3. serial and MPI unit, assembly, and integration tests where applicable;
+4. acceptance thresholds declared before the qualifying runs;
+5. machine-readable results tied to source, configuration, mesh, and reference-data hashes; and
+6. a short qualification record showing that the complete matrix passes without case-specific retuning.
+
+Passing a single benchmark, hiding raw transport error with volume correction, or obtaining nonlinear convergence after reducing the time step is not sufficient closure.
+
+### Non-negotiable implementation invariants
+
+The repaired infrastructure should enforce these invariants centrally rather than relying on every consumer to reconstruct them correctly.
+
+1. **One authoritative geometry state.** One immutable, revision-tagged snapshot must own retained liquid/dry volume rules, interface rules, sharply wetted exterior-boundary rules, contact rules, normals, pointwise geometry maps and Jacobians, pruning decisions, topology IDs, and MPI ownership. Surface and contact geometry must never be independently rebuilt from nominally similar inputs.
+2. **One-way transport extension.** Physical liquid velocity may generate an auxiliary extension field used to transport the level set, but the extension must not add rows or tractions to physical momentum. If a cut-conditioning operator acts on physical velocity, it must be named, derived, and qualified as cut stabilization rather than disguised as extension.
+3. **Identical assembled and measured domains.** Assembly, phase-volume accounting, force and energy diagnostics, output, and maintenance must consume the same retained quadrature and pointwise physical mapping. If an unpruned geometric volume is also useful, it must be reported under a different name.
+4. **A complete work and energy ledger.** Every contribution must be classified as variation of stored energy, physical dissipation, external work, or explicitly reported numerical work. Stabilization, aggregation, extension, pruning, redistancing, limiting, and global correction may not disappear from the balance.
+5. **Fail-closed configuration.** Incomplete contact models, stale geometry, ambiguous active domains, unsupported fitted-ALE policies, falsely claimed quadrature order or achieved order below the predeclared required minimum, excessive extension amplification, and unresolved rootless features must fail before operator registration or step acceptance. A parsed but unused option or silent whole-face fallback is not acceptable.
+
+### Architecture decisions to freeze before coding
+
+The following decisions affect several findings and should be recorded as short architecture decision records. Competing prototypes should be compared on a fixed low-level gate matrix; coefficients should not be tuned separately for each validation case.
+
+| Decision | Alternatives that need an explicit choice | Evidence required before selection |
+|---|---|---|
+| AD-1: unfitted transport extension | Auxiliary bounded extension only; or a mathematically analyzed discrete extension/aggregation construction | One-way wet-block invariance, reproduction, amplification, component-separation, and MPI tests |
+| AD-2: capillary force/pressure pair | Discrete surface-energy variation with compatible pressure; stabilized mean-curvature vector; pressure enrichment/lifting; trace/XFEM pressure; or a fitted/parametric interface option | Flat exact balance, static-circle/sphere and sessile-cap convergence, force representability, consistency in moving cases, and an energy argument |
+| AD-3: small-cut stability | A complete CutFEM formulation with the needed velocity/pressure ghost penalties; or a rigorously defined aggregate finite-element space | Cut-position-independent errors, inf-sup surrogate, cut-relative/canonically scaled conditioning, constraint amplification, conservation, and MPI invariance |
+| AD-4: conservative interface representation | Locally conservative phase-indicator/phase-volume transport using AFC/FCT continuous FE, DG/FV, or a coupled level-set/volume-fraction method | Cancellation of the appropriate discrete phase flux, boundedness, component conservation, geometry accuracy, topology behavior, and momentum consistency |
+| AD-5: geometry/nonlinear coupling | Complete fixed-topology shape tangent; or an energy-stable partitioned/outer iteration converged to a common stage | Directional derivatives or a discrete energy proof, refresh neutrality, stage consistency, and topology-event policy |
+| AD-6: physical capability | Qualified one-phase liquid envelope; incompressible two-phase extension; later compressible gas where required | Separate qualification matrices and explicit claims for each model; no reuse of one-phase success as two-phase evidence |
+
+### Dependency and delivery sequence
+
+The recommended dependency chain is:
+
+```text
+typed configuration and containment
+    -> authoritative geometry and bounded one-way extension
+    -> balanced capillarity, sharp wet boundaries, and coherent cut stability
+    -> contact-line geometry/reinitialization and conservative transport
+    -> complete energy/time integration and fitted-ALE closure
+    -> smooth and violent one-phase qualification
+    -> film, filament, jet, and pre-breakup crown qualification
+    -> two-phase and gas-sensitive splash qualification
+```
+
+This order is intentional. Dynamic-contact coefficients should not be calibrated while fictitious dry momentum, unbounded extension, unbalanced surface force, or whole-face dry boundary work remain active. Likewise, breakup data should not be used to tune global volume correction before local transport conservation and sliver handling have been exposed.
+
+Before the first implementation change, preserve the current failing and passing artifacts as a read-only baseline, including the effective inputs, current source hashes, D18/D38 map histories, pressure-representability output, four Ren--E gate results, raw/post-maintenance volume, solver histories, and resource use. Develop each work package through reviewable changes with its new tests added before or with the implementation. After every package, rerun its prerequisites and fixed baseline cases with a one-factor A/B comparison; do not combine several method replacements into one unexplained benchmark improvement.
+
+### WP-0: configuration containment and effective-state provenance
+
+**Findings addressed:** FSR-10, FSR-11, and FSR-12, plus fail-closed protection for all later work.
+
+Implementation notes:
+
+- Introduce a typed, discriminated contact configuration with explicit `None`, `Pinned`, `PrescribedAngle`, and `DynamicRenE` alternatives. If any contact-related key is present, parse the entire selected block and diagnose every missing, conflicting, unknown, or model-inapplicable key. Do not silently return when only a subset of aliases is present.
+- Move free-surface Nitsche settings into each `FreeSurfaceBoundary`. Keep module-global Nitsche values only for generic weak velocity conditions. Registration order must not affect either boundary.
+- Treat the fitted-ALE tangential options as unsupported until WP-9 wires them into mesh motion. A requested but unimplemented policy must stop configuration rather than run as a no-op.
+- Add a two-pass setup: first create and validate typed fields, boundary policies, level-set ownership, and geometry requests; only then register forms and constraints. Remove fallback owner selection for contact-angle operators.
+- Write one effective-configuration artifact after validation. It should include defaults after expansion, units, active phase sign, wall/contact markers, angle convention, slip length, mobility or line friction, smoothing widths, free-surface and Nitsche policy, maintenance policy, stabilization, pruning, extension guards, and capability label.
+- Version the schema and provide explicit checkpoint/configuration migration. Old inputs that select legacy behavior must say so and may not inherit production-qualified status.
+
+Required tests and exit evidence:
+
+- Exercise every contact alias alone and verify that it fails as incomplete; exercise valid configurations for all four model alternatives.
+- Test multiple walls, mismatched cardinality, degrees/radians ambiguity, unknown keys, duplicate owners, and keys that are illegal for the selected model.
+- Register two fitted free surfaces with different Nitsche policies in both orders and verify identical matrices and solutions. Verify that an unrelated weak velocity boundary retains its own policy.
+- Snapshot-test the effective configuration and prove that no accepted option is parsed but unused.
+- Close the work package only when unsupported combinations fail before assembly and configuration order has no numerical effect.
+
+### WP-1: remove physical dry-domain feedback and bound the transport extension
+
+**Findings addressed:** FSR-01, FSR-02, and FSR-18.
+
+Implementation notes for the physical velocity:
+
+- Remove `applyFreeSurfaceVelocityExtension` from the production physical momentum path. During transition, rename it as a legacy dry-velocity diffusion mechanism and fail closed when it is selected by a purportedly qualified case.
+- Reinstate a precise inactive-velocity constraint policy. Constrain only degrees of freedom with no retained liquid support; never pin a wet-supported cut degree of freedom.
+- If removal exposes small-cut conditioning, solve that problem in WP-7 with the selected consistent cut formulation. Do not reintroduce dry traction through a differently named coefficient.
+
+Implementation notes for the auxiliary field `E`:
+
+- Move extension-map construction out of `ApplicationDriver.cpp` into a testable component that produces an immutable map snapshot tied to mesh, level-set value, topology, ownership, geometry, and active-set revisions.
+- Replace pivot-only stencil acceptance with rank-revealing QR/SVD or an equivalent condition estimate. Record rank, condition estimate, maximum coefficient, row sum, row `L1` norm, negative-weight count/magnitude, reproduction error, extrapolation distance, preview amplification, component assignment, and revision-to-revision map change.
+- Use fixed guards for all of those quantities. A failed high-order reconstruction should take a bounded fallback, such as nonnegative inverse-distance or nearest-normal interpolation with row sum one; it should never accept an arbitrarily amplified row.
+- Reproject `E` onto every newly accepted map. A warm start that violates the refreshed exact constraints must not be retained.
+- Replace cell-node clique adjacency with actual mesh-edge adjacency or a bounded geometric-neighbor graph. Component IDs are bookkeeping only. Assign collision-zone vertices using nearest-interface or normal-geodesic geometry; use a documented bounded blend or fail on a true unresolved tie, never select the lower numeric component ID.
+- Build matrix sparsity from the same admissible graph and maximum fallback stencil used by the map. Enforce the one-way dependency `u -> E -> phi`; no `E` row may enter physical Navier--Stokes momentum.
+
+Required low-level tests:
+
+- Compare the liquid-supported residual and Jacobian blocks while changing dry depth, exterior dry velocity values, legacy diffusivity, and disconnected dry paths. Define scaled norms such as `||Delta R_w||/(a_R + ||R_w||)` and `||Delta J_ww||_F/(a_J + ||J_ww||_F)`, with documented dimensional absolute floors; exclude pressure-gauge rows and unrelated global constraints. Candidate assembled-block gates are `1e-11` in serial and `1e-9` under MPI, subject to ratification before running. Compare solved fields separately against declared nonlinear, linear-solver, and reduction tolerances rather than requiring roundoff equality.
+- Verify zero matrix coupling between two liquid islands through dry cells and unchanged manufactured liquid velocity after adding dry layers.
+- Test constant reproduction, permitted affine reproduction, exact frozen-map Jacobian, wall-normal compatibility, and residual neutrality after same-state map refresh.
+- Use collinear/coplanar, near-singular, thin-band, isolated-island, and approaching-component stencils. Sweep band widths of 1, 2, 4, and 8 cell layers and permute node/component numbering and MPI partitions.
+- Verify that quadrilateral/hexahedral diagonals do not become graph edges. Translate two nearby but physically disconnected drops or sheets through a collision-band overlap and require no cross-component contamination before actual contact.
+- Require row-sum error below the predeclared floating-point tolerance, bounded row `L1` norm, bounded `||E||/||u||`, no unapproved negative weights, and identical physical results after deliberate component relabeling. A convex fallback should have nonnegative coefficients and row `L1` no greater than one plus tolerance.
+
+Simulation exits:
+
+- Re-run wall advection, translating drop, reversible Enright deformation, and the two-island case, plus a reduced deterministic reproducer of the D38 map failure. The reproducer must eliminate the previously observed `10^2`--`10^6` extension amplification and map-refresh velocity spike. Full-horizon D18/D38 runs remain Q5 tests after Q0--Q4, where they must also be independent of unused dry-domain geometry.
+- Preserve a machine-readable per-revision map report, including every fallback and guard rejection. Closure requires both the one-way wet-block result and the replacement cut-conditioning evidence from WP-7.
+
+### WP-2: one authoritative cut/interface/wet-wall/contact geometry snapshot
+
+**Findings addressed:** FSR-13, FSR-14, FSR-15, and FSR-17; this work is also a prerequisite for FSR-03 through FSR-07 and FSR-09.
+
+Implementation notes:
+
+- Extend the current cut-integration context or introduce an equivalent immutable `FreeSurfaceGeometrySnapshot`. It should contain retained positive/negative volume quadrature, interface quadrature, sharply clipped positive/negative external-boundary quadrature, contact quadrature, source-fragment stable IDs, topology and component IDs, ownership, achieved order, pruning/aggregation status, reference and physical points, normals/conormals, pointwise `J` and `|det J|`, and all source revisions.
+- Derive interface, wetted wall, and contact rules from the same cell decomposition. The contact line is the boundary of the wetted wall patch and must point back to its source interface fragment; it is not an independently discovered root set.
+- In the scalar contact builder, use `interface_domain.fragments()` as the authoritative candidates. Any higher-accuracy wall root reconstruction must remain inside and verify correspondence with its parent fragment. Reject orphan contact roots and surface fragments that should meet a wall but have no corresponding contact rule.
+- Compute physical phase volume by evaluating the same pointwise geometry map and `|det J(xi_q)|` used by assembly at every retained quadrature point. Test this through assembly of the constant-one form. Report an unpruned lifecycle volume and an assembled retained volume separately if both are needed.
+- Pair high-order curvature values and coordinates at the same reference point: select `xi`, map it through the geometry mapping to `x(xi)`, and evaluate `phi(xi)`. Replace nodal-extrema screening with a certified polynomial bound/subdivision or an authoritative high-order cut-backend query.
+- Add a single validator that checks every point, not only points marked `root_polished`: finite positive weights, parent-cell containment, declared phase sign, root residual, normal angular error, positive/negative volume partition, wet/dry boundary partition, surface/contact provenance, polynomial moments through claimed order, achieved-order policy, revision equality, and unique MPI ownership. Root and normal checks must use the geometry represented by that backend: for `LinearCorner`, test roots and normals of the linear interpolant; error relative to a higher-order FE field or analytic surface is a separate approximation metric.
+- Keep the snapshot compact and cache by revision. Track cache size and peak resident memory; evict superseded snapshots only after no assembly or diagnostic consumer can reference them.
+
+Required tests:
+
+- Use affine and distorted Q1 quadrilaterals/hexahedra and curved Q2/Q3 cells. Compare phase volumes and surface moments against high-order reference integration; require constant-one diagnostic/assembly equality to quadrature tolerance.
+- Sweep analytic planar, circular, and spherical cuts through vertices, edges, faces, near tangencies, and volume fractions from `1e-8` through `0.5`, including phase reversal and rotations.
+- Inject off-interface roots, nearly orthogonal normals, outside-parent points, swapped phase labels, wrong moments, false achieved order, stale revisions, orphan contact rules, and duplicate MPI ownership. The validator must reject every injected defect.
+- Exercise vertex/edge/tangent/aligned-zero wall intersections and translate/rotate a sessile cap through cell and MPI boundaries. Physical contact measure and position should converge continuously; source IDs may legitimately change at a cell or ownership crossing but their remapping must be deterministic and revision correct.
+- Test warped high-order cells where a mapped reference centroid differs from an average of physical nodes and cases with interior roots missed by nodal extrema.
+- Run distorted-mesh translating-drop/volume-correction tests and high-order static-drop and capillary-wave curvature studies. The correction target must equal assembled liquid measure, and curvature error must recover its expected refinement trend.
+
+Exit evidence:
+
+- A geometry ledger must show that every contact fragment references exactly one valid source-surface fragment, while allowing one surface fragment to have zero or multiple wall intersections. It must also show zero stale/orphan contact rules, quantitative maximum root/normal/moment errors, and constant-one volume equality.
+- All consumers must declare the same complete snapshot revision key. A mismatch should be a hard error, not a warning or implicit refresh.
+
+### WP-3: sharply clipped exterior boundary operators
+
+**Finding addressed:** FSR-16, with direct relevance to FSR-01 and FSR-05.
+
+Implementation notes:
+
+- Add a generated codimension-one integration domain for the intersection of every background exterior face with the active liquid phase. Each point needs parent cell/facet, reference and physical coordinates, physical normal, wet measure/Jacobian, active side, interface and wall markers, ownership, and the common geometry revision.
+- Allow forms to request either the full physical boundary or an active-phase subset explicitly. When an unfitted active domain cuts a boundary, route traction, Robin, outflow, pressure-flux, weak Nitsche, wall slip, and any other natural/weak form through the sharp subset.
+- Reject ambiguous multiple active domains and reject an implicit fallback to the whole background `.ds`. The current smoothed wet-wall indicator may remain only as a separately named regularized experimental model with its width stated in physical units and independently refined.
+- Include cut-stable trace scaling for Nitsche and slip on arbitrarily small wet patches; qualify that scaling jointly with WP-7.
+
+Required tests and exits:
+
+- Integrate constants and polynomials over analytically half-wet, quarter-wet, and obliquely cut faces. A completely dry face must contribute exactly zero.
+- Sweep wet fractions `1e-8`, `1e-6`, `1e-4`, `1e-2`, `0.1`, `0.25`, `0.49`, and one; test traction, Robin/outflow, symmetric and unsymmetric Nitsche, and wall slip under active-side reversal and MPI repartitioning.
+- Run a manufactured channel while the interface crosses an inlet, outlet, and side wall. Force, flux, and penalty work must vary with the analytic wet measure. Compare left and right limits as a cut crosses a mesh vertex and require any global numerical jump to converge to zero with refinement.
+- Closure requires that no generic weak or natural operator on a supported cut physical boundary retains whole-face integration.
+
+### WP-4: balanced capillary pressure, wall energy, and prescribed angle
+
+**Findings addressed:** FSR-03 and FSR-04.
+
+Implementation notes:
+
+- Make the distance of the capillary load to the discrete pressure-gradient range a required physical diagnostic, not just an LSQR solver-convergence statistic.
+- Define one discrete functional that owns liquid--gas surface area `A_lg,h`, solid--liquid wetted area `A_sl,h`, and liquid volume `V_h`. Derive capillary surface work, Young wall work, and constant equilibrium-pressure work from variations of those exact discrete quantities and the authoritative geometry snapshot.
+- Verify finite-difference directional derivatives of `gamma A_lg,h - gamma cos(theta_e) A_sl,h` and `lambda V_h`, where `lambda` is the constant volume-constraint/equilibrium-pressure multiplier, before selecting a balanced-force formulation. Verify a general FE pressure field separately against the corresponding discrete divergence/domain-variation identity; it is not the variation of the scalar product `p V_h`. Do not merely project away the component of surface force that pressure cannot represent, because that could suppress real moving-interface dynamics.
+- Evaluate the AD-2 alternatives on the same static and moving tests. The selected method may require a compatible curvature projection, pressure enrichment/lifting, trace/XFEM pressure, or a different surface representation. Record why the chosen pressure and velocity traces can represent the needed equilibrium.
+- Initialize a discrete static cap by constrained minimization of the same discrete surface/wall energy at the same discrete volume. Separately measure convergence of that discrete equilibrium to the analytic cap; do not expect sampled analytic geometry to be an exact algebraic equilibrium on every coarse mesh.
+- Retire the literal unscaled codimension-two prescribed-angle penalty as a qualified path. Implement the wall condition `grad(phi) dot n_w = -cos(theta) |grad(phi)|` through a derived constrained update, ghost extension, or consistently scaled Nitsche/geometric treatment owned by the level set.
+- Preserve a clear division of labor: momentum-side Young wall energy supplies physical force, while level-set wall geometry and redistancing preserve the requested interface orientation. Show that the two do not impose contradictory work.
+
+Required tests:
+
+- Flat interfaces for every coordinate direction, wall orientation, phase sign, gravity direction, cut offset, pressure-gauge treatment, and MPI decomposition. At exactly representable fields, the assembled compatible pressure/external-pressure residual should balance at scaled roundoff. A computed solution is instead gated by its declared nonlinear and linear-solver tolerances.
+- Closed circles/spheres and sessile caps at `30`, `60`, `90`, `120`, and `150` degrees, rotated to every wall. Report pressure jump, best pressure-space residual, capillary residual, parasitic capillary number, kinetic energy, volume, base radius, apex height, and angle.
+- Positive rescaling of `phi` must not change prescribed-angle enforcement. Test dimensional consistency and independent `h`, `dt`, and reinitialization-cadence refinement in 2D and 3D.
+- Add one-phase adaptations of the Groß--Reusken planar/spherical force-discretization tests and Reusken sessile/spreading cases already identified in the literature review. Their original two-phase/XFEM ingredients must not be presented as fully reproduced before WP-10.
+
+Candidate gates to ratify before qualification:
+
+- exact-field flat assembly balance at scaled floating-point tolerance, with solved-state residuals bounded by the declared solver tolerances;
+- a stable asymptotic convergence envelope, expected rate, and GCI for best-pressure-space and force residuals over cut offsets; a mildly nonmonotone pair triggers another level rather than automatic acceptance or failure;
+- on the finest qualified static-cap level, pressure-jump error below `1%`, contact-angle error below `1 degree`, base-radius/height error below `1%`, and parasitic capillary number below `1e-6`;
+- finite-difference energy-variation error at the expected discretization/roundoff rate.
+
+These values are starting proposals, not retrospective pass criteria. If feasibility studies show that a threshold is incompatible with the chosen formal order, revise it with a documented derivation before the qualification matrix, then run the entire matrix unchanged.
+
+### WP-5: side-wall contact-line dynamics and wall-aware maintenance
+
+**Finding addressed:** FSR-05. Final qualification depends on closing FSR-01 through FSR-04, FSR-06, FSR-07, FSR-09, FSR-15, and FSR-16 so contact parameters are not compensating for extension, transport, cut, force-balance, geometry, or boundary-domain defects.
+
+Implementation notes:
+
+- Express the contact model as three coupled but distinguishable pieces: momentum-side surface/wall energy, positive line and wall dissipation, and physical contact-point kinematics. Record each piece in the energy ledger.
+- Integrate Navier slip and Ren--E contact-line terms on the sharp domains from WP-2/WP-3. Keep physical slip length, line mobility/friction, any numerical wall width, and mesh size independent and visible.
+- Evaluate contact position, dynamic angle, line velocity, wall slip, and constitutive residual at the identical accepted time, generalized-alpha stage, state revision, and geometry revision. Store both advancing/receding convention and wall frame in each record.
+- Make reinitialization wall aware. Prescribed-angle reinitialization should preserve the prescribed wall condition; dynamic-angle reinitialization should preserve the accepted stage-consistent crossing and dynamic angle rather than resetting to an unrelated equilibrium angle.
+- Implement distributed wall-aware reinitialization with deterministic contact ownership, halo synchronization, global convergence/rejection, and serial/MPI equivalence. Until that path passes, moving-wetting qualification is serial-only and MPI capability claims must fail closed. Do not expose Hamilton--Jacobi, fast-marching, or other reinitialization method names in the supported schema unless that implementation actually exists and is qualified.
+- Treat global volume shift as an emergency operation. Before accepting it, report the induced contact-line displacement, angle change, per-component volume transfer, and numerical work.
+
+Required sign and dissipation tests:
+
+- Reverse advancing/receding motion, wall normal, interface side, gravity, and wall orientation. The Ren--E residual and line speed must transform according to the declared convention.
+- Verify nonnegative wall-slip and line-friction dissipation and exact agreement between sharp wall/contact measure and analytic partially wet faces.
+- Run no-motion wedge/arc cases through reinitialization and correction. Contact position and angle must remain within predeclared error at every substage.
+
+Qualification simulations:
+
+- Repeat the current four advancing/receding side-wall cases on at least three meshes and three independent time steps. Every speed sign must be correct; the constitutive error and stage mismatch must converge.
+- Run sessile-cap relaxation for five equilibrium angles on bottom and side walls, Reusken spreading/contracting drops, resolved-slip cases from Sprittles--Shikhmurzaev, and the public Gründing et al. capillary-rise benchmark.
+- Resolve each fixed physical slip length on successively refined meshes corresponding to approximately `l_s/dx = 2, 4, 8`; sweep wall regularization width `delta/dx = 0, 0.5, 1, 2` only where the regularized model is deliberately tested; and limit accepted contact-line motion to approximately `0.2`, `0.1`, and `0.05` cell per step in the time study.
+
+Candidate physical gates:
+
+- correct speed sign in every orientation and stage;
+- finest-level Ren--E line-speed/constitutive error below `5%` with a convergent trend;
+- equilibrium angle within `1 degree` and equilibrium base radius or rise height within `1%` or the published uncertainty, whichever is larger;
+- capillary-rise height, overshoot, and damping within the reported experimental/intercode uncertainty;
+- monotone energy decay in closed relaxation and no unexplained positive line/slip work;
+- negligible dependence on wall orientation, MPI partition, and an independently vanishing numerical smoothing width.
+
+### WP-6: locally conservative interface transport and maintenance transaction
+
+**Finding addressed:** FSR-06.
+
+Implementation notes:
+
+- Implement the phase-measure-conservative strategy selected in AD-4. The conserved unknown must be stated explicitly; transporting a quantity named a conservative level set is not by itself evidence that liquid volume is conserved. If continuous FE is retained, replace the present nonconservative limiter with a conservative invariant-domain/AFC/FCT construction. A DG/FV or coupled level-set/volume-fraction method must likewise expose its phase fluxes and geometry reconciliation.
+- Add the flux ledger appropriate to the selected discretization: cell-face fluxes for DG/FV, or algebraic-edge/nodal-control-volume fluxes for AFC/FCT. Interior contributions must cancel exactly and the external sum must match the physical boundary flux. Track the local balance of the chosen phase indicator/volume, each connected liquid component, wall film, sheet, rim, and resolved satellite.
+- Use a divergence-compatible advecting field or explicitly account for discrete divergence in the conserved phase balance.
+- Make maintenance transactional: conservative transport, geometry rebuild, wall-aware reinitialization, local geometry/volume reconciliation, validation, then commit. On any failed invariant, roll back the full state and revisions rather than accepting a mixture of stages.
+- Keep raw post-transport, post-limit, post-reinitialization, and post-correction quantities. Global shift is a reported emergency fallback and may not be used to declare the transport conservative.
+
+Required tests:
+
+- Exact constant preservation, cancellation of the method's interior discrete fluxes, local control-volume balance of the declared conserved phase quantity, conservative limiter correction, boundedness, and transport across an MPI boundary.
+- Divergence-free translation and rotation, wall advection, disconnected drops, thin films, Zalesak rotation, and reversible Enright deformation with maintenance disabled, each maintenance component isolated, and the final production sequence.
+- Sweep extension-band width and map fallback, because transport is qualified only together with the bounded `E` field from WP-1.
+
+Simulation exits:
+
+- Translate drops at `D/dx = 16, 32, 64`; use Enright grids of approximately `32^3`, `64^3`, and `128^3`, with CFL `0.5`, `0.25`, and `0.125` in independent spatial and temporal studies.
+- Continue through capillary jet and filament-necking cases only after raw global and per-component errors converge without global shift.
+- Close with per-control-volume/component phase-flux artifacts, a conservative-limiter derivation, convergent interface norms and geometry, and explicit pre/post-maintenance mass and displacement histories.
+
+### WP-7: coherent small-cut stability and conditioning
+
+**Finding addressed:** FSR-07; this replaces any conditioning role previously attributed to FSR-01.
+
+Implementation notes:
+
+- Select one mathematically coherent method under AD-3. Do not combine pressure-only ghost penalty, empirical equal-order stabilization, unconstrained extrapolation, aggregation, pruning, and pinning and then assume their individual motivations prove the combination.
+- For CutFEM, implement and scale the velocity and pressure stabilization required by the applicable analysis for the actual transient equal-order VMS/PSPG spaces. For aggregation, define the aggregate trial/test space, conservation behavior, root selection, maximum path/extrapolation distance, and coefficient/row-norm limits.
+- Centralize stabilization coefficients and nondimensional scaling. Every term should report its dimensional scale and contribution to residual and energy.
+- Make sliver pruning an explicit topology/model event. Production splash runs must report or reject unresolved rootless liquid features; deleted liquid cannot be counted as conserved merely because a bookkeeping total is adjusted.
+
+Required cut matrix:
+
+- Volume fractions `1e-8`, `1e-6`, `1e-4`, `1e-2`, `0.1`, `0.25`, and `0.49`; axis-aligned and oblique interfaces; at least three `h` levels and every supported polynomial order; viscous-, transient-, and advection-dominated regimes; and 1, 2, and 4 or more MPI ranks.
+- Measure velocity/pressure error, divergence, mixed singular values or a reproducible inf-sup surrogate after removing pressure-gauge and componentwise pressure nullspaces, canonically scaled condition number, Krylov iterations, preconditioned spectrum where practical, aggregate/extension coefficient norms, rootless features, and solver fallback/retry.
+- Include connected and disconnected features and a cut moving continuously through a node so a method switch cannot create an unreported force or solution jump.
+
+Simulation exits:
+
+- Manufactured Stokes/Navier--Stokes errors must be cut-position independent at the expected rate. Static caps, translating drops, filaments, and D18/D38 must not show a nonconvergent numerical jump caused solely by a mesh-relative cut-topology change; real physical or interface-topology events are analyzed separately.
+- Closure requires a fixed sweep demonstrating cut-independent conditioning relative to a fitted/reference system at the same `h`, the theoretically expected `h` scaling after canonical scaling, bounded constraint amplification, and bounded preconditioned-iteration spread. The accompanying derivation must match the spaces and stabilization actually assembled.
+
+### WP-8: geometry coupling, nonlinear convergence, and a complete energy law
+
+**Finding addressed:** FSR-09.
+
+Implementation notes:
+
+- Implement the strategy selected by AD-5. A complete shape tangent must cover quadrature points, measures, normals, surface projector, contact geometry, cut volume, wet-wall rules, and extension-map changes while topology is fixed. An energy-stable split must instead define the common time stage and converge all coupled geometry/state fields to its declared tolerance.
+- Start qualification with backward Euler and constant surface tension. Add generalized-alpha only after the simpler scheme has a closed energy balance, then demonstrate stage consistency for every surface, wall, contact, transport, and maintenance term.
+- Record kinetic, gravitational, liquid--gas surface, solid--liquid wall, and any gas/compressibility energy; viscous, Navier-slip, and line-friction dissipation; external pressure/body work; and numerical work from VMS/PSPG, ghost penalty/aggregation, extension, pruning, limiting, redistancing, and volume reconciliation. Log rejected and rolled-back attempts separately; because they do not alter the accepted state, they contribute zero to the accepted-state energy balance.
+- Treat topology changes as nonsmooth events. Define detection, snapshot invalidation, nonlinear restart or step rejection, energy jump accounting, and minimum resolved-feature policy.
+
+Required tests and simulations:
+
+- Finite-difference directional derivatives for every geometry-dependent residual on fixed topology, and same-state refresh neutrality for geometry and extension maps.
+- Verify outer fixed-point contraction or the monolithic Jacobian under `h`/`dt` refinement, cut shifts, and MPI partitions.
+- Run a static cap, capillary relaxation, linear capillary wave, droplet oscillation, sloshing, and wetting relaxation. The complete energy residual must converge; a closed dissipative case may not exhibit unexplained growth.
+- Report energy before and after every maintenance substage. A globally decreasing final energy cannot hide a large positive transport/geometry error canceled by redistancing.
+
+### WP-9: fitted-ALE free-surface policies
+
+**Findings addressed:** FSR-10 and FSR-11 for the fitted path.
+
+Implementation notes:
+
+- Enforce the normal kinematic relation `w_m dot n = u dot n` at the free surface. Give the tangential policies unambiguous semantics: `SmoothingOnly` leaves tangential motion to the mesh-smoothing functional; `Prescribed` imposes the projected supplied tangential mesh velocity; `Free` should either mean no tangential constraint or be renamed if it is intended to follow fluid tangentially.
+- Route the selected policy through the existing mesh-motion tangential-boundary infrastructure so mesh displacement has one owner. Detect conflicting mesh-motion and Navier--Stokes policies.
+- Give each boundary separate local fluid-kinematic and mesh-motion enforcement policies with explicit compatibility checks. Their Nitsche/penalty forms and scaling need not be identical and must not overwrite one another or unrelated weak velocity conditions.
+- Decide the fitted-path status of `SurfaceStress` and prescribed/dynamic contact angle explicitly. Either implement and qualify them through the common WP-4/WP-5 energy, geometry, and wetting infrastructure, or keep those combinations fail-closed and exclude them from fitted capability claims.
+
+Required tests and exits:
+
+- Each policy must create the distinct documented boundary operator/state. Test prescribed-vector projection, rotations, multiple surfaces, reverse registration order, and conflicting-policy rejection.
+- Run a flat translating ALE interface, prescribed tangential shear, and fitted sloshing while measuring mesh quality, geometric conservation, phase volume, surface work, and policy-specific mesh velocity.
+- No fitted policy is qualified until its effective value appears in both configuration provenance and mesh-motion history.
+
+### WP-10: explicit one-phase boundary and a staged two-phase extension
+
+**Finding addressed:** FSR-08.
+
+Implementation notes:
+
+- Retain and label a one-phase liquid capability for cases in which gas dynamics are demonstrably negligible. Its reference pressure is imposed external pressure; it must not be described as a solved ambient gas.
+- For gas-sensitive splash, add an incompressible two-phase formulation with phasewise density and viscosity, both velocity/pressure fields or an equivalent stable one-field jump formulation, interface stress and velocity conditions, pressure enrichment appropriate to the jump, stabilization on both phases, phasewise conservation, and density-ratio-robust solvers.
+- Couple phase and momentum transport consistently at density/viscosity jumps so phase reconciliation or mass correction cannot create untracked momentum. Qualify the phase-flux/momentum-flux relationship at high density ratio.
+- Add compressible or otherwise validated gas physics before claiming trapped-air pressure, roof impact, air cushioning, ambient-pressure splash thresholds, or late atomization. The exact need should be decided from the benchmark nondimensional regime, not visual similarity.
+
+Required qualification progression:
+
+- Begin with planar pressure/viscous jumps, two-fluid hydrostatics, static drop, material-side reversal, both-phase mass, and high-density-ratio conditioning.
+- Add two-fluid capillary waves, Hysing case 1, and a rising bubble. Treat Hysing case 2 after breakup as an intercode range rather than a single exact shape.
+- Only then add ambient-pressure and gas-property sweeps for impact/cushioning and dry-wall splash. Maintain separate one-phase, incompressible-two-phase, and compressible-gas qualification records.
+
+### Finding-to-closure traceability matrix
+
+| Finding | Primary work package | Must pass before closure | Required completion artifact |
+|---|---|---|---|
+| FSR-01 | WP-1 | Wet-block/dry-depth invariance, zero island cross-coupling, replacement conditioning from WP-7 | Residual/Jacobian difference report and absence of legacy option in supported inputs |
+| FSR-02 | WP-1/Q5 | Reproduction, bounded row/amplification, refresh neutrality, reduced D38 map reproducer, then full-horizon D38 | Per-revision map statistics and guard/fallback log |
+| FSR-03 | WP-4 | Flat exact balance and convergent static circle/sphere/sessile matrix | Balanced-force derivation, pressure-range distance, and static qualification report |
+| FSR-04 | WP-4/WP-5 | Phi-scale invariance and angle/contact preservation through maintenance | Derived wall contract and angle/reinitialization convergence report |
+| FSR-05 | WP-5 | All Ren--E sign/speed gates and capillary-rise uncertainty gates | Stage-paired contact history and complete wetting energy ledger |
+| FSR-06 | WP-6 | Cancellation of the selected method's phase fluxes, bounded conservative phase transport, and raw component-mass convergence | Method-specific control-volume/component flux files and maintenance-stage ledger |
+| FSR-07 | WP-7 | Cut-position-independent error, cut-relative/expected `h`-scaled conditioning, stability surrogate, and MPI behavior | Fixed cut-sweep matrix and matching mathematical derivation |
+| FSR-08 | WP-10 | Separate two-phase and gas-sensitive gates for any expanded claim | Capability-specific qualification matrices and model statement |
+| FSR-09 | WP-8 | Shape derivative or energy-stable split, refresh neutrality, convergent full energy residual | Directional-derivative/energy-balance artifacts |
+| FSR-10 | WP-0/WP-9 | Distinct fitted policy behavior and mesh-motion plumbing | Effective policy plus mesh-velocity histories |
+| FSR-11 | WP-0/WP-9 | Multi-boundary registration-order invariance | Configuration and matrix comparison |
+| FSR-12 | WP-0 | Exhaustive positive/negative parser matrix with no silent keys | Versioned schema and effective-configuration snapshots |
+| FSR-13 | WP-2 | Constant-one equality on affine, warped, and high-order cells | Pointwise volume/mapping comparison |
+| FSR-14 | WP-2 | Rejection of all injected geometry defects, false order claims, and achieved order below the required minimum | Quantitative validator report for every retained rule |
+| FSR-15 | WP-2 | Valid contact-to-source provenance, deterministic remapping, and revision equality | Stable-ID/remapping/revision/ownership ledger |
+| FSR-16 | WP-3 | Exact wet-face moments, zero dry contribution, all operators sharply routed | Boundary-domain quadrature and assembly report |
+| FSR-17 | WP-2 | Exact `(xi,x,phi)` pairing and restored high-order curvature convergence | Sample provenance and distorted-mesh curvature study |
+| FSR-18 | WP-1 | Edge/geometric graph, label/MPI invariance, bounded collision behavior | Graph/map report under deliberate relabeling |
+
+### Qualification campaign Q0--Q7
+
+The following campaign should be implemented as a versioned benchmark registry rather than another collection of case-specific log parsers. Existing runners such as
+[`run_fs16_physical_matrix.py`](../tests/cases/fluid/open_vessel_free_surface/run_fs16_physical_matrix.py),
+[`run_impermeable_wall_advection_qualification.py`](../tests/cases/fluid/open_vessel_free_surface/run_impermeable_wall_advection_qualification.py),
+[`run_test05_validation_grade.py`](../tests/cases/fluid/open_vessel_free_surface/run_test05_validation_grade.py),
+[`run_test05_velocity_growth_smoke.py`](../tests/cases/fluid/open_vessel_free_surface/run_test05_velocity_growth_smoke.py), and
+[`unfitted_level_set/run_validation_matrix.py`](../tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/run_validation_matrix.py)
+already capture useful provenance; their common behavior should be consolidated rather than discarded.
+
+#### Q0: harness, provenance, and negative configuration tests
+
+Before any physical gate, record accepted step/time, nonlinear stage, state/geometry/map revisions, source and dirty-tree hashes, compiler/libraries/options, machine, MPI ranks, threads, mesh/reference-data checksums, dimensional parameters, nondimensional groups, and all acceptance thresholds.
+
+Every accepted step should expose:
+
+- raw and post-maintenance global, component, film, sheet, rim, and satellite volumes;
+- kinetic, gravitational, surface, wall, and any gas energy plus every dissipation/work channel listed in WP-8;
+- map row/amplification and fallback statistics;
+- cut fractions, achieved order, deleted/pruned/rootless features, aggregate paths, and geometry validation maxima;
+- nonlinear/Krylov iterations, rejected attempts, time-step reductions, fallback modes, and rollback reason; and
+- wall-clock time and peak resident memory.
+
+Run the complete WP-0 invalid-input matrix in continuous integration. A malformed physics request should fail deterministically with a diagnostic, not produce a numerical comparison.
+
+#### Q1: exact algebra, geometry, boundary, transport, and cut tests
+
+Q1 contains the WP-1 through WP-7 low-level matrices. It is release blocking and should run before static capillarity. Where an exact identity is expected, gate a scaled residual, not a plot. Include serial/MPI and node-number permutations.
+
+At minimum, Q1 contains:
+
+- dry-depth/BC/extension-coefficient wet-block invariance and two-island decoupling;
+- extension reproduction, coefficient/amplification bounds, refresh projection, collision bands, and a reduced deterministic D38 map reproducer;
+- volume/surface/contact/wet-wall moments on affine, warped, high-order, tiny-cut, and fault-injected rules;
+- every generic boundary form over dry-to-fully-wet fraction sweeps;
+- capillary energy directional derivatives and flat-interface balance;
+- method-specific conservative phase flux, limiter, and maintenance transactions; and
+- velocity/pressure cut stability over the full fraction, regime, orientation, and MPI matrix.
+
+A Q1 failure blocks using a later benchmark as evidence for the affected method. For example, a dam-break trajectory cannot waive an unbounded extension row, and a sessile cap cannot waive whole-face dry Nitsche work.
+
+#### Q2: hydrostatic, capillary-equilibrium, and contact-equilibrium tests
+
+Run flat surfaces for every axis/sign/wall orientation; translated circles and spheres; explicitly labeled one-phase adaptations of Groß--Reusken force tests; and sessile caps at five angles. Use at least `R/dx = 8, 16, 32`, adding 64 if three levels are not asymptotic, with multiple subcell offsets and rotations. Do not claim equivalence to original two-phase/XFEM ingredients that the current model does not contain.
+
+For each state report interface norms, volume and centroid, pressure jump and pressure-range distance, capillary residual, divergence, maximum/mean velocity, parasitic capillary number, kinetic/surface/wall/gravity energy, angle, base radius, apex height, nonlinear convergence, and every geometry intervention. Test both sampled analytic initial geometry and a discrete energy-minimized equilibrium and label them distinctly.
+
+Q2 passes only with scaled-roundoff flat assembly balance at exactly representable fields, solved flat states consistent with declared solver tolerances, and a stable observed convergence regime for curved states. The candidate finest-level thresholds in WP-4 must be frozen before running.
+
+#### Q3: pure transport and smooth free-surface dynamics
+
+Separate spatial and temporal error:
+
+1. run `h`, `h/2`, `h/4` with time error made subordinate;
+2. run `dt`, `dt/2`, `dt/4` at a fixed fine mesh; and
+3. run a three-level diagonal refinement, adding a fourth level when the observed order is not asymptotic.
+
+Recommended matrices are:
+
+| Case | Spatial levels | Temporal levels | Principal quantities |
+|---|---|---|---|
+| Reversible Enright deformation | approximately `32^3`, `64^3`, `128^3` | CFL `0.5`, `0.25`, `0.125` | return-shape norms, raw/component volume, surface area, topology, map guards |
+| Translating drop | `D/dx = 16, 32, 64` | same CFL sequence | shape/centroid, wet-block invariance, pressure/velocity, conservation |
+| Linear capillary wave | `lambda/dx = 16, 32, 64` | `dt/T = 1/50, 1/100, 1/200` | frequency, damping, phase, amplitude, full energy residual |
+| Oscillating drop | `R/dx = 8, 16, 32` | `dt/T = 1/100, 1/200, 1/400` | modal frequency/damping, volume, spurious modes, energy |
+| Smooth sloshing | `W/dx = 32, 64, 128` | `dt/T = 1/50, 1/100, 1/200` | elevation probes, frequency/damping, pressure, conservation |
+
+For transport cases, compare maintenance off, reinitialization only, correction only, and the proposed production transaction. Candidate smooth-dynamics gates are frequency error near `1%`, profile/amplitude error near `2%`, a stable asymptotic rate/GCI envelope over cut offsets, and finest-level unexplained energy defect below `1%`; these must be reconciled with the published reference uncertainty and frozen before use. A mildly nonmonotone pair requires another level and analysis, not automatic failure or a favorable-point pass.
+
+#### Q4: dynamic wetting and side-wall qualification
+
+Run analytic wedge/arc kinematics first, then the existing Ren--E side-wall matrix, sessile relaxation/spreading, resolved-slip dynamic wetting, and capillary rise. Independently refine `h`, `dt`, slip length resolution, and any numerical wall smoothing. Rotate equivalent cases among supported axis-aligned bottom, left, and right walls. Inclined or curved walls are a later gate that begins only after general planar/curved-wall frames, geometry, and contact ownership are implemented and verified.
+
+Primary quantities are contact position and speed, apparent and microscopic angle at declared distances, Ren--E constitutive residual, wall slip, wall/contact measure, rise height/overshoot/damping, per-component volume, and wall/line energy. The same fields must be emitted before and after reinitialization and correction.
+
+The public capillary-rise data should be the primary integral side-wall validation; the current four Ren--E tests remain sharp local regression gates. A sign failure, stage/revision mismatch, unresolved slip length, or smoothing-width-dependent limit fails Q4 even if final rise height is close. Q4 remains serial-only until the distributed wall-aware reinitialization gate in WP-5 passes; after that, representative partition sweeps become mandatory.
+
+#### Q5: violent but one-phase-compatible free-surface motion
+
+Use D18/D38 as numerical stress tests only after Q0--Q4 pass. They must reach their fixed accepted horizon while keeping bounded extension, raw mass, topology, geometry validation, cut-conditioning, and energy histories. Their present zero-surface-tension, no-contact-law, no-slip configurations must never be cited as physical wetting qualification.
+
+Then qualify against applicable dam-break/run-up/impact and nonlinear sloshing references already catalogued above, including Martin--Moyce, Lobovsky, Kleefsman, SPHERIC Tests 02 and 05, and Synolakis-style run-up where the solver's governing assumptions match the reference. Suggested starting resolution is `H/dx = 32, 64, 128` with CFL `0.25`, `0.125`, and `0.0625`, followed by an additional level when impulses or thin jets are not resolved.
+
+Compare complete histories and uncertainty bands for front position, free-surface probes, wall force/pressure and impulse, run-up, overturning time, volume distribution, and energy. Do not shift time origins, filter peaks, or select favorable probes after viewing results. Roof-impact cases that trap air are diagnostics of the one-phase limitation, not quantitative pressure validations.
+
+#### Q6: film, filament, jet, and pre-breakup crown motion
+
+Proceed in increasing topology difficulty:
+
+1. contracting filament and end pinching;
+2. Rayleigh--Plateau/capillary jet growth and breakup;
+3. resolved wet-film drop impact and crown formation over the smooth pre-breakup interval; and
+4. only then resolved sheet/rim instability and secondary fragments within the declared one-phase envelope.
+
+Resolve an initial or residual film with at least `h_film/dx = 4, 8, 16`, adding levels until thickness-dependent quantities are asymptotic. For crown cases record `D_Base`, `D_Mid`, `D_Rim`, `H_Rim`, rim radius/speed, sheet thickness, residual film, finger wavelength/count, resolved drop-size distribution, per-region raw volume, surface area, and energy. Fix the comparison interval before running; do not move the cutoff to omit the first disagreement.
+
+Minimum neck/rim/sheet scales and pruning/aggregation events must be shown next to the physical comparisons. A visually reasonable crown with an under-resolved sheet or correction-dominated volume is inconclusive, not a pass.
+
+#### Q7: two-phase and gas-sensitive phenomena
+
+Q7 begins only after WP-10. Run static/jump and Hysing tests first, then two-fluid capillary waves and rising bubbles, followed by air-cushioning, trapped-gas, ambient-pressure, and dry-wall splash matrices appropriate to the implemented gas model.
+
+Dry splash, entrainment, roof-impact pressure, aerodynamic sheet breakup, and late atomization remain outside the current one-phase qualification even if a qualitative experiment looks plausible.
+
+### Benchmark registry and applicability review
+
+Create a version-controlled registry entry for every rigorous public benchmark considered for a capability claim. “All available” should mean all identified, applicable, sufficiently specified references in the maintained registry, not an impossible claim to have discovered every experiment ever published. Review and update the literature inventory at each major release.
+
+Each registry entry should contain:
+
+- exact citation, persistent data link, downloaded-data checksum, license/access note, and the date the source was verified;
+- model applicability: one-phase, two-phase incompressible, compressible gas, contact model, turbulence, temperature, and dimensionality;
+- geometry, initial and boundary conditions, material properties, angle/slip/contact parameters, and units;
+- nondimensional groups and the acceptable parameter uncertainty/range;
+- measured quantities, probe definitions, time origin, sampling/filtering, experimental repeatability or intercode spread, and known ambiguities;
+- mesh, time-step, cut-offset, rotation, maintenance, and MPI matrices;
+- fixed comparison interval, convergence estimator, error norm, and acceptance gate; and
+- an explicit disposition: `PASS`, `FAIL_METHOD`, `FAIL_MODEL`, `INCONCLUSIVE_RESOLUTION`, `INFRASTRUCTURE_FAILURE`, or `OUT_OF_SCOPE`.
+
+Keep calibration and validation data disjoint. Slip length, mobility, contact-angle law, smoothing, stabilization, pruning, and correction parameters may be calibrated only on designated cases and then frozen for independent validation. Failed or inconclusive runs remain in the archive; they should not be replaced by a favorable rerun without preserving the original and explaining the change.
+
+### Convergence, uncertainty, and comparison rules
+
+- Estimate spatial and temporal order independently. Use at least three levels in an apparent asymptotic range and add a fourth for oscillatory or nonmonotone sequences.
+- Report observed order and Richardson extrapolation/Grid Convergence Index with the chosen safety factor. For first-order interface quantities, an initial minimum observed order near `0.8` can be proposed, but it must be derived per quantity and frozen rather than applied blindly.
+- Use the worst subcell cut offset, rotation, and representative MPI partition in the qualification conclusion, not only the best-aligned mesh.
+- For an experimental scalar quantity, a defensible initial acceptance rule under a predeclared common confidence convention is
+  \[
+  |Q_h-Q_{exp}| \le 2\sqrt{U_{num}^2+U_{exp}^2},
+  \]
+  with both uncertainty terms independently defined. Independently established model-form uncertainty may be reported as context, but it may not be adjusted to enlarge the acceptance band. A known governing-model mismatch is `FAIL_MODEL` or `OUT_OF_SCOPE`, and this rule does not rescue a nonconverged numerical result.
+- Compare time histories using declared integrated/RMS norms plus physical feature errors such as arrival time, peak/impulse, frequency, damping, and equilibrium. Do not use undocumented time shifts, spatial registration, smoothing, or peak filtering.
+- Exact/manufactured tests require both a finest-level tolerance and the expected rate. Experimental tests require numerical convergence and agreement with uncertainty; an isolated value inside an error bar is insufficient.
+- An MPI result should agree with serial within the discretization and solver uncertainty. Larger differences require a deterministic ownership/reduction investigation.
+
+### Required run-artifact layout
+
+Each immutable run directory should contain the equivalent of:
+
+```text
+manifest.json       case/reference IDs, model envelope, inputs, units, nondimensional groups
+build.json          source and dirty-tree hashes, compiler, libraries, options, machine, MPI/threads
+gates.json          predeclared metrics, intervals, tolerances, and expected convergence
+run.json            outcome, resources, solver/retry/fallback/rollback summary
+history.csv         accepted-stage physical and numerical histories with revision IDs
+geometry.*          cut, surface, wet-wall, contact, pruning, and topology diagnostics
+solver.*            nonlinear/Krylov histories and conditioning/stability summaries
+comparison.json     raw errors, convergence, uncertainty, disposition, and reason
+checkpoints/        fixed requested times, including states before and after maintenance
+plots/              generated only from archived machine-readable quantities
+checksums.txt        checksums for every input, reference, and result artifact
+```
+
+Every phase quantity must distinguish raw post-transport, post-limiter, post-reinitialization, post-correction, and retained assembly values. A result lacking source/configuration/reference provenance or predeclared gates is exploratory and cannot enter a release claim.
+
+### CI, HPC, and compute-resource safeguards
+
+Use resource tiers so exact regressions remain frequent without making large three-dimensional qualification runs unreliable:
+
+- **CI-0, every relevant change:** parser negative tests, exact algebra/geometry/boundary identities, small serial/MPI smoke tests, and schema checks.
+- **CI-1, nightly:** two-level transport, static cap, wetting sign, cut-fraction, and extension-map matrices.
+- **CI-2, weekly:** three-level smooth dynamics, side-wall/capillary-rise subsets, reduced deterministic D18/D38 map/fixed-step regressions, and representative MPI/cut rotations.
+- **CI-3, release/HPC:** the full frozen Q0--Q6 matrix, including full-horizon D18/D38, with independent space/time refinement and reference comparisons.
+- **CI-4, after a major method or physics change:** breakup/splash and, when present, the full two-phase/gas-sensitive Q7 matrix.
+
+Every runner should declare memory, wall-time, output-size, rank, and thread envelopes; sample peak resident memory throughout the run; and terminate or reschedule cleanly before node exhaustion. Geometry/map caches need explicit byte counters and bounded retention. Run independent cases through scheduler job arrays rather than holding all meshes or histories in one process. Stream or checkpoint long histories at fixed intervals, and keep plotting/postprocessing out of the solver allocation where possible. Treat a reproducible resource regression as a test failure even when physical metrics pass, but compare resource trends only on controlled hardware using normalized, statistically defined bounds.
+
+### Failure triage after implementation
+
+| Observed failure | First mechanism to isolate | First paired ablation or diagnostic |
+|---|---|---|
+| Static flat residual | Sign, active side, geometry revision, or pressure/external-pressure pair | Reverse side/orientation and inspect exact assembled force/gradient rows |
+| Wet solution changes with dry depth/BC | Physical dry diffusion or an unclipped boundary form | Remove dry layers/BC values one factor at a time and compare wet blocks |
+| Velocity/interface spike at refresh | Ill-conditioned/stale extension map or topology remap | Compare pre/post map row guards, projection residual, and revision IDs |
+| Static curved parasitic current | Pressure representability/curvature/geometry imbalance | Best-pressure residual and discrete-energy directional derivative |
+| Angle changes after maintenance | Missing wall-aware reinitialization or global shift | Compare each maintenance substage and contact-root provenance |
+| Wrong contact speed/sign | Stage mismatch, wall frame, slip/mobility, or smoothed domain | Rotate/reverse paired case with identical revision-tagged telemetry |
+| Total volume good but local regions wrong | Nonconservative transport hidden by global correction | Inspect raw cell/component/film/sheet ledgers with correction disabled |
+| Cut-position or MPI sensitivity | Stabilization, aggregation, pruning, ownership, or graph choice | Fixed physical case with only offset/partition/numbering changed |
+| Unexplained energy growth | Frozen geometry/stage mismatch or unreported numerical work | Complete substage energy ledger and fixed-topology derivative test |
+| Only splash/breakup disagrees | Under-resolution, topology intervention, or absent gas physics | Resolve film/sheet/rim, disable pruning/correction when safe, then test model envelope |
+
+Use one-factor paired ablations and rerun the failed prerequisite before the original benchmark. Do not compensate for a method failure by retuning contact, stabilization, extension, pruning, or volume-correction parameters on the validation case.
+
+### Capability-specific definition of done
+
+The **one-phase hydrostatic/capillary** capability is done only after Q0--Q2 pass over cut/rotation/MPI sweeps with a closed force and energy account.
+
+The **one-phase moving-wetting** capability additionally requires Q3--Q4, all existing advancing/receding sign and speed gates, resolved physical slip, wall-aware maintenance, and public capillary-rise agreement.
+
+The **one-phase violent-flow** capability additionally requires Q5 with raw conservation, bounded maps, cut stability, and uncertainty-qualified dam-break/run-up/sloshing histories. D18/D38 completion alone is a stress-test result, not physical validation.
+
+The **one-phase film/jet/pre-breakup crown** capability additionally requires Q6 with independently resolved film, sheet, rim, or neck scales and no correction- or pruning-dominated result.
+
+The current one-phase model cannot be declared validated for gas cushioning, gas inertia/viscosity/compressibility, trapped air, entrainment, aerodynamic breakup, gas-pressure-dependent dry splash, Hysing two-fluid flow, or late atomization. Those claims require WP-10 and Q7 appropriate to the implemented gas model.
+
+The overall free-surface implementation should be called robust only when every release-blocking finding has its closure artifact, the applicable registry matrix passes without benchmark-specific retuning, failures and model exclusions remain visible, and an independent reviewer can reproduce the conclusion from the archived configuration, reference data, and machine-readable histories.
+
+## Release-blocking gates
+
+The implementation should not be described as robust free-surface wetting/splash capability until all of these are closed:
+
+- flat and static curved capillary states have mesh- and cut-convergent pressure and parasitic-current errors;
+- the best pressure-space residual meets a fixed physical threshold;
+- wet liquid solutions are invariant to irrelevant dry-domain extension geometry and boundary values;
+- algebraic extension maps satisfy fixed stability/amplification bounds;
+- all advancing/receding contact-speed signs and quantitative gates pass under mesh/time refinement;
+- capillary-rise height and damping converge with a physically resolved slip length;
+- raw local and global interface mass errors converge without relying on a global shift;
+- cut stability, constraint amplification, and preconditioned iterations satisfy fixed cut-relative and expected `h`-scaled bounds across tiny-cut sweeps and MPI partitions;
+- weak/natural exterior BC work is restricted to the actual wetted boundary and converges under cut sweeps;
+- the complete surface/wall/line energy residual converges;
+- D18/D38 reach their fixed accepted horizons as transport tests; and
+- splash claims are limited to phenomena represented by the one-phase model, or a gas phase is added.
+
+## Final assessment
+
+The supported sharp-P1 free-surface weak form is more internally consistent than the observed failures initially suggest: its pressure sign, external-pressure sign, capillary projector, liquid-outward normal, Young angle convention, conormal ownership, side-wall frame, wall impermeability, and dissipative line/slip signs are all correct within the declared envelope.
+
+The failures instead expose system-level incompatibilities. The physical velocity is regularized through a fictitious dry PDE that feeds back into momentum. The separate transport extension can be arbitrarily amplifying and component-number dependent. Generic boundary forms are not sharply clipped to the wet face. Polygonal surface force and continuous pressure are not exactly well balanced. Prescribed angle is an unscaled geometric penalty, dynamic wetting remains quantitatively failed, redistancing lacks a wetting wall condition, transport is not locally conservative, and general cut stability and energy behavior remain unproved. High-order volume and curvature paths also contain definite geometry-mapping inconsistencies. These issues are directly relevant to side-wall run-up, thin-film motion, crown formation, and breakup.
+
+The next scientifically defensible milestone is not a visually plausible splash. It is a passing hierarchy of extension-invariance, flat/static force balance, conservative transport, cut-position stability, resolved moving contact, capillary rise, and complete energy tests. Wet-film crown splash should follow only after those gates pass; gas-dependent dry splash requires a two-phase model.
+
+## References
+
+1. Bänsch, E. “Finite element discretization of the Navier--Stokes equations with a free capillary surface.” [DOI](https://doi.org/10.1007/PL00005443).
+2. Barrett, J. W., Garcke, H., and Nürnberg, R. “Eliminating spurious velocities with a stable approximation of viscous incompressible two-phase Stokes flow.” [DOI](https://doi.org/10.1016/j.cma.2013.09.023), [preprint](https://arxiv.org/abs/1306.2192).
+3. Buscaglia, G. C., and Ausas, R. F. “Variational formulations for surface tension, capillarity and wetting.” [DOI](https://doi.org/10.1016/j.cma.2011.06.002).
+4. Castrejón-Pita, J. R. et al. “Plethora of transitions during breakup of liquid filaments.” [DOI](https://doi.org/10.1103/PhysRevLett.108.074506).
+5. Cossali, G. E. et al. “The role of time in single drop splash on thin film.” [DOI](https://doi.org/10.1007/s00348-003-0772-0).
+6. Enright, D. et al. “A hybrid particle level set method for improved interface capturing.” [DOI](https://doi.org/10.1006/jcph.2002.7166).
+7. Frachon, T., and Zahedi, S. “A cut finite element method for incompressible two-phase Navier--Stokes flows.” [DOI](https://doi.org/10.1016/j.jcp.2019.01.028), [preprint](https://arxiv.org/abs/1808.02662).
+8. Geppert, A. et al. “A benchmark study for crown-type splashing dynamics.” [DOI](https://doi.org/10.1007/s00348-017-2447-2).
+9. Groß, S., and Reusken, A. “Finite element discretization error analysis of a surface tension force.” [DOI](https://doi.org/10.1137/060667530).
+10. Gründing, D. et al. “A comparative study of transient capillary rise using direct numerical simulations” (preprint title: “Capillary Rise -- A Computational Benchmark for Wetting Processes”). [DOI](https://doi.org/10.1016/j.apm.2020.04.020), [preprint](https://arxiv.org/abs/1907.05054), [data](https://doi.org/10.25534/tudatalib-173).
+11. Huh, C., and Scriven, L. E. “Hydrodynamic model of steady movement of a solid/liquid/fluid contact line.” [DOI](https://doi.org/10.1016/0021-9797(71)90188-3).
+12. Hysing, S. et al. “Quantitative benchmark computations of two-dimensional bubble dynamics.” [DOI](https://doi.org/10.1002/fld.1934).
+13. Kleefsman, K. M. T. et al. “A volume-of-fluid based simulation method for wave impact problems.” [DOI](https://doi.org/10.1016/j.jcp.2004.12.007).
+14. Lobovský, L. et al. “Experimental investigation of dynamic pressure loads during dam break.” [DOI](https://doi.org/10.1016/j.jfluidstructs.2014.03.009), [preprint/data description](https://arxiv.org/abs/1308.0115).
+15. Mani, M., Mandre, S., and Brenner, M. P. “Events before droplet splashing on a solid surface.” [DOI](https://doi.org/10.1017/S0022112009993594).
+16. Massing, A. et al. “A stabilized Nitsche fictitious domain method for the Stokes problem.” [DOI](https://doi.org/10.1007/s10915-014-9838-9), [preprint](https://arxiv.org/abs/1206.1933).
+17. Mundo, C., Sommerfeld, M., and Tropea, C. “Droplet-wall collisions: experimental studies of the deformation and breakup process.” [DOI](https://doi.org/10.1016/0301-9322(94)00069-V).
+18. Notz, P. K., and Basaran, O. A. “Dynamics and breakup of a contracting liquid filament.” [DOI](https://doi.org/10.1017/S0022112004009759).
+19. Popinet, S. “An accurate adaptive solver for surface-tension-driven interfacial flows.” [DOI](https://doi.org/10.1016/j.jcp.2009.04.042).
+20. Prosperetti, A. “Viscous effects on small-amplitude surface waves.” [DOI](https://doi.org/10.1063/1.861446).
+21. Ren, W., and E, W. “Boundary conditions for the moving contact line problem.” [DOI](https://doi.org/10.1063/1.2646754).
+22. Reusken, A., Xu, X., and Zhang, L. “Finite element methods for a class of continuum models for immiscible flows with moving contact lines.” [DOI](https://doi.org/10.1002/fld.4349), [preprint](https://arxiv.org/abs/1510.03160).
+23. Rider, W. J., and Kothe, D. B. “Reconstructing volume tracking.” [DOI](https://doi.org/10.1006/jcph.1998.5906).
+24. Sprittles, J. E., and Shikhmurzaev, Y. D. “Finite element framework for describing dynamic wetting phenomena.” [DOI](https://doi.org/10.1002/fld.2603), [accepted manuscript](https://wrap.warwick.ac.uk/id/eprint/78933/).
+25. Sussman, M., Smereka, P., and Osher, S. “A level set approach for computing solutions to incompressible two-phase flow.” [DOI](https://doi.org/10.1006/jcph.1994.1155).
+26. Synolakis, C. E. “The runup of solitary waves.” [DOI](https://doi.org/10.1017/S002211208700329X).
+27. Xu, S., and Ren, W. “Reinitialization of the level-set function in 3D simulation of moving contact lines.” [DOI](https://doi.org/10.4208/cicp.210815.180316a).
+28. Xu, L., Zhang, W. W., and Nagel, S. R. “Drop splashing on a dry smooth surface.” [DOI](https://doi.org/10.1103/PhysRevLett.94.184505).
+29. Yarin, A. L., and Weiss, D. A. “Impact of drops on solid surfaces: self-similar capillary waves, and splashing as a new type of kinematic discontinuity.” [DOI](https://doi.org/10.1017/S0022112095002266).
+30. Zahedi, S., Kronbichler, M., and Kreiss, G. “Spurious currents in finite element based level set methods for two-phase flow.” [DOI](https://doi.org/10.1002/fld.2643).
+31. Zhao, X., and Ren, W. “A finite element method for two-phase flows with moving contact lines.” [DOI](https://doi.org/10.1016/j.jcp.2020.109582), [preprint](https://arxiv.org/abs/2002.12009).
+32. Bagheri, M. et al. “Insights into the Dynamics of Crown Splash Using a Phase-Field Interface-Capturing Method: Benchmark data.” [Open dataset](https://tudatalib.ulb.tu-darmstadt.de/items/c83209b0-090c-4f4c-a3dc-c53fe58534f7).
+33. Badia, S., Martín, A. F., and Verdugo, F. “Mixed aggregated finite element methods for the unfitted discretization of the Stokes problem.” [DOI](https://doi.org/10.1137/18M1185624), [preprint](https://arxiv.org/abs/1805.01727).
+34. Burman, E., and Hansbo, P. “Fictitious domain finite element methods using cut elements: II. A stabilized Nitsche method.” [DOI](https://doi.org/10.1051/m2an/2013123).
+35. Burman, E., Hansbo, P., and Larson, M. G. “On the design of locking free ghost penalty stabilization and the relation to CutFEM with discrete extension.” [Preprint](https://arxiv.org/abs/2205.01340).
+36. Della Rocca, G., and Blanquart, G. “Level set reinitialization at a contact line.” [DOI](https://doi.org/10.1016/j.jcp.2014.01.040).
+37. Kuzmin, D., and Quezada de Luna, M. “Algebraic entropy fixes and convex limiting for continuous finite element discretizations of scalar hyperbolic conservation laws.” [Preprint](https://arxiv.org/abs/2003.12007).
+38. Olshanskii, M. A., Reusken, A., and Schwering, P. “A narrow band finite element method for the level set equation.” [DOI](https://doi.org/10.1137/24M1674182).
+39. Saye, R. I. “High-order quadrature on multi-component domains implicitly defined by multivariate polynomials.” [Preprint](https://arxiv.org/abs/2105.08857).
+
+## Nonmutation and compute-monitoring note
+
+Only this Markdown report was created. No solver, test, input, build, or existing documentation file was edited, and no Git commit was made. Compute and memory use were monitored during the audit. No build or solver run was launched; the work remained source/literature analysis. Although raw free RAM was sometimes small because Linux used memory for cache, available memory remained approximately 9.8--10 GiB at the final check, with no sustained CPU or I/O pressure attributable to this audit.

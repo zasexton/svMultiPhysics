@@ -1,0 +1,96 @@
+{
+  "cmake_cache": {
+    "CMAKE_BUILD_TYPE:STRING": "RelWithDebInfo",
+    "CMAKE_CXX_COMPILER:STRING": "/usr/bin/c++",
+    "CMAKE_CXX_FLAGS:STRING": "",
+    "CMAKE_CXX_FLAGS_DEBUG-ADVANCED:INTERNAL": "1",
+    "CMAKE_CXX_FLAGS_DEBUG:STRING": "-g",
+    "CMAKE_CXX_FLAGS_MINSIZEREL-ADVANCED:INTERNAL": "1",
+    "CMAKE_CXX_FLAGS_MINSIZEREL:STRING": "-Os -DNDEBUG",
+    "CMAKE_CXX_FLAGS_RELEASE-ADVANCED:INTERNAL": "1",
+    "CMAKE_CXX_FLAGS_RELEASE:STRING": "-O3 -DNDEBUG",
+    "CMAKE_CXX_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL": "1",
+    "CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING": "-O2 -g -DNDEBUG",
+    "FE_ENABLE_LLVM_JIT:STRING": "OFF",
+    "FE_ENABLE_MPI:BOOL": "ON",
+    "PHYSICS_BUILD_TESTS:BOOL": "ON"
+  },
+  "machine": {
+    "cpu_count": 8,
+    "machine": "x86_64",
+    "memory_mib": 15672,
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.35",
+    "processor": "x86_64"
+  },
+  "mpi_ranks": 1,
+  "source_commit": "ffef62d3bd7af3f125074297d6f98c81e3cd916f",
+  "source_state_sha256": "96f0693d54cd986257669618547b4ff90116c29b76fcbd7f1f720b6ddb62264c",
+  "source_tree": "a89b1c66996fe9e22fbb737d7302d0cdf7f197d2",
+  "supplemental_sources": [
+    {
+      "path": "Code/Source/solver/FE/Basis/VectorBasisBDM_Runtime.cpp",
+      "sha256": "cda5bcaa826c7f64910bafa6b1fa7f72e4c3a7abbae15bb84b97cb47e146a081",
+      "size_bytes": 6913
+    },
+    {
+      "path": "Code/Source/solver/FE/Basis/VectorBasisNedelec_Runtime.cpp",
+      "sha256": "86b6da9b8719f68222fc707f7eebd66f1943367e63dc05dac116412e207d9a50",
+      "size_bytes": 44585
+    },
+    {
+      "path": "Code/Source/solver/FE/Basis/VectorBasisRaviartThomas_Runtime.cpp",
+      "sha256": "540cc5f6d502ad62676fe4ce97f67840353c869c3a741a078b0baef0eeeabb9e",
+      "size_bytes": 36751
+    },
+    {
+      "path": "Code/Source/solver/FE/Math/DenseTransformKernels.h",
+      "sha256": "52ebed3d49077af27e2cb8afa20bd41385794c90de67e5bdc7be42e1e969dfb8",
+      "size_bytes": 2599
+    },
+    {
+      "path": "Code/Source/solver/Physics/Formulations/Ustruct/UstructBCFactories.h",
+      "sha256": "e57c6c3eb14e9e3aab1927a45ffc0ae4906fcaf6cddaf3c97ffc23db04fc074d",
+      "size_bytes": 11130
+    },
+    {
+      "path": "Code/Source/solver/Physics/Formulations/Ustruct/UstructModule.cpp",
+      "sha256": "efd9c680331d88319db85a316324a5c757b14959e46081b18ec9a1863b23a2e6",
+      "size_bytes": 10307
+    },
+    {
+      "path": "Code/Source/solver/Physics/Formulations/Ustruct/UstructModule.h",
+      "sha256": "f6f3bbd63c752337d575c8f7fb6416a5f465ada34a91c27d5201ce0a511c45e5",
+      "size_bytes": 4142
+    },
+    {
+      "path": "Code/Source/solver/Physics/Formulations/Ustruct/UstructPostProcessing.h",
+      "sha256": "1c09b483de0fedef26afb380f6837db3f1a65311373d28429521f48eabfbbc86",
+      "size_bytes": 7453
+    },
+    {
+      "path": "Code/Source/solver/Physics/Formulations/Ustruct/UstructRegister.cpp",
+      "sha256": "55fb8efc39af52d040d7f11c98eaf3354232d8b9fb1444f45e97dd6923275cfd",
+      "size_bytes": 28686
+    },
+    {
+      "path": "Code/Source/solver/Physics/Materials/Solid/IsochoricNeoHookeanPK1.cpp",
+      "sha256": "97f170a05159bc2cb9c008d787b7649763ca06b8693f65fb627959d8cd4ce696",
+      "size_bytes": 601
+    },
+    {
+      "path": "Code/Source/solver/Physics/Materials/Solid/IsochoricNeoHookeanPK1.h",
+      "sha256": "5ab690bc1af72a105ebdffaa4c39c8b5fe20849d2ac83502a6c0be6110d15102",
+      "size_bytes": 7247
+    },
+    {
+      "path": "Code/Source/solver/Physics/Tests/Unit/test_UstructModule.cpp",
+      "sha256": "930c2432aa0c5e941dbd4f72ecc0ceee10ed8f0396492093f24e324aa0bd2aaf",
+      "size_bytes": 80
+    }
+  ],
+  "test_binary": "build-wp0-system/test_physics",
+  "test_binary_sha256": "b958326419baf1fa1dab4286c22a01b7d9ac1f6f536abefe4303a0100af31959",
+  "threads": 1,
+  "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "tracked_sources_clean": true
+}

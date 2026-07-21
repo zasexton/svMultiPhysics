@@ -1,0 +1,225 @@
+{
+  "tests": 24,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-21T11:53:17Z",
+  "time": "0.198s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "NavierStokesLegacyBCs",
+      "tests": 9,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-21T11:53:17Z",
+      "time": "0.067s",
+      "testsuite": [
+        {
+          "name": "FittedFreeSurfacePrescribedTangentialMeshPolicyTranslation",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:17Z",
+          "time": "0.03s",
+          "classname": "NavierStokesLegacyBCs"
+        },
+        {
+          "name": "FittedFreeSurfacePrescribedAngleTranslationFailsClosed",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:17Z",
+          "time": "0s",
+          "classname": "NavierStokesLegacyBCs"
+        },
+        {
+          "name": "FreeSurfaceContactAliasesFailClosedWhenIncomplete",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:17Z",
+          "time": "0.007s",
+          "classname": "NavierStokesLegacyBCs"
+        },
+        {
+          "name": "FreeSurfaceContactConfigurationRejectsAmbiguityAndCrossModelFields",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:17Z",
+          "time": "0.001s",
+          "classname": "NavierStokesLegacyBCs"
+        },
+        {
+          "name": "FreeSurfaceConfigurationSchemaAliasesAreExplicitAndUnambiguous",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:17Z",
+          "time": "0.014s",
+          "classname": "NavierStokesLegacyBCs"
+        },
+        {
+          "name": "FreeSurfaceContactNoneIsExplicitAndComplete",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:17Z",
+          "time": "0.002s",
+          "classname": "NavierStokesLegacyBCs"
+        },
+        {
+          "name": "FreeSurfacePinnedIsExplicitAndComplete",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:17Z",
+          "time": "0.003s",
+          "classname": "NavierStokesLegacyBCs"
+        },
+        {
+          "name": "UnfittedFreeSurfaceContactLinePluralMarkersTranslation_AddsGeneratedMarkers",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:17Z",
+          "time": "0.002s",
+          "classname": "NavierStokesLegacyBCs"
+        },
+        {
+          "name": "UnfittedDynamicContactAngleTranslationRoutesLineAndSharpWallGeometry",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:17Z",
+          "time": "0.003s",
+          "classname": "NavierStokesLegacyBCs"
+        }
+      ]
+    },
+    {
+      "name": "MovingDomainPhysics",
+      "tests": 15,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-21T11:53:17Z",
+      "time": "0.131s",
+      "testsuite": [
+        {
+          "name": "FittedFreeSurfaceNitschePoliciesAreBoundaryLocalAndOrderInvariant",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:17Z",
+          "time": "0.098s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "FittedFreeSurfaceKinematicPolicyOptionsAreExplicit",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:18Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:18Z",
+          "time": "0.001s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "FittedFreeSurfacePrescribedTangentialVelocityRequiresCoupledDisplacement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:18Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "FittedFreeSurfaceRejectsMeshMotionTangentialOwnerInEitherOrder",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:18Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "FittedFreeSurfacePrescribedTangentialVelocityProjectsOutNormalTarget",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:18Z",
+          "time": "0.026s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:18Z",
+          "time": "0.002s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "FittedPrescribedContactAngleFailsClosedWithoutContactLineIntegration",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:18Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "NavierStokesFittedSurfaceStressFailsClosed",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:18Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "NavierStokesRejectsBoundaryConflictBeforeFluidMutation",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:18Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "NavierStokesConfigurationSchemaRejectsBeforeSystemMutation",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:18Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "NavierStokesLegacySchemaIsExplicitAndLosesCurrentCapabilityLabel",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:18Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:18Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "NavierStokesRejectsDuplicatePrescribedWallOwnershipWithUniqueMarkers",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:18Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "FreeSurfaceContactAlternativesExcludeCrossModelState",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-21T11:53:18Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics"
+        }
+      ]
+    }
+  ]
+}

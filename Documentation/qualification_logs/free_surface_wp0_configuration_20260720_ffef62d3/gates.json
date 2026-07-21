@@ -1,0 +1,18 @@
+{
+  "gates": {
+    "expected_disabled": 0,
+    "expected_errors": 0,
+    "expected_failures": 0,
+    "expected_test_count": 24,
+    "skipped_tests_allowed": false,
+    "unexpected_tests_allowed": false
+  },
+  "matrix_status_at_execution": "FROZEN_BEFORE_QUALIFICATION",
+  "resource_envelope": {
+    "memory_mib": 2048,
+    "mpi_ranks": 1,
+    "output_mib": 16,
+    "threads": 1,
+    "wall_time_seconds": 120
+  }
+}
