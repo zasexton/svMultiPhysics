@@ -14,6 +14,7 @@
 #include "FE/Assembly/CompositeMeshAccess.h"
 #include "FE/Dofs/DofHandler.h"
 #include "FE/Dofs/EntityDofMap.h"
+#include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/TimeStepping/TimeHistory.h"
 #include "Mesh/Mesh.h"

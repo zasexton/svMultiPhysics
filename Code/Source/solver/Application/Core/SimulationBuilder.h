@@ -16,6 +16,10 @@ namespace systems {
 class FESystem;
 } // namespace systems
 
+namespace interfaces {
+class FreeSurfaceGeometrySnapshotCache;
+} // namespace interfaces
+
 namespace backends {
 class BackendFactory;
 class LinearSolver;
@@ -41,6 +45,8 @@ struct SimulationComponents {
   std::string primary_mesh_name{};
 
   std::unique_ptr<svmp::FE::systems::FESystem> fe_system{};
+  std::unique_ptr<svmp::FE::interfaces::FreeSurfaceGeometrySnapshotCache>
+      free_surface_geometry_snapshot_cache{};
   std::vector<std::unique_ptr<svmp::Physics::PhysicsModule>> physics_modules{};
 
   std::unique_ptr<svmp::FE::backends::BackendFactory> backend{};
