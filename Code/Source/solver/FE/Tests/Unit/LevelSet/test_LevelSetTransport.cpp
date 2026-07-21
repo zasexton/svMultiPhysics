@@ -1,8 +1,10 @@
 #include "LevelSet/LevelSetTransport.h"
+#include "LevelSet/LevelSetVelocityExtensionConstraint.h"
 
 #include "Assembly/Assembler.h"
 #include "Dofs/EntityDofMap.h"
 #include "Forms/FormExpr.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemSetup.h"
@@ -374,6 +376,171 @@ private:
     std::vector<std::array<FE::GlobalIndex, 9>> cells_{};
 };
 
+class StructuredQuadTransportMeshAccess final
+    : public FE::assembly::IMeshAccess {
+public:
+    static constexpr int kWallMarker = 31;
+    static constexpr int kInflowMarker = 32;
+    static constexpr int kOutflowMarker = 33;
+
+    explicit StructuredQuadTransportMeshAccess(int cells_per_axis)
+        : n_(cells_per_axis)
+    {
+        if (n_ <= 0) {
+            throw std::invalid_argument(
+                "StructuredQuadTransportMeshAccess requires a positive cell count");
+        }
+        const int nodes_per_axis = n_ + 1;
+        nodes_.resize(static_cast<std::size_t>(nodes_per_axis * nodes_per_axis));
+        for (int j = 0; j < nodes_per_axis; ++j) {
+            for (int i = 0; i < nodes_per_axis; ++i) {
+                nodes_[static_cast<std::size_t>(nodeId(i, j))] = {
+                    static_cast<FE::Real>(i) / static_cast<FE::Real>(n_),
+                    static_cast<FE::Real>(j) / static_cast<FE::Real>(n_),
+                    0.0};
+            }
+        }
+        cells_.resize(static_cast<std::size_t>(n_ * n_));
+        for (int j = 0; j < n_; ++j) {
+            for (int i = 0; i < n_; ++i) {
+                cells_[static_cast<std::size_t>(cellId(i, j))] = {
+                    nodeId(i, j), nodeId(i + 1, j),
+                    nodeId(i + 1, j + 1), nodeId(i, j + 1)};
+            }
+        }
+        // Quad4 local faces: bottom, right, top, left.
+        for (int i = 0; i < n_; ++i) {
+            boundary_faces_.push_back(
+                {cellId(i, 0), FE::LocalIndex{0}, kWallMarker});
+            boundary_faces_.push_back(
+                {cellId(i, n_ - 1), FE::LocalIndex{2}, kWallMarker});
+        }
+        for (int j = 0; j < n_; ++j) {
+            boundary_faces_.push_back(
+                {cellId(0, j), FE::LocalIndex{3}, kInflowMarker});
+            boundary_faces_.push_back(
+                {cellId(n_ - 1, j), FE::LocalIndex{1}, kOutflowMarker});
+        }
+    }
+
+    [[nodiscard]] FE::GlobalIndex numCells() const override
+    {
+        return static_cast<FE::GlobalIndex>(cells_.size());
+    }
+    [[nodiscard]] FE::GlobalIndex numOwnedCells() const override
+    {
+        return numCells();
+    }
+    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override
+    {
+        return static_cast<FE::GlobalIndex>(boundary_faces_.size());
+    }
+    [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool isOwnedCell(FE::GlobalIndex /*cell*/) const override
+    {
+        return true;
+    }
+    [[nodiscard]] FE::ElementType getCellType(
+        FE::GlobalIndex /*cell*/) const override
+    {
+        return FE::ElementType::Quad4;
+    }
+    void getCellNodes(FE::GlobalIndex cell,
+                      std::vector<FE::GlobalIndex>& nodes) const override
+    {
+        const auto& record = cells_.at(static_cast<std::size_t>(cell));
+        nodes.assign(record.begin(), record.end());
+    }
+    [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
+        FE::GlobalIndex node) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node));
+    }
+    void getCellCoordinates(
+        FE::GlobalIndex cell,
+        std::vector<std::array<FE::Real, 3>>& coordinates) const override
+    {
+        const auto& record = cells_.at(static_cast<std::size_t>(cell));
+        coordinates.clear();
+        coordinates.reserve(record.size());
+        for (const auto node : record) {
+            coordinates.push_back(getNodeCoordinates(node));
+        }
+    }
+    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
+        FE::GlobalIndex face,
+        FE::GlobalIndex cell) const override
+    {
+        const auto& record = boundary_faces_.at(static_cast<std::size_t>(face));
+        if (record.cell != cell) {
+            throw std::invalid_argument(
+                "StructuredQuadTransportMeshAccess face/cell mismatch");
+        }
+        return record.local_face;
+    }
+    [[nodiscard]] int getBoundaryFaceMarker(
+        FE::GlobalIndex face) const override
+    {
+        return boundary_faces_.at(static_cast<std::size_t>(face)).marker;
+    }
+    [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
+    getInteriorFaceCells(FE::GlobalIndex /*face*/) const override
+    {
+        return {0, 0};
+    }
+    void forEachCell(
+        std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        for (FE::GlobalIndex cell = 0; cell < numCells(); ++cell) {
+            callback(cell);
+        }
+    }
+    void forEachOwnedCell(
+        std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        forEachCell(std::move(callback));
+    }
+    void forEachBoundaryFace(
+        int marker,
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex)> callback) const override
+    {
+        for (FE::GlobalIndex face = 0; face < numBoundaryFaces(); ++face) {
+            const auto& record =
+                boundary_faces_[static_cast<std::size_t>(face)];
+            if (marker < 0 || marker == record.marker) {
+                callback(face, record.cell);
+            }
+        }
+    }
+    void forEachInteriorFace(
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex,
+                           FE::GlobalIndex)> /*callback*/) const override
+    {
+    }
+    [[nodiscard]] int cellsPerAxis() const noexcept { return n_; }
+    [[nodiscard]] FE::GlobalIndex nodeId(int i, int j) const
+    {
+        return static_cast<FE::GlobalIndex>(i + (n_ + 1) * j);
+    }
+
+private:
+    struct BoundaryFace {
+        FE::GlobalIndex cell{-1};
+        FE::LocalIndex local_face{0};
+        int marker{-1};
+    };
+    [[nodiscard]] FE::GlobalIndex cellId(int i, int j) const
+    {
+        return static_cast<FE::GlobalIndex>(i + n_ * j);
+    }
+
+    int n_{1};
+    std::vector<std::array<FE::Real, 3>> nodes_{};
+    std::vector<std::array<FE::GlobalIndex, 4>> cells_{};
+    std::vector<BoundaryFace> boundary_faces_{};
+};
+
 [[nodiscard]] std::shared_ptr<FE::spaces::FunctionSpace> scalarSpace(
     const std::shared_ptr<const FE::assembly::IMeshAccess>& mesh)
 {
@@ -520,6 +687,35 @@ void addScalarAndVelocityFields(FE::systems::FESystem& system,
     return inputs;
 }
 
+[[nodiscard]] FE::systems::SetupInputs makeStructuredQuadTransportSetupInputs(
+    const StructuredQuadTransportMeshAccess& mesh)
+{
+    const int n = mesh.cellsPerAxis();
+    FE::dofs::MeshTopologyInfo topology;
+    topology.n_cells = static_cast<FE::GlobalIndex>(n * n);
+    topology.n_vertices = static_cast<FE::GlobalIndex>((n + 1) * (n + 1));
+    topology.dim = 2;
+    topology.cell2vertex_offsets.reserve(
+        static_cast<std::size_t>(topology.n_cells) + 1u);
+    topology.cell2vertex_offsets.push_back(0);
+    for (FE::GlobalIndex cell = 0; cell < topology.n_cells; ++cell) {
+        std::vector<FE::GlobalIndex> nodes;
+        mesh.getCellNodes(cell, nodes);
+        topology.cell2vertex_data.insert(topology.cell2vertex_data.end(),
+                                         nodes.begin(), nodes.end());
+        topology.cell2vertex_offsets.push_back(
+            static_cast<FE::MeshOffset>(topology.cell2vertex_data.size()));
+        topology.cell_gids.push_back(cell);
+        topology.cell_owner_ranks.push_back(0);
+    }
+    for (FE::GlobalIndex vertex = 0; vertex < topology.n_vertices; ++vertex) {
+        topology.vertex_gids.push_back(vertex);
+    }
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = std::move(topology);
+    return inputs;
+}
+
 std::vector<FE::Real> constantVectorTetraCoefficients(FE::Real x,
                                                       FE::Real y,
                                                       FE::Real z)
@@ -600,6 +796,145 @@ void setScalarVertexValue(std::vector<FE::Real>& solution,
         out[static_cast<std::size_t>(i)] = residual.getVectorEntry(i);
     }
     return out;
+}
+
+[[nodiscard]] std::vector<FE::Real> solveDenseSystem(
+    std::vector<FE::Real> matrix,
+    std::vector<FE::Real> rhs)
+{
+    const std::size_t n = rhs.size();
+    if (matrix.size() != n * n) {
+        throw std::invalid_argument("solveDenseSystem matrix size mismatch");
+    }
+    for (std::size_t column = 0; column < n; ++column) {
+        std::size_t pivot = column;
+        FE::Real pivot_magnitude =
+            std::abs(matrix[column * n + column]);
+        for (std::size_t row = column + 1u; row < n; ++row) {
+            const FE::Real magnitude =
+                std::abs(matrix[row * n + column]);
+            if (magnitude > pivot_magnitude) {
+                pivot = row;
+                pivot_magnitude = magnitude;
+            }
+        }
+        if (!(pivot_magnitude > 1.0e-14) || !std::isfinite(pivot_magnitude)) {
+            throw std::runtime_error("solveDenseSystem encountered a singular pivot");
+        }
+        if (pivot != column) {
+            for (std::size_t j = column; j < n; ++j) {
+                std::swap(matrix[column * n + j], matrix[pivot * n + j]);
+            }
+            std::swap(rhs[column], rhs[pivot]);
+        }
+        const FE::Real diagonal = matrix[column * n + column];
+        for (std::size_t row = column + 1u; row < n; ++row) {
+            const FE::Real multiplier = matrix[row * n + column] / diagonal;
+            matrix[row * n + column] = 0.0;
+            for (std::size_t j = column + 1u; j < n; ++j) {
+                matrix[row * n + j] -= multiplier * matrix[column * n + j];
+            }
+            rhs[row] -= multiplier * rhs[column];
+        }
+    }
+    std::vector<FE::Real> solution(n, 0.0);
+    for (std::size_t reverse = 0; reverse < n; ++reverse) {
+        const std::size_t row = n - 1u - reverse;
+        FE::Real value = rhs[row];
+        for (std::size_t column = row + 1u; column < n; ++column) {
+            value -= matrix[row * n + column] * solution[column];
+        }
+        solution[row] = value / matrix[row * n + row];
+    }
+    return solution;
+}
+
+[[nodiscard]] std::vector<FE::Real> solveLinearLevelSetStep(
+    FE::systems::FESystem& system,
+    std::span<const FE::Real> previous,
+    FE::Real dt)
+{
+    const auto n = system.dofHandler().getNumDofs();
+    if (n <= 0 || previous.size() != static_cast<std::size_t>(n)) {
+        throw std::invalid_argument(
+            "solveLinearLevelSetStep incompatible previous solution");
+    }
+    std::vector<FE::Real> candidate(previous.begin(), previous.end());
+    FE::systems::SystemStateView state;
+    state.dt = dt;
+    state.u = std::span<const FE::Real>(candidate);
+    state.u_prev = previous;
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    FE::assembly::DenseMatrixView jacobian(n);
+    FE::assembly::DenseVectorView residual(n);
+    jacobian.zero();
+    residual.zero();
+    FE::systems::AssemblyRequest request;
+    request.op = "level_set";
+    request.want_matrix = true;
+    request.want_vector = true;
+    const auto assembled = system.assemble(
+        request, state, &jacobian, &residual);
+    if (!assembled.success) {
+        throw std::runtime_error(assembled.error_message);
+    }
+    std::vector<FE::Real> matrix(static_cast<std::size_t>(n * n), 0.0);
+    std::vector<FE::Real> rhs(static_cast<std::size_t>(n), 0.0);
+    for (FE::GlobalIndex row = 0; row < n; ++row) {
+        rhs[static_cast<std::size_t>(row)] = residual.getVectorEntry(row);
+        for (FE::GlobalIndex column = 0; column < n; ++column) {
+            matrix[static_cast<std::size_t>(row * n + column)] =
+                jacobian(row, column);
+        }
+    }
+    const auto update = solveDenseSystem(std::move(matrix), std::move(rhs));
+    for (std::size_t i = 0; i < candidate.size(); ++i) {
+        candidate[i] -= update[i];
+    }
+    return candidate;
+}
+
+template <typename Function>
+void fillScalarFieldAtStructuredVertices(
+    std::vector<FE::Real>& solution,
+    const FE::systems::FESystem& system,
+    FE::FieldId field,
+    const StructuredQuadTransportMeshAccess& mesh,
+    Function&& value)
+{
+    const int n = mesh.cellsPerAxis();
+    for (int j = 0; j <= n; ++j) {
+        for (int i = 0; i <= n; ++i) {
+            const auto node = mesh.nodeId(i, j);
+            const auto point = mesh.getNodeCoordinates(node);
+            setScalarVertexValue(solution, system, field, node,
+                                 value(point[0], point[1]));
+        }
+    }
+}
+
+[[nodiscard]] FE::Real scalarVertexValue(
+    std::span<const FE::Real> solution,
+    const FE::systems::FESystem& system,
+    FE::FieldId field,
+    FE::GlobalIndex vertex)
+{
+    const auto& handler = system.fieldDofHandler(field);
+    const auto* entity_map = handler.getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::runtime_error("scalarVertexValue missing entity map");
+    }
+    const auto dofs = entity_map->getVertexDofs(vertex);
+    if (dofs.size() != 1u) {
+        throw std::runtime_error("scalarVertexValue expected a scalar vertex DOF");
+    }
+    const auto index = static_cast<std::size_t>(
+        system.fieldDofOffset(field) + dofs.front());
+    return solution[index];
 }
 
 [[nodiscard]] FE::Real l2Norm(std::span<const FE::Real> values)
@@ -847,7 +1182,7 @@ TEST(LevelSetTransport, ConservativeDivergenceTransportUsesDivergenceResidual)
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Divergence));
 }
 
-TEST(LevelSetTransport, SUPGAddsCellDiameterStabilization)
+TEST(LevelSetTransport, SUPGUsesTransientDirectionalMetricAndControlledCapturing)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();
     auto phi_space = scalarSpace(mesh);
@@ -862,12 +1197,374 @@ TEST(LevelSetTransport, SUPGAddsCellDiameterStabilization)
     options.velocity.field_name = "advecting_velocity";
     options.velocity.source = level_set::LevelSetVelocitySource::PrescribedData;
     options.supg.enabled = true;
+    options.supg.discontinuity_capturing_enabled = true;
 
     (void)level_set::installLevelSetTransport(system, phi_space, options);
 
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellDiameter));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::TimeDerivative));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::EffectiveTimeStep));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::JacobianInverse));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::SmoothAbsoluteValue));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Minimum));
+}
+
+TEST(LevelSetTransport, DiscontinuityCapturingJitRequestUsesCompiledPath)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+
+    level_set::LevelSetTransportOptions options{};
+    options.operator_tag = "equations";
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.field_name = "advecting_velocity";
+    options.velocity.source = level_set::LevelSetVelocitySource::CoupledField;
+    options.supg.enabled = true;
+    options.supg.discontinuity_capturing_enabled = true;
+
+    FE::systems::FormInstallOptions install_options{};
+    install_options.compiler_options.jit.enable = true;
+
+    FE::systems::FESystem dc_system(mesh);
+    addScalarAndVelocityFields(
+        dc_system,
+        phi_space,
+        velocity_space,
+        FE::systems::FieldSourceKind::Unknown);
+    const auto dc_kernels = level_set::installLevelSetTransport(
+        dc_system, phi_space, options, install_options);
+
+    ASSERT_EQ(dc_kernels.residual.size(), 1u);
+    ASSERT_TRUE(dc_kernels.residual.front());
+    EXPECT_NE(
+        dynamic_cast<const FE::forms::jit::JITKernelWrapper*>(
+            dc_kernels.residual.front().get()),
+        nullptr);
+    ASSERT_TRUE(dc_kernels.mixed_plan);
+    EXPECT_TRUE(dc_kernels.mixed_plan->jit_requested);
+    EXPECT_TRUE(dc_kernels.mixed_plan->monolithic_cell_requested);
+
+    // Ordinary SUPG and residual-based discontinuity capturing must both
+    // remain eligible for the compiled mixed-cell path.
+    FE::systems::FESystem supg_system(mesh);
+    addScalarAndVelocityFields(
+        supg_system,
+        phi_space,
+        velocity_space,
+        FE::systems::FieldSourceKind::Unknown);
+    options.supg.discontinuity_capturing_enabled = false;
+    const auto supg_kernels = level_set::installLevelSetTransport(
+        supg_system, phi_space, options, install_options);
+
+    ASSERT_EQ(supg_kernels.residual.size(), 1u);
+    ASSERT_TRUE(supg_kernels.residual.front());
+    EXPECT_NE(
+        dynamic_cast<const FE::forms::jit::JITKernelWrapper*>(
+            supg_kernels.residual.front().get()),
+        nullptr);
+    ASSERT_TRUE(supg_kernels.mixed_plan);
+    EXPECT_TRUE(supg_kernels.mixed_plan->jit_requested);
+}
+
+TEST(LevelSetTransport,
+     DiscontinuityCapturingJitCombinedAndVectorOnlyResidualsMatch)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+    const auto velocity = system.addField(FE::systems::FieldSpec{
+        .name = "advecting_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.field_name = "advecting_velocity";
+    options.velocity.source = level_set::LevelSetVelocitySource::CoupledField;
+    options.supg.enabled = true;
+    options.supg.discontinuity_capturing_enabled = true;
+
+    FE::systems::FormInstallOptions install_options{};
+    install_options.compiler_options.jit.enable = true;
+    (void)level_set::installLevelSetTransport(
+        system, phi_space, options, install_options);
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<FE::Real> solution(static_cast<std::size_t>(n), 0.0);
+    std::vector<FE::Real> previous = solution;
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto point = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex, 0,
+                               0.12 + 0.03 * point[0] - 0.04 * point[1]);
+        setFieldComponentValue(previous, system, phi, vertex, 0,
+                               0.08 - 0.02 * point[0] + 0.01 * point[2]);
+        setFieldComponentValue(solution, system, velocity, vertex, 0,
+                               0.40 + 0.015 * point[0]);
+        setFieldComponentValue(solution, system, velocity, vertex, 1,
+                               -0.20 + 0.010 * point[1]);
+        setFieldComponentValue(solution, system, velocity, vertex, 2,
+                               0.30 - 0.005 * point[2]);
+    }
+
+    FE::systems::SystemStateView state;
+    state.dt = 0.1;
+    state.u = solution;
+    state.u_prev = previous;
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    FE::assembly::DenseMatrixView jacobian(n);
+    FE::assembly::DenseVectorView combined_residual(n);
+    FE::assembly::DenseVectorView vector_only_residual(n);
+    FE::systems::AssemblyRequest combined_request;
+    combined_request.op = "level_set";
+    combined_request.want_matrix = true;
+    combined_request.want_vector = true;
+    const auto combined = system.assemble(
+        combined_request, state, &jacobian, &combined_residual);
+    ASSERT_TRUE(combined.success) << combined.error_message;
+
+    FE::systems::AssemblyRequest vector_request;
+    vector_request.op = "level_set";
+    vector_request.want_vector = true;
+    const auto vector_only = system.assemble(
+        vector_request, state, nullptr, &vector_only_residual);
+    ASSERT_TRUE(vector_only.success) << vector_only.error_message;
+
+    FE::systems::FESystem interpreter_system(mesh);
+    (void)interpreter_system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+    (void)interpreter_system.addField(FE::systems::FieldSpec{
+        .name = "advecting_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+    auto interpreter_install_options = install_options;
+    interpreter_install_options.compiler_options.jit.enable = false;
+    (void)level_set::installLevelSetTransport(
+        interpreter_system,
+        phi_space,
+        options,
+        interpreter_install_options);
+    ASSERT_NO_THROW(
+        interpreter_system.setup({}, makeSingleTetraSetupInputs()));
+    ASSERT_EQ(interpreter_system.dofHandler().getNumDofs(), n);
+    FE::assembly::DenseVectorView interpreter_residual(n);
+    const auto interpreted = interpreter_system.assemble(
+        vector_request, state, nullptr, &interpreter_residual);
+    ASSERT_TRUE(interpreted.success) << interpreted.error_message;
+
+    for (FE::GlobalIndex row = 0; row < n; ++row) {
+        EXPECT_NEAR(combined_residual[row], vector_only_residual[row], 1.0e-12)
+            << "residual row=" << row;
+        EXPECT_NEAR(combined_residual[row], interpreter_residual[row], 1.0e-12)
+            << "interpreter residual row=" << row;
+    }
+}
+
+TEST(LevelSetTransport,
+     AlgebraicVelocityExtensionJitRequestUsesCompiledPath)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+    });
+    const auto physical_velocity = system.addField(FE::systems::FieldSpec{
+        .name = "physical_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+        .source_kind = FE::systems::FieldSourceKind::Unknown,
+    });
+
+    level_set::LevelSetTransportOptions options{};
+    options.operator_tag = "equations";
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.field_name = "extension_velocity";
+    options.velocity.source = level_set::LevelSetVelocitySource::CoupledField;
+    options.velocity.auto_register_field = true;
+    options.velocity.space = velocity_space;
+    options.velocity.algebraic_extension_source_field_name =
+        "physical_velocity";
+
+    FE::systems::FormInstallOptions install_options{};
+    install_options.compiler_options.jit.enable = true;
+    const auto kernels = level_set::installLevelSetTransport(
+        system, phi_space, options, install_options);
+
+    const auto extension_velocity =
+        system.findFieldByName("extension_velocity");
+    ASSERT_NE(extension_velocity, FE::INVALID_FIELD_ID);
+    EXPECT_NE(extension_velocity, physical_velocity);
+    EXPECT_TRUE(level_set::findLevelSetVelocityExtensionConstraintKernel(
+        system, options.operator_tag, extension_velocity));
+    ASSERT_EQ(kernels.residual.size(), 1u);
+    ASSERT_TRUE(kernels.residual.front());
+    EXPECT_NE(
+        dynamic_cast<const FE::forms::jit::JITKernelWrapper*>(
+            kernels.residual.front().get()),
+        nullptr);
+    ASSERT_TRUE(kernels.mixed_plan);
+    EXPECT_TRUE(kernels.mixed_plan->jit_requested);
+    EXPECT_TRUE(kernels.mixed_plan->monolithic_cell_requested);
+}
+
+TEST(LevelSetTransport,
+     AutoRegistrationPreflightRejectsMissingExtensionSourceWithoutMutation)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    level_set::LevelSetTransportOptions options{};
+    options.operator_tag = "equations";
+    options.level_set.field_name = "phi_pending";
+    options.level_set.auto_register_field = true;
+    options.velocity.field_name = "extension_pending";
+    options.velocity.source = level_set::LevelSetVelocitySource::CoupledField;
+    options.velocity.auto_register_field = true;
+    options.velocity.space = velocity_space;
+    options.velocity.algebraic_extension_source_field_name =
+        "missing_physical_velocity";
+
+    EXPECT_THROW(
+        (void)level_set::installLevelSetTransport(
+            system, phi_space, options),
+        std::invalid_argument);
+    EXPECT_EQ(system.findFieldByName("phi_pending"), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName("extension_pending"),
+              FE::INVALID_FIELD_ID);
+    EXPECT_FALSE(system.hasOperator("equations"));
+    EXPECT_TRUE(system.formulationRecords().empty());
+}
+
+TEST(LevelSetTransport,
+     DuplicateExtensionPreflightDoesNotInstallAnotherFormulation)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+    });
+    system.addField(FE::systems::FieldSpec{
+        .name = "physical_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+
+    level_set::LevelSetTransportOptions options{};
+    options.operator_tag = "equations";
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.field_name = "extension_velocity";
+    options.velocity.source = level_set::LevelSetVelocitySource::CoupledField;
+    options.velocity.auto_register_field = true;
+    options.velocity.space = velocity_space;
+    options.velocity.algebraic_extension_source_field_name =
+        "physical_velocity";
+
+    ASSERT_NO_THROW((void)level_set::installLevelSetTransport(
+        system, phi_space, options));
+    const auto record_count = system.formulationRecords().size();
+    ASSERT_GT(record_count, 0u);
+
+    EXPECT_THROW(
+        (void)level_set::installLevelSetTransport(
+            system, phi_space, options),
+        std::invalid_argument);
+    EXPECT_EQ(system.formulationRecords().size(), record_count);
+}
+
+TEST(LevelSetTransport, SUPGRejectsInvalidTransientAndCapturingControls)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+
+    auto make_options = [] {
+        level_set::LevelSetTransportOptions options{};
+        options.level_set.field_name = "phi";
+        options.level_set.auto_register_field = false;
+        options.velocity.field_name = "advecting_velocity";
+        options.velocity.source = level_set::LevelSetVelocitySource::PrescribedData;
+        options.supg.enabled = true;
+        options.supg.discontinuity_capturing_enabled = true;
+        return options;
+    };
+
+    {
+        FE::systems::FESystem system(mesh);
+        addScalarAndVelocityFields(system, phi_space, velocity_space);
+        auto options = make_options();
+        options.supg.transient_scale = 0.0;
+        EXPECT_THROW((void)level_set::installLevelSetTransport(system, phi_space, options),
+                     std::invalid_argument);
+    }
+    {
+        FE::systems::FESystem system(mesh);
+        addScalarAndVelocityFields(system, phi_space, velocity_space);
+        auto options = make_options();
+        options.supg.discontinuity_capturing_scale = -1.0;
+        EXPECT_THROW((void)level_set::installLevelSetTransport(system, phi_space, options),
+                     std::invalid_argument);
+    }
+    {
+        FE::systems::FESystem system(mesh);
+        addScalarAndVelocityFields(system, phi_space, velocity_space);
+        auto options = make_options();
+        options.supg.gradient_epsilon = 0.0;
+        EXPECT_THROW((void)level_set::installLevelSetTransport(system, phi_space, options),
+                     std::invalid_argument);
+    }
+    {
+        FE::systems::FESystem system(mesh);
+        addScalarAndVelocityFields(system, phi_space, velocity_space);
+        auto options = make_options();
+        options.supg.discontinuity_capturing_residual_epsilon = 0.0;
+        EXPECT_THROW((void)level_set::installLevelSetTransport(
+                         system, phi_space, options),
+                     std::invalid_argument);
+    }
+    {
+        FE::systems::FESystem system(mesh);
+        addScalarAndVelocityFields(system, phi_space, velocity_space);
+        auto options = make_options();
+        options.supg.discontinuity_capturing_max_courant = 0.0;
+        EXPECT_THROW((void)level_set::installLevelSetTransport(system, phi_space, options),
+                     std::invalid_argument);
+    }
+    {
+        FE::systems::FESystem system(mesh);
+        addScalarAndVelocityFields(system, phi_space, velocity_space);
+        auto options = make_options();
+        options.supg.enabled = false;
+        EXPECT_THROW((void)level_set::installLevelSetTransport(system, phi_space, options),
+                     std::invalid_argument);
+    }
 }
 
 TEST(LevelSetTransport, Quad9FlatHorizontalNullModeHasZeroSpatialResidual)
@@ -875,6 +1572,9 @@ TEST(LevelSetTransport, Quad9FlatHorizontalNullModeHasZeroSpatialResidual)
     const auto run_case =
         [](const std::shared_ptr<FE::assembly::IMeshAccess>& mesh,
            const FE::systems::SetupInputs& setup) {
+          for (const bool stabilized : {false, true}) {
+            SCOPED_TRACE(stabilized ? "SUPG and discontinuity capturing"
+                                    : "unstabilized Galerkin");
             auto phi_space = scalarSpace(mesh, /*order=*/2);
 
             FE::systems::FESystem system(mesh);
@@ -889,7 +1589,7 @@ TEST(LevelSetTransport, Quad9FlatHorizontalNullModeHasZeroSpatialResidual)
             options.level_set.auto_register_field = false;
             options.velocity.source = level_set::LevelSetVelocitySource::ConstantVector;
             options.velocity.constant_value = {0.1, 0.0, 0.0};
-            options.supg.enabled = false;
+            options.supg.enabled = stabilized;
 
             (void)level_set::installLevelSetTransport(system, phi_space, options);
             ASSERT_NO_THROW(system.setup({}, setup));
@@ -923,6 +1623,7 @@ TEST(LevelSetTransport, Quad9FlatHorizontalNullModeHasZeroSpatialResidual)
 
             const auto residual = assembleLevelSetResidual(system, state);
             EXPECT_LT(l2Norm(std::span<const FE::Real>(residual)), 1.0e-12);
+          }
         };
 
     run_case(
@@ -931,6 +1632,158 @@ TEST(LevelSetTransport, Quad9FlatHorizontalNullModeHasZeroSpatialResidual)
     run_case(
         std::make_shared<Quad9Patch2x2MeshAccess>(),
         makeQuad9Patch2x2SetupInputs());
+}
+
+TEST(LevelSetTransport, Quad9TravelingLinearModeHasZeroStabilizedResidual)
+{
+    const auto run_case =
+        [](const std::shared_ptr<FE::assembly::IMeshAccess>& mesh,
+           const FE::systems::SetupInputs& setup) {
+          constexpr FE::Real speed = FE::Real{0.35};
+          constexpr FE::Real dt = FE::Real{0.08};
+          constexpr FE::Real interface_offset = FE::Real{0.37};
+
+          auto phi_space = scalarSpace(mesh, /*order=*/2);
+          FE::systems::FESystem system(mesh);
+          const auto phi = system.addField(FE::systems::FieldSpec{
+              .name = "phi",
+              .space = phi_space,
+              .components = 1,
+          });
+
+          level_set::LevelSetTransportOptions options{};
+          options.level_set.field_name = "phi";
+          options.level_set.auto_register_field = false;
+          options.velocity.source = level_set::LevelSetVelocitySource::ConstantVector;
+          options.velocity.constant_value = {speed, 0.0, 0.0};
+          options.supg.enabled = true;
+          options.supg.discontinuity_capturing_enabled = true;
+
+          (void)level_set::installLevelSetTransport(system, phi_space, options);
+          ASSERT_NO_THROW(system.setup({}, setup));
+
+          std::vector<FE::Real> solution(
+              static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+          auto previous_solution = solution;
+          const auto& phi_dofs = system.fieldDofHandler(phi);
+          const auto offset = system.fieldDofOffset(phi);
+          for (FE::GlobalIndex cell = 0; cell < mesh->numCells(); ++cell) {
+              std::vector<FE::GlobalIndex> nodes;
+              mesh->getCellNodes(cell, nodes);
+              const auto dofs = phi_dofs.getCellDofs(cell);
+              ASSERT_EQ(dofs.size(), nodes.size());
+              for (std::size_t local = 0; local < nodes.size(); ++local) {
+                  const auto x = mesh->getNodeCoordinates(nodes[local]);
+                  const auto index = static_cast<std::size_t>(dofs[local] + offset);
+                  ASSERT_LT(index, solution.size());
+                  previous_solution[index] = x[0] - interface_offset;
+                  solution[index] =
+                      x[0] - speed * dt - interface_offset;
+              }
+          }
+
+          FE::systems::SystemStateView state;
+          state.dt = dt;
+          state.u = std::span<const FE::Real>(solution);
+          state.u_prev = std::span<const FE::Real>(previous_solution);
+          const FE::systems::BackwardDifferenceIntegrator integrator;
+          const auto time_context =
+              integrator.buildContext(/*max_time_derivative_order=*/1, state);
+          state.time_integration = &time_context;
+
+          const auto residual = assembleLevelSetResidual(system, state);
+          EXPECT_LT(l2Norm(std::span<const FE::Real>(residual)), 1.0e-12);
+        };
+
+    run_case(
+        std::make_shared<SingleQuad9MeshAccess>(),
+        makeSingleQuad9SetupInputs());
+    run_case(
+        std::make_shared<Quad9Patch2x2MeshAccess>(),
+        makeQuad9Patch2x2SetupInputs());
+}
+
+TEST(LevelSetTransport,
+     Quad9CurvedInterfaceTransportResidualConvergesUnderTimeRefinement)
+{
+    constexpr FE::Real speed_x = FE::Real{0.35};
+    constexpr FE::Real speed_y = FE::Real{-0.2};
+    constexpr FE::Real center_x = FE::Real{0.65};
+    constexpr FE::Real center_y = FE::Real{0.85};
+
+    const auto mesh = std::make_shared<Quad9Patch2x2MeshAccess>();
+    auto phi_space = scalarSpace(mesh, /*order=*/2);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+    });
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.source = level_set::LevelSetVelocitySource::ConstantVector;
+    options.velocity.constant_value = {speed_x, speed_y, 0.0};
+    options.supg.enabled = true;
+    options.supg.discontinuity_capturing_enabled = true;
+
+    (void)level_set::installLevelSetTransport(system, phi_space, options);
+    ASSERT_NO_THROW(system.setup({}, makeQuad9Patch2x2SetupInputs()));
+
+    std::vector<FE::Real> current(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& phi_dofs = system.fieldDofHandler(phi);
+    const auto offset = system.fieldDofOffset(phi);
+    const auto curved_phi = [](FE::Real x, FE::Real y) {
+        const FE::Real dx = x - center_x;
+        const FE::Real dy = y - center_y;
+        return dx * dx + FE::Real{0.6} * dy * dy - FE::Real{0.22};
+    };
+    for (FE::GlobalIndex cell = 0; cell < mesh->numCells(); ++cell) {
+        std::vector<FE::GlobalIndex> nodes;
+        mesh->getCellNodes(cell, nodes);
+        const auto dofs = phi_dofs.getCellDofs(cell);
+        ASSERT_EQ(dofs.size(), nodes.size());
+        for (std::size_t local = 0; local < nodes.size(); ++local) {
+            const auto x = mesh->getNodeCoordinates(nodes[local]);
+            current[static_cast<std::size_t>(dofs[local] + offset)] =
+                curved_phi(x[0], x[1]);
+        }
+    }
+
+    const auto residual_norm = [&](FE::Real dt) {
+        std::vector<FE::Real> previous = current;
+        for (FE::GlobalIndex cell = 0; cell < mesh->numCells(); ++cell) {
+            std::vector<FE::GlobalIndex> nodes;
+            mesh->getCellNodes(cell, nodes);
+            const auto dofs = phi_dofs.getCellDofs(cell);
+            for (std::size_t local = 0; local < nodes.size(); ++local) {
+                const auto x = mesh->getNodeCoordinates(nodes[local]);
+                // Exact previous-time value for the translating curved field
+                // phi(x,t)=phi_0(x-u*t), with the current time set to zero.
+                previous[static_cast<std::size_t>(dofs[local] + offset)] =
+                    curved_phi(x[0] + speed_x * dt,
+                               x[1] + speed_y * dt);
+            }
+        }
+
+        FE::systems::SystemStateView state;
+        state.dt = dt;
+        state.u = std::span<const FE::Real>(current);
+        state.u_prev = std::span<const FE::Real>(previous);
+        const FE::systems::BackwardDifferenceIntegrator integrator;
+        const auto time_context =
+            integrator.buildContext(/*max_time_derivative_order=*/1, state);
+        state.time_integration = &time_context;
+        return l2Norm(assembleLevelSetResidual(system, state));
+    };
+
+    const FE::Real coarse = residual_norm(FE::Real{0.08});
+    const FE::Real fine = residual_norm(FE::Real{0.04});
+    EXPECT_GT(coarse, 1.0e-7);
+    EXPECT_LT(fine, FE::Real{0.7} * coarse);
+    EXPECT_GT(fine, FE::Real{0.3} * coarse);
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -1005,6 +1858,413 @@ TEST(LevelSetTransport,
     EXPECT_LT(l2Norm(std::span<const FE::Real>(residual)), 1.0e-12);
 }
 #endif
+
+TEST(LevelSetTransport,
+     BoundPreservingLimiterEnforcesPreviousOneRingBoundsAndDrySign)
+{
+    constexpr int n = 4;
+    const auto mesh =
+        std::make_shared<StructuredQuadTransportMeshAccess>(n);
+    auto phi_space = scalarSpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+
+    level_set::LevelSetTransportOptions transport{};
+    transport.level_set.field_name = "phi";
+    transport.level_set.auto_register_field = false;
+    transport.velocity.source =
+        level_set::LevelSetVelocitySource::ConstantVector;
+    transport.velocity.constant_value = {0.25, 0.0, 0.0};
+    transport.bound_preserving.enabled = true;
+    (void)level_set::installLevelSetTransport(system, phi_space, transport);
+    ASSERT_NO_THROW(system.setup(
+        {}, makeStructuredQuadTransportSetupInputs(*mesh)));
+
+    std::vector<FE::Real> previous(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    fillScalarFieldAtStructuredVertices(
+        previous, system, phi, *mesh,
+        [](FE::Real x, FE::Real /*y*/) { return x - FE::Real{0.55}; });
+    auto candidate = previous;
+    const auto corrupted_vertex = mesh->nodeId(n, n);
+    setScalarVertexValue(candidate, system, phi, corrupted_vertex, -0.25);
+
+    std::vector<FE::Real> limited;
+    const auto result = level_set::applyLevelSetBoundPreservingLimiter(
+        system, phi, transport.boundaries, transport.bound_preserving,
+        previous, candidate, /*observed_courant=*/0.25, limited);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_TRUE(result.applied);
+    EXPECT_TRUE(result.bounds_satisfied);
+    EXPECT_TRUE(result.sign_preservation_satisfied);
+    EXPECT_EQ(result.limited_dofs, 1u);
+    EXPECT_EQ(result.positive_patch_sign_flips_prevented, 1u);
+    EXPECT_GE(result.maximum_unrelaxed_bound_violation,
+              result.maximum_bound_violation);
+    EXPECT_GT(result.maximum_bound_violation, 0.0);
+    EXPECT_GT(scalarVertexValue(limited, system, phi, corrupted_vertex), 0.0);
+    EXPECT_NEAR(scalarVertexValue(limited, system, phi, corrupted_vertex),
+                0.2, 2.0e-12);
+}
+
+TEST(LevelSetTransport,
+     BoundPreservingLimiterRejectsSignFlipInsideRelaxedCoefficientBounds)
+{
+    constexpr int n = 4;
+    const auto mesh =
+        std::make_shared<StructuredQuadTransportMeshAccess>(n);
+    auto phi_space = scalarSpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+
+    level_set::LevelSetTransportOptions transport{};
+    transport.level_set.field_name = "phi";
+    transport.level_set.auto_register_field = false;
+    transport.velocity.source =
+        level_set::LevelSetVelocitySource::ConstantVector;
+    transport.velocity.constant_value = {0.25, 0.0, 0.0};
+    transport.bound_preserving.enabled = true;
+    // Deliberately make the coefficient bound permissive enough that the raw
+    // negative value is not clamped.  Same-sign patch preservation must remain
+    // an independent fail-closed invariant.
+    transport.bound_preserving.bound_tolerance = 1.0;
+    transport.bound_preserving.sign_tolerance = 1.0e-12;
+    (void)level_set::installLevelSetTransport(system, phi_space, transport);
+    ASSERT_NO_THROW(system.setup(
+        {}, makeStructuredQuadTransportSetupInputs(*mesh)));
+
+    std::vector<FE::Real> previous(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    fillScalarFieldAtStructuredVertices(
+        previous, system, phi, *mesh,
+        [](FE::Real x, FE::Real /*y*/) { return x - FE::Real{0.55}; });
+    auto candidate = previous;
+    const auto corrupted_vertex = mesh->nodeId(n, n);
+    setScalarVertexValue(candidate, system, phi, corrupted_vertex, -0.25);
+
+    std::vector<FE::Real> limited;
+    const auto result = level_set::applyLevelSetBoundPreservingLimiter(
+        system, phi, transport.boundaries, transport.bound_preserving,
+        previous, candidate, /*observed_courant=*/0.25, limited);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_TRUE(result.bounds_satisfied);
+    EXPECT_FALSE(result.sign_preservation_satisfied);
+    EXPECT_EQ(result.positive_patch_sign_flips_prevented, 1u);
+    EXPECT_EQ(result.limited_dofs, 0u);
+    EXPECT_GT(result.maximum_unrelaxed_bound_violation, 0.0);
+    EXPECT_EQ(result.maximum_bound_violation, 0.0);
+    EXPECT_LT(scalarVertexValue(limited, system, phi, corrupted_vertex), 0.0);
+    EXPECT_NE(result.diagnostic.find("post-projection invariant"),
+              std::string::npos);
+
+    std::vector<FE::Real> courant_limited;
+    const auto courant_result = level_set::applyLevelSetBoundPreservingLimiter(
+        system, phi, transport.boundaries, transport.bound_preserving,
+        previous, previous,
+        transport.bound_preserving.maximum_courant + 1.0e-6,
+        courant_limited);
+    EXPECT_FALSE(courant_result.success);
+    EXPECT_NE(courant_result.diagnostic.find("Courant"), std::string::npos);
+}
+
+TEST(LevelSetTransport,
+     TransportSafetyAcceptsTangentialWallsAndRejectsNormalWallFlux)
+{
+    constexpr int n = 8;
+    const auto mesh =
+        std::make_shared<StructuredQuadTransportMeshAccess>(n);
+    auto phi_space = scalarSpace(mesh);
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+
+    level_set::LevelSetTransportOptions transport{};
+    transport.level_set.field_name = "phi";
+    transport.level_set.auto_register_field = false;
+    transport.velocity.source =
+        level_set::LevelSetVelocitySource::ConstantVector;
+    transport.velocity.constant_value = {0.5, 0.0, 0.0};
+    transport.boundaries.inflow.push_back(
+        level_set::LevelSetInflowBoundary{
+            .boundary_marker =
+                StructuredQuadTransportMeshAccess::kInflowMarker,
+            .value = 1.0});
+    transport.boundaries.outflow.push_back(
+        level_set::LevelSetOutflowBoundary{
+            .boundary_marker =
+                StructuredQuadTransportMeshAccess::kOutflowMarker});
+    transport.bound_preserving.enabled = true;
+    (void)level_set::installLevelSetTransport(system, phi_space, transport);
+    ASSERT_NO_THROW(system.setup(
+        {}, makeStructuredQuadTransportSetupInputs(*mesh)));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    FE::systems::SystemStateView state;
+    state.u = solution;
+
+    const auto tangential = level_set::evaluateLevelSetTransportSafety(
+        system, transport.velocity, transport.boundaries,
+        transport.bound_preserving, state, /*dt=*/0.125);
+    ASSERT_TRUE(tangential.success) << tangential.diagnostic;
+    EXPECT_TRUE(tangential.courant_satisfied);
+    EXPECT_TRUE(tangential.impermeable_boundaries_satisfied);
+    EXPECT_EQ(tangential.impermeable_boundary_faces_checked,
+              static_cast<std::size_t>(2 * n));
+    EXPECT_NEAR(tangential.maximum_courant, 0.5, 1.0e-12);
+    EXPECT_NEAR(tangential.maximum_boundary_normal_velocity, 0.0, 1.0e-14);
+
+    auto normal_velocity = transport.velocity;
+    normal_velocity.constant_value = {0.0, 0.5, 0.0};
+    const auto incompatible = level_set::evaluateLevelSetTransportSafety(
+        system, normal_velocity, transport.boundaries,
+        transport.bound_preserving, state, /*dt=*/0.125);
+    EXPECT_FALSE(incompatible.success);
+    EXPECT_TRUE(incompatible.courant_satisfied);
+    EXPECT_FALSE(incompatible.impermeable_boundaries_satisfied);
+    EXPECT_NEAR(incompatible.maximum_boundary_normal_velocity, 0.5, 1.0e-12);
+}
+
+TEST(LevelSetTransport,
+     TransportSafetyRejectsNodalWallFluxThatCancelsAtFaceCentroid)
+{
+    const auto mesh =
+        std::make_shared<StructuredQuadTransportMeshAccess>(/*cells_per_axis=*/1);
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/2);
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+    const auto velocity = system.addField(FE::systems::FieldSpec{
+        .name = "advecting_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData});
+
+    level_set::LevelSetTransportOptions transport{};
+    transport.level_set.field_name = "phi";
+    transport.level_set.auto_register_field = false;
+    transport.velocity.field_name = "advecting_velocity";
+    transport.velocity.source =
+        level_set::LevelSetVelocitySource::PrescribedData;
+    transport.boundaries.inflow.push_back(
+        level_set::LevelSetInflowBoundary{
+            .boundary_marker =
+                StructuredQuadTransportMeshAccess::kInflowMarker,
+            .value = 1.0});
+    transport.boundaries.outflow.push_back(
+        level_set::LevelSetOutflowBoundary{
+            .boundary_marker =
+                StructuredQuadTransportMeshAccess::kOutflowMarker});
+    transport.bound_preserving.enabled = true;
+    (void)level_set::installLevelSetTransport(system, phi_space, transport);
+    ASSERT_NO_THROW(system.setup(
+        {}, makeStructuredQuadTransportSetupInputs(*mesh)));
+
+    const auto& handler = system.fieldDofHandler(velocity);
+    const auto* entity_map = handler.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    std::vector<FE::Real> coefficients(
+        static_cast<std::size_t>(handler.getNumDofs()), 0.0);
+    for (int j = 0; j <= 1; ++j) {
+        for (int i = 0; i <= 1; ++i) {
+            const auto dofs = entity_map->getVertexDofs(mesh->nodeId(i, j));
+            ASSERT_GE(dofs.size(), 2u);
+            ASSERT_GE(dofs[1], 0);
+            ASSERT_LT(static_cast<std::size_t>(dofs[1]), coefficients.size());
+            coefficients[static_cast<std::size_t>(dofs[1])] =
+                i == 0 ? -1.0 : 1.0;
+        }
+    }
+    system.setPrescribedFieldCoefficients(velocity, coefficients);
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    FE::systems::SystemStateView state;
+    state.u = solution;
+    const auto safety = level_set::evaluateLevelSetTransportSafety(
+        system, transport.velocity, transport.boundaries,
+        transport.bound_preserving, state, /*dt=*/0.125);
+
+    EXPECT_FALSE(safety.success);
+    EXPECT_TRUE(safety.courant_satisfied);
+    EXPECT_FALSE(safety.impermeable_boundaries_satisfied);
+    EXPECT_EQ(safety.impermeable_boundary_faces_checked, 2u);
+    EXPECT_NEAR(safety.maximum_boundary_normal_velocity, 1.0, 1.0e-12);
+    EXPECT_EQ(safety.worst_boundary_marker,
+              StructuredQuadTransportMeshAccess::kWallMarker);
+}
+
+TEST(LevelSetTransport,
+     AssembledSmoothTravelingWaveSolveConvergesUnderSpaceTimeRefinement)
+{
+    const auto solve_error = [](int n) {
+        const FE::Real speed = 0.35;
+        const FE::Real dt = 0.2 / static_cast<FE::Real>(n);
+        const auto mesh =
+            std::make_shared<StructuredQuadTransportMeshAccess>(n);
+        auto phi_space = scalarSpace(mesh);
+        FE::systems::FESystem system(mesh);
+        const auto phi = system.addField(FE::systems::FieldSpec{
+            .name = "phi", .space = phi_space, .components = 1});
+
+        level_set::LevelSetTransportOptions options{};
+        options.level_set.field_name = "phi";
+        options.level_set.auto_register_field = false;
+        options.velocity.source =
+            level_set::LevelSetVelocitySource::ConstantVector;
+        options.velocity.constant_value = {speed, 0.0, 0.0};
+        options.supg.enabled = true;
+        options.supg.discontinuity_capturing_enabled = false;
+        options.boundaries.inflow.push_back(
+            level_set::LevelSetInflowBoundary{
+                .boundary_marker =
+                    StructuredQuadTransportMeshAccess::kInflowMarker,
+                .value = std::sin(-2.0 * std::acos(-1.0) * speed * dt),
+                .penalty_scale = 4.0});
+        options.boundaries.outflow.push_back(
+            level_set::LevelSetOutflowBoundary{
+                .boundary_marker =
+                    StructuredQuadTransportMeshAccess::kOutflowMarker});
+        (void)level_set::installLevelSetTransport(system, phi_space, options);
+        system.setup({}, makeStructuredQuadTransportSetupInputs(*mesh));
+
+        std::vector<FE::Real> previous(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+        fillScalarFieldAtStructuredVertices(
+            previous, system, phi, *mesh,
+            [](FE::Real x, FE::Real /*y*/) {
+                return std::sin(2.0 * std::acos(-1.0) * x);
+            });
+        const auto candidate =
+            solveLinearLevelSetStep(system, previous, dt);
+
+        FE::Real squared_error = 0.0;
+        std::size_t samples = 0u;
+        for (int j = 0; j <= n; ++j) {
+            for (int i = 0; i <= n; ++i) {
+                const auto node = mesh->nodeId(i, j);
+                const auto point = mesh->getNodeCoordinates(node);
+                const FE::Real exact = std::sin(
+                    2.0 * std::acos(-1.0) * (point[0] - speed * dt));
+                const FE::Real error =
+                    scalarVertexValue(candidate, system, phi, node) - exact;
+                squared_error += error * error;
+                ++samples;
+            }
+        }
+        return std::sqrt(squared_error / static_cast<FE::Real>(samples));
+    };
+
+    const FE::Real coarse = solve_error(4);
+    const FE::Real medium = solve_error(8);
+    const FE::Real fine = solve_error(16);
+    EXPECT_GT(coarse, 0.0);
+    EXPECT_LT(medium, 0.8 * coarse);
+    EXPECT_LT(fine, 0.8 * medium);
+}
+
+TEST(LevelSetTransport,
+     AssembledSteepFrontLimiterPreventsFalseDryWallSignChange)
+{
+    constexpr int n = 16;
+    constexpr FE::Real speed = 0.5;
+    const FE::Real h = 1.0 / static_cast<FE::Real>(n);
+    const FE::Real dt = 0.8 * h / speed;
+    const auto mesh =
+        std::make_shared<StructuredQuadTransportMeshAccess>(n);
+    auto phi_space = scalarSpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.source =
+        level_set::LevelSetVelocitySource::ConstantVector;
+    options.velocity.constant_value = {speed, 0.0, 0.0};
+    options.supg.enabled = false;
+    options.boundaries.inflow.push_back(
+        level_set::LevelSetInflowBoundary{
+            .boundary_marker =
+                StructuredQuadTransportMeshAccess::kInflowMarker,
+            .value = -1.0});
+    options.boundaries.outflow.push_back(
+        level_set::LevelSetOutflowBoundary{
+            .boundary_marker =
+                StructuredQuadTransportMeshAccess::kOutflowMarker});
+    options.bound_preserving.enabled = true;
+    options.bound_preserving.maximum_courant = 1.0;
+    (void)level_set::installLevelSetTransport(system, phi_space, options);
+    ASSERT_NO_THROW(system.setup(
+        {}, makeStructuredQuadTransportSetupInputs(*mesh)));
+
+    std::vector<FE::Real> previous(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    fillScalarFieldAtStructuredVertices(
+        previous, system, phi, *mesh,
+        [](FE::Real x, FE::Real /*y*/) {
+            // A signed interface at x=0.30 followed by a dry-side gate cliff.
+            // The 0.01-to-1 jump is entirely dry; a monotone transport update
+            // must not turn its small positive upstream plateau negative.
+            if (x < FE::Real{0.30}) {
+                return x - FE::Real{0.30};
+            }
+            return x < FE::Real{0.625} ? FE::Real{0.01} : FE::Real{1.0};
+        });
+    const auto candidate = solveLinearLevelSetStep(system, previous, dt);
+
+    FE::systems::SystemStateView state;
+    state.u = candidate;
+    const auto safety = level_set::evaluateLevelSetTransportSafety(
+        system, options.velocity, options.boundaries,
+        options.bound_preserving, state, dt);
+    ASSERT_TRUE(safety.success) << safety.diagnostic;
+    EXPECT_NEAR(safety.maximum_courant, 0.8, 1.0e-12);
+    EXPECT_NEAR(safety.maximum_boundary_normal_velocity, 0.0, 1.0e-14);
+
+    std::vector<FE::Real> limited;
+    const auto limited_result = level_set::applyLevelSetBoundPreservingLimiter(
+        system, phi, options.boundaries, options.bound_preserving,
+        previous, candidate, safety.maximum_courant, limited);
+    ASSERT_TRUE(limited_result.success) << limited_result.diagnostic;
+    EXPECT_TRUE(limited_result.applied);
+    EXPECT_GT(limited_result.positive_patch_sign_flips_prevented, 0u);
+
+    std::size_t false_dry_wall_flips = 0u;
+    std::size_t remaining_false_dry_wall_flips = 0u;
+    for (const int wall_j : {0, n}) {
+        for (int i = 1; i < n; ++i) {
+            const auto vertex = mesh->nodeId(i, wall_j);
+            const FE::Real left_old = scalarVertexValue(
+                previous, system, phi, mesh->nodeId(i - 1, wall_j));
+            const FE::Real center_old = scalarVertexValue(
+                previous, system, phi, vertex);
+            const FE::Real right_old = scalarVertexValue(
+                previous, system, phi, mesh->nodeId(i + 1, wall_j));
+            const FE::Real patch_minimum =
+                std::min({left_old, center_old, right_old});
+            if (patch_minimum <= options.bound_preserving.sign_tolerance) {
+                continue;
+            }
+            if (scalarVertexValue(candidate, system, phi, vertex) <
+                -options.bound_preserving.sign_tolerance) {
+                ++false_dry_wall_flips;
+            }
+            if (scalarVertexValue(limited, system, phi, vertex) <
+                -options.bound_preserving.sign_tolerance) {
+                ++remaining_false_dry_wall_flips;
+            }
+        }
+    }
+    EXPECT_GT(false_dry_wall_flips, 0u);
+    EXPECT_EQ(remaining_false_dry_wall_flips, 0u);
+}
 
 TEST(LevelSetTransport, InterfaceKinematicAddsInterfaceResidual)
 {
@@ -1119,6 +2379,22 @@ TEST(LevelSetTransport, ValidatesReinitializationOptions)
         std::invalid_argument);
 
     options.reinitialization.pseudo_time_step_scale = 0.3;
+    options.reinitialization.preserve_band_width = 1.0e-3;
+    FE::systems::FESystem preserve_band_system(mesh);
+    EXPECT_THROW(
+        (void)level_set::installLevelSetTransport(
+            preserve_band_system, phi_space, options),
+        std::invalid_argument);
+
+    options.reinitialization.preserve_band_width = 0.0;
+    options.reinitialization.max_zero_set_displacement = -1.0;
+    FE::systems::FESystem displacement_system(mesh);
+    EXPECT_THROW(
+        (void)level_set::installLevelSetTransport(
+            displacement_system, phi_space, options),
+        std::invalid_argument);
+
+    options.reinitialization.max_zero_set_displacement = 1.0e-10;
     options.reinitialization.interface_band_width = 0.0;
     FE::systems::FESystem band_system(mesh);
     EXPECT_THROW(
@@ -1183,6 +2459,32 @@ TEST(LevelSetTransport, ValidatesVolumeCorrectionOptions)
         std::invalid_argument);
 
     options.volume_correction.max_iterations = 50;
+    options.volume_correction.minimum_relative_volume_error = -1.0;
+    FE::systems::FESystem relative_error_system(mesh);
+    EXPECT_THROW(
+        (void)level_set::installLevelSetTransport(
+            relative_error_system, phi_space, options),
+        std::invalid_argument);
+
+    options.volume_correction.minimum_relative_volume_error = 1.0e-6;
+    options.volume_correction.maximum_interface_displacement_fraction = 0.0;
+    FE::systems::FESystem displacement_system(mesh);
+    EXPECT_THROW(
+        (void)level_set::installLevelSetTransport(
+            displacement_system, phi_space, options),
+        std::invalid_argument);
+
+    options.volume_correction.maximum_interface_displacement_fraction = 0.1;
+    options.volume_correction
+        .maximum_cumulative_interface_displacement_fraction = 0.0;
+    FE::systems::FESystem cumulative_displacement_system(mesh);
+    EXPECT_THROW(
+        (void)level_set::installLevelSetTransport(
+            cumulative_displacement_system, phi_space, options),
+        std::invalid_argument);
+
+    options.volume_correction
+        .maximum_cumulative_interface_displacement_fraction = 1.0;
     options.volume_correction.use_initial_negative_volume_as_target = false;
     options.volume_correction.target_negative_volume = -1.0;
     FE::systems::FESystem target_system(mesh);
@@ -1435,4 +2737,242 @@ TEST(LevelSetTransport, CoupledVelocityJacobianMatchesFiniteDifference)
         1.0e-6,
         5.0e-5,
         1.0e-8);
+}
+
+TEST(LevelSetTransport,
+     DiscontinuityCapturingZeroStrongResidualJacobianMatchesCentralDifference)
+{
+    constexpr FE::Real speed = 0.35;
+    constexpr FE::Real dt = 0.1;
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.source =
+        level_set::LevelSetVelocitySource::ConstantVector;
+    options.velocity.constant_value = {0.0, speed, 0.0};
+    options.supg.enabled = true;
+    options.supg.discontinuity_capturing_enabled = true;
+
+    FE::systems::FormInstallOptions install_options{};
+    install_options.compiler_options.jit.enable = true;
+    (void)level_set::installLevelSetTransport(
+        system, phi_space, options, install_options);
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    std::vector<FE::Real> previous = solution;
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const FE::Real y = mesh->getNodeCoordinates(vertex)[1];
+        // phi(y,t_n)=y and phi(y,t_{n-1})=y+u_y*dt gives
+        // dt(phi)+u.grad(phi)=0 pointwise on this affine P1 cell.
+        setFieldComponentValue(solution, system, phi, vertex, 0, y);
+        setFieldComponentValue(
+            previous, system, phi, vertex, 0, y + speed * dt);
+    }
+
+    FE::systems::SystemStateView state;
+    state.dt = dt;
+    state.u = solution;
+    state.u_prev = previous;
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    expectOperatorJacobianMatchesCentralFD(
+        system,
+        state,
+        /*eps=*/1.0e-7,
+        /*rtol=*/2.0e-5,
+        /*atol=*/2.0e-8);
+}
+
+TEST(LevelSetTransport,
+     AlgebraicWetExtensionCarriesVelocityYToPhiForDryCutSupportSourceRow)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+    const auto physical_velocity = system.addField(FE::systems::FieldSpec{
+        .name = "Velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.field_name = "LevelSetAdvectionVelocity";
+    options.velocity.source = level_set::LevelSetVelocitySource::CoupledField;
+    options.velocity.auto_register_field = true;
+    options.velocity.space = velocity_space;
+    options.velocity.algebraic_extension_source_field_name = "Velocity";
+
+    FE::systems::FormInstallOptions install_options{};
+    install_options.compiler_options.jit.enable = true;
+    (void)level_set::installLevelSetTransport(
+        system, phi_space, options, install_options);
+    const auto extension_velocity =
+        system.findFieldByName("LevelSetAdvectionVelocity");
+    ASSERT_NE(extension_velocity, FE::INVALID_FIELD_ID);
+    auto extension_kernel =
+        level_set::findLevelSetVelocityExtensionConstraintKernel(
+            system, "level_set", extension_velocity);
+    ASSERT_TRUE(extension_kernel);
+
+    std::vector<level_set::VelocityExtensionConstraintRow> rows;
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        for (int component = 0; component < 3; ++component) {
+            rows.push_back(level_set::VelocityExtensionConstraintRow{
+                .vertex = vertex,
+                .component = component,
+                .dependencies = {
+                    level_set::VelocityExtensionDependency{
+                        .field = level_set::
+                            VelocityExtensionDependencyField::SourceVelocity,
+                        .vertex = vertex,
+                        .component = component,
+                        .coefficient = 1.0,
+                    }},
+            });
+        }
+    }
+    // phi=y-0.25 cuts this P1 tetra.  Vertex 2 (y=1) is dry, but it supports
+    // the cut-cell trace and therefore must carry an exact E_y=u_y source row
+    // rather than a graph-extension dependency.
+    constexpr FE::GlobalIndex dry_trace_vertex = 2;
+    ASSERT_GT(mesh->getNodeCoordinates(dry_trace_vertex)[1] - 0.25, 0.0);
+    const auto dry_trace_row = std::find_if(
+        rows.begin(), rows.end(), [](const auto& row) {
+          return row.vertex == dry_trace_vertex && row.component == 1;
+        });
+    ASSERT_NE(dry_trace_row, rows.end());
+    ASSERT_EQ(dry_trace_row->dependencies.size(), 1u);
+    EXPECT_EQ(dry_trace_row->dependencies.front().field,
+              level_set::
+                  VelocityExtensionDependencyField::SourceVelocity);
+    EXPECT_EQ(dry_trace_row->dependencies.front().vertex,
+              dry_trace_vertex);
+    EXPECT_EQ(dry_trace_row->dependencies.front().component, 1);
+    EXPECT_DOUBLE_EQ(dry_trace_row->dependencies.front().coefficient, 1.0);
+    extension_kernel->setFrozenRows(std::move(rows), 1u);
+    EXPECT_TRUE(extension_kernel->hasFrozenMap());
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto system_dof = [&](FE::FieldId field,
+                                FE::GlobalIndex vertex,
+                                int component) {
+        const auto* entity_map =
+            system.fieldDofHandler(field).getEntityDofMap();
+        if (entity_map == nullptr) {
+            throw std::runtime_error("test field has no vertex DOF map");
+        }
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        if (component < 0 ||
+            static_cast<std::size_t>(component) >= dofs.size()) {
+            throw std::runtime_error("test field component is out of range");
+        }
+        return system.fieldDofOffset(field) +
+               dofs[static_cast<std::size_t>(component)];
+    };
+
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<FE::Real> solution(static_cast<std::size_t>(n), 0.0);
+    std::vector<FE::Real> previous = solution;
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto coordinates = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(
+            solution, system, phi, vertex, 0, coordinates[1] - 0.25);
+        setFieldComponentValue(
+            previous, system, phi, vertex, 0, coordinates[1] - 0.25);
+        for (int component = 0; component < 3; ++component) {
+            const FE::Real value = component == 1 ? FE::Real{0.2} : 0.0;
+            setFieldComponentValue(solution, system, physical_velocity,
+                                   vertex, component, value);
+            setFieldComponentValue(solution, system, extension_velocity,
+                                   vertex, component, value);
+        }
+    }
+
+    FE::systems::SystemStateView state;
+    state.dt = 0.1;
+    state.u = solution;
+    state.u_prev = previous;
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    FE::assembly::DenseMatrixView jacobian(n);
+    FE::systems::AssemblyRequest matrix_request;
+    matrix_request.op = "level_set";
+    matrix_request.want_matrix = true;
+    const auto matrix_result =
+        system.assemble(matrix_request, state, &jacobian, nullptr);
+    ASSERT_TRUE(matrix_result.success) << matrix_result.error_message;
+
+    constexpr FE::Real eps = 1.0e-7;
+    FE::Real maximum_chain_entry = 0.0;
+    for (FE::GlobalIndex source_vertex = 0; source_vertex < 4;
+         ++source_vertex) {
+        const auto source_y =
+            system_dof(physical_velocity, source_vertex, 1);
+        const auto extension_y =
+            system_dof(extension_velocity, source_vertex, 1);
+
+        std::vector<FE::Real> plus = solution;
+        std::vector<FE::Real> minus = solution;
+        // Perturb the physical velocity and move E along the exact active-row
+        // constraint E=u.  This is the condensed monolithic u_y direction.
+        plus[static_cast<std::size_t>(source_y)] += eps;
+        plus[static_cast<std::size_t>(extension_y)] += eps;
+        minus[static_cast<std::size_t>(source_y)] -= eps;
+        minus[static_cast<std::size_t>(extension_y)] -= eps;
+
+        auto state_plus = state;
+        auto state_minus = state;
+        state_plus.u = plus;
+        state_minus.u = minus;
+        const auto residual_plus = assembleLevelSetResidual(system, state_plus);
+        const auto residual_minus =
+            assembleLevelSetResidual(system, state_minus);
+
+        for (FE::GlobalIndex row_vertex = 0; row_vertex < 4; ++row_vertex) {
+            const auto phi_row = system_dof(phi, row_vertex, 0);
+            const FE::Real finite_difference =
+                (residual_plus[static_cast<std::size_t>(phi_row)] -
+                 residual_minus[static_cast<std::size_t>(phi_row)]) /
+                (2.0 * eps);
+            const FE::Real assembled_chain =
+                jacobian(phi_row, extension_y);
+            maximum_chain_entry =
+                std::max(maximum_chain_entry, std::abs(assembled_chain));
+            EXPECT_NEAR(assembled_chain, finite_difference, 2.0e-8)
+                << "phi row vertex=" << row_vertex
+                << " source y vertex=" << source_vertex;
+            // The active extension row itself must annihilate the same
+            // constrained direction: d(E_y-u_y)=0.
+            const auto extension_row = extension_y;
+            EXPECT_NEAR(jacobian(extension_row, extension_y) +
+                            jacobian(extension_row, source_y),
+                        0.0,
+                        1.0e-13);
+        }
+    }
+    EXPECT_GT(maximum_chain_entry, 1.0e-6)
+        << "Regression guard: the D18 u_y -> phi block must not be zero";
+    extension_kernel->invalidateFrozenMap();
+    EXPECT_FALSE(extension_kernel->hasFrozenMap());
 }

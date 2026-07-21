@@ -896,6 +896,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSet.h
     LevelSet/LevelSetOptions.h
     LevelSet/LevelSetTransport.h
+    LevelSet/LevelSetVelocityExtensionConstraint.h
     LevelSet/LevelSetCellEvaluator.h
     LevelSet/LevelSetCurvatureProjection.h
     LevelSet/LevelSetInterfaceLifecycle.h
@@ -908,6 +909,7 @@ set(FE_LEVELSET_HEADERS
 
 set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetTransport.cpp
+    LevelSet/LevelSetVelocityExtensionConstraint.cpp
     LevelSet/LevelSetCellEvaluator.cpp
     LevelSet/LevelSetCurvatureProjection.cpp
     LevelSet/LevelSetInterfaceLifecycle.cpp
