@@ -17,11 +17,82 @@ provides interface geometry. Geometry reconciliation must preserve the
 accepted `q` measure and must remain inside the maintenance transaction.
 
 The reusable correction kernel is implemented in
-`LevelSetConservativePhaseTransport`. Production application wiring, finite
-element flux construction, geometry reconciliation, distributed ownership,
-and the required transport benchmark matrix remain separate qualification
-steps. Until those steps are complete, the existing signed-distance transport
-must continue to report that it is not locally conservative.
+`LevelSetConservativePhaseTransport`. The first geometry-aware P1 operator is
+implemented in `LevelSetConservativePhaseOperator`. It constructs lumped nodal
+control volumes and the full algebraic gradient graph from the actual physical
+mapping and quadrature. Production application wiring, geometry
+reconciliation, distributed ownership, and the required transport benchmark
+matrix remain separate qualification steps. Until those steps are complete,
+the existing signed-distance transport must continue to report that it is not
+locally conservative.
+
+## P1 finite-element flux construction
+
+For the assembled gradient matrix
+
+\[
+C_{ij}=\int_\Omega N_i\nabla N_j\,dx,
+\]
+
+the strong conservative CG contribution is
+
+\[
+-\sum_j C_{ij}\cdot(q_j u_j).
+\]
+
+Every unordered edge `i<j` is stored once. The central mass-transfer rate into
+`i` is
+
+\[
+T_{ij}=C_{ji}\cdot(q_i u_i)-C_{ij}\cdot(q_j u_j),
+\qquad T_{ji}=-T_{ij}.
+\]
+
+The part not represented by pair transfers is the physical-boundary remainder
+
+\[
+B_i=-q_i u_i\cdot b_i,
+\qquad b_i=\sum_j C_{ji}=\int_{\partial\Omega}N_i n\,ds.
+\]
+
+Writing advective indicator transport in conservative form adds the explicit
+discrete-divergence source
+
+\[
+S_i=q_i\sum_j C_{ij}\cdot u_j.
+\]
+
+Consequently `sum_edges(T_ij) + B_i + S_i` equals the lumped strong-CG
+advective operator node by node. For constant `q`, the boundary, edge, and
+divergence terms cancel exactly even for a nodal velocity field with nonzero
+discrete divergence.
+
+The symmetric low-order graph-viscosity coefficient is
+
+\[
+d_{ij}=\max\left(\left|C_{ij}\cdot u_j\right|,
+                  \left|C_{ji}\cdot u_i\right|\right).
+\]
+
+It makes both directed off-diagonal update coefficients nonnegative. The
+forward-Euler stage is accepted only when
+
+\[
+\max_i \frac{\Delta t}{m_i}
+\sum_{j\ne i}\left(d_{ij}-C_{ij}\cdot u_j\right)\le 1.
+\]
+
+The low-order edge transfer adds `d_ij(q_j-q_i)`. The raw antidiffusive
+transfer removes exactly that addition, so the unlimited target is the
+lumped central operator and the accepted correction remains pairwise
+conservative.
+
+The graph builder validates partition of unity, the zero gradient sum,
+positive mapped quadrature and control volumes, the global row-sum identity,
+and closure of the summed lumped volumes against mapped physical measure.
+It records geometry, topology, ownership, numbering, and degree-of-freedom
+layout revisions. Multi-rank construction currently fails closed until unique
+edge ownership and sparse coefficient exchange are implemented.
 
 ## Fully discrete edge update
 
