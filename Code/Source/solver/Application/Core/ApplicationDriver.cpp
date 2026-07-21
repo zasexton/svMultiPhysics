@@ -4197,12 +4197,20 @@ evaluateAcceptedFreeSurfaceContactStages(
           static_cast<double>(
               coefficient.equilibrium_contact_angle_radians);
       const double mobility = static_cast<double>(coefficient.mobility);
+      const double slip_length =
+          static_cast<double>(coefficient.slip_length);
+      const double dynamic_viscosity =
+          static_cast<double>(coefficient.dynamic_viscosity);
       if (globalMinDouble(boundary_marker, comm) !=
               globalMaxDouble(boundary_marker, comm) ||
           globalMinDouble(equilibrium_angle, comm) !=
               globalMaxDouble(equilibrium_angle, comm) ||
           globalMinDouble(mobility, comm) !=
-              globalMaxDouble(mobility, comm)) {
+              globalMaxDouble(mobility, comm) ||
+          globalMinDouble(slip_length, comm) !=
+              globalMaxDouble(slip_length, comm) ||
+          globalMinDouble(dynamic_viscosity, comm) !=
+              globalMaxDouble(dynamic_viscosity, comm)) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Dynamic contact-stage wall coefficients differ across the FE communicator for marker " +
             std::to_string(declaration.interface_marker) + ".");
@@ -4352,7 +4360,20 @@ evaluateAcceptedFreeSurfaceContactStages(
           global_sum(wall.absolute_constitutive_residual_integral);
       wall.line_friction_dissipation =
           global_sum(wall.line_friction_dissipation);
+      wall.owned_wetted_wall_quadrature_point_count = globalSumSize(
+          wall.owned_wetted_wall_quadrature_point_count, comm);
+      wall.owned_wetted_wall_measure =
+          global_sum(wall.owned_wetted_wall_measure);
+      wall.wall_slip_speed_integral =
+          global_sum(wall.wall_slip_speed_integral);
+      wall.wall_slip_speed_squared_integral =
+          global_sum(wall.wall_slip_speed_squared_integral);
+      wall.wall_slip_dissipation =
+          global_sum(wall.wall_slip_dissipation);
       for (std::size_t component = 0; component < 3u; ++component) {
+        wall.wall_tangential_velocity_integral[component] =
+            global_sum(
+                wall.wall_tangential_velocity_integral[component]);
         wall.contact_position_integral[component] =
             global_sum(wall.contact_position_integral[component]);
         wall.wall_normal_integral[component] =

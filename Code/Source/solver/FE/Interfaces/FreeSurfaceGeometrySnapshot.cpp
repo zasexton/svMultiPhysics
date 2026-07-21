@@ -1131,7 +1131,10 @@ void finalizeFreeSurfaceDynamicContactState(
     FreeSurfaceDynamicContactState& state)
 {
     state.owned_contact_measure = Real{0.0};
+    state.owned_wetted_wall_measure = Real{0.0};
     state.line_friction_dissipation = Real{0.0};
+    state.wall_slip_dissipation = Real{0.0};
+    state.total_dissipation = Real{0.0};
     for (auto& wall : state.walls) {
         const auto count = wall.owned_advancing_point_count +
                            wall.owned_receding_point_count +
@@ -1141,7 +1144,18 @@ void finalizeFreeSurfaceDynamicContactState(
                 return std::isfinite(value);
             });
         };
-        if (count != wall.owned_quadrature_point_count ||
+        if (wall.boundary_marker < 0 ||
+            !std::isfinite(wall.equilibrium_contact_angle_radians) ||
+            !(wall.equilibrium_contact_angle_radians > Real{0.0}) ||
+            !(wall.equilibrium_contact_angle_radians <
+              std::numbers::pi_v<Real>) ||
+            !std::isfinite(wall.mobility) ||
+            !(wall.mobility > Real{0.0}) ||
+            !std::isfinite(wall.slip_length) ||
+            !(wall.slip_length > Real{0.0}) ||
+            !std::isfinite(wall.dynamic_viscosity) ||
+            !(wall.dynamic_viscosity > Real{0.0}) ||
+            count != wall.owned_quadrature_point_count ||
             !std::isfinite(wall.owned_contact_measure) ||
             wall.owned_contact_measure < Real{0.0} ||
             ((wall.owned_contact_measure > Real{0.0}) !=
@@ -1157,15 +1171,74 @@ void finalizeFreeSurfaceDynamicContactState(
             wall.absolute_constitutive_residual_integral < Real{0.0} ||
             !std::isfinite(wall.line_friction_dissipation) ||
             wall.line_friction_dissipation < Real{0.0} ||
+            !std::isfinite(wall.owned_wetted_wall_measure) ||
+            wall.owned_wetted_wall_measure < Real{0.0} ||
+            ((wall.owned_wetted_wall_measure > Real{0.0}) !=
+             (wall.owned_wetted_wall_quadrature_point_count > 0u)) ||
+            !std::isfinite(wall.wall_slip_speed_integral) ||
+            wall.wall_slip_speed_integral < Real{0.0} ||
+            !std::isfinite(wall.wall_slip_speed_squared_integral) ||
+            wall.wall_slip_speed_squared_integral < Real{0.0} ||
+            !std::isfinite(wall.wall_slip_dissipation) ||
+            wall.wall_slip_dissipation < Real{0.0} ||
+            !finite_array(wall.wall_tangential_velocity_integral) ||
             !finite_array(wall.contact_position_integral) ||
             !finite_array(wall.wall_normal_integral) ||
             !finite_array(wall.footprint_direction_integral)) {
             throw std::invalid_argument(
                 "free-surface dynamic-contact state has invalid additive data");
         }
+        const Real wall_slip_cauchy_scale = std::max(
+            {Real{1.0},
+             wall.wall_slip_speed_squared_integral *
+                 wall.owned_wetted_wall_measure,
+             wall.wall_slip_speed_integral *
+                 wall.wall_slip_speed_integral});
+        Real tangential_integral_norm_squared = Real{0.0};
+        for (const auto component :
+             wall.wall_tangential_velocity_integral) {
+            tangential_integral_norm_squared += component * component;
+        }
+        const Real wall_slip_cauchy_tolerance =
+            Real{1024.0} * std::numeric_limits<Real>::epsilon() *
+            wall_slip_cauchy_scale;
+        if (wall.wall_slip_speed_squared_integral *
+                    wall.owned_wetted_wall_measure -
+                wall.wall_slip_speed_integral *
+                    wall.wall_slip_speed_integral <
+                -wall_slip_cauchy_tolerance ||
+            wall.wall_slip_speed_squared_integral *
+                        wall.owned_wetted_wall_measure -
+                    tangential_integral_norm_squared <
+                -wall_slip_cauchy_tolerance) {
+            throw std::invalid_argument(
+                "free-surface dynamic-contact wall-slip integrals violate their measure bounds");
+        }
+        wall.line_friction_dissipation =
+            wall.contact_speed_squared_integral / wall.mobility;
+        wall.wall_slip_dissipation =
+            wall.dynamic_viscosity / wall.slip_length *
+            wall.wall_slip_speed_squared_integral;
         state.owned_contact_measure += wall.owned_contact_measure;
+        state.owned_wetted_wall_measure +=
+            wall.owned_wetted_wall_measure;
         state.line_friction_dissipation +=
             wall.line_friction_dissipation;
+        state.wall_slip_dissipation += wall.wall_slip_dissipation;
+        if (wall.owned_wetted_wall_measure > Real{0.0}) {
+            const Real inverse_wall_measure =
+                Real{1.0} / wall.owned_wetted_wall_measure;
+            wall.mean_wall_slip_speed =
+                wall.wall_slip_speed_integral * inverse_wall_measure;
+            for (std::size_t component = 0; component < 3u; ++component) {
+                wall.mean_wall_tangential_velocity[component] =
+                    wall.wall_tangential_velocity_integral[component] *
+                    inverse_wall_measure;
+            }
+        } else {
+            wall.mean_wall_slip_speed.reset();
+            wall.mean_wall_tangential_velocity = {{0.0, 0.0, 0.0}};
+        }
         if (!(wall.owned_contact_measure > Real{0.0})) {
             wall.mean_dynamic_angle_radians.reset();
             wall.mean_dynamic_cosine.reset();
@@ -1211,8 +1284,13 @@ void finalizeFreeSurfaceDynamicContactState(
             wall.motion = FreeSurfaceContactMotion::Stationary;
         }
     }
+    state.total_dissipation = state.line_friction_dissipation +
+                              state.wall_slip_dissipation;
     if (!std::isfinite(state.owned_contact_measure) ||
-        !std::isfinite(state.line_friction_dissipation)) {
+        !std::isfinite(state.owned_wetted_wall_measure) ||
+        !std::isfinite(state.line_friction_dissipation) ||
+        !std::isfinite(state.wall_slip_dissipation) ||
+        !std::isfinite(state.total_dissipation)) {
         throw std::invalid_argument(
             "free-surface dynamic-contact state produced a non-finite total");
     }
@@ -1253,9 +1331,13 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
             !(coefficient.equilibrium_contact_angle_radians <
               std::numbers::pi_v<Real>) ||
             !std::isfinite(coefficient.mobility) ||
-            !(coefficient.mobility > Real{0.0})) {
+            !(coefficient.mobility > Real{0.0}) ||
+            !std::isfinite(coefficient.slip_length) ||
+            !(coefficient.slip_length > Real{0.0}) ||
+            !std::isfinite(coefficient.dynamic_viscosity) ||
+            !(coefficient.dynamic_viscosity > Real{0.0})) {
             throw std::invalid_argument(
-                "free-surface dynamic-contact coefficient requires a nonnegative marker, an angle strictly between zero and pi, and positive mobility");
+                "free-surface dynamic-contact coefficient requires a nonnegative marker, an angle strictly between zero and pi, positive mobility, positive slip length, and positive dynamic viscosity");
         }
         const auto young = std::find_if(
             parameters.young_wall_coefficients.begin(),
@@ -1275,6 +1357,8 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
         wall.equilibrium_contact_angle_radians =
             coefficient.equilibrium_contact_angle_radians;
         wall.mobility = coefficient.mobility;
+        wall.slip_length = coefficient.slip_length;
+        wall.dynamic_viscosity = coefficient.dynamic_viscosity;
         if (!walls.emplace(coefficient.boundary_marker, wall).second) {
             throw std::invalid_argument(
                 "free-surface dynamic-contact evaluation has duplicate wall coefficients");
@@ -1286,10 +1370,15 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
         snapshot.revision().snapshot_revision_key;
     state.liquid_side = parameters.liquid_side;
     state.surface_tension = parameters.surface_tension;
+    const auto wall_role =
+        parameters.liquid_side == geometry::CutIntegrationSide::Negative
+            ? FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary
+            : FreeSurfaceGeometryRuleRole::PositiveExteriorBoundary;
     for (const auto& record : snapshot.rules()) {
         if (!record.locally_owned ||
             record.retention != FreeSurfaceGeometryRetention::Retained ||
-            record.role != FreeSurfaceGeometryRuleRole::Contact) {
+            (record.role != FreeSurfaceGeometryRuleRole::Contact &&
+             record.role != wall_role)) {
             continue;
         }
         const auto found = walls.find(record.physical_boundary_marker);
@@ -1301,6 +1390,74 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
             record.physical_rule.points.size()) {
             throw std::invalid_argument(
                 "free-surface dynamic-contact rule has inconsistent reference and physical point counts");
+        }
+        if (record.role == wall_role) {
+            for (std::size_t point_index = 0;
+                 point_index < record.physical_rule.points.size();
+                 ++point_index) {
+                const auto& physical =
+                    record.physical_rule.points[point_index];
+                const auto& reference =
+                    record.reference_rule.points[point_index];
+                const Real weight = physical.physical_weight;
+                if (!std::isfinite(weight) || !(weight > Real{0.0}) ||
+                    !finitePoint(physical.boundary_normal)) {
+                    throw std::invalid_argument(
+                        "free-surface dynamic-contact wall rule has invalid physical geometry");
+                }
+                auto wall_normal = physical.boundary_normal;
+                const Real wall_normal_norm = norm(wall_normal);
+                if (!(wall_normal_norm > Real{0.0}) ||
+                    !std::isfinite(wall_normal_norm)) {
+                    throw std::invalid_argument(
+                        "free-surface dynamic-contact wall rule has a degenerate normal");
+                }
+                for (auto& component : wall_normal) {
+                    component /= wall_normal_norm;
+                }
+                const auto value = velocity.value(
+                    record.reference_rule.provenance.parent_entity,
+                    reference.parent_coordinate,
+                    record.reference_rule.provenance);
+                if (!finitePoint(value)) {
+                    throw std::invalid_argument(
+                        "free-surface dynamic-contact wall velocity evaluator returned a non-finite value");
+                }
+                std::array<Real, 3> tangential_velocity{};
+                const Real normal_velocity = dot(value, wall_normal);
+                Real tangential_speed_squared = Real{0.0};
+                for (std::size_t component = 0; component < 3u;
+                     ++component) {
+                    tangential_velocity[component] =
+                        value[component] -
+                        normal_velocity * wall_normal[component];
+                    tangential_speed_squared +=
+                        tangential_velocity[component] *
+                        tangential_velocity[component];
+                }
+                if (!std::isfinite(tangential_speed_squared) ||
+                    tangential_speed_squared < Real{0.0}) {
+                    throw std::invalid_argument(
+                        "free-surface dynamic-contact wall slip is non-finite");
+                }
+                const Real tangential_speed =
+                    std::sqrt(tangential_speed_squared);
+                ++wall.owned_wetted_wall_quadrature_point_count;
+                wall.owned_wetted_wall_measure += weight;
+                wall.wall_slip_speed_integral +=
+                    tangential_speed * weight;
+                wall.wall_slip_speed_squared_integral +=
+                    tangential_speed_squared * weight;
+                wall.wall_slip_dissipation +=
+                    wall.dynamic_viscosity / wall.slip_length *
+                    tangential_speed_squared * weight;
+                for (std::size_t component = 0; component < 3u;
+                     ++component) {
+                    wall.wall_tangential_velocity_integral[component] +=
+                        tangential_velocity[component] * weight;
+                }
+            }
+            continue;
         }
         const Real line_friction = Real{1.0} / wall.mobility;
         const Real equilibrium_cosine =

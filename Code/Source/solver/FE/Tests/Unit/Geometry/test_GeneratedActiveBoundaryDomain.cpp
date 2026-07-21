@@ -838,7 +838,12 @@ TEST(FreeSurfaceGeometrySnapshot,
     functional_parameters.young_wall_coefficients.push_back(
         {10, std::acos(FE::Real{0.5})});
     functional_parameters.dynamic_contact_coefficients.push_back(
-        {10, std::acos(FE::Real{0.5}), FE::Real{0.5}});
+        {.boundary_marker = 10,
+         .equilibrium_contact_angle_radians =
+             std::acos(FE::Real{0.5}),
+         .mobility = FE::Real{0.5},
+         .slip_length = FE::Real{0.2},
+         .dynamic_viscosity = FE::Real{0.4}});
     functional_parameters.volume_multiplier = 3.0;
     const auto functional =
         interfaces::evaluateFreeSurfaceDiscreteFunctional(
@@ -931,6 +936,24 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_NEAR(contact.line_friction_dissipation,
                 FE::Real{0.125} * expected_contact_measure,
                 1.0e-14);
+    EXPECT_EQ(contact.owned_wetted_wall_quadrature_point_count, 2u);
+    EXPECT_NEAR(contact.owned_wetted_wall_measure,
+                expected_negative_wall_area,
+                1.0e-14);
+    EXPECT_NEAR(contact.wall_slip_speed_squared_integral,
+                FE::Real{0.0625} * expected_negative_wall_area,
+                1.0e-14);
+    EXPECT_NEAR(contact.wall_slip_dissipation,
+                FE::Real{0.125} * expected_negative_wall_area,
+                1.0e-14);
+    ASSERT_TRUE(contact.mean_wall_slip_speed.has_value());
+    EXPECT_NEAR(*contact.mean_wall_slip_speed, 0.25, 1.0e-14);
+    EXPECT_NEAR(contact.mean_wall_tangential_velocity[0],
+                0.25,
+                1.0e-14);
+    EXPECT_NEAR(contact.mean_wall_tangential_velocity[1],
+                0.0,
+                1.0e-14);
     EXPECT_NEAR(contact.mean_wall_normal[0], 0.0, 1.0e-14);
     EXPECT_NEAR(contact.mean_wall_normal[1], -1.0, 1.0e-14);
     EXPECT_NEAR(contact.mean_contact_position[0], 0.5, 1.0e-14);
@@ -943,9 +966,33 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_NEAR(dynamic_contact.line_friction_dissipation,
                 contact.line_friction_dissipation,
                 1.0e-14);
+    EXPECT_NEAR(dynamic_contact.owned_wetted_wall_measure,
+                contact.owned_wetted_wall_measure,
+                1.0e-14);
+    EXPECT_NEAR(dynamic_contact.wall_slip_dissipation,
+                contact.wall_slip_dissipation,
+                1.0e-14);
+    EXPECT_NEAR(dynamic_contact.total_dissipation,
+                contact.line_friction_dissipation +
+                    contact.wall_slip_dissipation,
+                1.0e-14);
     EXPECT_THROW(
         (void)interfaces::evaluateFreeSurfaceDynamicContactState(
             *snapshot, functional_parameters, {}),
+        std::invalid_argument);
+    auto invalid_contact_parameters = functional_parameters;
+    invalid_contact_parameters.dynamic_contact_coefficients.front()
+        .slip_length = 0.0;
+    EXPECT_THROW(
+        (void)interfaces::evaluateFreeSurfaceDynamicContactState(
+            *snapshot, invalid_contact_parameters, velocity),
+        std::invalid_argument);
+    invalid_contact_parameters = functional_parameters;
+    invalid_contact_parameters.dynamic_contact_coefficients.front()
+        .dynamic_viscosity = 0.0;
+    EXPECT_THROW(
+        (void)interfaces::evaluateFreeSurfaceDynamicContactState(
+            *snapshot, invalid_contact_parameters, velocity),
         std::invalid_argument);
 
     auto positive_parameters = functional_parameters;

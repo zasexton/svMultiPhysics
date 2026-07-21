@@ -6488,7 +6488,9 @@ bool sameFreeSurfaceFunctionalParameters(
         if (left.boundary_marker != right.boundary_marker ||
             left.equilibrium_contact_angle_radians !=
                 right.equilibrium_contact_angle_radians ||
-            left.mobility != right.mobility) {
+            left.mobility != right.mobility ||
+            left.slip_length != right.slip_length ||
+            left.dynamic_viscosity != right.dynamic_viscosity) {
             return false;
         }
     }
@@ -6539,6 +6541,8 @@ bool sameFreeSurfaceDynamicContactWallState(
            lhs.equilibrium_contact_angle_radians ==
                rhs.equilibrium_contact_angle_radians &&
            lhs.mobility == rhs.mobility &&
+           lhs.slip_length == rhs.slip_length &&
+           lhs.dynamic_viscosity == rhs.dynamic_viscosity &&
            lhs.owned_quadrature_point_count ==
                rhs.owned_quadrature_point_count &&
            lhs.owned_advancing_point_count ==
@@ -6559,6 +6563,17 @@ bool sameFreeSurfaceDynamicContactWallState(
                rhs.absolute_constitutive_residual_integral &&
            lhs.line_friction_dissipation ==
                rhs.line_friction_dissipation &&
+           lhs.owned_wetted_wall_quadrature_point_count ==
+               rhs.owned_wetted_wall_quadrature_point_count &&
+           lhs.owned_wetted_wall_measure ==
+               rhs.owned_wetted_wall_measure &&
+           lhs.wall_slip_speed_integral ==
+               rhs.wall_slip_speed_integral &&
+           lhs.wall_slip_speed_squared_integral ==
+               rhs.wall_slip_speed_squared_integral &&
+           lhs.wall_slip_dissipation == rhs.wall_slip_dissipation &&
+           lhs.wall_tangential_velocity_integral ==
+               rhs.wall_tangential_velocity_integral &&
            lhs.contact_position_integral ==
                rhs.contact_position_integral &&
            lhs.wall_normal_integral == rhs.wall_normal_integral &&
@@ -6572,6 +6587,9 @@ bool sameFreeSurfaceDynamicContactWallState(
                rhs.mean_constitutive_residual &&
            lhs.mean_absolute_constitutive_residual ==
                rhs.mean_absolute_constitutive_residual &&
+           lhs.mean_wall_slip_speed == rhs.mean_wall_slip_speed &&
+           lhs.mean_wall_tangential_velocity ==
+               rhs.mean_wall_tangential_velocity &&
            lhs.mean_contact_position == rhs.mean_contact_position &&
            lhs.mean_wall_normal == rhs.mean_wall_normal &&
            lhs.mean_footprint_direction ==
@@ -6596,8 +6614,13 @@ bool sameFreeSurfaceAcceptedContactStageState(
         lhs.state.surface_tension != rhs.state.surface_tension ||
         lhs.state.owned_contact_measure !=
             rhs.state.owned_contact_measure ||
+        lhs.state.owned_wetted_wall_measure !=
+            rhs.state.owned_wetted_wall_measure ||
         lhs.state.line_friction_dissipation !=
             rhs.state.line_friction_dissipation ||
+        lhs.state.wall_slip_dissipation !=
+            rhs.state.wall_slip_dissipation ||
+        lhs.state.total_dissipation != rhs.state.total_dissipation ||
         lhs.state.walls.size() != rhs.state.walls.size()) {
         return false;
     }
@@ -6915,11 +6938,16 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
                   Real{0.0}) ||
                 !(coefficient.equilibrium_contact_angle_radians < pi) ||
                 !std::isfinite(coefficient.mobility) ||
-                !(coefficient.mobility > Real{0.0}),
+                !(coefficient.mobility > Real{0.0}) ||
+                !std::isfinite(coefficient.slip_length) ||
+                !(coefficient.slip_length > Real{0.0}) ||
+                !std::isfinite(coefficient.dynamic_viscosity) ||
+                !(coefficient.dynamic_viscosity > Real{0.0}),
             InvalidArgumentException,
             "FESystem::declareFreeSurfaceDiscreteFunctional: every dynamic "
             "contact coefficient requires a nonnegative marker, a finite "
-            "angle strictly in (0, pi), and finite positive mobility");
+            "angle strictly in (0, pi), finite positive mobility, finite "
+            "positive slip length, and finite positive dynamic viscosity");
         FE_THROW_IF(
             i != 0u &&
                 parameters.dynamic_contact_coefficients[i - 1u]
@@ -7023,7 +7051,10 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
         message << " dynamic_contact_marker=" << contact.boundary_marker
                 << " dynamic_contact_equilibrium_angle_radians="
                 << contact.equilibrium_contact_angle_radians
-                << " dynamic_contact_mobility=" << contact.mobility;
+                << " dynamic_contact_mobility=" << contact.mobility
+                << " dynamic_contact_slip_length=" << contact.slip_length
+                << " dynamic_contact_viscosity="
+                << contact.dynamic_viscosity;
     }
     FE_LOG_INFO(message.str());
 }
@@ -7258,6 +7289,16 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                         declaration.parameters.liquid_side ||
                     contact_state.surface_tension !=
                         declaration.parameters.surface_tension ||
+                    !finite_nonnegative(
+                        contact_state.owned_contact_measure) ||
+                    !finite_nonnegative(
+                        contact_state.owned_wetted_wall_measure) ||
+                    !finite_nonnegative(
+                        contact_state.line_friction_dissipation) ||
+                    !finite_nonnegative(
+                        contact_state.wall_slip_dissipation) ||
+                    !finite_nonnegative(
+                        contact_state.total_dissipation) ||
                     contact_state.walls.size() !=
                         declaration.parameters.dynamic_contact_coefficients
                             .size(),
@@ -7266,7 +7307,9 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 "contact-stage coefficients do not match the declaration");
 
             Real dynamic_contact_measure_sum = Real{0.0};
+            Real dynamic_wetted_wall_measure_sum = Real{0.0};
             Real line_dissipation_sum = Real{0.0};
+            Real wall_slip_dissipation_sum = Real{0.0};
             for (std::size_t contact_index = 0;
                  contact_index < contact_state.walls.size();
                  ++contact_index) {
@@ -7287,6 +7330,9 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                             coefficient
                                 .equilibrium_contact_angle_radians ||
                         wall.mobility != coefficient.mobility ||
+                        wall.slip_length != coefficient.slip_length ||
+                        wall.dynamic_viscosity !=
+                            coefficient.dynamic_viscosity ||
                         point_count !=
                             wall.owned_quadrature_point_count ||
                         !finite_nonnegative(
@@ -7305,6 +7351,21 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                             Real{0.0} ||
                         !finite_nonnegative(
                             wall.line_friction_dissipation) ||
+                        !finite_nonnegative(
+                            wall.owned_wetted_wall_measure) ||
+                        ((wall.owned_wetted_wall_measure > Real{0.0}) !=
+                         (wall.owned_wetted_wall_quadrature_point_count >
+                          0u)) ||
+                        !finite_nonnegative(
+                            wall.wall_slip_speed_integral) ||
+                        !finite_nonnegative(
+                            wall.wall_slip_speed_squared_integral) ||
+                        !finite_nonnegative(
+                            wall.wall_slip_dissipation) ||
+                        !std::all_of(
+                            wall.wall_tangential_velocity_integral.begin(),
+                            wall.wall_tangential_velocity_integral.end(),
+                            finite) ||
                         !std::all_of(
                             wall.contact_position_integral.begin(),
                             wall.contact_position_integral.end(), finite) ||
@@ -7340,6 +7401,16 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                               wall.owned_contact_measure),
                      wall.contact_speed_integral *
                          wall.contact_speed_integral});
+                const Real wall_slip_cauchy_scale = std::max(
+                    {Real{1.0},
+                     wall.wall_slip_speed_squared_integral *
+                         wall.owned_wetted_wall_measure,
+                     wall.wall_slip_speed_integral *
+                         wall.wall_slip_speed_integral,
+                     vector_norm(
+                         wall.wall_tangential_velocity_integral) *
+                         vector_norm(
+                             wall.wall_tangential_velocity_integral)});
                 FE_THROW_IF(
                     wall.dynamic_angle_integral < Real{0.0} ||
                         wall.dynamic_angle_integral >
@@ -7365,7 +7436,23 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                         wall.absolute_constitutive_residual_integral +
                                 residual_tolerance <
                             std::abs(
-                                wall.constitutive_residual_integral),
+                                wall.constitutive_residual_integral) ||
+                        wall.wall_slip_speed_squared_integral *
+                                    wall.owned_wetted_wall_measure -
+                                wall.wall_slip_speed_integral *
+                                    wall.wall_slip_speed_integral <
+                            -Real{1024.0} *
+                                std::numeric_limits<Real>::epsilon() *
+                                wall_slip_cauchy_scale ||
+                        wall.wall_slip_speed_squared_integral *
+                                    wall.owned_wetted_wall_measure -
+                                vector_norm(
+                                    wall.wall_tangential_velocity_integral) *
+                                    vector_norm(
+                                        wall.wall_tangential_velocity_integral) <
+                            -Real{1024.0} *
+                                std::numeric_limits<Real>::epsilon() *
+                                wall_slip_cauchy_scale,
                     InvalidArgumentException,
                     "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
                     "contact-stage integral bounds are inconsistent");
@@ -7382,6 +7469,11 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                     wall.line_friction_dissipation,
                     wall.contact_speed_squared_integral / wall.mobility,
                     "contact-stage line-friction dissipation identity");
+                require_near(
+                    wall.wall_slip_dissipation,
+                    wall.dynamic_viscosity / wall.slip_length *
+                        wall.wall_slip_speed_squared_integral,
+                    "contact-stage wall-slip dissipation identity");
 
                 const bool has_measure =
                     wall.owned_contact_measure > Real{0.0};
@@ -7461,6 +7553,39 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                                      "absent contact footprint frame");
                     }
                 }
+                const bool has_wetted_wall_measure =
+                    wall.owned_wetted_wall_measure > Real{0.0};
+                FE_THROW_IF(
+                    wall.mean_wall_slip_speed.has_value() !=
+                        has_wetted_wall_measure,
+                    InvalidArgumentException,
+                    "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                    "contact-stage wall-slip mean presence does not match "
+                    "its sharp wetted-wall measure");
+                if (has_wetted_wall_measure) {
+                    const Real inverse_wall_measure =
+                        Real{1.0} / wall.owned_wetted_wall_measure;
+                    require_near(
+                        *wall.mean_wall_slip_speed,
+                        wall.wall_slip_speed_integral *
+                            inverse_wall_measure,
+                        "mean wall-slip speed");
+                    for (std::size_t component = 0; component < 3u;
+                         ++component) {
+                        require_near(
+                            wall.mean_wall_tangential_velocity[component],
+                            wall.wall_tangential_velocity_integral[component] *
+                                inverse_wall_measure,
+                            "mean wall-tangential velocity");
+                    }
+                } else {
+                    for (const auto value :
+                         wall.mean_wall_tangential_velocity) {
+                        require_near(value,
+                                     Real{0.0},
+                                     "absent wall-tangential velocity");
+                    }
+                }
                 auto expected_motion =
                     interfaces::FreeSurfaceContactMotion::Absent;
                 if (has_measure) {
@@ -7486,8 +7611,12 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                     "contact-stage motion label is inconsistent");
                 dynamic_contact_measure_sum +=
                     wall.owned_contact_measure;
+                dynamic_wetted_wall_measure_sum +=
+                    wall.owned_wetted_wall_measure;
                 line_dissipation_sum +=
                     wall.line_friction_dissipation;
+                wall_slip_dissipation_sum +=
+                    wall.wall_slip_dissipation;
             }
             require_near(contact_state.owned_contact_measure,
                          dynamic_contact_measure_sum,
@@ -7495,6 +7624,16 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
             require_near(contact_state.line_friction_dissipation,
                          line_dissipation_sum,
                          "contact-stage line-friction dissipation");
+            require_near(contact_state.owned_wetted_wall_measure,
+                         dynamic_wetted_wall_measure_sum,
+                         "contact-stage sharp wetted-wall measure");
+            require_near(contact_state.wall_slip_dissipation,
+                         wall_slip_dissipation_sum,
+                         "contact-stage wall-slip dissipation");
+            require_near(contact_state.total_dissipation,
+                         contact_state.line_friction_dissipation +
+                             contact_state.wall_slip_dissipation,
+                         "contact-stage total contact and wall dissipation");
         }
     }
 
@@ -7668,8 +7807,14 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 << contact_stage.geometry_revision.source_value_revision
                 << " contact_stage_measure="
                 << contact_stage.state.owned_contact_measure
+                << " contact_stage_wetted_wall_measure="
+                << contact_stage.state.owned_wetted_wall_measure
                 << " contact_stage_line_friction_dissipation="
-                << contact_stage.state.line_friction_dissipation;
+                << contact_stage.state.line_friction_dissipation
+                << " contact_stage_wall_slip_dissipation="
+                << contact_stage.state.wall_slip_dissipation
+                << " contact_stage_total_dissipation="
+                << contact_stage.state.total_dissipation;
             for (const auto& contact : contact_stage.state.walls) {
                 const char* motion = "Absent";
                 switch (contact.motion) {
@@ -7693,6 +7838,9 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                     << " contact_equilibrium_angle_radians="
                     << contact.equilibrium_contact_angle_radians
                     << " contact_mobility=" << contact.mobility
+                    << " contact_slip_length=" << contact.slip_length
+                    << " contact_dynamic_viscosity="
+                    << contact.dynamic_viscosity
                     << " contact_qpoints="
                     << contact.owned_quadrature_point_count
                     << " contact_advancing_qpoints="
@@ -7707,7 +7855,17 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                     << " contact_line_friction_dissipation="
                     << contact.line_friction_dissipation
                     << " contact_speed_squared_integral="
-                    << contact.contact_speed_squared_integral;
+                    << contact.contact_speed_squared_integral
+                    << " contact_wetted_wall_qpoints="
+                    << contact.owned_wetted_wall_quadrature_point_count
+                    << " contact_wetted_wall_measure="
+                    << contact.owned_wetted_wall_measure
+                    << " contact_wall_slip_speed_integral="
+                    << contact.wall_slip_speed_integral
+                    << " contact_wall_slip_speed_squared_integral="
+                    << contact.wall_slip_speed_squared_integral
+                    << " contact_wall_slip_dissipation="
+                    << contact.wall_slip_dissipation;
                 if (contact.mean_dynamic_angle_radians.has_value()) {
                     message
                         << " contact_mean_dynamic_angle_radians="
@@ -7727,6 +7885,12 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                             << " contact_mean_constitutive_residual=none"
                             << " contact_mean_absolute_constitutive_residual=none";
                 }
+                if (contact.mean_wall_slip_speed.has_value()) {
+                    message << " contact_mean_wall_slip_speed="
+                            << *contact.mean_wall_slip_speed;
+                } else {
+                    message << " contact_mean_wall_slip_speed=none";
+                }
                 for (std::size_t component = 0; component < 3u;
                      ++component) {
                     message
@@ -7736,7 +7900,10 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                         << contact.mean_wall_normal[component]
                         << " contact_mean_footprint_direction_" << component
                         << "="
-                        << contact.mean_footprint_direction[component];
+                        << contact.mean_footprint_direction[component]
+                        << " contact_mean_wall_tangential_velocity_"
+                        << component << "="
+                        << contact.mean_wall_tangential_velocity[component];
                 }
             }
         }

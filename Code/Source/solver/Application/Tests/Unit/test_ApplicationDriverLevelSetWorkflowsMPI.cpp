@@ -1665,6 +1665,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
             .boundary_marker = marker,
             .equilibrium_contact_angle_radians = equilibrium_angle,
             .mobility = svmp::FE::Real{0.5},
+            .slip_length = svmp::FE::Real{0.2},
+            .dynamic_viscosity = svmp::FE::Real{0.4},
         });
   }
   system->declareFreeSurfaceDiscreteFunctional(
@@ -1840,6 +1842,15 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   EXPECT_NEAR(contact_stage.state.line_friction_dissipation,
               0.25,
               1.0e-12);
+  EXPECT_NEAR(contact_stage.state.owned_wetted_wall_measure,
+              1.0,
+              1.0e-12);
+  EXPECT_NEAR(contact_stage.state.wall_slip_dissipation,
+              0.125,
+              1.0e-12);
+  EXPECT_NEAR(contact_stage.state.total_dissipation,
+              0.375,
+              1.0e-12);
   ASSERT_EQ(contact_stage.state.walls.size(), 2u);
   std::size_t contact_qpoints = 0u;
   for (const auto& wall : contact_stage.state.walls) {
@@ -1851,6 +1862,14 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
     EXPECT_NEAR(*wall.mean_contact_speed, 0.25, 1.0e-12);
     EXPECT_NEAR(*wall.mean_constitutive_residual, 0.0, 1.0e-12);
     EXPECT_NEAR(wall.contact_speed_squared_integral, 0.0625, 1.0e-12);
+    EXPECT_EQ(wall.owned_wetted_wall_quadrature_point_count, 2u);
+    EXPECT_NEAR(wall.owned_wetted_wall_measure, 0.5, 1.0e-12);
+    EXPECT_NEAR(wall.wall_slip_speed_squared_integral,
+                0.03125,
+                1.0e-12);
+    EXPECT_NEAR(wall.wall_slip_dissipation, 0.0625, 1.0e-12);
+    ASSERT_TRUE(wall.mean_wall_slip_speed.has_value());
+    EXPECT_NEAR(*wall.mean_wall_slip_speed, 0.25, 1.0e-12);
   }
   EXPECT_EQ(contact_qpoints, 2u);
 

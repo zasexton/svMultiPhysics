@@ -178,6 +178,8 @@ struct FreeSurfaceDynamicContactCoefficient {
     int boundary_marker{-1};
     Real equilibrium_contact_angle_radians{0.0};
     Real mobility{0.0};
+    Real slip_length{0.0};
+    Real dynamic_viscosity{0.0};
 };
 
 struct FreeSurfaceDiscreteFunctionalParameters {
@@ -241,6 +243,8 @@ struct FreeSurfaceDynamicContactWallState {
     int boundary_marker{-1};
     Real equilibrium_contact_angle_radians{0.0};
     Real mobility{0.0};
+    Real slip_length{0.0};
+    Real dynamic_viscosity{0.0};
     std::size_t owned_quadrature_point_count{0u};
     std::size_t owned_advancing_point_count{0u};
     std::size_t owned_receding_point_count{0u};
@@ -253,6 +257,13 @@ struct FreeSurfaceDynamicContactWallState {
     Real constitutive_residual_integral{0.0};
     Real absolute_constitutive_residual_integral{0.0};
     Real line_friction_dissipation{0.0};
+    std::size_t owned_wetted_wall_quadrature_point_count{0u};
+    Real owned_wetted_wall_measure{0.0};
+    Real wall_slip_speed_integral{0.0};
+    Real wall_slip_speed_squared_integral{0.0};
+    Real wall_slip_dissipation{0.0};
+    std::array<Real, 3> wall_tangential_velocity_integral{
+        {0.0, 0.0, 0.0}};
     std::array<Real, 3> contact_position_integral{{0.0, 0.0, 0.0}};
     std::array<Real, 3> wall_normal_integral{{0.0, 0.0, 0.0}};
     std::array<Real, 3> footprint_direction_integral{{0.0, 0.0, 0.0}};
@@ -261,6 +272,9 @@ struct FreeSurfaceDynamicContactWallState {
     std::optional<Real> mean_contact_speed{};
     std::optional<Real> mean_constitutive_residual{};
     std::optional<Real> mean_absolute_constitutive_residual{};
+    std::optional<Real> mean_wall_slip_speed{};
+    std::array<Real, 3> mean_wall_tangential_velocity{
+        {0.0, 0.0, 0.0}};
     std::array<Real, 3> mean_contact_position{{0.0, 0.0, 0.0}};
     std::array<Real, 3> mean_wall_normal{{0.0, 0.0, 0.0}};
     std::array<Real, 3> mean_footprint_direction{{0.0, 0.0, 0.0}};
@@ -274,7 +288,10 @@ struct FreeSurfaceDynamicContactState {
     Real surface_tension{0.0};
     std::vector<FreeSurfaceDynamicContactWallState> walls{};
     Real owned_contact_measure{0.0};
+    Real owned_wetted_wall_measure{0.0};
     Real line_friction_dissipation{0.0};
+    Real wall_slip_dissipation{0.0};
+    Real total_dissipation{0.0};
 };
 
 struct FreeSurfaceDiscreteFunctionalVectorEvaluator {

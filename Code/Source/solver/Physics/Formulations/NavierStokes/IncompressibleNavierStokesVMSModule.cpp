@@ -2138,7 +2138,8 @@ void validateGeneratedFreeSurfaceMarkerUniqueness(
 void declareFreeSurfaceDiscreteFunctionals(
     const std::vector<FreeSurfaceBoundary>& free_surfaces,
     FE::systems::FESystem& system,
-    FE::FieldId velocity_field)
+    FE::FieldId velocity_field,
+    FE::Real dynamic_viscosity)
 {
     for (const auto& bc : free_surfaces) {
         if (!isUnfittedLevelSet(bc) || !usesSurfaceStress(bc) ||
@@ -2187,6 +2188,11 @@ void declareFreeSurfaceDiscreteFunctionals(
                             contactLineMobility(contact_line),
                             "free-surface discrete-functional dynamic "
                             "contact mobility"),
+                        .slip_length = constantScalarValueOrThrow(
+                            contactLineSlipLength(contact_line),
+                            "free-surface discrete-functional Navier slip "
+                            "length"),
+                        .dynamic_viscosity = dynamic_viscosity,
                     });
             }
         }
@@ -3830,6 +3836,10 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             }
         }
         if (contactLineKind(contact_line) == ContactLineKind::DynamicRenE) {
+            if (options.viscosity_model) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: DynamicContactAngle currently requires literal Newtonian viscosity so accepted sharp-wall slip dissipation can be evaluated from the identical operator stage; constitutive viscosity models are unsupported for this contact law");
+            }
             if (!isUnfittedLevelSet(bc)) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: DynamicContactAngle is currently supported only for sharp unfitted level-set free surfaces");
@@ -7042,7 +7052,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     }
 
     declareFreeSurfaceDiscreteFunctionals(
-        effective_free_surfaces, system, u_id);
+        effective_free_surfaces, system, u_id, options_.viscosity);
 
     const auto generated_active_boundary_for =
         [&system, &effective_free_surfaces](int physical_boundary_marker)

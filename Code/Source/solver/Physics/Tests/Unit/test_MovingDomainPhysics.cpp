@@ -13,6 +13,7 @@
 #include "Physics/Formulations/MeshMotion/PseudoElasticMeshMotionModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Materials/Fluid/CarreauYasudaViscosity.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
 #include "FE/Forms/FormExpr.h"
@@ -1359,7 +1360,8 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     ns::FreeSurfaceSurfaceTensionForm surface_tension_form =
         ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction,
     FE::Real liquid_pressure = FE::Real{0.0},
-    FE::Real external_pressure = FE::Real{0.0})
+    FE::Real external_pressure = FE::Real{0.0},
+    bool use_constitutive_viscosity = false)
 {
     constexpr int interface_marker = 167;
     constexpr int wall_marker = 57;
@@ -1374,6 +1376,11 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_convection = false;
+    if (use_constitutive_viscosity) {
+        opts.viscosity_model =
+            std::make_shared<materials::fluid::CarreauYasudaViscosity>(
+                0.02, 0.01, 1.0, 0.8, 2.0);
+    }
     opts.velocity_dirichlet.push_back(
         ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
             .boundary_marker = wall_marker,
@@ -4073,6 +4080,8 @@ TEST(MovingDomainPhysics,
     constexpr FE::Real theta =
         FE::Real{1.04719755119659774615421446109316763};
     constexpr FE::Real mobility = FE::Real{0.5};
+    constexpr FE::Real slip_length = FE::Real{0.2};
+    constexpr FE::Real dynamic_viscosity = FE::Real{0.01};
     auto mesh = makeMesh();
     auto scalar_space = makePressureSpace(mesh);
     auto velocity_space = makeVelocitySpace(mesh);
@@ -4118,6 +4127,8 @@ TEST(MovingDomainPhysics,
             .boundary_marker = wall_marker,
             .equilibrium_contact_angle_radians = theta,
             .mobility = mobility,
+            .slip_length = slip_length,
+            .dynamic_viscosity = dynamic_viscosity,
         });
     auto incomplete_parameters = parameters;
     incomplete_parameters.young_wall_coefficients.clear();
@@ -4206,6 +4217,8 @@ TEST(MovingDomainPhysics,
             .boundary_marker = wall_marker,
             .equilibrium_contact_angle_radians = theta,
             .mobility = mobility,
+            .slip_length = slip_length,
+            .dynamic_viscosity = dynamic_viscosity,
             .owned_quadrature_point_count = 1u,
             .owned_advancing_point_count = 0u,
             .owned_receding_point_count = 0u,
@@ -4219,6 +4232,13 @@ TEST(MovingDomainPhysics,
             .constitutive_residual_integral = FE::Real{0.0},
             .absolute_constitutive_residual_integral = FE::Real{0.0},
             .line_friction_dissipation = FE::Real{0.0},
+            .owned_wetted_wall_quadrature_point_count = 1u,
+            .owned_wetted_wall_measure = FE::Real{0.3},
+            .wall_slip_speed_integral = FE::Real{0.06},
+            .wall_slip_speed_squared_integral = FE::Real{0.012},
+            .wall_slip_dissipation = FE::Real{0.0006},
+            .wall_tangential_velocity_integral =
+                {{0.06, 0.0, 0.0}},
             .contact_position_integral = {{0.02, 0.03, 0.04}},
             .wall_normal_integral = {{0.0, 0.0, -0.1}},
             .footprint_direction_integral = {{0.1, 0.0, 0.0}},
@@ -4259,6 +4279,16 @@ TEST(MovingDomainPhysics,
         1.0e-14);
     EXPECT_EQ(stage.state.walls.front().motion,
               FE::interfaces::FreeSurfaceContactMotion::Stationary);
+    ASSERT_TRUE(stage.state.walls.front().mean_wall_slip_speed.has_value());
+    EXPECT_NEAR(*stage.state.walls.front().mean_wall_slip_speed,
+                FE::Real{0.2},
+                1.0e-14);
+    EXPECT_NEAR(stage.state.wall_slip_dissipation,
+                FE::Real{0.0006},
+                1.0e-14);
+    EXPECT_NEAR(stage.state.total_dissipation,
+                FE::Real{0.0006},
+                1.0e-14);
     EXPECT_NEAR(stage.state.walls.front().mean_contact_position[0],
                 FE::Real{0.2},
                 1.0e-14);
@@ -4304,6 +4334,22 @@ TEST(MovingDomainPhysics,
         .contact_stage->state.walls.front()
         .line_friction_dissipation = FE::Real{0.01};
     invalid.front().contact_stage->state.line_friction_dissipation =
+        FE::Real{0.01};
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            7u,
+            FE::Real{0.35},
+            FE::Real{0.05},
+            13u,
+            invalid),
+        FE::InvalidArgumentException);
+    invalid = accepted_states;
+    invalid.front()
+        .contact_stage->state.walls.front()
+        .wall_slip_dissipation = FE::Real{0.01};
+    invalid.front().contact_stage->state.wall_slip_dissipation =
+        FE::Real{0.01};
+    invalid.front().contact_stage->state.total_dissipation =
         FE::Real{0.01};
     EXPECT_THROW(
         system.recordAcceptedFreeSurfaceDiscreteFunctionals(
@@ -7471,7 +7517,50 @@ TEST(MovingDomainPhysics,
             declaration.parameters.dynamic_contact_coefficients.front()
                 .mobility,
             0.5);
+        EXPECT_DOUBLE_EQ(
+            declaration.parameters.dynamic_contact_coefficients.front()
+                .slip_length,
+            0.2);
+        EXPECT_DOUBLE_EQ(
+            declaration.parameters.dynamic_contact_coefficients.front()
+                .dynamic_viscosity,
+            0.01);
         EXPECT_FALSE(declaration.owner_component.empty());
+    }
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesDynamicContactRejectsConstitutiveViscosityUntilAcceptedStageEvaluationExists)
+{
+    constexpr FE::Real theta =
+        FE::Real{1.04719755119659774615421446109316763};
+    constexpr std::array<FE::Real, 4> zero_velocity{
+        FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}};
+
+    try {
+        (void)assembleDynamicContactAngleCase(
+            theta,
+            theta,
+            zero_velocity,
+            /*include_dynamic_contact_angle=*/true,
+            /*assemble_jacobian=*/false,
+            std::array<FE::Real, 4>{0.0, 0.0, 0.0, 0.0},
+            std::array<FE::Real, 3>{0.0, 0.0, -1.0},
+            /*level_set_scale=*/1.0,
+            /*level_set_shift=*/0.0,
+            /*velocity_component=*/0,
+            ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
+            /*liquid_pressure=*/0.0,
+            /*external_pressure=*/0.0,
+            /*use_constitutive_viscosity=*/true);
+        FAIL() << "constitutive viscosity must remain fail-closed for "
+                  "accepted dynamic-contact dissipation";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find(
+                      "requires literal Newtonian viscosity"),
+                  std::string::npos)
+            << error.what();
     }
 }
 

@@ -1350,6 +1350,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .equilibrium_contact_angle_radians =
               svmp::FE::Real{1.04719755119659774615421446109316763},
           .mobility = svmp::FE::Real{0.5},
+          .slip_length = svmp::FE::Real{0.2},
+          .dynamic_viscosity = svmp::FE::Real{0.4},
       });
   system->declareFreeSurfaceDiscreteFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
