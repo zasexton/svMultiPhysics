@@ -9236,6 +9236,11 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       /*reuse_cached_on_projection_failure=*/false);
   (void)updateLevelSetAdvectionVelocities(
       sim, *sim.time_history, steady_level_set_advection_velocity);
+  sim.fe_system->recordAcceptedMeshTangentialBoundaryPolicies(
+      /*accepted_step=*/1u,
+      solve_time,
+      sim.time_history->dt(),
+      sim.time_history->u().valueRevision());
   outputResults(sim, params, /*step=*/1, solve_time, pvd);
 
   const auto comm = svmp::MeshComm::world();
@@ -9741,6 +9746,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         /*reuse_cached_on_projection_failure=*/false);
     (void)updateLevelSetAdvectionVelocities(
         sim, h, level_set_advection_velocity);
+    sim.fe_system->recordAcceptedMeshTangentialBoundaryPolicies(
+        static_cast<std::uint64_t>(h.stepIndex()),
+        h.time(),
+        h.dt(),
+        h.u().valueRevision());
     if (level_set_maintenance_changed && cut_report.refreshed) {
       oopCout()
           << "[svMultiPhysics::Application] Level-set maintenance refreshed cut context"

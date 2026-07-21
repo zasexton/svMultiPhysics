@@ -68,6 +68,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -6499,6 +6500,11 @@ void FESystem::declareMeshTangentialBoundaryPolicy(
     MeshTangentialBoundaryPolicyDeclaration declaration)
 {
     FE_THROW_IF(
+        !mesh_tangential_boundary_policy_history_.empty(),
+        InvalidArgumentException,
+        "FESystem::declareMeshTangentialBoundaryPolicy: policies cannot "
+        "change after accepted history has begun");
+    FE_THROW_IF(
         !field_registry_.has(declaration.mesh_displacement_field),
         InvalidArgumentException,
         "FESystem::declareMeshTangentialBoundaryPolicy: unknown mesh "
@@ -6550,6 +6556,95 @@ void FESystem::declareMeshTangentialBoundaryPolicy(
                    ? std::string("SmoothingOnly")
                    : std::string("Prescribed")));
     mesh_tangential_boundary_policies_.push_back(std::move(declaration));
+}
+
+void FESystem::recordAcceptedMeshTangentialBoundaryPolicies(
+    std::uint64_t accepted_step,
+    Real accepted_time,
+    Real dt,
+    std::uint64_t state_revision)
+{
+    if (mesh_tangential_boundary_policies_.empty()) {
+        return;
+    }
+    FE_THROW_IF(
+        !isSetup(),
+        InvalidArgumentException,
+        "FESystem::recordAcceptedMeshTangentialBoundaryPolicies: system "
+        "setup must be complete");
+    FE_THROW_IF(
+        !std::isfinite(accepted_time) || !std::isfinite(dt) ||
+            dt < Real{0.0},
+        InvalidArgumentException,
+        "FESystem::recordAcceptedMeshTangentialBoundaryPolicies: accepted "
+        "time must be finite and dt must be finite and nonnegative");
+
+    const auto mesh_revision = meshAccess().geometryRevision();
+    if (!mesh_tangential_boundary_policy_history_.empty()) {
+        const auto& latest =
+            mesh_tangential_boundary_policy_history_.back();
+        FE_THROW_IF(
+            accepted_step < latest.accepted_step ||
+                accepted_time < latest.accepted_time,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshTangentialBoundaryPolicies: "
+            "accepted history must be monotone");
+        if (accepted_step == latest.accepted_step) {
+            const bool identical =
+                accepted_time == latest.accepted_time && dt == latest.dt &&
+                state_revision == latest.state_revision &&
+                mesh_revision == latest.mesh_geometry_revision;
+            FE_THROW_IF(
+                !identical,
+                InvalidArgumentException,
+                "FESystem::recordAcceptedMeshTangentialBoundaryPolicies: "
+                "an accepted step cannot be recorded with conflicting "
+                "provenance");
+            return;
+        }
+    }
+
+    for (const auto& declaration : mesh_tangential_boundary_policies_) {
+        mesh_tangential_boundary_policy_history_.push_back(
+            MeshTangentialBoundaryPolicyHistoryRecord{
+                .accepted_step = accepted_step,
+                .accepted_time = accepted_time,
+                .dt = dt,
+                .state_revision = state_revision,
+                .mesh_geometry_revision = mesh_revision,
+                .mesh_displacement_field =
+                    declaration.mesh_displacement_field,
+                .boundary_marker = declaration.boundary_marker,
+                .policy = declaration.policy,
+                .owner_component = declaration.owner_component,
+            });
+        const char* policy_name = "SmoothingOnly";
+        switch (declaration.policy) {
+        case MeshTangentialBoundaryPolicy::Free:
+            policy_name = "Free";
+            break;
+        case MeshTangentialBoundaryPolicy::SmoothingOnly:
+            break;
+        case MeshTangentialBoundaryPolicy::Prescribed:
+            policy_name = "Prescribed";
+            break;
+        }
+        std::ostringstream message;
+        message << std::setprecision(17)
+                << "FESystem: accepted tangential mesh policy history"
+                << " diagnostic=mesh_tangential_boundary_policy_history"
+                << " accepted_step=" << accepted_step
+                << " accepted_time=" << accepted_time
+                << " dt=" << dt
+                << " state_revision=" << state_revision
+                << " mesh_geometry_revision=" << mesh_revision
+                << " mesh_displacement_field="
+                << declaration.mesh_displacement_field
+                << " boundary_marker=" << declaration.boundary_marker
+                << " policy=" << policy_name
+                << " owner='" << declaration.owner_component << "'";
+        FE_LOG_INFO(message.str());
+    }
 }
 
 assembly::MeshMotionFieldAccess FESystem::meshMotionFieldAccess() const noexcept

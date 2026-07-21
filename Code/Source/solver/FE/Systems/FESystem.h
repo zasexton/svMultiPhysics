@@ -207,6 +207,19 @@ struct MeshTangentialBoundaryPolicyDeclaration {
     std::string owner_component{};
 };
 
+struct MeshTangentialBoundaryPolicyHistoryRecord {
+    std::uint64_t accepted_step{0};
+    Real accepted_time{0.0};
+    Real dt{0.0};
+    std::uint64_t state_revision{0};
+    std::uint64_t mesh_geometry_revision{0};
+    FieldId mesh_displacement_field{INVALID_FIELD_ID};
+    int boundary_marker{-1};
+    MeshTangentialBoundaryPolicy policy{
+        MeshTangentialBoundaryPolicy::SmoothingOnly};
+    std::string owner_component{};
+};
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 enum class MeshCoordinateUpdateMode : std::uint8_t {
     AbsoluteFromReference,
@@ -370,6 +383,16 @@ public:
     [[nodiscard]] std::span<const MeshTangentialBoundaryPolicyDeclaration>
     meshTangentialBoundaryPolicies() const noexcept {
         return mesh_tangential_boundary_policies_;
+    }
+    void recordAcceptedMeshTangentialBoundaryPolicies(
+        std::uint64_t accepted_step,
+        Real accepted_time,
+        Real dt,
+        std::uint64_t state_revision);
+    [[nodiscard]] std::span<
+        const MeshTangentialBoundaryPolicyHistoryRecord>
+    meshTangentialBoundaryPolicyHistory() const noexcept {
+        return mesh_tangential_boundary_policy_history_;
     }
     void setGeometricNonlinearityPolicy(GeometricNonlinearityPolicy policy);
     [[nodiscard]] const GeometricNonlinearityPolicy& geometricNonlinearityPolicy() const noexcept;
@@ -1783,6 +1806,8 @@ private:
     assembly::MeshMotionFieldAccess mesh_motion_fields_{};
     std::vector<MeshTangentialBoundaryPolicyDeclaration>
         mesh_tangential_boundary_policies_{};
+    std::vector<MeshTangentialBoundaryPolicyHistoryRecord>
+        mesh_tangential_boundary_policy_history_{};
     GeometricNonlinearityPolicy geometric_nonlinearity_policy_{};
 
 		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>> sparsity_by_op_{};

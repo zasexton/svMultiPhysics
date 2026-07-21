@@ -3881,6 +3881,37 @@ TEST(MovingDomainPhysics,
         });
     EXPECT_EQ(tangential_descriptor_count, 1);
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    ASSERT_NO_THROW(system.recordAcceptedMeshTangentialBoundaryPolicies(
+        /*accepted_step=*/7u,
+        FE::Real{0.35},
+        FE::Real{0.05},
+        /*state_revision=*/13u));
+    auto history = system.meshTangentialBoundaryPolicyHistory();
+    ASSERT_EQ(history.size(), 2u);
+    for (const auto& record : history) {
+        EXPECT_EQ(record.accepted_step, 7u);
+        EXPECT_DOUBLE_EQ(record.accepted_time, FE::Real{0.35});
+        EXPECT_DOUBLE_EQ(record.dt, FE::Real{0.05});
+        EXPECT_EQ(record.state_revision, 13u);
+        EXPECT_EQ(record.mesh_geometry_revision,
+                  mesh->geometryRevision());
+    }
+
+    // Replaying identical accepted provenance is idempotent, while a
+    // conflicting replay or a backwards step is rejected.
+    ASSERT_NO_THROW(system.recordAcceptedMeshTangentialBoundaryPolicies(
+        7u, FE::Real{0.35}, FE::Real{0.05}, 13u));
+    EXPECT_EQ(system.meshTangentialBoundaryPolicyHistory().size(), 2u);
+    EXPECT_THROW(system.recordAcceptedMeshTangentialBoundaryPolicies(
+                     7u, FE::Real{0.35}, FE::Real{0.05}, 14u),
+                 FE::InvalidArgumentException);
+    ASSERT_NO_THROW(system.recordAcceptedMeshTangentialBoundaryPolicies(
+        8u, FE::Real{0.40}, FE::Real{0.05}, 15u));
+    EXPECT_EQ(system.meshTangentialBoundaryPolicyHistory().size(), 4u);
+    EXPECT_THROW(system.recordAcceptedMeshTangentialBoundaryPolicies(
+                     6u, FE::Real{0.30}, FE::Real{0.05}, 12u),
+                 FE::InvalidArgumentException);
 }
 
 TEST(MovingDomainPhysics, FreeSurfaceContactLineOptionsAreExplicit)
