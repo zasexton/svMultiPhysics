@@ -3227,11 +3227,84 @@ void append_free_surface_bc(
         "[svMultiPhysics::Physics] Boundary-local free-surface Nitsche settings require Kinematic_enforcement=Nitsche; unused Nitsche settings are accepted only by the explicit schema-1 legacy mode.");
   }
 
-  if (const auto small_cut_aggregation = first_defined_bool(
+  const auto small_cut_aggregation = first_defined_bool(
           bc.params,
           {"Small_cut_aggregation", "SmallCutAggregation",
-           "Enable_small_cut_aggregation", "EnableSmallCutAggregation"})) {
+           "Enable_small_cut_aggregation", "EnableSmallCutAggregation"});
+  if (small_cut_aggregation.has_value()) {
     fs.small_cut_aggregation = *small_cut_aggregation;
+  }
+
+  bool aggregation_guard_suboption_present = false;
+  if (const auto maximum_root_path = first_defined_int(
+          bc.params,
+          {"Small_cut_aggregation_maximum_root_path_length",
+           "SmallCutAggregationMaximumRootPathLength"})) {
+    aggregation_guard_suboption_present = true;
+    if (*maximum_root_path <= 0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Free-surface small-cut aggregation "
+          "maximum root path length must be positive.");
+    }
+    fs.small_cut_aggregation_guards.maximum_root_path_length =
+        static_cast<std::size_t>(*maximum_root_path);
+  }
+  if (const auto maximum_extrapolation = first_defined_double(
+          bc.params,
+          {"Small_cut_aggregation_maximum_reference_extrapolation_distance",
+           "SmallCutAggregationMaximumReferenceExtrapolationDistance"})) {
+    aggregation_guard_suboption_present = true;
+    if (!std::isfinite(*maximum_extrapolation) ||
+        *maximum_extrapolation < 0.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Free-surface small-cut aggregation "
+          "maximum reference extrapolation distance must be finite and "
+          "nonnegative.");
+    }
+    fs.small_cut_aggregation_guards
+        .maximum_reference_extrapolation_distance =
+        static_cast<svmp::FE::Real>(*maximum_extrapolation);
+  }
+  if (const auto maximum_coefficient = first_defined_double(
+          bc.params,
+          {"Small_cut_aggregation_maximum_absolute_coefficient",
+           "SmallCutAggregationMaximumAbsoluteCoefficient"})) {
+    aggregation_guard_suboption_present = true;
+    if (!std::isfinite(*maximum_coefficient) ||
+        *maximum_coefficient < 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Free-surface small-cut aggregation "
+          "maximum absolute coefficient must be finite and at least 1.");
+    }
+    fs.small_cut_aggregation_guards.maximum_absolute_coefficient =
+        static_cast<svmp::FE::Real>(*maximum_coefficient);
+  }
+  if (const auto maximum_row_norm = first_defined_double(
+          bc.params,
+          {"Small_cut_aggregation_maximum_row_l1_norm",
+           "SmallCutAggregationMaximumRowL1Norm"})) {
+    aggregation_guard_suboption_present = true;
+    if (!std::isfinite(*maximum_row_norm) || *maximum_row_norm < 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Free-surface small-cut aggregation "
+          "maximum row L1 norm must be finite and at least 1.");
+    }
+    fs.small_cut_aggregation_guards.maximum_row_l1_norm =
+        static_cast<svmp::FE::Real>(*maximum_row_norm);
+  }
+  if (fs.small_cut_aggregation_guards.maximum_row_l1_norm <
+      fs.small_cut_aggregation_guards.maximum_absolute_coefficient) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Free-surface small-cut aggregation "
+        "maximum row L1 norm must be no smaller than the maximum absolute "
+        "coefficient.");
+  }
+  if (!fs.small_cut_aggregation && aggregation_guard_suboption_present &&
+      !explicit_legacy_configuration) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Small_cut_aggregation=false cannot be "
+        "combined with aggregation guard settings; unused guards are "
+        "accepted only by the explicit schema-1 legacy mode.");
   }
 
   const auto cut_cell_stabilization_enabled = first_defined_bool(

@@ -40,6 +40,7 @@
 #include "FE/Spaces/FunctionSpace.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -256,6 +257,18 @@ struct IncompressibleNavierStokesVMSOptions {
         std::optional<FE::Real> cut_metadata_scale_cap{};
     };
 
+    struct FreeSurfaceSmallCutAggregationGuards {
+        // Bound the distance and algebraic amplification of every aggregate
+        // extension row.  These defaults match the FE constraint contract;
+        // keeping them boundary-local makes the effective production state
+        // explicit and allows different interfaces to be qualified
+        // independently.
+        std::size_t maximum_root_path_length{8u};
+        FE::Real maximum_reference_extrapolation_distance{4.0};
+        FE::Real maximum_absolute_coefficient{16.0};
+        FE::Real maximum_row_l1_norm{32.0};
+    };
+
     struct FreeSurfaceVelocityExtension {
         bool enabled{false};
         ScalarValue diffusivity{1.0};
@@ -356,6 +369,8 @@ struct IncompressibleNavierStokesVMSOptions {
         // Default ON: with the velocity ghost penalty retired, small-cut
         // aggregation is the conditioning mechanism for unfitted cut bands.
         bool small_cut_aggregation{true};
+        FreeSurfaceSmallCutAggregationGuards
+            small_cut_aggregation_guards{};
     };
 
     /**

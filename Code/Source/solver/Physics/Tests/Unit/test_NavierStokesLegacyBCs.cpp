@@ -1506,6 +1506,14 @@ TEST(NavierStokesLegacyBCs,
     bc.params["Use_cut_metadata_scale"] = defined("true");
     bc.params["Cut_cell_metadata_scale_cap"] = defined("3.5");
     bc.params["Cut_cell_pressure_gradient_penalty"] = defined("0.2");
+    bc.params["Small_cut_aggregation_maximum_root_path_length"] =
+        defined("5");
+    bc.params[
+        "Small_cut_aggregation_maximum_reference_extrapolation_distance"] =
+        defined("2.5");
+    bc.params["Small_cut_aggregation_maximum_absolute_coefficient"] =
+        defined("7");
+    bc.params["Small_cut_aggregation_maximum_row_l1_norm"] = defined("9");
     input.boundary_conditions.push_back(std::move(bc));
 
     svmp::FE::systems::FESystem system(mesh);
@@ -1523,6 +1531,37 @@ TEST(NavierStokesLegacyBCs,
     EXPECT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::InteriorFaceIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::ParameterRef));
     EXPECT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::Minimum));
+    const auto artifact = module->effectiveConfigurationArtifact();
+    ASSERT_TRUE(artifact.has_value());
+    EXPECT_NE(
+        artifact->json.find(
+            "\"aggregation_guards\":{\"maximum_root_path_length\":5,"
+            "\"maximum_reference_extrapolation_distance\":2.5,"
+            "\"maximum_absolute_coefficient\":7,"
+            "\"maximum_row_l1_norm\":9}"),
+        std::string::npos);
+
+    auto disabled_input = input;
+    disabled_input.boundary_conditions.front()
+        .params["Small_cut_aggregation"] = defined("false");
+    svmp::FE::systems::FESystem rejected_system(mesh);
+    rejected_system.addField(svmp::FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+        .source_kind =
+            svmp::FE::systems::FieldSourceKind::PrescribedData,
+    });
+    EXPECT_THROW(
+        (void)svmp::Physics::EquationModuleRegistry::instance().create(
+            "fluid", disabled_input, rejected_system),
+        std::runtime_error);
+    EXPECT_NE(rejected_system.findFieldByName("phi"),
+              svmp::FE::INVALID_FIELD_ID);
+    EXPECT_EQ(rejected_system.findFieldByName("u"),
+              svmp::FE::INVALID_FIELD_ID);
+    EXPECT_EQ(rejected_system.findFieldByName("p"),
+              svmp::FE::INVALID_FIELD_ID);
 #endif
 }
 

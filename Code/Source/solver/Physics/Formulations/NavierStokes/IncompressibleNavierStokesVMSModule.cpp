@@ -3466,6 +3466,25 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
     validateNonnegativeConstantScalar(
         bc.cut_cell_stabilization.pressure_gradient_penalty,
         "cut-cell pressure-gradient penalty");
+    const auto& aggregation_guards = bc.small_cut_aggregation_guards;
+    if (aggregation_guards.maximum_root_path_length == 0u ||
+        !(aggregation_guards.maximum_reference_extrapolation_distance >=
+          FE::Real{0.0}) ||
+        !std::isfinite(
+            aggregation_guards.maximum_reference_extrapolation_distance) ||
+        !(aggregation_guards.maximum_absolute_coefficient >= FE::Real{1.0}) ||
+        !std::isfinite(aggregation_guards.maximum_absolute_coefficient) ||
+        !(aggregation_guards.maximum_row_l1_norm >= FE::Real{1.0}) ||
+        !std::isfinite(aggregation_guards.maximum_row_l1_norm) ||
+        aggregation_guards.maximum_row_l1_norm <
+            aggregation_guards.maximum_absolute_coefficient) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: small-cut aggregation "
+            "guards require a positive root path, finite nonnegative "
+            "reference extrapolation distance, finite coefficient and row "
+            "L1 limits at least one, and a row L1 limit no smaller than the "
+            "coefficient limit");
+    }
     validateNonnegativeConstantScalar(
         bc.velocity_extension.diffusivity,
         "velocity-extension diffusivity");
@@ -6398,6 +6417,22 @@ void installFittedFreeSurfaceMeshKinematics(
         } else {
             out << "null";
         }
+        out << ",\"aggregation_guards\":{\"maximum_root_path_length\":"
+            << boundary.small_cut_aggregation_guards
+                   .maximum_root_path_length
+            << ",\"maximum_reference_extrapolation_distance\":"
+            << jsonReal(
+                   boundary.small_cut_aggregation_guards
+                       .maximum_reference_extrapolation_distance)
+            << ",\"maximum_absolute_coefficient\":"
+            << jsonReal(
+                   boundary.small_cut_aggregation_guards
+                       .maximum_absolute_coefficient)
+            << ",\"maximum_row_l1_norm\":"
+            << jsonReal(
+                   boundary.small_cut_aggregation_guards
+                       .maximum_row_l1_norm)
+            << '}';
         out << '}'
             << ",\"pruning\":{\"decision_owner\":\"authoritative_geometry_snapshot\",\"fallback_to_whole_face\":false}"
             << ",\"legacy_dry_velocity_diffusion\":{\"enabled\":"
@@ -6790,6 +6825,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         FE::geometry::CutIntegrationSide side{
             FE::geometry::CutIntegrationSide::Negative};
         int interface_marker{-1};
+        FE::constraints::SmallCutAggregationGuardOptions guards{};
     };
     std::optional<PendingSmallCutAggregation> pending_small_cut_aggregation;
     if (active_pressure_domain.has_value() &&
@@ -6909,6 +6945,24 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                     .side = aggregation_side,
                     .interface_marker =
                         active_pressure_domain->boundary->interface_marker,
+                    .guards = {
+                        .maximum_root_path_length =
+                            active_pressure_domain->boundary
+                                ->small_cut_aggregation_guards
+                                .maximum_root_path_length,
+                        .maximum_reference_extrapolation_distance =
+                            active_pressure_domain->boundary
+                                ->small_cut_aggregation_guards
+                                .maximum_reference_extrapolation_distance,
+                        .maximum_absolute_coefficient =
+                            active_pressure_domain->boundary
+                                ->small_cut_aggregation_guards
+                                .maximum_absolute_coefficient,
+                        .maximum_row_l1_norm =
+                            active_pressure_domain->boundary
+                                ->small_cut_aggregation_guards
+                                .maximum_row_l1_norm,
+                    },
                 };
             }
         }
@@ -7682,12 +7736,18 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             std::make_unique<FE::constraints::SmallCutAggregationConstraint>(
                 u_id,
                 pending_small_cut_aggregation->side,
-                pending_small_cut_aggregation->interface_marker));
+                pending_small_cut_aggregation->interface_marker,
+                std::vector<int>{},
+                std::vector<FE::GlobalIndex>{},
+                pending_small_cut_aggregation->guards));
         system.addSystemConstraint(
             std::make_unique<FE::constraints::SmallCutAggregationConstraint>(
                 p_id,
                 pending_small_cut_aggregation->side,
-                pending_small_cut_aggregation->interface_marker));
+                pending_small_cut_aggregation->interface_marker,
+                std::vector<int>{},
+                std::vector<FE::GlobalIndex>{},
+                pending_small_cut_aggregation->guards));
         FE_LOG_INFO(
             std::string("IncompressibleNavierStokesVMSModule: small-cut "
                         "aggregation enabled for unfitted free surface") +
@@ -7696,6 +7756,22 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                 pending_small_cut_aggregation->interface_marker) +
             " registration_order=after_strong_constraints"
             " component_precedence=per_dof"
+            " maximum_root_path_length=" +
+            std::to_string(
+                pending_small_cut_aggregation->guards
+                    .maximum_root_path_length) +
+            " maximum_reference_extrapolation_distance=" +
+            std::to_string(
+                pending_small_cut_aggregation->guards
+                    .maximum_reference_extrapolation_distance) +
+            " maximum_absolute_coefficient=" +
+            std::to_string(
+                pending_small_cut_aggregation->guards
+                    .maximum_absolute_coefficient) +
+            " maximum_row_l1_norm=" +
+            std::to_string(
+                pending_small_cut_aggregation->guards
+                    .maximum_row_l1_norm) +
             " diagnostic=small_cut_aggregation_registration"
             " velocity_ghost_penalty=skipped_by_aggregation");
     }
