@@ -1725,6 +1725,29 @@ bool activeSideContains(double phi, const LevelSetAdvectionVelocityRequest& requ
              : phi >= request.isovalue;
 }
 
+std::vector<double> orientedLevelSetForVelocityExtension(
+    std::span<const double> level_set_values,
+    double isovalue,
+    LevelSetActiveSide retained_side)
+{
+  if (!std::isfinite(isovalue)) {
+    throw std::invalid_argument(
+        "velocity-extension orientation requires a finite isovalue");
+  }
+  std::vector<double> oriented(level_set_values.size(), 0.0);
+  for (std::size_t vertex = 0u; vertex < level_set_values.size(); ++vertex) {
+    const double centered = level_set_values[vertex] - isovalue;
+    oriented[vertex] = retained_side == LevelSetActiveSide::Negative
+                           ? centered
+                           : -centered;
+    if (!std::isfinite(oriented[vertex])) {
+      throw std::invalid_argument(
+          "velocity-extension orientation received a non-finite level-set value");
+    }
+  }
+  return oriented;
+}
+
 const char* activeSideName(LevelSetActiveSide side) noexcept
 {
   return side == LevelSetActiveSide::Negative
@@ -8765,6 +8788,9 @@ bool updateLevelSetAdvectionVelocitiesFromState(
       }
       wall_boundary_label_count = wall_constraints.size();
 
+      const auto oriented_level_set = orientedLevelSetForVelocityExtension(
+          phi_values, request.isovalue, request.active_side);
+
       if (algebraic_extension) {
         std::uint64_t free_surface_geometry_revision = 0u;
         if (const auto* cut_context = system.cutIntegrationContext()) {
@@ -8785,7 +8811,8 @@ bool updateLevelSetAdvectionVelocitiesFromState(
                 mesh_access.ownershipRevision(),
                 mesh_access.numberingRevision(),
                 free_surface_geometry_revision,
-                std::span<const double>(phi_values.data(), phi_values.size()),
+                std::span<const double>(oriented_level_set.data(),
+                                        oriented_level_set.size()),
                 std::span<const std::uint8_t>(trace_seed.data(),
                                               trace_seed.size()));
         algebraic_map_snapshot =
@@ -8793,7 +8820,8 @@ bool updateLevelSetAdvectionVelocitiesFromState(
                 mesh,
                 extension_comm,
                 map_revision,
-                std::span<const double>(phi_values.data(), phi_values.size()),
+                std::span<const double>(oriented_level_set.data(),
+                                        oriented_level_set.size()),
                 std::span<const double>(source_values.data(),
                                         source_values.size()),
                 source_components,
@@ -8813,7 +8841,8 @@ bool updateLevelSetAdvectionVelocitiesFromState(
         wall_extension_report = extendVelocityInLevelSetNormalBand(
             mesh,
             extension_comm,
-            std::span<const double>(phi_values.data(), phi_values.size()),
+            std::span<const double>(oriented_level_set.data(),
+                                    oriented_level_set.size()),
             std::span<const double>(source_values.data(), source_values.size()),
             source_components,
             std::span<const std::uint8_t>(trace_seed.data(), trace_seed.size()),

@@ -84,6 +84,22 @@ std::uint64_t VelocityExtensionMapRevision::key() const noexcept
   return hash == 0u ? 1u : hash;
 }
 
+std::string_view velocityExtensionRowDispositionName(
+    VelocityExtensionRowDisposition disposition) noexcept
+{
+  switch (disposition) {
+  case VelocityExtensionRowDisposition::TraceSeed:
+    return "trace_seed";
+  case VelocityExtensionRowDisposition::Regression:
+    return "regression";
+  case VelocityExtensionRowDisposition::BoundedFallback:
+    return "bounded_fallback";
+  case VelocityExtensionRowDisposition::OutsideBandZero:
+    return "outside_band_zero";
+  }
+  return "unknown";
+}
+
 bool VelocityExtensionMapRevision::complete() const noexcept
 {
   return level_set_values != 0u && active_set != 0u && key() != 0u;
@@ -126,6 +142,7 @@ VelocityExtensionMapSnapshot::VelocityExtensionMapSnapshot(
     std::vector<double> preview,
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows,
     std::vector<std::int64_t> component_assignment,
+    std::vector<VelocityExtensionGraphRowDiagnostic> row_diagnostics,
     WallCompatibleVelocityExtensionResult report,
     double wet_to_dry_amplification)
     : revision_(revision),
@@ -133,16 +150,135 @@ VelocityExtensionMapSnapshot::VelocityExtensionMapSnapshot(
       preview_(std::move(preview)),
       rows_(std::move(rows)),
       component_assignment_(std::move(component_assignment)),
+      row_diagnostics_(std::move(row_diagnostics)),
       report_(report),
       wet_to_dry_amplification_(wet_to_dry_amplification)
 {
   if (!revision_.complete() || components_ == 0u || preview_.empty() ||
       preview_.size() % components_ != 0u ||
       component_assignment_.size() != preview_.size() / components_ ||
-      rows_.empty() || !std::isfinite(wet_to_dry_amplification_) ||
+      rows_.empty() || row_diagnostics_.empty() ||
+      rows_.size() != row_diagnostics_.size() * components_ ||
+      !std::isfinite(wet_to_dry_amplification_) ||
       wet_to_dry_amplification_ < 0.0) {
     throw std::invalid_argument(
         "velocity-extension map snapshot received incomplete or incompatible data");
+  }
+  std::set<svmp::FE::GlobalIndex> owner_vertices;
+  std::size_t extended_rows = 0u;
+  std::size_t outside_rows = 0u;
+  std::size_t collision_rows = 0u;
+  std::size_t regression_rows = 0u;
+  std::size_t accepted_regression_rows = 0u;
+  std::size_t fallback_rows = 0u;
+  std::size_t condition_rejections = 0u;
+  std::size_t coefficient_rejections = 0u;
+  std::size_t wall_projected_rows = 0u;
+  for (const auto& diagnostic : row_diagnostics_) {
+    if (diagnostic.local_vertex == svmp::FE::INVALID_GLOBAL_INDEX ||
+        diagnostic.local_vertex < 0 ||
+        static_cast<std::size_t>(diagnostic.local_vertex) >=
+            component_assignment_.size() ||
+        diagnostic.global_vertex == svmp::INVALID_GID ||
+        !owner_vertices.insert(diagnostic.local_vertex).second ||
+        diagnostic.component_assignment !=
+            component_assignment_[static_cast<std::size_t>(
+                diagnostic.local_vertex)] ||
+        diagnostic.band_layer < 0 ||
+        diagnostic.reconstruction_dimension < 0 ||
+        diagnostic.numerical_rank < 0 ||
+        diagnostic.numerical_rank > diagnostic.reconstruction_dimension ||
+        !std::isfinite(diagnostic.proposed_coefficient_sum) ||
+        !std::isfinite(diagnostic.proposed_coefficient_l1) ||
+        !std::isfinite(diagnostic.proposed_max_abs_coefficient) ||
+        !std::isfinite(diagnostic.proposed_max_negative_coefficient) ||
+        !std::isfinite(diagnostic.coefficient_sum) ||
+        !std::isfinite(diagnostic.coefficient_l1) ||
+        !std::isfinite(diagnostic.max_abs_coefficient) ||
+        !std::isfinite(diagnostic.max_negative_coefficient) ||
+        !std::isfinite(diagnostic.constant_reproduction_error) ||
+        !std::isfinite(
+            diagnostic.max_tangential_linear_reproduction_error) ||
+        !std::isfinite(diagnostic.extrapolation_distance) ||
+        diagnostic.extrapolation_distance < 0.0 ||
+        !std::isfinite(diagnostic.dependency_max_speed) ||
+        diagnostic.dependency_max_speed < 0.0 ||
+        !std::isfinite(diagnostic.preview_speed) ||
+        diagnostic.preview_speed < 0.0 ||
+        !std::isfinite(diagnostic.preview_amplification) ||
+        diagnostic.preview_amplification < 0.0 ||
+        diagnostic.preview_amplification >
+            1.0 + kVelocityExtensionRowTolerance ||
+        (!std::isfinite(diagnostic.condition_estimate) &&
+         !diagnostic.condition_rejected)) {
+      throw std::invalid_argument(
+          "velocity-extension map snapshot received an invalid owner row diagnostic");
+    }
+    if (diagnostic.assigned) {
+      if (std::abs(diagnostic.coefficient_sum - 1.0) >
+              kVelocityExtensionRowTolerance ||
+          diagnostic.coefficient_l1 >
+              1.0 + kVelocityExtensionRowTolerance ||
+          diagnostic.max_abs_coefficient >
+              1.0 + kVelocityExtensionRowTolerance ||
+          diagnostic.negative_weight_count != 0u ||
+          diagnostic.max_negative_coefficient >
+              kVelocityExtensionCoefficientTolerance ||
+          diagnostic.dependencies.empty()) {
+        throw std::invalid_argument(
+            "velocity-extension map snapshot received an unbounded assigned graph row");
+      }
+    } else if (diagnostic.disposition !=
+                   VelocityExtensionRowDisposition::OutsideBandZero ||
+               !diagnostic.dependencies.empty()) {
+      throw std::invalid_argument(
+          "velocity-extension map snapshot received an invalid outside-band graph row");
+    }
+    for (const auto& dependency : diagnostic.dependencies) {
+      if (dependency.local_vertex == svmp::FE::INVALID_GLOBAL_INDEX ||
+          dependency.global_vertex == svmp::INVALID_GID ||
+          !std::isfinite(dependency.coefficient)) {
+        throw std::invalid_argument(
+            "velocity-extension map snapshot received an invalid graph dependency");
+      }
+    }
+    const bool reconstructed =
+        diagnostic.disposition == VelocityExtensionRowDisposition::Regression ||
+        diagnostic.disposition ==
+            VelocityExtensionRowDisposition::BoundedFallback;
+    if (reconstructed != diagnostic.regression_attempted ||
+        diagnostic.regression_accepted !=
+            (diagnostic.disposition ==
+             VelocityExtensionRowDisposition::Regression) ||
+        diagnostic.bounded_fallback_used !=
+            (diagnostic.disposition ==
+             VelocityExtensionRowDisposition::BoundedFallback) ||
+        diagnostic.condition_rejected == diagnostic.coefficient_rejected &&
+            diagnostic.bounded_fallback_used) {
+      throw std::invalid_argument(
+          "velocity-extension map snapshot received inconsistent reconstruction evidence");
+    }
+    extended_rows += reconstructed ? 1u : 0u;
+    outside_rows += !diagnostic.assigned ? 1u : 0u;
+    collision_rows += diagnostic.component_candidates > 1u ? 1u : 0u;
+    regression_rows += diagnostic.regression_attempted ? 1u : 0u;
+    accepted_regression_rows += diagnostic.regression_accepted ? 1u : 0u;
+    fallback_rows += diagnostic.bounded_fallback_used ? 1u : 0u;
+    condition_rejections += diagnostic.condition_rejected ? 1u : 0u;
+    coefficient_rejections += diagnostic.coefficient_rejected ? 1u : 0u;
+    wall_projected_rows += diagnostic.wall_projected ? 1u : 0u;
+  }
+  if (extended_rows != report_.extended_vertices ||
+      outside_rows != report_.vertices_outside_band ||
+      collision_rows != report_.component_collision_vertices ||
+      regression_rows != report_.regression_candidate_rows ||
+      accepted_regression_rows != report_.regression_accepted_rows ||
+      fallback_rows != report_.bounded_fallback_rows ||
+      condition_rejections != report_.condition_rejected_rows ||
+      coefficient_rejections != report_.coefficient_rejected_rows ||
+      wall_projected_rows != report_.wall_projected_vertices) {
+    throw std::invalid_argument(
+        "velocity-extension map snapshot owner rows disagree with the aggregate report");
   }
 }
 
@@ -222,12 +358,15 @@ bool solveSmallDenseSystem(
       [](double value) { return std::isfinite(value); });
 }
 
-double estimateSymmetricConditionNumber(
+SymmetricRankConditionEstimate estimateSymmetricRankAndCondition(
     const std::array<std::array<double, 4>, 4>& matrix,
     int size)
 {
   if (size <= 0 || size > 4) {
-    return std::numeric_limits<double>::infinity();
+    return SymmetricRankConditionEstimate{
+        .numerical_rank = 0,
+        .condition_estimate = std::numeric_limits<double>::infinity(),
+    };
   }
 
   std::array<std::array<double, 4>, 4> scaled{};
@@ -236,21 +375,30 @@ double estimateSymmetricConditionNumber(
         matrix[static_cast<std::size_t>(row)]
               [static_cast<std::size_t>(row)];
     if (!(diagonal > 0.0) || !std::isfinite(diagonal)) {
-      return std::numeric_limits<double>::infinity();
+      return SymmetricRankConditionEstimate{
+          .numerical_rank = 0,
+          .condition_estimate = std::numeric_limits<double>::infinity(),
+      };
     }
     for (int column = 0; column < size; ++column) {
       const double other_diagonal =
           matrix[static_cast<std::size_t>(column)]
                 [static_cast<std::size_t>(column)];
       if (!(other_diagonal > 0.0) || !std::isfinite(other_diagonal)) {
-        return std::numeric_limits<double>::infinity();
+        return SymmetricRankConditionEstimate{
+            .numerical_rank = 0,
+            .condition_estimate = std::numeric_limits<double>::infinity(),
+        };
       }
       const double value =
           matrix[static_cast<std::size_t>(row)]
                 [static_cast<std::size_t>(column)] /
           std::sqrt(diagonal * other_diagonal);
       if (!std::isfinite(value)) {
-        return std::numeric_limits<double>::infinity();
+        return SymmetricRankConditionEstimate{
+            .numerical_rank = 0,
+            .condition_estimate = std::numeric_limits<double>::infinity(),
+        };
       }
       scaled[static_cast<std::size_t>(row)]
             [static_cast<std::size_t>(column)] = value;
@@ -303,23 +451,52 @@ double estimateSymmetricConditionNumber(
     scaled[p][q] = scaled[q][p] = 0.0;
   }
 
-  double minimum = std::numeric_limits<double>::infinity();
+  std::array<double, 4> eigenvalues{};
   double maximum = 0.0;
   for (int index = 0; index < size; ++index) {
     const double eigenvalue =
         scaled[static_cast<std::size_t>(index)]
               [static_cast<std::size_t>(index)];
     if (!std::isfinite(eigenvalue)) {
-      return std::numeric_limits<double>::infinity();
+      return SymmetricRankConditionEstimate{
+          .numerical_rank = 0,
+          .condition_estimate = std::numeric_limits<double>::infinity(),
+      };
     }
-    minimum = std::min(minimum, eigenvalue);
+    eigenvalues[static_cast<std::size_t>(index)] = eigenvalue;
     maximum = std::max(maximum, eigenvalue);
   }
-  if (!(maximum > 0.0) ||
-      !(minimum > maximum * 64.0 * std::numeric_limits<double>::epsilon())) {
-    return std::numeric_limits<double>::infinity();
+  if (!(maximum > 0.0)) {
+    return SymmetricRankConditionEstimate{
+        .numerical_rank = 0,
+        .condition_estimate = std::numeric_limits<double>::infinity(),
+    };
   }
-  return maximum / minimum;
+  const double rank_tolerance =
+      maximum * 64.0 * std::numeric_limits<double>::epsilon();
+  int numerical_rank = 0;
+  double minimum_retained = std::numeric_limits<double>::infinity();
+  for (int index = 0; index < size; ++index) {
+    const double eigenvalue = eigenvalues[static_cast<std::size_t>(index)];
+    if (eigenvalue > rank_tolerance) {
+      ++numerical_rank;
+      minimum_retained = std::min(minimum_retained, eigenvalue);
+    }
+  }
+  return SymmetricRankConditionEstimate{
+      .numerical_rank = numerical_rank,
+      .condition_estimate =
+          numerical_rank == size
+              ? maximum / minimum_retained
+              : std::numeric_limits<double>::infinity(),
+  };
+}
+
+double estimateSymmetricConditionNumber(
+    const std::array<std::array<double, 4>, 4>& matrix,
+    int size)
+{
+  return estimateSymmetricRankAndCondition(matrix, size).condition_estimate;
 }
 
 bool ownsVelocityExtensionVertex(const svmp::Mesh& mesh,
@@ -340,6 +517,21 @@ bool ownsVelocityExtensionVertex(const svmp::Mesh& mesh,
         "velocity-extension graph requires valid vertex owner ranks on the active communicator");
   }
   return owner == comm.rank();
+}
+
+svmp::gid_t velocityExtensionVertexGlobalIdentity(const svmp::Mesh& mesh,
+                                                  std::size_t vertex)
+{
+  if (vertex >= mesh.n_vertices()) {
+    throw std::runtime_error(
+        "velocity-extension row diagnostic received an invalid local vertex");
+  }
+  const auto& vertex_gids = mesh.local_mesh().vertex_gids();
+  if (vertex_gids.size() == mesh.n_vertices() &&
+      vertex_gids[vertex] != svmp::INVALID_GID) {
+    return vertex_gids[vertex];
+  }
+  return static_cast<svmp::gid_t>(vertex);
 }
 
 std::size_t globalOwnedVelocityExtensionMaskCount(
@@ -1158,7 +1350,8 @@ extendVelocityInLevelSetNormalBand(
     std::vector<double>& extended,
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>*
         constraint_rows,
-    std::vector<std::int64_t>* component_assignment)
+    std::vector<std::int64_t>* component_assignment,
+    std::vector<VelocityExtensionGraphRowDiagnostic>* row_diagnostics)
 {
   const auto vertex_count = mesh.n_vertices();
   const int dimension = mesh.dim();
@@ -1182,6 +1375,10 @@ extendVelocityInLevelSetNormalBand(
   if (constraint_rows != nullptr) {
     constraint_rows->clear();
     constraint_rows->reserve(vertex_count * target_components);
+  }
+  if (row_diagnostics != nullptr) {
+    row_diagnostics->clear();
+    row_diagnostics->reserve(vertex_count);
   }
   const auto& coordinates = mesh.X_ref();
   const auto& local_mesh = mesh.local_mesh();
@@ -1359,6 +1556,7 @@ extendVelocityInLevelSetNormalBand(
     return constrained;
   };
 
+  WallCompatibleVelocityExtensionResult result;
   std::vector<std::uint8_t> assigned(vertex_count, 0u);
   std::vector<double> extension_distance(
       vertex_count, std::numeric_limits<double>::infinity());
@@ -1379,8 +1577,63 @@ extendVelocityInLevelSetNormalBand(
       extended[vertex * target_components + c] = value;
     }
     assigned[vertex] = 1u;
+    // The input is oriented so the retained side is negative.  Retaining its
+    // signed seed offset reconstructs distance from the interface: a wet seed
+    // contributes the edge path minus its interior distance, while a promoted
+    // dry trace seed contributes the path plus its exterior distance.
     extension_distance[vertex] = phi[vertex];
     frontier.push_back(vertex);
+    if (row_diagnostics != nullptr) {
+      double preview_speed2 = 0.0;
+      for (std::size_t component = 0; component < copy_components;
+           ++component) {
+        const double value =
+            extended[vertex * target_components + component];
+        preview_speed2 += value * value;
+      }
+      VelocityExtensionGraphRowDiagnostic diagnostic{
+          .local_vertex = static_cast<svmp::FE::GlobalIndex>(vertex),
+          .global_vertex =
+              velocityExtensionVertexGlobalIdentity(mesh, vertex),
+          .disposition = VelocityExtensionRowDisposition::TraceSeed,
+          .component_assignment = extension_component[vertex],
+          .component_candidates = 1u,
+          .band_layer = 0,
+          .reconstruction_dimension = 1,
+          .numerical_rank = 1,
+          .assigned = true,
+          .regression_attempted = false,
+          .regression_accepted = false,
+          .bounded_fallback_used = false,
+          .condition_rejected = false,
+          .coefficient_rejected = false,
+          .wall_projected = false,
+          .condition_estimate = 1.0,
+          .proposed_coefficient_sum = 1.0,
+          .proposed_coefficient_l1 = 1.0,
+          .proposed_max_abs_coefficient = 1.0,
+          .proposed_negative_weight_count = 0u,
+          .proposed_max_negative_coefficient = 0.0,
+          .coefficient_sum = 1.0,
+          .coefficient_l1 = 1.0,
+          .max_abs_coefficient = 1.0,
+          .negative_weight_count = 0u,
+          .max_negative_coefficient = 0.0,
+          .constant_reproduction_error = 0.0,
+          .max_tangential_linear_reproduction_error = 0.0,
+          .extrapolation_distance = std::abs(extension_distance[vertex]),
+          .dependency_max_speed = std::sqrt(preview_speed2),
+          .preview_speed = std::sqrt(preview_speed2),
+          .preview_amplification = preview_speed2 > 0.0 ? 1.0 : 0.0,
+      };
+      diagnostic.dependencies.push_back(VelocityExtensionGraphDependency{
+          .local_vertex = static_cast<svmp::FE::GlobalIndex>(vertex),
+          .global_vertex =
+              velocityExtensionVertexGlobalIdentity(mesh, vertex),
+          .coefficient = 1.0,
+      });
+      row_diagnostics->push_back(std::move(diagnostic));
+    }
     if (constraint_rows != nullptr) {
       for (std::size_t component = 0; component < target_components;
            ++component) {
@@ -1411,7 +1664,6 @@ extendVelocityInLevelSetNormalBand(
       extended,
       extension_distance);
 
-  WallCompatibleVelocityExtensionResult result;
   const auto velocity_magnitude = [&](std::size_t vertex) {
     double magnitude2 = 0.0;
     for (std::size_t component = 0; component < copy_components;
@@ -1450,6 +1702,8 @@ extendVelocityInLevelSetNormalBand(
         candidates.size(), std::numeric_limits<double>::infinity());
     std::vector<std::vector<std::pair<std::size_t, double>>>
         candidate_dependencies(candidates.size());
+    std::vector<VelocityExtensionGraphRowDiagnostic> candidate_diagnostics(
+        candidates.size());
     for (std::size_t index = 0; index < candidates.size(); ++index) {
       const auto vertex = candidates[index];
       const auto point = meshVertexPoint(coordinates, dimension, vertex);
@@ -1673,14 +1927,16 @@ extendVelocityInLevelSetNormalBand(
       std::array<double, 4> evaluation_rhs{};
       evaluation_rhs[0] = 1.0;
       std::array<double, 4> evaluation_weights{};
-      const double regression_condition = estimateSymmetricConditionNumber(
+      const auto rank_condition = estimateSymmetricRankAndCondition(
           regression_matrix, regression_size);
+      const double regression_condition = rank_condition.condition_estimate;
       if (std::isfinite(regression_condition)) {
         result.max_regression_condition = std::max(
             result.max_regression_condition, regression_condition);
       }
       ++result.regression_candidate_rows;
       const bool regression_available =
+          rank_condition.numerical_rank == regression_size &&
           regression_condition <= kVelocityExtensionMaxRegressionCondition &&
           solveSmallDenseSystem(
           regression_matrix,
@@ -1693,6 +1949,7 @@ extendVelocityInLevelSetNormalBand(
       double regression_l1 = 0.0;
       double regression_max_abs = 0.0;
       double regression_max_negative = 0.0;
+      std::size_t regression_negative_count = 0u;
       bool finite_coefficients = regression_available;
       for (const auto& neighbor : regression_neighbors) {
         double coefficient = 0.0;
@@ -1712,6 +1969,7 @@ extendVelocityInLevelSetNormalBand(
             std::max(regression_max_abs, std::abs(coefficient));
         regression_max_negative =
             std::max(regression_max_negative, std::max(0.0, -coefficient));
+        regression_negative_count += coefficient < 0.0 ? 1u : 0u;
         graph_coefficients.push_back(coefficient);
       }
       const bool bounded_regression =
@@ -1750,6 +2008,7 @@ extendVelocityInLevelSetNormalBand(
       double row_l1 = 0.0;
       double row_max_abs = 0.0;
       double row_max_negative = 0.0;
+      std::size_t row_negative_count = 0u;
       for (auto& coefficient : graph_coefficients) {
         coefficient /= positive_sum;
         row_sum += coefficient;
@@ -1757,6 +2016,7 @@ extendVelocityInLevelSetNormalBand(
         row_max_abs = std::max(row_max_abs, std::abs(coefficient));
         row_max_negative =
             std::max(row_max_negative, std::max(0.0, -coefficient));
+        row_negative_count += coefficient < 0.0 ? 1u : 0u;
       }
       const double row_sum_error = std::abs(row_sum - 1.0);
       if (row_sum_error > kVelocityExtensionRowTolerance ||
@@ -1776,6 +2036,7 @@ extendVelocityInLevelSetNormalBand(
           result.max_negative_graph_coefficient, row_max_negative);
       result.max_constant_reproduction_error = std::max(
           result.max_constant_reproduction_error, row_sum_error);
+      double maximum_linear_reproduction_error = 0.0;
       for (int feature = 1; feature < regression_size; ++feature) {
         double reproduction_error = 0.0;
         for (std::size_t neighbor_index = 0;
@@ -1786,10 +2047,51 @@ extendVelocityInLevelSetNormalBand(
               regression_neighbors[neighbor_index]
                   .features[static_cast<std::size_t>(feature)];
         }
-        result.max_linear_reproduction_error = std::max(
-            result.max_linear_reproduction_error,
+        maximum_linear_reproduction_error = std::max(
+            maximum_linear_reproduction_error,
             std::abs(reproduction_error));
       }
+      result.max_linear_reproduction_error = std::max(
+          result.max_linear_reproduction_error,
+          maximum_linear_reproduction_error);
+
+      auto& diagnostic = candidate_diagnostics[index];
+      diagnostic.local_vertex =
+          static_cast<svmp::FE::GlobalIndex>(vertex);
+      diagnostic.global_vertex =
+          velocityExtensionVertexGlobalIdentity(mesh, vertex);
+      diagnostic.disposition = bounded_regression
+          ? VelocityExtensionRowDisposition::Regression
+          : VelocityExtensionRowDisposition::BoundedFallback;
+      diagnostic.component_assignment = selected_component;
+      diagnostic.component_candidates =
+          component_geometric_distance.size();
+      diagnostic.band_layer = layer;
+      diagnostic.reconstruction_dimension = regression_size;
+      diagnostic.numerical_rank = rank_condition.numerical_rank;
+      diagnostic.assigned = true;
+      diagnostic.regression_attempted = true;
+      diagnostic.regression_accepted = bounded_regression;
+      diagnostic.bounded_fallback_used = !bounded_regression;
+      diagnostic.condition_rejected = !regression_available;
+      diagnostic.coefficient_rejected =
+          regression_available && !bounded_regression;
+      diagnostic.condition_estimate = regression_condition;
+      diagnostic.proposed_coefficient_sum = regression_sum;
+      diagnostic.proposed_coefficient_l1 = regression_l1;
+      diagnostic.proposed_max_abs_coefficient = regression_max_abs;
+      diagnostic.proposed_negative_weight_count =
+          regression_negative_count;
+      diagnostic.proposed_max_negative_coefficient =
+          regression_max_negative;
+      diagnostic.coefficient_sum = row_sum;
+      diagnostic.coefficient_l1 = row_l1;
+      diagnostic.max_abs_coefficient = row_max_abs;
+      diagnostic.negative_weight_count = row_negative_count;
+      diagnostic.max_negative_coefficient = row_max_negative;
+      diagnostic.constant_reproduction_error = row_sum_error;
+      diagnostic.max_tangential_linear_reproduction_error =
+          maximum_linear_reproduction_error;
 
       auto& dependencies = candidate_dependencies[index];
       dependencies.reserve(regression_neighbors.size());
@@ -1798,6 +2100,13 @@ extendVelocityInLevelSetNormalBand(
         const auto& neighbor = regression_neighbors[neighbor_index];
         const double coefficient = graph_coefficients[neighbor_index];
         dependencies.emplace_back(neighbor.vertex, coefficient);
+        diagnostic.dependencies.push_back(VelocityExtensionGraphDependency{
+            .local_vertex = static_cast<svmp::FE::GlobalIndex>(
+                neighbor.vertex),
+            .global_vertex = velocityExtensionVertexGlobalIdentity(
+                mesh, neighbor.vertex),
+            .coefficient = coefficient,
+        });
         const auto neighbor_point =
             meshVertexPoint(coordinates, dimension, neighbor.vertex);
         double edge_distance2 = 0.0;
@@ -1835,13 +2144,28 @@ extendVelocityInLevelSetNormalBand(
             "wall-compatible level-set velocity extension could not measure its extrapolation path");
       }
       extension_distance[vertex] = candidate_distances[index];
+      auto& diagnostic = candidate_diagnostics[index];
+      diagnostic.extrapolation_distance = extension_distance[vertex];
       result.max_extrapolation_distance = std::max(
           result.max_extrapolation_distance,
           std::max(0.0, extension_distance[vertex]));
       candidate_flag[vertex] = 0u;
       if (apply_wall_velocity_constraints(vertex)) {
         ++result.wall_projected_vertices;
+        diagnostic.wall_projected = true;
       }
+      double dependency_max_speed = 0.0;
+      for (const auto& dependency : diagnostic.dependencies) {
+        dependency_max_speed = std::max(
+            dependency_max_speed,
+            velocity_magnitude(
+                static_cast<std::size_t>(dependency.local_vertex)));
+      }
+      diagnostic.dependency_max_speed = dependency_max_speed;
+      diagnostic.preview_speed = velocity_magnitude(vertex);
+      diagnostic.preview_amplification =
+          diagnostic.preview_speed /
+          std::max(diagnostic.dependency_max_speed, 1.0e-12);
       if (constraint_rows != nullptr) {
         const auto [projection, unused_constrained] =
             wall_velocity_projection(vertex);
@@ -1881,6 +2205,9 @@ extendVelocityInLevelSetNormalBand(
           constraint_rows->push_back(std::move(row));
         }
       }
+      if (row_diagnostics != nullptr) {
+        row_diagnostics->push_back(std::move(diagnostic));
+      }
       ++result.extended_vertices;
     }
     synchronizeVelocityExtensionComponentLabels(
@@ -1911,6 +2238,21 @@ extendVelocityInLevelSetNormalBand(
                   .component = static_cast<int>(component),
               });
         }
+      }
+      if (row_diagnostics != nullptr && owned) {
+        row_diagnostics->push_back(VelocityExtensionGraphRowDiagnostic{
+            .local_vertex = static_cast<svmp::FE::GlobalIndex>(vertex),
+            .global_vertex =
+                velocityExtensionVertexGlobalIdentity(mesh, vertex),
+            .disposition =
+                VelocityExtensionRowDisposition::OutsideBandZero,
+            .component_assignment = extension_component[vertex],
+            .component_candidates = 0u,
+            .band_layer = band_layers + 1,
+            .reconstruction_dimension = 0,
+            .numerical_rank = 0,
+            .assigned = false,
+        });
       }
     }
     if (active[vertex] != 0u) {
@@ -1977,6 +2319,26 @@ extendVelocityInLevelSetNormalBand(
   if (component_assignment != nullptr) {
     *component_assignment = std::move(extension_component);
   }
+  if (row_diagnostics != nullptr) {
+    std::sort(
+        row_diagnostics->begin(),
+        row_diagnostics->end(),
+        [](const auto& lhs, const auto& rhs) {
+          return lhs.global_vertex < rhs.global_vertex ||
+                 (lhs.global_vertex == rhs.global_vertex &&
+                  lhs.local_vertex < rhs.local_vertex);
+        });
+    const auto duplicate = std::adjacent_find(
+        row_diagnostics->begin(),
+        row_diagnostics->end(),
+        [](const auto& lhs, const auto& rhs) {
+          return lhs.local_vertex == rhs.local_vertex;
+        });
+    if (duplicate != row_diagnostics->end()) {
+      throw std::runtime_error(
+          "velocity-extension map produced duplicate owner row diagnostics");
+    }
+  }
   return result;
 }
 
@@ -2011,6 +2373,7 @@ buildVelocityExtensionMapSnapshot(
   std::vector<double> preview;
   std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
   std::vector<std::int64_t> component_assignment;
+  std::vector<VelocityExtensionGraphRowDiagnostic> row_diagnostics;
   auto report = extendVelocityInLevelSetNormalBand(
       mesh,
       comm,
@@ -2025,7 +2388,8 @@ buildVelocityExtensionMapSnapshot(
       wall_constraints,
       preview,
       &rows,
-      &component_assignment);
+      &component_assignment,
+      &row_diagnostics);
 
   const double amplification =
       report.max_extended_speed / std::max(report.max_seed_speed, 1.0e-12);
@@ -2050,6 +2414,7 @@ buildVelocityExtensionMapSnapshot(
       std::move(preview),
       std::move(rows),
       std::move(component_assignment),
+      std::move(row_diagnostics),
       report,
       amplification);
 }

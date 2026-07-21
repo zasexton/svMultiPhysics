@@ -2764,8 +2764,38 @@ TEST(ApplicationDriverLevelSetWorkflows,
   matrix[1][1] = 1.0;
 
   const double condition = estimateSymmetricConditionNumber(matrix, 2);
+  const auto estimate =
+      application::core::estimateSymmetricRankAndCondition(matrix, 2);
   EXPECT_TRUE(std::isfinite(condition));
   EXPECT_GT(condition, kVelocityExtensionMaxRegressionCondition);
+  EXPECT_EQ(estimate.numerical_rank, 2);
+  EXPECT_EQ(estimate.condition_estimate, condition);
+
+  matrix[0][1] = 1.0;
+  matrix[1][0] = 1.0;
+  const auto singular =
+      application::core::estimateSymmetricRankAndCondition(matrix, 2);
+  EXPECT_EQ(singular.numerical_rank, 1);
+  EXPECT_TRUE(std::isinf(singular.condition_estimate));
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     VelocityExtensionOrientationMakesEitherRetainedSideNegative)
+{
+  const std::array<double, 3> level_set{{-0.25, 0.5, 1.25}};
+  const auto negative = orientedLevelSetForVelocityExtension(
+      level_set, 0.5, LevelSetActiveSide::Negative);
+  const auto positive = orientedLevelSetForVelocityExtension(
+      level_set, 0.5, LevelSetActiveSide::Positive);
+  EXPECT_EQ(negative, (std::vector<double>{-0.75, 0.0, 0.75}));
+  EXPECT_EQ(positive, (std::vector<double>{0.75, -0.0, -0.75}));
+
+  const std::array<double, 1> nonfinite{{
+      std::numeric_limits<double>::quiet_NaN()}};
+  EXPECT_THROW(
+      (void)orientedLevelSetForVelocityExtension(
+          nonfinite, 0.0, LevelSetActiveSide::Negative),
+      std::invalid_argument);
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -3239,12 +3269,44 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(snapshot->revision(), revision);
   EXPECT_EQ(snapshot->preview().size(), source.size());
   EXPECT_EQ(snapshot->componentAssignment().size(), mesh->n_vertices());
+  ASSERT_EQ(snapshot->rowDiagnostics().size(), mesh->n_vertices());
   EXPECT_GT(snapshot->report().max_extrapolation_distance, 0.0);
   EXPECT_LE(snapshot->report().max_constant_reproduction_error,
             kVelocityExtensionRowTolerance);
   EXPECT_LE(snapshot->report().max_linear_reproduction_error,
             kVelocityExtensionRowTolerance);
   EXPECT_LE(snapshot->wetToDryAmplification(), 1.0 + 1.0e-12);
+
+  std::size_t trace_rows = 0u;
+  std::size_t reconstructed_rows = 0u;
+  for (const auto& diagnostic : snapshot->rowDiagnostics()) {
+    EXPECT_NE(diagnostic.local_vertex, svmp::FE::INVALID_GLOBAL_INDEX);
+    EXPECT_NE(diagnostic.global_vertex, svmp::INVALID_GID);
+    EXPECT_TRUE(diagnostic.assigned);
+    EXPECT_GE(diagnostic.extrapolation_distance, 0.0);
+    EXPECT_LE(diagnostic.preview_amplification, 1.0 + 1.0e-12);
+    if (diagnostic.disposition ==
+        application::core::VelocityExtensionRowDisposition::TraceSeed) {
+      ++trace_rows;
+      EXPECT_EQ(diagnostic.band_layer, 0);
+      EXPECT_EQ(diagnostic.numerical_rank, 1);
+      EXPECT_NEAR(diagnostic.coefficient_sum, 1.0, 0.0);
+      ASSERT_EQ(diagnostic.dependencies.size(), 1u);
+      continue;
+    }
+    ++reconstructed_rows;
+    EXPECT_TRUE(diagnostic.regression_attempted);
+    EXPECT_EQ(diagnostic.numerical_rank,
+              diagnostic.reconstruction_dimension);
+    EXPECT_NEAR(diagnostic.coefficient_sum, 1.0,
+                kVelocityExtensionRowTolerance);
+    EXPECT_LE(diagnostic.coefficient_l1,
+              1.0 + kVelocityExtensionRowTolerance);
+    EXPECT_EQ(diagnostic.negative_weight_count, 0u);
+    EXPECT_FALSE(diagnostic.dependencies.empty());
+  }
+  EXPECT_GT(trace_rows, 0u);
+  EXPECT_GT(reconstructed_rows, 0u);
 
   auto detached_rows = snapshot->copyRows();
   ASSERT_FALSE(detached_rows.empty());
@@ -3529,6 +3591,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
     fallback_source[2u * vertex + 1u] = normal_velocity;
   }
   std::vector<double> fallback_extension;
+  std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>
+      fallback_rows;
+  std::vector<std::int64_t> fallback_components;
+  std::vector<application::core::VelocityExtensionGraphRowDiagnostic>
+      fallback_diagnostics;
   const auto fallback_report = extendVelocityInLevelSetNormalBand(
       *fallback_mesh,
       svmp::MeshComm::self(),
@@ -3541,7 +3608,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
       /*band_layers=*/1,
       /*enforce_wall_impermeability=*/false,
       std::span<const WallVelocityExtensionConstraint>{},
-      fallback_extension);
+      fallback_extension,
+      &fallback_rows,
+      &fallback_components,
+      &fallback_diagnostics);
   EXPECT_EQ(fallback_report.vertices_outside_band, 0u);
   EXPECT_EQ(fallback_report.regression_candidate_rows, 1u);
   EXPECT_EQ(fallback_report.regression_accepted_rows, 0u);
@@ -3558,6 +3628,29 @@ TEST(ApplicationDriverLevelSetWorkflows,
             kVelocityExtensionCoefficientTolerance);
   EXPECT_LE(fallback_report.max_extended_speed,
             fallback_report.max_seed_speed + 1.0e-12);
+  const auto fallback_diagnostic = std::find_if(
+      fallback_diagnostics.begin(),
+      fallback_diagnostics.end(),
+      [](const auto& diagnostic) {
+        return diagnostic.disposition ==
+               application::core::VelocityExtensionRowDisposition::
+                   BoundedFallback;
+      });
+  ASSERT_NE(fallback_diagnostic, fallback_diagnostics.end());
+  EXPECT_TRUE(fallback_diagnostic->regression_attempted);
+  EXPECT_FALSE(fallback_diagnostic->regression_accepted);
+  EXPECT_TRUE(fallback_diagnostic->bounded_fallback_used);
+  EXPECT_FALSE(fallback_diagnostic->condition_rejected);
+  EXPECT_TRUE(fallback_diagnostic->coefficient_rejected);
+  EXPECT_GT(fallback_diagnostic->proposed_negative_weight_count, 0u);
+  EXPECT_GT(fallback_diagnostic->proposed_max_negative_coefficient, 0.0);
+  EXPECT_EQ(fallback_diagnostic->negative_weight_count, 0u);
+  EXPECT_NEAR(fallback_diagnostic->coefficient_sum, 1.0,
+              kVelocityExtensionRowTolerance);
+  EXPECT_LE(fallback_diagnostic->coefficient_l1,
+            1.0 + kVelocityExtensionRowTolerance);
+  EXPECT_LE(fallback_diagnostic->preview_amplification,
+            1.0 + 1.0e-12);
   ASSERT_EQ(fallback_extension.size(), fallback_source.size());
   for (std::size_t index = 0u;
        index < fallback_extension.size(); index += 2u) {
@@ -3589,6 +3682,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
     ill_conditioned_source[2u * vertex + 1u] = normal_velocity;
   }
   std::vector<double> ill_conditioned_extension;
+  std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>
+      ill_conditioned_rows;
+  std::vector<std::int64_t> ill_conditioned_components;
+  std::vector<application::core::VelocityExtensionGraphRowDiagnostic>
+      ill_conditioned_diagnostics;
   const auto ill_conditioned_report = extendVelocityInLevelSetNormalBand(
       *ill_conditioned_mesh,
       svmp::MeshComm::self(),
@@ -3601,7 +3699,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
       /*band_layers=*/1,
       /*enforce_wall_impermeability=*/false,
       std::span<const WallVelocityExtensionConstraint>{},
-      ill_conditioned_extension);
+      ill_conditioned_extension,
+      &ill_conditioned_rows,
+      &ill_conditioned_components,
+      &ill_conditioned_diagnostics);
   EXPECT_EQ(ill_conditioned_report.regression_candidate_rows, 1u);
   EXPECT_EQ(ill_conditioned_report.regression_accepted_rows, 0u);
   EXPECT_EQ(ill_conditioned_report.bounded_fallback_rows, 1u);
@@ -3613,6 +3714,23 @@ TEST(ApplicationDriverLevelSetWorkflows,
             kVelocityExtensionRowTolerance);
   EXPECT_LE(ill_conditioned_report.max_extended_speed,
             ill_conditioned_report.max_seed_speed + 1.0e-12);
+  const auto condition_diagnostic = std::find_if(
+      ill_conditioned_diagnostics.begin(),
+      ill_conditioned_diagnostics.end(),
+      [](const auto& diagnostic) {
+        return diagnostic.condition_rejected;
+      });
+  ASSERT_NE(condition_diagnostic, ill_conditioned_diagnostics.end());
+  EXPECT_EQ(condition_diagnostic->disposition,
+            application::core::VelocityExtensionRowDisposition::
+                BoundedFallback);
+  EXPECT_TRUE(condition_diagnostic->bounded_fallback_used);
+  EXPECT_FALSE(condition_diagnostic->coefficient_rejected);
+  EXPECT_GT(condition_diagnostic->condition_estimate,
+            kVelocityExtensionMaxRegressionCondition);
+  EXPECT_EQ(condition_diagnostic->negative_weight_count, 0u);
+  EXPECT_LE(condition_diagnostic->coefficient_l1,
+            1.0 + kVelocityExtensionRowTolerance);
   RecordProperty("extension_condition_fallback_rows",
                  std::to_string(
                      ill_conditioned_report.condition_rejected_rows));

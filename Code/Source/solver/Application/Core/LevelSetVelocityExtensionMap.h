@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace application::core {
@@ -49,6 +50,68 @@ struct WallCompatibleVelocityExtensionResult {
   double max_extended_speed{0.0};
 };
 
+enum class VelocityExtensionRowDisposition : std::uint8_t {
+  TraceSeed,
+  Regression,
+  BoundedFallback,
+  OutsideBandZero,
+};
+
+[[nodiscard]] std::string_view velocityExtensionRowDispositionName(
+    VelocityExtensionRowDisposition disposition) noexcept;
+
+struct VelocityExtensionGraphDependency {
+  svmp::FE::GlobalIndex local_vertex{svmp::FE::INVALID_GLOBAL_INDEX};
+  svmp::gid_t global_vertex{svmp::INVALID_GID};
+  double coefficient{0.0};
+};
+
+/**
+ * Owner-local evidence for one scalar graph row. Vector constraint rows reuse
+ * this graph row before applying the declared wall-component projection.
+ */
+struct VelocityExtensionGraphRowDiagnostic {
+  svmp::FE::GlobalIndex local_vertex{svmp::FE::INVALID_GLOBAL_INDEX};
+  svmp::gid_t global_vertex{svmp::INVALID_GID};
+  VelocityExtensionRowDisposition disposition{
+      VelocityExtensionRowDisposition::OutsideBandZero};
+  std::int64_t component_assignment{-1};
+  std::size_t component_candidates{0u};
+  int band_layer{0};
+  int reconstruction_dimension{0};
+  int numerical_rank{0};
+  bool assigned{false};
+  bool regression_attempted{false};
+  bool regression_accepted{false};
+  bool bounded_fallback_used{false};
+  bool condition_rejected{false};
+  bool coefficient_rejected{false};
+  bool wall_projected{false};
+  double condition_estimate{0.0};
+  double proposed_coefficient_sum{0.0};
+  double proposed_coefficient_l1{0.0};
+  double proposed_max_abs_coefficient{0.0};
+  std::size_t proposed_negative_weight_count{0u};
+  double proposed_max_negative_coefficient{0.0};
+  double coefficient_sum{0.0};
+  double coefficient_l1{0.0};
+  double max_abs_coefficient{0.0};
+  std::size_t negative_weight_count{0u};
+  double max_negative_coefficient{0.0};
+  double constant_reproduction_error{0.0};
+  double max_tangential_linear_reproduction_error{0.0};
+  double extrapolation_distance{0.0};
+  double dependency_max_speed{0.0};
+  double preview_speed{0.0};
+  double preview_amplification{0.0};
+  std::vector<VelocityExtensionGraphDependency> dependencies{};
+};
+
+struct SymmetricRankConditionEstimate {
+  int numerical_rank{0};
+  double condition_estimate{0.0};
+};
+
 struct VelocityExtensionMapRevision {
   std::uint64_t mesh_geometry{0u};
   std::uint64_t mesh_topology{0u};
@@ -71,6 +134,7 @@ public:
       std::vector<double> preview,
       std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows,
       std::vector<std::int64_t> component_assignment,
+      std::vector<VelocityExtensionGraphRowDiagnostic> row_diagnostics,
       WallCompatibleVelocityExtensionResult report,
       double wet_to_dry_amplification);
 
@@ -97,6 +161,11 @@ public:
   {
     return component_assignment_;
   }
+  [[nodiscard]] std::span<const VelocityExtensionGraphRowDiagnostic>
+  rowDiagnostics() const noexcept
+  {
+    return row_diagnostics_;
+  }
   [[nodiscard]] const WallCompatibleVelocityExtensionResult& report() const noexcept
   {
     return report_;
@@ -112,6 +181,7 @@ private:
   std::vector<double> preview_{};
   std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows_{};
   std::vector<std::int64_t> component_assignment_{};
+  std::vector<VelocityExtensionGraphRowDiagnostic> row_diagnostics_{};
   WallCompatibleVelocityExtensionResult report_{};
   double wet_to_dry_amplification_{0.0};
 };
@@ -125,6 +195,9 @@ private:
     std::span<const double> level_set_values,
     std::span<const std::uint8_t> active_set);
 
+// Map construction expects phi relative to the configured isovalue and
+// oriented so the retained physical side is nonpositive. This convention
+// makes signed graph-path offsets measure distance from either interface side.
 [[nodiscard]] std::shared_ptr<const VelocityExtensionMapSnapshot>
 buildVelocityExtensionMapSnapshot(
     const svmp::Mesh& mesh,
@@ -141,6 +214,11 @@ buildVelocityExtensionMapSnapshot(
     std::span<const WallVelocityExtensionConstraint> wall_constraints);
 
 [[nodiscard]] double estimateSymmetricConditionNumber(
+    const std::array<std::array<double, 4>, 4>& matrix,
+    int size);
+
+[[nodiscard]] SymmetricRankConditionEstimate
+estimateSymmetricRankAndCondition(
     const std::array<std::array<double, 4>, 4>& matrix,
     int size);
 
@@ -172,6 +250,7 @@ nodalVelocityExtensionInterfaceCells(
 [[nodiscard]] std::vector<std::vector<std::size_t>>
 velocityExtensionEdgeAdjacency(const svmp::Mesh& mesh);
 
+// The same wet-negative orientation contract applies to phi here.
 [[nodiscard]] WallCompatibleVelocityExtensionResult
 extendVelocityInLevelSetNormalBand(
     const svmp::Mesh& mesh,
@@ -188,7 +267,9 @@ extendVelocityInLevelSetNormalBand(
     std::vector<double>& extended,
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>*
         constraint_rows = nullptr,
-    std::vector<std::int64_t>* component_assignment = nullptr);
+    std::vector<std::int64_t>* component_assignment = nullptr,
+    std::vector<VelocityExtensionGraphRowDiagnostic>* row_diagnostics =
+        nullptr);
 
 [[nodiscard]] WallCompatibleVelocityExtensionResult
 extendVelocityInLevelSetNormalBand(
