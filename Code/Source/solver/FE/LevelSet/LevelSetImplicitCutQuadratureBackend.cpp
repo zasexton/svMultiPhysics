@@ -672,6 +672,10 @@ constexpr int kTerminalTopologyExtraSubdivisionDepth = 2;
         if (!finiteArray(simplex.vertices[i])) {
             return Real{-1.0};
         }
+        if (simplex.has_represented_signed_values &&
+            !std::isfinite(simplex.represented_signed_values[i])) {
+            return Real{-1.0};
+        }
     }
     if (!std::isfinite(simplex.measure_scale) ||
         !(simplex.measure_scale > Real{0.0})) {

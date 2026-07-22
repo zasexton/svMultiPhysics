@@ -285,6 +285,8 @@ void mixRuleContent(std::uint64_t& hash,
                   record.moment_certificate.ambient_dimension));
     mix(hash, static_cast<std::uint64_t>(
                   record.moment_certificate.source));
+    mix(hash, static_cast<std::uint64_t>(
+                  record.moment_certificate.phase_sign_certified));
     for (const auto& moment : record.moment_certificate.moments) {
         for (const auto exponent : moment.exponents) {
             mix(hash, static_cast<std::uint64_t>(exponent));
@@ -638,7 +640,8 @@ makeParentCellMomentCertificate(const assembly::IMeshAccess& mesh,
 makeVolumeRegionMomentCertificate(
     const CutInterfaceVolumeRegion& region,
     const geometry::CutQuadratureRule& rule,
-    int ambient_dimension);
+    int ambient_dimension,
+    Real tolerance);
 
 [[nodiscard]] FreeSurfaceGeometryMomentCertificate
 makeInterfaceFragmentMomentCertificate(
@@ -925,6 +928,10 @@ void validateRule(
                     "retained interface/contact point fails its represented-backend root residual");
             }
         }
+        if (volumeRole(record.role) &&
+            record.moment_certificate.phase_sign_certified) {
+            ++ledger.represented_phase_point_count;
+        }
         if (!scalar.canEvaluateValue()) {
             continue;
         }
@@ -940,17 +947,28 @@ void validateRule(
         const Real scaled_tolerance = Real{128.0} * policy.tolerance;
         if ((negativeRole(record.role) && level_set > scaled_tolerance) ||
             (positiveRole(record.role) && level_set < -scaled_tolerance)) {
-            ++ledger.invalid_phase_point_count;
-            throw std::invalid_argument(
-                "retained free-surface point has the wrong declared phase sign"
-                "; role=" + std::to_string(static_cast<int>(record.role)) +
-                "; topology_id=" + record.topology_id +
-                "; point_index=" + std::to_string(q) +
-                "; xi=(" + std::to_string(physical.reference_point[0]) +
-                "," + std::to_string(physical.reference_point[1]) +
-                "," + std::to_string(physical.reference_point[2]) + ")" +
-                "; level_set=" + std::to_string(level_set) +
-                "; tolerance=" + std::to_string(scaled_tolerance));
+            if (volumeRole(record.role) &&
+                record.moment_certificate.phase_sign_certified) {
+                ++ledger.represented_phase_disagreement_count;
+                ledger.maximum_represented_phase_disagreement =
+                    std::max(
+                        ledger.maximum_represented_phase_disagreement,
+                        std::abs(level_set));
+            } else {
+                ++ledger.invalid_phase_point_count;
+                throw std::invalid_argument(
+                    "retained free-surface point has the wrong declared phase sign"
+                    "; role=" +
+                    std::to_string(static_cast<int>(record.role)) +
+                    "; topology_id=" + record.topology_id +
+                    "; point_index=" + std::to_string(q) +
+                    "; xi=(" +
+                    std::to_string(physical.reference_point[0]) + "," +
+                    std::to_string(physical.reference_point[1]) + "," +
+                    std::to_string(physical.reference_point[2]) + ")" +
+                    "; level_set=" + std::to_string(level_set) +
+                    "; tolerance=" + std::to_string(scaled_tolerance));
+            }
         }
         if (record.role == FreeSurfaceGeometryRuleRole::Interface ||
             record.role == FreeSurfaceGeometryRuleRole::Contact) {
@@ -1199,6 +1217,153 @@ makeMomentCertificateFromSamples(
              a[0] * b[1] - a[1] * b[0]}};
 }
 
+[[nodiscard]] bool representedSimplexCoordinates(
+    const CutInterfaceReferenceSimplex& simplex,
+    const std::array<Real, 3>& point,
+    int ambient_dimension,
+    Real tolerance,
+    std::array<Real, 4>& coordinates) noexcept
+{
+    if (simplex.vertex_count !=
+        static_cast<std::uint8_t>(ambient_dimension + 1)) {
+        return false;
+    }
+    const auto& a = simplex.vertices[0];
+    const auto ab = subtractPoint(simplex.vertices[1], a);
+    const auto ap = subtractPoint(point, a);
+    const Real coordinate_tolerance = std::max(
+        tolerance,
+        Real{128.0} * std::numeric_limits<Real>::epsilon());
+    if (ambient_dimension == 1) {
+        const Real denominator = dot(ab, ab);
+        if (!(denominator > Real{0.0})) {
+            return false;
+        }
+        const Real t = dot(ap, ab) / denominator;
+        const auto residual = subtractPoint(ap, {{t * ab[0],
+                                                   t * ab[1],
+                                                   t * ab[2]}});
+        if (norm(residual) >
+            coordinate_tolerance * std::max(Real{1.0}, norm(ab))) {
+            return false;
+        }
+        coordinates = {{Real{1.0} - t, t, Real{0.0}, Real{0.0}}};
+    } else if (ambient_dimension == 2) {
+        const auto ac = subtractPoint(simplex.vertices[2], a);
+        const Real d00 = dot(ab, ab);
+        const Real d01 = dot(ab, ac);
+        const Real d11 = dot(ac, ac);
+        const Real d20 = dot(ap, ab);
+        const Real d21 = dot(ap, ac);
+        const Real denominator = d00 * d11 - d01 * d01;
+        if (!(std::abs(denominator) > Real{0.0})) {
+            return false;
+        }
+        const Real b = (d11 * d20 - d01 * d21) / denominator;
+        const Real c = (d00 * d21 - d01 * d20) / denominator;
+        const auto residual = subtractPoint(
+            ap,
+            {{b * ab[0] + c * ac[0],
+              b * ab[1] + c * ac[1],
+              b * ab[2] + c * ac[2]}});
+        if (norm(residual) >
+            coordinate_tolerance *
+                std::max({Real{1.0}, norm(ab), norm(ac)})) {
+            return false;
+        }
+        coordinates = {{Real{1.0} - b - c,
+                        b,
+                        c,
+                        Real{0.0}}};
+    } else if (ambient_dimension == 3) {
+        const auto ac = subtractPoint(simplex.vertices[2], a);
+        const auto ad = subtractPoint(simplex.vertices[3], a);
+        const Real denominator = dot(ab, crossPoint(ac, ad));
+        if (!(std::abs(denominator) > Real{0.0})) {
+            return false;
+        }
+        const Real b = dot(ap, crossPoint(ac, ad)) / denominator;
+        const Real c = dot(ab, crossPoint(ap, ad)) / denominator;
+        const Real d = dot(ab, crossPoint(ac, ap)) / denominator;
+        coordinates = {{Real{1.0} - b - c - d, b, c, d}};
+    } else {
+        return false;
+    }
+    for (std::size_t i = 0u; i < simplex.vertex_count; ++i) {
+        if (coordinates[i] < -coordinate_tolerance ||
+            coordinates[i] > Real{1.0} + coordinate_tolerance) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool certifyRepresentedVolumePhase(
+    std::span<const CutInterfaceReferenceSimplex> subcells,
+    const geometry::CutQuadratureRule& rule,
+    int ambient_dimension,
+    Real tolerance)
+{
+    const bool has_signed_values = std::any_of(
+        subcells.begin(), subcells.end(), [](const auto& subcell) {
+            return subcell.has_represented_signed_values;
+        });
+    const bool has_unsigned_values = std::any_of(
+        subcells.begin(), subcells.end(), [](const auto& subcell) {
+            return !subcell.has_represented_signed_values;
+        });
+    if (has_signed_values && has_unsigned_values) {
+        throw std::invalid_argument(
+            "volume source decomposition has inconsistent represented phase data");
+    }
+    if (!has_signed_values) {
+        return false;
+    }
+    const Real sign_tolerance = std::max(
+        Real{128.0} * tolerance,
+        Real{512.0} * std::numeric_limits<Real>::epsilon());
+    for (const auto& point : rule.points) {
+        const auto& coordinate =
+            rule.frame == geometry::CutGeometryFrame::Reference
+                ? point.point
+                : point.parent_coordinate;
+        bool found = false;
+        Real represented_value{0.0};
+        for (const auto& subcell : subcells) {
+            std::array<Real, 4> barycentric{};
+            if (!representedSimplexCoordinates(
+                    subcell,
+                    coordinate,
+                    ambient_dimension,
+                    Real{64.0} * tolerance,
+                    barycentric)) {
+                continue;
+            }
+            represented_value = Real{0.0};
+            for (std::size_t i = 0u; i < subcell.vertex_count; ++i) {
+                represented_value +=
+                    barycentric[i] * subcell.represented_signed_values[i];
+            }
+            found = true;
+            break;
+        }
+        if (!found) {
+            throw std::invalid_argument(
+                "volume quadrature point lies outside its authoritative source decomposition");
+        }
+        const bool wrong_side =
+            (rule.side == geometry::CutIntegrationSide::Negative &&
+             represented_value > sign_tolerance) ||
+            (rule.side == geometry::CutIntegrationSide::Positive &&
+             represented_value < -sign_tolerance);
+        if (wrong_side) {
+            throw std::invalid_argument(
+                "volume quadrature point has the wrong represented source phase");
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] std::vector<MomentCertificateSample>
 piecewiseAffineMomentSamples(
     std::span<const std::array<Real, 3>> vertices,
@@ -1319,6 +1484,14 @@ referenceSubcellMomentSamples(
             throw std::invalid_argument(
                 "volume moment certificate has an invalid reference simplex");
         }
+        if (subcell.has_represented_signed_values) {
+            for (std::size_t i = 0u; i < subcell.vertex_count; ++i) {
+                if (!std::isfinite(subcell.represented_signed_values[i])) {
+                    throw std::invalid_argument(
+                        "volume moment certificate has non-finite represented phase data");
+                }
+            }
+        }
         const ElementType element_type =
             ambient_dimension == 1
                 ? ElementType::Line2
@@ -1381,15 +1554,19 @@ referenceSubcellMomentSamples(
 makeReferenceSubcellMomentCertificate(
     std::span<const CutInterfaceReferenceSimplex> subcells,
     const geometry::CutQuadratureRule& rule,
-    int ambient_dimension)
+    int ambient_dimension,
+    Real tolerance)
 {
     const auto samples = referenceSubcellMomentSamples(
         subcells, ambient_dimension, rule.exact_polynomial_order);
-    return makeMomentCertificateFromSamples(
+    auto certificate = makeMomentCertificateFromSamples(
         samples,
         ambient_dimension,
         rule.exact_polynomial_order,
         FreeSurfaceGeometryMomentCertificateSource::PiecewiseAffineGeometry);
+    certificate.phase_sign_certified = certifyRepresentedVolumePhase(
+        subcells, rule, ambient_dimension, tolerance);
+    return certificate;
 }
 
 [[nodiscard]] FreeSurfaceGeometryMomentCertificate
@@ -1469,7 +1646,8 @@ void requireUniqueAuthoritativeSourceIds(
 makeVolumeRegionMomentCertificate(
     const CutInterfaceVolumeRegion& region,
     const geometry::CutQuadratureRule& rule,
-    int ambient_dimension)
+    int ambient_dimension,
+    Real tolerance)
 {
     if (rule.full_cell_equivalent) {
         throw std::invalid_argument(
@@ -1478,7 +1656,7 @@ makeVolumeRegionMomentCertificate(
     if (rule.frame == geometry::CutGeometryFrame::Reference &&
         !region.reference_subcells.empty()) {
         return makeReferenceSubcellMomentCertificate(
-            region.reference_subcells, rule, ambient_dimension);
+            region.reference_subcells, rule, ambient_dimension, tolerance);
     }
     if (rule.frame == geometry::CutGeometryFrame::Reference &&
         rule.exact_polynomial_order <= 1) {
@@ -2647,7 +2825,7 @@ buildFreeSurfaceGeometrySnapshot(
             rule.full_cell_equivalent
                 ? makeParentCellMomentCertificate(mesh, rule)
                 : makeVolumeRegionMomentCertificate(
-                      *region, rule, mesh.dimension());
+                      *region, rule, mesh.dimension(), policy.tolerance);
         addRule(records,
                 ledger,
                 std::move(rule),

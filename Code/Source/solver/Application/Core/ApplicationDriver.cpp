@@ -9992,9 +9992,17 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " orphan_contact_fragments="
         << geometry_ledger.orphan_contact_fragment_count
         << " stale_revisions=" << geometry_ledger.stale_revision_count
+        << " invalid_phase_points="
+        << geometry_ledger.invalid_phase_point_count
+        << " represented_phase_points="
+        << geometry_ledger.represented_phase_point_count
+        << " represented_phase_disagreements="
+        << geometry_ledger.represented_phase_disagreement_count
         << " max_root_residual=" << geometry_ledger.maximum_root_residual
         << " max_normal_angle_error="
         << geometry_ledger.maximum_normal_angular_error
+        << " max_represented_phase_disagreement="
+        << geometry_ledger.maximum_represented_phase_disagreement
         << " max_constant_moment_error="
         << geometry_ledger.maximum_constant_moment_error
         << " certified_rules="

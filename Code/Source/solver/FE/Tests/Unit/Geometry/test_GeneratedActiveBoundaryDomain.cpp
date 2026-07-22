@@ -1604,6 +1604,8 @@ TEST(FreeSurfaceGeometrySnapshot,
     ASSERT_NE(snapshot, nullptr);
     EXPECT_EQ(snapshot->ledger().stored_generated_moment_certificate_count,
               0u);
+    EXPECT_GT(snapshot->ledger().represented_phase_point_count, 0u);
+    EXPECT_EQ(snapshot->ledger().represented_phase_disagreement_count, 0u);
     std::size_t volume_rule_count = 0u;
     for (const auto& record : snapshot->rules()) {
         if (record.reference_rule.kind !=
@@ -1615,6 +1617,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         EXPECT_EQ(record.moment_certificate.source,
                   interfaces::FreeSurfaceGeometryMomentCertificateSource::
                       PiecewiseAffineGeometry);
+        EXPECT_TRUE(record.moment_certificate.phase_sign_certified);
     }
     EXPECT_EQ(volume_rule_count, 2u);
 
@@ -1650,6 +1653,37 @@ TEST(FreeSurfaceGeometrySnapshot,
             verticalScalar(),
             "source_subcell_quadratic_volume_defect"),
         std::invalid_argument);
+
+    auto swapped_source = make_domain();
+    interfaces::LevelSetInterfaceDomain swapped(swapped_source.request());
+    for (auto fragment : swapped_source.fragments()) {
+        swapped.addFragment(std::move(fragment));
+    }
+    bool swapped_phase = false;
+    for (auto region : swapped_source.volumeRegions()) {
+        if (!swapped_phase &&
+            region.side == FE::geometry::CutIntegrationSide::Negative) {
+            region.side = FE::geometry::CutIntegrationSide::Positive;
+            swapped_phase = true;
+        }
+        swapped.addVolumeRegion(std::move(region));
+    }
+    ASSERT_TRUE(swapped_phase);
+    try {
+        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+            std::move(swapped),
+            {},
+            {},
+            mesh,
+            snapshotPolicyWithoutBoundary(),
+            verticalScalar(),
+            "source_subcell_swapped_phase");
+        FAIL() << "swapped represented phase was accepted";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find(
+                      "wrong represented source phase"),
+                  std::string::npos);
+    }
 }
 
 TEST(FreeSurfaceGeometrySnapshot,

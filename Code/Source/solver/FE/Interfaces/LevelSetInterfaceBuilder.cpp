@@ -560,15 +560,26 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
 }
 
 [[nodiscard]] CutInterfaceReferenceSimplex makeReferenceSimplex(
-    std::initializer_list<std::array<Real, 3>> vertices)
+    std::initializer_list<std::array<Real, 3>> vertices,
+    std::initializer_list<Real> represented_signed_values = {})
 {
     if (vertices.size() < 2u || vertices.size() > 4u) {
         throw std::invalid_argument(
             "reference simplex requires two through four vertices");
     }
+    if (represented_signed_values.size() != 0u &&
+        represented_signed_values.size() != vertices.size()) {
+        throw std::invalid_argument(
+            "reference simplex signed values must match its vertices");
+    }
     CutInterfaceReferenceSimplex simplex;
     simplex.vertex_count = static_cast<std::uint8_t>(vertices.size());
     std::copy(vertices.begin(), vertices.end(), simplex.vertices.begin());
+    simplex.has_represented_signed_values =
+        represented_signed_values.size() != 0u;
+    std::copy(represented_signed_values.begin(),
+              represented_signed_values.end(),
+              simplex.represented_signed_values.begin());
     return simplex;
 }
 
@@ -590,7 +601,11 @@ referenceTrianglesFromPolygon(const std::vector<SignedPoint>& polygon,
         const Real area =
             Real{0.5} * norm3(cross(sub(b, origin), sub(c, origin)));
         if (area > minimum_area) {
-            triangles.push_back(makeReferenceSimplex({origin, b, c}));
+            triangles.push_back(makeReferenceSimplex(
+                {origin, b, c},
+                {polygon.front().value,
+                 polygon[i].value,
+                 polygon[i + 1u].value}));
         }
     }
     return triangles;
@@ -880,8 +895,43 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
 [[nodiscard]] std::vector<CutInterfaceReferenceSimplex>
 referenceTetrahedraFromFaces(
     const std::vector<std::vector<std::array<Real, 3>>>& faces,
+    const std::vector<std::array<Real, 3>>& source_points,
+    const std::vector<Real>& signed_values,
     Real tolerance)
 {
+    if (source_points.size() < 4u || signed_values.size() < 4u) {
+        throw std::invalid_argument(
+            "reference tetrahedra require four source points and signed values");
+    }
+    const auto represented_value = [&](const std::array<Real, 3>& point) {
+        const auto& a = source_points[0];
+        std::array<std::array<Real, 3>, 3> matrix{{
+            {{source_points[1][0] - a[0],
+              source_points[2][0] - a[0],
+              source_points[3][0] - a[0]}},
+            {{source_points[1][1] - a[1],
+              source_points[2][1] - a[1],
+              source_points[3][1] - a[1]}},
+            {{source_points[1][2] - a[2],
+              source_points[2][2] - a[2],
+              source_points[3][2] - a[2]}},
+        }};
+        const std::array<Real, 3> rhs{{
+            point[0] - a[0],
+            point[1] - a[1],
+            point[2] - a[2],
+        }};
+        std::array<Real, 3> coordinates{};
+        if (!solve3x3(matrix, rhs, coordinates)) {
+            throw std::invalid_argument(
+                "reference tetrahedron source geometry is degenerate");
+        }
+        return signed_values[0] +
+               coordinates[0] * (signed_values[1] - signed_values[0]) +
+               coordinates[1] * (signed_values[2] - signed_values[0]) +
+               coordinates[2] * (signed_values[3] - signed_values[0]);
+    };
+
     std::vector<std::array<Real, 3>> unique_points;
     for (const auto& face : faces) {
         for (const auto& point : face) {
@@ -909,7 +959,11 @@ referenceTetrahedraFromFaces(
             if (tetraVolume(center, face[0], face[i], face[i + 1u]) >
                 minimum_volume) {
                 tetrahedra.push_back(makeReferenceSimplex(
-                    {center, face[0], face[i], face[i + 1u]}));
+                    {center, face[0], face[i], face[i + 1u]},
+                    {represented_value(center),
+                     represented_value(face[0]),
+                     represented_value(face[i]),
+                     represented_value(face[i + 1u])}));
             }
         }
     }
@@ -1646,9 +1700,17 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     auto positive_quadrature =
         polyhedronQuadratureFromFaces(positive_faces, request.tolerance);
     auto negative_reference_subcells =
-        referenceTetrahedraFromFaces(negative_faces, request.tolerance);
+        referenceTetrahedraFromFaces(
+            negative_faces,
+            input.node_coordinates,
+            signed_values,
+            request.tolerance);
     auto positive_reference_subcells =
-        referenceTetrahedraFromFaces(positive_faces, request.tolerance);
+        referenceTetrahedraFromFaces(
+            positive_faces,
+            input.node_coordinates,
+            signed_values,
+            request.tolerance);
     fragment.negative_volume_fraction =
         parent_measure > Real{0.0}
             ? clampFraction(negative_moments.measure / parent_measure)

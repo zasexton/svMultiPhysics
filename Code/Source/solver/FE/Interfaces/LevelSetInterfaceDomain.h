@@ -300,11 +300,15 @@ struct CutInterfaceQuadraturePoint {
  * polynomial moments without reusing the rule's quadrature samples.  A
  * segment has two vertices, a triangle three, and a tetrahedron four.
  * measure_scale records an explicit conservative normalization applied by the
- * backend after constructing the geometric decomposition.
+ * backend after constructing the geometric decomposition.  When available,
+ * represented_signed_values retain the affine level-set values that classify
+ * this source simplex independently of a higher-order source field.
  */
 struct CutInterfaceReferenceSimplex {
     std::uint8_t vertex_count{0u};
     std::array<std::array<Real, 3>, 4> vertices{};
+    bool has_represented_signed_values{false};
+    std::array<Real, 4> represented_signed_values{};
     Real measure_scale{1.0};
 };
 

@@ -69,6 +69,7 @@ struct FreeSurfaceGeometryMomentCertificate {
     int ambient_dimension{0};
     FreeSurfaceGeometryMomentCertificateSource source{
         FreeSurfaceGeometryMomentCertificateSource::RegionMeasureCentroid};
+    bool phase_sign_certified{false};
     std::vector<FreeSurfaceGeometryMonomialMoment> moments{};
 };
 
@@ -158,6 +159,8 @@ struct FreeSurfaceGeometryValidationLedger {
     std::size_t missing_contact_fragment_count{0};
     std::size_t stale_revision_count{0};
     std::size_t invalid_phase_point_count{0};
+    std::size_t represented_phase_point_count{0};
+    std::size_t represented_phase_disagreement_count{0};
     std::size_t outside_parent_point_count{0};
     std::size_t invalid_weight_count{0};
     std::size_t false_achieved_order_count{0};
@@ -193,6 +196,7 @@ struct FreeSurfaceGeometryValidationLedger {
     Real contact_physical_measure{0.0};
     Real maximum_root_residual{0.0};
     Real maximum_normal_angular_error{0.0};
+    Real maximum_represented_phase_disagreement{0.0};
     Real maximum_constant_moment_error{0.0};
     Real maximum_polynomial_moment_error{0.0};
     Real maximum_polynomial_moment_scaled_error{0.0};

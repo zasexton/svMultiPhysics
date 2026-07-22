@@ -5642,6 +5642,14 @@ TEST(LevelSetInterfaceLifecycle, LinearBackendOutputPassesCommonValidation)
     for (const auto& region : result.cut.volume_regions) {
         parent_measure = std::max(parent_measure, region.parent_measure);
         side_measure += region.measure;
+        ASSERT_FALSE(region.reference_subcells.empty());
+        for (const auto& subcell : region.reference_subcells) {
+            EXPECT_TRUE(subcell.has_represented_signed_values);
+            for (std::size_t i = 0u; i < subcell.vertex_count; ++i) {
+                EXPECT_TRUE(std::isfinite(
+                    subcell.represented_signed_values[i]));
+            }
+        }
     }
     EXPECT_NEAR(side_measure, parent_measure, 1.0e-12);
 
@@ -6818,6 +6826,24 @@ TEST(LevelSetInterfaceLifecycle,
 
     auto result = make_result();
     ASSERT_TRUE(result.success) << result.diagnostic;
+    const auto complete_snapshot =
+        FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+            result.domain,
+            {},
+            {},
+            mesh,
+            policy,
+            make_scalar(),
+            "curved-complete-reference-rule");
+    ASSERT_NE(complete_snapshot, nullptr);
+    EXPECT_GT(complete_snapshot->ledger().represented_phase_point_count, 0u);
+    EXPECT_GT(
+        complete_snapshot->ledger().represented_phase_disagreement_count,
+        0u);
+    EXPECT_GT(
+        complete_snapshot->ledger().maximum_represented_phase_disagreement,
+        0.0);
+
     auto interface_domain = interface_only_domain(result.domain);
     const auto snapshot =
         FE::interfaces::buildFreeSurfaceGeometrySnapshot(
