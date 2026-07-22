@@ -16,9 +16,11 @@ namespace svmp::Physics::formulations::mesh_motion {
 void forceLink_MeshMotionRegister();
 }
 
+#if defined(SVMP_PHYSICS_HAS_USTRUCT_REGISTRATION)
 namespace svmp::Physics::formulations::ustruct {
 void forceLink_UstructRegister();
 }
+#endif
 
 namespace svmp::Physics {
 
@@ -29,7 +31,9 @@ void forceLinkBuiltInEquationRegistrations()
   formulations::navier_stokes::forceLink_NavierStokesRegister();
   formulations::poisson::forceLink_PoissonRegister();
   formulations::mesh_motion::forceLink_MeshMotionRegister();
+#if defined(SVMP_PHYSICS_HAS_USTRUCT_REGISTRATION)
   formulations::ustruct::forceLink_UstructRegister();
+#endif
 }
 
 } // namespace

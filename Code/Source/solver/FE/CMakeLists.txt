@@ -435,14 +435,25 @@ set(FE_MATH_SOURCES
 	    Basis/ModalTransform.cpp
 	    Basis/NodeOrderingConventions.cpp
 	)
-    foreach(_fe_optional_basis_source
-            Basis/VectorBasisBDM_Runtime.cpp
-            Basis/VectorBasisNedelec_Runtime.cpp
-            Basis/VectorBasisRaviartThomas_Runtime.cpp)
-        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_fe_optional_basis_source}")
-            list(APPEND FE_BASIS_SOURCES ${_fe_optional_basis_source})
+    set(_FE_VECTOR_BASIS_RUNTIME_SOURCES
+        Basis/VectorBasisBDM_Runtime.cpp
+        Basis/VectorBasisNedelec_Runtime.cpp
+        Basis/VectorBasisRaviartThomas_Runtime.cpp
+    )
+    set(_FE_VECTOR_BASIS_RUNTIME_AVAILABLE TRUE)
+    foreach(_fe_vector_basis_runtime_source
+            IN LISTS _FE_VECTOR_BASIS_RUNTIME_SOURCES)
+        if(NOT EXISTS
+           "${CMAKE_CURRENT_SOURCE_DIR}/${_fe_vector_basis_runtime_source}")
+            set(_FE_VECTOR_BASIS_RUNTIME_AVAILABLE FALSE)
         endif()
     endforeach()
+    if(_FE_VECTOR_BASIS_RUNTIME_AVAILABLE)
+        list(APPEND FE_BASIS_SOURCES ${_FE_VECTOR_BASIS_RUNTIME_SOURCES})
+    else()
+        list(APPEND FE_BASIS_SOURCES
+            Basis/VectorBasisRuntimeUnavailable.cpp)
+    endif()
 
 # Quadrature sources
 set(FE_QUADRATURE_HEADERS
@@ -1962,15 +1973,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/BSplineBasis.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/NURBSTensorBasis.cpp
     )
-    foreach(_fe_optional_basis_source
-            Basis/VectorBasisBDM_Runtime.cpp
-            Basis/VectorBasisNedelec_Runtime.cpp
-            Basis/VectorBasisRaviartThomas_Runtime.cpp)
-        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_fe_optional_basis_source}")
+    if(_FE_VECTOR_BASIS_RUNTIME_AVAILABLE)
+        foreach(_fe_vector_basis_runtime_source
+                IN LISTS _FE_VECTOR_BASIS_RUNTIME_SOURCES)
             list(APPEND _FE_BASIS_HOT_FILES
-                "${CMAKE_CURRENT_SOURCE_DIR}/${_fe_optional_basis_source}")
-        endif()
-    endforeach()
+                "${CMAKE_CURRENT_SOURCE_DIR}/${_fe_vector_basis_runtime_source}")
+        endforeach()
+    endif()
 
     set(_FE_BASIS_HOT_FLAGS)
     foreach(_fe_basis_flag -O3 -ftree-vectorize -funroll-loops)

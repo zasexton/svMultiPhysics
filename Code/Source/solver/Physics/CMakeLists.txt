@@ -237,6 +237,12 @@ else()
     add_library(svphysics STATIC ${PHYSICS_PUBLIC_HEADERS} ${PHYSICS_SOURCES})
 endif()
 
+if(EXISTS
+   "${CMAKE_CURRENT_SOURCE_DIR}/Formulations/Ustruct/UstructRegister.cpp")
+    target_compile_definitions(svphysics
+        PRIVATE SVMP_PHYSICS_HAS_USTRUCT_REGISTRATION=1)
+endif()
+
 add_library(svphysics::svphysics ALIAS svphysics)
 
 set_target_properties(svphysics PROPERTIES
