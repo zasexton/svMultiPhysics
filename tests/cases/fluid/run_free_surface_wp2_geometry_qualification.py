@@ -1190,6 +1190,7 @@ def run_clean_builds(
         "parallel": parallel,
         "timeout_seconds_per_phase": timeout_seconds,
         "validation": [],
+        "target_inventory": [],
         "builds": [],
         "diagnostic": None,
         "outcome": "PASS",
@@ -1254,6 +1255,63 @@ def run_clean_builds(
         result["outcome"] = "FAIL_METHOD"
         result["diagnostic"] = "build_provenance_validation_failed"
         return result
+
+    for ordinal, (build_directory, entries) in enumerate(
+        sorted(grouped.items(), key=lambda item: str(item[0])), start=1
+    ):
+        targets = sorted({entry[1] for entry in entries})
+        inventory_stdout = (
+            build_root / f"target_inventory_{ordinal:02d}_stdout.txt"
+        )
+        inventory_stderr = (
+            build_root / f"target_inventory_{ordinal:02d}_stderr.txt"
+        )
+        inventory = run_build_phase(
+            [
+                str(cmake),
+                "--build",
+                str(build_directory),
+                "--target",
+                "help",
+            ],
+            source_root,
+            output_root,
+            inventory_stdout,
+            inventory_stderr,
+            min(timeout_seconds, GTEST_LIST_TIMEOUT_SECONDS),
+        )
+        help_text = inventory_stdout.read_text(
+            encoding="utf-8", errors="replace"
+        )
+        listed_targets = [
+            target
+            for target in targets
+            if re.search(
+                rf"(?<![A-Za-z0-9_.-]){re.escape(target)}"
+                rf"(?![A-Za-z0-9_.-])",
+                help_text,
+            )
+        ]
+        missing_targets = sorted(set(targets) - set(listed_targets))
+        inventory_passed = (
+            not inventory["timed_out"]
+            and inventory["return_code"] == 0
+            and not missing_targets
+        )
+        inventory.update(
+            {
+                "build_directory": str(build_directory),
+                "expected_targets": targets,
+                "listed_expected_targets": listed_targets,
+                "missing_targets": missing_targets,
+                "outcome": "PASS" if inventory_passed else "FAIL_METHOD",
+            }
+        )
+        result["target_inventory"].append(inventory)
+        if not inventory_passed:
+            result["outcome"] = "FAIL_METHOD"
+            result["diagnostic"] = "build_target_inventory_failed"
+            return result
 
     for ordinal, (build_directory, entries) in enumerate(
         sorted(grouped.items(), key=lambda item: str(item[0])), start=1
