@@ -1,0 +1,146 @@
+Note: Google Test filter = GeneratedActiveBoundaryDomain.HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly:GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules:GeneratedActiveBoundaryDomain.RejectsScalarRootThatDoesNotMatchAuthoritativeContactTrace:GeneratedActiveBoundaryDomain.RejectsUnimplementedHighOrderImplicitBoundaryRestriction:GeneratedActiveBoundaryDomain.WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases:GeneratedActiveBoundaryDomain.CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping:FreeSurfaceGeometrySnapshot.OwnsOneRevisionAndPointwisePhysicalMappingForEveryRuleFamily:FreeSurfaceGeometrySnapshot.RejectsStoredOffInterfaceResidual:FreeSurfaceGeometrySnapshot.SeparatesUnprunedLifecycleVolumeFromRetainedAssemblyVolume:FreeSurfaceGeometrySnapshot.RejectsStaleGlobalIdentityAndOwner:FreeSurfaceGeometrySnapshot.CollectiveValidatorRejectsDuplicateAndMissingRuleOwners:FreeSurfaceGeometrySnapshot.DiscreteFunctionalExcludesGhostRuleContributions:FreeSurfaceGeometrySnapshot.RejectsPointOutsideParentReferenceCell:FreeSurfaceGeometrySnapshot.RejectsQuadraturePointOnWrongPhase:FreeSurfaceGeometrySnapshot.RejectsNormalOpposedToRepresentedGradient:FreeSurfaceGeometrySnapshot.RejectsIncorrectConstantMoment:FreeSurfaceGeometrySnapshot.RejectsIncorrectLinearPartitionMoment:FreeSurfaceGeometrySnapshot.RejectsCompensatingPerPhaseMomentDefects:FreeSurfaceGeometrySnapshot.CertifiesQuadraticVolumeRulesFromSourceSubcells:FreeSurfaceGeometrySnapshot.RejectsInterfaceMomentDefectWithValidRootsAndMeasure:FreeSurfaceGeometrySnapshot.MaterializesFullCurvedCellRuleForMappingAndMomentValidation:FreeSurfaceGeometrySnapshot.RejectsImpossibleClaimedQuadraticOrder:FreeSurfaceGeometrySnapshot.RejectsAchievedOrderBelowPolicy:FreeSurfaceGeometrySnapshot.RejectsStaleAndDuplicateContactDomains:FreeSurfaceGeometrySnapshot.RejectsMissingExpectedContactTrace:FreeSurfaceGeometrySnapshotCache.HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease:FreeSurfaceGeometrySnapshotCache.RevisionKeyIncludesAuthoritativeQuadratureContent:GeneratedInterfaceBoundaryIntersectionDomain.Builds2DPointOnMarkedBoundaryEdge:GeneratedInterfaceBoundaryIntersectionDomain.GlobalIdentityIsIndependentOfRepartitionedLocalFaceNumbering:GeneratedInterfaceBoundaryIntersectionDomain.WrongBoundaryMarkerProducesZeroMeasure:GeneratedInterfaceBoundaryIntersectionDomain.Builds3DSegmentOnMarkedBoundaryFace:GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventContactWithoutSourceSurfaceFragment:GeneratedInterfaceBoundaryIntersectionDomain.ImportsRulesIntoCutContextByGeneratedMarker:GeneratedInterfaceBoundaryIntersectionDomain.RestrictsAuthoritativeFragmentOnHighOrderParentGeometry:GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventHighOrderContactWithoutSourceFragment:GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventAmbiguousContactWithoutSourceFragment:GeneratedInterfaceBoundaryIntersectionDomain.ProvenanceValidatorRejectsOrphanContactFragment:GeneratedInterfaceBoundaryIntersectionDomain.RejectsCurrentFrameToPreventMixedGeometryContracts:GeneratedInterfaceBoundaryIntersectionDomain.ReportsLinearCornerQuadratureOrderHonestly:GeneratedInterfaceBoundaryIntersectionDomain.CutContextRejectsGeneratedMarkerCollisions:GeneratedInterfaceBoundaryIntersectionDomain.OwnedAndGhostViewsYieldOneGlobalPointMultiplicity:LevelSetInterfaceBuilder.CutsLinearTriangleWithSingleSegment:LevelSetInterfaceBuilder.CutsLinearQuadWithSingleSegment:LevelSetInterfaceBuilder.CutsLinearTetrahedronWithTriangularPatch:LevelSetInterfaceBuilder.CutsLinearTetrahedronWithQuadrilateralPatch:LevelSetInterfaceBuilder.GeneratedNormalsMatchLinearLevelSetGradients:LevelSetInterfaceBuilder.CircleInterfaceLengthConvergesUnderRefinement:LevelSetInterfaceBuilder.SphereInterfaceAreaConvergesUnderRefinement:LevelSetInterfaceBuilder.CurvedInterfaceNormalsConvergeToAnalyticNormals:LevelSetInterfaceBuilder.ClassifiesCutEdgeCases:LevelSetInterfaceBuilder.PreservesSmallVolumeFractionsNearVertexAndEdge:LevelSetInterfaceBuilder.VolumeQuadratureMatchesConservativeToleranceBandFractions:LevelSetInterfaceDomain.CutVolumeMetadataIsDeterministicForOwnedAndGhostRegions:LevelSetInterfaceDomain.LinearCellCutsExportFullSideVolumeRules:LevelSetInterfaceDomain.LinearCellCutsExportCutSideVolumeRules:LevelSetInterfaceDomain.CutVolumeRulesConserveConstantsForSupportedElementTypes:LevelSetInterfaceDomain.PlanarCutVolumeSupportsPositiveOrderFiveRules:LevelSetInterfaceDomain.CutVolumeQuadratureConvergesForQuadraticFields:LevelSetInterfaceDomain.ConfigurableQuadratureOrderIsRecordedAndValidated:LevelSetInterfaceDomain.CurvedPatchUsesStoredHighOrderQuadratureMetadata:LevelSetInterfaceDomain.SeparateInterfaceAndVolumeQuadratureOrders
+[==========] Running 61 tests from 6 test suites.
+[----------] Global test environment set-up.
+[----------] 6 tests from GeneratedActiveBoundaryDomain
+[ RUN      ] GeneratedActiveBoundaryDomain.HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly
+[       OK ] GeneratedActiveBoundaryDomain.HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules
+[       OK ] GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.RejectsScalarRootThatDoesNotMatchAuthoritativeContactTrace
+[       OK ] GeneratedActiveBoundaryDomain.RejectsScalarRootThatDoesNotMatchAuthoritativeContactTrace (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.RejectsUnimplementedHighOrderImplicitBoundaryRestriction
+[       OK ] GeneratedActiveBoundaryDomain.RejectsUnimplementedHighOrderImplicitBoundaryRestriction (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases
+[       OK ] GeneratedActiveBoundaryDomain.WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping
+[       OK ] GeneratedActiveBoundaryDomain.CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping (0 ms)
+[----------] 6 tests from GeneratedActiveBoundaryDomain (0 ms total)
+
+[----------] 19 tests from FreeSurfaceGeometrySnapshot
+[ RUN      ] FreeSurfaceGeometrySnapshot.OwnsOneRevisionAndPointwisePhysicalMappingForEveryRuleFamily
+[       OK ] FreeSurfaceGeometrySnapshot.OwnsOneRevisionAndPointwisePhysicalMappingForEveryRuleFamily (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.RejectsStoredOffInterfaceResidual
+[       OK ] FreeSurfaceGeometrySnapshot.RejectsStoredOffInterfaceResidual (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.SeparatesUnprunedLifecycleVolumeFromRetainedAssemblyVolume
+[       OK ] FreeSurfaceGeometrySnapshot.SeparatesUnprunedLifecycleVolumeFromRetainedAssemblyVolume (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.RejectsStaleGlobalIdentityAndOwner
+[       OK ] FreeSurfaceGeometrySnapshot.RejectsStaleGlobalIdentityAndOwner (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.CollectiveValidatorRejectsDuplicateAndMissingRuleOwners
+[       OK ] FreeSurfaceGeometrySnapshot.CollectiveValidatorRejectsDuplicateAndMissingRuleOwners (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.DiscreteFunctionalExcludesGhostRuleContributions
+[       OK ] FreeSurfaceGeometrySnapshot.DiscreteFunctionalExcludesGhostRuleContributions (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.RejectsPointOutsideParentReferenceCell
+[       OK ] FreeSurfaceGeometrySnapshot.RejectsPointOutsideParentReferenceCell (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.RejectsQuadraturePointOnWrongPhase
+[       OK ] FreeSurfaceGeometrySnapshot.RejectsQuadraturePointOnWrongPhase (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.RejectsNormalOpposedToRepresentedGradient
+[       OK ] FreeSurfaceGeometrySnapshot.RejectsNormalOpposedToRepresentedGradient (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.RejectsIncorrectConstantMoment
+[       OK ] FreeSurfaceGeometrySnapshot.RejectsIncorrectConstantMoment (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.RejectsIncorrectLinearPartitionMoment
+[       OK ] FreeSurfaceGeometrySnapshot.RejectsIncorrectLinearPartitionMoment (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.RejectsCompensatingPerPhaseMomentDefects
+[       OK ] FreeSurfaceGeometrySnapshot.RejectsCompensatingPerPhaseMomentDefects (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.CertifiesQuadraticVolumeRulesFromSourceSubcells
+[       OK ] FreeSurfaceGeometrySnapshot.CertifiesQuadraticVolumeRulesFromSourceSubcells (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.RejectsInterfaceMomentDefectWithValidRootsAndMeasure
+[       OK ] FreeSurfaceGeometrySnapshot.RejectsInterfaceMomentDefectWithValidRootsAndMeasure (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.MaterializesFullCurvedCellRuleForMappingAndMomentValidation
+[       OK ] FreeSurfaceGeometrySnapshot.MaterializesFullCurvedCellRuleForMappingAndMomentValidation (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.RejectsImpossibleClaimedQuadraticOrder
+[       OK ] FreeSurfaceGeometrySnapshot.RejectsImpossibleClaimedQuadraticOrder (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.RejectsAchievedOrderBelowPolicy
+[       OK ] FreeSurfaceGeometrySnapshot.RejectsAchievedOrderBelowPolicy (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.RejectsStaleAndDuplicateContactDomains
+[       OK ] FreeSurfaceGeometrySnapshot.RejectsStaleAndDuplicateContactDomains (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshot.RejectsMissingExpectedContactTrace
+[       OK ] FreeSurfaceGeometrySnapshot.RejectsMissingExpectedContactTrace (0 ms)
+[----------] 19 tests from FreeSurfaceGeometrySnapshot (1 ms total)
+
+[----------] 2 tests from FreeSurfaceGeometrySnapshotCache
+[ RUN      ] FreeSurfaceGeometrySnapshotCache.HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease
+[       OK ] FreeSurfaceGeometrySnapshotCache.HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease (0 ms)
+[ RUN      ] FreeSurfaceGeometrySnapshotCache.RevisionKeyIncludesAuthoritativeQuadratureContent
+[       OK ] FreeSurfaceGeometrySnapshotCache.RevisionKeyIncludesAuthoritativeQuadratureContent (0 ms)
+[----------] 2 tests from FreeSurfaceGeometrySnapshotCache (0 ms total)
+
+[----------] 14 tests from GeneratedInterfaceBoundaryIntersectionDomain
+[ RUN      ] GeneratedInterfaceBoundaryIntersectionDomain.Builds2DPointOnMarkedBoundaryEdge
+[       OK ] GeneratedInterfaceBoundaryIntersectionDomain.Builds2DPointOnMarkedBoundaryEdge (0 ms)
+[ RUN      ] GeneratedInterfaceBoundaryIntersectionDomain.GlobalIdentityIsIndependentOfRepartitionedLocalFaceNumbering
+[       OK ] GeneratedInterfaceBoundaryIntersectionDomain.GlobalIdentityIsIndependentOfRepartitionedLocalFaceNumbering (0 ms)
+[ RUN      ] GeneratedInterfaceBoundaryIntersectionDomain.WrongBoundaryMarkerProducesZeroMeasure
+[       OK ] GeneratedInterfaceBoundaryIntersectionDomain.WrongBoundaryMarkerProducesZeroMeasure (0 ms)
+[ RUN      ] GeneratedInterfaceBoundaryIntersectionDomain.Builds3DSegmentOnMarkedBoundaryFace
+[       OK ] GeneratedInterfaceBoundaryIntersectionDomain.Builds3DSegmentOnMarkedBoundaryFace (0 ms)
+[ RUN      ] GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventContactWithoutSourceSurfaceFragment
+[       OK ] GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventContactWithoutSourceSurfaceFragment (0 ms)
+[ RUN      ] GeneratedInterfaceBoundaryIntersectionDomain.ImportsRulesIntoCutContextByGeneratedMarker
+[       OK ] GeneratedInterfaceBoundaryIntersectionDomain.ImportsRulesIntoCutContextByGeneratedMarker (0 ms)
+[ RUN      ] GeneratedInterfaceBoundaryIntersectionDomain.RestrictsAuthoritativeFragmentOnHighOrderParentGeometry
+[       OK ] GeneratedInterfaceBoundaryIntersectionDomain.RestrictsAuthoritativeFragmentOnHighOrderParentGeometry (0 ms)
+[ RUN      ] GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventHighOrderContactWithoutSourceFragment
+[       OK ] GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventHighOrderContactWithoutSourceFragment (0 ms)
+[ RUN      ] GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventAmbiguousContactWithoutSourceFragment
+[       OK ] GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventAmbiguousContactWithoutSourceFragment (0 ms)
+[ RUN      ] GeneratedInterfaceBoundaryIntersectionDomain.ProvenanceValidatorRejectsOrphanContactFragment
+[       OK ] GeneratedInterfaceBoundaryIntersectionDomain.ProvenanceValidatorRejectsOrphanContactFragment (0 ms)
+[ RUN      ] GeneratedInterfaceBoundaryIntersectionDomain.RejectsCurrentFrameToPreventMixedGeometryContracts
+[       OK ] GeneratedInterfaceBoundaryIntersectionDomain.RejectsCurrentFrameToPreventMixedGeometryContracts (0 ms)
+[ RUN      ] GeneratedInterfaceBoundaryIntersectionDomain.ReportsLinearCornerQuadratureOrderHonestly
+[       OK ] GeneratedInterfaceBoundaryIntersectionDomain.ReportsLinearCornerQuadratureOrderHonestly (0 ms)
+[ RUN      ] GeneratedInterfaceBoundaryIntersectionDomain.CutContextRejectsGeneratedMarkerCollisions
+[       OK ] GeneratedInterfaceBoundaryIntersectionDomain.CutContextRejectsGeneratedMarkerCollisions (0 ms)
+[ RUN      ] GeneratedInterfaceBoundaryIntersectionDomain.OwnedAndGhostViewsYieldOneGlobalPointMultiplicity
+[       OK ] GeneratedInterfaceBoundaryIntersectionDomain.OwnedAndGhostViewsYieldOneGlobalPointMultiplicity (0 ms)
+[----------] 14 tests from GeneratedInterfaceBoundaryIntersectionDomain (0 ms total)
+
+[----------] 11 tests from LevelSetInterfaceBuilder
+[ RUN      ] LevelSetInterfaceBuilder.CutsLinearTriangleWithSingleSegment
+[       OK ] LevelSetInterfaceBuilder.CutsLinearTriangleWithSingleSegment (0 ms)
+[ RUN      ] LevelSetInterfaceBuilder.CutsLinearQuadWithSingleSegment
+[       OK ] LevelSetInterfaceBuilder.CutsLinearQuadWithSingleSegment (0 ms)
+[ RUN      ] LevelSetInterfaceBuilder.CutsLinearTetrahedronWithTriangularPatch
+[       OK ] LevelSetInterfaceBuilder.CutsLinearTetrahedronWithTriangularPatch (0 ms)
+[ RUN      ] LevelSetInterfaceBuilder.CutsLinearTetrahedronWithQuadrilateralPatch
+[       OK ] LevelSetInterfaceBuilder.CutsLinearTetrahedronWithQuadrilateralPatch (0 ms)
+[ RUN      ] LevelSetInterfaceBuilder.GeneratedNormalsMatchLinearLevelSetGradients
+[       OK ] LevelSetInterfaceBuilder.GeneratedNormalsMatchLinearLevelSetGradients (0 ms)
+[ RUN      ] LevelSetInterfaceBuilder.CircleInterfaceLengthConvergesUnderRefinement
+[       OK ] LevelSetInterfaceBuilder.CircleInterfaceLengthConvergesUnderRefinement (1 ms)
+[ RUN      ] LevelSetInterfaceBuilder.SphereInterfaceAreaConvergesUnderRefinement
+[       OK ] LevelSetInterfaceBuilder.SphereInterfaceAreaConvergesUnderRefinement (27 ms)
+[ RUN      ] LevelSetInterfaceBuilder.CurvedInterfaceNormalsConvergeToAnalyticNormals
+[       OK ] LevelSetInterfaceBuilder.CurvedInterfaceNormalsConvergeToAnalyticNormals (28 ms)
+[ RUN      ] LevelSetInterfaceBuilder.ClassifiesCutEdgeCases
+[       OK ] LevelSetInterfaceBuilder.ClassifiesCutEdgeCases (0 ms)
+[ RUN      ] LevelSetInterfaceBuilder.PreservesSmallVolumeFractionsNearVertexAndEdge
+[       OK ] LevelSetInterfaceBuilder.PreservesSmallVolumeFractionsNearVertexAndEdge (0 ms)
+[ RUN      ] LevelSetInterfaceBuilder.VolumeQuadratureMatchesConservativeToleranceBandFractions
+[       OK ] LevelSetInterfaceBuilder.VolumeQuadratureMatchesConservativeToleranceBandFractions (0 ms)
+[----------] 11 tests from LevelSetInterfaceBuilder (57 ms total)
+
+[----------] 9 tests from LevelSetInterfaceDomain
+[ RUN      ] LevelSetInterfaceDomain.CutVolumeMetadataIsDeterministicForOwnedAndGhostRegions
+[       OK ] LevelSetInterfaceDomain.CutVolumeMetadataIsDeterministicForOwnedAndGhostRegions (0 ms)
+[ RUN      ] LevelSetInterfaceDomain.LinearCellCutsExportFullSideVolumeRules
+[       OK ] LevelSetInterfaceDomain.LinearCellCutsExportFullSideVolumeRules (0 ms)
+[ RUN      ] LevelSetInterfaceDomain.LinearCellCutsExportCutSideVolumeRules
+[       OK ] LevelSetInterfaceDomain.LinearCellCutsExportCutSideVolumeRules (0 ms)
+[ RUN      ] LevelSetInterfaceDomain.CutVolumeRulesConserveConstantsForSupportedElementTypes
+[       OK ] LevelSetInterfaceDomain.CutVolumeRulesConserveConstantsForSupportedElementTypes (0 ms)
+[ RUN      ] LevelSetInterfaceDomain.PlanarCutVolumeSupportsPositiveOrderFiveRules
+[       OK ] LevelSetInterfaceDomain.PlanarCutVolumeSupportsPositiveOrderFiveRules (0 ms)
+[ RUN      ] LevelSetInterfaceDomain.CutVolumeQuadratureConvergesForQuadraticFields
+[       OK ] LevelSetInterfaceDomain.CutVolumeQuadratureConvergesForQuadraticFields (0 ms)
+[ RUN      ] LevelSetInterfaceDomain.ConfigurableQuadratureOrderIsRecordedAndValidated
+[       OK ] LevelSetInterfaceDomain.ConfigurableQuadratureOrderIsRecordedAndValidated (0 ms)
+[ RUN      ] LevelSetInterfaceDomain.CurvedPatchUsesStoredHighOrderQuadratureMetadata
+[       OK ] LevelSetInterfaceDomain.CurvedPatchUsesStoredHighOrderQuadratureMetadata (0 ms)
+[ RUN      ] LevelSetInterfaceDomain.SeparateInterfaceAndVolumeQuadratureOrders
+[       OK ] LevelSetInterfaceDomain.SeparateInterfaceAndVolumeQuadratureOrders (0 ms)
+[----------] 9 tests from LevelSetInterfaceDomain (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 61 tests from 6 test suites ran. (60 ms total)
+[  PASSED  ] 61 tests.

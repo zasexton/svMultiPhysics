@@ -1,0 +1,22 @@
+  === assembleOperator TIMING (rank 0, op='op') ===
+    Total:               0.000180 s
+    Cell terms:          0.000004 s  (  2.3%)
+    Boundary terms:      0.000000 s  (  0.1%)
+    Other (DG+global):   0.000176 s  ( 97.6%)
+      Interior faces:    0.000000 s  (  0.1%)
+      Interface faces:   0.000000 s  (  0.1%)
+      Cut volumes:       0.000175 s  ( 97.5%)
+      Global terms:      0.000000 s  (  0.0%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='op' process_vm_kb=81252 process_rss_kb=46028
+  === assembleOperator TIMING (rank 0, op='op') ===
+    Total:               0.000071 s
+    Cell terms:          0.000001 s  (  1.2%)
+    Boundary terms:      0.000000 s  (  0.1%)
+    Other (DG+global):   0.000070 s  ( 98.7%)
+      Interior faces:    0.000000 s  (  0.1%)
+      Interface faces:   0.000000 s  (  0.1%)
+      Cut volumes:       0.000070 s  ( 98.4%)
+      Global terms:      0.000000 s  (  0.1%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='op' process_vm_kb=81256 process_rss_kb=46032

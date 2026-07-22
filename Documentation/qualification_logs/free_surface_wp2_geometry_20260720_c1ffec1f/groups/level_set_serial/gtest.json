@@ -1,0 +1,425 @@
+{
+  "tests": 49,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-22T09:20:34Z",
+  "time": "26.138s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "LevelSetInterfaceLifecycle",
+      "tests": 46,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T09:20:34Z",
+      "time": "26.059s",
+      "testsuite": [
+        {
+          "name": "ProductionQualifiedHighOrderDiscoversSameSignCornerInteriorIsland",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.001s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "ProductionQualifiedHighOrderDiscoversSerendipityInteriorProbeIsland",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.002s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "Saye3DTerminalBoxUsesInteriorHintToSplitSameSignCorners",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.001s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "LinearBackendOutputPassesCommonValidation",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "InvalidBackendOutputIsRejected",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "BackendValidationRejectsInconsistentInterfaceNormals",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "BackendValidationRejectsInconsistentQuadratureWeights",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "BackendValidationRejectsBadRootPolishMetadata",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "BackendMetadataReachesCutIntegrationContext",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleP1LineMatchesLinearMeasures",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleSeededLineCutsMatchAnalyticAreas",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleP1PlaneMatchesHexMeasures",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHexReferenceVolumeRulesMapToPhysicalCutVolume",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellP2CircleSegmentApproximatesAreaAndLength",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.008s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellTriangleCircleErrorsDecreaseUnderHRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.002s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellTriangleCircleErrorsDecreaseUnderPRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.006s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellTriangleVertexAndEdgeTouchesAreDegenerate",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "BackendIndependentValidationFixturesCheckRuleInvariants",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.01s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "CurvedInterfaceMomentsUseIndependentBackendReferenceRules",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.074s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "GeneratedOrderSummariesMatchRuleProvenance",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.02s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "AffineCutsMatchLinearMeasuresForSupportedHighOrderCells",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.053s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "AffinePlaneCutsStayPlanarOnHighOrderPhysicalCells",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.026s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "Affine2DCutRulesIntegratePolynomialMomentsToAdvertisedOrder",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.002s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "Affine3DCutRulesIntegratePolynomialMomentsToAdvertisedOrder",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.054s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "PromotedAffineCutRulesUseConsistentNormalsAndSides",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.049s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "Affine2DCutRulesImprovePolynomialMomentsUnderQRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "0.004s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "GeneratedRulesConserveParentMeasureAndUsePositiveWeights",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:34Z",
+          "time": "6.802s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellP2SphereCapApproximatesVolumeAndArea",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:41Z",
+          "time": "6.663s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellTetraSphereCapErrorsDecreaseUnderHRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:47Z",
+          "time": "10.408s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellTetraP2EdgeDofMovesCutVolume",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:58Z",
+          "time": "0.731s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleQuadP3DofMovesGeometryAndQuadrature",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:59Z",
+          "time": "0.026s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellTriangleP3DofMovesGeometryAndQuadrature",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:59Z",
+          "time": "0.009s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleP2CircleApproximatesAreaAndLength",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:59Z",
+          "time": "0.059s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleVolumeNormalsFollowSideConvention",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:59Z",
+          "time": "0.01s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleP2EllipseIntegratesAreaAndArcLength",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:59Z",
+          "time": "0.024s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleCircleErrorsDecreaseUnderHAndPRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:59Z",
+          "time": "0.022s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleEllipseErrorsDecreaseUnderHRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:59Z",
+          "time": "0.022s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SmallVolumeCutsReturnFinitePositiveRules",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:59Z",
+          "time": "0.003s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "MultipleComponentsInSingleParentCellProduceSeparatedRules",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:59Z",
+          "time": "0.018s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleNearTangentCircleReturnsRulesOrDiagnostic",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:59Z",
+          "time": "0.042s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleP2SphereApproximatesVolumeAndArea",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:59Z",
+          "time": "0.063s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleP2EllipsoidApproximatesVolumeAndArea",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:59Z",
+          "time": "0.242s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleSphereAndEllipsoidErrorsDecreaseUnderHRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:20:59Z",
+          "time": "0.531s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleRulesAssembleFixedGeometryMeasures",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:21:00Z",
+          "time": "0.028s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "GeneratedRulesUseReferenceCoordinatesOnPhysicalCells",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:21:00Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleReferenceRulesMapToCurvedHexGeometry",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:21:00Z",
+          "time": "0.024s",
+          "classname": "LevelSetInterfaceLifecycle"
+        }
+      ]
+    },
+    {
+      "name": "LevelSetVolume",
+      "tests": 3,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T09:21:00Z",
+      "time": "0.078s",
+      "testsuite": [
+        {
+          "name": "GeneratedCutVolumeUsesPointwiseJacobianOnWarpedTensorProductCell",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:21:00Z",
+          "time": "0s",
+          "classname": "LevelSetVolume"
+        },
+        {
+          "name": "GeneratedInterfaceVolumeDiscoversInteriorIsland",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:21:00Z",
+          "time": "0.068s",
+          "classname": "LevelSetVolume"
+        },
+        {
+          "name": "GeneratedInterfaceGlobalShiftUsesGeneratedQuadrature",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:21:00Z",
+          "time": "0s",
+          "classname": "LevelSetVolume"
+        }
+      ]
+    }
+  ]
+}

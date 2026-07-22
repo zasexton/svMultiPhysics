@@ -1,0 +1,158 @@
+Note: Google Test filter = GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity:GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure:LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure:LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks
+[==========] Running 4 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 2 tests from GeneratedContactMeasureMPI
+[ RUN      ] GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity
+Note: Google Test filter = GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity:GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure:LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure:LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks
+[==========] Running 4 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 2 tests from GeneratedContactMeasureMPI
+[ RUN      ] GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:532: Failure
+Expected equality of these values:
+  serial.physical_length
+    Which is: 0
+  Real{4.0}
+    Which is: 4
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:533: Failure
+Expected equality of these values:
+  serial.fragment_count
+    Which is: 0
+  4u
+    Which is: 4
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:534: Failure
+Expected equality of these values:
+  serial.quadrature_point_count
+    Which is: 0
+  8u
+    Which is: 8
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:532: Failure
+Expected equality of these values:
+  serial.physical_length
+    Which is: 0
+  Real{4.0}
+    Which is: 4
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:533: Failure
+Expected equality of these values:
+  serial.fragment_count
+    Which is: 0
+  4u
+    Which is: 4
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:534: Failure
+Expected equality of these values:
+  serial.quadrature_point_count
+    Which is: 0
+  8u
+    Which is: 8
+[  FAILED  ] GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity (0 ms)
+[ RUN      ] GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure
+[  FAILED  ] GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity (0 ms)
+[ RUN      ] GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:581: Failure
+Expected equality of these values:
+  local.fragment_count
+    Which is: 0
+  local_owned
+    Which is: 2
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:581: Failure
+Expected equality of these values:
+  local.fragment_count
+    Which is: 0
+  local_owned
+    Which is: 2
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:582: Failure
+Expected equality of these values:
+  local.quadrature_point_count
+    Which is: 0
+  local_owned
+    Which is: 2
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:584: Failure
+Expected equality of these values:
+  local.counting_measure
+    Which is: 0
+  static_cast<Real>(local_owned)
+    Which is: 2
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:582: Failure
+Expected equality of these values:
+  local.quadrature_point_count
+    Which is: 0
+  local_owned
+    Which is: 2
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:584: Failure
+Expected equality of these values:
+  local.counting_measure
+    Which is: 0
+  static_cast<Real>(local_owned)
+    Which is: 2
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:606: Failure
+Expected equality of these values:
+  serial.counting_measure
+    Which is: 0
+  Real{4.0}
+    Which is: 4
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:607: Failure
+Expected equality of these values:
+  serial.fragment_count
+    Which is: 0
+  4u
+    Which is: 4
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:608: Failure
+Expected equality of these values:
+  serial.quadrature_point_count
+    Which is: 0
+  4u
+    Which is: 4
+[  FAILED  ] GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure (0 ms)
+[----------] 2 tests from GeneratedContactMeasureMPI (0 ms total)
+
+[----------] 2 tests from LevelSetInterfaceBuilderMPI
+[ RUN      ] LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:606: Failure
+Expected equality of these values:
+  serial.counting_measure
+    Which is: 0
+  Real{4.0}
+    Which is: 4
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:607: Failure
+Expected equality of these values:
+  serial.fragment_count
+    Which is: 0
+  4u
+    Which is: 4
+/home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedContactMeasureMPI.cpp:608: Failure
+Expected equality of these values:
+  serial.quadrature_point_count
+    Which is: 0
+  4u
+    Which is: 4
+[  FAILED  ] GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure (0 ms)
+[----------] 2 tests from GeneratedContactMeasureMPI (0 ms total)
+
+[----------] 2 tests from LevelSetInterfaceBuilderMPI
+[ RUN      ] LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure
+[       OK ] LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure (0 ms)
+[ RUN      ] LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks
+[       OK ] LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure (0 ms)
+[ RUN      ] LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks
+[       OK ] LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks (42 ms)
+[----------] 2 tests from LevelSetInterfaceBuilderMPI (42 ms total)
+
+[----------] Global test environment tear-down
+[==========] 4 tests from 2 test suites ran. (43 ms total)
+[  PASSED  ] 2 tests.
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity
+[  FAILED  ] GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure
+
+ 2 FAILED TESTS
+[       OK ] LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks (42 ms)
+[----------] 2 tests from LevelSetInterfaceBuilderMPI (42 ms total)
+
+[----------] Global test environment tear-down
+[==========] 4 tests from 2 test suites ran. (43 ms total)
+[  PASSED  ] 2 tests.
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity
+[  FAILED  ] GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure
+
+ 2 FAILED TESTS

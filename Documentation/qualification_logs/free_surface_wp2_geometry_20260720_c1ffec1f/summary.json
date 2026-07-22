@@ -1,0 +1,15 @@
+{
+  "distinct_test_count": 155,
+  "group_outcomes": {
+    "application_mpi": "PASS",
+    "application_serial": "PASS",
+    "assembly_mpi": "FAIL_METHOD",
+    "geometry_serial": "PASS",
+    "level_set_serial": "PASS",
+    "systems_serial": "PASS"
+  },
+  "matrix_id": "free_surface_wp2_geometry_v1",
+  "overall_outcome": "FAIL_METHOD",
+  "qualification_scope": "WP-2 closure only; later force-balance, wetting, transport, stability, and release matrices remain separate gates",
+  "source_commit": "c1ffec1f7e81e0e3784ae91a890c8f53929de0b0"
+}
