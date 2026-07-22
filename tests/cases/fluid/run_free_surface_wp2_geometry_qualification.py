@@ -1260,6 +1260,14 @@ def run_clean_builds(
     ):
         group_directory = build_root / f"build_{ordinal:02d}"
         group_directory.mkdir(parents=True, exist_ok=False)
+        group_caches = {entry[3] for entry in entries}
+        if len(group_caches) != 1:
+            raise RuntimeError(
+                "one build directory cannot have multiple CMake caches"
+            )
+        cache = next(iter(group_caches))
+        if cache.parent != build_directory:
+            raise RuntimeError("build directory does not own its CMake cache")
         targets = sorted({entry[1] for entry in entries})
         binary_keys = sorted(binary_key for binary_key, *_ in entries)
         binaries_before_clean = {
