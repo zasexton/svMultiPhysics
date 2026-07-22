@@ -92,6 +92,14 @@ struct FreeSurfaceGeometryRevision {
         const FreeSurfaceGeometryRevision& other) const noexcept;
 };
 
+/** Rank-local mesh epochs retained for live-consumer staleness checks. */
+struct FreeSurfaceGeometryLocalMeshRevision {
+    std::uint64_t mesh_geometry_revision{0};
+    std::uint64_t mesh_topology_revision{0};
+    std::uint64_t ownership_revision{0};
+    std::uint64_t numbering_revision{0};
+};
+
 struct FreeSurfaceGeometryRuleRecord {
     FreeSurfaceGeometryRuleRole role{FreeSurfaceGeometryRuleRole::Interface};
     FreeSurfaceGeometryRetention retention{
@@ -368,6 +376,8 @@ public:
         delete;
 
     [[nodiscard]] const FreeSurfaceGeometryRevision& revision() const noexcept;
+    [[nodiscard]] const FreeSurfaceGeometryLocalMeshRevision&
+    localMeshRevision() const noexcept;
     [[nodiscard]] const FreeSurfaceGeometrySnapshotPolicy& policy() const noexcept;
     [[nodiscard]] const LevelSetInterfaceDomain& interfaceDomain() const noexcept;
     [[nodiscard]] const std::vector<GeneratedInterfaceBoundaryIntersectionDomain>&
@@ -396,6 +406,7 @@ private:
 
     FreeSurfaceGeometrySnapshot(
         FreeSurfaceGeometryRevision revision,
+        FreeSurfaceGeometryLocalMeshRevision local_mesh_revision,
         FreeSurfaceGeometrySnapshotPolicy policy,
         LevelSetInterfaceDomain interface_domain,
         std::vector<GeneratedInterfaceBoundaryIntersectionDomain> contact_domains,
@@ -404,6 +415,7 @@ private:
         FreeSurfaceGeometryValidationLedger ledger);
 
     FreeSurfaceGeometryRevision revision_{};
+    FreeSurfaceGeometryLocalMeshRevision local_mesh_revision_{};
     FreeSurfaceGeometrySnapshotPolicy policy_{};
     LevelSetInterfaceDomain interface_domain_{};
     std::vector<GeneratedInterfaceBoundaryIntersectionDomain> contact_domains_{};

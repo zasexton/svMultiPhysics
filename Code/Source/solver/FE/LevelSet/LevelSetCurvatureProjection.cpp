@@ -469,6 +469,9 @@ void mixSignature(std::uint64_t& seed, std::uint64_t value) noexcept
     mixSignature(seed, static_cast<std::uint64_t>(samples.size()));
     for (const auto& sample : samples) {
         mixSignature(seed, static_cast<std::uint64_t>(sample.parent_cell));
+        mixSignature(seed, sample.free_surface_snapshot_revision_key);
+        mixSignature(seed, sample.source_value_revision);
+        mixSignature(seed, sample.cut_topology_revision);
         if (sample.parent_cell < static_cast<MeshIndex>(0)) {
             for (const auto coordinate : sample.coordinate) {
                 mixSignature(seed, realBitsForSignature(coordinate));
@@ -476,6 +479,59 @@ void mixSignature(std::uint64_t& seed, std::uint64_t value) noexcept
         }
     }
     return seed;
+}
+
+struct SupplementalSampleRevisionIdentity {
+    std::uint64_t free_surface_snapshot_revision_key{0};
+    std::uint64_t source_value_revision{0};
+};
+
+[[nodiscard]] SupplementalSampleRevisionIdentity
+supplementalSampleRevisionIdentity(
+    std::span<const LevelSetCurvatureProjectionSample> samples)
+{
+    SupplementalSampleRevisionIdentity identity;
+    bool found_revisioned_sample = false;
+    bool found_unrevisioned_sample = false;
+    for (const auto& sample : samples) {
+        const bool has_snapshot_revision =
+            sample.free_surface_snapshot_revision_key != 0u;
+        const bool has_source_revision = sample.source_value_revision != 0u;
+        if (has_snapshot_revision != has_source_revision) {
+            throw std::invalid_argument(
+                "level-set curvature supplemental sample has incomplete free-surface revision identity");
+        }
+        if (!has_snapshot_revision) {
+            found_unrevisioned_sample = true;
+            if (sample.cut_topology_revision != 0u) {
+                throw std::invalid_argument(
+                    "level-set curvature supplemental sample has a cut revision without a free-surface snapshot revision");
+            }
+            continue;
+        }
+        if (sample.cut_topology_revision == 0u) {
+            throw std::invalid_argument(
+                "level-set curvature supplemental sample has a free-surface revision without a cut topology revision");
+        }
+        found_revisioned_sample = true;
+        if (identity.free_surface_snapshot_revision_key == 0u) {
+            identity.free_surface_snapshot_revision_key =
+                sample.free_surface_snapshot_revision_key;
+            identity.source_value_revision = sample.source_value_revision;
+            continue;
+        }
+        if (identity.free_surface_snapshot_revision_key !=
+                sample.free_surface_snapshot_revision_key ||
+            identity.source_value_revision != sample.source_value_revision) {
+            throw std::invalid_argument(
+                "level-set curvature supplemental samples mix free-surface snapshot revisions");
+        }
+    }
+    if (found_revisioned_sample && found_unrevisioned_sample) {
+        throw std::invalid_argument(
+            "level-set curvature supplemental samples mix revisioned and unrevisioned geometry");
+    }
+    return identity;
 }
 
 [[nodiscard]] bool workspaceMatchesMesh(
@@ -1297,12 +1353,23 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
         }
     }
 
+    const auto sample_revision =
+        supplementalSampleRevisionIdentity(supplemental_samples);
     LevelSetCurvatureProjectionResult result;
+    result.free_surface_snapshot_revision_key =
+        sample_revision.free_surface_snapshot_revision_key;
+    result.source_value_revision = sample_revision.source_value_revision;
     result.vertices = n_vertices;
     result.supplemental_samples = supplemental_samples.size();
     result.supplemental_sample_weight = options.supplemental_sample_weight;
     result.narrow_band_width = options.narrow_band_width;
     result.smoothing_mode = options.smoothing_mode;
+    if (workspace != nullptr) {
+        workspace->free_surface_snapshot_revision_key =
+            sample_revision.free_surface_snapshot_revision_key;
+        workspace->source_value_revision = sample_revision.source_value_revision;
+        workspace->cut_rule_signature = 0u;
+    }
     curvature_vertex_values.assign(n_vertices, Real{0.0});
     if (n_vertices == 0u) {
         result.diagnostic = "level-set curvature projection received an empty mesh";

@@ -11,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <initializer_list>
+#include <numeric>
 #include <stdexcept>
 #include <utility>
 
@@ -1216,6 +1217,50 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     const int planar_volume_order =
         implementedPlanarLevelSetCutVolumeExactOrder(
             request.resolvedVolumeQuadratureOrder());
+    const auto append_collapsed_full_region =
+        [&](CutInterfaceDegeneracy degeneracy, const char* reason) {
+            const Real centroid_value =
+                std::accumulate(signed_values.begin(),
+                                signed_values.end(),
+                                Real{0.0}) /
+                static_cast<Real>(count);
+            const auto side =
+                centroid_value < Real{0.0} ||
+                        (std::abs(centroid_value) <= request.tolerance &&
+                         negative_count >= positive_count)
+                    ? geometry::CutIntegrationSide::Negative
+                    : geometry::CutIntegrationSide::Positive;
+            const Real representative_value =
+                side == geometry::CutIntegrationSide::Negative
+                    ? Real{-1.0}
+                    : Real{1.0};
+            const std::vector<Real> dominant_values(count,
+                                                    representative_value);
+            const auto full_quadrature = cutSideQuadrature2D(
+                input.node_coordinates,
+                dominant_values,
+                count,
+                side,
+                request.tolerance,
+                planar_volume_order);
+            appendSideVolumeRegion(
+                result,
+                makeVolumeRegion(request,
+                                 input,
+                                 side,
+                                 parent_measure,
+                                 Real{1.0},
+                                 parent_centroid,
+                                 gradient_normal,
+                                 signed_values,
+                                 0u,
+                                 "collapsed-small-fragment-volume",
+                                 full_quadrature,
+                                 true,
+                                 planar_volume_order));
+            result.degeneracy = degeneracy;
+            result.diagnostic = reason;
+        };
 
     if (zero_count == count) {
         result.degeneracy = CutInterfaceDegeneracy::FullZeroCell;
@@ -1325,11 +1370,10 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     }
 
     if (cut_points.size() < 2u) {
-        result.degeneracy = zero_count > 0u ? CutInterfaceDegeneracy::VertexTouch
-                                            : CutInterfaceDegeneracy::SmallFragment;
-        if (result.degeneracy == CutInterfaceDegeneracy::SmallFragment) {
-            result.diagnostic = "level-set cut produced a fragment below the point separation tolerance";
-        }
+        append_collapsed_full_region(
+            zero_count > 0u ? CutInterfaceDegeneracy::VertexTouch
+                            : CutInterfaceDegeneracy::SmallFragment,
+            "level-set cut collapsed a fragment below the point separation tolerance onto its represented dominant phase");
         return result;
     }
 
@@ -1338,8 +1382,9 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     const auto& b = cut_points[endpoints.second];
     const Real measure = distance2(a.point, b.point);
     if (measure <= request.tolerance) {
-        result.degeneracy = CutInterfaceDegeneracy::SmallFragment;
-        result.diagnostic = "level-set cut produced a fragment below the minimum measure tolerance";
+        append_collapsed_full_region(
+            CutInterfaceDegeneracy::SmallFragment,
+            "level-set cut collapsed a fragment below the minimum measure tolerance onto its represented dominant phase");
         return result;
     }
 
@@ -1517,6 +1562,50 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     const auto parent_centroid = parent_moments.centroid;
     const auto gradient_normal =
         estimateGradient3D(input.node_coordinates, signed_values, count);
+    const auto append_collapsed_full_region =
+        [&](CutInterfaceDegeneracy degeneracy, const char* reason) {
+            const Real centroid_value =
+                std::accumulate(signed_values.begin(),
+                                signed_values.end(),
+                                Real{0.0}) /
+                static_cast<Real>(count);
+            const auto side =
+                centroid_value < Real{0.0} ||
+                        (std::abs(centroid_value) <= request.tolerance &&
+                         negative_count >= positive_count)
+                    ? geometry::CutIntegrationSide::Negative
+                    : geometry::CutIntegrationSide::Positive;
+            const Real representative_value =
+                side == geometry::CutIntegrationSide::Negative
+                    ? Real{-1.0}
+                    : Real{1.0};
+            const std::vector<Real> dominant_values(count,
+                                                    representative_value);
+            const auto full_faces = tetrahedronSideFaces(
+                input.node_coordinates,
+                dominant_values,
+                {},
+                side,
+                request.tolerance);
+            const auto full_quadrature =
+                polyhedronQuadratureFromFaces(full_faces, request.tolerance);
+            appendSideVolumeRegion(
+                result,
+                makeVolumeRegion(request,
+                                 input,
+                                 side,
+                                 parent_measure,
+                                 Real{1.0},
+                                 parent_centroid,
+                                 gradient_normal,
+                                 signed_values,
+                                 0u,
+                                 "collapsed-small-fragment-volume",
+                                 full_quadrature,
+                                 true));
+            result.degeneracy = degeneracy;
+            result.diagnostic = reason;
+        };
 
     if (zero_count == count) {
         result.degeneracy = CutInterfaceDegeneracy::FullZeroCell;
@@ -1633,21 +1722,22 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     }
 
     if (cut_points.size() < 3u) {
-        if (zero_count > 0u) {
-            result.degeneracy = cut_points.size() == 2u ? CutInterfaceDegeneracy::EdgeTouch
-                                                        : CutInterfaceDegeneracy::VertexTouch;
-        } else {
-            result.degeneracy = CutInterfaceDegeneracy::SmallFragment;
-            result.diagnostic = "level-set cut produced a fragment below the point separation tolerance";
-        }
+        append_collapsed_full_region(
+            zero_count > 0u
+                ? (cut_points.size() == 2u
+                       ? CutInterfaceDegeneracy::EdgeTouch
+                       : CutInterfaceDegeneracy::VertexTouch)
+                : CutInterfaceDegeneracy::SmallFragment,
+            "level-set cut collapsed a fragment below the point separation tolerance onto its represented dominant phase");
         return result;
     }
 
     orderPolygonPoints(cut_points, gradient_normal);
     const Real measure = polygonArea(cut_points, gradient_normal);
     if (measure <= request.tolerance) {
-        result.degeneracy = CutInterfaceDegeneracy::SmallFragment;
-        result.diagnostic = "level-set cut produced a fragment below the minimum measure tolerance";
+        append_collapsed_full_region(
+            CutInterfaceDegeneracy::SmallFragment,
+            "level-set cut collapsed a fragment below the minimum measure tolerance onto its represented dominant phase");
         return result;
     }
 

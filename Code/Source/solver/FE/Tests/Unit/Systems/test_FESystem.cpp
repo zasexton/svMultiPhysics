@@ -13,6 +13,7 @@
 #include "Systems/SystemsExceptions.h"
 
 #include "Assembly/AssemblyKernel.h"
+#include "Assembly/CutIntegrationContext.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/MeshAccess.h"
 #include "Assembly/StandardAssembler.h"
@@ -35,6 +36,7 @@
 #include <memory>
 #include <numeric>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -457,7 +459,66 @@ public:
     [[nodiscard]] std::string name() const override { return "DGInteriorFaceProbeKernel"; }
 };
 
+class MaterialStateSetupKernel final
+    : public svmp::FE::assembly::LinearFormKernel {
+public:
+    [[nodiscard]] svmp::FE::assembly::RequiredData getRequiredData()
+        const override {
+        return svmp::FE::assembly::RequiredData::MaterialState;
+    }
+
+    [[nodiscard]] svmp::FE::assembly::MaterialStateSpec materialStateSpec()
+        const noexcept override {
+        svmp::FE::assembly::MaterialStateSpec spec;
+        spec.bytes_per_qpt = 8u;
+        spec.alignment = 8u;
+        return spec;
+    }
+
+    void computeCell(const svmp::FE::assembly::AssemblyContext&,
+                     svmp::FE::assembly::KernelOutput&) override {}
+
+    [[nodiscard]] std::string name() const override {
+        return "MaterialStateSetupKernel";
+    }
+};
+
 } // namespace
+
+TEST(FESystem, MaterialStateSetupRejectsOrphanSnapshotInterfaceRule)
+{
+    constexpr int marker = 73;
+    auto mesh = build_single_quad_mesh();
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, 1);
+
+    FESystem system(mesh);
+    const auto field = system.addField(
+        FieldSpec{.name = "u", .space = space, .components = 1});
+    system.addOperator("stateful");
+    system.addCellKernel(
+        "stateful",
+        field,
+        field,
+        std::make_shared<MaterialStateSetupKernel>());
+
+    auto orphan =
+        std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+    svmp::FE::geometry::CutQuadratureRule rule;
+    rule.kind = svmp::FE::geometry::CutQuadratureKind::Interface;
+    rule.side = svmp::FE::geometry::CutIntegrationSide::Interface;
+    rule.provenance.marker = marker;
+    rule.provenance.cut_topology_revision = 1u;
+    rule.provenance.free_surface_snapshot_revision_key = 902u;
+    rule.points.push_back(svmp::FE::geometry::CutQuadraturePoint{
+        .point = {{Real{0.0}, Real{0.0}, Real{0.0}}},
+        .weight = Real{1.0},
+    });
+    orphan->addInterfaceRule(std::move(rule));
+    system.setCutIntegrationContext(std::move(orphan));
+
+    EXPECT_THROW(system.setup(), std::invalid_argument);
+    RecordProperty("system_setup_snapshot_revision_negative_case_count", 1);
+}
 
 TEST(FESystem, CoordinateConfigurationIsPropagatedToMeshAndSearchAccess)
 {

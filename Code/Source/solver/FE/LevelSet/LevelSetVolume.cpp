@@ -841,7 +841,8 @@ tetrahedralCornerDecomposition(ElementType type)
 [[nodiscard]] bool hasScalarContinuousSimplicialLinearLayout(
     const assembly::IMeshAccess& mesh,
     const dofs::DofHandler& level_set_dofs,
-    const CollectiveContext& collective)
+    const CollectiveContext& collective,
+    bool allow_axis_aligned_tensor_product_quadrilaterals = false)
 {
     const auto* entity_map = level_set_dofs.getEntityDofMap();
     bool qualified = entity_map != nullptr;
@@ -864,13 +865,15 @@ tetrahedralCornerDecomposition(ElementType type)
                 return;
             }
             const auto cell_type = mesh.getCellType(cell);
-            const bool supported_simplex =
+            const bool supported_cell =
                 cell_type == ElementType::Triangle3 ||
-                cell_type == ElementType::Tetra4;
+                cell_type == ElementType::Tetra4 ||
+                (allow_axis_aligned_tensor_product_quadrilaterals &&
+                 cell_type == ElementType::Quad4);
             const auto corner_count = cornerCount(cell_type);
             mesh.getCellNodes(cell, nodes);
             const auto cell_dofs = level_set_dofs.getCellDofs(cell);
-            if (!supported_simplex || mesh.getCellGeometryOrder(cell) != 1 ||
+            if (!supported_cell || mesh.getCellGeometryOrder(cell) != 1 ||
                 corner_count == 0u || nodes.size() < corner_count ||
                 cell_dofs.size() != corner_count) {
                 qualified = false;
@@ -899,14 +902,20 @@ tetrahedralCornerDecomposition(ElementType type)
 void requireQualifiedGlobalShiftLayout(
     const assembly::IMeshAccess& mesh,
     const dofs::DofHandler& level_set_dofs,
-    const CollectiveContext& collective)
+    const CollectiveContext& collective,
+    bool allow_axis_aligned_tensor_product_quadrilaterals = false)
 {
     if (!hasScalarContinuousSimplicialLinearLayout(
-            mesh, level_set_dofs, collective)) {
+            mesh,
+            level_set_dofs,
+            collective,
+            allow_axis_aligned_tensor_product_quadrilaterals)) {
         throw std::invalid_argument(
             "level-set global shift correction is qualified only for scalar "
             "continuous vertex-nodal P1 fields on linear triangles or "
-            "tetrahedra; tensor-product, curved-geometry, high-order, "
+            "tetrahedra, plus reference-axis-aligned Q1 fields on linear "
+            "quadrilaterals when generated quadrature is active; other "
+            "tensor-product, curved-geometry, high-order, "
             "hierarchical, discontinuous, vector, and non-nodal layouts are "
             "rejected before correction");
     }
@@ -914,7 +923,8 @@ void requireQualifiedGlobalShiftLayout(
 
 void requireQualifiedGlobalShiftField(
     const systems::FESystem& system,
-    FieldId level_set_field)
+    FieldId level_set_field,
+    bool allow_axis_aligned_tensor_product_quadrilaterals = false)
 {
     const auto& field = system.fieldRecord(level_set_field);
     const auto& field_dofs = system.fieldDofHandler(level_set_field);
@@ -931,10 +941,13 @@ void requireQualifiedGlobalShiftField(
     if (!allReduceLogicalAnd(collective, qualified_space)) {
         throw std::invalid_argument(
             "level-set global shift correction is qualified only for scalar "
-            "continuous nodal first-order H1 Lagrange fields (simplicial P1)");
+            "continuous nodal first-order H1 Lagrange fields");
     }
     requireQualifiedGlobalShiftLayout(
-        system.meshAccess(), field_dofs, collective);
+        system.meshAccess(),
+        field_dofs,
+        collective,
+        allow_axis_aligned_tensor_product_quadrilaterals);
 }
 
 struct TopologyStableShiftMetrics {
@@ -984,6 +997,43 @@ struct TopologyStableShiftMetrics {
             values.push_back(value);
         }
 
+        if (mesh.getCellType(cell) == ElementType::Quad4) {
+            if (values.size() != 4u) {
+                metrics.valid = false;
+                return;
+            }
+            // In the conventional Quad4 reference ordering, these are the
+            // xi, eta, and xi*eta coefficients.  Requiring a vanishing mixed
+            // coefficient and one vanishing directional coefficient
+            // certifies an axis-aligned reference line.  A uniform shift then
+            // has no unobserved interior saddle/topology event, and the
+            // component-volume ledger remains exact on a distorted physical
+            // Q1 map because each retained reference region is rectangular.
+            const Real xi_coefficient = Real{0.25} *
+                                        (-values[0] + values[1] + values[2] -
+                                         values[3]);
+            const Real eta_coefficient = Real{0.25} *
+                                         (-values[0] - values[1] + values[2] +
+                                          values[3]);
+            const Real mixed = Real{0.25} *
+                               (values[0] - values[1] + values[2] - values[3]);
+            const Real scale = std::max(
+                {Real{1.0},
+                 std::abs(values[0]),
+                 std::abs(values[1]),
+                 std::abs(values[2]),
+                 std::abs(values[3])});
+            const Real affine_tolerance = std::max(
+                options.tolerance,
+                Real{128.0} * std::numeric_limits<Real>::epsilon() * scale);
+            if (std::abs(mixed) > affine_tolerance ||
+                std::min(std::abs(xi_coefficient),
+                         std::abs(eta_coefficient)) > affine_tolerance) {
+                metrics.valid = false;
+                return;
+            }
+        }
+
         for (const auto edge : cornerEdgePairs(mesh.getCellType(cell))) {
             if (edge[0] < values.size() && edge[1] < values.size() &&
                 ((values[edge[0]] < -options.tolerance &&
@@ -1027,9 +1077,10 @@ struct TopologyStableShiftMetrics {
     if (!metrics.valid) {
         throw std::invalid_argument(
             "level-set global shift correction requires a nondegenerate "
-            "simplicial P1 interface with at least one strict edge crossing "
-            "and every vertex outside a two-tolerance safety margin around "
-            "the isovalue");
+            "simplicial P1 or certified reference-axis-aligned quadrilateral Q1 "
+            "interface with at least one strict edge crossing and every "
+            "vertex outside a two-tolerance safety margin around the "
+            "isovalue");
     }
     return metrics.maximum_symmetric_shift;
 }
@@ -1154,8 +1205,12 @@ struct TopologyStableShiftMetrics {
     if (simple_fraction >= Real{0.0}) {
         return simple_fraction * measure;
     }
-    if (type == ElementType::Triangle3 && coordinates.size() == 3u &&
-        signed_values.size() == 3u) {
+    const bool supported_2d =
+        (type == ElementType::Triangle3 && coordinates.size() == 3u &&
+         signed_values.size() == 3u) ||
+        (type == ElementType::Quad4 && coordinates.size() == 4u &&
+         signed_values.size() == 4u);
+    if (supported_2d) {
         LevelSetCellCutInput input{};
         input.parent_cell = parent_cell;
         input.element_type = type;
@@ -1171,7 +1226,7 @@ struct TopologyStableShiftMetrics {
             [](const auto& fragment) { return fragment.active(); });
         if (active == cut_result.fragments.end()) {
             throw std::runtime_error(
-                "level-set component ledger found a cut triangle without an active interface fragment");
+                "level-set component ledger found a cut 2D cell without an active interface fragment");
         }
         return active->negative_volume_fraction * measure;
     }
@@ -1185,7 +1240,8 @@ struct TopologyStableShiftMetrics {
             tolerance);
     }
     throw std::invalid_argument(
-        "level-set component ledger requires linear triangles or tetrahedra");
+        "level-set component ledger requires linear triangles, certified "
+        "reference-affine quadrilaterals, or tetrahedra");
 }
 
 struct ComponentVolumeTransferLedger {
@@ -2239,7 +2295,10 @@ LevelSetGlobalShiftCorrectionResult applyGlobalLevelSetShiftCorrection(
     std::span<const Real> solution,
     std::vector<Real>& corrected_solution)
 {
-    requireQualifiedGlobalShiftField(system, level_set_field);
+    requireQualifiedGlobalShiftField(
+        system,
+        level_set_field,
+        volume_options.use_generated_interface_quadrature);
     if (volume_options.use_generated_interface_quadrature) {
         if (!(correction_options.volume_tolerance > 0.0) ||
             !std::isfinite(correction_options.volume_tolerance) ||

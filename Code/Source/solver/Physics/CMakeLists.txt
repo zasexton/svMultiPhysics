@@ -316,7 +316,6 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_PoissonSquareSteady.cpp
         Tests/Unit/test_FluidViscosityModels.cpp
         Tests/Unit/test_SolidMaterialModels.cpp
-        Tests/Unit/test_UstructModule.cpp
         Tests/Unit/test_FormIntegrationJacobian.cpp
         Tests/Unit/test_NavierStokesPressureGauge.cpp
         Tests/Unit/test_NavierStokesLegacyBCs.cpp
@@ -328,10 +327,18 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/Coupling/test_FSICouplingModule.cpp
         Tests/Unit/Coupling/test_ThermalInterfaceCouplingModule.cpp
     )
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/test_UstructModule.cpp")
+        list(APPEND PHYSICS_TEST_SOURCES Tests/Unit/test_UstructModule.cpp)
+    endif()
 
     add_executable(test_physics ${PHYSICS_TEST_SOURCES})
     add_dependencies(test_physics test_physics_coupling_headers)
     target_link_libraries(test_physics PRIVATE svphysics ${GTEST_LIBRARIES})
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Materials/Solid/IsochoricNeoHookeanPK1.h" AND
+       EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Materials/Solid/IsochoricNeoHookeanPK1.cpp")
+        target_compile_definitions(test_physics
+            PRIVATE SVMP_TEST_HAS_ISOCHORIC_NEOHOOKEAN_PK1=1)
+    endif()
     if(_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS)
         target_compile_options(test_physics PRIVATE ${_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS})
     endif()

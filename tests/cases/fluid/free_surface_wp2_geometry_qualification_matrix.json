@@ -1,10 +1,30 @@
 {
   "schema_version": 1,
-  "matrix_id": "free_surface_wp2_geometry_v2",
+  "matrix_id": "free_surface_wp2_geometry_v4",
   "status": "FROZEN_BEFORE_EXECUTION",
   "work_package": "WP-2",
   "findings": ["FSR-13", "FSR-14", "FSR-15", "FSR-17"],
   "model_envelope": "one_phase_level_set_geometry_with_authoritative_retained_rules",
+  "build_targets": {
+    "geometry": "test_fe_geometry",
+    "level_set": "test_fe_levelset",
+    "systems": "test_fe_systems",
+    "assembly": "test_fe_assembly",
+    "physics": "test_physics",
+    "application": "test_application",
+    "assembly_mpi": "test_fe_assembly_mpi",
+    "application_mpi": "test_application_mpi"
+  },
+  "build_cmake_homes": {
+    "geometry": "Code/Source/solver/FE",
+    "level_set": "Code/Source/solver/FE",
+    "systems": "Code/Source/solver/FE",
+    "assembly": "Code/Source/solver/FE",
+    "physics": "Code/Source/solver/Physics",
+    "application": "Code",
+    "assembly_mpi": "Code/Source/solver/FE",
+    "application_mpi": "Code"
+  },
   "groups": [
     {
       "id": "geometry_serial",
@@ -18,8 +38,18 @@
         "GeneratedActiveBoundaryDomain.RejectsUnimplementedHighOrderImplicitBoundaryRestriction",
         "GeneratedActiveBoundaryDomain.WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases",
         "GeneratedActiveBoundaryDomain.CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping",
+        "FreeSurfaceGeometrySnapshot.CurvedQ2AndQ3ConstantOneAssemblyMatchesRetainedPhysicalVolume",
         "FreeSurfaceGeometrySnapshot.OwnsOneRevisionAndPointwisePhysicalMappingForEveryRuleFamily",
+        "FreeSurfaceGeometrySnapshot.RejectsDuplicateClosedSnapshotImportWithoutMutation",
+        "FreeSurfaceGeometrySnapshot.RejectsStaleTrackedMeshAtBuildAndConsumption",
+        "FreeSurfaceGeometrySnapshot.RejectsIncompleteAuthoritativeCutFamilies",
+        "FreeSurfaceGeometrySnapshot.AcceptsCompleteAndDegenerateAuthoritativeFamilies",
+        "FreeSurfaceGeometrySnapshot.RejectsUncertifiedVolumeWithoutMatchingScalarValue",
+        "FreeSurfaceGeometrySnapshot.AcceptsVolumeOnlyValueEvaluatorWithoutGradient",
+        "FreeSurfaceGeometrySnapshot.RejectsIncompleteRevisionKeysAcrossEveryImportedRuleFamily",
         "FreeSurfaceGeometrySnapshot.RejectsStoredOffInterfaceResidual",
+        "FreeSurfaceGeometrySnapshot.RejectsOffChordPointWithZeroStoredResidual",
+        "FreeSurfaceGeometrySnapshot.RejectsWrongNormalWhenScalarEvaluatorIsMissing",
         "FreeSurfaceGeometrySnapshot.SeparatesUnprunedLifecycleVolumeFromRetainedAssemblyVolume",
         "FreeSurfaceGeometrySnapshot.RejectsStaleGlobalIdentityAndOwner",
         "FreeSurfaceGeometrySnapshot.CollectiveValidatorRejectsDuplicateAndMissingRuleOwners",
@@ -27,6 +57,9 @@
         "FreeSurfaceGeometrySnapshot.RejectsPointOutsideParentReferenceCell",
         "FreeSurfaceGeometrySnapshot.RejectsQuadraturePointOnWrongPhase",
         "FreeSurfaceGeometrySnapshot.RejectsNormalOpposedToRepresentedGradient",
+        "FreeSurfaceGeometrySnapshot.RejectsNearlyOrthogonalNormalToRepresentedGradient",
+        "FreeSurfaceGeometrySnapshot.RejectsDegenerateOrNonFiniteGradientAndNormal",
+        "FreeSurfaceGeometrySnapshot.AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
         "FreeSurfaceGeometrySnapshot.RejectsIncorrectConstantMoment",
         "FreeSurfaceGeometrySnapshot.RejectsIncorrectLinearPartitionMoment",
         "FreeSurfaceGeometrySnapshot.RejectsCompensatingPerPhaseMomentDefects",
@@ -87,6 +120,12 @@
       "gtest_output_copies": 1,
       "tests": [
         "LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSameSignCornerInteriorIsland",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedQ3CertifiedRangeDiscoversUnsampledInteriorInterval",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedQ2RegularGraphCapturesDoubleBoundaryEntry",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedQ2AlignedGraphHasSingleInterfaceOwnership",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedQ3FailsClosedForVisibleLineAndHiddenCircle",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedQ2SerendipityCertifiedRangeDiscoversUnsampledInteriorInterval",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedSayeRejectsUncertifiedCompleteQ4TensorField",
         "LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSerendipityInteriorProbeIsland",
         "LevelSetInterfaceLifecycle.Saye3DTerminalBoxUsesInteriorHintToSplitSameSignCorners",
         "LevelSetInterfaceLifecycle.LinearBackendOutputPassesCommonValidation",
@@ -132,9 +171,24 @@
         "LevelSetInterfaceLifecycle.SayeHyperrectangleRulesAssembleFixedGeometryMeasures",
         "LevelSetInterfaceLifecycle.GeneratedRulesUseReferenceCoordinatesOnPhysicalCells",
         "LevelSetInterfaceLifecycle.SayeHyperrectangleReferenceRulesMapToCurvedHexGeometry",
+        "LevelSetInterfaceLifecycle.DistortedQ1HexUsesPointwisePhysicalVolumeAndSurfaceMoments",
+        "LevelSetInterfaceLifecycle.CurvedQ3HexMapsPhaseVolumesAndSurfaceMomentsToIndependentReference",
+        "LevelSetInterfaceLifecycle.AnalyticCutSweepCoversTopologyFractionsRotationsAndPhaseReversal",
         "LevelSetVolume.GeneratedCutVolumeUsesPointwiseJacobianOnWarpedTensorProductCell",
         "LevelSetVolume.GeneratedInterfaceVolumeDiscoversInteriorIsland",
-        "LevelSetVolume.GeneratedInterfaceGlobalShiftUsesGeneratedQuadrature"
+        "LevelSetVolume.GeneratedInterfaceGlobalShiftUsesGeneratedQuadrature",
+        "LevelSetVolume.WarpedGeneratedCorrectionTargetEqualsSnapshotConstantOneMeasure",
+        "LevelSetVolume.GeneratedGlobalShiftRejectsNonAffineTensorProductQ1",
+        "LevelSetConservativePhaseBenchmarks.DistortedMeshTranslatingDiskConservesAndRefines",
+        "LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift",
+        "LevelSetCurvatureProjection.RecoversCircleCurvatureFromSignedDistance",
+        "LevelSetCurvatureProjection.CircleCurvatureErrorImprovesWithRefinement",
+        "LevelSetCurvatureProjection.RecoversSphereCurvatureFromSignedDistance",
+        "LevelSetCurvatureProjection.SupplementalSamplesAllowUnderresolvedQuadraticStencil",
+        "LevelSetCurvatureProjection.CarriesSnapshotRevisionAndRejectsMixedSamples",
+        "LevelSetCurvatureProjection.StaticDropQ3SamplesProduceQuantifiedCurvatureRefinement",
+        "LevelSetCurvatureProjection.SphereQ3SamplesProduceQuantifiedCurvatureRefinement",
+        "LevelSetCurvatureProjection.CapillaryWaveQ3SamplesProduceQuantifiedCurvatureRefinement"
       ],
       "execution": {
         "wall_time_seconds": 1800,
@@ -168,7 +222,39 @@
         "CutIntegrationInfrastructure.LinearizedCutDataIsIdenticalAcrossAllExecutionPaths",
         "CutIntegrationInfrastructure.ProductionCutScalarOperatorsMatchAnalyticHalfCubePlaneCut",
         "FormsInstaller.FormsInstaller_RevisionBoundFullSideCutVolumeUsesSnapshotRulePoints",
-        "FormsInstaller.FormsInstaller_UnflaggedFullMeasureCutVolumeUsesRulePoints"
+        "FormsInstaller.FormsInstaller_RejectsOrphanRevisionBoundFullSideCutVolume",
+        "FormsInstaller.FormsInstaller_UnflaggedFullMeasureCutVolumeUsesRulePoints",
+        "FESystem.MaterialStateSetupRejectsOrphanSnapshotInterfaceRule"
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 6144,
+        "output_mib": 192
+      }
+    },
+    {
+      "id": "assembly_core_serial",
+      "binary": "assembly",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "StandardAssemblerCutInterfaces.RejectsOrphanSnapshotRuleWhenMarkerlessSelectionRequestsAll",
+        "StandardAssemblerFaces.InteriorStabilizationRejectsOrphanSnapshotMetadata"
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 6144,
+        "output_mib": 192
+      }
+    },
+    {
+      "id": "physics_serial",
+      "binary": "physics",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "MovingDomainPhysics.FreeSurfaceDiscreteFunctionalHistoryIsValidatedAndReplaySafe",
+        "MovingDomainPhysics.FreeSurfaceDynamicContactStageHistoryPreservesLawAndFrameProvenance"
       ],
       "execution": {
         "wall_time_seconds": 1200,
@@ -188,6 +274,7 @@
         "ApplicationDriverLevelSetWorkflows.PrescribedWallSnapshotDrivesEndpointReinitialization",
         "ApplicationDriverLevelSetWorkflows.ActiveOnlyRetentionRejectsInactiveCutVolumeConsumerWithoutRules",
         "ActiveDomainOutput.WritesWetVolumeFractionForCutCell",
+        "ActiveDomainOutput.RejectsMixedGeometrySnapshotRevisions",
         "ActiveDomainOutput.WetFractionsMatchGeneratedCutVolumeMetadata",
         "ActiveDomainOutput.WritesHighOrderWetVolumeFractionFromRetainedRules",
         "ActiveDomainOutput.WritesFullWetAndFullDryFractions",
@@ -200,11 +287,26 @@
         "ActiveDomainOutput.CollectsPhysicalFullCellMeasureOnDistortedQuad",
         "ActiveDomainOutput.UnflaggedFullMeasureRuleUsesMappedQuadraturePoints",
         "LevelSetCurvatureSamples.CollectsGeneratedCutVolumeQuadratureSamplesForActiveSide",
-        "LevelSetCurvatureSamples.MapsWarpedHighOrderValueAndCoordinateAtIdenticalReferencePoint"
+        "LevelSetCurvatureSamples.MapsWarpedHighOrderValueAndCoordinateAtIdenticalReferencePoint",
+        "LevelSetCurvatureSamples.Q3AuthoritativeInterfacePairsSampleWithSnapshotRevision"
       ],
       "execution": {
         "wall_time_seconds": 1200,
         "memory_mib": 6144,
+        "output_mib": 192
+      }
+    },
+    {
+      "id": "assembly_mpi_serial",
+      "binary": "assembly_mpi",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic"
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 4096,
         "output_mib": 192
       }
     },
@@ -216,6 +318,8 @@
       "tests": [
         "GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity",
         "GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure",
+        "GeneratedContactMeasureMPI.SnapshotCollectiveRejectsGeometryOwnedByBothRanks",
+        "GeneratedContactMeasureMPI.RotatedSessileCapContactIsContinuousAcrossCellAndOwnerBoundaries",
         "LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure",
         "LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks"
       ],
@@ -240,9 +344,922 @@
       }
     }
   ],
+  "quantitative_evidence": [
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
+      "property": "source_contact_count_zero",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
+      "property": "source_contact_count_one",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
+      "property": "source_contact_count_multiple",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 2
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
+      "property": "geometry_ledger_contact_fragment_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 3
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
+      "property": "geometry_ledger_rule_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 12
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
+      "property": "geometry_ledger_orphan_contact_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
+      "property": "geometry_ledger_missing_contact_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
+      "property": "geometry_ledger_stale_revision_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
+      "property": "geometry_ledger_maximum_root_residual",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
+      "property": "geometry_ledger_maximum_normal_angular_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
+      "property": "geometry_ledger_maximum_constant_moment_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
+      "property": "geometry_ledger_maximum_scaled_polynomial_moment_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1.0
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.RejectsIncompleteRevisionKeysAcrossEveryImportedRuleFamily",
+      "property": "snapshot_revision_negative_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 27
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.RejectsDuplicateClosedSnapshotImportWithoutMutation",
+      "property": "duplicate_snapshot_import_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.RejectsStaleTrackedMeshAtBuildAndConsumption",
+      "property": "snapshot_stale_mesh_build_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 3
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.RejectsStaleTrackedMeshAtBuildAndConsumption",
+      "property": "snapshot_stale_mesh_consumption_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 4
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.RejectsDegenerateOrNonFiniteGradientAndNormal",
+      "property": "invalid_gradient_normal_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 4
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.RejectsOffChordPointWithZeroStoredResidual",
+      "property": "off_chord_zero_residual_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.CurvedQ2AndQ3ConstantOneAssemblyMatchesRetainedPhysicalVolume",
+      "property": "curved_q2_snapshot_constant_one_assembly_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-12
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.CurvedQ2AndQ3ConstantOneAssemblyMatchesRetainedPhysicalVolume",
+      "property": "curved_q3_snapshot_constant_one_assembly_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-12
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.RejectsWrongNormalWhenScalarEvaluatorIsMissing",
+      "property": "missing_normal_evaluator_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "StandardAssemblerCutInterfaces.RejectsOrphanSnapshotRuleWhenMarkerlessSelectionRequestsAll",
+      "property": "standard_assembler_markerless_snapshot_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "StandardAssemblerFaces.InteriorStabilizationRejectsOrphanSnapshotMetadata",
+      "property": "standard_assembler_stabilization_snapshot_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FESystem.MaterialStateSetupRejectsOrphanSnapshotInterfaceRule",
+      "property": "system_setup_snapshot_revision_negative_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshotCache.HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease",
+      "property": "peak_live_snapshot_count",
+      "type": "integer",
+      "relation": "greater_than_or_equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshotCache.HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease",
+      "property": "peak_live_resident_bytes",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshotCache.HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease",
+      "property": "final_live_snapshot_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshotCache.HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease",
+      "property": "expired_eviction_count",
+      "type": "integer",
+      "relation": "greater_than_or_equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshotCache.HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease",
+      "property": "snapshot_cache_hit_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshotCache.HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease",
+      "property": "snapshot_cache_miss_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ3CertifiedRangeDiscoversUnsampledInteriorInterval",
+      "property": "certified_q3_hidden_interval_minimum_nodal_value",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ3CertifiedRangeDiscoversUnsampledInteriorInterval",
+      "property": "certified_q3_hidden_interval_minimum_probe_value",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ3CertifiedRangeDiscoversUnsampledInteriorInterval",
+      "property": "certified_q3_hidden_interval_interior_value",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ3CertifiedRangeDiscoversUnsampledInteriorInterval",
+      "property": "certified_q3_hidden_interval_negative_volume",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ3CertifiedRangeDiscoversUnsampledInteriorInterval",
+      "property": "certified_q3_hidden_interval_fragment_count",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ3CertifiedRangeDiscoversUnsampledInteriorInterval",
+      "property": "certified_q3_hidden_interval_range_query_count",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ3CertifiedRangeDiscoversUnsampledInteriorInterval",
+      "property": "certified_q3_hidden_interval_refinement_count",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2RegularGraphCapturesDoubleBoundaryEntry",
+      "property": "certified_q2_double_boundary_entry_negative_volume",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 1.0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2RegularGraphCapturesDoubleBoundaryEntry",
+      "property": "certified_q2_double_boundary_entry_volume_error",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.03
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2RegularGraphCapturesDoubleBoundaryEntry",
+      "property": "certified_q2_double_boundary_entry_fragment_count",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2RegularGraphCapturesDoubleBoundaryEntry",
+      "property": "certified_q2_double_boundary_entry_topology_refinements",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2RegularGraphCapturesDoubleBoundaryEntry",
+      "property": "certified_q2_double_boundary_entry_regular_graph_leaves",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2AlignedGraphHasSingleInterfaceOwnership",
+      "property": "certified_q2_aligned_graph_interface_measure",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 1.999999999
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2AlignedGraphHasSingleInterfaceOwnership",
+      "property": "certified_q2_aligned_graph_volume_closure",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2AlignedGraphHasSingleInterfaceOwnership",
+      "property": "certified_q2_aligned_graph_fragment_count",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ3FailsClosedForVisibleLineAndHiddenCircle",
+      "property": "certified_q3_hidden_component_visible_line_residual",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-12
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ3FailsClosedForVisibleLineAndHiddenCircle",
+      "property": "certified_q3_hidden_component_center_value",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": -1e-10
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ3FailsClosedForVisibleLineAndHiddenCircle",
+      "property": "certified_q3_hidden_component_outside_value",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 1e-10
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ3FailsClosedForVisibleLineAndHiddenCircle",
+      "property": "certified_q3_hidden_component_fail_closed_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2SerendipityCertifiedRangeDiscoversUnsampledInteriorInterval",
+      "property": "certified_q2_serendipity_hidden_interval_minimum_nodal_value",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2SerendipityCertifiedRangeDiscoversUnsampledInteriorInterval",
+      "property": "certified_q2_serendipity_hidden_interval_center_probe_value",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2SerendipityCertifiedRangeDiscoversUnsampledInteriorInterval",
+      "property": "certified_q2_serendipity_hidden_interval_interior_value",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2SerendipityCertifiedRangeDiscoversUnsampledInteriorInterval",
+      "property": "certified_q2_serendipity_hidden_interval_negative_volume",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2SerendipityCertifiedRangeDiscoversUnsampledInteriorInterval",
+      "property": "certified_q2_serendipity_hidden_interval_fragment_count",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2SerendipityCertifiedRangeDiscoversUnsampledInteriorInterval",
+      "property": "certified_q2_serendipity_hidden_interval_range_query_count",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedQ2SerendipityCertifiedRangeDiscoversUnsampledInteriorInterval",
+      "property": "certified_q2_serendipity_hidden_interval_refinement_count",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.ProductionQualifiedSayeRejectsUncertifiedCompleteQ4TensorField",
+      "property": "production_q4_uncertified_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.DistortedQ1HexUsesPointwisePhysicalVolumeAndSurfaceMoments",
+      "property": "distorted_q1_hex_negative_volume_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-9
+    },
+    {
+      "test": "FormsInstaller.FormsInstaller_RejectsOrphanRevisionBoundFullSideCutVolume",
+      "property": "orphan_snapshot_rejected",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "MovingDomainPhysics.FreeSurfaceDiscreteFunctionalHistoryIsValidatedAndReplaySafe",
+      "property": "functional_snapshot_mismatch_rejected",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "MovingDomainPhysics.FreeSurfaceDynamicContactStageHistoryPreservesLawAndFrameProvenance",
+      "property": "contact_snapshot_mismatch_rejected",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.DistortedQ1HexUsesPointwisePhysicalVolumeAndSurfaceMoments",
+      "property": "distorted_q1_hex_positive_volume_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-9
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.DistortedQ1HexUsesPointwisePhysicalVolumeAndSurfaceMoments",
+      "property": "distorted_q1_hex_surface_moment_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-9
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.CurvedQ3HexMapsPhaseVolumesAndSurfaceMomentsToIndependentReference",
+      "property": "curved_physical_geometry_order",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 3
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.CurvedQ3HexMapsPhaseVolumesAndSurfaceMomentsToIndependentReference",
+      "property": "curved_q3_hex_negative_volume_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-8
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.CurvedQ3HexMapsPhaseVolumesAndSurfaceMomentsToIndependentReference",
+      "property": "curved_q3_hex_positive_volume_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-8
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.CurvedQ3HexMapsPhaseVolumesAndSurfaceMomentsToIndependentReference",
+      "property": "curved_q3_hex_surface_measure_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-8
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.CurvedQ3HexMapsPhaseVolumesAndSurfaceMomentsToIndependentReference",
+      "property": "curved_q3_hex_surface_moment_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-8
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.AnalyticCutSweepCoversTopologyFractionsRotationsAndPhaseReversal",
+      "property": "analytic_cut_sweep_fraction_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 8
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.AnalyticCutSweepCoversTopologyFractionsRotationsAndPhaseReversal",
+      "property": "analytic_cut_sweep_radial_topology_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 10
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.AnalyticCutSweepCoversTopologyFractionsRotationsAndPhaseReversal",
+      "property": "analytic_cut_sweep_maximum_partition_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-8
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.AnalyticCutSweepCoversTopologyFractionsRotationsAndPhaseReversal",
+      "property": "analytic_cut_sweep_maximum_radial_volume_error",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.05
+    },
+    {
+      "test": "LevelSetInterfaceLifecycle.AnalyticCutSweepCoversTopologyFractionsRotationsAndPhaseReversal",
+      "property": "analytic_cut_sweep_maximum_radial_surface_error",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.25
+    },
+    {
+      "test": "LevelSetVolume.WarpedGeneratedCorrectionTargetEqualsSnapshotConstantOneMeasure",
+      "property": "constant_one_assembly_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    },
+    {
+      "test": "LevelSetVolume.WarpedGeneratedCorrectionTargetEqualsSnapshotConstantOneMeasure",
+      "property": "constant_one_target_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedMeshTranslatingDiskConservesAndRefines",
+      "property": "distorted_l1_N64",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.08
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedMeshTranslatingDiskConservesAndRefines",
+      "property": "distorted_centroid_error_N64",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.01
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedMeshTranslatingDiskConservesAndRefines",
+      "property": "distorted_measure_error_N64",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-8
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift",
+      "property": "runtime_maximum_snapshot_measure_difference",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-9
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift",
+      "property": "runtime_minimum_absolute_pre_correction_drift",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 1e-8
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift",
+      "property": "runtime_maximum_absolute_post_correction_drift",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-8
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift",
+      "property": "runtime_target_measure_order_12_to_24",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 1.0
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift",
+      "property": "runtime_target_measure_order_24_to_48",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 1.0
+    },
+    {
+      "test": "LevelSetCurvatureProjection.StaticDropQ3SamplesProduceQuantifiedCurvatureRefinement",
+      "property": "static_drop_mean_error_N64",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.015
+    },
+    {
+      "test": "LevelSetCurvatureProjection.StaticDropQ3SamplesProduceQuantifiedCurvatureRefinement",
+      "property": "static_drop_order_32_to_64",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 1.0
+    },
+    {
+      "test": "LevelSetCurvatureProjection.StaticDropQ3SamplesProduceQuantifiedCurvatureRefinement",
+      "property": "static_drop_Q3_samples_N64",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 16384
+    },
+    {
+      "test": "LevelSetCurvatureProjection.StaticDropQ3SamplesProduceQuantifiedCurvatureRefinement",
+      "property": "static_drop_Q3_interpolation_defect_N64",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 1e-6
+    },
+    {
+      "test": "LevelSetCurvatureProjection.CarriesSnapshotRevisionAndRejectsMixedSamples",
+      "property": "curvature_snapshot_mismatch_rejections",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 2
+    },
+    {
+      "test": "ActiveDomainOutput.RejectsMixedGeometrySnapshotRevisions",
+      "property": "output_snapshot_mismatch_rejected",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "ActiveDomainOutput.RejectsMixedGeometrySnapshotRevisions",
+      "property": "output_revisioned_mapping_failure_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 3
+    },
+    {
+      "test": "LevelSetCurvatureProjection.SphereQ3SamplesProduceQuantifiedCurvatureRefinement",
+      "property": "sphere_mean_error_N16",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.12
+    },
+    {
+      "test": "LevelSetCurvatureProjection.SphereQ3SamplesProduceQuantifiedCurvatureRefinement",
+      "property": "sphere_order_8_to_16",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0.5
+    },
+    {
+      "test": "LevelSetCurvatureProjection.SphereQ3SamplesProduceQuantifiedCurvatureRefinement",
+      "property": "sphere_Q3_samples_N16",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 32768
+    },
+    {
+      "test": "LevelSetCurvatureProjection.CapillaryWaveQ3SamplesProduceQuantifiedCurvatureRefinement",
+      "property": "wave_mean_error_N64",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.002
+    },
+    {
+      "test": "LevelSetCurvatureProjection.CapillaryWaveQ3SamplesProduceQuantifiedCurvatureRefinement",
+      "property": "wave_order_32_to_64",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0.5
+    },
+    {
+      "test": "LevelSetCurvatureProjection.CapillaryWaveQ3SamplesProduceQuantifiedCurvatureRefinement",
+      "property": "wave_Q3_samples_N64",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 8192
+    },
+    {
+      "test": "LevelSetCurvatureSamples.Q3AuthoritativeInterfacePairsSampleWithSnapshotRevision",
+      "property": "q3_curvature_paired_sample_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "LevelSetCurvatureSamples.Q3AuthoritativeInterfacePairsSampleWithSnapshotRevision",
+      "property": "q3_curvature_authoritative_interface_validation_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "LevelSetCurvatureSamples.Q3AuthoritativeInterfacePairsSampleWithSnapshotRevision",
+      "property": "q3_curvature_missing_snapshot_rejections",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "LevelSetCurvatureSamples.Q3AuthoritativeInterfacePairsSampleWithSnapshotRevision",
+      "property": "q3_curvature_stale_state_rejections",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "LevelSetCurvatureSamples.Q3AuthoritativeInterfacePairsSampleWithSnapshotRevision",
+      "property": "q3_curvature_zero_topology_rejections",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "LevelSetCurvatureSamples.Q3AuthoritativeInterfacePairsSampleWithSnapshotRevision",
+      "property": "q3_curvature_authoritative_root_residual",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 1e-8
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_state_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 12
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_nonzero_snapshot_key_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 12
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_distinct_snapshot_key_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 12
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_rule_snapshot_mismatch_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_rule_source_revision_mismatch_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_orphan_contact_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_missing_contact_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_max_counting_measure_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-12
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_coarse_position_error",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.05
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_medium_position_error",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.007
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_fine_position_error",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.003
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_observed_position_order",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0.0
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_max_crossing_position_jump",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 1e-5
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_cell_boundary_crossing_count",
+      "type": "integer",
+      "relation": "greater_than_or_equal",
+      "threshold": 1
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_deterministic_remap_mismatch_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "trajectory_source_id_change_count",
+      "type": "integer",
+      "relation": "greater_than_or_equal",
+      "threshold": 1
+    },
+    {
+      "test": "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+      "property": "snapshot_trajectory_stale_consumption_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 12
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.RejectsIncompleteAuthoritativeCutFamilies",
+      "property": "authoritative_cut_family_incomplete_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 3
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.RejectsIncompleteAuthoritativeCutFamilies",
+      "property": "authoritative_cross_family_marker_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.RejectsIncompleteAuthoritativeCutFamilies",
+      "property": "authoritative_cut_family_total_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 4
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsCompleteAndDegenerateAuthoritativeFamilies",
+      "property": "authoritative_cut_family_valid_acceptance_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsCompleteAndDegenerateAuthoritativeFamilies",
+      "property": "authoritative_two_sided_cut_acceptance_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 3
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsCompleteAndDegenerateAuthoritativeFamilies",
+      "property": "authoritative_one_sided_full_cell_acceptance_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 3
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsCompleteAndDegenerateAuthoritativeFamilies",
+      "property": "authoritative_empty_full_zero_acceptance_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.RejectsUncertifiedVolumeWithoutMatchingScalarValue",
+      "property": "uncertified_volume_missing_scalar_value_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.RejectsUncertifiedVolumeWithoutMatchingScalarValue",
+      "property": "uncertified_volume_wrong_side_scalar_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.RejectsUncertifiedVolumeWithoutMatchingScalarValue",
+      "property": "uncertified_volume_scalar_rejection_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 2
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.AcceptsVolumeOnlyValueEvaluatorWithoutGradient",
+      "property": "volume_only_value_without_gradient_acceptance_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    }
+  ],
   "gates": {
-    "expected_group_count": 6,
-    "expected_distinct_test_count": 155,
+    "expected_group_count": 9,
+    "expected_distinct_test_count": 200,
+    "expected_quantitative_evidence_count": 130,
     "expected_failures": 0,
     "expected_errors": 0,
     "expected_disabled": 0,
@@ -253,7 +1270,26 @@
       "claim": "all_retained_rule_families_share_one_complete_revision_and_pointwise_mapping",
       "evidence": [
         "FreeSurfaceGeometrySnapshot.OwnsOneRevisionAndPointwisePhysicalMappingForEveryRuleFamily",
+        "FreeSurfaceGeometrySnapshot.RejectsDuplicateClosedSnapshotImportWithoutMutation",
+        "FreeSurfaceGeometrySnapshot.RejectsIncompleteAuthoritativeCutFamilies",
+        "FreeSurfaceGeometrySnapshot.AcceptsCompleteAndDegenerateAuthoritativeFamilies",
         "ApplicationDriverLevelSetWorkflows.AcceptedFunctionalUsesAuthoritativeSnapshotAndRecordsGlobalState"
+      ]
+    },
+    {
+      "claim": "assembly_curvature_output_functional_and_contact_consumers_reject_revision_mismatch",
+      "evidence": [
+        "FreeSurfaceGeometrySnapshot.RejectsIncompleteRevisionKeysAcrossEveryImportedRuleFamily",
+        "FreeSurfaceGeometrySnapshot.RejectsStaleTrackedMeshAtBuildAndConsumption",
+        "StandardAssemblerCutInterfaces.RejectsOrphanSnapshotRuleWhenMarkerlessSelectionRequestsAll",
+        "StandardAssemblerFaces.InteriorStabilizationRejectsOrphanSnapshotMetadata",
+        "FESystem.MaterialStateSetupRejectsOrphanSnapshotInterfaceRule",
+        "FormsInstaller.FormsInstaller_RejectsOrphanRevisionBoundFullSideCutVolume",
+        "LevelSetCurvatureProjection.CarriesSnapshotRevisionAndRejectsMixedSamples",
+        "ActiveDomainOutput.RejectsMixedGeometrySnapshotRevisions",
+        "GeneratedContactMeasureMPI.SnapshotCollectiveRejectsGeometryOwnedByBothRanks",
+        "MovingDomainPhysics.FreeSurfaceDiscreteFunctionalHistoryIsValidatedAndReplaySafe",
+        "MovingDomainPhysics.FreeSurfaceDynamicContactStageHistoryPreservesLawAndFrameProvenance"
       ]
     },
     {
@@ -267,16 +1303,28 @@
     {
       "claim": "retained_physical_volume_matches_pointwise_assembly_mapping",
       "evidence": [
+        "FreeSurfaceGeometrySnapshot.CurvedQ2AndQ3ConstantOneAssemblyMatchesRetainedPhysicalVolume",
         "LevelSetVolume.GeneratedCutVolumeUsesPointwiseJacobianOnWarpedTensorProductCell",
+        "LevelSetVolume.WarpedGeneratedCorrectionTargetEqualsSnapshotConstantOneMeasure",
+        "LevelSetInterfaceLifecycle.DistortedQ1HexUsesPointwisePhysicalVolumeAndSurfaceMoments",
+        "LevelSetInterfaceLifecycle.CurvedQ3HexMapsPhaseVolumesAndSurfaceMomentsToIndependentReference",
         "CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesConstantsAcrossPaths",
-        "ActiveDomainOutput.CollectsPhysicalFullCellMeasureOnDistortedQuad"
+        "ActiveDomainOutput.CollectsPhysicalFullCellMeasureOnDistortedQuad",
+        "ActiveDomainOutput.RejectsMixedGeometrySnapshotRevisions"
       ]
     },
     {
       "claim": "high_order_samples_pair_value_and_coordinate_at_one_reference_point",
       "evidence": [
         "LevelSetCurvatureSamples.MapsWarpedHighOrderValueAndCoordinateAtIdenticalReferencePoint",
-        "LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSameSignCornerInteriorIsland"
+        "LevelSetCurvatureSamples.Q3AuthoritativeInterfacePairsSampleWithSnapshotRevision",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSameSignCornerInteriorIsland",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedQ3CertifiedRangeDiscoversUnsampledInteriorInterval",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedQ2RegularGraphCapturesDoubleBoundaryEntry",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedQ2AlignedGraphHasSingleInterfaceOwnership",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedQ3FailsClosedForVisibleLineAndHiddenCircle",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedQ2SerendipityCertifiedRangeDiscoversUnsampledInteriorInterval",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedSayeRejectsUncertifiedCompleteQ4TensorField"
       ]
     },
     {
@@ -284,6 +1332,12 @@
       "evidence": [
         "FreeSurfaceGeometrySnapshot.CertifiesQuadraticVolumeRulesFromSourceSubcells",
         "FreeSurfaceGeometrySnapshot.RejectsInterfaceMomentDefectWithValidRootsAndMeasure",
+        "FreeSurfaceGeometrySnapshot.RejectsNearlyOrthogonalNormalToRepresentedGradient",
+        "FreeSurfaceGeometrySnapshot.RejectsDegenerateOrNonFiniteGradientAndNormal",
+        "FreeSurfaceGeometrySnapshot.RejectsOffChordPointWithZeroStoredResidual",
+        "FreeSurfaceGeometrySnapshot.RejectsWrongNormalWhenScalarEvaluatorIsMissing",
+        "FreeSurfaceGeometrySnapshot.RejectsUncertifiedVolumeWithoutMatchingScalarValue",
+        "FreeSurfaceGeometrySnapshot.AcceptsVolumeOnlyValueEvaluatorWithoutGradient",
         "FreeSurfaceGeometrySnapshot.CollectiveValidatorRejectsDuplicateAndMissingRuleOwners",
         "LevelSetInterfaceLifecycle.BackendIndependentValidationFixturesCheckRuleInvariants"
       ]
@@ -292,9 +1346,41 @@
       "claim": "curved_and_small_feature_rules_have_independent_convergence_and_defect_evidence",
       "evidence": [
         "LevelSetInterfaceLifecycle.CurvedInterfaceMomentsUseIndependentBackendReferenceRules",
+        "LevelSetInterfaceLifecycle.CurvedQ3HexMapsPhaseVolumesAndSurfaceMomentsToIndependentReference",
+        "LevelSetInterfaceLifecycle.AnalyticCutSweepCoversTopologyFractionsRotationsAndPhaseReversal",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedQ2RegularGraphCapturesDoubleBoundaryEntry",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedQ2AlignedGraphHasSingleInterfaceOwnership",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedQ3FailsClosedForVisibleLineAndHiddenCircle",
         "LevelSetInterfaceLifecycle.GeneratedRulesConserveParentMeasureAndUsePositiveWeights",
         "LevelSetInterfaceLifecycle.SayeHyperrectangleSphereAndEllipsoidErrorsDecreaseUnderHRefinement",
         "LevelSetInterfaceLifecycle.SmallVolumeCutsReturnFinitePositiveRules"
+      ]
+    },
+    {
+      "claim": "moving_contact_remapping_is_continuous_revision_bound_and_partition_independent",
+      "evidence": [
+        "GeneratedContactMeasureMPI.RankOneSnapshotTrajectoryIsRevisionBoundContinuousAndDeterministic",
+        "GeneratedContactMeasureMPI.RotatedSessileCapContactIsContinuousAcrossCellAndOwnerBoundaries",
+        "GeneratedInterfaceBoundaryIntersectionDomain.GlobalIdentityIsIndependentOfRepartitionedLocalFaceNumbering"
+      ]
+    },
+    {
+      "claim": "distorted_transport_volume_correction_and_curvature_refinement_studies_pass",
+      "evidence": [
+        "LevelSetConservativePhaseBenchmarks.DistortedMeshTranslatingDiskConservesAndRefines",
+        "LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift",
+        "LevelSetVolume.WarpedGeneratedCorrectionTargetEqualsSnapshotConstantOneMeasure",
+        "LevelSetCurvatureProjection.StaticDropQ3SamplesProduceQuantifiedCurvatureRefinement",
+        "LevelSetCurvatureProjection.SphereQ3SamplesProduceQuantifiedCurvatureRefinement",
+        "LevelSetCurvatureProjection.CapillaryWaveQ3SamplesProduceQuantifiedCurvatureRefinement"
+      ]
+    },
+    {
+      "claim": "geometry_ledger_quantifies_contact_cardinality_and_all_validator_errors",
+      "evidence": [
+        "FreeSurfaceGeometrySnapshot.AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
+        "LevelSetInterfaceLifecycle.AnalyticCutSweepCoversTopologyFractionsRotationsAndPhaseReversal",
+        "LevelSetVolume.WarpedGeneratedCorrectionTargetEqualsSnapshotConstantOneMeasure"
       ]
     },
     {
@@ -309,6 +1395,8 @@
       "claim": "serial_and_distributed_ownership_are_unique_and_deterministic",
       "evidence": [
         "GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity",
+        "GeneratedContactMeasureMPI.SnapshotCollectiveRejectsGeometryOwnedByBothRanks",
+        "GeneratedContactMeasureMPI.RotatedSessileCapContactIsContinuousAcrossCellAndOwnerBoundaries",
         "LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks",
         "ApplicationDriverLevelSetWorkflowsMPI.ActiveCutRefreshUsesCommunicatorWideSortedBoundaryMarkerUnion"
       ]

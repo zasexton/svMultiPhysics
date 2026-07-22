@@ -1,7 +1,10 @@
 #include "LevelSet/LevelSetConservativePhaseOperator.h"
+#include "LevelSet/LevelSetInterfaceLifecycle.h"
+#include "LevelSet/LevelSetVolume.h"
 
 #include "Assembly/Assembler.h"
 #include "Dofs/EntityDofMap.h"
+#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemSetup.h"
@@ -37,8 +40,11 @@ class StructuredQuadPhaseMeshAccess final
 public:
     using FE::assembly::IMeshAccess::getCellCoordinates;
 
-    explicit StructuredQuadPhaseMeshAccess(std::size_t cells_per_axis)
+    explicit StructuredQuadPhaseMeshAccess(
+        std::size_t cells_per_axis,
+        FE::Real distortion_amplitude = FE::Real{0.0})
         : cells_per_axis_(cells_per_axis)
+        , distortion_amplitude_(distortion_amplitude)
     {
     }
 
@@ -104,9 +110,16 @@ public:
         const auto j = index / nodes_per_axis;
         const FE::Real spacing = FE::Real{1.0} /
                                  static_cast<FE::Real>(cells_per_axis_);
+        const FE::Real xi = spacing * static_cast<FE::Real>(i);
+        const FE::Real eta = spacing * static_cast<FE::Real>(j);
+        const FE::Real pi = std::numbers::pi_v<FE::Real>;
         return {
-            spacing * static_cast<FE::Real>(i),
-            spacing * static_cast<FE::Real>(j),
+            xi + distortion_amplitude_ *
+                     std::sin(FE::Real{2.0} * pi * xi) *
+                     std::sin(pi * eta),
+            eta + distortion_amplitude_ *
+                      std::sin(pi * xi) *
+                      std::sin(FE::Real{2.0} * pi * eta),
             FE::Real{0.0},
         };
     }
@@ -172,6 +185,168 @@ private:
     }
 
     std::size_t cells_per_axis_{0u};
+    FE::Real distortion_amplitude_{0.0};
+};
+
+class StructuredTriLevelSetMeshAccess final
+    : public FE::assembly::IMeshAccess {
+public:
+    using FE::assembly::IMeshAccess::getCellCoordinates;
+
+    explicit StructuredTriLevelSetMeshAccess(
+        std::size_t cells_per_axis,
+        FE::Real distortion_amplitude)
+        : cells_per_axis_(cells_per_axis)
+        , distortion_amplitude_(distortion_amplitude)
+    {
+    }
+
+    [[nodiscard]] FE::GlobalIndex numCells() const override
+    {
+        return static_cast<FE::GlobalIndex>(
+            2u * cells_per_axis_ * cells_per_axis_);
+    }
+    [[nodiscard]] FE::GlobalIndex numOwnedCells() const override
+    {
+        return numCells();
+    }
+    [[nodiscard]] FE::GlobalIndex numVertices() const override
+    {
+        const auto nodes_per_axis = cells_per_axis_ + 1u;
+        return static_cast<FE::GlobalIndex>(
+            nodes_per_axis * nodes_per_axis);
+    }
+    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override
+    {
+        return 0;
+    }
+    [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override
+    {
+        return 0;
+    }
+    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool cellIdsAreDense() const override { return true; }
+    [[nodiscard]] bool globalEntityIdsAvailable() const override
+    {
+        return true;
+    }
+    [[nodiscard]] bool isOwnedCell(
+        FE::GlobalIndex cell) const override
+    {
+        return cell >= 0 && cell < numCells();
+    }
+    [[nodiscard]] FE::ElementType getCellType(
+        FE::GlobalIndex /*cell*/) const override
+    {
+        return FE::ElementType::Triangle3;
+    }
+    void getCellNodes(
+        FE::GlobalIndex cell,
+        std::vector<FE::GlobalIndex>& nodes) const override
+    {
+        const auto cell_index = static_cast<std::size_t>(cell);
+        const auto square = cell_index / 2u;
+        const auto i = square % cells_per_axis_;
+        const auto j = square / cells_per_axis_;
+        if (cell_index % 2u == 0u) {
+            nodes = {
+                node(i, j),
+                node(i + 1u, j),
+                node(i + 1u, j + 1u),
+            };
+        } else {
+            nodes = {
+                node(i, j),
+                node(i + 1u, j + 1u),
+                node(i, j + 1u),
+            };
+        }
+    }
+    [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
+        FE::GlobalIndex node_id) const override
+    {
+        const auto index = static_cast<std::size_t>(node_id);
+        const auto nodes_per_axis = cells_per_axis_ + 1u;
+        const auto i = index % nodes_per_axis;
+        const auto j = index / nodes_per_axis;
+        const FE::Real spacing = FE::Real{1.0} /
+                                 static_cast<FE::Real>(cells_per_axis_);
+        const FE::Real xi = spacing * static_cast<FE::Real>(i);
+        const FE::Real eta = spacing * static_cast<FE::Real>(j);
+        const FE::Real pi = std::numbers::pi_v<FE::Real>;
+        return {
+            xi + distortion_amplitude_ *
+                     std::sin(FE::Real{2.0} * pi * xi) *
+                     std::sin(pi * eta),
+            eta + distortion_amplitude_ *
+                      std::sin(pi * xi) *
+                      std::sin(FE::Real{2.0} * pi * eta),
+            FE::Real{0.0},
+        };
+    }
+    void getCellCoordinates(
+        FE::GlobalIndex cell,
+        std::vector<std::array<FE::Real, 3>>& coordinates) const override
+    {
+        std::vector<FE::GlobalIndex> nodes;
+        getCellNodes(cell, nodes);
+        coordinates.clear();
+        coordinates.reserve(nodes.size());
+        for (const auto node_id : nodes) {
+            coordinates.push_back(getNodeCoordinates(node_id));
+        }
+    }
+    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
+        FE::GlobalIndex /*face*/,
+        FE::GlobalIndex /*cell*/) const override
+    {
+        return 0;
+    }
+    [[nodiscard]] int getBoundaryFaceMarker(
+        FE::GlobalIndex /*face*/) const override
+    {
+        return -1;
+    }
+    [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
+    getInteriorFaceCells(FE::GlobalIndex /*face*/) const override
+    {
+        return {0, 0};
+    }
+    void forEachCell(
+        std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        for (FE::GlobalIndex cell = 0; cell < numCells(); ++cell) {
+            callback(cell);
+        }
+    }
+    void forEachOwnedCell(
+        std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        forEachCell(std::move(callback));
+    }
+    void forEachBoundaryFace(
+        int /*marker*/,
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex)>
+            /*callback*/) const override
+    {
+    }
+    void forEachInteriorFace(
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex,
+                           FE::GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+private:
+    [[nodiscard]] FE::GlobalIndex node(
+        std::size_t i,
+        std::size_t j) const
+    {
+        return static_cast<FE::GlobalIndex>(
+            j * (cells_per_axis_ + 1u) + i);
+    }
+
+    std::size_t cells_per_axis_{0u};
+    FE::Real distortion_amplitude_{0.0};
 };
 
 class StructuredHexPhaseMeshAccess final
@@ -372,6 +547,64 @@ private:
     return inputs;
 }
 
+[[nodiscard]] FE::systems::SetupInputs structuredTriSetupInputs(
+    std::size_t cells_per_axis)
+{
+    const auto nodes_per_axis = cells_per_axis + 1u;
+    const auto square_count = cells_per_axis * cells_per_axis;
+    const auto cell_count = 2u * square_count;
+    const auto node_count = nodes_per_axis * nodes_per_axis;
+    FE::dofs::MeshTopologyInfo topology;
+    topology.n_cells = static_cast<FE::GlobalIndex>(cell_count);
+    topology.n_vertices = static_cast<FE::GlobalIndex>(node_count);
+    topology.dim = 2;
+    topology.cell2vertex_offsets.resize(cell_count + 1u, 0);
+    topology.cell2vertex_data.reserve(3u * cell_count);
+    topology.cell_gids.resize(cell_count);
+    topology.cell_owner_ranks.assign(cell_count, 0);
+    for (std::size_t j = 0u; j < cells_per_axis; ++j) {
+        for (std::size_t i = 0u; i < cells_per_axis; ++i) {
+            const auto square = j * cells_per_axis + i;
+            const auto first_cell = 2u * square;
+            const auto lower_left = j * nodes_per_axis + i;
+            const auto lower_right = lower_left + 1u;
+            const auto upper_left = lower_left + nodes_per_axis;
+            const auto upper_right = upper_left + 1u;
+            topology.cell2vertex_offsets[first_cell] =
+                static_cast<FE::MeshOffset>(3u * first_cell);
+            topology.cell2vertex_data.push_back(
+                static_cast<FE::MeshIndex>(lower_left));
+            topology.cell2vertex_data.push_back(
+                static_cast<FE::MeshIndex>(lower_right));
+            topology.cell2vertex_data.push_back(
+                static_cast<FE::MeshIndex>(upper_right));
+            topology.cell_gids[first_cell] =
+                static_cast<FE::dofs::gid_t>(first_cell);
+
+            topology.cell2vertex_offsets[first_cell + 1u] =
+                static_cast<FE::MeshOffset>(3u * (first_cell + 1u));
+            topology.cell2vertex_data.push_back(
+                static_cast<FE::MeshIndex>(lower_left));
+            topology.cell2vertex_data.push_back(
+                static_cast<FE::MeshIndex>(upper_right));
+            topology.cell2vertex_data.push_back(
+                static_cast<FE::MeshIndex>(upper_left));
+            topology.cell_gids[first_cell + 1u] =
+                static_cast<FE::dofs::gid_t>(first_cell + 1u);
+        }
+    }
+    topology.cell2vertex_offsets[cell_count] =
+        static_cast<FE::MeshOffset>(3u * cell_count);
+    topology.vertex_gids.resize(node_count);
+    for (std::size_t vertex = 0u; vertex < node_count; ++vertex) {
+        topology.vertex_gids[vertex] =
+            static_cast<FE::dofs::gid_t>(vertex);
+    }
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = std::move(topology);
+    return inputs;
+}
+
 [[nodiscard]] FE::systems::SetupInputs structuredHexSetupInputs(
     std::size_t cells_per_axis)
 {
@@ -437,9 +670,11 @@ struct StructuredPhaseFixture {
     level_set::LevelSetP1PhaseTransportGraph graph{};
     std::vector<std::array<FE::Real, 3>> node_coordinates{};
 
-    explicit StructuredPhaseFixture(std::size_t cells_per_axis)
+    explicit StructuredPhaseFixture(
+        std::size_t cells_per_axis,
+        FE::Real distortion_amplitude = FE::Real{0.0})
         : mesh(std::make_shared<StructuredQuadPhaseMeshAccess>(
-              cells_per_axis)),
+              cells_per_axis, distortion_amplitude)),
           system(mesh)
     {
         phase = system.addField(FE::systems::FieldSpec{
@@ -474,6 +709,46 @@ struct StructuredPhaseFixture {
             }
             node_coordinates[static_cast<std::size_t>(dofs.front())] =
                 mesh->getNodeCoordinates(vertex);
+        }
+    }
+};
+
+struct StructuredTriLevelSetFixture {
+    std::shared_ptr<StructuredTriLevelSetMeshAccess> mesh;
+    FE::systems::FESystem system;
+    FE::FieldId level_set_field{FE::INVALID_FIELD_ID};
+    std::vector<FE::GlobalIndex> vertex_dofs{};
+
+    explicit StructuredTriLevelSetFixture(
+        std::size_t cells_per_axis,
+        FE::Real distortion_amplitude)
+        : mesh(std::make_shared<StructuredTriLevelSetMeshAccess>(
+              cells_per_axis, distortion_amplitude))
+        , system(mesh)
+    {
+        level_set_field = system.addField(FE::systems::FieldSpec{
+            .name = "level_set",
+            .space = std::make_shared<FE::spaces::H1Space>(
+                FE::ElementType::Triangle3, /*order=*/1),
+            .components = 1,
+        });
+        system.setup({}, structuredTriSetupInputs(cells_per_axis));
+        const auto* entity_map =
+            system.fieldDofHandler(level_set_field).getEntityDofMap();
+        if (entity_map == nullptr) {
+            throw std::runtime_error(
+                "structured triangular level-set fixture has no entity map");
+        }
+        vertex_dofs.resize(
+            static_cast<std::size_t>(mesh->numVertices()));
+        for (FE::GlobalIndex vertex = 0;
+             vertex < mesh->numVertices(); ++vertex) {
+            const auto dofs = entity_map->getVertexDofs(vertex);
+            if (dofs.size() != 1u || dofs.front() < 0) {
+                throw std::runtime_error(
+                    "structured triangular level-set fixture has an invalid vertex map");
+            }
+            vertex_dofs[static_cast<std::size_t>(vertex)] = dofs.front();
         }
     }
 };
@@ -1282,6 +1557,308 @@ TEST(LevelSetConservativePhaseBenchmarks,
     EXPECT_LT(centroid_errors[2], centroid_errors[1]);
     EXPECT_LT(errors.back(), 0.08);
     EXPECT_LT(centroid_errors.back(), 0.01);
+}
+
+TEST(LevelSetConservativePhaseBenchmarks,
+     DistortedMeshTranslatingDiskConservesAndRefines)
+{
+    constexpr FE::Real speed = 0.2;
+    constexpr FE::Real final_time = 0.5;
+    constexpr FE::Real distortion_amplitude = 0.04;
+    std::vector<FE::Real> errors;
+    std::vector<FE::Real> centroid_errors;
+    for (const std::size_t cells_per_axis : {16u, 32u, 64u}) {
+        StructuredPhaseFixture fixture(
+            cells_per_axis, distortion_amplitude);
+        ASSERT_TRUE(fixture.graph.success) << fixture.graph.diagnostic;
+        const auto initial = disk(0.30, 0.50, 0.14);
+        const auto exact = disk(
+            0.30 + speed * final_time, 0.50, 0.14);
+        const auto run = runTransport(
+            fixture,
+            initial,
+            [](FE::Real /*time*/,
+               const std::array<FE::Real, 3>& /*point*/) {
+                return std::array<FE::Real, 3>{speed, 0.0, 0.0};
+            },
+            final_time,
+            static_cast<int>(5u * cells_per_axis));
+        expectConservativeRun(run);
+        EXPECT_LE(run.maximum_measure_error, 1.0e-8);
+        errors.push_back(weightedL1Error(
+            fixture, run.final_phase, exact));
+        const auto initial_centroid = phaseCentroid(
+            fixture, run.initial_phase);
+        const auto final_centroid = phaseCentroid(
+            fixture, run.final_phase);
+        centroid_errors.push_back(std::abs(
+            final_centroid[0] - initial_centroid[0] -
+            speed * final_time));
+        const std::string suffix = "_N" +
+                                   std::to_string(cells_per_axis);
+        RecordProperty("distorted_l1" + suffix,
+                       serializeReal(errors.back()));
+        RecordProperty("distorted_centroid_error" + suffix,
+                       serializeReal(centroid_errors.back()));
+        RecordProperty("distorted_measure_error" + suffix,
+                       serializeReal(run.maximum_measure_error));
+        EXPECT_EQ(run.minimum_components, 1u);
+        EXPECT_EQ(run.maximum_components, 1u);
+    }
+    ASSERT_EQ(errors.size(), 3u);
+    EXPECT_LT(errors[1], errors[0]);
+    EXPECT_LT(errors[2], errors[1]);
+    EXPECT_LT(centroid_errors[1], centroid_errors[0]);
+    EXPECT_LT(centroid_errors[2], centroid_errors[1]);
+    EXPECT_LT(errors.back(), 0.08);
+    EXPECT_LT(centroid_errors.back(), 0.01);
+}
+
+TEST(LevelSetConservativePhaseBenchmarks,
+     DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift)
+{
+    constexpr FE::Real speed = 0.2;
+    constexpr FE::Real representative_time = 0.37;
+    constexpr FE::Real initial_center_x = 0.317;
+    constexpr FE::Real center_y = 0.473;
+    constexpr FE::Real radius = 0.137;
+    constexpr FE::Real distortion_amplitude = 0.03;
+    const FE::Real translated_center_x =
+        initial_center_x + speed * representative_time;
+    const FE::Real analytic_measure =
+        std::numbers::pi_v<FE::Real> * radius * radius;
+    std::vector<FE::Real> target_measure_errors;
+    FE::Real maximum_snapshot_measure_difference{0.0};
+    FE::Real maximum_absolute_post_correction_drift{0.0};
+    FE::Real minimum_absolute_pre_correction_drift =
+        std::numeric_limits<FE::Real>::max();
+
+    for (const std::size_t cells_per_axis : {12u, 24u, 48u}) {
+        StructuredTriLevelSetFixture fixture(
+            cells_per_axis, distortion_amplitude);
+        const auto field_offset = static_cast<std::size_t>(
+            fixture.system.fieldDofOffset(fixture.level_set_field));
+        std::vector<FE::Real> target_solution(
+            static_cast<std::size_t>(
+                fixture.system.dofHandler().getNumDofs()),
+            FE::Real{0.0});
+        FE::Real minimum_absolute_vertex_value =
+            std::numeric_limits<FE::Real>::max();
+        for (FE::GlobalIndex vertex = 0;
+             vertex < fixture.mesh->numVertices(); ++vertex) {
+            const auto point = fixture.mesh->getNodeCoordinates(vertex);
+            const FE::Real dx = point[0] - translated_center_x;
+            const FE::Real dy = point[1] - center_y;
+            const FE::Real value = std::sqrt(dx * dx + dy * dy) - radius;
+            const auto local_dof = fixture.vertex_dofs.at(
+                static_cast<std::size_t>(vertex));
+            target_solution[field_offset +
+                            static_cast<std::size_t>(local_dof)] = value;
+            minimum_absolute_vertex_value = std::min(
+                minimum_absolute_vertex_value, std::abs(value));
+        }
+        ASSERT_GT(minimum_absolute_vertex_value, FE::Real{1.0e-8});
+
+        level_set::LevelSetVolumeOptions volume_options{};
+        volume_options.use_generated_interface_quadrature = true;
+        volume_options.level_set_field_name = "level_set";
+        volume_options.generated_domain_id =
+            "distorted_translating_disk_correction_" +
+            std::to_string(cells_per_axis);
+        volume_options.interface_quadrature_order = 4;
+        volume_options.volume_quadrature_order = 4;
+
+        const auto target_volume =
+            level_set::computeLevelSetCutCellVolume(
+                fixture.system,
+                fixture.level_set_field,
+                volume_options,
+                target_solution);
+        ASSERT_TRUE(target_volume.success) << target_volume.diagnostic;
+        target_measure_errors.push_back(std::abs(
+            target_volume.negative_volume - analytic_measure));
+
+        level_set::LevelSetGeneratedInterfaceOptions interface_options{};
+        interface_options.level_set_field_name = "level_set";
+        interface_options.domain_id = volume_options.generated_domain_id;
+        interface_options.requested_interface_marker =
+            4700 + static_cast<int>(cells_per_axis);
+        interface_options.interface_quadrature_order = 4;
+        interface_options.volume_quadrature_order = 4;
+        level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+        auto generated = lifecycle.build(
+            fixture.system, interface_options, target_solution);
+        ASSERT_TRUE(generated.success) << generated.diagnostic;
+
+        FE::interfaces::FreeSurfaceGeometrySnapshotPolicy snapshot_policy;
+        snapshot_policy.require_complete_exterior_boundary_partition = false;
+        FE::interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+        scalar.value = [mesh = fixture.mesh,
+                        vertex_dofs = fixture.vertex_dofs,
+                        target_solution,
+                        field_offset](
+                           FE::GlobalIndex cell,
+                           const std::array<FE::Real, 3>& xi,
+                           const FE::geometry::CutQuadratureProvenance&) {
+            std::vector<FE::GlobalIndex> nodes;
+            mesh->getCellNodes(cell, nodes);
+            std::array<FE::Real, 3> values{};
+            for (std::size_t local = 0u; local < values.size(); ++local) {
+                const auto vertex = static_cast<std::size_t>(nodes.at(local));
+                values[local] = target_solution[
+                    field_offset + static_cast<std::size_t>(
+                                       vertex_dofs.at(vertex))];
+            }
+            return (FE::Real{1.0} - xi[0] - xi[1]) * values[0] +
+                   xi[0] * values[1] + xi[1] * values[2];
+        };
+        scalar.reference_gradient =
+            [mesh = fixture.mesh,
+             vertex_dofs = fixture.vertex_dofs,
+             target_solution,
+             field_offset](
+                FE::GlobalIndex cell,
+                const std::array<FE::Real, 3>&,
+                const FE::geometry::CutQuadratureProvenance&) {
+                std::vector<FE::GlobalIndex> nodes;
+                mesh->getCellNodes(cell, nodes);
+                std::array<FE::Real, 3> values{};
+                for (std::size_t local = 0u; local < values.size(); ++local) {
+                    const auto vertex =
+                        static_cast<std::size_t>(nodes.at(local));
+                    values[local] = target_solution[
+                        field_offset + static_cast<std::size_t>(
+                                           vertex_dofs.at(vertex))];
+                }
+                return std::array<FE::Real, 3>{
+                    values[1] - values[0],
+                    values[2] - values[0],
+                    FE::Real{0.0},
+                };
+            };
+        const auto snapshot =
+            FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+                std::move(generated.domain),
+                {},
+                {},
+                fixture.system.meshAccess(),
+                snapshot_policy,
+                std::move(scalar),
+                volume_options.generated_domain_id);
+        ASSERT_TRUE(snapshot);
+        const FE::Real snapshot_measure =
+            snapshot->ledger().owned_retained_negative_physical_volume;
+        maximum_snapshot_measure_difference = std::max(
+            maximum_snapshot_measure_difference,
+            std::abs(snapshot_measure - target_volume.negative_volume));
+        EXPECT_NEAR(snapshot_measure,
+                    target_volume.negative_volume,
+                    FE::Real{2.0e-11});
+        EXPECT_NEAR(snapshot->ledger().maximum_constant_moment_error,
+                    FE::Real{0.0},
+                    FE::Real{2.0e-12});
+
+        const FE::Real spacing = FE::Real{1.0} /
+                                 static_cast<FE::Real>(cells_per_axis);
+        const FE::Real imposed_drift = std::min(
+            FE::Real{0.04} * spacing,
+            FE::Real{0.25} * minimum_absolute_vertex_value);
+        ASSERT_GT(imposed_drift, FE::Real{1.0e-8});
+        auto drifted_solution = target_solution;
+        for (const auto local_dof : fixture.vertex_dofs) {
+            drifted_solution[
+                field_offset + static_cast<std::size_t>(local_dof)] +=
+                imposed_drift;
+        }
+        const auto drifted_volume =
+            level_set::computeLevelSetCutCellVolume(
+                fixture.system,
+                fixture.level_set_field,
+                volume_options,
+                drifted_solution);
+        ASSERT_TRUE(drifted_volume.success) << drifted_volume.diagnostic;
+        const FE::Real pre_correction_drift =
+            drifted_volume.negative_volume - target_volume.negative_volume;
+        minimum_absolute_pre_correction_drift = std::min(
+            minimum_absolute_pre_correction_drift,
+            std::abs(pre_correction_drift));
+        EXPECT_LT(pre_correction_drift, FE::Real{0.0});
+
+        level_set::LevelSetGlobalShiftCorrectionOptions correction_options{};
+        correction_options.target_negative_volume =
+            target_volume.negative_volume;
+        correction_options.volume_tolerance = FE::Real{1.0e-10};
+        correction_options.max_iterations = 80;
+        correction_options.maximum_interface_displacement_fraction = 0.2;
+        std::vector<FE::Real> corrected_solution;
+        const auto correction =
+            level_set::applyGlobalLevelSetShiftCorrection(
+                fixture.system,
+                fixture.level_set_field,
+                volume_options,
+                correction_options,
+                drifted_solution,
+                corrected_solution);
+        ASSERT_TRUE(correction.success) << correction.diagnostic;
+        ASSERT_TRUE(correction.correction_triggered);
+        ASSERT_TRUE(correction.correction_applied);
+        ASSERT_TRUE(correction.target_reached);
+        EXPECT_FALSE(correction.limited_by_displacement_bound);
+        EXPECT_NEAR(correction.applied_shift,
+                    -imposed_drift,
+                    FE::Real{2.0e-9});
+        const FE::Real post_correction_drift =
+            correction.corrected_negative_volume -
+            target_volume.negative_volume;
+        maximum_absolute_post_correction_drift = std::max(
+            maximum_absolute_post_correction_drift,
+            std::abs(post_correction_drift));
+        EXPECT_LE(std::abs(post_correction_drift),
+                  correction_options.volume_tolerance);
+
+        const std::string suffix =
+            "_N" + std::to_string(cells_per_axis);
+        RecordProperty("runtime_target_measure" + suffix,
+                       serializeReal(target_volume.negative_volume));
+        RecordProperty("runtime_snapshot_measure" + suffix,
+                       serializeReal(snapshot_measure));
+        RecordProperty("runtime_drifted_measure" + suffix,
+                       serializeReal(drifted_volume.negative_volume));
+        RecordProperty("runtime_pre_correction_drift" + suffix,
+                       serializeReal(pre_correction_drift));
+        RecordProperty("runtime_imposed_shift" + suffix,
+                       serializeReal(imposed_drift));
+        RecordProperty("runtime_correction_shift" + suffix,
+                       serializeReal(correction.applied_shift));
+        RecordProperty("runtime_corrected_measure" + suffix,
+                       serializeReal(correction.corrected_negative_volume));
+        RecordProperty("runtime_post_correction_drift" + suffix,
+                       serializeReal(post_correction_drift));
+        RecordProperty("runtime_target_analytic_error" + suffix,
+                       serializeReal(target_measure_errors.back()));
+        RecordProperty("runtime_correction_iterations" + suffix,
+                       std::to_string(correction.iterations));
+    }
+
+    ASSERT_EQ(target_measure_errors.size(), 3u);
+    EXPECT_LT(target_measure_errors[1], target_measure_errors[0]);
+    EXPECT_LT(target_measure_errors[2], target_measure_errors[1]);
+    const FE::Real first_measure_order = observedOrder(
+        target_measure_errors[0], target_measure_errors[1]);
+    const FE::Real second_measure_order = observedOrder(
+        target_measure_errors[1], target_measure_errors[2]);
+    RecordProperty("runtime_target_measure_order_12_to_24",
+                   serializeReal(first_measure_order));
+    RecordProperty("runtime_target_measure_order_24_to_48",
+                   serializeReal(second_measure_order));
+    RecordProperty("runtime_maximum_snapshot_measure_difference",
+                   serializeReal(maximum_snapshot_measure_difference));
+    RecordProperty("runtime_minimum_absolute_pre_correction_drift",
+                   serializeReal(minimum_absolute_pre_correction_drift));
+    RecordProperty("runtime_maximum_absolute_post_correction_drift",
+                   serializeReal(maximum_absolute_post_correction_drift));
+    EXPECT_GT(first_measure_order, FE::Real{1.0});
+    EXPECT_GT(second_measure_order, FE::Real{1.0});
 }
 
 TEST(LevelSetConservativePhaseBenchmarks,

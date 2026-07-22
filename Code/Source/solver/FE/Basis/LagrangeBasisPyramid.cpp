@@ -13,7 +13,11 @@
 #include "Basis/BasisExceptions.h"
 #include "BasisTolerance.h"
 #include "Math/DenseLinearAlgebra.h"
+#if __has_include("Math/DenseTransformKernels.h")
 #include "Math/DenseTransformKernels.h"
+#else
+#include "Math/DenseTransformFallback.h"
+#endif
 #include "LagrangeBasisUtility.h"
 #include "PyramidModalBasis.h"
 

@@ -436,6 +436,7 @@ projectLevelSetP1PhaseIndicatorFromCutContext(
         bool local_rule_snapshot_success = true;
         std::string local_rule_snapshot_diagnostic;
         try {
+            cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
             rules = cut_context->generatedVolumeRulesForMarkerAndSide(
                 options.interface_marker, options.liquid_side);
         } catch (const std::exception& exception) {
@@ -874,6 +875,7 @@ buildLevelSetP1PhaseGeometrySensitivity(
         bool local_rule_snapshot_success = true;
         std::string local_rule_snapshot_diagnostic;
         try {
+            cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
             rules = cut_context->interfaceRulesForMarker(
                 options.interface_marker);
         } catch (const std::exception& exception) {

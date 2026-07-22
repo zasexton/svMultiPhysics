@@ -1,11 +1,15 @@
 #include "LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 
+#include "Basis/BasisTraits.h"
+#include "Basis/NodeOrderingConventions.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -510,6 +514,893 @@ struct Box3D {
     Real zmax{0.0};
 };
 
+struct OutwardInterval {
+    long double lower{0.0L};
+    long double upper{0.0L};
+};
+
+[[nodiscard]] long double roundDown(long double value) noexcept
+{
+    return std::nextafter(value,
+                          -std::numeric_limits<long double>::infinity());
+}
+
+[[nodiscard]] long double roundUp(long double value) noexcept
+{
+    return std::nextafter(value,
+                          std::numeric_limits<long double>::infinity());
+}
+
+[[nodiscard]] OutwardInterval pointInterval(Real value) noexcept
+{
+    const auto exact = static_cast<long double>(value);
+    return OutwardInterval{exact, exact};
+}
+
+[[nodiscard]] OutwardInterval addIntervals(const OutwardInterval& lhs,
+                                            const OutwardInterval& rhs) noexcept
+{
+    return OutwardInterval{roundDown(lhs.lower + rhs.lower),
+                           roundUp(lhs.upper + rhs.upper)};
+}
+
+[[nodiscard]] OutwardInterval subtractIntervals(
+    const OutwardInterval& lhs,
+    const OutwardInterval& rhs) noexcept
+{
+    return OutwardInterval{roundDown(lhs.lower - rhs.upper),
+                           roundUp(lhs.upper - rhs.lower)};
+}
+
+[[nodiscard]] OutwardInterval multiplyIntervals(
+    const OutwardInterval& lhs,
+    const OutwardInterval& rhs) noexcept
+{
+    const std::array<long double, 4> products{{
+        lhs.lower * rhs.lower,
+        lhs.lower * rhs.upper,
+        lhs.upper * rhs.lower,
+        lhs.upper * rhs.upper,
+    }};
+    const auto [minimum, maximum] =
+        std::minmax_element(products.begin(), products.end());
+    return OutwardInterval{roundDown(*minimum), roundUp(*maximum)};
+}
+
+[[nodiscard]] OutwardInterval divideIntervals(
+    const OutwardInterval& numerator,
+    const OutwardInterval& denominator)
+{
+    if (denominator.lower <= 0.0L && denominator.upper >= 0.0L) {
+        throw std::invalid_argument(
+            "certified tensor polynomial interval division crossed zero");
+    }
+    const std::array<long double, 4> quotients{{
+        numerator.lower / denominator.lower,
+        numerator.lower / denominator.upper,
+        numerator.upper / denominator.lower,
+        numerator.upper / denominator.upper,
+    }};
+    const auto [minimum, maximum] =
+        std::minmax_element(quotients.begin(), quotients.end());
+    return OutwardInterval{roundDown(*minimum), roundUp(*maximum)};
+}
+
+[[nodiscard]] OutwardInterval rationalInterval(long double numerator,
+                                                long double denominator)
+{
+    return divideIntervals(OutwardInterval{numerator, numerator},
+                           OutwardInterval{denominator, denominator});
+}
+
+[[nodiscard]] OutwardInterval scaleInterval(
+    const OutwardInterval& value,
+    long double numerator,
+    long double denominator = 1.0L)
+{
+    return multiplyIntervals(
+        value, rationalInterval(numerator, denominator));
+}
+
+[[nodiscard]] std::vector<OutwardInterval> nodalLineToBernstein(
+    const std::vector<OutwardInterval>& nodal,
+    int order)
+{
+    if (order == 2 && nodal.size() == 3u) {
+        return {
+            nodal[0],
+            addIntervals(
+                scaleInterval(nodal[1], 2.0L),
+                addIntervals(scaleInterval(nodal[0], -1.0L, 2.0L),
+                             scaleInterval(nodal[2], -1.0L, 2.0L))),
+            nodal[2],
+        };
+    }
+    if (order == 3 && nodal.size() == 4u) {
+        return {
+            nodal[0],
+            addIntervals(
+                addIntervals(scaleInterval(nodal[0], -5.0L, 6.0L),
+                             scaleInterval(nodal[1], 3.0L)),
+                addIntervals(scaleInterval(nodal[2], -3.0L, 2.0L),
+                             scaleInterval(nodal[3], 1.0L, 3.0L))),
+            addIntervals(
+                addIntervals(scaleInterval(nodal[0], 1.0L, 3.0L),
+                             scaleInterval(nodal[1], -3.0L, 2.0L)),
+                addIntervals(scaleInterval(nodal[2], 3.0L),
+                             scaleInterval(nodal[3], -5.0L, 6.0L))),
+            nodal[3],
+        };
+    }
+    throw std::invalid_argument(
+        "certified tensor polynomial range supports only Q2 and Q3 lines");
+}
+
+struct TensorBernsteinCertificate {
+    int dimension{0};
+    int order{0};
+    std::size_t axis_size{0u};
+    std::array<Real, 3> reference_min{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> reference_max{{0.0, 0.0, 0.0}};
+    std::vector<OutwardInterval> root_control_values{};
+};
+
+[[nodiscard]] std::size_t integerPower(std::size_t base, int exponent) noexcept
+{
+    std::size_t value = 1u;
+    for (int i = 0; i < exponent; ++i) {
+        value *= base;
+    }
+    return value;
+}
+
+void transformTensorAxisToBernstein(
+    std::vector<OutwardInterval>& values,
+    int dimension,
+    int order,
+    int axis)
+{
+    const auto n = static_cast<std::size_t>(order + 1);
+    const auto stride = integerPower(n, axis);
+    const auto block = stride * n;
+    const auto total = integerPower(n, dimension);
+    auto transformed = values;
+    for (std::size_t base = 0u; base < total; base += block) {
+        for (std::size_t inner = 0u; inner < stride; ++inner) {
+            std::vector<OutwardInterval> line;
+            line.reserve(n);
+            for (std::size_t i = 0u; i < n; ++i) {
+                line.push_back(values[base + inner + i * stride]);
+            }
+            const auto bernstein = nodalLineToBernstein(line, order);
+            for (std::size_t i = 0u; i < n; ++i) {
+                transformed[base + inner + i * stride] = bernstein[i];
+            }
+        }
+    }
+    values = std::move(transformed);
+}
+
+[[nodiscard]] std::optional<TensorBernsteinCertificate>
+makeTensorBernsteinCertificate(
+    int mesh_dimension,
+    const ImplicitCutQuadratureBackendCellInput& input)
+{
+    if (input.evaluator == nullptr ||
+        (mesh_dimension != 2 && mesh_dimension != 3)) {
+        return std::nullopt;
+    }
+    const auto cell_id = input.linearized_input.parent_cell;
+    const int order = input.evaluator->interpolationOrder(cell_id);
+    if (order != 2 && order != 3) {
+        return std::nullopt;
+    }
+
+    const auto element_type = input.linearized_input.element_type;
+    const ElementType canonical_type =
+        mesh_dimension == 2 && basis::is_quadrilateral(element_type)
+            ? ElementType::Quad4
+            : mesh_dimension == 3 && basis::is_hexahedron(element_type)
+                  ? ElementType::Hex8
+                  : ElementType::Unknown;
+    if (canonical_type == ElementType::Unknown) {
+        return std::nullopt;
+    }
+    const auto nodes = basis::ReferenceNodeLayout::get_lagrange_node_coords(
+        canonical_type, order);
+    const auto coefficients =
+        input.evaluator->gatherCellCoefficients(cell_id);
+    const bool coefficients_are_complete_tensor_nodes =
+        input.evaluator->usesCompleteTensorLagrangeBasis(cell_id);
+    const bool coefficients_use_tensor_serendipity =
+        input.evaluator->usesTensorSerendipityBasis(cell_id);
+    if (!coefficients_are_complete_tensor_nodes &&
+        !coefficients_use_tensor_serendipity) {
+        return std::nullopt;
+    }
+    const auto n = static_cast<std::size_t>(order + 1);
+    const auto expected = integerPower(n, mesh_dimension);
+    if (nodes.size() != expected ||
+        (coefficients_are_complete_tensor_nodes &&
+         coefficients.size() != expected)) {
+        throw std::invalid_argument(
+            "certified tensor polynomial range found an inconsistent complete Lagrange control net");
+    }
+
+    long double coefficient_scale = 1.0L;
+    for (const Real coefficient : coefficients) {
+        coefficient_scale += std::abs(static_cast<long double>(coefficient));
+    }
+    const long double evaluated_node_uncertainty = roundUp(
+        4096.0L * std::numeric_limits<Real>::epsilon() *
+        coefficient_scale);
+
+    std::vector<OutwardInterval> tensor_values(expected);
+    std::vector<unsigned char> assigned(expected, 0u);
+    constexpr Real coordinate_tolerance = Real{256.0} *
+                                          std::numeric_limits<Real>::epsilon();
+    for (std::size_t local = 0u; local < nodes.size(); ++local) {
+        std::array<std::size_t, 3> index{{0u, 0u, 0u}};
+        for (int axis = 0; axis < mesh_dimension; ++axis) {
+            const Real scaled =
+                (nodes[local][static_cast<std::size_t>(axis)] + Real{1.0}) *
+                static_cast<Real>(order) / Real{2.0};
+            const auto nearest = static_cast<long long>(std::llround(scaled));
+            if (nearest < 0 || nearest > order ||
+                std::abs(scaled - static_cast<Real>(nearest)) >
+                    coordinate_tolerance) {
+                throw std::invalid_argument(
+                    "certified tensor polynomial range found a non-equispaced Lagrange node");
+            }
+            index[static_cast<std::size_t>(axis)] =
+                static_cast<std::size_t>(nearest);
+        }
+        const auto flat = index[0] + n * (index[1] + n * index[2]);
+        if (flat >= expected || assigned[flat] != 0u) {
+            throw std::invalid_argument(
+                "certified tensor polynomial range found duplicate tensor nodes");
+        }
+        if (coefficients_are_complete_tensor_nodes) {
+            tensor_values[flat] = pointInterval(coefficients[local]);
+        } else {
+            const auto value = input.evaluator
+                                   ->evaluate(
+                                       cell_id,
+                                       {{nodes[local][0],
+                                         nodes[local][1],
+                                         nodes[local][2]}})
+                                   .value;
+            const auto extended = static_cast<long double>(value);
+            tensor_values[flat] = OutwardInterval{
+                roundDown(extended - evaluated_node_uncertainty),
+                roundUp(extended + evaluated_node_uncertainty)};
+        }
+        assigned[flat] = 1u;
+    }
+    if (std::find(assigned.begin(), assigned.end(), 0u) != assigned.end()) {
+        throw std::invalid_argument(
+            "certified tensor polynomial range found an incomplete tensor node set");
+    }
+
+    for (int axis = 0; axis < mesh_dimension; ++axis) {
+        transformTensorAxisToBernstein(
+            tensor_values, mesh_dimension, order, axis);
+    }
+    const auto isovalue = pointInterval(input.isovalue);
+    for (auto& value : tensor_values) {
+        value = subtractIntervals(value, isovalue);
+    }
+    return TensorBernsteinCertificate{
+        .dimension = mesh_dimension,
+        .order = order,
+        .axis_size = n,
+        .reference_min = input.reference_min,
+        .reference_max = input.reference_max,
+        .root_control_values = std::move(tensor_values),
+    };
+}
+
+struct BernsteinSplitLine {
+    std::vector<OutwardInterval> left{};
+    std::vector<OutwardInterval> right{};
+};
+
+[[nodiscard]] BernsteinSplitLine splitBernsteinLine(
+    const std::vector<OutwardInterval>& control,
+    const OutwardInterval& parameter)
+{
+    const auto n = control.size();
+    if (n == 0u) {
+        return {};
+    }
+    auto work = control;
+    BernsteinSplitLine split;
+    split.left.resize(n);
+    split.right.resize(n);
+    split.left[0] = work[0];
+    split.right[n - 1u] = work[n - 1u];
+    const auto one_minus_parameter =
+        subtractIntervals(OutwardInterval{1.0L, 1.0L}, parameter);
+    for (std::size_t level = 1u; level < n; ++level) {
+        for (std::size_t i = 0u; i + level < n; ++i) {
+            work[i] = addIntervals(
+                multiplyIntervals(one_minus_parameter, work[i]),
+                multiplyIntervals(parameter, work[i + 1u]));
+        }
+        split.left[level] = work[0];
+        split.right[n - level - 1u] = work[n - level - 1u];
+    }
+    return split;
+}
+
+void restrictTensorControlAxis(
+    std::vector<OutwardInterval>& values,
+    const TensorBernsteinCertificate& certificate,
+    int axis,
+    Real lower,
+    Real upper)
+{
+    const auto n = certificate.axis_size;
+    const auto stride = integerPower(n, axis);
+    const auto block = stride * n;
+    const auto total = integerPower(n, certificate.dimension);
+    const Real root_lower =
+        certificate.reference_min[static_cast<std::size_t>(axis)];
+    const Real root_upper =
+        certificate.reference_max[static_cast<std::size_t>(axis)];
+    const auto root_span = subtractIntervals(pointInterval(root_upper),
+                                             pointInterval(root_lower));
+    const auto upper_parameter = divideIntervals(
+        subtractIntervals(pointInterval(upper), pointInterval(root_lower)),
+        root_span);
+    const auto lower_parameter_on_left = divideIntervals(
+        subtractIntervals(pointInterval(lower), pointInterval(root_lower)),
+        subtractIntervals(pointInterval(upper), pointInterval(root_lower)));
+
+    auto restricted = values;
+    for (std::size_t base = 0u; base < total; base += block) {
+        for (std::size_t inner = 0u; inner < stride; ++inner) {
+            std::vector<OutwardInterval> line;
+            line.reserve(n);
+            for (std::size_t i = 0u; i < n; ++i) {
+                line.push_back(values[base + inner + i * stride]);
+            }
+            if (upper != root_upper) {
+                line = splitBernsteinLine(line, upper_parameter).left;
+            }
+            if (lower != root_lower) {
+                line = splitBernsteinLine(
+                           line, lower_parameter_on_left)
+                           .right;
+            }
+            for (std::size_t i = 0u; i < n; ++i) {
+                restricted[base + inner + i * stride] = line[i];
+            }
+        }
+    }
+    values = std::move(restricted);
+}
+
+[[nodiscard]] OutwardInterval certifiedRectangleRange(
+    const TensorBernsteinCertificate& certificate,
+    const Rectangle2D& rect)
+{
+    auto control = certificate.root_control_values;
+    restrictTensorControlAxis(
+        control, certificate, 0, rect.xmin, rect.xmax);
+    restrictTensorControlAxis(
+        control, certificate, 1, rect.ymin, rect.ymax);
+    OutwardInterval range{std::numeric_limits<long double>::infinity(),
+                          -std::numeric_limits<long double>::infinity()};
+    for (const auto& value : control) {
+        range.lower = std::min(range.lower, value.lower);
+        range.upper = std::max(range.upper, value.upper);
+    }
+    return range;
+}
+
+[[nodiscard]] OutwardInterval certifiedBoxRange(
+    const TensorBernsteinCertificate& certificate,
+    const Box3D& box)
+{
+    auto control = certificate.root_control_values;
+    restrictTensorControlAxis(
+        control, certificate, 0, box.xmin, box.xmax);
+    restrictTensorControlAxis(
+        control, certificate, 1, box.ymin, box.ymax);
+    restrictTensorControlAxis(
+        control, certificate, 2, box.zmin, box.zmax);
+    OutwardInterval range{std::numeric_limits<long double>::infinity(),
+                          -std::numeric_limits<long double>::infinity()};
+    for (const auto& value : control) {
+        range.lower = std::min(range.lower, value.lower);
+        range.upper = std::max(range.upper, value.upper);
+    }
+    return range;
+}
+
+struct CertifiedRegularGraph {
+    int axis{-1};
+    bool lower_face_zero{false};
+    bool upper_face_zero{false};
+    bool coordinatewise_monotone{false};
+};
+
+[[nodiscard]] long double certifiedControlRoundoffZeroBound(
+    const std::vector<OutwardInterval>& control) noexcept
+{
+    // This factor exceeds the scalar-operation count of the supported Q3
+    // transform and two-axis restriction while remaining far below Real root
+    // tolerances at unit scale.
+    constexpr long double operation_roundoff_factor = 16384.0L;
+    long double control_scale = 1.0L;
+    for (const auto& value : control) {
+        control_scale = std::max(
+            control_scale,
+            std::max(std::abs(value.lower), std::abs(value.upper)));
+    }
+    return roundUp(
+        operation_roundoff_factor *
+        std::numeric_limits<long double>::epsilon() *
+        control_scale);
+}
+
+[[nodiscard]] bool isCertifiedRoundoffZero(
+    const OutwardInterval& value,
+    long double zero_bound) noexcept
+{
+    return value.lower >= -zero_bound && value.upper <= zero_bound;
+}
+
+[[nodiscard]] bool certifiedFaceEndpointTouch(
+    const std::vector<OutwardInterval>& control,
+    const TensorBernsteinCertificate& certificate,
+    int graph_axis,
+    bool lower_face,
+    bool nonnegative_face,
+    Real root_tolerance,
+    long double roundoff_zero_bound)
+{
+    if (certificate.dimension != 2) {
+        return false;
+    }
+    const auto n = certificate.axis_size;
+    const int tangent_axis = 1 - graph_axis;
+    std::vector<OutwardInterval> face;
+    face.reserve(n);
+    for (std::size_t tangent = 0u; tangent < n; ++tangent) {
+        std::array<std::size_t, 2> index{{0u, 0u}};
+        index[static_cast<std::size_t>(graph_axis)] =
+            lower_face ? 0u : n - 1u;
+        index[static_cast<std::size_t>(tangent_axis)] = tangent;
+        const auto flat = index[0] + n * index[1];
+        const auto& value = control[flat];
+        face.push_back(nonnegative_face
+                           ? value
+                           : OutwardInterval{-value.upper, -value.lower});
+    }
+
+    for (const auto& value : face) {
+        if (value.lower < 0.0L &&
+            !isCertifiedRoundoffZero(value, roundoff_zero_bound)) {
+            return false;
+        }
+    }
+
+    const auto tolerance = static_cast<long double>(root_tolerance);
+    for (const std::size_t zero_endpoint :
+         {std::size_t{0u}, n - 1u}) {
+        if (!isCertifiedRoundoffZero(
+                face[zero_endpoint], roundoff_zero_bound)) {
+            continue;
+        }
+        const std::size_t opposite_endpoint =
+            zero_endpoint == 0u ? n - 1u : 0u;
+        if (face[opposite_endpoint].lower <= tolerance) {
+            continue;
+        }
+        const bool zero_endpoint_is_upper = zero_endpoint == n - 1u;
+        bool strict_step = false;
+        bool monotone_toward_zero = true;
+        for (std::size_t i = 0u; i + 1u < n; ++i) {
+            const auto difference =
+                subtractIntervals(face[i + 1u], face[i]);
+            if (zero_endpoint_is_upper) {
+                monotone_toward_zero =
+                    difference.upper <= 0.0L ||
+                    isCertifiedRoundoffZero(
+                        difference, roundoff_zero_bound);
+                strict_step = strict_step ||
+                    difference.upper < -roundoff_zero_bound;
+            } else {
+                monotone_toward_zero =
+                    difference.lower >= 0.0L ||
+                    isCertifiedRoundoffZero(
+                        difference, roundoff_zero_bound);
+                strict_step = strict_step ||
+                    difference.lower > roundoff_zero_bound;
+            }
+            if (!monotone_toward_zero) {
+                break;
+            }
+        }
+        if (monotone_toward_zero && strict_step) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] std::optional<CertifiedRegularGraph> certifiedRegularGraph(
+    const TensorBernsteinCertificate& certificate,
+    const std::array<Real, 3>& lower,
+    const std::array<Real, 3>& upper,
+    Real root_tolerance)
+{
+    auto control = certificate.root_control_values;
+    for (int axis = 0; axis < certificate.dimension; ++axis) {
+        restrictTensorControlAxis(
+            control,
+            certificate,
+            axis,
+            lower[static_cast<std::size_t>(axis)],
+            upper[static_cast<std::size_t>(axis)]);
+    }
+
+    const auto n = certificate.axis_size;
+    const auto total = integerPower(n, certificate.dimension);
+    const long double roundoff_zero_bound =
+        certifiedControlRoundoffZeroBound(control);
+    std::optional<CertifiedRegularGraph> face_bracketed_graph;
+    int strictly_monotone_axis_count = 0;
+    int first_strictly_monotone_axis = -1;
+    for (int axis = 0; axis < certificate.dimension; ++axis) {
+        const auto stride = integerPower(n, axis);
+        const auto block = stride * n;
+        bool strictly_increasing = true;
+        bool strictly_decreasing = true;
+        bool lower_face_negative = true;
+        bool lower_face_positive = true;
+        bool upper_face_negative = true;
+        bool upper_face_positive = true;
+        bool lower_face_zero = true;
+        bool upper_face_zero = true;
+        const auto tolerance =
+            static_cast<long double>(root_tolerance);
+        for (std::size_t base = 0u; base < total; base += block) {
+            for (std::size_t inner = 0u; inner < stride; ++inner) {
+                const auto& lower_face_value = control[base + inner];
+                const auto& upper_face_value =
+                    control[base + inner + (n - 1u) * stride];
+                lower_face_negative =
+                    lower_face_negative &&
+                    lower_face_value.upper < -tolerance;
+                lower_face_positive =
+                    lower_face_positive &&
+                    lower_face_value.lower > tolerance;
+                upper_face_negative =
+                    upper_face_negative &&
+                    upper_face_value.upper < -tolerance;
+                upper_face_positive =
+                    upper_face_positive &&
+                    upper_face_value.lower > tolerance;
+                lower_face_zero =
+                    lower_face_zero &&
+                    lower_face_value.lower >= -tolerance &&
+                    lower_face_value.upper <= tolerance;
+                upper_face_zero =
+                    upper_face_zero &&
+                    upper_face_value.lower >= -tolerance &&
+                    upper_face_value.upper <= tolerance;
+                for (std::size_t i = 0u; i + 1u < n; ++i) {
+                    const auto difference = subtractIntervals(
+                        control[base + inner + (i + 1u) * stride],
+                        control[base + inner + i * stride]);
+                    strictly_increasing =
+                        strictly_increasing && difference.lower > 0.0L;
+                    strictly_decreasing =
+                        strictly_decreasing && difference.upper < 0.0L;
+                }
+            }
+        }
+        const bool increasing_graph_bracket = strictly_increasing &&
+            ((lower_face_negative && upper_face_positive) ||
+             (lower_face_zero && upper_face_positive) ||
+             (lower_face_negative && upper_face_zero) ||
+             (certifiedFaceEndpointTouch(
+                  control,
+                  certificate,
+                  axis,
+                  /*lower_face=*/true,
+                  /*nonnegative_face=*/false,
+                  root_tolerance,
+                  roundoff_zero_bound) &&
+              upper_face_positive) ||
+             (lower_face_negative &&
+              certifiedFaceEndpointTouch(
+                  control,
+                  certificate,
+                  axis,
+                  /*lower_face=*/false,
+                  /*nonnegative_face=*/true,
+                  root_tolerance,
+                  roundoff_zero_bound)));
+        const bool decreasing_graph_bracket = strictly_decreasing &&
+            ((lower_face_positive && upper_face_negative) ||
+             (lower_face_zero && upper_face_negative) ||
+             (lower_face_positive && upper_face_zero) ||
+             (certifiedFaceEndpointTouch(
+                  control,
+                  certificate,
+                  axis,
+                  /*lower_face=*/true,
+                  /*nonnegative_face=*/true,
+                  root_tolerance,
+                  roundoff_zero_bound) &&
+              upper_face_negative) ||
+             (lower_face_positive &&
+              certifiedFaceEndpointTouch(
+                  control,
+                  certificate,
+                  axis,
+                  /*lower_face=*/false,
+                  /*nonnegative_face=*/false,
+                  root_tolerance,
+                  roundoff_zero_bound)));
+        if (strictly_increasing || strictly_decreasing) {
+            ++strictly_monotone_axis_count;
+            if (first_strictly_monotone_axis < 0) {
+                first_strictly_monotone_axis = axis;
+            }
+        }
+        if (!face_bracketed_graph.has_value() &&
+            (increasing_graph_bracket || decreasing_graph_bracket)) {
+            face_bracketed_graph = CertifiedRegularGraph{
+                .axis = axis,
+                .lower_face_zero = lower_face_zero,
+                .upper_face_zero = upper_face_zero,
+                .coordinatewise_monotone = false,
+            };
+        }
+    }
+    if (face_bracketed_graph.has_value()) {
+        return face_bracketed_graph;
+    }
+    if (certificate.dimension == 2 &&
+        strictly_monotone_axis_count == certificate.dimension) {
+        bool certified_negative_corner = false;
+        bool certified_positive_corner = false;
+        const auto tolerance = static_cast<long double>(root_tolerance);
+        for (std::size_t flat = 0u; flat < total; ++flat) {
+            std::size_t remaining = flat;
+            bool is_corner = true;
+            for (int axis = 0; axis < certificate.dimension; ++axis) {
+                const auto coordinate = remaining % n;
+                remaining /= n;
+                is_corner = is_corner &&
+                    (coordinate == 0u || coordinate + 1u == n);
+            }
+            if (!is_corner) {
+                continue;
+            }
+            certified_negative_corner = certified_negative_corner ||
+                control[flat].upper < -tolerance;
+            certified_positive_corner = certified_positive_corner ||
+                control[flat].lower > tolerance;
+        }
+        if (certified_negative_corner && certified_positive_corner) {
+            return CertifiedRegularGraph{
+                .axis = first_strictly_monotone_axis,
+                .lower_face_zero = false,
+                .upper_face_zero = false,
+                .coordinatewise_monotone = true,
+            };
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<CertifiedRegularGraph> certifiedRegularGraph(
+    const TensorBernsteinCertificate& certificate,
+    const Rectangle2D& rect,
+    Real root_tolerance)
+{
+    return certifiedRegularGraph(
+        certificate,
+        {{rect.xmin, rect.ymin, 0.0}},
+        {{rect.xmax, rect.ymax, 0.0}},
+        root_tolerance);
+}
+
+[[nodiscard]] std::optional<geometry::CutIntegrationSide>
+certifiedOneSidedBoundaryTouch(
+    const TensorBernsteinCertificate& certificate,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Rectangle2D& rect,
+    const OutwardInterval& certified_range,
+    Real root_tolerance)
+{
+    if (certificate.dimension != 2 || input.evaluator == nullptr) {
+        return std::nullopt;
+    }
+
+    auto control = certificate.root_control_values;
+    restrictTensorControlAxis(
+        control, certificate, 0, rect.xmin, rect.xmax);
+    restrictTensorControlAxis(
+        control, certificate, 1, rect.ymin, rect.ymax);
+
+    const long double roundoff_zero_bound =
+        certifiedControlRoundoffZeroBound(control);
+    const auto is_roundoff_zero = [&](const OutwardInterval& value) {
+        return isCertifiedRoundoffZero(value, roundoff_zero_bound);
+    };
+
+    const auto n = certificate.axis_size;
+    const auto total = integerPower(n, certificate.dimension);
+    const auto corner_flat_index = [n](std::size_t x, std::size_t y) {
+        return x + n * y;
+    };
+    for (const auto side : {geometry::CutIntegrationSide::Positive,
+                            geometry::CutIntegrationSide::Negative}) {
+        const bool positive_side =
+            side == geometry::CutIntegrationSide::Positive;
+        const bool range_is_one_sided =
+            positive_side
+                ? certified_range.lower >= -roundoff_zero_bound &&
+                      certified_range.upper > roundoff_zero_bound
+                : certified_range.upper <= roundoff_zero_bound &&
+                      certified_range.lower < -roundoff_zero_bound;
+        if (!range_is_one_sided) {
+            continue;
+        }
+
+        for (const std::size_t corner_y : {std::size_t{0u}, n - 1u}) {
+            for (const std::size_t corner_x : {std::size_t{0u}, n - 1u}) {
+                const auto corner_index =
+                    corner_flat_index(corner_x, corner_y);
+                if (!is_roundoff_zero(control[corner_index])) {
+                    continue;
+                }
+                const std::array<Real, 3> corner{{
+                    corner_x == 0u ? rect.xmin : rect.xmax,
+                    corner_y == 0u ? rect.ymin : rect.ymax,
+                    0.0,
+                }};
+                const Real corner_value =
+                    input.evaluator
+                        ->evaluate(input.linearized_input.parent_cell, corner)
+                        .value -
+                    input.isovalue;
+                if ((positive_side &&
+                     (corner_value < Real{0.0} ||
+                      corner_value > root_tolerance)) ||
+                    (!positive_side &&
+                     (corner_value > Real{0.0} ||
+                      corner_value < -root_tolerance))) {
+                    continue;
+                }
+
+                bool all_axes_monotone = true;
+                for (int axis = 0; axis < 2; ++axis) {
+                    const auto stride = integerPower(n, axis);
+                    const auto block = stride * n;
+                    const bool corner_is_lower =
+                        axis == 0 ? corner_x == 0u : corner_y == 0u;
+                    const bool increasing_with_axis =
+                        positive_side == corner_is_lower;
+                    bool strict_step = false;
+                    for (std::size_t base = 0u;
+                         base < total && all_axes_monotone;
+                         base += block) {
+                        for (std::size_t inner = 0u;
+                             inner < stride && all_axes_monotone;
+                             ++inner) {
+                            for (std::size_t i = 0u; i + 1u < n; ++i) {
+                                const auto difference = subtractIntervals(
+                                    control[base + inner + (i + 1u) * stride],
+                                    control[base + inner + i * stride]);
+                                if (increasing_with_axis) {
+                                    all_axes_monotone =
+                                        difference.lower >= 0.0L ||
+                                        is_roundoff_zero(difference);
+                                    strict_step = strict_step ||
+                                        difference.lower >
+                                            roundoff_zero_bound;
+                                } else {
+                                    all_axes_monotone =
+                                        difference.upper <= 0.0L ||
+                                        is_roundoff_zero(difference);
+                                    strict_step = strict_step ||
+                                        difference.upper <
+                                            -roundoff_zero_bound;
+                                }
+                            }
+                        }
+                    }
+                    all_axes_monotone = all_axes_monotone && strict_step;
+                    if (!all_axes_monotone) {
+                        break;
+                    }
+                }
+                if (!all_axes_monotone) {
+                    continue;
+                }
+
+                bool other_corners_have_strict_side_sign = true;
+                for (const std::size_t other_y :
+                     {std::size_t{0u}, n - 1u}) {
+                    for (const std::size_t other_x :
+                         {std::size_t{0u}, n - 1u}) {
+                        if (other_x == corner_x && other_y == corner_y) {
+                            continue;
+                        }
+                        const auto& value = control[
+                            corner_flat_index(other_x, other_y)];
+                        other_corners_have_strict_side_sign =
+                            other_corners_have_strict_side_sign &&
+                            (positive_side
+                                 ? value.lower >
+                                       static_cast<long double>(root_tolerance)
+                                 : value.upper <
+                                       -static_cast<long double>(root_tolerance));
+                    }
+                }
+                if (other_corners_have_strict_side_sign) {
+                    return side;
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<CertifiedRegularGraph> certifiedRegularGraph(
+    const TensorBernsteinCertificate& certificate,
+    const Box3D& box,
+    Real root_tolerance)
+{
+    return certifiedRegularGraph(
+        certificate,
+        {{box.xmin, box.ymin, box.zmin}},
+        {{box.xmax, box.ymax, box.zmax}},
+        root_tolerance);
+}
+
+[[nodiscard]] bool certifiedGraphLeafOwnsInterface(
+    const TensorBernsteinCertificate& certificate,
+    const CertifiedRegularGraph& graph,
+    const std::array<Real, 3>& lower) noexcept
+{
+    if (!graph.lower_face_zero || graph.upper_face_zero) {
+        return true;
+    }
+    const auto axis = static_cast<std::size_t>(graph.axis);
+    return lower[axis] <= certificate.reference_min[axis];
+}
+
+[[nodiscard]] Real intervalLowerAsReal(long double value) noexcept
+{
+    Real converted = static_cast<Real>(value);
+    if (static_cast<long double>(converted) > value) {
+        converted = std::nextafter(
+            converted, -std::numeric_limits<Real>::infinity());
+    }
+    return std::nextafter(
+        converted, -std::numeric_limits<Real>::infinity());
+}
+
+[[nodiscard]] Real intervalUpperAsReal(long double value) noexcept
+{
+    Real converted = static_cast<Real>(value);
+    if (static_cast<long double>(converted) < value) {
+        converted = std::nextafter(
+            converted, std::numeric_limits<Real>::infinity());
+    }
+    return std::nextafter(
+        converted, std::numeric_limits<Real>::infinity());
+}
+
 struct Triangle2D {
     std::array<Real, 3> a{{0.0, 0.0, 0.0}};
     std::array<Real, 3> b{{0.0, 0.0, 0.0}};
@@ -533,6 +1424,15 @@ struct SayeHyperrectangleDiagnostics {
     int curved_fragment_count{0};
     int full_negative_region_count{0};
     int full_positive_region_count{0};
+    int certified_tensor_range_available{0};
+    int certified_range_query_count{0};
+    int certified_full_sign_region_count{0};
+    int certified_same_sign_refinement_count{0};
+    int certified_range_fail_closed_count{0};
+    int certified_topology_query_count{0};
+    int certified_regular_graph_leaf_count{0};
+    int certified_topology_refinement_count{0};
+    int certified_topology_fail_closed_count{0};
     int linearized_leaf_count{0};
     int interface_fragment_count{0};
     int curved_fragment_failure_count{0};
@@ -549,6 +1449,7 @@ struct SayeHyperrectangleDiagnostics {
 };
 
 constexpr int kTerminalTopologyExtraSubdivisionDepth = 2;
+constexpr int kCertifiedRangeExtraSubdivisionDepth = 6;
 
 [[nodiscard]] Real rectangleMeasure(const Rectangle2D& rect) noexcept
 {
@@ -4067,13 +4968,118 @@ void appendFullTetrahedronRegion(
     }
 }
 
+void appendCertifiedAlignedRectangleFragment(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Rectangle2D& rect,
+    const CertifiedRegularGraph& graph,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    const bool lower_face = graph.lower_face_zero;
+    std::array<Real, 3> a{{rect.xmin, rect.ymin, 0.0}};
+    std::array<Real, 3> b{{rect.xmax, rect.ymax, 0.0}};
+    if (graph.axis == 0) {
+        const Real x = lower_face ? rect.xmin : rect.xmax;
+        a = {{x, rect.ymin, 0.0}};
+        b = {{x, rect.ymax, 0.0}};
+    } else {
+        const Real y = lower_face ? rect.ymin : rect.ymax;
+        a = {{rect.xmin, y, 0.0}};
+        b = {{rect.xmax, y, 0.0}};
+    }
+    const std::array<Real, 3> midpoint{{
+        Real{0.5} * (a[0] + b[0]),
+        Real{0.5} * (a[1] + b[1]),
+        0.0,
+    }};
+    const auto evaluation = input.evaluator->evaluate(
+        input.linearized_input.parent_cell, midpoint);
+
+    interfaces::CutInterfaceFragment fragment;
+    fragment.interface_marker = request.interface_marker;
+    fragment.parent_cell = input.linearized_input.parent_cell;
+    fragment.kind = interfaces::CutInterfaceFragmentKind::CurvedPatch;
+    fragment.normal = normalizedOrDefault(evaluation.reference_gradient);
+    const Real dx = b[0] - a[0];
+    const Real dy = b[1] - a[1];
+    fragment.measure = std::sqrt(dx * dx + dy * dy);
+    fragment.min_level_set_value = -request.implicit_cut_root_tolerance;
+    fragment.max_level_set_value = request.implicit_cut_root_tolerance;
+    fragment.conditioning_diagnostic =
+        "certified-aligned-regular-graph";
+    fragment.max_root_residual = std::abs(evaluation.value - input.isovalue);
+    fragment.min_gradient_norm = norm3(evaluation.reference_gradient);
+    fragment.root_polished = true;
+    fragment.vertices = {
+        interfaces::CutInterfaceVertex{
+            .point = a,
+            .parent_coordinate = a,
+            .level_set_value = 0.0,
+            .stable_id = interfaces::cutInterfaceStableId(
+                request.interface_marker,
+                input.linearized_input.parent_cell,
+                static_cast<LocalIndex>(1u),
+                request.source.value_revision)},
+        interfaces::CutInterfaceVertex{
+            .point = b,
+            .parent_coordinate = b,
+            .level_set_value = 0.0,
+            .stable_id = interfaces::cutInterfaceStableId(
+                request.interface_marker,
+                input.linearized_input.parent_cell,
+                static_cast<LocalIndex>(2u),
+                request.source.value_revision)},
+    };
+    const auto make_rule = [&](int order) {
+        std::vector<interfaces::CutInterfaceQuadraturePoint> points;
+        for (const auto& [parameter, unit_weight] :
+             gaussLegendreUnitRule(order)) {
+            const std::array<Real, 3> point{{
+                (Real{1.0} - parameter) * a[0] + parameter * b[0],
+                (Real{1.0} - parameter) * a[1] + parameter * b[1],
+                0.0,
+            }};
+            const auto point_evaluation = input.evaluator->evaluate(
+                input.linearized_input.parent_cell, point);
+            const Real weight = unit_weight * fragment.measure;
+            points.push_back(interfaces::CutInterfaceQuadraturePoint{
+                .point = point,
+                .parent_coordinate = point,
+                .normal = normalizedOrDefault(
+                    point_evaluation.reference_gradient),
+                .weight = weight,
+                .reference_measure_factor = weight,
+                .level_set_residual =
+                    std::abs(point_evaluation.value - input.isovalue),
+                .gradient_norm =
+                    norm3(point_evaluation.reference_gradient),
+            });
+        }
+        return points;
+    };
+    fragment.quadrature_points = make_rule(
+        request.resolvedInterfaceQuadratureOrder());
+    fragment.moment_certificate_order =
+        request.resolvedInterfaceQuadratureOrder();
+    fragment.moment_certificate_points = make_rule(
+        std::max(5, request.resolvedInterfaceQuadratureOrder() + 2));
+    stampGeneratedInterfaceFragmentMetadata(
+        fragment, cut, request, input, "certified-aligned-rectangle");
+    cut.fragments.push_back(std::move(fragment));
+    ++diagnostics.interface_fragment_count;
+    ++diagnostics.root_branch_count;
+    ++diagnostics.curved_fragment_count;
+}
+
 void appendLinearizedRectangleCut(
     interfaces::LevelSetCellCutResult& cut,
     const interfaces::CutInterfaceDomainRequest& request,
     const ImplicitCutQuadratureBackendCellInput& input,
     const Rectangle2D& rect,
     Real parent_measure,
-    SayeHyperrectangleDiagnostics& diagnostics)
+    SayeHyperrectangleDiagnostics& diagnostics,
+    bool retain_interface_fragments = true)
 {
     ++diagnostics.linearized_leaf_count;
 
@@ -4096,16 +5102,18 @@ void appendLinearizedRectangleCut(
 
     auto leaf_cut = interfaces::cutLinearLevelSetCell2D(request, leaf);
     alignLeafCutNormalsWithEvaluator(leaf_cut, input);
-    diagnostics.interface_fragment_count +=
-        static_cast<int>(leaf_cut.fragments.size());
-    for (auto& fragment : leaf_cut.fragments) {
-        (void)replaceWithRootPolishedRectangleFragment(
-            fragment, request, input, rect, diagnostics);
-        fragment.parent_cell = input.linearized_input.parent_cell;
-        fragment.interface_marker = request.interface_marker;
-        stampGeneratedInterfaceFragmentMetadata(
-            fragment, cut, request, input, "rectangle");
-        cut.fragments.push_back(std::move(fragment));
+    if (retain_interface_fragments) {
+        diagnostics.interface_fragment_count +=
+            static_cast<int>(leaf_cut.fragments.size());
+        for (auto& fragment : leaf_cut.fragments) {
+            (void)replaceWithRootPolishedRectangleFragment(
+                fragment, request, input, rect, diagnostics);
+            fragment.parent_cell = input.linearized_input.parent_cell;
+            fragment.interface_marker = request.interface_marker;
+            stampGeneratedInterfaceFragmentMetadata(
+                fragment, cut, request, input, "rectangle");
+            cut.fragments.push_back(std::move(fragment));
+        }
     }
     for (auto& region : leaf_cut.volume_regions) {
         region.parent_cell = input.linearized_input.parent_cell;
@@ -4333,8 +5341,11 @@ void appendLinearizedBoxCut(
     const ImplicitCutQuadratureBackendCellInput& input,
     const Box3D& box,
     Real parent_measure,
-    SayeHyperrectangleDiagnostics& diagnostics)
+    SayeHyperrectangleDiagnostics& diagnostics,
+    bool retain_interface_fragments = true)
 {
+    const auto first_fragment = cut.fragments.size();
+    const int initial_fragment_count = diagnostics.interface_fragment_count;
     const auto v = boxVertices(box);
     const std::array<Tetrahedron3D, 6> tetrahedra{{
         Tetrahedron3D{v[0], v[1], v[2], v[6]},
@@ -4347,6 +5358,10 @@ void appendLinearizedBoxCut(
     for (const auto& tet : tetrahedra) {
         appendLinearizedTetrahedronCut(
             cut, request, input, tet, parent_measure, diagnostics);
+    }
+    if (!retain_interface_fragments) {
+        cut.fragments.resize(first_fragment);
+        diagnostics.interface_fragment_count = initial_fragment_count;
     }
 }
 
@@ -4587,6 +5602,7 @@ void appendAdaptiveRectangleCut(
     interfaces::LevelSetCellCutResult& cut,
     const interfaces::CutInterfaceDomainRequest& request,
     const ImplicitCutQuadratureBackendCellInput& input,
+    const TensorBernsteinCertificate* certificate,
     const Rectangle2D& rect,
     Real parent_measure,
     int depth,
@@ -4610,14 +5626,37 @@ void appendAdaptiveRectangleCut(
         has_positive = has_positive || value >= -request.implicit_cut_root_tolerance;
     }
 
-    if (!has_negative || !has_positive) {
+    std::optional<OutwardInterval> certified_range;
+    bool certified_negative = false;
+    bool certified_positive = false;
+    if (certificate != nullptr) {
+        certified_range = certifiedRectangleRange(*certificate, rect);
+        ++diagnostics.certified_range_query_count;
+        certified_negative =
+            certified_range->upper <
+            -static_cast<long double>(request.implicit_cut_root_tolerance);
+        certified_positive =
+            certified_range->lower >
+            static_cast<long double>(request.implicit_cut_root_tolerance);
+        min_signed = std::min(
+            min_signed, intervalLowerAsReal(certified_range->lower));
+        max_signed = std::max(
+            max_signed, intervalUpperAsReal(certified_range->upper));
+    }
+
+    if ((certificate == nullptr && (!has_negative || !has_positive)) ||
+        certified_negative || certified_positive) {
+        if (certificate != nullptr) {
+            ++diagnostics.certified_full_sign_region_count;
+        }
         appendFullRectangleRegion(
             cut,
             request,
             input,
             rect,
-            has_negative ? geometry::CutIntegrationSide::Negative
-                         : geometry::CutIntegrationSide::Positive,
+            (certificate != nullptr ? certified_negative : has_negative)
+                ? geometry::CutIntegrationSide::Negative
+                : geometry::CutIntegrationSide::Positive,
             parent_measure,
             min_signed,
             max_signed,
@@ -4625,14 +5664,136 @@ void appendAdaptiveRectangleCut(
         return;
     }
 
+    if (certificate != nullptr &&
+        request.required_implicit_cut_backend_qualification ==
+            "ProductionQualified") {
+        ++diagnostics.certified_topology_query_count;
+        const auto regular_graph = certifiedRegularGraph(
+            *certificate,
+            rect,
+            request.implicit_cut_root_tolerance);
+        const bool topology_resolution_sufficient =
+            regular_graph.has_value() &&
+            depth >= max_depth + 3;
+        if (topology_resolution_sufficient) {
+            ++diagnostics.certified_regular_graph_leaf_count;
+            const bool retain_interface =
+                certifiedGraphLeafOwnsInterface(
+                    *certificate,
+                    *regular_graph,
+                    {{rect.xmin, rect.ymin, 0.0}});
+            const auto first_fragment = cut.fragments.size();
+            appendLinearizedRectangleCut(
+                cut,
+                request,
+                input,
+                rect,
+                parent_measure,
+                diagnostics,
+                retain_interface);
+            if (retain_interface &&
+                cut.fragments.size() == first_fragment &&
+                (regular_graph->lower_face_zero ||
+                 regular_graph->upper_face_zero)) {
+                appendCertifiedAlignedRectangleFragment(
+                    cut,
+                    request,
+                    input,
+                    rect,
+                    *regular_graph,
+                    diagnostics);
+            }
+            return;
+        }
+    }
+
     if (depth >= max_depth) {
+        const int extra_depth = depth - max_depth;
         int local_iterations = 0;
         const auto edge_roots =
             rectangleEdgeRoots(input, request, rect, local_iterations);
         diagnostics.root_finder_iteration_count += local_iterations;
-        const int extra_depth = depth - max_depth;
+        if (certificate != nullptr &&
+            request.required_implicit_cut_backend_qualification ==
+                "ProductionQualified") {
+            if (extra_depth >= kCertifiedRangeExtraSubdivisionDepth) {
+                const auto boundary_touch =
+                    certifiedOneSidedBoundaryTouch(
+                        *certificate,
+                        input,
+                        rect,
+                        *certified_range,
+                        request.implicit_cut_root_tolerance);
+                if (boundary_touch.has_value()) {
+                    ++diagnostics.certified_full_sign_region_count;
+                    appendFullRectangleRegion(
+                        cut,
+                        request,
+                        input,
+                        rect,
+                        *boundary_touch,
+                        parent_measure,
+                        intervalLowerAsReal(certified_range->lower),
+                        intervalUpperAsReal(certified_range->upper),
+                        diagnostics);
+                    return;
+                }
+                if (request.required_implicit_cut_backend_qualification !=
+                    "ProductionQualified") {
+                    appendLinearizedRectangleCut(
+                        cut,
+                        request,
+                        input,
+                        rect,
+                        parent_measure,
+                        diagnostics);
+                    return;
+                }
+                ++diagnostics.certified_topology_fail_closed_count;
+                throw std::invalid_argument(
+                    "SayeHyperrectangle could not certify regular graph topology for an ambiguous Q2/Q3 tensor polynomial leaf within the bounded topology-refinement depth; leaf=[" +
+                    std::to_string(rect.xmin) + "," +
+                    std::to_string(rect.xmax) + "]x[" +
+                    std::to_string(rect.ymin) + "," +
+                    std::to_string(rect.ymax) + "]; certified_range=[" +
+                    formatReal(intervalLowerAsReal(certified_range->lower)) +
+                    "," +
+                    formatReal(intervalUpperAsReal(certified_range->upper)) +
+                    "]");
+            }
+            ++diagnostics.terminal_topology_refinement_count;
+            ++diagnostics.certified_same_sign_refinement_count;
+            ++diagnostics.certified_topology_refinement_count;
+            diagnostics.max_terminal_topology_extra_depth =
+                std::max(diagnostics.max_terminal_topology_extra_depth,
+                         extra_depth + 1);
+            ++diagnostics.subdivision_count;
+            const Real xm = Real{0.5} * (rect.xmin + rect.xmax);
+            const Real ym = Real{0.5} * (rect.ymin + rect.ymax);
+            const std::array<Rectangle2D, 4> children{{
+                Rectangle2D{rect.xmin, xm, rect.ymin, ym},
+                Rectangle2D{xm, rect.xmax, rect.ymin, ym},
+                Rectangle2D{xm, rect.xmax, ym, rect.ymax},
+                Rectangle2D{rect.xmin, xm, ym, rect.ymax},
+            }};
+            for (const auto& child : children) {
+                appendAdaptiveRectangleCut(
+                    cut,
+                    request,
+                    input,
+                    certificate,
+                    child,
+                    parent_measure,
+                    depth + 1,
+                    max_depth,
+                    diagnostics);
+            }
+            return;
+        }
+        const int topology_extra_depth_limit =
+            kTerminalTopologyExtraSubdivisionDepth;
         if (edge_roots.size() > 2u &&
-            extra_depth < kTerminalTopologyExtraSubdivisionDepth) {
+            extra_depth < topology_extra_depth_limit) {
             ++diagnostics.terminal_topology_refinement_count;
             diagnostics.max_terminal_topology_extra_depth =
                 std::max(diagnostics.max_terminal_topology_extra_depth,
@@ -4651,6 +5812,7 @@ void appendAdaptiveRectangleCut(
                     cut,
                     request,
                     input,
+                    certificate,
                     child,
                     parent_measure,
                     depth + 1,
@@ -4688,6 +5850,7 @@ void appendAdaptiveRectangleCut(
             cut,
             request,
             input,
+            certificate,
             child,
             parent_measure,
             depth + 1,
@@ -4700,6 +5863,7 @@ void appendAdaptiveBoxCut(
     interfaces::LevelSetCellCutResult& cut,
     const interfaces::CutInterfaceDomainRequest& request,
     const ImplicitCutQuadratureBackendCellInput& input,
+    const TensorBernsteinCertificate* certificate,
     const Box3D& box,
     Real parent_measure,
     int depth,
@@ -4723,14 +5887,37 @@ void appendAdaptiveBoxCut(
         has_positive = has_positive || value >= -request.implicit_cut_root_tolerance;
     }
 
-    if (!has_negative || !has_positive) {
+    std::optional<OutwardInterval> certified_range;
+    bool certified_negative = false;
+    bool certified_positive = false;
+    if (certificate != nullptr) {
+        certified_range = certifiedBoxRange(*certificate, box);
+        ++diagnostics.certified_range_query_count;
+        certified_negative =
+            certified_range->upper <
+            -static_cast<long double>(request.implicit_cut_root_tolerance);
+        certified_positive =
+            certified_range->lower >
+            static_cast<long double>(request.implicit_cut_root_tolerance);
+        min_signed = std::min(
+            min_signed, intervalLowerAsReal(certified_range->lower));
+        max_signed = std::max(
+            max_signed, intervalUpperAsReal(certified_range->upper));
+    }
+
+    if ((certificate == nullptr && (!has_negative || !has_positive)) ||
+        certified_negative || certified_positive) {
+        if (certificate != nullptr) {
+            ++diagnostics.certified_full_sign_region_count;
+        }
         appendFullBoxRegion(
             cut,
             request,
             input,
             box,
-            has_negative ? geometry::CutIntegrationSide::Negative
-                         : geometry::CutIntegrationSide::Positive,
+            (certificate != nullptr ? certified_negative : has_negative)
+                ? geometry::CutIntegrationSide::Negative
+                : geometry::CutIntegrationSide::Positive,
             parent_measure,
             min_signed,
             max_signed,
@@ -4739,6 +5926,81 @@ void appendAdaptiveBoxCut(
     }
 
     if (depth >= max_depth) {
+        const int extra_depth = depth - max_depth;
+        if (certificate != nullptr &&
+            request.required_implicit_cut_backend_qualification ==
+                "ProductionQualified") {
+            ++diagnostics.certified_topology_query_count;
+            const auto regular_graph = certifiedRegularGraph(
+                *certificate,
+                box,
+                request.implicit_cut_root_tolerance);
+            if (regular_graph.has_value()) {
+                ++diagnostics.certified_regular_graph_leaf_count;
+                const bool retain_interface =
+                    certifiedGraphLeafOwnsInterface(
+                        *certificate,
+                        *regular_graph,
+                        {{box.xmin, box.ymin, box.zmin}});
+                appendLinearizedBoxCut(
+                    cut,
+                    request,
+                    input,
+                    box,
+                    parent_measure,
+                    diagnostics,
+                    retain_interface);
+                return;
+            }
+            if (extra_depth >= kCertifiedRangeExtraSubdivisionDepth) {
+                if (request.required_implicit_cut_backend_qualification !=
+                    "ProductionQualified") {
+                    appendLinearizedBoxCut(
+                        cut,
+                        request,
+                        input,
+                        box,
+                        parent_measure,
+                        diagnostics);
+                    return;
+                }
+                ++diagnostics.certified_topology_fail_closed_count;
+                throw std::invalid_argument(
+                    "SayeHyperrectangle could not certify regular graph topology for an ambiguous Q2/Q3 tensor polynomial leaf within the bounded topology-refinement depth");
+            }
+            ++diagnostics.terminal_topology_refinement_count;
+            ++diagnostics.certified_same_sign_refinement_count;
+            ++diagnostics.certified_topology_refinement_count;
+            diagnostics.max_terminal_topology_extra_depth =
+                std::max(diagnostics.max_terminal_topology_extra_depth,
+                         extra_depth + 1);
+            ++diagnostics.subdivision_count;
+            const Real xm = Real{0.5} * (box.xmin + box.xmax);
+            const Real ym = Real{0.5} * (box.ymin + box.ymax);
+            const Real zm = Real{0.5} * (box.zmin + box.zmax);
+            const std::array<Real, 3> xs{{box.xmin, xm, box.xmax}};
+            const std::array<Real, 3> ys{{box.ymin, ym, box.ymax}};
+            const std::array<Real, 3> zs{{box.zmin, zm, box.zmax}};
+            for (std::size_t iz = 0u; iz < 2u; ++iz) {
+                for (std::size_t iy = 0u; iy < 2u; ++iy) {
+                    for (std::size_t ix = 0u; ix < 2u; ++ix) {
+                        appendAdaptiveBoxCut(
+                            cut,
+                            request,
+                            input,
+                            certificate,
+                            Box3D{xs[ix], xs[ix + 1u],
+                                  ys[iy], ys[iy + 1u],
+                                  zs[iz], zs[iz + 1u]},
+                            parent_measure,
+                            depth + 1,
+                            max_depth,
+                            diagnostics);
+                    }
+                }
+            }
+            return;
+        }
         if (appendHintRefinedBoxCut(
                 cut, request, input, box, parent_measure, samples, diagnostics)) {
             return;
@@ -4762,6 +6024,7 @@ void appendAdaptiveBoxCut(
                     cut,
                     request,
                     input,
+                    certificate,
                     Box3D{xs[ix], xs[ix + 1u],
                           ys[iy], ys[iy + 1u],
                           zs[iz], zs[iz + 1u]},
@@ -5047,6 +6310,25 @@ void appendAdaptiveTetrahedronCut(
            std::to_string(diagnostics.full_negative_region_count) +
            "; full_positive_regions=" +
            std::to_string(diagnostics.full_positive_region_count) +
+           "; certified_tensor_range_available=" +
+           std::to_string(diagnostics.certified_tensor_range_available) +
+           "; certified_range_queries=" +
+           std::to_string(diagnostics.certified_range_query_count) +
+           "; certified_full_sign_regions=" +
+           std::to_string(diagnostics.certified_full_sign_region_count) +
+           "; certified_same_sign_refinements=" +
+           std::to_string(
+               diagnostics.certified_same_sign_refinement_count) +
+           "; certified_range_fail_closed=" +
+           std::to_string(diagnostics.certified_range_fail_closed_count) +
+           "; certified_topology_queries=" +
+           std::to_string(diagnostics.certified_topology_query_count) +
+           "; certified_regular_graph_leaves=" +
+           std::to_string(diagnostics.certified_regular_graph_leaf_count) +
+           "; certified_topology_refinements=" +
+           std::to_string(diagnostics.certified_topology_refinement_count) +
+           "; certified_topology_fail_closed=" +
+           std::to_string(diagnostics.certified_topology_fail_closed_count) +
            "; interface_fragments=" +
            std::to_string(diagnostics.interface_fragment_count) +
            "; curved_fragment_failures=" +
@@ -5104,6 +6386,25 @@ void appendAdaptiveTetrahedronCut(
            std::to_string(diagnostics.full_negative_region_count) +
            "; full_positive_regions=" +
            std::to_string(diagnostics.full_positive_region_count) +
+           "; certified_tensor_range_available=" +
+           std::to_string(diagnostics.certified_tensor_range_available) +
+           "; certified_range_queries=" +
+           std::to_string(diagnostics.certified_range_query_count) +
+           "; certified_full_sign_regions=" +
+           std::to_string(diagnostics.certified_full_sign_region_count) +
+           "; certified_same_sign_refinements=" +
+           std::to_string(
+               diagnostics.certified_same_sign_refinement_count) +
+           "; certified_range_fail_closed=" +
+           std::to_string(diagnostics.certified_range_fail_closed_count) +
+           "; certified_topology_queries=" +
+           std::to_string(diagnostics.certified_topology_query_count) +
+           "; certified_regular_graph_leaves=" +
+           std::to_string(diagnostics.certified_regular_graph_leaf_count) +
+           "; certified_topology_refinements=" +
+           std::to_string(diagnostics.certified_topology_refinement_count) +
+           "; certified_topology_fail_closed=" +
+           std::to_string(diagnostics.certified_topology_fail_closed_count) +
            "; interface_fragments=" +
            std::to_string(diagnostics.interface_fragment_count) +
            "; curved_fragment_failures=" +
@@ -5512,7 +6813,30 @@ public:
 
         const int max_depth =
             std::max(0, request.implicit_cut_max_subdivision_depth);
+        const auto tensor_range_certificate =
+            makeTensorBernsteinCertificate(mesh_dimension, input);
+        const auto cell_id = input.linearized_input.parent_cell;
+        if (request.required_implicit_cut_backend_qualification ==
+                "ProductionQualified" &&
+            input.evaluator->interpolationOrder(cell_id) > 1 &&
+            !tensor_range_certificate.has_value()) {
+            setUnavailableOrderMetadata(result, request);
+            result.cut.supported = false;
+            result.cut.degeneracy =
+                interfaces::CutInterfaceDegeneracy::NoCut;
+            result.cut.diagnostic =
+                "production-qualified SayeHyperrectangle tensor polynomial "
+                "range certification is limited to Q2 and Q3; "
+                "higher orders require a certified range implementation";
+            result.diagnostic_status =
+                ImplicitCutQuadratureDiagnosticStatus::Failed;
+            appendDetailedBackendDiagnostics(result, request);
+            return finalizeBackendResult(
+                std::move(result), request, backend_start);
+        }
         SayeHyperrectangleDiagnostics diagnostics;
+        diagnostics.certified_tensor_range_available =
+            tensor_range_certificate.has_value() ? 1 : 0;
         if (mesh_dimension == 2) {
             const Rectangle2D root{
                 input.reference_min[0],
@@ -5523,6 +6847,9 @@ public:
                 result.cut,
                 request,
                 input,
+                tensor_range_certificate.has_value()
+                    ? &*tensor_range_certificate
+                    : nullptr,
                 root,
                 rectangleMeasure(root),
                 0,
@@ -5552,6 +6879,9 @@ public:
                 result.cut,
                 request,
                 input,
+                tensor_range_certificate.has_value()
+                    ? &*tensor_range_certificate
+                    : nullptr,
                 root,
                 boxMeasure(root),
                 0,
@@ -6360,7 +7690,10 @@ validateImplicitCutQuadratureBackendCellResult(
                 measureTolerance(request.tolerance, fragment.measure)) {
             return failedValidation(
                 ImplicitCutQuadratureDiagnosticStatus::Failed,
-                "implicit cut backend interface moment-certificate weights do not sum to the fragment measure");
+                "implicit cut backend interface moment-certificate weights do not sum to the fragment measure; topology=" +
+                    fragment.topology_id + "; certificate_weight_sum=" +
+                    formatReal(certificate_weight_sum) +
+                    "; fragment_measure=" + formatReal(fragment.measure));
         }
         if (!fragment.moment_certificate_points.empty()) {
             SurfacePatchRuleResult production_moments;

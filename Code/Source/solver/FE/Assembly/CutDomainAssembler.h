@@ -159,11 +159,20 @@ inline void accumulateCutKernelOutput(KernelOutput& dst, const KernelOutput& src
     const bool has_explicit_bindings = !context.bindings().empty();
 
     if (options.include_volume_rules) {
-        if (options.volume_marker >= 0 &&
-            options.volume_side != geometry::CutIntegrationSide::Interface) {
-            context.assertGeneratedVolumeRulesCurrentForMarkerAndSide(
-                options.volume_marker,
-                options.volume_side);
+        if (options.volume_marker >= 0) {
+            if (options.volume_side ==
+                geometry::CutIntegrationSide::Interface) {
+                context.assertGeneratedVolumeRulesCurrentForMarkerAndSide(
+                    options.volume_marker,
+                    geometry::CutIntegrationSide::Negative);
+                context.assertGeneratedVolumeRulesCurrentForMarkerAndSide(
+                    options.volume_marker,
+                    geometry::CutIntegrationSide::Positive);
+            } else {
+                context.assertGeneratedVolumeRulesCurrentForMarkerAndSide(
+                    options.volume_marker,
+                    options.volume_side);
+            }
         }
         const auto& volume_rules = context.volumeRules();
         const auto& metadata = context.metadata();
@@ -173,6 +182,9 @@ inline void accumulateCutKernelOutput(KernelOutput& dst, const KernelOutput& src
                 ++summary.skipped_rule_count;
                 continue;
             }
+            context.assertGeneratedVolumeRulesCurrentForMarkerAndSide(
+                volume_rules[i].provenance.marker,
+                volume_rules[i].side);
             const auto* binding = has_explicit_bindings && i < bindings.size() ? &bindings[i] : nullptr;
             if (binding != nullptr && !cutBindingVisibleToPath(*binding, options.path)) {
                 ++summary.skipped_rule_count;
@@ -206,8 +218,33 @@ inline void accumulateCutKernelOutput(KernelOutput& dst, const KernelOutput& src
     }
 
     if (options.include_interface_rules) {
+        if (options.interface_marker >= 0) {
+            context.assertGeneratedInterfaceRulesCurrentForMarker(
+                options.interface_marker);
+        }
         const auto& interface_rules = context.interfaceRules();
         for (std::size_t i = 0u; i < interface_rules.size(); ++i) {
+            const auto& rule = interface_rules[i];
+            const int declared_marker = rule.provenance.marker;
+            const int active_marker =
+                declared_marker >= 0 ? declared_marker
+                                     : options.interface_marker;
+            if (options.interface_marker >= 0 &&
+                active_marker != options.interface_marker) {
+                ++summary.skipped_rule_count;
+                continue;
+            }
+            context.assertGeneratedInterfaceRulesCurrentForMarker(
+                declared_marker);
+            if (active_marker >= 0 && active_marker != declared_marker) {
+                if (context.hasFreeSurfaceGeometrySnapshotForMarker(
+                        active_marker)) {
+                    throw std::invalid_argument(
+                        "CutDomainAssembler: free-surface interface rule must declare its generated marker");
+                }
+                context.assertGeneratedInterfaceRulesCurrentForMarker(
+                    active_marker);
+            }
             if (!kernel.hasBoundaryFace() && !kernel.hasSingleSidedInterfaceFace()) {
                 ++summary.skipped_rule_count;
                 continue;
@@ -216,15 +253,15 @@ inline void accumulateCutKernelOutput(KernelOutput& dst, const KernelOutput& src
             CutRuleAssemblyRequest request;
             request.path = options.path;
             request.domain = CutDomainKind::EmbeddedInterface;
-            request.rule = &interface_rules[i];
+            request.rule = &rule;
             request.rule_index = i;
-            request.marker = options.interface_marker;
+            request.marker = active_marker;
 
             AssemblyContext rule_context;
             context_builder(request, rule_context);
 
             KernelOutput output;
-            kernel.computeBoundaryFace(rule_context, options.interface_marker, output);
+            kernel.computeBoundaryFace(rule_context, active_marker, output);
             accumulateCutKernelOutput(summary.interface_output, output);
             accumulateCutKernelOutput(summary.total_output, output);
             ++summary.interface_rule_count;

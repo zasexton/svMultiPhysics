@@ -1965,6 +1965,7 @@ assembly::AssemblyResult assembleOperator(
         const auto* cut_context = system.cutIntegrationContext();
         FE_THROW_IF(cut_context == nullptr, InvalidArgumentException,
                     "assembleOperator: cut-volume terms require a registered CutIntegrationContext");
+        cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
 
         struct CutVolumeAssemblyEntry {
             const FESystem::PlannedCutVolumeTerm* term{nullptr};

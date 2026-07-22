@@ -4040,11 +4040,25 @@ TEST(MovingDomainPhysics,
     EXPECT_DOUBLE_EQ(history.front().accepted_time, FE::Real{0.35});
     EXPECT_EQ(history.front().state_revision, 13u);
     EXPECT_EQ(history.front().geometry_revision.snapshot_revision_key, 101u);
+    EXPECT_EQ(history.front().state.snapshot_revision_key,
+              history.front().geometry_revision.snapshot_revision_key);
     EXPECT_DOUBLE_EQ(history.front().state.total_potential, total_potential);
 
     ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
         7u, FE::Real{0.35}, FE::Real{0.05}, 13u, accepted_states));
     EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+    auto mismatched_snapshot_states = accepted_states;
+    mismatched_snapshot_states.front().state.snapshot_revision_key = 102u;
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            7u,
+            FE::Real{0.35},
+            FE::Real{0.05},
+            13u,
+            mismatched_snapshot_states),
+        FE::InvalidArgumentException);
+    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+    RecordProperty("functional_snapshot_mismatch_rejected", 1);
     auto conflicting_states = accepted_states;
     conflicting_states.front().geometry_revision.source_value_revision = 10u;
     EXPECT_THROW(
@@ -4268,6 +4282,8 @@ TEST(MovingDomainPhysics,
     ASSERT_EQ(history.size(), 1u);
     ASSERT_TRUE(history.front().contact_stage.has_value());
     const auto& stage = *history.front().contact_stage;
+    EXPECT_EQ(stage.state.snapshot_revision_key,
+              stage.geometry_revision.snapshot_revision_key);
     EXPECT_DOUBLE_EQ(stage.stage_time, FE::Real{0.325});
     EXPECT_DOUBLE_EQ(stage.stage_alpha_f, FE::Real{0.5});
     ASSERT_EQ(stage.state.walls.size(), 1u);
@@ -4296,6 +4312,18 @@ TEST(MovingDomainPhysics,
         7u, FE::Real{0.35}, FE::Real{0.05}, 13u, accepted_states));
 
     auto invalid = accepted_states;
+    invalid.front().contact_stage->state.snapshot_revision_key = 103u;
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            7u,
+            FE::Real{0.35},
+            FE::Real{0.05},
+            13u,
+            invalid),
+        FE::InvalidArgumentException);
+    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+    RecordProperty("contact_snapshot_mismatch_rejected", 1);
+    invalid = accepted_states;
     invalid.front().contact_stage.reset();
     EXPECT_THROW(
         system.recordAcceptedFreeSurfaceDiscreteFunctionals(

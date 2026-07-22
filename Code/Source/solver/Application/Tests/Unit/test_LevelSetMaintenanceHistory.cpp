@@ -4,14 +4,22 @@
 #include "Application/Core/LevelSetMaintenanceHistory.h"
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/MeshAccess.h"
+#include "FE/Basis/NodeOrderingConventions.h"
+#include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -267,7 +275,8 @@ TEST(LevelSetCurvatureSamples,
           state,
           phi,
           marker,
-          svmp::FE::geometry::CutIntegrationSide::Negative);
+          svmp::FE::geometry::CutIntegrationSide::Negative,
+          /*evaluated_state_source_revision=*/0u);
   ASSERT_EQ(negative_samples.size(), 1u);
   EXPECT_EQ(negative_samples.front().parent_cell, 0);
   EXPECT_NEAR(negative_samples.front().value, svmp::FE::Real{7.0}, 1.0e-12);
@@ -281,7 +290,8 @@ TEST(LevelSetCurvatureSamples,
           state,
           phi,
           marker,
-          svmp::FE::geometry::CutIntegrationSide::Positive);
+          svmp::FE::geometry::CutIntegrationSide::Positive,
+          /*evaluated_state_source_revision=*/0u);
   EXPECT_TRUE(positive_samples.empty());
 }
 
@@ -311,4 +321,270 @@ TEST(LevelSetCurvatureSamples,
   }
   EXPECT_GT(std::abs((*physical)[0] - nodal_average[0]), 0.25);
   EXPECT_GT(std::abs((*physical)[1] - nodal_average[1]), 0.1);
+}
+
+TEST(LevelSetCurvatureSamples,
+     Q3AuthoritativeInterfacePairsSampleWithSnapshotRevision)
+{
+  constexpr int marker = 943;
+  constexpr svmp::FE::Real first_root = svmp::FE::Real{0.55};
+  constexpr svmp::FE::Real second_root = svmp::FE::Real{0.70};
+  constexpr std::uint64_t source_value_revision = 37u;
+  const auto polynomial = [](svmp::FE::Real xi) {
+    return (xi - first_root) * (xi - second_root);
+  };
+
+  auto mesh = buildSingleQuadMesh();
+  auto q3_space =
+      std::make_shared<svmp::FE::spaces::H1Space>(
+          svmp::FE::ElementType::Quad4, /*order=*/3);
+  svmp::FE::systems::FESystem system(mesh);
+  const auto phi = system.addField(
+      svmp::FE::systems::FieldSpec{
+          .name = "phi",
+          .space = q3_space,
+          .components = 1});
+  ASSERT_NO_THROW(system.setup());
+
+  const auto q3_nodes =
+      svmp::FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(
+          svmp::FE::ElementType::Quad4, /*order=*/3);
+  const auto cell_dofs = system.fieldDofHandler(phi).getCellDofs(0);
+  ASSERT_EQ(cell_dofs.size(), q3_nodes.size());
+  const auto offset = system.fieldDofOffset(phi);
+  std::vector<svmp::FE::Real> solution(
+      static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+      svmp::FE::Real{0.0});
+  std::vector<svmp::FE::Real> coefficients;
+  coefficients.reserve(q3_nodes.size());
+  for (std::size_t i = 0; i < q3_nodes.size(); ++i) {
+    const auto value = polynomial(q3_nodes[i][0]);
+    ASSERT_GT(value, svmp::FE::Real{0.0});
+    coefficients.push_back(value);
+    solution[static_cast<std::size_t>(offset + cell_dofs[i])] = value;
+  }
+
+  svmp::FE::spaces::FunctionSpace::Value center{};
+  const auto center_value = q3_space->evaluate_scalar(center, coefficients);
+  ASSERT_GT(center_value, svmp::FE::Real{0.0});
+  ASSERT_NEAR(center_value, polynomial(svmp::FE::Real{0.0}), 1.0e-13);
+  ASSERT_LT(polynomial(svmp::FE::Real{0.60}), svmp::FE::Real{0.0});
+
+  svmp::FE::interfaces::CutInterfaceDomainRequest interface_request;
+  interface_request.source =
+      svmp::FE::interfaces::LevelSetInterfaceSource::fromField(
+          phi, system.dofLayoutRevision(), source_value_revision);
+  interface_request.interface_marker = marker;
+  interface_request.interface_quadrature_order = 3;
+  interface_request.volume_quadrature_order = 3;
+  interface_request.achieved_interface_quadrature_order = 3;
+  interface_request.implicit_geometry_mode = "HighOrderImplicit";
+  interface_request.implicit_quadrature_backend = "SayeHyperrectangle";
+  interface_request.implicit_fallback_policy = "Fail";
+  interface_request.implicit_fallback_status = "None";
+  interface_request.mesh_geometry_revision =
+      system.meshAccess().geometryRevision();
+  interface_request.mesh_topology_revision =
+      system.meshAccess().topologyRevision();
+  interface_request.ownership_revision =
+      system.meshAccess().ownershipRevision();
+  interface_request.quadrature_policy_key = 73u;
+
+  svmp::FE::interfaces::LevelSetInterfaceDomain interface_domain(
+      interface_request);
+  svmp::FE::interfaces::CutInterfaceFragment fragment;
+  fragment.parent_cell = 0;
+  fragment.parent_cell_global_id = 0;
+  fragment.owner_rank = 0;
+  fragment.kind =
+      svmp::FE::interfaces::CutInterfaceFragmentKind::Segment;
+  fragment.measure = svmp::FE::Real{2.0};
+  fragment.normal = {{svmp::FE::Real{-1.0}, 0.0, 0.0}};
+  fragment.min_gradient_norm = second_root - first_root;
+  fragment.root_polished = true;
+  fragment.implicit_quadrature_backend = "SayeHyperrectangle";
+  fragment.implicit_fallback_status = "None";
+  fragment.vertices = {
+      svmp::FE::interfaces::CutInterfaceVertex{
+          .point = {{first_root, -1.0, 0.0}},
+          .parent_coordinate = {{first_root, -1.0, 0.0}}},
+      svmp::FE::interfaces::CutInterfaceVertex{
+          .point = {{first_root, 1.0, 0.0}},
+          .parent_coordinate = {{first_root, 1.0, 0.0}}},
+  };
+  interface_domain.addFragment(std::move(fragment));
+
+  constexpr svmp::FE::Real parent_measure = svmp::FE::Real{4.0};
+  const auto negative_measure =
+      svmp::FE::Real{2.0} * (second_root - first_root);
+  const auto positive_measure = parent_measure - negative_measure;
+  const auto add_volume_region =
+      [&](svmp::FE::geometry::CutIntegrationSide side,
+          svmp::FE::Real measure,
+          svmp::FE::Real centroid_x) {
+    svmp::FE::interfaces::CutInterfaceVolumeRegion region;
+    region.parent_cell = 0;
+    region.parent_cell_global_id = 0;
+    region.owner_rank = 0;
+    region.side = side;
+    region.centroid = {{centroid_x, 0.0, 0.0}};
+    region.normal =
+        side == svmp::FE::geometry::CutIntegrationSide::Negative
+            ? std::array<svmp::FE::Real, 3>{{-1.0, 0.0, 0.0}}
+            : std::array<svmp::FE::Real, 3>{{1.0, 0.0, 0.0}};
+    region.parent_measure = parent_measure;
+    region.measure = measure;
+    region.volume_fraction = measure / parent_measure;
+    region.min_level_set_value =
+        side == svmp::FE::geometry::CutIntegrationSide::Negative
+            ? polynomial(centroid_x)
+            : svmp::FE::Real{0.0};
+    region.max_level_set_value =
+        side == svmp::FE::geometry::CutIntegrationSide::Negative
+            ? svmp::FE::Real{0.0}
+            : polynomial(svmp::FE::Real{-1.0});
+    region.topology_id =
+        side == svmp::FE::geometry::CutIntegrationSide::Negative
+            ? "q3-negative-pocket"
+            : "q3-positive-complement";
+    region.achieved_quadrature_order = 0;
+    interface_domain.addVolumeRegion(std::move(region));
+  };
+  add_volume_region(
+      svmp::FE::geometry::CutIntegrationSide::Negative,
+      negative_measure,
+      svmp::FE::Real{0.5} * (first_root + second_root));
+  add_volume_region(
+      svmp::FE::geometry::CutIntegrationSide::Positive,
+      positive_measure,
+      (first_root * first_root - second_root * second_root) /
+          positive_measure);
+
+  const auto authoritative_interface_rules =
+      interface_domain.interfaceQuadratureRules();
+  ASSERT_FALSE(authoritative_interface_rules.empty());
+  svmp::FE::Real maximum_root_residual = 0.0;
+  for (const auto& rule : authoritative_interface_rules) {
+    ASSERT_EQ(rule.provenance.parent_entity, 0);
+    ASSERT_EQ(rule.provenance.source_value_revision,
+              source_value_revision);
+    ASSERT_GT(rule.provenance.cut_topology_revision, 0u);
+    for (const auto& point : rule.points) {
+      const auto xi = rule.frame ==
+                              svmp::FE::geometry::CutGeometryFrame::Reference
+                          ? point.point
+                          : point.parent_coordinate;
+      maximum_root_residual = std::max(
+          maximum_root_residual, std::abs(polynomial(xi[0])));
+    }
+  }
+  ASSERT_LT(maximum_root_residual, svmp::FE::Real{1.0e-8});
+
+  svmp::FE::systems::SystemStateView state;
+  state.u = solution;
+  EXPECT_THROW(
+      (void)application::core::
+          collectLevelSetCurvatureHighOrderSupplementalSamples(
+              system, state, phi, marker, source_value_revision),
+      std::invalid_argument);
+
+  svmp::FE::interfaces::FreeSurfaceGeometrySnapshotPolicy snapshot_policy;
+  snapshot_policy.require_complete_exterior_boundary_partition = false;
+  svmp::FE::interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+  scalar.value = [q3_space, coefficients](
+                     svmp::FE::GlobalIndex,
+                     const std::array<svmp::FE::Real, 3>& xi,
+                     const svmp::FE::geometry::CutQuadratureProvenance&) {
+    svmp::FE::spaces::FunctionSpace::Value reference{};
+    reference[0] = xi[0];
+    reference[1] = xi[1];
+    reference[2] = xi[2];
+    return q3_space->evaluate_scalar(reference, coefficients);
+  };
+  scalar.reference_gradient = [q3_space, coefficients](
+                                  svmp::FE::GlobalIndex,
+                                  const std::array<svmp::FE::Real, 3>& xi,
+                                  const svmp::FE::geometry::
+                                      CutQuadratureProvenance&) {
+    svmp::FE::spaces::FunctionSpace::Value reference{};
+    reference[0] = xi[0];
+    reference[1] = xi[1];
+    reference[2] = xi[2];
+    const auto gradient =
+        q3_space->evaluate_gradient(reference, coefficients);
+    return std::array<svmp::FE::Real, 3>{
+        gradient[0], gradient[1], gradient[2]};
+  };
+  const auto snapshot =
+      svmp::FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+          std::move(interface_domain),
+          {},
+          {},
+          system.meshAccess(),
+          snapshot_policy,
+          std::move(scalar),
+          "q3-interior-root-curvature");
+  ASSERT_TRUE(snapshot);
+  ASSERT_GT(snapshot->revision().snapshot_revision_key, 0u);
+  ASSERT_EQ(snapshot->revision().source_value_revision,
+            source_value_revision);
+
+  auto cut_context =
+      std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+  cut_context->addFreeSurfaceGeometrySnapshot(
+      snapshot, svmp::FE::geometry::CutIntegrationSide::Negative);
+  system.setCutIntegrationContext(cut_context);
+
+  EXPECT_THROW(
+      (void)application::core::
+          collectLevelSetCurvatureHighOrderSupplementalSamples(
+              system,
+              state,
+              phi,
+              marker,
+              source_value_revision + 1u),
+      std::invalid_argument);
+  const auto samples =
+      application::core::
+          collectLevelSetCurvatureHighOrderSupplementalSamples(
+              system, state, phi, marker, source_value_revision);
+  ASSERT_EQ(samples.size(), 1u);
+  const auto& sample = samples.front();
+  EXPECT_EQ(sample.parent_cell, 0);
+  EXPECT_NEAR(sample.coordinate[0], svmp::FE::Real{0.5}, 1.0e-13);
+  EXPECT_NEAR(sample.coordinate[1], svmp::FE::Real{0.5}, 1.0e-13);
+  EXPECT_NEAR(sample.coordinate[2], svmp::FE::Real{0.0}, 1.0e-13);
+  EXPECT_NEAR(sample.value, center_value, 1.0e-13);
+  EXPECT_EQ(sample.free_surface_snapshot_revision_key,
+            snapshot->revision().snapshot_revision_key);
+  EXPECT_EQ(sample.source_value_revision, source_value_revision);
+  EXPECT_GT(sample.cut_topology_revision, 0u);
+
+  auto zero_topology_samples = samples;
+  zero_topology_samples.front().cut_topology_revision = 0u;
+  const std::vector<svmp::FE::Real> vertex_phi{
+      polynomial(svmp::FE::Real{-1.0}),
+      polynomial(svmp::FE::Real{1.0}),
+      polynomial(svmp::FE::Real{1.0}),
+      polynomial(svmp::FE::Real{-1.0}),
+  };
+  svmp::FE::level_set::LevelSetCurvatureProjectionOptions projection_options;
+  std::vector<svmp::FE::Real> curvature;
+  EXPECT_THROW(
+      (void)svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
+          system.meshAccess(),
+          vertex_phi,
+          zero_topology_samples,
+          projection_options,
+          curvature),
+      std::invalid_argument);
+
+  RecordProperty("q3_curvature_paired_sample_count",
+                 std::to_string(samples.size()));
+  RecordProperty("q3_curvature_authoritative_interface_validation_count", "1");
+  RecordProperty("q3_curvature_missing_snapshot_rejections", "1");
+  RecordProperty("q3_curvature_stale_state_rejections", "1");
+  RecordProperty("q3_curvature_zero_topology_rejections", "1");
+  RecordProperty("q3_curvature_authoritative_root_residual",
+                 ::testing::PrintToString(maximum_root_residual));
 }

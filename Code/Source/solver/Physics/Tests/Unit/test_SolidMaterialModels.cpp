@@ -8,7 +8,9 @@
 #include <gtest/gtest.h>
 
 #include "Physics/Materials/Solid/LinearElasticStress.h"
+#if defined(SVMP_TEST_HAS_ISOCHORIC_NEOHOOKEAN_PK1)
 #include "Physics/Materials/Solid/IsochoricNeoHookeanPK1.h"
+#endif
 #include "Physics/Materials/Solid/NeoHookeanPK1.h"
 
 #include "FE/Forms/Dual.h"
@@ -148,6 +150,7 @@ TEST(NeoHookeanPK1, DerivativeMatchesFiniteDifferenceForSingleEntry)
     EXPECT_NEAR(ad, fd, std::max(1e-9, 2e-5 * std::abs(fd)));
 }
 
+#if defined(SVMP_TEST_HAS_ISOCHORIC_NEOHOOKEAN_PK1)
 TEST(IsochoricNeoHookeanPK1, IdentityDeformationGivesZeroStress)
 {
     materials::solid::IsochoricNeoHookeanPK1 model(/*mu=*/2.0);
@@ -219,6 +222,7 @@ TEST(IsochoricNeoHookeanPK1, DerivativeMatchesFiniteDifferenceForSingleEntry)
     EXPECT_NEAR(Pd.matrixAt(0, 0).value, P00, 1e-14);
     EXPECT_NEAR(ad, fd, std::max(1e-9, 2e-5 * std::abs(fd)));
 }
+#endif
 
 } // namespace test
 } // namespace Physics

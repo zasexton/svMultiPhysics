@@ -37,6 +37,21 @@ public:
 
     [[nodiscard]] int interpolationOrder(GlobalIndex cell_id) const noexcept;
 
+    /**
+     * Whether the cell uses the complete nodal tensor-product Lagrange basis.
+     *
+     * This narrow query lets implicit-geometry backends select range
+     * certification algorithms that depend on the convex-hull property of a
+     * Bernstein conversion without assuming that every scalar H1 space is
+     * nodal Lagrange.
+     */
+    [[nodiscard]] bool usesCompleteTensorLagrangeBasis(
+        GlobalIndex cell_id) const noexcept;
+
+    /** Whether the cell uses a tensor-product serendipity polynomial basis. */
+    [[nodiscard]] bool usesTensorSerendipityBasis(
+        GlobalIndex cell_id) const noexcept;
+
     [[nodiscard]] std::vector<Real> gatherCellCoefficients(
         GlobalIndex cell_id) const;
 

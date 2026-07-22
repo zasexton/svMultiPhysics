@@ -3104,12 +3104,14 @@ void orientGeneratedInterfaceContextForSide(
 using CutStabilizationCellScales = std::unordered_map<GlobalIndex, Real>;
 
 [[nodiscard]] CutStabilizationCellScales buildCutStabilizationCellScales(
+    const IMeshAccess& mesh,
     const CutIntegrationContext* cut_context)
 {
     CutStabilizationCellScales scales;
     if (cut_context == nullptr) {
         return scales;
     }
+    cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
 
     constexpr Real fraction_floor = Real{1.0e-12};
     constexpr Real full_fraction_tol = Real{1.0e-12};
@@ -6507,7 +6509,7 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     std::vector<GlobalIndex> cell_nodes_plus;
     std::vector<Real> cut_face_jit_constants;
     const auto cut_stabilization_cell_scales =
-        buildCutStabilizationCellScales(cut_integration_context_);
+        buildCutStabilizationCellScales(mesh, cut_integration_context_);
     face_setup_time = face_now() - face_start;
 
     withDevirtualizedKernel(kernel, [&](auto& kernel_impl) {
@@ -10538,6 +10540,7 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
                                   col_dof_map_, col_dof_offset_, matrix_view);
     }
     ensureCellConstrainedFlags(mesh);
+    cut_context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
 
     const LocalIndex max_dofs =
         std::max(row_dof_map_->getMaxDofsPerCell(), col_dof_map_->getMaxDofsPerCell());
@@ -11132,6 +11135,7 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
         return result;
     }
 
+    cut_context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
     const auto& rules = cut_context.volumeRules();
     const auto indexed_rule_indices =
         cut_context.generatedVolumeRuleIndexSpanForMarkerAndSide(interface_marker, side);
@@ -11766,6 +11770,7 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
                                   col_dof_map_, col_dof_offset_, matrix_view);
     }
     ensureCellConstrainedFlags(mesh);
+    cut_context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
 
     std::vector<const geometry::CutQuadratureRule*> selected_rules;
     if (interface_marker >= 0) {

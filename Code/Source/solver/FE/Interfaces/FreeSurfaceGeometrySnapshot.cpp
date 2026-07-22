@@ -88,12 +88,6 @@ void mix(std::uint64_t& hash, Real value) noexcept
             result[i] += inverse[j][i] * gradient[j];
         }
     }
-    const Real magnitude = norm(result);
-    if (magnitude > Real{0.0}) {
-        for (auto& value : result) {
-            value /= magnitude;
-        }
-    }
     return result;
 }
 
@@ -835,8 +829,184 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
     records.push_back(std::move(record));
 }
 
+struct LinearCornerAffineRepresentation {
+    std::array<Real, 3> origin{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> reference_gradient{{0.0, 0.0, 0.0}};
+
+    [[nodiscard]] Real value(
+        const std::array<Real, 3>& point) const noexcept
+    {
+        return reference_gradient[0] * (point[0] - origin[0]) +
+               reference_gradient[1] * (point[1] - origin[1]) +
+               reference_gradient[2] * (point[2] - origin[2]);
+    }
+};
+
+[[nodiscard]] LinearCornerAffineRepresentation
+makeLinearCornerAffineRepresentation(
+    const FreeSurfaceGeometryRuleRecord& record,
+    const LevelSetInterfaceDomain& interface_domain,
+    const assembly::IMeshAccess& mesh,
+    const FreeSurfaceGeometryScalarEvaluator& scalar,
+    Real tolerance)
+{
+    const auto& rule = record.reference_rule;
+    const auto source_id = rule.provenance.source_stable_id;
+    const auto source = std::find_if(
+        interface_domain.fragments().begin(),
+        interface_domain.fragments().end(),
+        [source_id](const CutInterfaceFragment& fragment) {
+            return fragment.stable_id == source_id;
+        });
+    if (source_id == 0u || source == interface_domain.fragments().end() ||
+        source->parent_cell != rule.provenance.parent_entity ||
+        source->vertices.empty()) {
+        throw std::invalid_argument(
+            "LinearCorner rule has no matching authoritative source fragment");
+    }
+
+    std::vector<std::array<Real, 3>> vertices;
+    vertices.reserve(source->vertices.size());
+    for (const auto& vertex : source->vertices) {
+        if (!finitePoint(vertex.parent_coordinate)) {
+            throw std::invalid_argument(
+                "LinearCorner source fragment has a non-finite reference vertex");
+        }
+        vertices.push_back(vertex.parent_coordinate);
+    }
+
+    const auto difference = [](const auto& a, const auto& b) {
+        return std::array<Real, 3>{{
+            a[0] - b[0], a[1] - b[1], a[2] - b[2]}};
+    };
+    const auto cross = [](const auto& a, const auto& b) {
+        return std::array<Real, 3>{{
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0]}};
+    };
+
+    LinearCornerAffineRepresentation represented;
+    Real direction_norm{0.0};
+    if (mesh.dimension() == 2) {
+        if (source->kind != CutInterfaceFragmentKind::Segment ||
+            vertices.size() < 2u) {
+            throw std::invalid_argument(
+                "two-dimensional LinearCorner geometry requires a source chord");
+        }
+        std::pair<std::size_t, std::size_t> endpoints{0u, 1u};
+        Real maximum_distance_squared{-1.0};
+        for (std::size_t i = 0u; i < vertices.size(); ++i) {
+            for (std::size_t j = i + 1u; j < vertices.size(); ++j) {
+                const auto edge = difference(vertices[j], vertices[i]);
+                const Real distance_squared = dot(edge, edge);
+                if (distance_squared > maximum_distance_squared) {
+                    maximum_distance_squared = distance_squared;
+                    endpoints = {i, j};
+                }
+            }
+        }
+        represented.origin = vertices[endpoints.first];
+        const auto tangent = difference(vertices[endpoints.second],
+                                        represented.origin);
+        represented.reference_gradient =
+            {{tangent[1], -tangent[0], Real{0.0}}};
+        direction_norm = norm(represented.reference_gradient);
+    } else if (mesh.dimension() == 3) {
+        if (source->kind != CutInterfaceFragmentKind::Polygon ||
+            vertices.size() < 3u) {
+            throw std::invalid_argument(
+                "three-dimensional LinearCorner geometry requires a source plane");
+        }
+        std::array<std::size_t, 3> plane_vertices{{0u, 1u, 2u}};
+        Real maximum_area_squared{-1.0};
+        for (std::size_t i = 0u; i < vertices.size(); ++i) {
+            for (std::size_t j = i + 1u; j < vertices.size(); ++j) {
+                for (std::size_t k = j + 1u; k < vertices.size(); ++k) {
+                    const auto ab = difference(vertices[j], vertices[i]);
+                    const auto ac = difference(vertices[k], vertices[i]);
+                    const auto candidate = cross(ab, ac);
+                    const Real area_squared = dot(candidate, candidate);
+                    if (area_squared > maximum_area_squared) {
+                        maximum_area_squared = area_squared;
+                        plane_vertices = {{i, j, k}};
+                        represented.reference_gradient = candidate;
+                    }
+                }
+            }
+        }
+        represented.origin = vertices[plane_vertices[0]];
+        direction_norm = norm(represented.reference_gradient);
+    } else {
+        throw std::invalid_argument(
+            "LinearCorner affine validation requires a two- or three-dimensional parent mesh");
+    }
+
+    constexpr Real minimum_direction_scale =
+        Real{64.0} * std::numeric_limits<Real>::min();
+    if (!std::isfinite(direction_norm) ||
+        !(direction_norm > minimum_direction_scale)) {
+        throw std::invalid_argument(
+            "LinearCorner source fragment has degenerate affine geometry");
+    }
+    for (auto& component : represented.reference_gradient) {
+        component /= direction_norm;
+    }
+
+    Real vertex_scale{1.0};
+    for (const auto& vertex : vertices) {
+        vertex_scale = std::max(
+            vertex_scale, norm(difference(vertex, represented.origin)));
+        if (std::abs(represented.value(vertex)) >
+            Real{128.0} * tolerance * vertex_scale) {
+            throw std::invalid_argument(
+                "LinearCorner source vertices do not define one affine chord or plane");
+        }
+    }
+
+    std::array<Real, 3> centroid{{0.0, 0.0, 0.0}};
+    for (const auto& vertex : vertices) {
+        for (std::size_t component = 0u; component < 3u; ++component) {
+            centroid[component] +=
+                vertex[component] / static_cast<Real>(vertices.size());
+        }
+    }
+    if (!scalar.reference_gradient) {
+        throw std::invalid_argument(
+            "LinearCorner orientation requires an independent scalar gradient evaluator");
+    }
+    const auto independent_gradient = scalar.reference_gradient(
+        static_cast<GlobalIndex>(rule.provenance.parent_entity),
+        centroid,
+        rule.provenance);
+    const Real independent_norm = norm(independent_gradient);
+    const Real orientation =
+        dot(represented.reference_gradient, independent_gradient);
+    if (!finitePoint(independent_gradient) ||
+        !std::isfinite(independent_norm) ||
+        !(independent_norm > minimum_direction_scale) ||
+        !std::isfinite(orientation)) {
+        throw std::invalid_argument(
+            "LinearCorner source geometry cannot be oriented by the independent scalar gradient");
+    }
+    const Real orientation_angle = std::acos(std::clamp(
+        std::abs(orientation) / independent_norm, Real{0.0}, Real{1.0}));
+    if (!std::isfinite(orientation_angle) ||
+        orientation_angle > Real{1.0e-7}) {
+        throw std::invalid_argument(
+            "LinearCorner source normal disagrees with the independent scalar gradient");
+    }
+    if (orientation < Real{0.0}) {
+        for (auto& component : represented.reference_gradient) {
+            component = -component;
+        }
+    }
+    return represented;
+}
+
 void validateRule(
     const FreeSurfaceGeometryRuleRecord& record,
+    const LevelSetInterfaceDomain& interface_domain,
     const assembly::IMeshAccess& mesh,
     const FreeSurfaceGeometryRevision& revision,
     const FreeSurfaceGeometrySnapshotPolicy& policy,
@@ -844,6 +1014,18 @@ void validateRule(
     FreeSurfaceGeometryValidationLedger& ledger)
 {
     const auto& rule = record.reference_rule;
+    const bool interface_or_contact =
+        record.role == FreeSurfaceGeometryRuleRole::Interface ||
+        record.role == FreeSurfaceGeometryRuleRole::Contact;
+    std::optional<LinearCornerAffineRepresentation>
+        linear_corner_representation;
+    if (interface_or_contact &&
+        rule.provenance.selected_implicit_quadrature_backend ==
+            "LinearCorner") {
+        linear_corner_representation =
+            makeLinearCornerAffineRepresentation(
+                record, interface_domain, mesh, scalar, policy.tolerance);
+    }
     const int geometric_dimension =
         rule.geometric_dimension >= 0
             ? rule.geometric_dimension
@@ -913,8 +1095,7 @@ void validateRule(
             throw std::invalid_argument(
                 "retained free-surface point lies outside its parent reference cell");
         }
-        if (record.role == FreeSurfaceGeometryRuleRole::Interface ||
-            record.role == FreeSurfaceGeometryRuleRole::Contact) {
+        if (interface_or_contact) {
             if (!std::isfinite(point.level_set_residual)) {
                 throw std::invalid_argument(
                     "retained interface/contact point has a non-finite represented root residual");
@@ -935,11 +1116,13 @@ void validateRule(
         if (!scalar.canEvaluateValue()) {
             continue;
         }
-        const Real level_set =
-            scalar.value(parent,
-                         physical.reference_point,
-                         rule.provenance) -
-            revision.isovalue;
+        const Real level_set = linear_corner_representation
+                                   ? linear_corner_representation->value(
+                                         physical.reference_point)
+                                   : scalar.value(parent,
+                                                  physical.reference_point,
+                                                  rule.provenance) -
+                                         revision.isovalue;
         if (!std::isfinite(level_set)) {
             throw std::invalid_argument(
                 "free-surface snapshot scalar evaluator returned a non-finite value");
@@ -970,8 +1153,7 @@ void validateRule(
                     "; tolerance=" + std::to_string(scaled_tolerance));
             }
         }
-        if (record.role == FreeSurfaceGeometryRuleRole::Interface ||
-            record.role == FreeSurfaceGeometryRuleRole::Contact) {
+        if (interface_or_contact) {
             ledger.maximum_root_residual = std::max(
                 ledger.maximum_root_residual, std::abs(level_set));
             if (std::abs(level_set) > scaled_tolerance) {
@@ -979,22 +1161,64 @@ void validateRule(
                     "retained interface/contact point is off the represented zero set");
             }
             if (scalar.reference_gradient) {
-                const auto gradient = scalar.reference_gradient(
-                    parent, physical.reference_point, rule.provenance);
+                const auto gradient = linear_corner_representation
+                                          ? linear_corner_representation
+                                                ->reference_gradient
+                                          : scalar.reference_gradient(
+                                                parent,
+                                                physical.reference_point,
+                                                rule.provenance);
                 const auto mapped_gradient = mapReferenceGradient(
                     physical.inverse_jacobian, gradient);
-                if (norm(mapped_gradient) > Real{0.0} &&
-                    norm(physical.normal) > Real{0.0}) {
-                    const Real cosine = std::clamp(
-                        dot(mapped_gradient, physical.normal),
-                        Real{-1.0}, Real{1.0});
-                    const Real angle = std::acos(cosine);
-                    ledger.maximum_normal_angular_error =
-                        std::max(ledger.maximum_normal_angular_error, angle);
-                    if (angle > Real{1.0e-7}) {
-                        throw std::invalid_argument(
-                            "retained interface/contact normal disagrees with the represented scalar gradient");
-                    }
+                const auto maximum_component = [](const auto& direction) {
+                    return std::max({std::abs(direction[0]),
+                                     std::abs(direction[1]),
+                                     std::abs(direction[2])});
+                };
+                const Real gradient_scale = maximum_component(mapped_gradient);
+                const Real normal_scale = maximum_component(physical.normal);
+                constexpr Real minimum_direction_scale =
+                    Real{64.0} * std::numeric_limits<Real>::min();
+                if (!finitePoint(gradient) || !finitePoint(mapped_gradient) ||
+                    !finitePoint(physical.normal) ||
+                    !std::isfinite(gradient_scale) ||
+                    !std::isfinite(normal_scale) ||
+                    !(gradient_scale > minimum_direction_scale) ||
+                    !(normal_scale > minimum_direction_scale)) {
+                    throw std::invalid_argument(
+                        "retained interface/contact point has an invalid represented scalar gradient or physical normal");
+                }
+                auto unit_gradient = mapped_gradient;
+                auto unit_normal = physical.normal;
+                for (auto& component : unit_gradient) {
+                    component /= gradient_scale;
+                }
+                for (auto& component : unit_normal) {
+                    component /= normal_scale;
+                }
+                const Real gradient_norm = norm(unit_gradient);
+                const Real normal_norm = norm(unit_normal);
+                if (!std::isfinite(gradient_norm) ||
+                    !std::isfinite(normal_norm) ||
+                    !(gradient_norm > Real{0.0}) ||
+                    !(normal_norm > Real{0.0})) {
+                    throw std::invalid_argument(
+                        "retained interface/contact point has an invalid represented scalar gradient or physical normal");
+                }
+                for (auto& component : unit_gradient) {
+                    component /= gradient_norm;
+                }
+                for (auto& component : unit_normal) {
+                    component /= normal_norm;
+                }
+                const Real cosine = std::clamp(
+                    dot(unit_gradient, unit_normal), Real{-1.0}, Real{1.0});
+                const Real angle = std::acos(cosine);
+                ledger.maximum_normal_angular_error =
+                    std::max(ledger.maximum_normal_angular_error, angle);
+                if (angle > Real{1.0e-7}) {
+                    throw std::invalid_argument(
+                        "retained interface/contact normal disagrees with the represented scalar gradient");
                 }
             }
         }
@@ -1250,17 +1474,15 @@ makeMomentCertificateFromSamples(
         coordinates = {{Real{1.0} - t, t, Real{0.0}, Real{0.0}}};
     } else if (ambient_dimension == 2) {
         const auto ac = subtractPoint(simplex.vertices[2], a);
-        const Real d00 = dot(ab, ab);
-        const Real d01 = dot(ab, ac);
-        const Real d11 = dot(ac, ac);
-        const Real d20 = dot(ap, ab);
-        const Real d21 = dot(ap, ac);
-        const Real denominator = d00 * d11 - d01 * d01;
-        if (!(std::abs(denominator) > Real{0.0})) {
+        const auto normal = crossPoint(ab, ac);
+        const Real denominator = dot(normal, normal);
+        if (!(denominator > Real{0.0})) {
             return false;
         }
-        const Real b = (d11 * d20 - d01 * d21) / denominator;
-        const Real c = (d00 * d21 - d01 * d20) / denominator;
+        const Real b =
+            dot(crossPoint(ap, ac), normal) / denominator;
+        const Real c =
+            dot(crossPoint(ab, ap), normal) / denominator;
         const auto residual = subtractPoint(
             ap,
             {{b * ab[0] + c * ac[0],
@@ -1349,7 +1571,16 @@ makeMomentCertificateFromSamples(
         }
         if (!found) {
             throw std::invalid_argument(
-                "volume quadrature point lies outside its authoritative source decomposition");
+                "volume quadrature point lies outside its authoritative "
+                "source decomposition for parent " +
+                std::to_string(rule.provenance.parent_entity) +
+                " on side " +
+                (rule.side == geometry::CutIntegrationSide::Negative
+                     ? "negative"
+                     : "positive") +
+                " at (" + std::to_string(coordinate[0]) + ", " +
+                std::to_string(coordinate[1]) + ", " +
+                std::to_string(coordinate[2]) + ")");
         }
         const bool wrong_side =
             (rule.side == geometry::CutIntegrationSide::Negative &&
@@ -1638,6 +1869,60 @@ void requireUniqueAuthoritativeSourceIds(
             !interface_source_ids.insert(fragment.stable_id).second) {
             throw std::invalid_argument(
                 "free-surface snapshot has duplicate authoritative interface-fragment stable ids");
+        }
+    }
+}
+
+void requireCompleteAuthoritativeCutFamilies(
+    const LevelSetInterfaceDomain& interface_domain)
+{
+    struct ParentVolumeState {
+        bool has_negative{false};
+        bool has_positive{false};
+    };
+
+    std::map<MeshIndex, ParentVolumeState> volume_state_by_parent;
+    for (const auto& fragment : interface_domain.fragments()) {
+        if (fragment.active() &&
+            fragment.interface_marker != interface_domain.marker()) {
+            throw std::invalid_argument(
+                "active authoritative free-surface fragment has the wrong interface marker");
+        }
+    }
+    for (const auto& region : interface_domain.volumeRegions()) {
+        if (!region.active()) {
+            continue;
+        }
+        if (region.interface_marker != interface_domain.marker()) {
+            throw std::invalid_argument(
+                "active authoritative free-surface volume region has the wrong interface marker");
+        }
+        auto& state = volume_state_by_parent[region.parent_cell];
+        state.has_negative =
+            state.has_negative ||
+            region.side == geometry::CutIntegrationSide::Negative;
+        state.has_positive =
+            state.has_positive ||
+            region.side == geometry::CutIntegrationSide::Positive;
+    }
+
+    const auto cut_cells = interface_domain.cutCells();
+    const std::set<MeshIndex> cut_cell_set(cut_cells.begin(),
+                                          cut_cells.end());
+    for (const auto parent : cut_cells) {
+        const auto found = volume_state_by_parent.find(parent);
+        if (found == volume_state_by_parent.end() ||
+            !found->second.has_negative || !found->second.has_positive) {
+            throw std::invalid_argument(
+                "authoritative free-surface cut cell is missing an active negative or positive source volume region");
+        }
+    }
+
+    for (const auto& [parent, state] : volume_state_by_parent) {
+        if (state.has_negative && state.has_positive &&
+            cut_cell_set.find(parent) == cut_cell_set.end()) {
+            throw std::invalid_argument(
+                "authoritative two-phase free-surface volume family is missing its active interface source fragment");
         }
     }
 }
@@ -2009,6 +2294,7 @@ bool FreeSurfaceGeometryRevision::sameSourceState(
 
 FreeSurfaceGeometrySnapshot::FreeSurfaceGeometrySnapshot(
     FreeSurfaceGeometryRevision revision,
+    FreeSurfaceGeometryLocalMeshRevision local_mesh_revision,
     FreeSurfaceGeometrySnapshotPolicy policy,
     LevelSetInterfaceDomain interface_domain,
     std::vector<GeneratedInterfaceBoundaryIntersectionDomain> contact_domains,
@@ -2016,6 +2302,7 @@ FreeSurfaceGeometrySnapshot::FreeSurfaceGeometrySnapshot(
     std::vector<FreeSurfaceGeometryRuleRecord> rules,
     FreeSurfaceGeometryValidationLedger ledger)
     : revision_(std::move(revision))
+    , local_mesh_revision_(local_mesh_revision)
     , policy_(policy)
     , interface_domain_(std::move(interface_domain))
     , contact_domains_(std::move(contact_domains))
@@ -2029,6 +2316,12 @@ const FreeSurfaceGeometryRevision&
 FreeSurfaceGeometrySnapshot::revision() const noexcept
 {
     return revision_;
+}
+
+const FreeSurfaceGeometryLocalMeshRevision&
+FreeSurfaceGeometrySnapshot::localMeshRevision() const noexcept
+{
+    return local_mesh_revision_;
 }
 
 const FreeSurfaceGeometrySnapshotPolicy&
@@ -2801,11 +3094,28 @@ buildFreeSurfaceGeometrySnapshot(
         throw std::invalid_argument(
             "free-surface geometry snapshot requires valid communicator metadata and distributed global entity ids");
     }
+    if (mesh.revisionTrackingAvailable() &&
+        (interface_domain.request().mesh_geometry_revision !=
+             mesh.geometryRevision() ||
+         interface_domain.request().mesh_topology_revision !=
+             mesh.topologyRevision() ||
+         interface_domain.request().ownership_revision !=
+             mesh.ownershipRevision())) {
+        throw std::invalid_argument(
+            "free-surface geometry request does not match the current mesh revision");
+    }
     auto revision = makeRevision(interface_domain, mesh, std::move(domain_id));
+    const FreeSurfaceGeometryLocalMeshRevision local_mesh_revision{
+        .mesh_geometry_revision = mesh.geometryRevision(),
+        .mesh_topology_revision = mesh.topologyRevision(),
+        .ownership_revision = mesh.ownershipRevision(),
+        .numbering_revision = mesh.numberingRevision(),
+    };
     FreeSurfaceGeometryValidationLedger ledger;
     std::vector<FreeSurfaceGeometryRuleRecord> records;
 
     requireUniqueAuthoritativeSourceIds(interface_domain);
+    requireCompleteAuthoritativeCutFamilies(interface_domain);
     auto volume_rules = interface_domain.volumeQuadratureRules();
     auto interface_rules = interface_domain.interfaceQuadratureRules();
     records.reserve(volume_rules.size() + interface_rules.size());
@@ -2995,6 +3305,27 @@ buildFreeSurfaceGeometrySnapshot(
             "free-surface snapshot active-boundary/contact marker sets differ");
     }
 
+    const bool has_interface_or_contact_rules =
+        std::any_of(records.begin(), records.end(), [](const auto& record) {
+            return record.role == FreeSurfaceGeometryRuleRole::Interface ||
+                   record.role == FreeSurfaceGeometryRuleRole::Contact;
+        });
+    const bool has_volume_rule_without_phase_certificate =
+        std::any_of(records.begin(), records.end(), [](const auto& record) {
+            return volumeRole(record.role) &&
+                   !record.moment_certificate.phase_sign_certified;
+        });
+    if (has_volume_rule_without_phase_certificate &&
+        !scalar.canEvaluateValue()) {
+        throw std::invalid_argument(
+            "free-surface snapshot volume validation requires a scalar value evaluator when source geometry does not certify the represented phase");
+    }
+    if (has_interface_or_contact_rules &&
+        (!scalar.canEvaluateValue() || !scalar.reference_gradient)) {
+        throw std::invalid_argument(
+            "free-surface snapshot interface/contact validation requires a represented scalar value and gradient evaluator");
+    }
+
     std::set<std::tuple<FreeSurfaceGeometryRuleRole,
                         int,
                         GlobalIndex,
@@ -3015,6 +3346,7 @@ buildFreeSurfaceGeometrySnapshot(
                 "free-surface snapshot contains a duplicate retained rule identity");
         }
         validateRule(record,
+                     interface_domain,
                      mesh,
                      revision,
                      policy,
@@ -3043,6 +3375,7 @@ buildFreeSurfaceGeometrySnapshot(
     return std::shared_ptr<const FreeSurfaceGeometrySnapshot>(
         new FreeSurfaceGeometrySnapshot(
             std::move(revision),
+            local_mesh_revision,
             policy,
             std::move(interface_domain),
             std::move(contact_domains),

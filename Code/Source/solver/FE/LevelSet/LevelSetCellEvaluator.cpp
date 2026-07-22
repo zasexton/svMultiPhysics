@@ -1,6 +1,9 @@
 #include "LevelSet/LevelSetCellEvaluator.h"
 
+#include "Basis/BasisTraits.h"
 #include "Basis/LagrangeBasis.h"
+#include "Basis/SerendipityBasis.h"
+#include "Elements/Element.h"
 
 #include <cstddef>
 #include <stdexcept>
@@ -89,6 +92,25 @@ LevelSetCellEvaluator::LevelSetCellEvaluator(
 int LevelSetCellEvaluator::interpolationOrder(GlobalIndex cell_id) const noexcept
 {
     return space_->polynomial_order(cell_id);
+}
+
+bool LevelSetCellEvaluator::usesCompleteTensorLagrangeBasis(
+    GlobalIndex cell_id) const noexcept
+{
+    const auto& element =
+        space_->getElement(space_->element_type(), cell_id);
+    return basis::is_tensor_product(element.element_type()) &&
+           dynamic_cast<const basis::LagrangeBasis*>(&element.basis()) != nullptr;
+}
+
+bool LevelSetCellEvaluator::usesTensorSerendipityBasis(
+    GlobalIndex cell_id) const noexcept
+{
+    const auto& element =
+        space_->getElement(space_->element_type(), cell_id);
+    return basis::is_tensor_product(element.element_type()) &&
+           dynamic_cast<const basis::SerendipityBasis*>(&element.basis()) !=
+               nullptr;
 }
 
 std::vector<Real> LevelSetCellEvaluator::gatherCellCoefficients(

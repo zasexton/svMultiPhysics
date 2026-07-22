@@ -54,10 +54,16 @@ struct LevelSetCurvatureProjectionSample {
     MeshIndex parent_cell{static_cast<MeshIndex>(-1)};
     std::array<Real, 3> coordinate{{0.0, 0.0, 0.0}};
     Real value{0.0};
+    std::uint64_t free_surface_snapshot_revision_key{0};
+    std::uint64_t source_value_revision{0};
+    std::uint64_t cut_topology_revision{0};
 };
 
 struct LevelSetCurvatureProjectionResult {
     bool success{false};
+    std::uint64_t free_surface_snapshot_revision_key{0};
+    std::uint64_t source_value_revision{0};
+    std::uint64_t cut_rule_signature{0};
     std::size_t vertices{0};
     std::size_t supplemental_samples{0};
     std::size_t supplemental_sample_rows{0};
@@ -105,6 +111,9 @@ struct LevelSetCurvatureProjectionWorkspace {
     std::uint64_t mesh_ownership_revision{0};
     std::uint64_t mesh_numbering_revision{0};
     std::uint64_t mesh_coordinate_configuration_key{0};
+    std::uint64_t free_surface_snapshot_revision_key{0};
+    std::uint64_t source_value_revision{0};
+    std::uint64_t cut_rule_signature{0};
     std::uint64_t sample_signature{0};
     std::size_t vertex_adjacency_builds{0};
     std::size_t sample_adjacency_builds{0};
@@ -124,6 +133,9 @@ struct LevelSetCurvatureProjectionWorkspace {
         mesh_ownership_revision = 0;
         mesh_numbering_revision = 0;
         mesh_coordinate_configuration_key = 0;
+        free_surface_snapshot_revision_key = 0;
+        source_value_revision = 0;
+        cut_rule_signature = 0;
         sample_signature = 0;
         vertex_adjacency_builds = 0;
         sample_adjacency_builds = 0;

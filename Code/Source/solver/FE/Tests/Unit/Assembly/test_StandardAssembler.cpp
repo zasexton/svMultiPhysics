@@ -3071,6 +3071,48 @@ TEST(StandardAssemblerFaces, InteriorFacePreparesBothSidesConsistently) {
     EXPECT_NEAR(system.getVectorEntry(11), 0.0, 1e-12);
 }
 
+TEST(StandardAssemblerFaces,
+     InteriorStabilizationRejectsOrphanSnapshotMetadata) {
+    TwoHexStackedMeshAccess mesh;
+    dofs::DofMap dof_map(2, 16, 8);
+    dof_map.setCellDofs(
+        0, std::vector<GlobalIndex>{0, 1, 2, 3, 4, 5, 6, 7});
+    dof_map.setCellDofs(
+        1, std::vector<GlobalIndex>{8, 9, 10, 11, 12, 13, 14, 15});
+    dof_map.setNumDofs(16);
+    dof_map.setNumLocalDofs(16);
+    dof_map.finalize();
+
+    CutCellAssemblyMetadata metadata;
+    metadata.cell = 0;
+    metadata.parent_entity = 0;
+    metadata.volume_fraction = Real{0.5};
+    metadata.free_surface_snapshot_revision_key = 91u;
+    geometry::CutQuadratureRule rule;
+    rule.kind = geometry::CutQuadratureKind::Volume;
+    rule.side = geometry::CutIntegrationSide::Negative;
+    rule.provenance.parent_entity = 0;
+    rule.provenance.marker = 18;
+    rule.provenance.free_surface_snapshot_revision_key = 91u;
+    CutIntegrationContext orphan;
+    orphan.addVolumeRule(std::move(metadata), std::move(rule));
+
+    HexFunctionSpace space;
+    DenseSystemView system(16);
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setCutIntegrationContext(&orphan);
+    assembler.initialize();
+    InteriorFaceDiagnosticsKernel kernel;
+
+    EXPECT_THROW(
+        (void)assembler.assembleInteriorFaces(
+            mesh, space, space, kernel, system, &system),
+        std::invalid_argument);
+    RecordProperty(
+        "standard_assembler_stabilization_snapshot_rejection_count", 1);
+}
+
 TEST_F(StandardAssemblerTest, DefaultConstruction) {
     StandardAssembler assembler;
     EXPECT_EQ(assembler.name(), "StandardAssembler");
@@ -4033,6 +4075,51 @@ TEST(StandardAssemblerCutInterfaces, MapsReferenceInterfaceMeasureToPhysicalSurf
     EXPECT_NEAR(rhs.getVectorEntry(1), 0.0, 1e-12);
     EXPECT_NEAR(rhs.getVectorEntry(2), Real{6.0} / std::sqrt(Real{61.0}), 1e-12);
     EXPECT_NEAR(rhs.getVectorEntry(3), Real{4.0} / std::sqrt(Real{61.0}), 1e-12);
+}
+
+TEST(StandardAssemblerCutInterfaces,
+     RejectsOrphanSnapshotRuleWhenMarkerlessSelectionRequestsAll)
+{
+    constexpr int marker = 1315;
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{1.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 1.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 1.0},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+    auto dof_map = createSingleCellDofMap(4);
+    MockFunctionSpace space;
+
+    CutIntegrationContext generated;
+    generated.addGeneratedInterfaceDomain(
+        makeReferencePlaneInterfaceDomain(marker));
+    ASSERT_EQ(generated.interfaceRules().size(), 1u);
+    auto orphan_rule = generated.interfaceRules().front();
+    orphan_rule.provenance.free_surface_snapshot_revision_key = 91u;
+    CutIntegrationContext orphan;
+    orphan.addInterfaceRule(std::move(orphan_rule));
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+    CutInterfaceDiagnosticsKernel kernel;
+    EXPECT_THROW(
+        (void)assembler.assembleCutInterfaces(
+            mesh,
+            orphan,
+            /*interface_marker=*/-1,
+            space,
+            space,
+            kernel,
+            nullptr,
+            nullptr,
+            /*assemble_matrix=*/false,
+            /*assemble_vector=*/false),
+        std::invalid_argument);
+    RecordProperty(
+        "standard_assembler_markerless_snapshot_rejection_count", 1);
 }
 
 TEST(StandardAssemblerCutInterfaces,

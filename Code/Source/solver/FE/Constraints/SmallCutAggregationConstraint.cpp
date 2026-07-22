@@ -2080,6 +2080,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             "missing_cut_integration_context aggregation requires a generated "
             "cut context before post-setup constraint rebuild");
     }
+    cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+        system.meshAccess());
 
     // Contexts may be ownership-filtered, so an empty-work rank need not
     // retain this marker locally. At least one rank in the field communicator

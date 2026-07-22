@@ -1,6 +1,8 @@
 #include "LevelSet/LevelSetCurvatureProjection.h"
 
 #include "Assembly/Assembler.h"
+#include "Basis/NodeOrderingConventions.h"
+#include "Spaces/H1Space.h"
 
 #include <gtest/gtest.h>
 
@@ -396,6 +398,318 @@ FE::Real circleCurvatureMeanError(int nx, FE::Real h, FE::Real radius)
     return error_sum / static_cast<FE::Real>(samples);
 }
 
+template <typename ValueFunction>
+std::vector<level_set::LevelSetCurvatureProjectionSample>
+makeQ3InteriorSamples(const FE::assembly::IMeshAccess& mesh,
+                      const ValueFunction& value_function,
+                      FE::Real* max_interpolation_defect = nullptr)
+{
+    const auto element_type =
+        mesh.dimension() == 3 ? FE::ElementType::Hex8
+                              : FE::ElementType::Quad4;
+    FE::spaces::H1Space q3_space(element_type, /*order=*/3);
+    const auto q3_nodes =
+        FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(
+            element_type, /*order=*/3);
+    const FE::Real gauss_coordinate =
+        FE::Real{1.0} / std::sqrt(FE::Real{3.0});
+    const std::array<FE::Real, 2> coordinates{
+        -gauss_coordinate,
+        gauss_coordinate,
+    };
+    if (max_interpolation_defect != nullptr) {
+        *max_interpolation_defect = FE::Real{0.0};
+    }
+    std::vector<level_set::LevelSetCurvatureProjectionSample> samples;
+    const auto samples_per_cell = mesh.dimension() == 3 ? 8u : 4u;
+    samples.reserve(static_cast<std::size_t>(mesh.numCells()) *
+                    samples_per_cell);
+
+    std::vector<std::array<FE::Real, 3>> cell_coordinates;
+    mesh.forEachCell([&](FE::GlobalIndex cell) {
+        mesh.getCellCoordinates(cell, cell_coordinates);
+        if (mesh.dimension() == 2 && cell_coordinates.size() != 4u) {
+            throw std::runtime_error("Q3 curvature study expects Quad4 cells");
+        }
+        if (mesh.dimension() == 3 && cell_coordinates.size() != 8u) {
+            throw std::runtime_error("Q3 curvature study expects Hex8 cells");
+        }
+
+        const auto map_to_physical =
+            [&](const auto& xi) -> std::array<FE::Real, 3> {
+                const FE::Real u = FE::Real{0.5} * (xi[0] + FE::Real{1.0});
+                const FE::Real v = FE::Real{0.5} * (xi[1] + FE::Real{1.0});
+                const FE::Real w =
+                    FE::Real{0.5} * (xi[2] + FE::Real{1.0});
+                std::array<FE::Real, 3> x{{0.0, 0.0, 0.0}};
+                if (mesh.dimension() == 2) {
+                    const std::array<FE::Real, 4> weights{
+                        (FE::Real{1.0} - u) * (FE::Real{1.0} - v),
+                        u * (FE::Real{1.0} - v),
+                        u * v,
+                        (FE::Real{1.0} - u) * v,
+                    };
+                    for (std::size_t node = 0; node < weights.size(); ++node) {
+                        for (int component = 0; component < 3; ++component) {
+                            x[static_cast<std::size_t>(component)] +=
+                                weights[node] *
+                                cell_coordinates[node]
+                                                [static_cast<std::size_t>(
+                                                    component)];
+                        }
+                    }
+                } else {
+                    const std::array<FE::Real, 8> weights{
+                        (FE::Real{1.0} - u) * (FE::Real{1.0} - v) *
+                            (FE::Real{1.0} - w),
+                        u * (FE::Real{1.0} - v) * (FE::Real{1.0} - w),
+                        u * v * (FE::Real{1.0} - w),
+                        (FE::Real{1.0} - u) * v * (FE::Real{1.0} - w),
+                        (FE::Real{1.0} - u) * (FE::Real{1.0} - v) * w,
+                        u * (FE::Real{1.0} - v) * w,
+                        u * v * w,
+                        (FE::Real{1.0} - u) * v * w,
+                    };
+                    for (std::size_t node = 0; node < weights.size(); ++node) {
+                        for (int component = 0; component < 3; ++component) {
+                            x[static_cast<std::size_t>(component)] +=
+                                weights[node] *
+                                cell_coordinates[node]
+                                                [static_cast<std::size_t>(
+                                                    component)];
+                        }
+                    }
+                }
+                return x;
+            };
+
+        std::vector<FE::Real> coefficients;
+        coefficients.reserve(q3_nodes.size());
+        for (const auto& q3_node : q3_nodes) {
+            coefficients.push_back(value_function(map_to_physical(q3_node)));
+        }
+
+        for (const auto xi0 : coordinates) {
+            for (const auto xi1 : coordinates) {
+                const auto append_sample = [&](FE::Real xi2) {
+                    FE::spaces::FunctionSpace::Value xi{};
+                    xi[0] = xi0;
+                    xi[1] = xi1;
+                    xi[2] = xi2;
+                    const auto x = map_to_physical(xi);
+                    const auto interpolated_value =
+                        q3_space.evaluate_scalar(xi, coefficients);
+                    if (max_interpolation_defect != nullptr) {
+                        *max_interpolation_defect = std::max(
+                            *max_interpolation_defect,
+                            std::abs(interpolated_value - value_function(x)));
+                    }
+                    samples.push_back(
+                        level_set::LevelSetCurvatureProjectionSample{
+                            .parent_cell = static_cast<FE::MeshIndex>(cell),
+                            .coordinate = x,
+                            .value = interpolated_value,
+                        });
+                };
+
+                if (mesh.dimension() == 2) {
+                    append_sample(FE::Real{0.0});
+                } else {
+                    for (const auto w : coordinates) {
+                        append_sample(w);
+                    }
+                }
+            }
+        }
+    });
+    return samples;
+}
+
+struct CurvatureStudyResult {
+    FE::Real mean_error{0.0};
+    FE::Real max_error{0.0};
+    std::size_t error_samples{0u};
+    std::size_t supplemental_samples{0u};
+    FE::Real max_fit_residual{0.0};
+    FE::Real max_interpolation_defect{0.0};
+};
+
+CurvatureStudyResult staticDropQ3CurvatureError(int subdivisions)
+{
+    constexpr FE::Real extent = 0.8;
+    constexpr FE::Real radius = 0.24;
+    const FE::Real h = extent / static_cast<FE::Real>(subdivisions);
+    StructuredQuadMeshAccess mesh(subdivisions, subdivisions, h);
+    const auto signed_distance = [=](const std::array<FE::Real, 3>& x) {
+        return std::sqrt(x[0] * x[0] + x[1] * x[1]) - radius;
+    };
+
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()));
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        phi[static_cast<std::size_t>(vertex)] =
+            signed_distance(mesh.getNodeCoordinates(vertex));
+    }
+    FE::Real max_interpolation_defect = 0.0;
+    const auto samples = makeQ3InteriorSamples(
+        mesh, signed_distance, &max_interpolation_defect);
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.max_neighbor_rings = 2;
+    options.narrow_band_width = FE::Real{1.5} * h;
+    std::vector<FE::Real> curvature;
+    const auto projection = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, options, curvature);
+    if (!projection.success) {
+        throw std::runtime_error(projection.diagnostic);
+    }
+
+    CurvatureStudyResult study;
+    study.supplemental_samples = projection.supplemental_samples;
+    study.max_fit_residual = projection.max_normalized_fit_residual;
+    study.max_interpolation_defect = max_interpolation_defect;
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto index = static_cast<std::size_t>(vertex);
+        if (std::abs(phi[index]) > h) {
+            continue;
+        }
+        const auto x = mesh.getNodeCoordinates(vertex);
+        const FE::Real r = std::sqrt(x[0] * x[0] + x[1] * x[1]);
+        const FE::Real error = std::abs(curvature[index] - FE::Real{1.0} / r);
+        study.mean_error += error;
+        study.max_error = std::max(study.max_error, error);
+        ++study.error_samples;
+    }
+    if (study.error_samples == 0u) {
+        throw std::runtime_error("static-drop curvature study has no samples");
+    }
+    study.mean_error /= static_cast<FE::Real>(study.error_samples);
+    return study;
+}
+
+CurvatureStudyResult sphereQ3CurvatureError(int subdivisions)
+{
+    constexpr FE::Real extent = 0.8;
+    constexpr FE::Real radius = 0.24;
+    const FE::Real h = extent / static_cast<FE::Real>(subdivisions);
+    StructuredHexMeshAccess mesh(
+        subdivisions, subdivisions, subdivisions, h);
+    const auto signed_distance = [=](const std::array<FE::Real, 3>& x) {
+        return std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]) -
+               radius;
+    };
+
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()));
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        phi[static_cast<std::size_t>(vertex)] =
+            signed_distance(mesh.getNodeCoordinates(vertex));
+    }
+    FE::Real max_interpolation_defect = 0.0;
+    const auto samples = makeQ3InteriorSamples(
+        mesh, signed_distance, &max_interpolation_defect);
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.max_neighbor_rings = 2;
+    options.narrow_band_width = FE::Real{1.5} * h;
+    std::vector<FE::Real> curvature;
+    const auto projection = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, options, curvature);
+    if (!projection.success) {
+        throw std::runtime_error(projection.diagnostic);
+    }
+
+    CurvatureStudyResult study;
+    study.supplemental_samples = projection.supplemental_samples;
+    study.max_fit_residual = projection.max_normalized_fit_residual;
+    study.max_interpolation_defect = max_interpolation_defect;
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto index = static_cast<std::size_t>(vertex);
+        if (std::abs(phi[index]) > h) {
+            continue;
+        }
+        const auto x = mesh.getNodeCoordinates(vertex);
+        const FE::Real r =
+            std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+        const FE::Real error = std::abs(curvature[index] - FE::Real{2.0} / r);
+        study.mean_error += error;
+        study.max_error = std::max(study.max_error, error);
+        ++study.error_samples;
+    }
+    if (study.error_samples == 0u) {
+        throw std::runtime_error("sphere curvature study has no samples");
+    }
+    study.mean_error /= static_cast<FE::Real>(study.error_samples);
+    return study;
+}
+
+CurvatureStudyResult capillaryWaveQ3CurvatureError(int subdivisions)
+{
+    constexpr FE::Real pi = 3.141592653589793238462643383279502884;
+    constexpr FE::Real amplitude = 0.01;
+    constexpr FE::Real wave_number = FE::Real{2.0} * pi;
+    const int vertical_subdivisions = subdivisions / 2;
+    const FE::Real h = FE::Real{1.0} / static_cast<FE::Real>(subdivisions);
+    StructuredQuadMeshAccess mesh(
+        subdivisions, vertical_subdivisions, h, h);
+    const auto level_set_value = [](const std::array<FE::Real, 3>& x) {
+        return x[1] - amplitude * std::cos(wave_number * x[0]);
+    };
+    const auto exact_curvature = [](FE::Real x) {
+        const FE::Real slope =
+            -amplitude * wave_number * std::sin(wave_number * x);
+        const FE::Real denominator =
+            std::pow(FE::Real{1.0} + slope * slope, FE::Real{1.5});
+        return amplitude * wave_number * wave_number *
+               std::cos(wave_number * x) / denominator;
+    };
+
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()));
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        phi[static_cast<std::size_t>(vertex)] =
+            level_set_value(mesh.getNodeCoordinates(vertex));
+    }
+    FE::Real max_interpolation_defect = 0.0;
+    const auto samples = makeQ3InteriorSamples(
+        mesh, level_set_value, &max_interpolation_defect);
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.max_neighbor_rings = 2;
+    options.narrow_band_width = FE::Real{1.5} * h;
+    std::vector<FE::Real> curvature;
+    const auto projection = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, options, curvature);
+    if (!projection.success) {
+        throw std::runtime_error(projection.diagnostic);
+    }
+
+    CurvatureStudyResult study;
+    study.supplemental_samples = projection.supplemental_samples;
+    study.max_fit_residual = projection.max_normalized_fit_residual;
+    study.max_interpolation_defect = max_interpolation_defect;
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const auto index = static_cast<std::size_t>(vertex);
+        const auto x = mesh.getNodeCoordinates(vertex);
+        if (std::abs(phi[index]) > h ||
+            std::abs(x[0]) > FE::Real{0.5} - FE::Real{2.0} * h) {
+            continue;
+        }
+        const FE::Real error =
+            std::abs(curvature[index] - exact_curvature(x[0]));
+        study.mean_error += error;
+        study.max_error = std::max(study.max_error, error);
+        ++study.error_samples;
+    }
+    if (study.error_samples == 0u) {
+        throw std::runtime_error("capillary-wave curvature study has no samples");
+    }
+    study.mean_error /= static_cast<FE::Real>(study.error_samples);
+    return study;
+}
+
+FE::Real observedOrder(FE::Real coarse_error, FE::Real fine_error)
+{
+    return std::log(coarse_error / fine_error) / std::log(FE::Real{2.0});
+}
+
 FE::Real recoveredQuadraticCurvatureAtOrigin(FE::Real hx, FE::Real hy)
 {
     StructuredQuadMeshAccess mesh(/*nx=*/6, /*ny=*/6, hx, hy);
@@ -482,6 +796,112 @@ TEST(LevelSetCurvatureProjection, CircleCurvatureErrorImprovesWithRefinement)
 
     EXPECT_LT(fine_error, coarse_error);
     EXPECT_LT(fine_error, 0.08);
+}
+
+TEST(LevelSetCurvatureProjection,
+     StaticDropQ3SamplesProduceQuantifiedCurvatureRefinement)
+{
+    const auto coarse = staticDropQ3CurvatureError(16);
+    const auto medium = staticDropQ3CurvatureError(32);
+    const auto fine = staticDropQ3CurvatureError(64);
+    const FE::Real coarse_order =
+        observedOrder(coarse.mean_error, medium.mean_error);
+    const FE::Real fine_order =
+        observedOrder(medium.mean_error, fine.mean_error);
+
+    RecordProperty("static_drop_mean_error_N16",
+                   ::testing::PrintToString(coarse.mean_error));
+    RecordProperty("static_drop_mean_error_N32",
+                   ::testing::PrintToString(medium.mean_error));
+    RecordProperty("static_drop_mean_error_N64",
+                   ::testing::PrintToString(fine.mean_error));
+    RecordProperty("static_drop_max_error_N64",
+                   ::testing::PrintToString(fine.max_error));
+    RecordProperty("static_drop_order_16_to_32",
+                   ::testing::PrintToString(coarse_order));
+    RecordProperty("static_drop_order_32_to_64",
+                   ::testing::PrintToString(fine_order));
+    RecordProperty("static_drop_Q3_samples_N64",
+                   std::to_string(fine.supplemental_samples));
+    RecordProperty("static_drop_fit_residual_N64",
+                   ::testing::PrintToString(fine.max_fit_residual));
+    RecordProperty("static_drop_Q3_interpolation_defect_N64",
+                   ::testing::PrintToString(
+                       fine.max_interpolation_defect));
+
+    EXPECT_EQ(coarse.supplemental_samples, 4u * 16u * 16u);
+    EXPECT_EQ(medium.supplemental_samples, 4u * 32u * 32u);
+    EXPECT_EQ(fine.supplemental_samples, 4u * 64u * 64u);
+    EXPECT_LT(medium.mean_error, coarse.mean_error);
+    EXPECT_LT(fine.mean_error, medium.mean_error);
+    EXPECT_GT(coarse_order, FE::Real{1.0});
+    EXPECT_GT(fine_order, FE::Real{1.0});
+    EXPECT_GT(fine.max_interpolation_defect, FE::Real{1.0e-12});
+    EXPECT_LT(fine.mean_error, FE::Real{0.015});
+}
+
+TEST(LevelSetCurvatureProjection,
+     SphereQ3SamplesProduceQuantifiedCurvatureRefinement)
+{
+    const auto coarse = sphereQ3CurvatureError(8);
+    const auto fine = sphereQ3CurvatureError(16);
+    const FE::Real order = observedOrder(coarse.mean_error, fine.mean_error);
+
+    RecordProperty("sphere_mean_error_N8",
+                   ::testing::PrintToString(coarse.mean_error));
+    RecordProperty("sphere_mean_error_N16",
+                   ::testing::PrintToString(fine.mean_error));
+    RecordProperty("sphere_max_error_N16",
+                   ::testing::PrintToString(fine.max_error));
+    RecordProperty("sphere_order_8_to_16", ::testing::PrintToString(order));
+    RecordProperty("sphere_Q3_samples_N16",
+                   std::to_string(fine.supplemental_samples));
+    RecordProperty("sphere_fit_residual_N16",
+                   ::testing::PrintToString(fine.max_fit_residual));
+
+    EXPECT_EQ(coarse.supplemental_samples, 8u * 8u * 8u * 8u);
+    EXPECT_EQ(fine.supplemental_samples, 8u * 16u * 16u * 16u);
+    EXPECT_LT(fine.mean_error, coarse.mean_error);
+    EXPECT_GT(order, FE::Real{0.5});
+    EXPECT_LT(fine.mean_error, FE::Real{0.12});
+}
+
+TEST(LevelSetCurvatureProjection,
+     CapillaryWaveQ3SamplesProduceQuantifiedCurvatureRefinement)
+{
+    const auto coarse = capillaryWaveQ3CurvatureError(16);
+    const auto medium = capillaryWaveQ3CurvatureError(32);
+    const auto fine = capillaryWaveQ3CurvatureError(64);
+    const FE::Real coarse_order =
+        observedOrder(coarse.mean_error, medium.mean_error);
+    const FE::Real fine_order =
+        observedOrder(medium.mean_error, fine.mean_error);
+
+    RecordProperty("wave_mean_error_N16",
+                   ::testing::PrintToString(coarse.mean_error));
+    RecordProperty("wave_mean_error_N32",
+                   ::testing::PrintToString(medium.mean_error));
+    RecordProperty("wave_mean_error_N64",
+                   ::testing::PrintToString(fine.mean_error));
+    RecordProperty("wave_max_error_N64",
+                   ::testing::PrintToString(fine.max_error));
+    RecordProperty("wave_order_16_to_32",
+                   ::testing::PrintToString(coarse_order));
+    RecordProperty("wave_order_32_to_64",
+                   ::testing::PrintToString(fine_order));
+    RecordProperty("wave_Q3_samples_N64",
+                   std::to_string(fine.supplemental_samples));
+    RecordProperty("wave_fit_residual_N64",
+                   ::testing::PrintToString(fine.max_fit_residual));
+
+    EXPECT_EQ(coarse.supplemental_samples, 4u * 16u * 8u);
+    EXPECT_EQ(medium.supplemental_samples, 4u * 32u * 16u);
+    EXPECT_EQ(fine.supplemental_samples, 4u * 64u * 32u);
+    EXPECT_LT(medium.mean_error, coarse.mean_error);
+    EXPECT_LT(fine.mean_error, medium.mean_error);
+    EXPECT_GT(coarse_order, FE::Real{0.5});
+    EXPECT_GT(fine_order, FE::Real{0.5});
+    EXPECT_LT(fine.mean_error, FE::Real{0.002});
 }
 
 TEST(LevelSetCurvatureProjection,
@@ -1169,4 +1589,89 @@ TEST(LevelSetCurvatureProjection,
     EXPECT_FALSE(second.reused_sample_adjacency);
     EXPECT_EQ(second.vertex_adjacency_builds, 1u);
     EXPECT_EQ(second.sample_adjacency_builds, 2u);
+}
+
+TEST(LevelSetCurvatureProjection,
+     CarriesSnapshotRevisionAndRejectsMixedSamples)
+{
+    StructuredQuadMeshAccess mesh(/*nx=*/4, /*ny=*/4, /*h=*/0.20);
+    const auto phi_function = [](const std::array<FE::Real, 3>& x) {
+        return x[0] + FE::Real{0.25} * x[0] * x[0] +
+               FE::Real{0.50} * x[1] * x[1];
+    };
+    std::vector<FE::Real> phi(
+        static_cast<std::size_t>(mesh.numVertices()), FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        phi[static_cast<std::size_t>(vertex)] =
+            phi_function(mesh.getNodeCoordinates(vertex));
+    }
+
+    std::vector<level_set::LevelSetCurvatureProjectionSample> samples{
+        level_set::LevelSetCurvatureProjectionSample{
+            .parent_cell = 0,
+            .coordinate = {{FE::Real{-0.30}, FE::Real{-0.25}, FE::Real{0.0}}},
+            .value = phi_function(
+                {{FE::Real{-0.30}, FE::Real{-0.25}, FE::Real{0.0}}}),
+            .free_surface_snapshot_revision_key = 8101u,
+            .source_value_revision = 9101u,
+            .cut_topology_revision = 101u},
+        level_set::LevelSetCurvatureProjectionSample{
+            .parent_cell = 5,
+            .coordinate = {{FE::Real{0.05}, FE::Real{0.10}, FE::Real{0.0}}},
+            .value = phi_function(
+                {{FE::Real{0.05}, FE::Real{0.10}, FE::Real{0.0}}}),
+            .free_surface_snapshot_revision_key = 8101u,
+            .source_value_revision = 9101u,
+            .cut_topology_revision = 102u},
+    };
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.max_neighbor_rings = 2;
+    level_set::LevelSetCurvatureProjectionWorkspace workspace;
+    std::vector<FE::Real> curvature;
+    const auto first = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, options, curvature, workspace);
+    ASSERT_TRUE(first.success) << first.diagnostic;
+    EXPECT_EQ(first.free_surface_snapshot_revision_key, 8101u);
+    EXPECT_EQ(first.source_value_revision, 9101u);
+    EXPECT_EQ(workspace.free_surface_snapshot_revision_key, 8101u);
+    EXPECT_EQ(workspace.source_value_revision, 9101u);
+    EXPECT_EQ(first.sample_adjacency_builds, 1u);
+
+    for (auto& sample : samples) {
+        sample.free_surface_snapshot_revision_key = 8102u;
+        sample.source_value_revision = 9102u;
+    }
+    const auto second = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, options, curvature, workspace);
+    ASSERT_TRUE(second.success) << second.diagnostic;
+    EXPECT_EQ(second.free_surface_snapshot_revision_key, 8102u);
+    EXPECT_EQ(second.source_value_revision, 9102u);
+    EXPECT_EQ(workspace.free_surface_snapshot_revision_key, 8102u);
+    EXPECT_EQ(workspace.source_value_revision, 9102u);
+    EXPECT_FALSE(second.reused_sample_adjacency);
+    EXPECT_EQ(second.sample_adjacency_builds, 2u);
+
+    samples.back().free_surface_snapshot_revision_key = 8103u;
+    EXPECT_THROW(
+        (void)level_set::projectLevelSetMeanCurvatureToVertices(
+            mesh, phi, samples, options, curvature, workspace),
+        std::invalid_argument);
+
+    samples.back().free_surface_snapshot_revision_key = 0u;
+    samples.back().source_value_revision = 0u;
+    samples.back().cut_topology_revision = 0u;
+    EXPECT_THROW(
+        (void)level_set::projectLevelSetMeanCurvatureToVertices(
+            mesh, phi, samples, options, curvature, workspace),
+        std::invalid_argument);
+    samples.back().free_surface_snapshot_revision_key = 8102u;
+    samples.back().source_value_revision = 9102u;
+    samples.back().cut_topology_revision = 0u;
+    EXPECT_THROW(
+        (void)level_set::projectLevelSetMeanCurvatureToVertices(
+            mesh, phi, samples, options, curvature, workspace),
+        std::invalid_argument);
+    RecordProperty("curvature_snapshot_mismatch_rejections", 2);
+    RecordProperty("curvature_zero_topology_rejections", 1);
 }

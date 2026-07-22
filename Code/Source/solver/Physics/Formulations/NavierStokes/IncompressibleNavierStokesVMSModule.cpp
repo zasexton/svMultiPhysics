@@ -99,6 +99,8 @@ embeddedFreeSurfaceMeasureEvidence(
     const FE::assembly::CutIntegrationContext& context,
     int interface_marker)
 {
+    context.assertAllFreeSurfaceGeometrySnapshotsCurrent(
+        system.meshAccess());
     EmbeddedFreeSurfaceMeasureEvidence local;
     for (const auto* rule : context.interfaceRulesForMarker(interface_marker)) {
         if (rule == nullptr) {
@@ -1136,6 +1138,10 @@ std::size_t initializeStateFieldFromMeshVertexField(
     };
 
     const auto* cut_context = system.cutIntegrationContext();
+    if (cut_context != nullptr) {
+        cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+            system.meshAccess());
+    }
     const auto& bc = *active_pressure_domain.boundary;
     if (bc.active_domain_method == FreeSurfaceActiveDomainMethod::CutVolume &&
         bc.interface_marker >= 0 &&
@@ -2780,6 +2786,8 @@ void validateUnfittedContactWallNormal(
     if (context == nullptr) {
         return;
     }
+    context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+        system.meshAccess());
     const auto rules = context->interfaceRulesForMarker(contact_marker);
     if (rules.empty()) {
         // An interface need not currently intersect every configured wall.
@@ -2914,6 +2922,8 @@ void logDynamicContactOperatorAngle(
         !context->hasGeneratedInterfaceMarker(contact_marker)) {
         return;
     }
+    context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+        system.meshAccess());
 
     const auto log_unavailable = [&](std::string_view reason) {
         FE_LOG_INFO(
@@ -4192,6 +4202,8 @@ void logUnfittedContactLineMeasure(
         cut_context != nullptr &&
         cut_context->hasGeneratedInterfaceMarker(contact_marker);
     if (marker_available) {
+        cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+            system.meshAccess());
         const auto rules = cut_context->interfaceRulesForMarker(contact_marker);
         rule_count = rules.size();
         for (const auto* rule : rules) {

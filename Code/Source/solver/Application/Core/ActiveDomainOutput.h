@@ -4,6 +4,7 @@
 #include "Mesh/Mesh.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -27,9 +28,14 @@ struct CutVolumeMeasureSummary {
   // Counts and measures include locally owned parent cells only.  Generated
   // rules on ghost cells remain available in the cut context for assembly but
   // must not contribute again to communicator-wide physical totals.
+  // Revision identity is validated across every supplied volume rule before
+  // ownership filtering so the complete consumer view cannot mix snapshots.
   svmp::FE::Real reference_measure{0.0};
   svmp::FE::Real physical_measure{0.0};
+  std::uint64_t free_surface_snapshot_revision_key{0};
+  std::uint64_t source_value_revision{0};
   std::size_t rule_count{0};
+  std::size_t revisioned_rule_count{0};
   std::size_t physical_rule_count{0};
   std::size_t skipped_physical_rule_count{0};
 };

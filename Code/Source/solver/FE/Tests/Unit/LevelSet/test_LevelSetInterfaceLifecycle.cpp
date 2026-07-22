@@ -371,6 +371,20 @@ public:
         }
     }
 
+    SingleHexMeshAccess(
+        FE::ElementType type,
+        const std::array<std::array<FE::Real, 3>, 8>& corner_coordinates)
+        : type_(type)
+    {
+        if (type_ != FE::ElementType::Hex8) {
+            throw std::invalid_argument(
+                "explicit corner coordinates require a Hex8 cell");
+        }
+        std::copy(corner_coordinates.begin(),
+                  corner_coordinates.end(),
+                  nodes_.begin());
+    }
+
     [[nodiscard]] FE::GlobalIndex numCells() const override { return 1; }
     [[nodiscard]] FE::GlobalIndex numOwnedCells() const override { return 1; }
     [[nodiscard]] FE::GlobalIndex numVertices() const override { return 8; }
@@ -1929,6 +1943,76 @@ FE::Real mappedInterfaceMeasure(
     return measure;
 }
 
+FE::Real mappedInterfaceMoment(
+    const FE::geometry::CutQuadratureRule& rule,
+    const FE::geometry::GeometryMapping& mapping,
+    const std::function<FE::Real(
+        const FE::math::Vector<FE::Real, 3>&)>& integrand)
+{
+    FE::Real moment = 0.0;
+    for (const auto& point : rule.points) {
+        const auto xi = toMathPoint(point.point);
+        const auto transform =
+            FE::geometry::surfaceTransformFromJacobianInverse(
+                point.normal,
+                point.weight,
+                toGeometryMatrix(mapping.jacobian_inverse(xi)),
+                mapping.jacobian_determinant(xi));
+        moment += transform.measure * integrand(mapping.map_to_physical(xi));
+    }
+    return moment;
+}
+
+constexpr std::array<FE::Real, 8> reference_gauss_points{{
+    -0.9602898564975363,
+    -0.7966664774136267,
+    -0.5255324099163290,
+    -0.1834346424956498,
+    0.1834346424956498,
+    0.5255324099163290,
+    0.7966664774136267,
+    0.9602898564975363,
+}};
+
+constexpr std::array<FE::Real, 8> reference_gauss_weights{{
+    0.1012285362903763,
+    0.2223810344533745,
+    0.3137066458778873,
+    0.3626837833783620,
+    0.3626837833783620,
+    0.3137066458778873,
+    0.2223810344533745,
+    0.1012285362903763,
+}};
+
+FE::math::Vector<FE::Real, 3> curvedHexQ3PhysicalPoint(
+    const FE::math::Vector<FE::Real, 3>& xi)
+{
+    FE::math::Vector<FE::Real, 3> point{};
+    point[0] = FE::Real{1.1} * xi[0] +
+               FE::Real{0.05} * xi[0] * xi[0] * xi[0];
+    point[1] = FE::Real{0.9} * xi[1];
+    point[2] = FE::Real{1.2} * xi[2] + FE::Real{0.15} * xi[0] * xi[1];
+    return point;
+}
+
+std::shared_ptr<FE::geometry::GeometryMapping> makeCurvedHexQ3Mapping()
+{
+    const auto reference_nodes =
+        FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(
+            FE::ElementType::Hex8, 3);
+    std::vector<FE::math::Vector<FE::Real, 3>> physical_nodes;
+    physical_nodes.reserve(reference_nodes.size());
+    for (const auto& xi : reference_nodes) {
+        physical_nodes.push_back(curvedHexQ3PhysicalPoint(xi));
+    }
+    FE::geometry::MappingRequest request{};
+    request.element_type = FE::ElementType::Hex8;
+    request.geometry_order = 3;
+    request.use_affine = false;
+    return FE::geometry::MappingFactory::create(request, physical_nodes);
+}
+
 FE::Real expectedCurvedHexMidplaneArea()
 {
     constexpr FE::Real sx = 1.25;
@@ -2056,7 +2140,9 @@ level_set::LevelSetGeneratedInterfaceResult buildSingleQuadEllipseCut(
     int interface_order,
     int volume_order,
     int interface_marker,
-    bool require_production_qualified_backend = false)
+    bool require_production_qualified_backend = false,
+    FE::Real constant_shift = 0.0,
+    FE::Real* represented_tangent_value = nullptr)
 {
     const auto mesh = std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad9);
     auto scalar_space =
@@ -2079,7 +2165,14 @@ level_set::LevelSetGeneratedInterfaceResult buildSingleQuadEllipseCut(
         const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
         solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
             x[0] * x[0] / (semi_major * semi_major) +
-            x[1] * x[1] / (semi_minor * semi_minor) - 1.0;
+            x[1] * x[1] / (semi_minor * semi_minor) - 1.0 +
+            constant_shift;
+    }
+    if (represented_tangent_value != nullptr) {
+        const auto evaluator =
+            level_set::makeLevelSetCellEvaluator(system, phi, solution);
+        *represented_tangent_value =
+            evaluator.evaluate(0, {{0.0, -semi_minor, 0.0}}).value;
     }
 
     level_set::LevelSetGeneratedInterfaceOptions options{};
@@ -2105,7 +2198,9 @@ level_set::LevelSetGeneratedInterfaceResult buildSingleQuadSayeCut(
     int subdivision_depth,
     int interface_order,
     int volume_order,
-    int interface_marker)
+    int interface_marker,
+    level_set::ImplicitCutFallbackPolicy fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::Fail)
 {
     const auto mesh = std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad9);
     auto scalar_space =
@@ -2141,6 +2236,7 @@ level_set::LevelSetGeneratedInterfaceResult buildSingleQuadSayeCut(
     options.implicit_cut_max_subdivision_depth = subdivision_depth;
     options.interface_quadrature_order = interface_order;
     options.volume_quadrature_order = volume_order;
+    options.implicit_cut_fallback_policy = fallback_policy;
 
     level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
     return lifecycle.build(system, options, solution);
@@ -2386,7 +2482,8 @@ level_set::LevelSetGeneratedInterfaceResult buildSayeAffineHyperrectangleCut(
     int subdivision_depth = 3,
     int interface_order = 1,
     int volume_order = 2,
-    bool require_production_qualified_backend = false)
+    bool require_production_qualified_backend = false,
+    FE::Real phase_sign = FE::Real{1.0})
 {
     const bool is_2d = element_type == FE::ElementType::Quad4 ||
                        element_type == FE::ElementType::Quad8 ||
@@ -2415,13 +2512,13 @@ level_set::LevelSetGeneratedInterfaceResult buildSayeAffineHyperrectangleCut(
     for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
         const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
         solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
-            x[0] - cut_coordinate;
+            phase_sign * (x[0] - cut_coordinate);
     }
     const FE::GlobalIndex vertex_count = is_2d ? 4 : 8;
     for (FE::GlobalIndex vertex = 0; vertex < vertex_count; ++vertex) {
         const auto x = mesh->getNodeCoordinates(vertex);
         setFieldComponentValue(solution, system, phi, vertex,
-                               x[0] - cut_coordinate);
+                               phase_sign * (x[0] - cut_coordinate));
     }
 
     level_set::LevelSetGeneratedInterfaceOptions options{};
@@ -3245,6 +3342,554 @@ TEST(LevelSetInterfaceLifecycle,
     EXPECT_GT(result.summary.positive_volume_measure, 0.0);
     EXPECT_EQ(result.diagnostic.find("same-sign-corner"), std::string::npos)
         << result.diagnostic;
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     ProductionQualifiedQ3CertifiedRangeDiscoversUnsampledInteriorInterval)
+{
+    constexpr int interface_marker = 881;
+    const auto mesh =
+        std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad4);
+    auto scalar_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/3, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleQuadSetupInputs()));
+
+    const auto polynomial = [](FE::Real x) {
+        return -(x - FE::Real{0.05}) * (x - FE::Real{0.25}) *
+               (x - FE::Real{2.0});
+    };
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    const auto dof_coordinates =
+        FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(
+            FE::ElementType::Quad4, 3);
+    ASSERT_EQ(cell_dofs.size(), dof_coordinates.size());
+    const auto offset = system.fieldDofOffset(phi);
+    FE::Real minimum_nodal_value = std::numeric_limits<FE::Real>::infinity();
+    for (std::size_t i = 0u; i < cell_dofs.size(); ++i) {
+        const FE::Real value = polynomial(dof_coordinates[i][0]);
+        minimum_nodal_value = std::min(minimum_nodal_value, value);
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] = value;
+    }
+    ASSERT_GT(minimum_nodal_value, 0.0);
+
+    const auto evaluator =
+        level_set::makeLevelSetCellEvaluator(system, phi, solution);
+    constexpr std::array<FE::Real, 5> existing_probe_x{{
+        FE::Real{-1.0},
+        FE::Real{-1.0} / FE::Real{3.0},
+        FE::Real{0.0},
+        FE::Real{1.0} / FE::Real{3.0},
+        FE::Real{1.0},
+    }};
+    FE::Real minimum_probe_value =
+        std::numeric_limits<FE::Real>::infinity();
+    for (const FE::Real x : existing_probe_x) {
+        const auto value = evaluator.evaluate(0, {{x, 0.0, 0.0}}).value;
+        minimum_probe_value = std::min(minimum_probe_value, value);
+        ASSERT_GT(value, 0.0);
+    }
+    const FE::Real hidden_interval_value =
+        evaluator.evaluate(0, {{0.15, 0.0, 0.0}}).value;
+    ASSERT_LT(hidden_interval_value, 0.0);
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::Fail;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+    options.implicit_cut_max_subdivision_depth = 0;
+    options.require_production_qualified_implicit_cut_backend = true;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.interface_marker, interface_marker);
+    EXPECT_EQ(result.implicit_cut_fallback_cell_count, 0u);
+    EXPECT_GT(result.summary.active_fragment_count, 0u);
+    EXPECT_GT(result.summary.negative_volume_measure, 0.1);
+    EXPECT_LT(result.summary.negative_volume_measure, 1.0);
+    EXPECT_GT(result.summary.positive_volume_measure, 0.0);
+    EXPECT_NE(result.diagnostic.find("certified_tensor_range_available=1"),
+              std::string::npos)
+        << result.diagnostic;
+    EXPECT_EQ(result.diagnostic.find("certified_same_sign_refinements=0"),
+              std::string::npos)
+        << result.diagnostic;
+    EXPECT_NE(result.diagnostic.find("certified_range_fail_closed=0"),
+              std::string::npos)
+        << result.diagnostic;
+
+    const auto diagnostic_count = [&](const std::string& name) {
+        const auto begin = result.diagnostic.find(name + "=");
+        if (begin == std::string::npos) {
+            return std::size_t{0};
+        }
+        const auto value_begin = begin + name.size() + 1u;
+        const auto value_end = result.diagnostic.find(';', value_begin);
+        return static_cast<std::size_t>(std::stoull(
+            result.diagnostic.substr(value_begin, value_end - value_begin)));
+    };
+    const auto range_queries = diagnostic_count("certified_range_queries");
+    const auto same_sign_refinements =
+        diagnostic_count("certified_same_sign_refinements");
+    EXPECT_GT(range_queries, 0u);
+    EXPECT_GT(same_sign_refinements, 0u);
+
+    RecordProperty("certified_q3_hidden_interval_minimum_nodal_value",
+                   ::testing::PrintToString(minimum_nodal_value));
+    RecordProperty("certified_q3_hidden_interval_minimum_probe_value",
+                   ::testing::PrintToString(minimum_probe_value));
+    RecordProperty("certified_q3_hidden_interval_interior_value",
+                   ::testing::PrintToString(hidden_interval_value));
+    RecordProperty("certified_q3_hidden_interval_negative_volume",
+                   ::testing::PrintToString(
+                       result.summary.negative_volume_measure));
+    RecordProperty("certified_q3_hidden_interval_fragment_count",
+                   static_cast<int>(result.summary.active_fragment_count));
+    RecordProperty("certified_q3_hidden_interval_range_query_count",
+                   static_cast<int>(range_queries));
+    RecordProperty("certified_q3_hidden_interval_refinement_count",
+                   static_cast<int>(same_sign_refinements));
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     ProductionQualifiedQ2RegularGraphCapturesDoubleBoundaryEntry)
+{
+    constexpr int interface_marker = 887;
+    const auto mesh =
+        std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad4);
+    auto scalar_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleQuadSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    const auto dof_coordinates =
+        FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(
+            FE::ElementType::Quad4, 2);
+    ASSERT_EQ(cell_dofs.size(), dof_coordinates.size());
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0u; i < cell_dofs.size(); ++i) {
+        const FE::Real x = dof_coordinates[i][0];
+        const FE::Real y = dof_coordinates[i][1];
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            x + y * y + FE::Real{0.1};
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::Fail;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+    options.implicit_cut_max_subdivision_depth = 0;
+    options.require_production_qualified_implicit_cut_backend = true;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    const FE::Real expected_negative_volume =
+        FE::Real{4.0} / FE::Real{3.0} *
+        std::pow(FE::Real{0.9}, FE::Real{1.5});
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_GT(result.summary.active_fragment_count, 0u);
+    EXPECT_NEAR(result.summary.negative_volume_measure,
+                expected_negative_volume,
+                3.0e-2);
+    EXPECT_NEAR(result.summary.negative_volume_measure +
+                    result.summary.positive_volume_measure,
+                4.0,
+                1.0e-10);
+
+    const auto diagnostic_count = [&](const std::string& name) {
+        const auto begin = result.diagnostic.find(name + "=");
+        if (begin == std::string::npos) {
+            return std::size_t{0};
+        }
+        const auto value_begin = begin + name.size() + 1u;
+        const auto value_end = result.diagnostic.find(';', value_begin);
+        return static_cast<std::size_t>(std::stoull(
+            result.diagnostic.substr(value_begin, value_end - value_begin)));
+    };
+    const auto topology_refinements =
+        diagnostic_count("certified_topology_refinements");
+    const auto regular_graph_leaves =
+        diagnostic_count("certified_regular_graph_leaves");
+    EXPECT_GT(topology_refinements, 0u);
+    EXPECT_GT(regular_graph_leaves, 0u);
+
+    RecordProperty("certified_q2_double_boundary_entry_negative_volume",
+                   ::testing::PrintToString(
+                       result.summary.negative_volume_measure));
+    RecordProperty("certified_q2_double_boundary_entry_volume_error",
+                   ::testing::PrintToString(std::abs(
+                       result.summary.negative_volume_measure -
+                       expected_negative_volume)));
+    RecordProperty("certified_q2_double_boundary_entry_fragment_count",
+                   static_cast<int>(result.summary.active_fragment_count));
+    RecordProperty("certified_q2_double_boundary_entry_topology_refinements",
+                   static_cast<int>(topology_refinements));
+    RecordProperty("certified_q2_double_boundary_entry_regular_graph_leaves",
+                   static_cast<int>(regular_graph_leaves));
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     ProductionQualifiedQ2AlignedGraphHasSingleInterfaceOwnership)
+{
+    constexpr int interface_marker = 888;
+    const auto mesh =
+        std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad4);
+    auto scalar_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleQuadSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    const auto dof_coordinates =
+        FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(
+            FE::ElementType::Quad4, 2);
+    ASSERT_EQ(cell_dofs.size(), dof_coordinates.size());
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0u; i < cell_dofs.size(); ++i) {
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            dof_coordinates[i][0];
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::Fail;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+    options.implicit_cut_max_subdivision_depth = 3;
+    options.require_production_qualified_implicit_cut_backend = true;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_GT(result.summary.active_fragment_count, 0u);
+    EXPECT_NEAR(result.summary.measure, 2.0, 1.0e-10);
+    EXPECT_NEAR(result.summary.negative_volume_measure, 2.0, 1.0e-10);
+    EXPECT_NEAR(result.summary.positive_volume_measure, 2.0, 1.0e-10);
+
+    const FE::Real volume_closure = std::abs(
+        result.summary.negative_volume_measure +
+        result.summary.positive_volume_measure - FE::Real{4.0});
+    RecordProperty("certified_q2_aligned_graph_interface_measure",
+                   ::testing::PrintToString(result.summary.measure));
+    RecordProperty("certified_q2_aligned_graph_volume_closure",
+                   ::testing::PrintToString(volume_closure));
+    RecordProperty("certified_q2_aligned_graph_fragment_count",
+                   static_cast<int>(result.summary.active_fragment_count));
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     ProductionQualifiedQ3FailsClosedForVisibleLineAndHiddenCircle)
+{
+    constexpr int interface_marker = 886;
+    const auto mesh =
+        std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad4);
+    auto scalar_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/3, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleQuadSetupInputs()));
+
+    const auto polynomial = [](FE::Real x, FE::Real y) {
+        return (x - FE::Real{0.07}) *
+               ((x - FE::Real{0.25}) * (x - FE::Real{0.25}) +
+                (y - FE::Real{0.07}) * (y - FE::Real{0.07}) -
+                FE::Real{1.0e-8});
+    };
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    const auto dof_coordinates =
+        FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(
+            FE::ElementType::Quad4, 3);
+    ASSERT_EQ(cell_dofs.size(), dof_coordinates.size());
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0u; i < cell_dofs.size(); ++i) {
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            polynomial(dof_coordinates[i][0], dof_coordinates[i][1]);
+    }
+
+    const auto evaluator =
+        level_set::makeLevelSetCellEvaluator(system, phi, solution);
+    const FE::Real visible_line_value =
+        evaluator.evaluate(0, {{0.07, -0.5, 0.0}}).value;
+    const FE::Real hidden_circle_center_value =
+        evaluator.evaluate(0, {{0.25, 0.07, 0.0}}).value;
+    const FE::Real hidden_circle_outside_value =
+        evaluator.evaluate(0, {{0.25, 0.071, 0.0}}).value;
+    EXPECT_NEAR(visible_line_value, 0.0, 1.0e-12);
+    EXPECT_LT(hidden_circle_center_value, -1.0e-10);
+    EXPECT_GT(hidden_circle_outside_value, 1.0e-10);
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::Fail;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+    options.implicit_cut_max_subdivision_depth = 0;
+    options.require_production_qualified_implicit_cut_backend = true;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    int fail_closed_count = 0;
+    try {
+        (void)lifecycle.build(system, options, solution);
+        FAIL() << "Expected unresolved hidden topology to fail closed";
+    } catch (const std::invalid_argument& ex) {
+        ++fail_closed_count;
+        const std::string message = ex.what();
+        EXPECT_NE(message.find("regular graph topology"), std::string::npos)
+            << message;
+        EXPECT_NE(message.find("bounded topology-refinement depth"),
+                  std::string::npos)
+            << message;
+    }
+
+    EXPECT_EQ(fail_closed_count, 1);
+    RecordProperty("certified_q3_hidden_component_visible_line_residual",
+                   ::testing::PrintToString(std::abs(visible_line_value)));
+    RecordProperty("certified_q3_hidden_component_center_value",
+                   ::testing::PrintToString(hidden_circle_center_value));
+    RecordProperty("certified_q3_hidden_component_outside_value",
+                   ::testing::PrintToString(hidden_circle_outside_value));
+    RecordProperty("certified_q3_hidden_component_fail_closed_count",
+                   fail_closed_count);
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     ProductionQualifiedQ2SerendipityCertifiedRangeDiscoversUnsampledInteriorInterval)
+{
+    constexpr int interface_marker = 885;
+    const auto mesh =
+        std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad8);
+    auto scalar_space =
+        makeAffineFixtureScalarSpace(FE::ElementType::Quad8, mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleQuadSetupInputs()));
+
+    const auto polynomial = [](FE::Real x) {
+        return (x - FE::Real{0.1}) * (x - FE::Real{0.2});
+    };
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_EQ(cell_dofs.size(), 8u);
+    const auto offset = system.fieldDofOffset(phi);
+    FE::Real minimum_nodal_value = std::numeric_limits<FE::Real>::infinity();
+    for (std::size_t i = 0u; i < cell_dofs.size(); ++i) {
+        const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(
+            FE::ElementType::Quad8, i);
+        const FE::Real value = polynomial(xi[0]);
+        minimum_nodal_value = std::min(minimum_nodal_value, value);
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] = value;
+    }
+    ASSERT_GT(minimum_nodal_value, 0.0);
+
+    const auto evaluator =
+        level_set::makeLevelSetCellEvaluator(system, phi, solution);
+    const FE::Real center_probe_value =
+        evaluator.evaluate(0, {{0.0, 0.0, 0.0}}).value;
+    const FE::Real hidden_interval_value =
+        evaluator.evaluate(0, {{0.15, 0.0, 0.0}}).value;
+    ASSERT_GT(center_probe_value, 0.0);
+    ASSERT_LT(hidden_interval_value, 0.0);
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::Fail;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+    options.implicit_cut_max_subdivision_depth = 0;
+    options.require_production_qualified_implicit_cut_backend = true;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.interface_marker, interface_marker);
+    EXPECT_EQ(result.implicit_cut_fallback_cell_count, 0u);
+    EXPECT_GT(result.summary.active_fragment_count, 0u);
+    EXPECT_GT(result.summary.negative_volume_measure, 0.02);
+    EXPECT_LT(result.summary.negative_volume_measure, 0.5);
+    EXPECT_GT(result.summary.positive_volume_measure, 0.0);
+    EXPECT_NE(result.diagnostic.find("certified_tensor_range_available=1"),
+              std::string::npos)
+        << result.diagnostic;
+    EXPECT_EQ(result.diagnostic.find("certified_same_sign_refinements=0"),
+              std::string::npos)
+        << result.diagnostic;
+    EXPECT_NE(result.diagnostic.find("certified_range_fail_closed=0"),
+              std::string::npos)
+        << result.diagnostic;
+
+    const auto diagnostic_count = [&](const std::string& name) {
+        const auto begin = result.diagnostic.find(name + "=");
+        if (begin == std::string::npos) {
+            return std::size_t{0};
+        }
+        const auto value_begin = begin + name.size() + 1u;
+        const auto value_end = result.diagnostic.find(';', value_begin);
+        return static_cast<std::size_t>(std::stoull(
+            result.diagnostic.substr(value_begin, value_end - value_begin)));
+    };
+    const auto range_queries = diagnostic_count("certified_range_queries");
+    const auto same_sign_refinements =
+        diagnostic_count("certified_same_sign_refinements");
+    EXPECT_GT(range_queries, 0u);
+    EXPECT_GT(same_sign_refinements, 0u);
+
+    RecordProperty("certified_q2_serendipity_hidden_interval_minimum_nodal_value",
+                   ::testing::PrintToString(minimum_nodal_value));
+    RecordProperty("certified_q2_serendipity_hidden_interval_center_probe_value",
+                   ::testing::PrintToString(center_probe_value));
+    RecordProperty("certified_q2_serendipity_hidden_interval_interior_value",
+                   ::testing::PrintToString(hidden_interval_value));
+    RecordProperty("certified_q2_serendipity_hidden_interval_negative_volume",
+                   ::testing::PrintToString(
+                       result.summary.negative_volume_measure));
+    RecordProperty("certified_q2_serendipity_hidden_interval_fragment_count",
+                   static_cast<int>(result.summary.active_fragment_count));
+    RecordProperty("certified_q2_serendipity_hidden_interval_range_query_count",
+                   static_cast<int>(range_queries));
+    RecordProperty("certified_q2_serendipity_hidden_interval_refinement_count",
+                   static_cast<int>(same_sign_refinements));
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     ProductionQualifiedSayeRejectsUncertifiedCompleteQ4TensorField)
+{
+    constexpr int interface_marker = 883;
+    const auto mesh =
+        std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad4);
+    auto scalar_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/4, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleQuadSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_EQ(cell_dofs.size(), 25u);
+    const auto offset = system.fieldDofOffset(phi);
+    for (const auto dof : cell_dofs) {
+        solution[static_cast<std::size_t>(offset + dof)] = 1.0;
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::Fail;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+    options.require_production_qualified_implicit_cut_backend = true;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    try {
+        (void)lifecycle.build(system, options, solution);
+        FAIL() << "Expected the uncertified complete Q4 tensor range to be rejected";
+    } catch (const std::invalid_argument& ex) {
+        const std::string message = ex.what();
+        EXPECT_NE(message.find("range certification is limited to Q2 and Q3"),
+                  std::string::npos)
+            << message;
+        EXPECT_NE(message.find("higher orders require a certified range"),
+                  std::string::npos)
+            << message;
+    }
+    RecordProperty("production_q4_uncertified_rejection_count", 1);
 }
 
 TEST(LevelSetInterfaceLifecycle,
@@ -4179,6 +4824,29 @@ TEST(LevelSetInterfaceLifecycle,
                   static_cast<std::size_t>(
                       level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle)],
               1u);
+
+    FE::Real represented_negative_crossing = 0.0;
+    try {
+        (void)buildSingleQuadEllipseCut(
+            /*semi_major=*/0.75,
+            /*semi_minor=*/0.50,
+            /*subdivision_depth=*/5,
+            /*interface_order=*/2,
+            /*volume_order=*/2,
+            /*interface_marker=*/915,
+            /*require_production_qualified_backend=*/true,
+            /*constant_shift=*/-1.0e-12,
+            &represented_negative_crossing);
+        FAIL() << "Expected the represented negative crossing to fail closed";
+    } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("regular graph topology"), std::string::npos)
+            << message;
+    }
+    EXPECT_LT(represented_negative_crossing, 0.0);
+    EXPECT_GT(std::abs(represented_negative_crossing),
+              128.0 * std::numeric_limits<FE::Real>::epsilon());
+    EXPECT_LT(std::abs(represented_negative_crossing), 1.0e-10);
 }
 
 TEST(LevelSetInterfaceLifecycle,
@@ -6383,6 +7051,524 @@ TEST(LevelSetInterfaceLifecycle,
                 1.0e-11);
 }
 
+TEST(LevelSetInterfaceLifecycle,
+     DistortedQ1HexUsesPointwisePhysicalVolumeAndSurfaceMoments)
+{
+    constexpr int interface_marker = 2191;
+    constexpr FE::Real cut = 0.15;
+    std::array<std::array<FE::Real, 3>, 8> coordinates{};
+    for (std::size_t node = 0; node < coordinates.size(); ++node) {
+        const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(
+            FE::ElementType::Hex8, node);
+        coordinates[node] = {{
+            xi[0],
+            xi[1],
+            xi[2] * (FE::Real{1.0} + FE::Real{0.2} * xi[0]),
+        }};
+    }
+    const auto mesh = std::make_shared<SingleHexMeshAccess>(
+        FE::ElementType::Hex8, coordinates);
+    auto scalar_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleHexSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 8; ++vertex) {
+        const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(
+            FE::ElementType::Hex8, static_cast<std::size_t>(vertex));
+        setFieldComponentValue(solution, system, phi, vertex, xi[0] - cut);
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "distorted-q1-hex-reference-cut";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.interface_quadrature_order = 1;
+    options.volume_quadrature_order = 2;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto generated = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(generated.success) << generated.diagnostic;
+    EXPECT_NEAR(generated.summary.negative_volume_measure,
+                FE::Real{4.0} * (FE::Real{1.0} + cut),
+                1.0e-12);
+    EXPECT_NEAR(generated.summary.positive_volume_measure,
+                FE::Real{4.0} * (FE::Real{1.0} - cut),
+                1.0e-12);
+
+    std::vector<FE::math::Vector<FE::Real, 3>> mapping_nodes;
+    mapping_nodes.reserve(coordinates.size());
+    for (const auto& coordinate : coordinates) {
+        mapping_nodes.push_back(toMathPoint(coordinate));
+    }
+    FE::geometry::MappingRequest mapping_request{};
+    mapping_request.element_type = FE::ElementType::Hex8;
+    mapping_request.geometry_order = 1;
+    mapping_request.use_affine = false;
+    const auto mapping =
+        FE::geometry::MappingFactory::create(mapping_request, mapping_nodes);
+    ASSERT_FALSE(mapping->isAffine());
+
+    const auto reference_volume = [&](FE::Real lower, FE::Real upper) {
+        const FE::Real half = FE::Real{0.5} * (upper - lower);
+        const FE::Real center = FE::Real{0.5} * (upper + lower);
+        FE::Real measure = 0.0;
+        for (std::size_t i = 0; i < reference_gauss_points.size(); ++i) {
+            for (std::size_t j = 0; j < reference_gauss_points.size(); ++j) {
+                for (std::size_t k = 0; k < reference_gauss_points.size(); ++k) {
+                    FE::math::Vector<FE::Real, 3> xi{};
+                    xi[0] = center + half * reference_gauss_points[i];
+                    xi[1] = reference_gauss_points[j];
+                    xi[2] = reference_gauss_points[k];
+                    measure += half * reference_gauss_weights[i] *
+                               reference_gauss_weights[j] *
+                               reference_gauss_weights[k] *
+                               std::abs(mapping->jacobian_determinant(xi));
+                }
+            }
+        }
+        return measure;
+    };
+    const FE::Real negative_reference = reference_volume(-1.0, cut);
+    const FE::Real positive_reference = reference_volume(cut, 1.0);
+
+    const auto assemble_side = [&](FE::geometry::CutIntegrationSide side) {
+        FE::assembly::CutIntegrationContext context;
+        context.addGeneratedInterfaceDomain(generated.domain, side);
+        FE::assembly::StandardAssembler assembler;
+        assembler.setDofMap(system.fieldDofHandler(phi).getDofMap());
+        assembler.initialize();
+        FE::assembly::DenseVectorView rhs(
+            system.fieldDofHandler(phi).getNumDofs());
+        PhysicalCutVolumeMeasureKernel kernel;
+        const auto assembly = assembler.assembleCutVolumes(
+            *mesh,
+            context,
+            interface_marker,
+            side,
+            *scalar_space,
+            *scalar_space,
+            kernel,
+            /*matrix_view=*/nullptr,
+            &rhs,
+            /*assemble_matrix=*/false,
+            /*assemble_vector=*/true);
+        EXPECT_TRUE(assembly.success) << assembly.error_message;
+        return std::accumulate(
+            rhs.data().begin(), rhs.data().end(), FE::Real{0.0});
+    };
+    const FE::Real assembled_negative =
+        assemble_side(FE::geometry::CutIntegrationSide::Negative);
+    const FE::Real assembled_positive =
+        assemble_side(FE::geometry::CutIntegrationSide::Positive);
+    EXPECT_NEAR(assembled_negative, negative_reference, 2.0e-11);
+    EXPECT_NEAR(assembled_positive, positive_reference, 2.0e-11);
+
+    FE::Real mapped_area = 0.0;
+    FE::Real mapped_x_moment = 0.0;
+    for (const auto& rule : generated.domain.interfaceQuadratureRules()) {
+        mapped_area += mappedInterfaceMeasure(rule, *mapping);
+        mapped_x_moment += mappedInterfaceMoment(
+            rule,
+            *mapping,
+            [](const FE::math::Vector<FE::Real, 3>& x) { return x[0]; });
+    }
+    FE::Real reference_area = 0.0;
+    FE::Real reference_x_moment = 0.0;
+    const std::array<FE::Real, 3> reference_normal{{1.0, 0.0, 0.0}};
+    for (std::size_t j = 0; j < reference_gauss_points.size(); ++j) {
+        for (std::size_t k = 0; k < reference_gauss_points.size(); ++k) {
+            FE::math::Vector<FE::Real, 3> xi{};
+            xi[0] = cut;
+            xi[1] = reference_gauss_points[j];
+            xi[2] = reference_gauss_points[k];
+            const auto transform =
+                FE::geometry::surfaceTransformFromJacobianInverse(
+                    reference_normal,
+                    FE::Real{1.0},
+                    toGeometryMatrix(mapping->jacobian_inverse(xi)),
+                    mapping->jacobian_determinant(xi));
+            const FE::Real weight = reference_gauss_weights[j] *
+                                    reference_gauss_weights[k] *
+                                    transform.measure;
+            const auto x = mapping->map_to_physical(xi);
+            reference_area += weight;
+            reference_x_moment += weight * x[0];
+        }
+    }
+    EXPECT_NEAR(mapped_area, reference_area, 2.0e-11);
+    EXPECT_NEAR(mapped_x_moment, reference_x_moment, 2.0e-11);
+    RecordProperty("distorted_q1_hex_negative_volume_error",
+                   ::testing::PrintToString(
+                       std::abs(assembled_negative - negative_reference)));
+    RecordProperty("distorted_q1_hex_positive_volume_error",
+                   ::testing::PrintToString(
+                       std::abs(assembled_positive - positive_reference)));
+    RecordProperty("distorted_q1_hex_surface_moment_error",
+                   ::testing::PrintToString(
+                       std::abs(mapped_x_moment - reference_x_moment)));
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     CurvedQ3HexMapsPhaseVolumesAndSurfaceMomentsToIndependentReference)
+{
+    constexpr FE::Real cut = 0.27;
+    const auto generated = buildSayeAffineHyperrectangleCut(
+        FE::ElementType::Hex8,
+        /*interface_marker=*/2192,
+        cut,
+        /*subdivision_depth=*/3,
+        /*interface_order=*/1,
+        /*volume_order=*/2);
+    ASSERT_TRUE(generated.success) << generated.diagnostic;
+    const auto mapping = makeCurvedHexQ3Mapping();
+    ASSERT_FALSE(mapping->isAffine());
+
+    FE::Real mapped_negative = 0.0;
+    FE::Real mapped_positive = 0.0;
+    for (const auto& rule : generated.domain.volumeQuadratureRules()) {
+        if (rule.side == FE::geometry::CutIntegrationSide::Negative) {
+            mapped_negative += mappedVolumeMeasure(rule, *mapping);
+        } else if (rule.side == FE::geometry::CutIntegrationSide::Positive) {
+            mapped_positive += mappedVolumeMeasure(rule, *mapping);
+        }
+    }
+    FE::Real mapped_area = 0.0;
+    FE::Real mapped_x_moment = 0.0;
+    for (const auto& rule : generated.domain.interfaceQuadratureRules()) {
+        mapped_area += mappedInterfaceMeasure(rule, *mapping);
+        mapped_x_moment += mappedInterfaceMoment(
+            rule,
+            *mapping,
+            [](const FE::math::Vector<FE::Real, 3>& x) {
+                return x[0];
+            });
+    }
+
+    const auto reference_volume = [&](FE::Real lower, FE::Real upper) {
+        const FE::Real half = FE::Real{0.5} * (upper - lower);
+        const FE::Real center = FE::Real{0.5} * (upper + lower);
+        FE::Real measure = 0.0;
+        for (std::size_t i = 0; i < reference_gauss_points.size(); ++i) {
+            for (std::size_t j = 0; j < reference_gauss_points.size(); ++j) {
+                for (std::size_t k = 0; k < reference_gauss_points.size(); ++k) {
+                    FE::math::Vector<FE::Real, 3> xi{};
+                    xi[0] = center + half * reference_gauss_points[i];
+                    xi[1] = reference_gauss_points[j];
+                    xi[2] = reference_gauss_points[k];
+                    measure += half * reference_gauss_weights[i] *
+                               reference_gauss_weights[j] *
+                               reference_gauss_weights[k] *
+                               std::abs(mapping->jacobian_determinant(xi));
+                }
+            }
+        }
+        return measure;
+    };
+    const FE::Real reference_negative = reference_volume(-1.0, cut);
+    const FE::Real reference_positive = reference_volume(cut, 1.0);
+
+    FE::Real reference_area = 0.0;
+    FE::Real reference_x_moment = 0.0;
+    const std::array<FE::Real, 3> reference_normal{{1.0, 0.0, 0.0}};
+    for (std::size_t j = 0; j < reference_gauss_points.size(); ++j) {
+        for (std::size_t k = 0; k < reference_gauss_points.size(); ++k) {
+            FE::math::Vector<FE::Real, 3> xi{};
+            xi[0] = cut;
+            xi[1] = reference_gauss_points[j];
+            xi[2] = reference_gauss_points[k];
+            const auto transform =
+                FE::geometry::surfaceTransformFromJacobianInverse(
+                    reference_normal,
+                    FE::Real{1.0},
+                    toGeometryMatrix(mapping->jacobian_inverse(xi)),
+                    mapping->jacobian_determinant(xi));
+            const auto x = mapping->map_to_physical(xi);
+            const FE::Real weight = reference_gauss_weights[j] *
+                                    reference_gauss_weights[k] *
+                                    transform.measure;
+            reference_area += weight;
+            reference_x_moment += weight * x[0];
+        }
+    }
+
+    EXPECT_NEAR(mapped_negative, reference_negative, 2.0e-11);
+    EXPECT_NEAR(mapped_positive, reference_positive, 2.0e-11);
+    EXPECT_NEAR(mapped_area, reference_area, 2.0e-11);
+    EXPECT_NEAR(mapped_x_moment, reference_x_moment, 2.0e-11);
+    RecordProperty("curved_physical_geometry_order", 3);
+    RecordProperty("curved_q3_hex_negative_volume_error",
+                   ::testing::PrintToString(
+                       std::abs(mapped_negative - reference_negative)));
+    RecordProperty("curved_q3_hex_positive_volume_error",
+                   ::testing::PrintToString(
+                       std::abs(mapped_positive - reference_positive)));
+    RecordProperty("curved_q3_hex_surface_measure_error",
+                   ::testing::PrintToString(
+                       std::abs(mapped_area - reference_area)));
+    RecordProperty("curved_q3_hex_surface_moment_error",
+                   ::testing::PrintToString(
+                       std::abs(mapped_x_moment - reference_x_moment)));
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     AnalyticCutSweepCoversTopologyFractionsRotationsAndPhaseReversal)
+{
+    const std::array<FE::Real, 8> fractions{{
+        1.0e-8, 1.0e-6, 1.0e-4, 1.0e-2, 0.1, 0.25, 0.49, 0.5}};
+    FE::Real maximum_partition_error = 0.0;
+    FE::Real maximum_radial_volume_error = 0.0;
+    FE::Real maximum_radial_surface_error = 0.0;
+    constexpr FE::Real pi =
+        3.141592653589793238462643383279502884;
+    int marker = 2210;
+    for (const FE::Real fraction : fractions) {
+        const FE::Real cut = FE::Real{-1.0} + FE::Real{2.0} * fraction;
+        for (const FE::Real phase_sign : {FE::Real{1.0}, FE::Real{-1.0}}) {
+            const auto result = buildSayeAffineHyperrectangleCut(
+                FE::ElementType::Quad4,
+                marker++,
+                cut,
+                /*subdivision_depth=*/3,
+                /*interface_order=*/1,
+                /*volume_order=*/2,
+                /*require_production_qualified_backend=*/false,
+                phase_sign);
+            ASSERT_TRUE(result.success) << result.diagnostic;
+            const FE::Real expected_negative =
+                phase_sign > FE::Real{0.0}
+                    ? FE::Real{4.0} * fraction
+                    : FE::Real{4.0} * (FE::Real{1.0} - fraction);
+            const FE::Real expected_positive = FE::Real{4.0} - expected_negative;
+            EXPECT_NEAR(result.summary.negative_volume_measure,
+                        expected_negative,
+                        2.0e-10);
+            EXPECT_NEAR(result.summary.positive_volume_measure,
+                        expected_positive,
+                        2.0e-10);
+            maximum_partition_error = std::max(
+                maximum_partition_error,
+                std::abs(result.summary.negative_volume_measure +
+                         result.summary.positive_volume_measure - FE::Real{4.0}));
+            expectSingleParentVolumeRulesPartitionMeasure(result.domain, 2.0e-10);
+            expectGeneratedCutRulesAreFinite(result.domain);
+        }
+    }
+
+    constexpr FE::Real rotation = 0.37;
+    const auto rotated_plane = buildSingleQuadSayeCut(
+        [](const std::array<FE::Real, 3>& x) {
+            return std::cos(rotation) * x[0] +
+                   std::sin(rotation) * x[1] - FE::Real{0.1};
+        },
+        /*subdivision_depth=*/4,
+        /*interface_order=*/1,
+        /*volume_order=*/2,
+        marker++);
+    ASSERT_TRUE(rotated_plane.success) << rotated_plane.diagnostic;
+    maximum_partition_error = std::max(
+        maximum_partition_error,
+        std::abs(rotated_plane.summary.negative_volume_measure +
+                 rotated_plane.summary.positive_volume_measure - FE::Real{4.0}));
+    expectSingleParentVolumeRulesPartitionMeasure(rotated_plane.domain, 1.0e-10);
+    expectGeneratedCutRulesAreFinite(rotated_plane.domain);
+
+    struct RadialCase {
+        std::array<FE::Real, 3> center{{0.0, 0.0, 0.0}};
+        FE::Real radius{0.5};
+        const char* feature{nullptr};
+    };
+    const std::array<RadialCase, 5> circle_cases{{
+        {{{0.0, 0.0, 0.0}}, 0.5, "interior"},
+        {{{-0.75, -0.75, 0.0}}, std::sqrt(FE::Real{0.125}), "vertex"},
+        {{{0.0, -0.6, 0.0}}, 0.4, "edge"},
+        {{{0.0, 0.0, 0.0}}, 1.0, "face_tangent"},
+        {{{0.0, 0.0, 0.0}}, 1.0 - 1.0e-7, "near_tangent"},
+    }};
+    for (const auto& entry : circle_cases) {
+        SCOPED_TRACE(entry.feature);
+        try {
+            const auto circle = buildSingleQuadSayeCut(
+                [entry](const std::array<FE::Real, 3>& x) {
+                    const FE::Real dx = x[0] - entry.center[0];
+                    const FE::Real dy = x[1] - entry.center[1];
+                    return dx * dx + dy * dy - entry.radius * entry.radius;
+                },
+                /*subdivision_depth=*/6,
+                /*interface_order=*/1,
+                /*volume_order=*/2,
+                marker++,
+                level_set::ImplicitCutFallbackPolicy::LinearCorner);
+            EXPECT_TRUE(circle.success) << circle.diagnostic;
+            if (circle.success) {
+                maximum_partition_error = std::max(
+                    maximum_partition_error,
+                    std::abs(circle.summary.negative_volume_measure +
+                             circle.summary.positive_volume_measure -
+                             FE::Real{4.0}));
+                expectSingleParentVolumeRulesPartitionMeasure(circle.domain,
+                                                               2.0e-9);
+                expectGeneratedCutRulesAreFinite(circle.domain);
+                if (std::string(entry.feature) == "interior") {
+                    maximum_radial_volume_error = std::max(
+                        maximum_radial_volume_error,
+                        std::abs(circle.summary.negative_volume_measure -
+                                 pi * entry.radius * entry.radius));
+                    maximum_radial_surface_error = std::max(
+                        maximum_radial_surface_error,
+                        std::abs(circle.summary.measure -
+                                 FE::Real{2.0} * pi * entry.radius));
+                }
+            }
+        } catch (const std::exception& error) {
+            ADD_FAILURE() << entry.feature << ": " << error.what();
+        }
+    }
+
+    const std::array<RadialCase, 5> sphere_cases{{
+        {{{0.0, 0.0, 0.0}}, 0.5, "interior"},
+        {{{-0.7, -0.7, -0.7}}, std::sqrt(FE::Real{0.27}), "vertex"},
+        {{{-0.7, -0.7, 0.0}}, std::sqrt(FE::Real{0.18}), "edge"},
+        {{{0.0, 0.0, -0.6}}, 0.4, "face"},
+        {{{0.0, 0.0, 0.0}}, 1.0 - 1.0e-7, "near_tangent"},
+    }};
+    for (const auto& entry : sphere_cases) {
+        SCOPED_TRACE(entry.feature);
+        try {
+            const auto sphere = buildSingleHexSayeCut(
+                [entry](const std::array<FE::Real, 3>& x) {
+                    const FE::Real dx = x[0] - entry.center[0];
+                    const FE::Real dy = x[1] - entry.center[1];
+                    const FE::Real dz = x[2] - entry.center[2];
+                    return dx * dx + dy * dy + dz * dz -
+                           entry.radius * entry.radius;
+                },
+                /*subdivision_depth=*/5,
+                /*interface_order=*/1,
+                /*volume_order=*/2,
+                marker++,
+                level_set::ImplicitCutFallbackPolicy::LinearCorner);
+            EXPECT_TRUE(sphere.success) << sphere.diagnostic;
+            if (sphere.success) {
+                maximum_partition_error = std::max(
+                    maximum_partition_error,
+                    std::abs(sphere.summary.negative_volume_measure +
+                             sphere.summary.positive_volume_measure -
+                             FE::Real{8.0}));
+                expectSingleParentVolumeRulesPartitionMeasure(sphere.domain,
+                                                               5.0e-9);
+                expectGeneratedCutRulesAreFinite(sphere.domain);
+                if (std::string(entry.feature) == "interior") {
+                    maximum_radial_volume_error = std::max(
+                        maximum_radial_volume_error,
+                        std::abs(sphere.summary.negative_volume_measure -
+                                 FE::Real{4.0} * pi * entry.radius *
+                                     entry.radius * entry.radius /
+                                     FE::Real{3.0}));
+                    maximum_radial_surface_error = std::max(
+                        maximum_radial_surface_error,
+                        std::abs(sphere.summary.measure -
+                                 FE::Real{4.0} * pi * entry.radius *
+                                     entry.radius));
+                }
+            }
+        } catch (const std::exception& error) {
+            ADD_FAILURE() << entry.feature << ": " << error.what();
+        }
+    }
+
+    const auto circle_negative = buildSingleQuadSayeCut(
+        [](const std::array<FE::Real, 3>& x) {
+            return x[0] * x[0] + x[1] * x[1] - FE::Real{0.25};
+        },
+        /*subdivision_depth=*/6,
+        /*interface_order=*/1,
+        /*volume_order=*/2,
+        marker++);
+    const auto circle_positive = buildSingleQuadSayeCut(
+        [](const std::array<FE::Real, 3>& x) {
+            return -(x[0] * x[0] + x[1] * x[1] - FE::Real{0.25});
+        },
+        /*subdivision_depth=*/6,
+        /*interface_order=*/1,
+        /*volume_order=*/2,
+        marker++);
+    ASSERT_TRUE(circle_negative.success) << circle_negative.diagnostic;
+    ASSERT_TRUE(circle_positive.success) << circle_positive.diagnostic;
+    EXPECT_NEAR(circle_negative.summary.negative_volume_measure,
+                circle_positive.summary.positive_volume_measure,
+                2.0e-10);
+    EXPECT_NEAR(circle_negative.summary.positive_volume_measure,
+                circle_positive.summary.negative_volume_measure,
+                2.0e-10);
+    EXPECT_NEAR(circle_negative.summary.measure,
+                circle_positive.summary.measure,
+                2.0e-10);
+    maximum_partition_error = std::max(
+        {maximum_partition_error,
+         std::abs(circle_negative.summary.negative_volume_measure +
+                  circle_negative.summary.positive_volume_measure -
+                  FE::Real{4.0}),
+         std::abs(circle_positive.summary.negative_volume_measure +
+                  circle_positive.summary.positive_volume_measure -
+                  FE::Real{4.0})});
+
+    const auto sphere_level_set = [](FE::Real sign) {
+        return [sign](const std::array<FE::Real, 3>& x) {
+            return sign * (x[0] * x[0] + x[1] * x[1] + x[2] * x[2] -
+                           FE::Real{0.25});
+        };
+    };
+    const auto sphere_negative = buildSingleHexSayeCut(
+        sphere_level_set(FE::Real{1.0}), 5, 1, 2, marker++);
+    const auto sphere_positive = buildSingleHexSayeCut(
+        sphere_level_set(FE::Real{-1.0}), 5, 1, 2, marker++);
+    ASSERT_TRUE(sphere_negative.success) << sphere_negative.diagnostic;
+    ASSERT_TRUE(sphere_positive.success) << sphere_positive.diagnostic;
+    EXPECT_NEAR(sphere_negative.summary.negative_volume_measure,
+                sphere_positive.summary.positive_volume_measure,
+                2.0e-9);
+    EXPECT_NEAR(sphere_negative.summary.positive_volume_measure,
+                sphere_positive.summary.negative_volume_measure,
+                2.0e-9);
+    EXPECT_NEAR(sphere_negative.summary.measure,
+                sphere_positive.summary.measure,
+                2.0e-9);
+    maximum_partition_error = std::max(
+        {maximum_partition_error,
+         std::abs(sphere_negative.summary.negative_volume_measure +
+                  sphere_negative.summary.positive_volume_measure -
+                  FE::Real{8.0}),
+         std::abs(sphere_positive.summary.negative_volume_measure +
+                  sphere_positive.summary.positive_volume_measure -
+                  FE::Real{8.0})});
+    EXPECT_LT(maximum_radial_volume_error, FE::Real{5.0e-2});
+    EXPECT_LT(maximum_radial_surface_error, FE::Real{2.5e-1});
+
+    RecordProperty("analytic_cut_sweep_fraction_count",
+                   static_cast<int>(fractions.size()));
+    RecordProperty("analytic_cut_sweep_radial_topology_count",
+                   static_cast<int>(circle_cases.size() + sphere_cases.size()));
+    RecordProperty("analytic_cut_sweep_maximum_partition_error",
+                   ::testing::PrintToString(maximum_partition_error));
+    RecordProperty("analytic_cut_sweep_maximum_radial_volume_error",
+                   ::testing::PrintToString(maximum_radial_volume_error));
+    RecordProperty("analytic_cut_sweep_maximum_radial_surface_error",
+                   ::testing::PrintToString(maximum_radial_surface_error));
+}
+
 TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP1LineMatchesLinearTriangleMeasures)
 {
     constexpr int interface_marker = 87;
@@ -6815,11 +8001,14 @@ TEST(LevelSetInterfaceLifecycle,
     FE::interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition = false;
     const SingleQuadMeshAccess mesh(FE::ElementType::Quad9);
-    const auto interface_only_domain = [](
+    const auto complete_interface_domain = [](
         const FE::interfaces::LevelSetInterfaceDomain& source) {
         FE::interfaces::LevelSetInterfaceDomain domain(source.request());
         for (const auto& fragment : source.fragments()) {
             domain.addFragment(fragment);
+        }
+        for (const auto& region : source.volumeRegions()) {
+            domain.addVolumeRegion(region);
         }
         return domain;
     };
@@ -6844,7 +8033,7 @@ TEST(LevelSetInterfaceLifecycle,
         complete_snapshot->ledger().maximum_represented_phase_disagreement,
         0.0);
 
-    auto interface_domain = interface_only_domain(result.domain);
+    auto interface_domain = complete_interface_domain(result.domain);
     const auto snapshot =
         FE::interfaces::buildFreeSurfaceGeometrySnapshot(
             std::move(interface_domain),
@@ -6896,6 +8085,9 @@ TEST(LevelSetInterfaceLifecycle,
         }
         defect.addFragment(std::move(fragment));
     }
+    for (auto region : defect_result.domain.volumeRegions()) {
+        defect.addVolumeRegion(std::move(region));
+    }
     ASSERT_TRUE(changed);
     EXPECT_THROW(
         (void)FE::interfaces::buildFreeSurfaceGeometrySnapshot(
@@ -6922,6 +8114,9 @@ TEST(LevelSetInterfaceLifecycle,
             duplicated = true;
         }
         duplicate.addFragment(std::move(fragment));
+    }
+    for (auto region : duplicate_result.domain.volumeRegions()) {
+        duplicate.addVolumeRegion(std::move(region));
     }
     ASSERT_TRUE(duplicated);
     EXPECT_THROW(

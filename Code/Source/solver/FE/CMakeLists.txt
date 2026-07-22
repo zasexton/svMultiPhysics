@@ -350,9 +350,12 @@ set(FE_MATH_HEADERS
     Math/IntegerMath.h
     Math/PyramidTensorCoordinates.h
     Math/DenseLinearAlgebra.h
-    Math/DenseTransformKernels.h
+    Math/DenseTransformFallback.h
     Math/LU.h
 )
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Math/DenseTransformKernels.h")
+    list(APPEND FE_MATH_HEADERS Math/DenseTransformKernels.h)
+endif()
 
 set(FE_MATH_SOURCES
     Math/DenseLinearAlgebra.cpp
@@ -411,14 +414,11 @@ set(FE_MATH_SOURCES
 	    Basis/OrthogonalPolynomials.cpp
 	    Basis/VectorBasis.cpp
 	    Basis/VectorBasisBDM.cpp
-	    Basis/VectorBasisBDM_Runtime.cpp
 	    Basis/VectorBasisDirectSeeds.cpp
 	    Basis/VectorBasisDofAssociations.cpp
 	    Basis/VectorBasisEvaluationHelpers.cpp
 	    Basis/VectorBasisNedelec.cpp
-	    Basis/VectorBasisNedelec_Runtime.cpp
 	    Basis/VectorBasisRaviartThomas.cpp
-	    Basis/VectorBasisRaviartThomas_Runtime.cpp
 	    Basis/VectorBasisRtConstruction.cpp
 	    Basis/CompatibleTensorVectorBasis.cpp
 	    Basis/TensorBasis.cpp
@@ -435,6 +435,14 @@ set(FE_MATH_SOURCES
 	    Basis/ModalTransform.cpp
 	    Basis/NodeOrderingConventions.cpp
 	)
+    foreach(_fe_optional_basis_source
+            Basis/VectorBasisBDM_Runtime.cpp
+            Basis/VectorBasisNedelec_Runtime.cpp
+            Basis/VectorBasisRaviartThomas_Runtime.cpp)
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_fe_optional_basis_source}")
+            list(APPEND FE_BASIS_SOURCES ${_fe_optional_basis_source})
+        endif()
+    endforeach()
 
 # Quadrature sources
 set(FE_QUADRATURE_HEADERS
@@ -1943,13 +1951,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/LagrangeBasisSimplex.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/SpectralBasis.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisBDM.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisBDM_Runtime.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisDirectSeeds.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisEvaluationHelpers.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisNedelec.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisNedelec_Runtime.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisRaviartThomas.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisRaviartThomas_Runtime.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisRtConstruction.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/BatchEvaluator.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Assembly/BatchedProjection.cpp
@@ -1957,6 +1962,15 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/BSplineBasis.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/NURBSTensorBasis.cpp
     )
+    foreach(_fe_optional_basis_source
+            Basis/VectorBasisBDM_Runtime.cpp
+            Basis/VectorBasisNedelec_Runtime.cpp
+            Basis/VectorBasisRaviartThomas_Runtime.cpp)
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_fe_optional_basis_source}")
+            list(APPEND _FE_BASIS_HOT_FILES
+                "${CMAKE_CURRENT_SOURCE_DIR}/${_fe_optional_basis_source}")
+        endif()
+    endforeach()
 
     set(_FE_BASIS_HOT_FLAGS)
     foreach(_fe_basis_flag -O3 -ftree-vectorize -funroll-loops)

@@ -1,9 +1,13 @@
 #include "LevelSet/LevelSetVolume.h"
 
 #include "Assembly/Assembler.h"
+#include "Assembly/CutIntegrationContext.h"
+#include "Assembly/GlobalSystemView.h"
 #include "Basis/NodeOrderingConventions.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
+#include "Forms/WeakForm.h"
+#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
@@ -11,6 +15,7 @@
 #include "Spaces/H1Space.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
+#include "Systems/FormsInstaller.h"
 #include "Systems/SystemSetup.h"
 #include "Systems/TimeIntegrator.h"
 
@@ -804,6 +809,207 @@ TEST(LevelSetVolume, GeneratedInterfaceGlobalShiftUsesGeneratedQuadrature)
 #endif
 }
 
+TEST(LevelSetVolume,
+     WarpedGeneratedCorrectionTargetEqualsSnapshotConstantOneMeasure)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    constexpr std::array<std::array<FE::Real, 3>, 4> coordinates = {{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {1.0, 1.4, 0.0},
+        {0.0, 0.6, 0.0},
+    }};
+    auto mesh = buildSingleCellMesh(
+        /*spatial_dim=*/2, coordinates, svmp::CellFamily::Quad);
+    auto phi_space =
+        std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4,
+                                              /*order=*/1);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup());
+
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    const auto offset = static_cast<std::size_t>(system.fieldDofOffset(phi));
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+        FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        solution[offset + static_cast<std::size_t>(dofs.front())] =
+            coordinates[static_cast<std::size_t>(vertex)][0] -
+            FE::Real{0.5};
+    }
+
+    level_set::LevelSetVolumeOptions volume_options{};
+    volume_options.use_generated_interface_quadrature = true;
+    volume_options.level_set_field_name = "phi";
+    volume_options.generated_domain_id = "warped_correction_measure";
+    volume_options.allow_corner_linearized_geometry = true;
+    volume_options.interface_quadrature_order = 4;
+    volume_options.volume_quadrature_order = 4;
+
+    const auto initial = level_set::computeLevelSetCutCellVolume(
+        system, phi, volume_options, solution);
+    ASSERT_TRUE(initial.success) << initial.diagnostic;
+    EXPECT_NEAR(initial.negative_volume, FE::Real{0.4}, 1.0e-12);
+
+    level_set::LevelSetGlobalShiftCorrectionOptions correction_options{};
+    correction_options.target_negative_volume = FE::Real{0.2};
+    correction_options.volume_tolerance = FE::Real{1.0e-11};
+    correction_options.max_iterations = 80;
+    std::vector<FE::Real> corrected_solution;
+    const auto correction = level_set::applyGlobalLevelSetShiftCorrection(
+        system,
+        phi,
+        volume_options,
+        correction_options,
+        solution,
+        corrected_solution);
+    ASSERT_TRUE(correction.success) << correction.diagnostic;
+    ASSERT_TRUE(correction.target_reached);
+    EXPECT_NEAR(correction.corrected_negative_volume,
+                correction_options.target_negative_volume,
+                correction_options.volume_tolerance);
+
+    level_set::LevelSetGeneratedInterfaceOptions interface_options{};
+    interface_options.level_set_field_name = "phi";
+    interface_options.domain_id = "warped_correction_measure";
+    interface_options.requested_interface_marker = 719;
+    interface_options.interface_quadrature_order = 4;
+    interface_options.volume_quadrature_order = 4;
+    interface_options.allow_corner_linearized_geometry = true;
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    auto generated = lifecycle.build(
+        system, interface_options, corrected_solution);
+    ASSERT_TRUE(generated.success) << generated.diagnostic;
+
+    FE::interfaces::FreeSurfaceGeometrySnapshotPolicy snapshot_policy;
+    snapshot_policy.require_complete_exterior_boundary_partition = false;
+    FE::interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    scalar.value = [shift = correction.applied_shift](
+                       FE::GlobalIndex,
+                       const std::array<FE::Real, 3>& xi,
+                       const FE::geometry::CutQuadratureProvenance&) {
+        return FE::Real{0.5} * xi[0] + shift;
+    };
+    scalar.reference_gradient = [](
+                                    FE::GlobalIndex,
+                                    const std::array<FE::Real, 3>&,
+                                    const FE::geometry::CutQuadratureProvenance&) {
+        return std::array<FE::Real, 3>{{0.5, 0.0, 0.0}};
+    };
+    const auto snapshot = FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+        std::move(generated.domain),
+        {},
+        {},
+        system.meshAccess(),
+        snapshot_policy,
+        std::move(scalar),
+        "warped_correction_measure");
+    ASSERT_TRUE(snapshot);
+
+    FE::Real snapshot_constant_one_measure{0.0};
+    for (const auto* record : snapshot->retainedRules(
+             FE::interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume)) {
+        ASSERT_NE(record, nullptr);
+        for (const auto& point : record->physical_rule.points) {
+            snapshot_constant_one_measure += point.physical_weight;
+        }
+    }
+    EXPECT_NEAR(snapshot_constant_one_measure,
+                correction_options.target_negative_volume,
+                correction_options.volume_tolerance);
+    EXPECT_NEAR(snapshot->ledger().owned_retained_negative_physical_volume,
+                snapshot_constant_one_measure,
+                1.0e-12);
+    EXPECT_NEAR(snapshot->ledger().maximum_constant_moment_error,
+                0.0,
+                1.0e-12);
+
+    FE::systems::FESystem assembly_system(mesh);
+    const auto constant_field = assembly_system.addField(
+        FE::systems::FieldSpec{
+            .name = "constant_one",
+            .space = phi_space,
+            .components = 1,
+        });
+    assembly_system.addOperator("constant_one_measure");
+    const auto state_field = FE::forms::FormExpr::stateField(
+        constant_field, *phi_space, "constant_one");
+    const auto test_function =
+        FE::forms::FormExpr::testFunction(*phi_space, "test_constant_one");
+    const auto residual = (state_field * test_function)
+                              .dCutVolume(
+                                  interface_options.requested_interface_marker,
+                                  FE::forms::CutVolumeSide::Negative);
+    const auto installed = FE::systems::installFormulation(
+        assembly_system,
+        "constant_one_measure",
+        {constant_field},
+        residual);
+    ASSERT_FALSE(installed.residual.empty());
+
+    auto cut_context =
+        std::make_shared<FE::assembly::CutIntegrationContext>();
+    cut_context->addFreeSurfaceGeometrySnapshot(
+        snapshot, FE::geometry::CutIntegrationSide::Negative);
+    assembly_system.setCutIntegrationContext(cut_context);
+    ASSERT_NO_THROW(assembly_system.setup());
+
+    std::vector<FE::Real> constant_state(
+        static_cast<std::size_t>(assembly_system.dofHandler().getNumDofs()),
+        FE::Real{1.0});
+    FE::systems::SystemStateView state;
+    state.u = constant_state;
+    FE::systems::AssemblyRequest request;
+    request.op = "constant_one_measure";
+    request.want_matrix = false;
+    request.want_vector = true;
+    FE::assembly::DenseSystemView assembled(
+        assembly_system.dofHandler().getNumDofs());
+    assembled.zero();
+    const auto assembly =
+        assembly_system.assemble(request, state, nullptr, &assembled);
+    ASSERT_TRUE(assembly.success) << assembly.error_message;
+
+    FE::Real assembled_constant_one_measure{0.0};
+    for (FE::GlobalIndex row = 0;
+         row < assembly_system.dofHandler().getNumDofs();
+         ++row) {
+        assembled_constant_one_measure += assembled.getVectorEntry(row);
+    }
+    EXPECT_NEAR(assembled_constant_one_measure,
+                snapshot_constant_one_measure,
+                1.0e-12);
+    const FE::Real constant_one_assembly_error =
+        std::abs(assembled_constant_one_measure -
+                 snapshot_constant_one_measure);
+    const FE::Real constant_one_target_error =
+        std::abs(snapshot_constant_one_measure -
+                 correction_options.target_negative_volume);
+    RecordProperty("volume_correction_target",
+                   ::testing::PrintToString(
+                       correction_options.target_negative_volume));
+    RecordProperty("snapshot_constant_one_liquid_measure",
+                   ::testing::PrintToString(snapshot_constant_one_measure));
+    RecordProperty("assembled_constant_one_liquid_measure",
+                   ::testing::PrintToString(assembled_constant_one_measure));
+    RecordProperty("constant_one_assembly_error",
+                   ::testing::PrintToString(constant_one_assembly_error));
+    RecordProperty("constant_one_target_error",
+                   ::testing::PrintToString(constant_one_target_error));
+#endif
+}
+
 TEST(LevelSetVolume, GeneratedInterfaceGlobalShiftReusesLifecycleCacheAcrossBisection)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -1243,6 +1449,66 @@ TEST(LevelSetVolume, GlobalShiftCorrectionRejectsTensorProductQ1)
             corrected),
         std::invalid_argument);
     EXPECT_TRUE(corrected.empty());
+#endif
+}
+
+TEST(LevelSetVolume,
+     GeneratedGlobalShiftRejectsNonAffineTensorProductQ1)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = buildSingleQuadMesh();
+    auto phi_space =
+        std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4,
+                                              /*order=*/1);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup());
+
+    const auto& phi_dofs = system.fieldDofHandler(phi);
+    const auto* entity_map = phi_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+        FE::Real{0.0});
+    const std::array<FE::Real, 4> values{{-1.0, 1.0, 2.0, -1.0}};
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        solution[static_cast<std::size_t>(system.fieldDofOffset(phi) +
+                                          dofs.front())] =
+            values[static_cast<std::size_t>(vertex)];
+    }
+
+    level_set::LevelSetVolumeOptions volume_options{};
+    volume_options.use_generated_interface_quadrature = true;
+    volume_options.level_set_field_name = "phi";
+    volume_options.generated_domain_id = "nonaffine_q1_correction_rejection";
+    volume_options.allow_corner_linearized_geometry = true;
+    const auto initial = level_set::computeLevelSetCutCellVolume(
+        system, phi, volume_options, solution);
+    ASSERT_TRUE(initial.success) << initial.diagnostic;
+
+    level_set::LevelSetGlobalShiftCorrectionOptions correction_options{};
+    correction_options.target_negative_volume =
+        FE::Real{0.5} * initial.negative_volume;
+    correction_options.volume_tolerance = FE::Real{1.0e-12};
+    std::vector<FE::Real> corrected;
+    EXPECT_THROW(
+        (void)level_set::applyGlobalLevelSetShiftCorrection(
+            system,
+            phi,
+            volume_options,
+            correction_options,
+            solution,
+            corrected),
+        std::invalid_argument);
+    EXPECT_TRUE(corrected.empty() || corrected == solution);
 #endif
 }
 

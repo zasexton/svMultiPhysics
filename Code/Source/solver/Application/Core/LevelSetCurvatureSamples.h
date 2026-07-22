@@ -36,7 +36,20 @@ collectLevelSetCurvatureCutVolumeSupplementalSamples(
     const svmp::FE::systems::SystemStateView& state,
     svmp::FE::FieldId field,
     int interface_marker,
-    svmp::FE::geometry::CutIntegrationSide side);
+    svmp::FE::geometry::CutIntegrationSide side,
+    std::uint64_t evaluated_state_source_revision);
+
+/**
+ * Collect one exactly paired interior sample for every high-order field cell
+ * selected by the marker's authoritative interface rules.
+ */
+[[nodiscard]] std::vector<svmp::FE::level_set::LevelSetCurvatureProjectionSample>
+collectLevelSetCurvatureHighOrderSupplementalSamples(
+    const svmp::FE::systems::FESystem& system,
+    const svmp::FE::systems::SystemStateView& state,
+    svmp::FE::FieldId field,
+    int interface_marker,
+    std::uint64_t evaluated_state_source_revision);
 
 } // namespace core
 } // namespace application

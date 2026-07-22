@@ -614,6 +614,10 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     };
 
     const auto* cut_context = system.cutIntegrationContext();
+    if (cut_context != nullptr) {
+        cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+            system.meshAccess());
+    }
     const bool has_retained_generated_volume_support =
         interface_marker_ >= 0 && cut_context != nullptr &&
         cut_context->hasGeneratedVolumeMarker(interface_marker_);

@@ -29,6 +29,7 @@
 #include "Forms/Vocabulary.h"
 #include "Forms/WeakForm.h"
 
+#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 
 #include "Quadrature/QuadratureFactory.h"
@@ -141,6 +142,60 @@ makeFormsInstallerReferencePlaneInterfaceDomain(int marker)
     domain.addVolumeRegion(std::move(positive_region));
 
     return domain;
+}
+
+std::shared_ptr<const svmp::FE::interfaces::FreeSurfaceGeometrySnapshot>
+makeFormsInstallerFullNegativeSnapshot(
+    const svmp::FE::assembly::IMeshAccess& mesh,
+    int marker,
+    FieldId source_field)
+{
+    namespace geometry = svmp::FE::geometry;
+    namespace interfaces = svmp::FE::interfaces;
+
+    interfaces::CutInterfaceDomainRequest request;
+    request.source = interfaces::LevelSetInterfaceSource::fromField(
+        source_field,
+        /*layout_revision=*/0u,
+        /*value_revision=*/1u);
+    request.interface_marker = marker;
+    request.quadrature_order = 1;
+    request.interface_quadrature_order = 1;
+    request.volume_quadrature_order = 1;
+    request.implicit_geometry_mode = "LinearCorner";
+    request.implicit_quadrature_backend = "LinearCorner";
+    request.implicit_fallback_status = "None";
+
+    interfaces::LevelSetInterfaceDomain domain(request);
+    interfaces::CutInterfaceVolumeRegion region;
+    region.interface_marker = marker;
+    region.parent_cell = 0;
+    region.local_region_index = 0;
+    region.stable_id = 1;
+    region.side = geometry::CutIntegrationSide::Negative;
+    region.centroid = {{Real{0.25}, Real{0.25}, Real{0.25}}};
+    region.parent_measure = Real{1.0} / Real{6.0};
+    region.measure = region.parent_measure;
+    region.volume_fraction = Real{1.0};
+    region.full_cell_equivalent = true;
+    domain.addVolumeRegion(std::move(region));
+
+    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    policy.require_complete_exterior_boundary_partition = false;
+    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    scalar.value = [](GlobalIndex,
+                      const std::array<Real, 3>&,
+                      const geometry::CutQuadratureProvenance&) {
+        return Real{-1.0};
+    };
+    return interfaces::buildFreeSurfaceGeometrySnapshot(
+        std::move(domain),
+        {},
+        {},
+        mesh,
+        policy,
+        std::move(scalar),
+        "forms-installer-full-negative");
 }
 
 bool exprContainsType(const svmp::FE::forms::FormExprNode& node,
@@ -2648,7 +2703,6 @@ TEST(FormsInstaller,
     sys.addOperator("op");
 
     constexpr int marker = 82;
-    constexpr std::uint64_t snapshot_revision = 9001u;
     const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
     const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
     const auto residual_form =
@@ -2659,29 +2713,17 @@ TEST(FormsInstaller,
     ASSERT_FALSE(installed.residual.empty());
     ASSERT_NE(installed.residual[0], nullptr);
 
-    auto cut_context = std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
-    svmp::FE::geometry::CutQuadratureRule rule;
-    rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
-    rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
-    rule.parent_measure = Real{1.0} / Real{6.0};
-    rule.measure = rule.parent_measure;
-    rule.volume_fraction = Real{1.0};
-    rule.full_cell_equivalent = true;
-    rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
-    rule.provenance.parent_entity = 0;
-    rule.provenance.marker = marker;
-    rule.provenance.free_surface_snapshot_revision_key = snapshot_revision;
-    rule.points.push_back(svmp::FE::geometry::CutQuadraturePoint{
-        .point = {{Real{0.25}, Real{0.25}, Real{0.25}}},
-        .weight = rule.measure,
-    });
-
-    svmp::FE::assembly::CutCellAssemblyMetadata metadata;
-    metadata.parent_entity = 0;
-    metadata.side = svmp::FE::geometry::CutIntegrationSide::Negative;
-    metadata.volume_fraction = rule.volume_fraction;
-    metadata.free_surface_snapshot_revision_key = snapshot_revision;
-    cut_context->addGeneratedVolumeRule(marker, metadata, rule);
+    auto cut_context =
+        std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+    const auto snapshot =
+        makeFormsInstallerFullNegativeSnapshot(*mesh, marker, u_field);
+    ASSERT_NE(snapshot, nullptr);
+    ASSERT_NE(snapshot->revision().snapshot_revision_key, 0u);
+    cut_context->addFreeSurfaceGeometrySnapshot(
+        snapshot,
+        svmp::FE::geometry::CutIntegrationSide::Negative);
+    EXPECT_EQ(cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(marker),
+              snapshot->revision().snapshot_revision_key);
     sys.setCutIntegrationContext(cut_context);
 
     svmp::FE::systems::SetupInputs inputs;
@@ -2711,6 +2753,77 @@ TEST(FormsInstaller,
             EXPECT_NEAR(out.getMatrixEntry(i, j), expected_matrix, 1.0e-12);
         }
     }
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_RejectsOrphanRevisionBoundFullSideCutVolume)
+{
+    auto mesh =
+        std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker = 83;
+    constexpr std::uint64_t orphan_snapshot_revision = 9001u;
+    const auto u =
+        svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto residual_form =
+        (u * v).dCutVolume(marker,
+                           svmp::FE::forms::CutVolumeSide::Negative);
+    (void)svmp::FE::systems::installFormulation(
+        sys, "op", {u_field}, residual_form);
+
+    auto cut_context =
+        std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+    svmp::FE::geometry::CutQuadratureRule rule;
+    rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+    rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+    rule.parent_measure = Real{1.0} / Real{6.0};
+    rule.measure = rule.parent_measure;
+    rule.volume_fraction = Real{1.0};
+    rule.full_cell_equivalent = true;
+    rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+    rule.provenance.parent_entity = 0;
+    rule.provenance.marker = marker;
+    rule.provenance.free_surface_snapshot_revision_key =
+        orphan_snapshot_revision;
+    rule.points.push_back(svmp::FE::geometry::CutQuadraturePoint{
+        .point = {{Real{0.25}, Real{0.25}, Real{0.25}}},
+        .weight = rule.measure,
+    });
+
+    svmp::FE::assembly::CutCellAssemblyMetadata metadata;
+    metadata.parent_entity = 0;
+    metadata.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+    metadata.volume_fraction = rule.volume_fraction;
+    metadata.free_surface_snapshot_revision_key = orphan_snapshot_revision;
+    cut_context->addGeneratedVolumeRule(marker, metadata, rule);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+    sys.setCutIntegrationContext(cut_context);
+
+    std::vector<Real> U(4u, Real{1.0});
+    svmp::FE::systems::SystemStateView state;
+    state.u = U;
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+    svmp::FE::assembly::DenseSystemView out(4);
+
+    EXPECT_THROW((void)sys.assemble(req, state, &out, &out),
+                 std::invalid_argument);
+    RecordProperty("orphan_snapshot_rejected", 1);
 }
 
 TEST(FormsInstaller, FormsInstaller_UnflaggedFullMeasureCutVolumeUsesRulePoints)

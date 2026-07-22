@@ -394,6 +394,8 @@ TEST(ActiveDomainOutput, CollectsPhysicalCutVolumeMeasureOnScaledQuad)
   cut_rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
   cut_rule.provenance.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
   cut_rule.provenance.parent_entity = 0;
+  cut_rule.provenance.free_surface_snapshot_revision_key = 7301u;
+  cut_rule.provenance.source_value_revision = 4107u;
   cut_rule.points.push_back(
       svmp::FE::geometry::CutQuadraturePoint{
           .point = {{0.0, 0.0, 0.0}},
@@ -407,6 +409,9 @@ TEST(ActiveDomainOutput, CollectsPhysicalCutVolumeMeasureOnScaledQuad)
       application::core::collectCutVolumeMeasures(mesh_access, rules);
 
   EXPECT_EQ(summary.rule_count, 1u);
+  EXPECT_EQ(summary.revisioned_rule_count, 1u);
+  EXPECT_EQ(summary.free_surface_snapshot_revision_key, 7301u);
+  EXPECT_EQ(summary.source_value_revision, 4107u);
   EXPECT_EQ(summary.physical_rule_count, 1u);
   EXPECT_EQ(summary.skipped_physical_rule_count, 0u);
   EXPECT_NEAR(summary.reference_measure, 2.0, 1.0e-12);
@@ -416,6 +421,76 @@ TEST(ActiveDomainOutput, CollectsPhysicalCutVolumeMeasureOnScaledQuad)
       application::core::collectWetVolumeFractions(mesh->n_cells(), rules);
   ASSERT_EQ(wet_fraction.size(), 1u);
   EXPECT_DOUBLE_EQ(wet_fraction[0], 0.5);
+}
+
+TEST(ActiveDomainOutput, RejectsMixedGeometrySnapshotRevisions)
+{
+  auto mesh = makeSingleQuadCellMesh({
+      0.0, 0.0,
+      1.0, 0.0,
+      1.0, 1.0,
+      0.0, 1.0,
+  });
+  svmp::FE::assembly::MeshAccess mesh_access(*mesh);
+
+  svmp::FE::geometry::CutQuadratureRule first;
+  first.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+  first.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  first.measure = 1.0;
+  first.parent_measure = 4.0;
+  first.volume_fraction = 0.25;
+  first.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+  first.provenance.frame =
+      svmp::FE::geometry::CutGeometryFrame::Reference;
+  first.provenance.parent_entity = 0;
+  first.provenance.free_surface_snapshot_revision_key = 9001u;
+  first.provenance.source_value_revision = 6101u;
+  first.points.push_back(svmp::FE::geometry::CutQuadraturePoint{
+      .point = {{-0.5, 0.0, 0.0}},
+      .normal = {{0.0, 0.0, 1.0}},
+      .weight = 1.0});
+
+  auto second = first;
+  second.provenance.free_surface_snapshot_revision_key = 9002u;
+  second.provenance.parent_entity = -1;
+  second.points.front().point[0] = 0.5;
+  const std::vector<const svmp::FE::geometry::CutQuadratureRule*> rules = {
+      &first,
+      &second,
+  };
+
+  EXPECT_THROW(
+      (void)application::core::collectCutVolumeMeasures(mesh_access, rules),
+      std::invalid_argument);
+
+  second.provenance.free_surface_snapshot_revision_key = 0u;
+  second.provenance.source_value_revision = 0u;
+  EXPECT_THROW(
+      (void)application::core::collectCutVolumeMeasures(mesh_access, rules),
+      std::invalid_argument);
+
+  auto invalid_mapping = first;
+  invalid_mapping.points.front().weight = 0.0;
+  const std::vector<const svmp::FE::geometry::CutQuadratureRule*>
+      invalid_mapping_rules = {&invalid_mapping};
+  EXPECT_THROW(
+      (void)application::core::collectCutVolumeMeasures(
+          mesh_access, invalid_mapping_rules),
+      std::invalid_argument);
+  EXPECT_THROW(
+      (void)application::core::writeWetVolumeFractionField(
+          *mesh, "RejectedWetVolume", invalid_mapping_rules),
+      std::invalid_argument);
+  application::core::CutVolumeMeasureSummary failed_revisioned_summary;
+  failed_revisioned_summary.revisioned_rule_count = 1u;
+  failed_revisioned_summary.skipped_physical_rule_count = 1u;
+  EXPECT_THROW(
+      (void)application::core::selectWetVolumeForDrift(
+          failed_revisioned_summary),
+      std::invalid_argument);
+  RecordProperty("output_snapshot_mismatch_rejected", 1);
+  RecordProperty(
+      "output_revisioned_mapping_failure_rejection_count", 3);
 }
 
 TEST(ActiveDomainOutput, CollectsPhysicalMeasureForHighOrderCurvedCutRule)
