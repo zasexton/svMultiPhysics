@@ -1,0 +1,448 @@
+{
+  "schema_version": 1,
+  "matrix_id": "free_surface_wp4_balanced_capillary_prerequisite_v1",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "work_package": "WP-4",
+  "findings": [
+    "FSR-03",
+    "FSR-04"
+  ],
+  "qualification_scope": "Low-level WP-4 prerequisite evidence only; this matrix does not close FSR-03, FSR-04, WP-4, or Q2.",
+  "closure_request_policy": {
+    "accepted_claim": "low_level_prerequisite",
+    "rejected_claims": [
+      "fsr03_closure",
+      "fsr04_closure",
+      "wp4_closure",
+      "q2_closure"
+    ],
+    "diagnostic": "The frozen safety slice does not select or qualify an AD-2 balanced-force method, establish a complete surface-wall-volume directional derivative, or execute the required static-cap refinement campaign."
+  },
+  "model_envelope": "one_phase_unfitted_p1_linearcorner_static_pressure_safety_and_discrete_functional_prerequisites",
+  "method_boundary": {
+    "selected_ad2_method": "UNSELECTED",
+    "current_pressure_action": "one_shot_additive_initial_guess_in_the_existing_pressure_space",
+    "production_capillary_operator_changed": false,
+    "force_projection_applied": false,
+    "balanced_force_evidence_claimed": false,
+    "prescribed_angle_momentum_owner": "young_wall_energy",
+    "prescribed_angle_geometry_owner": "wall_aware_level_set_constraint_and_reinitialization"
+  },
+  "qualification_disposition": {
+    "fsr03_closed": false,
+    "fsr04_closed": false,
+    "wp4_closed": false,
+    "q2_closed": false
+  },
+  "numeric_threshold_basis": {
+    "representability_acceptance": "The exactly representable synthetic load must have relative distance at or below 1e-10 and the incompatible synthetic load must be rejected before mutation.",
+    "transactional_lifecycle": "Rollback and retry checks are exact state and lifecycle assertions; they do not establish a capillary equilibrium error tolerance.",
+    "affine_balance": "The manufactured affine P1 Young-Laplace and wall-energy fixture requires exact zero residual and zero repeated-assembly difference in its representable algebraic state.",
+    "wall_orientation": "The two tracked redistancing tests preserve an oblique two-dimensional and a three-dimensional wall contact angle within their existing fixed unit-test tolerances.",
+    "distributed_scope": "The distributed fixture checks only collective configuration failure on two ranks; no distributed static-cap balance result is claimed."
+  },
+  "unqualified_required_campaigns": [
+    {
+      "id": "select_and_derive_one_ad2_balanced_capillary_pressure_method",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "surface_wall_volume_functional_directional_derivatives_on_fixed_topology",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "general_fe_pressure_domain_variation_identity",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "discrete_static_cap_constrained_energy_minimization",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "flat_interface_direction_phase_gravity_gauge_cut_and_mpi_matrix",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "circle_sphere_and_30_60_90_120_150_degree_sessile_refinement",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "all_supported_wall_rotations_and_cut_offsets",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "independent_mesh_time_and_reinitialization_cadence_refinement",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "gross_reusken_force_and_reusken_sessile_adaptations",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "pressure_jump_angle_shape_parasitic_current_and_energy_release_gates",
+      "status": "REQUIRED_NOT_CLAIMED"
+    }
+  ],
+  "build_targets": {
+    "geometry": "test_fe_geometry",
+    "level_set": "test_fe_levelset",
+    "systems": "test_fe_timestepping",
+    "assembly": "test_fe_assembly",
+    "physics": "test_physics",
+    "application": "test_application",
+    "assembly_mpi": "test_fe_assembly_mpi",
+    "application_mpi": "test_application_mpi"
+  },
+  "build_cmake_homes": {
+    "geometry": "Code/Source/solver/FE",
+    "level_set": "Code/Source/solver/FE",
+    "systems": "Code/Source/solver/FE",
+    "assembly": "Code/Source/solver/FE",
+    "physics": "Code/Source/solver/Physics",
+    "application": "Code",
+    "assembly_mpi": "Code/Source/solver/FE",
+    "application_mpi": "Code"
+  },
+  "groups": [
+    {
+      "id": "static_pressure_gate_serial",
+      "binary": "systems",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "NewtonSolver.AcceptedStaticPressureRepresentabilityDistanceGateAcceptsInRangeState",
+        "NewtonSolver.AcceptedStaticPressureRepresentabilityDistanceGateRejectsOutOfRangeStationaryState",
+        "NewtonSolver.AcceptedStaticPressureRepresentabilityDistanceGateRejectsUnavailableDiagnostic",
+        "NewtonSolver.StaticCompatiblePressureInitializerRequiresRepresentabilityDistanceGate",
+        "NewtonSolver.StaticCompatiblePressureInitializerAddsToBaselineAndPreservesCommittedState",
+        "NewtonSolver.StaticCompatiblePressureInitializerRollsBackNonlinearFailureAndCanRetry",
+        "NewtonSolver.StaticCompatiblePressureInitializerRollsBackSynchronizationExceptionAndCanRetry",
+        "NewtonSolver.StaticCompatiblePressureInitializerRetriesAfterConvergedAttemptRejection",
+        "NewtonSolver.StaticCompatiblePressureInitializerClosesGeometryOpenedByRestoration",
+        "NewtonSolver.StaticCompatiblePressureInitializerSurvivesDiscardedVsvoReferenceAndRetry",
+        "NewtonSolver.StaticCompatiblePressureInitializerExternalFixedPointRollbackExposesUnconsumedState",
+        "NewtonSolver.StaticCompatiblePressureInitializerRemainsOneShotAcrossWorkspaceAndJacobianReallocation",
+        "NewtonSolver.StaticCompatiblePressureInitializerRejectsIncompatibleLoadBeforeMutation"
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 6144,
+        "output_mib": 256
+      }
+    },
+    {
+      "id": "surface_wall_balance_serial",
+      "binary": "physics",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "MovingDomainPhysics.UnfittedExternalPressureAndCapillaryTractionSignsAgree",
+        "MovingDomainPhysics.UnfittedSurfaceStressUsesGeneratedGeometryAndIsOrientationInvariant",
+        "MovingDomainPhysics.NavierStokesPrescribedWallEnergyDoesNotWriteLevelSetRows",
+        "MovingDomainPhysics.NavierStokesSurfaceStressContactWallEnergyMatchesCombinedVirtualWorkForBothActiveSides",
+        "MovingDomainPhysics.NavierStokesSurfaceStressDeclaresSnapshotFunctionalForBothLiquidSides",
+        "MovingDomainPhysics.NavierStokesSurfaceStressConservativeBalanceDiagnosticSplitsTermsAndExcludesDissipation",
+        "MovingDomainPhysics.NavierStokesSurfaceStressPressureRepresentabilityPairIsTransposeWithZeroDiagonalBlocks",
+        "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff"
+      ],
+      "execution": {
+        "wall_time_seconds": 1800,
+        "memory_mib": 8192,
+        "output_mib": 256
+      }
+    },
+    {
+      "id": "wall_angle_geometry_serial",
+      "binary": "level_set",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "LevelSetReinitialization.ProjectionPreservesObliqueWallContactAngleWhileRedistancing",
+        "LevelSetReinitialization.ProjectionPreservesThreeDimensionalWallContactAngleWhileRedistancing"
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 6144,
+        "output_mib": 256
+      }
+    },
+    {
+      "id": "static_pressure_configuration_mpi",
+      "binary": "assembly_mpi",
+      "mpi_ranks": 2,
+      "gtest_output_copies": 2,
+      "tests": [
+        "TimeLoopFsilsConvergenceMPI.StaticPressureInitializerConfigurationMismatchFailsCollectively"
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 6144,
+        "output_mib": 256
+      }
+    }
+  ],
+  "prospective_tests": [],
+  "quantitative_evidence": [
+    {
+      "test": "NewtonSolver.AcceptedStaticPressureRepresentabilityDistanceGateAcceptsInRangeState",
+      "property": "pressure_representability_distance_gate_backend_available",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.AcceptedStaticPressureRepresentabilityDistanceGateAcceptsInRangeState",
+      "property": "pressure_representability_distance_gate_in_range_accept_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.AcceptedStaticPressureRepresentabilityDistanceGateAcceptsInRangeState",
+      "property": "pressure_representability_distance_gate_in_range_relative_distance",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    },
+    {
+      "test": "NewtonSolver.AcceptedStaticPressureRepresentabilityDistanceGateRejectsOutOfRangeStationaryState",
+      "property": "pressure_representability_distance_gate_out_of_range_reject_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.AcceptedStaticPressureRepresentabilityDistanceGateRejectsOutOfRangeStationaryState",
+      "property": "pressure_representability_distance_gate_out_of_range_relative_distance",
+      "type": "real",
+      "relation": "greater_than_or_equal",
+      "threshold": 1.0
+    },
+    {
+      "test": "NewtonSolver.AcceptedStaticPressureRepresentabilityDistanceGateRejectsUnavailableDiagnostic",
+      "property": "pressure_representability_distance_gate_unavailable_reject_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerRequiresRepresentabilityDistanceGate",
+      "property": "static_compatible_pressure_initializer_missing_gate_reject_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerAddsToBaselineAndPreservesCommittedState",
+      "property": "static_compatible_pressure_initializer_backend_available",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerAddsToBaselineAndPreservesCommittedState",
+      "property": "static_compatible_pressure_initializer_symbolic_assembly_apply_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerAddsToBaselineAndPreservesCommittedState",
+      "property": "static_compatible_pressure_initializer_relative_distance",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerAddsToBaselineAndPreservesCommittedState",
+      "property": "static_compatible_pressure_initializer_nonpressure_preserved",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerAddsToBaselineAndPreservesCommittedState",
+      "property": "static_compatible_pressure_initializer_existing_baseline_preserved",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerAddsToBaselineAndPreservesCommittedState",
+      "property": "static_compatible_pressure_initializer_committed_state_preserved",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerRollsBackNonlinearFailureAndCanRetry",
+      "property": "static_compatible_pressure_initializer_nonlinear_failure_rollback",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerRollsBackNonlinearFailureAndCanRetry",
+      "property": "static_compatible_pressure_initializer_retry_apply_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerRollsBackSynchronizationExceptionAndCanRetry",
+      "property": "static_compatible_pressure_initializer_sync_exception_rollback",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerRollsBackSynchronizationExceptionAndCanRetry",
+      "property": "static_compatible_pressure_initializer_sync_exception_retry",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerRollsBackSynchronizationExceptionAndCanRetry",
+      "property": "static_compatible_pressure_initializer_reversible_effect_rollback",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerRetriesAfterConvergedAttemptRejection",
+      "property": "static_compatible_pressure_initializer_attempt_retry_apply_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 2
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerRemainsOneShotAcrossWorkspaceAndJacobianReallocation",
+      "property": "static_compatible_pressure_initializer_workspace_reallocation_reapply_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerRemainsOneShotAcrossWorkspaceAndJacobianReallocation",
+      "property": "static_compatible_pressure_initializer_jacobian_reallocation_reapply_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerRejectsIncompatibleLoadBeforeMutation",
+      "property": "static_compatible_pressure_initializer_out_of_range_reject_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "NewtonSolver.StaticCompatiblePressureInitializerRejectsIncompatibleLoadBeforeMutation",
+      "property": "static_compatible_pressure_initializer_pre_mutation_preserved",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+      "property": "wp7_balance_interface_fragment_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 3
+    },
+    {
+      "test": "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+      "property": "wp7_balance_contact_fragment_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+      "property": "wp7_balance_maximum_interface_normal_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-13
+    },
+    {
+      "test": "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+      "property": "wp7_balance_maximum_contact_cosine_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-13
+    },
+    {
+      "test": "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+      "property": "wp7_balance_unconstrained_residual_norm",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-13
+    },
+    {
+      "test": "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+      "property": "wp7_balance_repeated_residual_difference_norm",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-13
+    }
+  ],
+  "gates": {
+    "expected_group_count": 4,
+    "expected_distinct_test_count": 24,
+    "expected_quantitative_evidence_count": 29,
+    "expected_failures": 0,
+    "expected_errors": 0,
+    "expected_disabled": 0,
+    "expected_skipped": 0
+  },
+  "closure_contract": [
+    {
+      "claim": "the_static_pressure_distance_gate_accepts_an_exactly_representable_load_and_rejects_incompatible_or_unavailable_diagnostics",
+      "evidence": [
+        "NewtonSolver.AcceptedStaticPressureRepresentabilityDistanceGateAcceptsInRangeState",
+        "NewtonSolver.AcceptedStaticPressureRepresentabilityDistanceGateRejectsOutOfRangeStationaryState",
+        "NewtonSolver.AcceptedStaticPressureRepresentabilityDistanceGateRejectsUnavailableDiagnostic"
+      ]
+    },
+    {
+      "claim": "the_additive_static_pressure_initial_guess_preserves_other_fields_and_committed_history_and_is_transactional_across_rejection_retry_and_workspace_lifecycle",
+      "evidence": [
+        "NewtonSolver.StaticCompatiblePressureInitializerAddsToBaselineAndPreservesCommittedState",
+        "NewtonSolver.StaticCompatiblePressureInitializerRollsBackNonlinearFailureAndCanRetry",
+        "NewtonSolver.StaticCompatiblePressureInitializerRollsBackSynchronizationExceptionAndCanRetry",
+        "NewtonSolver.StaticCompatiblePressureInitializerRetriesAfterConvergedAttemptRejection",
+        "NewtonSolver.StaticCompatiblePressureInitializerClosesGeometryOpenedByRestoration",
+        "NewtonSolver.StaticCompatiblePressureInitializerSurvivesDiscardedVsvoReferenceAndRetry",
+        "NewtonSolver.StaticCompatiblePressureInitializerExternalFixedPointRollbackExposesUnconsumedState",
+        "NewtonSolver.StaticCompatiblePressureInitializerRemainsOneShotAcrossWorkspaceAndJacobianReallocation",
+        "NewtonSolver.StaticCompatiblePressureInitializerRejectsIncompatibleLoadBeforeMutation"
+      ]
+    },
+    {
+      "claim": "surface_pressure_and_young_wall_terms_have_the_declared_low_level_sign_ownership_and_mixed_pair_structure",
+      "evidence": [
+        "MovingDomainPhysics.UnfittedExternalPressureAndCapillaryTractionSignsAgree",
+        "MovingDomainPhysics.NavierStokesPrescribedWallEnergyDoesNotWriteLevelSetRows",
+        "MovingDomainPhysics.NavierStokesSurfaceStressContactWallEnergyMatchesCombinedVirtualWorkForBothActiveSides",
+        "MovingDomainPhysics.NavierStokesSurfaceStressDeclaresSnapshotFunctionalForBothLiquidSides",
+        "MovingDomainPhysics.NavierStokesSurfaceStressConservativeBalanceDiagnosticSplitsTermsAndExcludesDissipation",
+        "MovingDomainPhysics.NavierStokesSurfaceStressPressureRepresentabilityPairIsTransposeWithZeroDiagonalBlocks"
+      ]
+    },
+    {
+      "claim": "the_representable_affine_fixture_balances_to_roundoff_and_wall_aware_redistancing_preserves_tracked_two_and_three_dimensional_contact_angles",
+      "evidence": [
+        "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+        "LevelSetReinitialization.ProjectionPreservesObliqueWallContactAngleWhileRedistancing",
+        "LevelSetReinitialization.ProjectionPreservesThreeDimensionalWallContactAngleWhileRedistancing"
+      ]
+    },
+    {
+      "claim": "rank_local_static_pressure_configuration_disagreement_fails_collectively_before_solver_branches_diverge",
+      "evidence": [
+        "TimeLoopFsilsConvergenceMPI.StaticPressureInitializerConfigurationMismatchFailsCollectively"
+      ]
+    }
+  ]
+}
