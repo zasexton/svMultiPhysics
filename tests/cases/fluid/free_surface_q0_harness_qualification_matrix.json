@@ -1,0 +1,339 @@
+{
+  "schema_version": 1,
+  "matrix_id": "free_surface_q0_harness_prerequisite_v1",
+  "status": "FROZEN_PREREQUISITE_NONCLOSURE",
+  "campaign": "Q0",
+  "audit_contract": "Documentation/free_surface_boundary_unfitted_audit_20260720.md",
+  "architecture_record": "Documentation/free_surface_q0_harness_provenance_architecture.md",
+  "freeze_scope": "Executable control-layer prerequisite evidence only. This matrix freezes the committed WP-0 configuration-containment tests, including negative cases, qualification-runner result gates, campaign artifact-schema rejection tests, and exact source definitions for the committed WP-0, WP-1, WP-2, and WP-10 runners. It does not supply the missing accepted-step Q0 telemetry campaign or authorize Q0 closure.",
+  "source_definitions": [
+    {
+      "id": "q0_audit_contract",
+      "role": "criteria",
+      "path": "Documentation/free_surface_boundary_unfitted_audit_20260720.md",
+      "sha256": "f3d39efdafaa16cdb9dabc5b06626906eb05f5a78b1c87583347dcc008473652",
+      "required_fragments": [
+        "#### Q0: harness, provenance, and negative configuration tests",
+        "Run the complete WP-0 invalid-input matrix in continuous integration.",
+        "Every accepted step should expose:"
+      ]
+    },
+    {
+      "id": "wp0_matrix",
+      "role": "prerequisite_definition",
+      "path": "tests/cases/fluid/free_surface_configuration_qualification_matrix.json",
+      "sha256": "c2a71701203f54abf3b2a7fc56c716f97e55ac9dd03895c5dfbba8539f66a823",
+      "required_fragments": [
+        "\"work_package\": \"WP-0\"",
+        "\"expected_test_count\": 24",
+        "\"ambiguous_unknown_and_cross_model_keys_fail_before_mutation\""
+      ]
+    },
+    {
+      "id": "wp0_runner",
+      "role": "prerequisite_runner",
+      "path": "tests/cases/fluid/run_free_surface_configuration_qualification.py",
+      "sha256": "a0a465d99e1cefce7cc312c67c4c368254e093c211b7b58c738c4a998d11f73e",
+      "required_fragments": [
+        "qualification requires clean tracked sources",
+        "source_state_sha256",
+        "test_binary_sha256"
+      ]
+    },
+    {
+      "id": "wp1_matrix",
+      "role": "provenance_pattern_definition",
+      "path": "tests/cases/fluid/free_surface_wp1_extension_qualification_matrix.json",
+      "sha256": "90a9be9dda5b9e232e05fc1fb1a95c55a4fb19e3f4e1dcaa7d16a95825b1c15f",
+      "required_fragments": [
+        "\"work_package\": \"WP-1\"",
+        "\"expected_distinct_test_count\": 53",
+        "\"qualification_scope\""
+      ]
+    },
+    {
+      "id": "wp1_runner",
+      "role": "provenance_pattern_runner",
+      "path": "tests/cases/fluid/run_free_surface_wp1_extension_qualification.py",
+      "sha256": "1ebcbb6849d1ab9ed4527796548bf9bbd26df441802f90cbf2488d51886e9589",
+      "required_fragments": [
+        "binary_record",
+        "cmake_cache_sha256",
+        "source_commit"
+      ]
+    },
+    {
+      "id": "wp2_matrix",
+      "role": "strict_runner_definition",
+      "path": "tests/cases/fluid/free_surface_wp2_geometry_qualification_matrix.json",
+      "sha256": "7e89ac445669a7f3e9b5217132949ecbe59f276ccd2e0326b12982fd26c28361",
+      "required_fragments": [
+        "\"work_package\": \"WP-2\"",
+        "\"status\": \"FROZEN_BEFORE_EXECUTION\"",
+        "\"expected_group_count\": 9"
+      ]
+    },
+    {
+      "id": "wp2_runner",
+      "role": "strict_runner",
+      "path": "tests/cases/fluid/run_free_surface_wp2_geometry_qualification.py",
+      "sha256": "960ff0426780cf8ac923854605fe63e7a5ac46679a884dca05c1dc3f6a835991",
+      "required_fragments": [
+        "run_clean_builds",
+        "build_preflight.json",
+        "final_provenance.json"
+      ]
+    },
+    {
+      "id": "wp10_matrix",
+      "role": "nonclosure_pattern_definition",
+      "path": "tests/cases/fluid/free_surface_wp10_capability_boundary_matrix.json",
+      "sha256": "a93527ab230f98f340ff027836016958821a22f1abbea2eca05d3636677c579d",
+      "required_fragments": [
+        "\"status\": \"FROZEN_CAPABILITY_BOUNDARY\"",
+        "\"source_checks\"",
+        "\"closure_request_policy\""
+      ]
+    },
+    {
+      "id": "wp10_runner",
+      "role": "nonclosure_pattern_runner",
+      "path": "tests/cases/fluid/run_free_surface_wp10_capability_boundary_qualification.py",
+      "sha256": "f3dc5072ac41a2cc0612faae16c0883958757e325d7ca671ca08380dc4fb889b",
+      "required_fragments": [
+        "validate_source_boundary",
+        "validate_requested_claim",
+        "source_hashes_after"
+      ]
+    },
+    {
+      "id": "campaign_registry",
+      "role": "q0_open_campaign_definition",
+      "path": "tests/cases/fluid/free_surface_qualification_campaign_registry.json",
+      "sha256": "8688bec9260d294ee0e9f5450813e70db2001d1c595974d9d244cfd9eb1d7a99",
+      "required_fragments": [
+        "\"id\": \"Q0\"",
+        "\"id\": \"q0_campaign_execution\"",
+        "\"accepted_step_telemetry_not_archived_under_the_campaign_contract\""
+      ]
+    },
+    {
+      "id": "campaign_validator",
+      "role": "artifact_schema_validator",
+      "path": "tests/cases/fluid/validate_free_surface_qualification_campaign.py",
+      "sha256": "c36afd21ad7a5cdf58c11fc6061eb1fead967442d3c3738f5d961c265ad423fa",
+      "required_fragments": [
+        "prerequisite-only evidence cannot promote a campaign",
+        "campaign promotion refused:",
+        "dirty_tree_sha256"
+      ]
+    },
+    {
+      "id": "wp0_runner_tests",
+      "role": "python_test_definition",
+      "path": "tests/test_free_surface_configuration_qualification_runner.py",
+      "sha256": "c40fc7e9a2295fa94089615bfbaa42521e0c576cbf2668018e56184c3ede528d",
+      "required_fragments": [
+        "test_complete_exact_matrix_passes",
+        "test_matrix_defects_fail_closed",
+        "test_explicit_source_state_accepts_exact_supplement_set"
+      ]
+    },
+    {
+      "id": "wp1_runner_tests",
+      "role": "python_test_definition",
+      "path": "tests/test_free_surface_wp1_extension_qualification_runner.py",
+      "sha256": "be4f704886bcdb24a81d2160064cda857d1851ef850af33643d0be5c0ca06e91",
+      "required_fragments": [
+        "test_serial_result_gate_requires_exact_complete_test_set",
+        "test_mpi_result_gate_requires_every_declared_gtest_output_copy",
+        "test_registry_rejects_duplicate_test"
+      ]
+    },
+    {
+      "id": "wp10_runner_tests",
+      "role": "python_test_definition",
+      "path": "tests/test_free_surface_wp10_capability_boundary_runner.py",
+      "sha256": "73381a310fd3b9606457ac7508e98606a0dddb820bbbcc44009a03db3794764a",
+      "required_fragments": [
+        "test_cli_rejects_closure_before_binary_or_output_validation",
+        "test_source_boundary_rejects_repository_escape",
+        "test_validate_only_reports_boundary_without_claiming_closure"
+      ]
+    },
+    {
+      "id": "campaign_validator_tests",
+      "role": "python_test_definition",
+      "path": "tests/test_free_surface_qualification_campaign_validator.py",
+      "sha256": "3d03f1edeec889fe302a8203b98c6fb0a4bd404a57a3acee87f16a686d490b10",
+      "required_fragments": [
+        "test_prerequisite_only_evidence_is_refused_for_promotion",
+        "test_source_tree_mismatch_is_rejected_before_promotion",
+        "test_checksum_mismatch_is_rejected"
+      ]
+    }
+  ],
+  "gtest_group": {
+    "id": "wp0_invalid_configuration_serial",
+    "binary_argument": "physics_binary",
+    "tests": [
+      "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedTangentialMeshPolicyTranslation",
+      "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedAngleTranslationFailsClosed",
+      "NavierStokesLegacyBCs.FreeSurfaceContactAliasesFailClosedWhenIncomplete",
+      "NavierStokesLegacyBCs.FreeSurfaceContactConfigurationRejectsAmbiguityAndCrossModelFields",
+      "NavierStokesLegacyBCs.FreeSurfaceConfigurationSchemaAliasesAreExplicitAndUnambiguous",
+      "NavierStokesLegacyBCs.FreeSurfaceContactNoneIsExplicitAndComplete",
+      "NavierStokesLegacyBCs.FreeSurfacePinnedIsExplicitAndComplete",
+      "NavierStokesLegacyBCs.UnfittedFreeSurfaceContactLinePluralMarkersTranslation_AddsGeneratedMarkers",
+      "NavierStokesLegacyBCs.UnfittedDynamicContactAngleTranslationRoutesLineAndSharpWallGeometry",
+      "MovingDomainPhysics.FittedFreeSurfaceNitschePoliciesAreBoundaryLocalAndOrderInvariant",
+      "MovingDomainPhysics.FittedFreeSurfaceKinematicPolicyOptionsAreExplicit",
+      "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership",
+      "MovingDomainPhysics.FittedFreeSurfacePrescribedTangentialVelocityRequiresCoupledDisplacement",
+      "MovingDomainPhysics.FittedFreeSurfaceRejectsMeshMotionTangentialOwnerInEitherOrder",
+      "MovingDomainPhysics.FittedFreeSurfacePrescribedTangentialVelocityProjectsOutNormalTarget",
+      "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal",
+      "MovingDomainPhysics.FittedPrescribedContactAngleFailsClosedWithoutContactLineIntegration",
+      "MovingDomainPhysics.NavierStokesFittedSurfaceStressFailsClosed",
+      "MovingDomainPhysics.NavierStokesRejectsBoundaryConflictBeforeFluidMutation",
+      "MovingDomainPhysics.NavierStokesConfigurationSchemaRejectsBeforeSystemMutation",
+      "MovingDomainPhysics.NavierStokesLegacySchemaIsExplicitAndLosesCurrentCapabilityLabel",
+      "MovingDomainPhysics.NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults",
+      "MovingDomainPhysics.NavierStokesRejectsDuplicatePrescribedWallOwnershipWithUniqueMarkers",
+      "MovingDomainPhysics.FreeSurfaceContactAlternativesExcludeCrossModelState"
+    ],
+    "execution": {
+      "mpi_ranks": 1,
+      "threads": 1,
+      "wall_time_seconds": 300,
+      "memory_mib": 2048,
+      "output_mib": 64
+    }
+  },
+  "pytest_group": {
+    "id": "qualification_control_contracts",
+    "paths": [
+      "tests/test_free_surface_configuration_qualification_runner.py",
+      "tests/test_free_surface_wp1_extension_qualification_runner.py",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py",
+      "tests/test_free_surface_qualification_campaign_validator.py"
+    ],
+    "tests": [
+      "tests/test_free_surface_configuration_qualification_runner.py::test_frozen_registry_is_self_consistent",
+      "tests/test_free_surface_configuration_qualification_runner.py::test_complete_exact_matrix_passes",
+      "tests/test_free_surface_configuration_qualification_runner.py::test_matrix_defects_fail_closed[missing]",
+      "tests/test_free_surface_configuration_qualification_runner.py::test_matrix_defects_fail_closed[unexpected]",
+      "tests/test_free_surface_configuration_qualification_runner.py::test_matrix_defects_fail_closed[skipped]",
+      "tests/test_free_surface_configuration_qualification_runner.py::test_matrix_defects_fail_closed[failed]",
+      "tests/test_free_surface_configuration_qualification_runner.py::test_registry_rejects_duplicate_test_names",
+      "tests/test_free_surface_configuration_qualification_runner.py::test_explicit_source_state_accepts_exact_supplement_set",
+      "tests/test_free_surface_wp1_extension_qualification_runner.py::test_frozen_wp1_registry_has_exact_groups_and_counts",
+      "tests/test_free_surface_wp1_extension_qualification_runner.py::test_serial_result_gate_requires_exact_complete_test_set",
+      "tests/test_free_surface_wp1_extension_qualification_runner.py::test_mpi_result_gate_requires_every_declared_gtest_output_copy",
+      "tests/test_free_surface_wp1_extension_qualification_runner.py::test_registry_rejects_duplicate_test",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_canonical_boundary_is_strict_and_explicitly_open",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_every_unsupported_closure_claim_is_rejected[fsr08_closure]",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_every_unsupported_closure_claim_is_rejected[wp10_closure]",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_every_unsupported_closure_claim_is_rejected[q7_closure]",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_every_unsupported_closure_claim_is_rejected[incompressible_two_fluid_qualification]",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_every_unsupported_closure_claim_is_rejected[gas_sensitive_qualification]",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_unknown_claim_is_rejected",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_matrix_rejects_premature_scope_promotion[<lambda>-current capability boundary changed]",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_matrix_rejects_premature_scope_promotion[<lambda>-invalid unimplemented WP-10 requirements entry]",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_matrix_rejects_premature_scope_promotion[<lambda>-blocked WP-10 exits changed]",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_matrix_rejects_premature_scope_promotion[<lambda>-blocked Q7 progression changed]",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_matrix_rejects_premature_scope_promotion[<lambda>-closure request policy changed]",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_source_boundary_rejects_repository_escape",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_source_boundary_rejects_symlink_escape",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_cli_rejects_closure_before_binary_or_output_validation",
+      "tests/test_free_surface_wp10_capability_boundary_runner.py::test_validate_only_reports_boundary_without_claiming_closure",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_central_registry_is_strict_and_explicitly_unresolved",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_record_only_prerequisite_artifact_cannot_promote",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_complete_ready_campaign_artifact_can_promote",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_artifact_layout_defects_are_rejected[missing]",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_artifact_layout_defects_are_rejected[unexpected]",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_artifact_layout_defects_are_rejected[symlink]",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_artifact_directory_symlink_is_rejected",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_boolean_parallelism_provenance_is_rejected",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_source_tree_mismatch_is_rejected_before_promotion",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_child_registry_hash_mismatch_is_rejected",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_registry_rejects_campaign_dependency_reordering",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_manifest_cannot_request_a_claim_outside_registered_scope",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_registry_rejects_incomplete_reference_metadata",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_artifact_rejects_missing_expected_metric",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_prerequisite_only_evidence_is_refused_for_promotion",
+      "tests/test_free_surface_qualification_campaign_validator.py::test_checksum_mismatch_is_rejected"
+    ],
+    "expected_test_count": 44,
+    "execution": {
+      "mpi_ranks": 1,
+      "threads": 1,
+      "wall_time_seconds": 300,
+      "memory_mib": 2048,
+      "output_mib": 64
+    }
+  },
+  "implemented_prerequisites": [
+    "wp0_configuration_containment_matrix_has_24_executable_tests_including_negative_cases",
+    "invalid_result_inventories_fail_on_missing_unexpected_skipped_or_failed_tests",
+    "duplicate_registry_tests_fail_closed",
+    "source_definition_paths_and_bytes_are_frozen",
+    "campaign_artifact_layout_provenance_metrics_references_and_checksums_have_negative_tests",
+    "prerequisite_only_campaign_evidence_is_refused_for_promotion",
+    "q0_open_state_and_unresolved_campaign_child_are_machine_readable"
+  ],
+  "open_exits": [
+    {
+      "id": "wp0_invalid_input_matrix_not_wired_into_continuous_integration",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "accepted_step_stage_time_and_state_geometry_map_revision_history_not_archived",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "accepted_step_raw_and_post_maintenance_region_phase_inventory_incomplete",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "accepted_step_complete_energy_dissipation_and_work_account_blocked_by_wp8",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "accepted_step_extension_geometry_solver_retry_rollback_and_resource_telemetry_incomplete",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "compiler_library_option_machine_mesh_reference_parameter_group_and_threshold_provenance_not_archived_together",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "same_revision_q0_campaign_execution_not_registered",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "complete_q0_campaign_artifact_not_archived",
+      "status": "REQUIRED_NOT_CLAIMED"
+    }
+  ],
+  "closure_request_policy": {
+    "accepted_claim": "q0_control_prerequisite",
+    "rejected_claims": [
+      "q0_closure",
+      "q0_qualification",
+      "q0_campaign_pass",
+      "physical_gate_ready"
+    ],
+    "reject_any_claim_suffix": "_closure",
+    "diagnostic": "The executable control slice does not provide the registered same-revision accepted-step telemetry campaign required to close Q0."
+  },
+  "qualification_disposition": {
+    "prerequisite_controls_frozen": true,
+    "wp0_invalid_configuration_evidence_available": true,
+    "q0_campaign_execution_registered": false,
+    "q0_complete_artifact_archived": false,
+    "q0_closed": false,
+    "audit_q0_checkbox_may_be_checked": false
+  },
+  "qualification_scope": "Q0 control-harness prerequisite and nonclosure evidence only; no physical gate or Q0 campaign closure is claimed."
+}
