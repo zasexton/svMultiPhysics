@@ -1,0 +1,708 @@
+{
+  "tests": 74,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-22T23:40:25Z",
+  "time": "0.066s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "GeneratedActiveBoundaryDomain",
+      "tests": 6,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T23:40:25Z",
+      "time": "0s",
+      "testsuite": [
+        {
+          "name": "HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedActiveBoundaryDomain"
+        },
+        {
+          "name": "CompletelyDrySideHasExactlyZeroRules",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedActiveBoundaryDomain"
+        },
+        {
+          "name": "RejectsScalarRootThatDoesNotMatchAuthoritativeContactTrace",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedActiveBoundaryDomain"
+        },
+        {
+          "name": "RejectsUnimplementedHighOrderImplicitBoundaryRestriction",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedActiveBoundaryDomain"
+        },
+        {
+          "name": "WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedActiveBoundaryDomain"
+        },
+        {
+          "name": "CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedActiveBoundaryDomain"
+        }
+      ]
+    },
+    {
+      "name": "FreeSurfaceGeometrySnapshot",
+      "tests": 32,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T23:40:25Z",
+      "time": "0.003s",
+      "testsuite": [
+        {
+          "name": "CurvedQ2AndQ3ConstantOneAssemblyMatchesRetainedPhysicalVolume",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot",
+          "curved_q2_snapshot_constant_one_assembly_error": "0",
+          "curved_q3_snapshot_constant_one_assembly_error": "0"
+        },
+        {
+          "name": "OwnsOneRevisionAndPointwisePhysicalMappingForEveryRuleFamily",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsDuplicateClosedSnapshotImportWithoutMutation",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot",
+          "duplicate_snapshot_import_rejection_count": "1"
+        },
+        {
+          "name": "RejectsStaleTrackedMeshAtBuildAndConsumption",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot",
+          "snapshot_stale_mesh_build_rejection_count": "3",
+          "snapshot_stale_mesh_consumption_rejection_count": "4"
+        },
+        {
+          "name": "RejectsIncompleteAuthoritativeCutFamilies",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot",
+          "authoritative_cut_family_incomplete_rejection_count": "3",
+          "authoritative_cross_family_marker_rejection_count": "1",
+          "authoritative_cut_family_total_rejection_count": "4"
+        },
+        {
+          "name": "AcceptsCompleteAndDegenerateAuthoritativeFamilies",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot",
+          "authoritative_cut_family_valid_acceptance_count": "7",
+          "authoritative_two_sided_cut_acceptance_count": "3",
+          "authoritative_one_sided_full_cell_acceptance_count": "3",
+          "authoritative_empty_full_zero_acceptance_count": "1"
+        },
+        {
+          "name": "RejectsUncertifiedVolumeWithoutMatchingScalarValue",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot",
+          "uncertified_volume_missing_scalar_value_rejection_count": "1",
+          "uncertified_volume_wrong_side_scalar_rejection_count": "1",
+          "uncertified_volume_scalar_rejection_count": "2"
+        },
+        {
+          "name": "AcceptsVolumeOnlyValueEvaluatorWithoutGradient",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot",
+          "volume_only_value_without_gradient_acceptance_count": "1"
+        },
+        {
+          "name": "RejectsIncompleteRevisionKeysAcrossEveryImportedRuleFamily",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot",
+          "snapshot_revision_negative_case_count": "27"
+        },
+        {
+          "name": "RejectsStoredOffInterfaceResidual",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsOffChordPointWithZeroStoredResidual",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot",
+          "off_chord_zero_residual_rejection_count": "1"
+        },
+        {
+          "name": "RejectsWrongNormalWhenScalarEvaluatorIsMissing",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot",
+          "missing_normal_evaluator_rejection_count": "1"
+        },
+        {
+          "name": "SeparatesUnprunedLifecycleVolumeFromRetainedAssemblyVolume",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsStaleGlobalIdentityAndOwner",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "CollectiveValidatorRejectsDuplicateAndMissingRuleOwners",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "DiscreteFunctionalExcludesGhostRuleContributions",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsPointOutsideParentReferenceCell",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsQuadraturePointOnWrongPhase",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsNormalOpposedToRepresentedGradient",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsNearlyOrthogonalNormalToRepresentedGradient",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsDegenerateOrNonFiniteGradientAndNormal",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot",
+          "invalid_gradient_normal_rejection_count": "4"
+        },
+        {
+          "name": "AcceptsZeroOneAndMultipleContactsPerSourceAndRecordsLedger",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot",
+          "source_contact_count_zero": "0",
+          "source_contact_count_one": "1",
+          "source_contact_count_multiple": "2",
+          "geometry_ledger_rule_count": "12",
+          "geometry_ledger_contact_fragment_count": "3",
+          "geometry_ledger_orphan_contact_count": "0",
+          "geometry_ledger_missing_contact_count": "0",
+          "geometry_ledger_stale_revision_count": "0",
+          "geometry_ledger_maximum_root_residual": "0",
+          "geometry_ledger_maximum_normal_angular_error": "0",
+          "geometry_ledger_maximum_constant_moment_error": "0",
+          "geometry_ledger_maximum_polynomial_moment_error": "4.44089e-16",
+          "geometry_ledger_maximum_scaled_polynomial_moment_error": "0.000187836"
+        },
+        {
+          "name": "RejectsIncorrectConstantMoment",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsIncorrectLinearPartitionMoment",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsCompensatingPerPhaseMomentDefects",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "CertifiesQuadraticVolumeRulesFromSourceSubcells",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsInterfaceMomentDefectWithValidRootsAndMeasure",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "MaterializesFullCurvedCellRuleForMappingAndMomentValidation",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsImpossibleClaimedQuadraticOrder",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsAchievedOrderBelowPolicy",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsStaleAndDuplicateContactDomains",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        },
+        {
+          "name": "RejectsMissingExpectedContactTrace",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshot"
+        }
+      ]
+    },
+    {
+      "name": "FreeSurfaceGeometrySnapshotCache",
+      "tests": 2,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T23:40:25Z",
+      "time": "0s",
+      "testsuite": [
+        {
+          "name": "HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshotCache",
+          "peak_live_snapshot_count": "1",
+          "peak_live_resident_bytes": "7961",
+          "final_live_snapshot_count": "0",
+          "expired_eviction_count": "1",
+          "snapshot_cache_hit_count": "1",
+          "snapshot_cache_miss_count": "1"
+        },
+        {
+          "name": "RevisionKeyIncludesAuthoritativeQuadratureContent",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "FreeSurfaceGeometrySnapshotCache"
+        }
+      ]
+    },
+    {
+      "name": "GeneratedInterfaceBoundaryIntersectionDomain",
+      "tests": 14,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T23:40:25Z",
+      "time": "0s",
+      "testsuite": [
+        {
+          "name": "Builds2DPointOnMarkedBoundaryEdge",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedInterfaceBoundaryIntersectionDomain"
+        },
+        {
+          "name": "GlobalIdentityIsIndependentOfRepartitionedLocalFaceNumbering",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedInterfaceBoundaryIntersectionDomain"
+        },
+        {
+          "name": "WrongBoundaryMarkerProducesZeroMeasure",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedInterfaceBoundaryIntersectionDomain"
+        },
+        {
+          "name": "Builds3DSegmentOnMarkedBoundaryFace",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedInterfaceBoundaryIntersectionDomain"
+        },
+        {
+          "name": "ScalarFieldCannotInventContactWithoutSourceSurfaceFragment",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedInterfaceBoundaryIntersectionDomain"
+        },
+        {
+          "name": "ImportsRulesIntoCutContextByGeneratedMarker",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedInterfaceBoundaryIntersectionDomain"
+        },
+        {
+          "name": "RestrictsAuthoritativeFragmentOnHighOrderParentGeometry",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedInterfaceBoundaryIntersectionDomain"
+        },
+        {
+          "name": "ScalarFieldCannotInventHighOrderContactWithoutSourceFragment",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedInterfaceBoundaryIntersectionDomain"
+        },
+        {
+          "name": "ScalarFieldCannotInventAmbiguousContactWithoutSourceFragment",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedInterfaceBoundaryIntersectionDomain"
+        },
+        {
+          "name": "ProvenanceValidatorRejectsOrphanContactFragment",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedInterfaceBoundaryIntersectionDomain"
+        },
+        {
+          "name": "RejectsCurrentFrameToPreventMixedGeometryContracts",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedInterfaceBoundaryIntersectionDomain"
+        },
+        {
+          "name": "ReportsLinearCornerQuadratureOrderHonestly",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedInterfaceBoundaryIntersectionDomain"
+        },
+        {
+          "name": "CutContextRejectsGeneratedMarkerCollisions",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedInterfaceBoundaryIntersectionDomain"
+        },
+        {
+          "name": "OwnedAndGhostViewsYieldOneGlobalPointMultiplicity",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "GeneratedInterfaceBoundaryIntersectionDomain"
+        }
+      ]
+    },
+    {
+      "name": "LevelSetInterfaceBuilder",
+      "tests": 11,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T23:40:25Z",
+      "time": "0.06s",
+      "testsuite": [
+        {
+          "name": "CutsLinearTriangleWithSingleSegment",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceBuilder"
+        },
+        {
+          "name": "CutsLinearQuadWithSingleSegment",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceBuilder"
+        },
+        {
+          "name": "CutsLinearTetrahedronWithTriangularPatch",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceBuilder"
+        },
+        {
+          "name": "CutsLinearTetrahedronWithQuadrilateralPatch",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceBuilder"
+        },
+        {
+          "name": "GeneratedNormalsMatchLinearLevelSetGradients",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceBuilder"
+        },
+        {
+          "name": "CircleInterfaceLengthConvergesUnderRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0.001s",
+          "classname": "LevelSetInterfaceBuilder"
+        },
+        {
+          "name": "SphereInterfaceAreaConvergesUnderRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0.027s",
+          "classname": "LevelSetInterfaceBuilder"
+        },
+        {
+          "name": "CurvedInterfaceNormalsConvergeToAnalyticNormals",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0.031s",
+          "classname": "LevelSetInterfaceBuilder"
+        },
+        {
+          "name": "ClassifiesCutEdgeCases",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceBuilder"
+        },
+        {
+          "name": "PreservesSmallVolumeFractionsNearVertexAndEdge",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceBuilder"
+        },
+        {
+          "name": "VolumeQuadratureMatchesConservativeToleranceBandFractions",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceBuilder"
+        }
+      ]
+    },
+    {
+      "name": "LevelSetInterfaceDomain",
+      "tests": 9,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T23:40:25Z",
+      "time": "0s",
+      "testsuite": [
+        {
+          "name": "CutVolumeMetadataIsDeterministicForOwnedAndGhostRegions",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceDomain"
+        },
+        {
+          "name": "LinearCellCutsExportFullSideVolumeRules",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceDomain"
+        },
+        {
+          "name": "LinearCellCutsExportCutSideVolumeRules",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceDomain"
+        },
+        {
+          "name": "CutVolumeRulesConserveConstantsForSupportedElementTypes",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceDomain"
+        },
+        {
+          "name": "PlanarCutVolumeSupportsPositiveOrderFiveRules",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceDomain"
+        },
+        {
+          "name": "CutVolumeQuadratureConvergesForQuadraticFields",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceDomain"
+        },
+        {
+          "name": "ConfigurableQuadratureOrderIsRecordedAndValidated",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceDomain"
+        },
+        {
+          "name": "CurvedPatchUsesStoredHighOrderQuadratureMetadata",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceDomain"
+        },
+        {
+          "name": "SeparateInterfaceAndVolumeQuadratureOrders",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceDomain"
+        }
+      ]
+    }
+  ]
+}

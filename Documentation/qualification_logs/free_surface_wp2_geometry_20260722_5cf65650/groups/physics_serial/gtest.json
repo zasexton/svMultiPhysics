@@ -1,0 +1,40 @@
+{
+  "tests": 2,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-22T23:41:05Z",
+  "time": "0.131s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "MovingDomainPhysics",
+      "tests": 2,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T23:41:05Z",
+      "time": "0.131s",
+      "testsuite": [
+        {
+          "name": "FreeSurfaceDiscreteFunctionalHistoryIsValidatedAndReplaySafe",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:05Z",
+          "time": "0.027s",
+          "classname": "MovingDomainPhysics",
+          "functional_snapshot_mismatch_rejected": "1"
+        },
+        {
+          "name": "FreeSurfaceDynamicContactStageHistoryPreservesLawAndFrameProvenance",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:05Z",
+          "time": "0.103s",
+          "classname": "MovingDomainPhysics",
+          "contact_snapshot_mismatch_rejected": "1"
+        }
+      ]
+    }
+  ]
+}

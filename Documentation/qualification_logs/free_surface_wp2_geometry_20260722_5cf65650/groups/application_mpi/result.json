@@ -1,0 +1,151 @@
+{
+  "checks": [
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "process_return_code",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": null,
+      "expected": null,
+      "metric": "termination_reason",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "failure_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "error_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "disabled_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "skipped_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "failure_marker_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "stderr_failure_marker_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_run_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_completed_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 2,
+      "expected": 2,
+      "metric": "run_multiplicity:ApplicationDriverLevelSetWorkflowsMPI.ActiveCutRefreshUsesCommunicatorWideSortedBoundaryMarkerUnion",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 2,
+      "expected": 2,
+      "metric": "pass_multiplicity:ApplicationDriverLevelSetWorkflowsMPI.ActiveCutRefreshUsesCommunicatorWideSortedBoundaryMarkerUnion",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "PASS",
+      "expected": "PASS",
+      "metric": "resource_monitoring_outcome",
+      "passed": true,
+      "relation": "equal"
+    }
+  ],
+  "command": [
+    "/usr/bin/orterun",
+    "--oversubscribe",
+    "-n",
+    "2",
+    "/tmp/svmp_wp2_clean_5cf65650/build-application/bin/test_application_mpi",
+    "--gtest_filter=ApplicationDriverLevelSetWorkflowsMPI.ActiveCutRefreshUsesCommunicatorWideSortedBoundaryMarkerUnion",
+    "--gtest_color=no"
+  ],
+  "diagnostic": null,
+  "execution": {
+    "memory_mib": 6144,
+    "output_mib": 192,
+    "wall_time_seconds": 1200
+  },
+  "expected_tests": [
+    "ApplicationDriverLevelSetWorkflowsMPI.ActiveCutRefreshUsesCommunicatorWideSortedBoundaryMarkerUnion"
+  ],
+  "group_id": "application_mpi",
+  "gtest_output_copies": 2,
+  "gtest_result_error": null,
+  "mpi_ranks": 2,
+  "outcome": "PASS",
+  "resources": {
+    "aggregate_memory_measurement": "sampled_peak",
+    "complete_session_process_coverage": true,
+    "final_output_bytes": 51604,
+    "launch_mode": "mpi",
+    "memory_enforcement_method": "per_process_address_space_limit_and_sampled_session_resident_memory",
+    "memory_enforcement_scope": "spawned_process_session",
+    "monitor_sample_count": 8,
+    "peak_aggregate_resident_kib_sampled": 204128,
+    "peak_process_count_sampled": 3,
+    "peak_process_group_count_sampled": 3,
+    "peak_resident_kib_sampled": 27608,
+    "peak_resident_sample_count": 3,
+    "process_session_id": 1068659,
+    "reaped_launcher_fallback_allowed": false,
+    "reaped_launcher_fallback_requires_session_enumeration": true,
+    "reaped_launcher_fallback_scope": "direct_serial_launcher_process",
+    "reaped_launcher_fallback_source": "wait4_ru_maxrss",
+    "reaped_launcher_fallback_used": false,
+    "reaped_launcher_max_resident_kib": 88712,
+    "reaped_launcher_rusage_available": true,
+    "required_simultaneous_process_samples": 3,
+    "resident_read_failure_count": 1,
+    "resource_monitoring_method": "sampled_process_session",
+    "resource_monitoring_outcome": "PASS",
+    "return_code": 0,
+    "session_enumeration_failure_count": 0,
+    "stat_read_failure_count": 2,
+    "successful_session_sample_count": 7,
+    "termination": null,
+    "termination_reason": null,
+    "wall_time_seconds": 0.5323095329804346
+  }
+}

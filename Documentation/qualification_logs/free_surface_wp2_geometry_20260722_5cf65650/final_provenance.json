@@ -1,0 +1,311 @@
+{
+  "artifact_schema_version": 1,
+  "binaries_after_execution": {
+    "application": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "0d937790e97e61d7c9d82bc3d0efef52b128cd707141a8c49be858154b877977",
+      "is_file": true,
+      "path": "/tmp/svmp_wp2_clean_5cf65650/build-application/bin/test_application",
+      "sha256": "0d937790e97e61d7c9d82bc3d0efef52b128cd707141a8c49be858154b877977"
+    },
+    "application_mpi": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "848d6b3c02b69f04c85fa430034d8187738f1b807533e074990d21da2cb6e834",
+      "is_file": true,
+      "path": "/tmp/svmp_wp2_clean_5cf65650/build-application/bin/test_application_mpi",
+      "sha256": "848d6b3c02b69f04c85fa430034d8187738f1b807533e074990d21da2cb6e834"
+    },
+    "assembly": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "6b5e551dfc09275d412d49dc8f0bccda27ef73c62a56710afcc754d430e08dc5",
+      "is_file": true,
+      "path": "/tmp/svmp_wp2_clean_5cf65650/build-fe/test_fe_assembly",
+      "sha256": "6b5e551dfc09275d412d49dc8f0bccda27ef73c62a56710afcc754d430e08dc5"
+    },
+    "assembly_mpi": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "637b46b9b5c325df3a4fb3ad4c99f7684e763ea039abc7675c437479cc1bdf08",
+      "is_file": true,
+      "path": "/tmp/svmp_wp2_clean_5cf65650/build-fe/test_fe_assembly_mpi",
+      "sha256": "637b46b9b5c325df3a4fb3ad4c99f7684e763ea039abc7675c437479cc1bdf08"
+    },
+    "geometry": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "a115945898999c5fdd03b4c2b02b6928caa449f29c61083f0814a85793e88035",
+      "is_file": true,
+      "path": "/tmp/svmp_wp2_clean_5cf65650/build-fe/test_fe_geometry",
+      "sha256": "a115945898999c5fdd03b4c2b02b6928caa449f29c61083f0814a85793e88035"
+    },
+    "level_set": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "95e369bb68beff698a283bd8d21e8ec5d54db40cbe0c2512c346cca996e3742c",
+      "is_file": true,
+      "path": "/tmp/svmp_wp2_clean_5cf65650/build-fe/test_fe_levelset",
+      "sha256": "95e369bb68beff698a283bd8d21e8ec5d54db40cbe0c2512c346cca996e3742c"
+    },
+    "physics": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "11269593f02c038e42397c23b90b5addea39de37fe9c366dc5b1d1ff8fc04237",
+      "is_file": true,
+      "path": "/tmp/svmp_wp2_clean_5cf65650/build-physics/test_physics",
+      "sha256": "11269593f02c038e42397c23b90b5addea39de37fe9c366dc5b1d1ff8fc04237"
+    },
+    "systems": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "2270173e88cfe063cdb4e1414e0f0b289849d3a55f6a422fd469e30f5c8c7dd7",
+      "is_file": true,
+      "path": "/tmp/svmp_wp2_clean_5cf65650/build-fe/test_fe_systems",
+      "sha256": "2270173e88cfe063cdb4e1414e0f0b289849d3a55f6a422fd469e30f5c8c7dd7"
+    }
+  },
+  "canonical_registry": "/tmp/svmp_wp2_clean_5cf65650/tests/cases/fluid/free_surface_wp2_geometry_qualification_matrix.json",
+  "checks": [
+    {
+      "actual": "5cf65650f93faf8d6f4c264ca50d03c70daea373",
+      "expected": "5cf65650f93faf8d6f4c264ca50d03c70daea373",
+      "metric": "source_commit",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "24b20591ab27156b5dc8a25ea1243d99810a04df",
+      "expected": "24b20591ab27156b5dc8a25ea1243d99810a04df",
+      "metric": "source_tree",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "",
+      "expected": "",
+      "metric": "tracked_status",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "unexpected_untracked_path_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "7e89ac445669a7f3e9b5217132949ecbe59f276ccd2e0326b12982fd26c28361",
+      "expected": "7e89ac445669a7f3e9b5217132949ecbe59f276ccd2e0326b12982fd26c28361",
+      "metric": "registry_sha256",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "87152bb031ac5b4cbcafb71bb39cd02fb3c5ce893d6f093d39f60e3429881583",
+      "expected": "87152bb031ac5b4cbcafb71bb39cd02fb3c5ce893d6f093d39f60e3429881583",
+      "metric": "runner_sha256",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:application",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:application",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "0d937790e97e61d7c9d82bc3d0efef52b128cd707141a8c49be858154b877977",
+      "expected": "0d937790e97e61d7c9d82bc3d0efef52b128cd707141a8c49be858154b877977",
+      "metric": "binary_sha256:application",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:application_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:application_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "848d6b3c02b69f04c85fa430034d8187738f1b807533e074990d21da2cb6e834",
+      "expected": "848d6b3c02b69f04c85fa430034d8187738f1b807533e074990d21da2cb6e834",
+      "metric": "binary_sha256:application_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:assembly",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:assembly",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "6b5e551dfc09275d412d49dc8f0bccda27ef73c62a56710afcc754d430e08dc5",
+      "expected": "6b5e551dfc09275d412d49dc8f0bccda27ef73c62a56710afcc754d430e08dc5",
+      "metric": "binary_sha256:assembly",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:assembly_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:assembly_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "637b46b9b5c325df3a4fb3ad4c99f7684e763ea039abc7675c437479cc1bdf08",
+      "expected": "637b46b9b5c325df3a4fb3ad4c99f7684e763ea039abc7675c437479cc1bdf08",
+      "metric": "binary_sha256:assembly_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:geometry",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:geometry",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "a115945898999c5fdd03b4c2b02b6928caa449f29c61083f0814a85793e88035",
+      "expected": "a115945898999c5fdd03b4c2b02b6928caa449f29c61083f0814a85793e88035",
+      "metric": "binary_sha256:geometry",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:level_set",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:level_set",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "95e369bb68beff698a283bd8d21e8ec5d54db40cbe0c2512c346cca996e3742c",
+      "expected": "95e369bb68beff698a283bd8d21e8ec5d54db40cbe0c2512c346cca996e3742c",
+      "metric": "binary_sha256:level_set",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:physics",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:physics",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "11269593f02c038e42397c23b90b5addea39de37fe9c366dc5b1d1ff8fc04237",
+      "expected": "11269593f02c038e42397c23b90b5addea39de37fe9c366dc5b1d1ff8fc04237",
+      "metric": "binary_sha256:physics",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:systems",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:systems",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "2270173e88cfe063cdb4e1414e0f0b289849d3a55f6a422fd469e30f5c8c7dd7",
+      "expected": "2270173e88cfe063cdb4e1414e0f0b289849d3a55f6a422fd469e30f5c8c7dd7",
+      "metric": "binary_sha256:systems",
+      "passed": true,
+      "relation": "equal"
+    }
+  ],
+  "diagnostics": [],
+  "outcome": "PASS",
+  "registry_sha256_after_execution": "7e89ac445669a7f3e9b5217132949ecbe59f276ccd2e0326b12982fd26c28361",
+  "registry_sha256_before_execution": "7e89ac445669a7f3e9b5217132949ecbe59f276ccd2e0326b12982fd26c28361",
+  "runner_sha256_after_execution": "87152bb031ac5b4cbcafb71bb39cd02fb3c5ce893d6f093d39f60e3429881583",
+  "runner_sha256_before_execution": "87152bb031ac5b4cbcafb71bb39cd02fb3c5ce893d6f093d39f60e3429881583",
+  "source_commit_after_execution": "5cf65650f93faf8d6f4c264ca50d03c70daea373",
+  "source_commit_before_execution": "5cf65650f93faf8d6f4c264ca50d03c70daea373",
+  "source_tree_after_execution": "24b20591ab27156b5dc8a25ea1243d99810a04df",
+  "source_tree_before_execution": "24b20591ab27156b5dc8a25ea1243d99810a04df",
+  "tracked_status_after_execution": "",
+  "untracked_sources_after_execution": {
+    "allowed_output_path_count": 0,
+    "allowed_output_path_list_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "allowed_output_paths": [],
+    "allowed_output_root": "/tmp/free_surface_wp2_geometry_20260722_5cf65650",
+    "ignored_scan_roots": [
+      "Code",
+      "Code/Source/solver/FE",
+      "Code/Source/solver/Physics"
+    ],
+    "ignored_source_path_count": 0,
+    "ordinary_path_count": 0,
+    "path_count": 0,
+    "path_list_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "unexpected_path_count": 0,
+    "unexpected_path_list_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "unexpected_paths": []
+  }
+}

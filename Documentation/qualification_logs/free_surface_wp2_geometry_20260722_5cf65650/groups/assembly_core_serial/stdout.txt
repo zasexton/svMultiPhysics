@@ -1,0 +1,16 @@
+Note: Google Test filter = StandardAssemblerCutInterfaces.RejectsOrphanSnapshotRuleWhenMarkerlessSelectionRequestsAll:StandardAssemblerFaces.InteriorStabilizationRejectsOrphanSnapshotMetadata
+[==========] Running 2 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 1 test from StandardAssemblerFaces
+[ RUN      ] StandardAssemblerFaces.InteriorStabilizationRejectsOrphanSnapshotMetadata
+[       OK ] StandardAssemblerFaces.InteriorStabilizationRejectsOrphanSnapshotMetadata (0 ms)
+[----------] 1 test from StandardAssemblerFaces (0 ms total)
+
+[----------] 1 test from StandardAssemblerCutInterfaces
+[ RUN      ] StandardAssemblerCutInterfaces.RejectsOrphanSnapshotRuleWhenMarkerlessSelectionRequestsAll
+[       OK ] StandardAssemblerCutInterfaces.RejectsOrphanSnapshotRuleWhenMarkerlessSelectionRequestsAll (0 ms)
+[----------] 1 test from StandardAssemblerCutInterfaces (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 2 tests from 2 test suites ran. (0 ms total)
+[  PASSED  ] 2 tests.

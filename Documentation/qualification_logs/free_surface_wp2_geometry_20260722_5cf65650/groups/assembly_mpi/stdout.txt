@@ -1,0 +1,48 @@
+Note: Google Test filter = GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity:GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure:GeneratedContactMeasureMPI.SnapshotCollectiveRejectsGeometryOwnedByBothRanks:GeneratedContactMeasureMPI.RotatedSessileCapContactIsContinuousAcrossCellAndOwnerBoundaries:LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure:LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks
+[==========] Running 6 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 4 tests from GeneratedContactMeasureMPI
+[ RUN      ] GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity
+Note: Google Test filter = GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity:GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure:GeneratedContactMeasureMPI.SnapshotCollectiveRejectsGeometryOwnedByBothRanks:GeneratedContactMeasureMPI.RotatedSessileCapContactIsContinuousAcrossCellAndOwnerBoundaries:LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure:LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks
+[==========] Running 6 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 4 tests from GeneratedContactMeasureMPI
+[ RUN      ] GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity
+[       OK ] GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity (0 ms)
+[ RUN      ] GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure
+[       OK ] GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity (0 ms)
+[ RUN      ] GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure
+[       OK ] GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure (0 ms)
+[ RUN      ] GeneratedContactMeasureMPI.SnapshotCollectiveRejectsGeometryOwnedByBothRanks
+[       OK ] GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure (0 ms)
+[ RUN      ] GeneratedContactMeasureMPI.SnapshotCollectiveRejectsGeometryOwnedByBothRanks
+[       OK ] GeneratedContactMeasureMPI.SnapshotCollectiveRejectsGeometryOwnedByBothRanks (4 ms)
+[ RUN      ] GeneratedContactMeasureMPI.RotatedSessileCapContactIsContinuousAcrossCellAndOwnerBoundaries
+[       OK ] GeneratedContactMeasureMPI.SnapshotCollectiveRejectsGeometryOwnedByBothRanks (4 ms)
+[ RUN      ] GeneratedContactMeasureMPI.RotatedSessileCapContactIsContinuousAcrossCellAndOwnerBoundaries
+[       OK ] GeneratedContactMeasureMPI.RotatedSessileCapContactIsContinuousAcrossCellAndOwnerBoundaries (3 ms)
+[----------] 4 tests from GeneratedContactMeasureMPI (8 ms total)
+
+[----------] 2 tests from LevelSetInterfaceBuilderMPI
+[ RUN      ] LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure
+[       OK ] GeneratedContactMeasureMPI.RotatedSessileCapContactIsContinuousAcrossCellAndOwnerBoundaries (3 ms)
+[----------] 4 tests from GeneratedContactMeasureMPI (8 ms total)
+
+[----------] 2 tests from LevelSetInterfaceBuilderMPI
+[ RUN      ] LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure
+[       OK ] LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure (0 ms)
+[ RUN      ] LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks
+[       OK ] LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure (0 ms)
+[ RUN      ] LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks
+[       OK ] LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks (23 ms)
+[----------] 2 tests from LevelSetInterfaceBuilderMPI (23 ms total)
+
+[----------] Global test environment tear-down
+[==========] 6 tests from 2 test suites ran. (31 ms total)
+[  PASSED  ] 6 tests.
+[       OK ] LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks (22 ms)
+[----------] 2 tests from LevelSetInterfaceBuilderMPI (23 ms total)
+
+[----------] Global test environment tear-down
+[==========] 6 tests from 2 test suites ran. (31 ms total)
+[  PASSED  ] 6 tests.

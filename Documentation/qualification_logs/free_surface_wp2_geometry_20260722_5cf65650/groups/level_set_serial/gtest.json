@@ -1,0 +1,729 @@
+{
+  "tests": 70,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-22T23:40:25Z",
+  "time": "39.964s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "LevelSetConservativePhaseBenchmarks",
+      "tests": 2,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T23:40:25Z",
+      "time": "3.399s",
+      "testsuite": [
+        {
+          "name": "DistortedMeshTranslatingDiskConservesAndRefines",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:25Z",
+          "time": "1.749s",
+          "classname": "LevelSetConservativePhaseBenchmarks",
+          "distorted_l1_N16": "0.026191950646687268",
+          "distorted_centroid_error_N16": "0.0052962749147039967",
+          "distorted_measure_error_N16": "1.0784265841445873e-10",
+          "distorted_l1_N32": "0.016334736422320112",
+          "distorted_centroid_error_N32": "0.0015350210253892438",
+          "distorted_measure_error_N32": "8.3266726846886741e-17",
+          "distorted_l1_N64": "0.010360314017878304",
+          "distorted_centroid_error_N64": "0.0005138146697570567",
+          "distorted_measure_error_N64": "6.9388939039072284e-18"
+        },
+        {
+          "name": "DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:26Z",
+          "time": "1.649s",
+          "classname": "LevelSetConservativePhaseBenchmarks",
+          "runtime_target_measure_N12": "0.056345839187121494",
+          "runtime_snapshot_measure_N12": "0.056345839187121473",
+          "runtime_drifted_measure_N12": "0.054666083688587684",
+          "runtime_pre_correction_drift_N12": "-0.0016797554985338095",
+          "runtime_imposed_shift_N12": "0.001952075600409664",
+          "runtime_correction_shift_N12": "-0.0019520755973489292",
+          "runtime_corrected_measure_N12": "0.056345839184475194",
+          "runtime_post_correction_drift_N12": "-2.6462998459209075e-12",
+          "runtime_target_analytic_error_N12": "0.0026187133281053432",
+          "runtime_correction_iterations_N12": "26",
+          "runtime_target_measure_N24": "0.058253290721683788",
+          "runtime_snapshot_measure_N24": "0.058253290721683747",
+          "runtime_drifted_measure_N24": "0.05818401901388956",
+          "runtime_pre_correction_drift_N24": "-6.9271707794228699e-05",
+          "runtime_imposed_shift_N24": "8.0192984173395321e-05",
+          "runtime_correction_shift_N24": "-8.019290729540632e-05",
+          "runtime_corrected_measure_N24": "0.058253290655255856",
+          "runtime_post_correction_drift_N24": "-6.6427932599033568e-11",
+          "runtime_target_analytic_error_N24": "0.00071126179354304847",
+          "runtime_correction_iterations_N24": "21",
+          "runtime_target_measure_N48": "0.0587879071719936",
+          "runtime_snapshot_measure_N48": "0.058787907171993552",
+          "runtime_drifted_measure_N48": "0.058777391880265289",
+          "runtime_pre_correction_drift_N48": "-1.0515291728310783e-05",
+          "runtime_imposed_shift_N48": "1.2192995326371081e-05",
+          "runtime_correction_shift_N48": "-1.2193041438955484e-05",
+          "runtime_corrected_measure_N48": "0.058787907211763364",
+          "runtime_post_correction_drift_N48": "3.9769763870989294e-11",
+          "runtime_target_analytic_error_N48": "0.00017664534323323655",
+          "runtime_correction_iterations_N48": "19",
+          "runtime_target_measure_order_12_to_24": "1.8804055614820399",
+          "runtime_target_measure_order_24_to_48": "2.0095249521113314",
+          "runtime_maximum_snapshot_measure_difference": "4.8572257327350599e-17",
+          "runtime_minimum_absolute_pre_correction_drift": "1.0515291728310783e-05",
+          "runtime_maximum_absolute_post_correction_drift": "6.6427932599033568e-11"
+        }
+      ]
+    },
+    {
+      "name": "LevelSetCurvatureProjection",
+      "tests": 8,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T23:40:28Z",
+      "time": "2.923s",
+      "testsuite": [
+        {
+          "name": "RecoversCircleCurvatureFromSignedDistance",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:28Z",
+          "time": "0.001s",
+          "classname": "LevelSetCurvatureProjection"
+        },
+        {
+          "name": "CircleCurvatureErrorImprovesWithRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:28Z",
+          "time": "0.001s",
+          "classname": "LevelSetCurvatureProjection"
+        },
+        {
+          "name": "StaticDropQ3SamplesProduceQuantifiedCurvatureRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:28Z",
+          "time": "0.128s",
+          "classname": "LevelSetCurvatureProjection",
+          "static_drop_mean_error_N16": "0.0906638",
+          "static_drop_mean_error_N32": "0.0260799",
+          "static_drop_mean_error_N64": "0.00649201",
+          "static_drop_max_error_N64": "0.0114677",
+          "static_drop_order_16_to_32": "1.79759",
+          "static_drop_order_32_to_64": "2.0062",
+          "static_drop_Q3_samples_N64": "16384",
+          "static_drop_fit_residual_N64": "0.236188",
+          "static_drop_Q3_interpolation_defect_N64": "0.00017828"
+        },
+        {
+          "name": "SphereQ3SamplesProduceQuantifiedCurvatureRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:28Z",
+          "time": "2.707s",
+          "classname": "LevelSetCurvatureProjection",
+          "sphere_mean_error_N8": "0.398474",
+          "sphere_mean_error_N16": "0.0954196",
+          "sphere_max_error_N16": "0.49567",
+          "sphere_order_8_to_16": "2.06213",
+          "sphere_Q3_samples_N16": "32768",
+          "sphere_fit_residual_N16": "0.223837"
+        },
+        {
+          "name": "CapillaryWaveQ3SamplesProduceQuantifiedCurvatureRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0.059s",
+          "classname": "LevelSetCurvatureProjection",
+          "wave_mean_error_N16": "0.0183798",
+          "wave_mean_error_N32": "0.00469493",
+          "wave_mean_error_N64": "0.00117417",
+          "wave_max_error_N64": "0.00370527",
+          "wave_order_16_to_32": "1.96895",
+          "wave_order_32_to_64": "1.99946",
+          "wave_Q3_samples_N64": "8192",
+          "wave_fit_residual_N64": "0.000284259"
+        },
+        {
+          "name": "RecoversSphereCurvatureFromSignedDistance",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0.025s",
+          "classname": "LevelSetCurvatureProjection"
+        },
+        {
+          "name": "SupplementalSamplesAllowUnderresolvedQuadraticStencil",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0s",
+          "classname": "LevelSetCurvatureProjection"
+        },
+        {
+          "name": "CarriesSnapshotRevisionAndRejectsMixedSamples",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0s",
+          "classname": "LevelSetCurvatureProjection",
+          "curvature_snapshot_mismatch_rejections": "2",
+          "curvature_zero_topology_rejections": "1"
+        }
+      ]
+    },
+    {
+      "name": "LevelSetInterfaceLifecycle",
+      "tests": 55,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T23:40:31Z",
+      "time": "32.949s",
+      "testsuite": [
+        {
+          "name": "ProductionQualifiedHighOrderDiscoversSameSignCornerInteriorIsland",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0.003s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "ProductionQualifiedQ3CertifiedRangeDiscoversUnsampledInteriorInterval",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0.007s",
+          "classname": "LevelSetInterfaceLifecycle",
+          "certified_q3_hidden_interval_minimum_nodal_value": "0.0393519",
+          "certified_q3_hidden_interval_minimum_probe_value": "0.025",
+          "certified_q3_hidden_interval_interior_value": "-0.0185",
+          "certified_q3_hidden_interval_negative_volume": "0.353211",
+          "certified_q3_hidden_interval_fragment_count": "48",
+          "certified_q3_hidden_interval_range_query_count": "125",
+          "certified_q3_hidden_interval_refinement_count": "31"
+        },
+        {
+          "name": "ProductionQualifiedQ2RegularGraphCapturesDoubleBoundaryEntry",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0.002s",
+          "classname": "LevelSetInterfaceLifecycle",
+          "certified_q2_double_boundary_entry_negative_volume": "1.11821",
+          "certified_q2_double_boundary_entry_volume_error": "0.0202057",
+          "certified_q2_double_boundary_entry_fragment_count": "14",
+          "certified_q2_double_boundary_entry_topology_refinements": "9",
+          "certified_q2_double_boundary_entry_regular_graph_leaves": "14"
+        },
+        {
+          "name": "ProductionQualifiedQ2AlignedGraphHasSingleInterfaceOwnership",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0.011s",
+          "classname": "LevelSetInterfaceLifecycle",
+          "certified_q2_aligned_graph_interface_measure": "2",
+          "certified_q2_aligned_graph_volume_closure": "0",
+          "certified_q2_aligned_graph_fragment_count": "64"
+        },
+        {
+          "name": "ProductionQualifiedQ3FailsClosedForVisibleLineAndHiddenCircle",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0.002s",
+          "classname": "LevelSetInterfaceLifecycle",
+          "certified_q3_hidden_component_visible_line_residual": "1.12757e-17",
+          "certified_q3_hidden_component_center_value": "-1.8e-09",
+          "certified_q3_hidden_component_outside_value": "1.782e-07",
+          "certified_q3_hidden_component_fail_closed_count": "1"
+        },
+        {
+          "name": "ProductionQualifiedQ2SerendipityCertifiedRangeDiscoversUnsampledInteriorInterval",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0.011s",
+          "classname": "LevelSetInterfaceLifecycle",
+          "certified_q2_serendipity_hidden_interval_minimum_nodal_value": "0.02",
+          "certified_q2_serendipity_hidden_interval_center_probe_value": "0.02",
+          "certified_q2_serendipity_hidden_interval_interior_value": "-0.0025",
+          "certified_q2_serendipity_hidden_interval_negative_volume": "0.162338",
+          "certified_q2_serendipity_hidden_interval_fragment_count": "48",
+          "certified_q2_serendipity_hidden_interval_range_query_count": "125",
+          "certified_q2_serendipity_hidden_interval_refinement_count": "31"
+        },
+        {
+          "name": "ProductionQualifiedSayeRejectsUncertifiedCompleteQ4TensorField",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle",
+          "production_q4_uncertified_rejection_count": "1"
+        },
+        {
+          "name": "ProductionQualifiedHighOrderDiscoversSerendipityInteriorProbeIsland",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0.007s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "Saye3DTerminalBoxUsesInteriorHintToSplitSameSignCorners",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0.001s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "LinearBackendOutputPassesCommonValidation",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "InvalidBackendOutputIsRejected",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "BackendValidationRejectsInconsistentInterfaceNormals",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "BackendValidationRejectsInconsistentQuadratureWeights",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "BackendValidationRejectsBadRootPolishMetadata",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "BackendMetadataReachesCutIntegrationContext",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleP1LineMatchesLinearMeasures",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleSeededLineCutsMatchAnalyticAreas",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleP1PlaneMatchesHexMeasures",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHexReferenceVolumeRulesMapToPhysicalCutVolume",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "DistortedQ1HexUsesPointwisePhysicalVolumeAndSurfaceMoments",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0.001s",
+          "classname": "LevelSetInterfaceLifecycle",
+          "distorted_q1_hex_negative_volume_error": "7.10543e-15",
+          "distorted_q1_hex_positive_volume_error": "3.9968e-15",
+          "distorted_q1_hex_surface_moment_error": "0"
+        },
+        {
+          "name": "CurvedQ3HexMapsPhaseVolumesAndSurfaceMomentsToIndependentReference",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "0.001s",
+          "classname": "LevelSetInterfaceLifecycle",
+          "curved_physical_geometry_order": "3",
+          "curved_q3_hex_negative_volume_error": "4.44089e-15",
+          "curved_q3_hex_positive_volume_error": "9.32587e-15",
+          "curved_q3_hex_surface_measure_error": "8.88178e-16",
+          "curved_q3_hex_surface_moment_error": "6.66134e-16"
+        },
+        {
+          "name": "AnalyticCutSweepCoversTopologyFractionsRotationsAndPhaseReversal",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:31Z",
+          "time": "4.054s",
+          "classname": "LevelSetInterfaceLifecycle",
+          "analytic_cut_sweep_fraction_count": "8",
+          "analytic_cut_sweep_radial_topology_count": "10",
+          "analytic_cut_sweep_maximum_partition_error": "4.29878e-13",
+          "analytic_cut_sweep_maximum_radial_volume_error": "0.00614221",
+          "analytic_cut_sweep_maximum_radial_surface_error": "0.0204624"
+        },
+        {
+          "name": "HighOrderSubcellP2CircleSegmentApproximatesAreaAndLength",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:35Z",
+          "time": "0.012s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellTriangleCircleErrorsDecreaseUnderHRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:35Z",
+          "time": "0.004s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellTriangleCircleErrorsDecreaseUnderPRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:35Z",
+          "time": "0.01s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellTriangleVertexAndEdgeTouchesAreDegenerate",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:35Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "BackendIndependentValidationFixturesCheckRuleInvariants",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:35Z",
+          "time": "0.016s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "CurvedInterfaceMomentsUseIndependentBackendReferenceRules",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:35Z",
+          "time": "0.11s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "GeneratedOrderSummariesMatchRuleProvenance",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:35Z",
+          "time": "0.024s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "AffineCutsMatchLinearMeasuresForSupportedHighOrderCells",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:35Z",
+          "time": "0.059s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "AffinePlaneCutsStayPlanarOnHighOrderPhysicalCells",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:35Z",
+          "time": "0.03s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "Affine2DCutRulesIntegratePolynomialMomentsToAdvertisedOrder",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:35Z",
+          "time": "0.003s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "Affine3DCutRulesIntegratePolynomialMomentsToAdvertisedOrder",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:35Z",
+          "time": "0.058s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "PromotedAffineCutRulesUseConsistentNormalsAndSides",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:36Z",
+          "time": "0.057s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "Affine2DCutRulesImprovePolynomialMomentsUnderQRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:36Z",
+          "time": "0.004s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "GeneratedRulesConserveParentMeasureAndUsePositiveWeights",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:36Z",
+          "time": "7.181s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellP2SphereCapApproximatesVolumeAndArea",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:43Z",
+          "time": "7.226s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellTetraSphereCapErrorsDecreaseUnderHRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:40:50Z",
+          "time": "11.69s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellTetraP2EdgeDofMovesCutVolume",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:02Z",
+          "time": "0.8s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleQuadP3DofMovesGeometryAndQuadrature",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:02Z",
+          "time": "0.038s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "HighOrderSubcellTriangleP3DofMovesGeometryAndQuadrature",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:03Z",
+          "time": "0.011s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleP2CircleApproximatesAreaAndLength",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:03Z",
+          "time": "0.066s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleVolumeNormalsFollowSideConvention",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:03Z",
+          "time": "0.014s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleP2EllipseIntegratesAreaAndArcLength",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:03Z",
+          "time": "0.033s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleCircleErrorsDecreaseUnderHAndPRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:03Z",
+          "time": "0.031s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleEllipseErrorsDecreaseUnderHRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:03Z",
+          "time": "0.031s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SmallVolumeCutsReturnFinitePositiveRules",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:03Z",
+          "time": "0.004s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "MultipleComponentsInSingleParentCellProduceSeparatedRules",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:03Z",
+          "time": "0.02s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleNearTangentCircleReturnsRulesOrDiagnostic",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:03Z",
+          "time": "0.059s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleP2SphereApproximatesVolumeAndArea",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:03Z",
+          "time": "0.092s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleP2EllipsoidApproximatesVolumeAndArea",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:03Z",
+          "time": "0.33s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleSphereAndEllipsoidErrorsDecreaseUnderHRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:03Z",
+          "time": "0.747s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleRulesAssembleFixedGeometryMeasures",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:04Z",
+          "time": "0.032s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "GeneratedRulesUseReferenceCoordinatesOnPhysicalCells",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:04Z",
+          "time": "0s",
+          "classname": "LevelSetInterfaceLifecycle"
+        },
+        {
+          "name": "SayeHyperrectangleReferenceRulesMapToCurvedHexGeometry",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:04Z",
+          "time": "0.028s",
+          "classname": "LevelSetInterfaceLifecycle"
+        }
+      ]
+    },
+    {
+      "name": "LevelSetVolume",
+      "tests": 5,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T23:41:04Z",
+      "time": "0.693s",
+      "testsuite": [
+        {
+          "name": "GeneratedCutVolumeUsesPointwiseJacobianOnWarpedTensorProductCell",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:04Z",
+          "time": "0s",
+          "classname": "LevelSetVolume"
+        },
+        {
+          "name": "GeneratedInterfaceVolumeDiscoversInteriorIsland",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:04Z",
+          "time": "0.674s",
+          "classname": "LevelSetVolume"
+        },
+        {
+          "name": "GeneratedInterfaceGlobalShiftUsesGeneratedQuadrature",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:05Z",
+          "time": "0s",
+          "classname": "LevelSetVolume"
+        },
+        {
+          "name": "WarpedGeneratedCorrectionTargetEqualsSnapshotConstantOneMeasure",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:05Z",
+          "time": "0.016s",
+          "classname": "LevelSetVolume",
+          "volume_correction_target": "0.2",
+          "snapshot_constant_one_liquid_measure": "0.2",
+          "assembled_constant_one_liquid_measure": "0.2",
+          "constant_one_assembly_error": "2.77556e-17",
+          "constant_one_target_error": "8.81434e-12"
+        },
+        {
+          "name": "GeneratedGlobalShiftRejectsNonAffineTensorProductQ1",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:05Z",
+          "time": "0s",
+          "classname": "LevelSetVolume"
+        }
+      ]
+    }
+  ]
+}

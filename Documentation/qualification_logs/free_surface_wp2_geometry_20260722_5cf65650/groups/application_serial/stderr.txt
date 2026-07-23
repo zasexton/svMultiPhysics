@@ -1,0 +1,1 @@
+/tmp/svmp_wp2_clean_5cf65650/build-application/bin/test_application: /home/zack/miniconda3/lib/libtinfo.so.6: no version information available (required by /tmp/svmp_wp2_clean_5cf65650/build-application/bin/test_application)

@@ -1,0 +1,22 @@
+{
+  "distinct_test_count": 200,
+  "final_provenance_diagnostics": [],
+  "final_provenance_outcome": "PASS",
+  "group_outcomes": {
+    "application_mpi": "PASS",
+    "application_serial": "PASS",
+    "assembly_core_serial": "PASS",
+    "assembly_mpi": "PASS",
+    "assembly_mpi_serial": "PASS",
+    "geometry_serial": "PASS",
+    "level_set_serial": "PASS",
+    "physics_serial": "PASS",
+    "systems_serial": "PASS"
+  },
+  "matrix_id": "free_surface_wp2_geometry_v4",
+  "overall_outcome": "PASS",
+  "qualification_scope": "WP-2 closure only; later force-balance, wetting, transport, stability, and release matrices remain separate gates",
+  "quantitative_evidence_check_count": 130,
+  "quantitative_evidence_outcome": "PASS",
+  "source_commit": "5cf65650f93faf8d6f4c264ca50d03c70daea373"
+}

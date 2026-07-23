@@ -1,0 +1,51 @@
+{
+  "tests": 2,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-22T23:41:05Z",
+  "time": "0s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "StandardAssemblerFaces",
+      "tests": 1,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T23:41:05Z",
+      "time": "0s",
+      "testsuite": [
+        {
+          "name": "InteriorStabilizationRejectsOrphanSnapshotMetadata",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:05Z",
+          "time": "0s",
+          "classname": "StandardAssemblerFaces",
+          "standard_assembler_stabilization_snapshot_rejection_count": "1"
+        }
+      ]
+    },
+    {
+      "name": "StandardAssemblerCutInterfaces",
+      "tests": 1,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T23:41:05Z",
+      "time": "0s",
+      "testsuite": [
+        {
+          "name": "RejectsOrphanSnapshotRuleWhenMarkerlessSelectionRequestsAll",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T23:41:05Z",
+          "time": "0s",
+          "classname": "StandardAssemblerCutInterfaces",
+          "standard_assembler_markerless_snapshot_rejection_count": "1"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,177 @@
+{
+  "checks": [
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "process_return_code",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": null,
+      "expected": null,
+      "metric": "termination_reason",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 23,
+      "expected": 23,
+      "metric": "test_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "failure_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "error_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "disabled_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "skipped_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "skipped_result_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "skipped_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "missing_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "incomplete_or_skipped_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "tests_with_failure_records",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "PASS",
+      "expected": "PASS",
+      "metric": "resource_monitoring_outcome",
+      "passed": true,
+      "relation": "equal"
+    }
+  ],
+  "command": [
+    "/tmp/svmp_wp2_clean_5cf65650/build-fe/test_fe_systems",
+    "--gtest_filter=CutIntegrationInfrastructure.ContentRevisionTracksGeneratedRuleMutations:CutIntegrationInfrastructure.ImportsGeneratedLevelSetInterfaceDomainByMarker:CutIntegrationInfrastructure.ImportsGeneratedLevelSetInterfaceDomainForRequestedVolumeSide:CutIntegrationInfrastructure.GeneratedCutVolumesRejectStaleSourceRevision:CutIntegrationInfrastructure.GeneratedInterfaceRulesRejectStaleSourceRevision:CutIntegrationInfrastructure.FullCellGeneratedRulesCarryDiagnosticMetadata:CutIntegrationInfrastructure.IndexesGeneratedLevelSetVolumeRulesByMarkerAndSide:CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesConstantsAcrossPaths:CutIntegrationInfrastructure.FixedGeometryDiagnosticsCountHighOrderRules:CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesLinearFieldsAcrossPaths:CutIntegrationInfrastructure.AssemblyContextCarriesQuadratureMetadataAndHooks:CutIntegrationInfrastructure.InvalidationSeparatesGeometryAndFELayoutChanges:CutIntegrationInfrastructure.ImportsClosedCutTopologyIntoAllAssemblyPathBindings:CutIntegrationInfrastructure.ImportsCurvedIsoparametricTopologyQuadrature:CutIntegrationInfrastructure.QuadraticCurvedPlaneCutDataIsIdenticalAcrossAllExecutionPaths:CutIntegrationInfrastructure.ImportsLinearizedCutQuadratureForEveryAdvertisedFamily:CutIntegrationInfrastructure.LinearizedPlaneCutDataIsIdenticalAcrossAllExecutionPaths:CutIntegrationInfrastructure.LinearizedCutDataIsIdenticalAcrossAllExecutionPaths:CutIntegrationInfrastructure.ProductionCutScalarOperatorsMatchAnalyticHalfCubePlaneCut:FormsInstaller.FormsInstaller_RevisionBoundFullSideCutVolumeUsesSnapshotRulePoints:FormsInstaller.FormsInstaller_RejectsOrphanRevisionBoundFullSideCutVolume:FormsInstaller.FormsInstaller_UnflaggedFullMeasureCutVolumeUsesRulePoints:FESystem.MaterialStateSetupRejectsOrphanSnapshotInterfaceRule",
+    "--gtest_color=no",
+    "--gtest_output=json:/tmp/free_surface_wp2_geometry_20260722_5cf65650/groups/systems_serial/gtest.json"
+  ],
+  "diagnostic": null,
+  "execution": {
+    "memory_mib": 6144,
+    "output_mib": 192,
+    "wall_time_seconds": 1200
+  },
+  "expected_tests": [
+    "CutIntegrationInfrastructure.ContentRevisionTracksGeneratedRuleMutations",
+    "CutIntegrationInfrastructure.ImportsGeneratedLevelSetInterfaceDomainByMarker",
+    "CutIntegrationInfrastructure.ImportsGeneratedLevelSetInterfaceDomainForRequestedVolumeSide",
+    "CutIntegrationInfrastructure.GeneratedCutVolumesRejectStaleSourceRevision",
+    "CutIntegrationInfrastructure.GeneratedInterfaceRulesRejectStaleSourceRevision",
+    "CutIntegrationInfrastructure.FullCellGeneratedRulesCarryDiagnosticMetadata",
+    "CutIntegrationInfrastructure.IndexesGeneratedLevelSetVolumeRulesByMarkerAndSide",
+    "CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesConstantsAcrossPaths",
+    "CutIntegrationInfrastructure.FixedGeometryDiagnosticsCountHighOrderRules",
+    "CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesLinearFieldsAcrossPaths",
+    "CutIntegrationInfrastructure.AssemblyContextCarriesQuadratureMetadataAndHooks",
+    "CutIntegrationInfrastructure.InvalidationSeparatesGeometryAndFELayoutChanges",
+    "CutIntegrationInfrastructure.ImportsClosedCutTopologyIntoAllAssemblyPathBindings",
+    "CutIntegrationInfrastructure.ImportsCurvedIsoparametricTopologyQuadrature",
+    "CutIntegrationInfrastructure.QuadraticCurvedPlaneCutDataIsIdenticalAcrossAllExecutionPaths",
+    "CutIntegrationInfrastructure.ImportsLinearizedCutQuadratureForEveryAdvertisedFamily",
+    "CutIntegrationInfrastructure.LinearizedPlaneCutDataIsIdenticalAcrossAllExecutionPaths",
+    "CutIntegrationInfrastructure.LinearizedCutDataIsIdenticalAcrossAllExecutionPaths",
+    "CutIntegrationInfrastructure.ProductionCutScalarOperatorsMatchAnalyticHalfCubePlaneCut",
+    "FormsInstaller.FormsInstaller_RevisionBoundFullSideCutVolumeUsesSnapshotRulePoints",
+    "FormsInstaller.FormsInstaller_RejectsOrphanRevisionBoundFullSideCutVolume",
+    "FormsInstaller.FormsInstaller_UnflaggedFullMeasureCutVolumeUsesRulePoints",
+    "FESystem.MaterialStateSetupRejectsOrphanSnapshotInterfaceRule"
+  ],
+  "group_id": "systems_serial",
+  "gtest_output_copies": 1,
+  "gtest_result_error": null,
+  "mpi_ranks": 1,
+  "outcome": "PASS",
+  "resources": {
+    "aggregate_memory_measurement": "sampled_peak",
+    "complete_session_process_coverage": true,
+    "final_output_bytes": 17869,
+    "launch_mode": "direct_serial",
+    "memory_enforcement_method": "per_process_address_space_limit_and_sampled_session_resident_memory",
+    "memory_enforcement_scope": "spawned_process_session",
+    "monitor_sample_count": 4,
+    "peak_aggregate_resident_kib_sampled": 44320,
+    "peak_process_count_sampled": 1,
+    "peak_process_group_count_sampled": 1,
+    "peak_resident_kib_sampled": 34136,
+    "peak_resident_sample_count": 1,
+    "process_session_id": 1068637,
+    "reaped_launcher_fallback_allowed": true,
+    "reaped_launcher_fallback_requires_session_enumeration": true,
+    "reaped_launcher_fallback_scope": "direct_serial_launcher_process",
+    "reaped_launcher_fallback_source": "wait4_ru_maxrss",
+    "reaped_launcher_fallback_used": false,
+    "reaped_launcher_max_resident_kib": 47304,
+    "reaped_launcher_rusage_available": true,
+    "required_simultaneous_process_samples": 1,
+    "resident_read_failure_count": 1,
+    "resource_monitoring_method": "sampled_process_session",
+    "resource_monitoring_outcome": "PASS",
+    "return_code": 0,
+    "session_enumeration_failure_count": 0,
+    "stat_read_failure_count": 0,
+    "successful_session_sample_count": 3,
+    "termination": null,
+    "termination_reason": null,
+    "wall_time_seconds": 0.23160949908196926
+  }
+}

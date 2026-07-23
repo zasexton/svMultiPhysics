@@ -1,0 +1,161 @@
+Note: Google Test filter = LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSameSignCornerInteriorIsland:LevelSetInterfaceLifecycle.ProductionQualifiedQ3CertifiedRangeDiscoversUnsampledInteriorInterval:LevelSetInterfaceLifecycle.ProductionQualifiedQ2RegularGraphCapturesDoubleBoundaryEntry:LevelSetInterfaceLifecycle.ProductionQualifiedQ2AlignedGraphHasSingleInterfaceOwnership:LevelSetInterfaceLifecycle.ProductionQualifiedQ3FailsClosedForVisibleLineAndHiddenCircle:LevelSetInterfaceLifecycle.ProductionQualifiedQ2SerendipityCertifiedRangeDiscoversUnsampledInteriorInterval:LevelSetInterfaceLifecycle.ProductionQualifiedSayeRejectsUncertifiedCompleteQ4TensorField:LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSerendipityInteriorProbeIsland:LevelSetInterfaceLifecycle.Saye3DTerminalBoxUsesInteriorHintToSplitSameSignCorners:LevelSetInterfaceLifecycle.LinearBackendOutputPassesCommonValidation:LevelSetInterfaceLifecycle.InvalidBackendOutputIsRejected:LevelSetInterfaceLifecycle.BackendValidationRejectsInconsistentInterfaceNormals:LevelSetInterfaceLifecycle.BackendValidationRejectsInconsistentQuadratureWeights:LevelSetInterfaceLifecycle.BackendValidationRejectsBadRootPolishMetadata:LevelSetInterfaceLifecycle.BackendMetadataReachesCutIntegrationContext:LevelSetInterfaceLifecycle.SayeHyperrectangleP1LineMatchesLinearMeasures:LevelSetInterfaceLifecycle.SayeHyperrectangleSeededLineCutsMatchAnalyticAreas:LevelSetInterfaceLifecycle.SayeHyperrectangleP1PlaneMatchesHexMeasures:LevelSetInterfaceLifecycle.SayeHexReferenceVolumeRulesMapToPhysicalCutVolume:LevelSetInterfaceLifecycle.HighOrderSubcellP2CircleSegmentApproximatesAreaAndLength:LevelSetInterfaceLifecycle.HighOrderSubcellTriangleCircleErrorsDecreaseUnderHRefinement:LevelSetInterfaceLifecycle.HighOrderSubcellTriangleCircleErrorsDecreaseUnderPRefinement:LevelSetInterfaceLifecycle.HighOrderSubcellTriangleVertexAndEdgeTouchesAreDegenerate:LevelSetInterfaceLifecycle.BackendIndependentValidationFixturesCheckRuleInvariants:LevelSetInterfaceLifecycle.CurvedInterfaceMomentsUseIndependentBackendReferenceRules:LevelSetInterfaceLifecycle.GeneratedOrderSummariesMatchRuleProvenance:LevelSetInterfaceLifecycle.AffineCutsMatchLinearMeasuresForSupportedHighOrderCells:LevelSetInterfaceLifecycle.AffinePlaneCutsStayPlanarOnHighOrderPhysicalCells:LevelSetInterfaceLifecycle.Affine2DCutRulesIntegratePolynomialMomentsToAdvertisedOrder:LevelSetInterfaceLifecycle.Affine3DCutRulesIntegratePolynomialMomentsToAdvertisedOrder:LevelSetInterfaceLifecycle.PromotedAffineCutRulesUseConsistentNormalsAndSides:LevelSetInterfaceLifecycle.Affine2DCutRulesImprovePolynomialMomentsUnderQRefinement:LevelSetInterfaceLifecycle.GeneratedRulesConserveParentMeasureAndUsePositiveWeights:LevelSetInterfaceLifecycle.HighOrderSubcellP2SphereCapApproximatesVolumeAndArea:LevelSetInterfaceLifecycle.HighOrderSubcellTetraSphereCapErrorsDecreaseUnderHRefinement:LevelSetInterfaceLifecycle.HighOrderSubcellTetraP2EdgeDofMovesCutVolume:LevelSetInterfaceLifecycle.SayeHyperrectangleQuadP3DofMovesGeometryAndQuadrature:LevelSetInterfaceLifecycle.HighOrderSubcellTriangleP3DofMovesGeometryAndQuadrature:LevelSetInterfaceLifecycle.SayeHyperrectangleP2CircleApproximatesAreaAndLength:LevelSetInterfaceLifecycle.SayeHyperrectangleVolumeNormalsFollowSideConvention:LevelSetInterfaceLifecycle.SayeHyperrectangleP2EllipseIntegratesAreaAndArcLength:LevelSetInterfaceLifecycle.SayeHyperrectangleCircleErrorsDecreaseUnderHAndPRefinement:LevelSetInterfaceLifecycle.SayeHyperrectangleEllipseErrorsDecreaseUnderHRefinement:LevelSetInterfaceLifecycle.SmallVolumeCutsReturnFinitePositiveRules:LevelSetInterfaceLifecycle.MultipleComponentsInSingleParentCellProduceSeparatedRules:LevelSetInterfaceLifecycle.SayeHyperrectangleNearTangentCircleReturnsRulesOrDiagnostic:LevelSetInterfaceLifecycle.SayeHyperrectangleP2SphereApproximatesVolumeAndArea:LevelSetInterfaceLifecycle.SayeHyperrectangleP2EllipsoidApproximatesVolumeAndArea:LevelSetInterfaceLifecycle.SayeHyperrectangleSphereAndEllipsoidErrorsDecreaseUnderHRefinement:LevelSetInterfaceLifecycle.SayeHyperrectangleRulesAssembleFixedGeometryMeasures:LevelSetInterfaceLifecycle.GeneratedRulesUseReferenceCoordinatesOnPhysicalCells:LevelSetInterfaceLifecycle.SayeHyperrectangleReferenceRulesMapToCurvedHexGeometry:LevelSetInterfaceLifecycle.DistortedQ1HexUsesPointwisePhysicalVolumeAndSurfaceMoments:LevelSetInterfaceLifecycle.CurvedQ3HexMapsPhaseVolumesAndSurfaceMomentsToIndependentReference:LevelSetInterfaceLifecycle.AnalyticCutSweepCoversTopologyFractionsRotationsAndPhaseReversal:LevelSetVolume.GeneratedCutVolumeUsesPointwiseJacobianOnWarpedTensorProductCell:LevelSetVolume.GeneratedInterfaceVolumeDiscoversInteriorIsland:LevelSetVolume.GeneratedInterfaceGlobalShiftUsesGeneratedQuadrature:LevelSetVolume.WarpedGeneratedCorrectionTargetEqualsSnapshotConstantOneMeasure:LevelSetVolume.GeneratedGlobalShiftRejectsNonAffineTensorProductQ1:LevelSetConservativePhaseBenchmarks.DistortedMeshTranslatingDiskConservesAndRefines:LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift:LevelSetCurvatureProjection.RecoversCircleCurvatureFromSignedDistance:LevelSetCurvatureProjection.CircleCurvatureErrorImprovesWithRefinement:LevelSetCurvatureProjection.RecoversSphereCurvatureFromSignedDistance:LevelSetCurvatureProjection.SupplementalSamplesAllowUnderresolvedQuadraticStencil:LevelSetCurvatureProjection.CarriesSnapshotRevisionAndRejectsMixedSamples:LevelSetCurvatureProjection.StaticDropQ3SamplesProduceQuantifiedCurvatureRefinement:LevelSetCurvatureProjection.SphereQ3SamplesProduceQuantifiedCurvatureRefinement:LevelSetCurvatureProjection.CapillaryWaveQ3SamplesProduceQuantifiedCurvatureRefinement
+[==========] Running 70 tests from 4 test suites.
+[----------] Global test environment set-up.
+[----------] 2 tests from LevelSetConservativePhaseBenchmarks
+[ RUN      ] LevelSetConservativePhaseBenchmarks.DistortedMeshTranslatingDiskConservesAndRefines
+[       OK ] LevelSetConservativePhaseBenchmarks.DistortedMeshTranslatingDiskConservesAndRefines (1749 ms)
+[ RUN      ] LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift
+[       OK ] LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift (1649 ms)
+[----------] 2 tests from LevelSetConservativePhaseBenchmarks (3399 ms total)
+
+[----------] 8 tests from LevelSetCurvatureProjection
+[ RUN      ] LevelSetCurvatureProjection.RecoversCircleCurvatureFromSignedDistance
+[       OK ] LevelSetCurvatureProjection.RecoversCircleCurvatureFromSignedDistance (1 ms)
+[ RUN      ] LevelSetCurvatureProjection.CircleCurvatureErrorImprovesWithRefinement
+[       OK ] LevelSetCurvatureProjection.CircleCurvatureErrorImprovesWithRefinement (1 ms)
+[ RUN      ] LevelSetCurvatureProjection.StaticDropQ3SamplesProduceQuantifiedCurvatureRefinement
+[       OK ] LevelSetCurvatureProjection.StaticDropQ3SamplesProduceQuantifiedCurvatureRefinement (128 ms)
+[ RUN      ] LevelSetCurvatureProjection.SphereQ3SamplesProduceQuantifiedCurvatureRefinement
+[       OK ] LevelSetCurvatureProjection.SphereQ3SamplesProduceQuantifiedCurvatureRefinement (2707 ms)
+[ RUN      ] LevelSetCurvatureProjection.CapillaryWaveQ3SamplesProduceQuantifiedCurvatureRefinement
+[       OK ] LevelSetCurvatureProjection.CapillaryWaveQ3SamplesProduceQuantifiedCurvatureRefinement (59 ms)
+[ RUN      ] LevelSetCurvatureProjection.RecoversSphereCurvatureFromSignedDistance
+[       OK ] LevelSetCurvatureProjection.RecoversSphereCurvatureFromSignedDistance (25 ms)
+[ RUN      ] LevelSetCurvatureProjection.SupplementalSamplesAllowUnderresolvedQuadraticStencil
+[       OK ] LevelSetCurvatureProjection.SupplementalSamplesAllowUnderresolvedQuadraticStencil (0 ms)
+[ RUN      ] LevelSetCurvatureProjection.CarriesSnapshotRevisionAndRejectsMixedSamples
+[       OK ] LevelSetCurvatureProjection.CarriesSnapshotRevisionAndRejectsMixedSamples (0 ms)
+[----------] 8 tests from LevelSetCurvatureProjection (2923 ms total)
+
+[----------] 55 tests from LevelSetInterfaceLifecycle
+[ RUN      ] LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSameSignCornerInteriorIsland
+[       OK ] LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSameSignCornerInteriorIsland (3 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.ProductionQualifiedQ3CertifiedRangeDiscoversUnsampledInteriorInterval
+[       OK ] LevelSetInterfaceLifecycle.ProductionQualifiedQ3CertifiedRangeDiscoversUnsampledInteriorInterval (7 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.ProductionQualifiedQ2RegularGraphCapturesDoubleBoundaryEntry
+[       OK ] LevelSetInterfaceLifecycle.ProductionQualifiedQ2RegularGraphCapturesDoubleBoundaryEntry (2 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.ProductionQualifiedQ2AlignedGraphHasSingleInterfaceOwnership
+[       OK ] LevelSetInterfaceLifecycle.ProductionQualifiedQ2AlignedGraphHasSingleInterfaceOwnership (11 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.ProductionQualifiedQ3FailsClosedForVisibleLineAndHiddenCircle
+[       OK ] LevelSetInterfaceLifecycle.ProductionQualifiedQ3FailsClosedForVisibleLineAndHiddenCircle (2 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.ProductionQualifiedQ2SerendipityCertifiedRangeDiscoversUnsampledInteriorInterval
+[       OK ] LevelSetInterfaceLifecycle.ProductionQualifiedQ2SerendipityCertifiedRangeDiscoversUnsampledInteriorInterval (11 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.ProductionQualifiedSayeRejectsUncertifiedCompleteQ4TensorField
+[       OK ] LevelSetInterfaceLifecycle.ProductionQualifiedSayeRejectsUncertifiedCompleteQ4TensorField (0 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSerendipityInteriorProbeIsland
+[       OK ] LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSerendipityInteriorProbeIsland (7 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.Saye3DTerminalBoxUsesInteriorHintToSplitSameSignCorners
+[       OK ] LevelSetInterfaceLifecycle.Saye3DTerminalBoxUsesInteriorHintToSplitSameSignCorners (1 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.LinearBackendOutputPassesCommonValidation
+[       OK ] LevelSetInterfaceLifecycle.LinearBackendOutputPassesCommonValidation (0 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.InvalidBackendOutputIsRejected
+[       OK ] LevelSetInterfaceLifecycle.InvalidBackendOutputIsRejected (0 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.BackendValidationRejectsInconsistentInterfaceNormals
+[       OK ] LevelSetInterfaceLifecycle.BackendValidationRejectsInconsistentInterfaceNormals (0 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.BackendValidationRejectsInconsistentQuadratureWeights
+[       OK ] LevelSetInterfaceLifecycle.BackendValidationRejectsInconsistentQuadratureWeights (0 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.BackendValidationRejectsBadRootPolishMetadata
+[       OK ] LevelSetInterfaceLifecycle.BackendValidationRejectsBadRootPolishMetadata (0 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.BackendMetadataReachesCutIntegrationContext
+[       OK ] LevelSetInterfaceLifecycle.BackendMetadataReachesCutIntegrationContext (0 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleP1LineMatchesLinearMeasures
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleP1LineMatchesLinearMeasures (0 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleSeededLineCutsMatchAnalyticAreas
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleSeededLineCutsMatchAnalyticAreas (0 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleP1PlaneMatchesHexMeasures
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleP1PlaneMatchesHexMeasures (0 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHexReferenceVolumeRulesMapToPhysicalCutVolume
+[       OK ] LevelSetInterfaceLifecycle.SayeHexReferenceVolumeRulesMapToPhysicalCutVolume (0 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.DistortedQ1HexUsesPointwisePhysicalVolumeAndSurfaceMoments
+[       OK ] LevelSetInterfaceLifecycle.DistortedQ1HexUsesPointwisePhysicalVolumeAndSurfaceMoments (1 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.CurvedQ3HexMapsPhaseVolumesAndSurfaceMomentsToIndependentReference
+[       OK ] LevelSetInterfaceLifecycle.CurvedQ3HexMapsPhaseVolumesAndSurfaceMomentsToIndependentReference (1 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.AnalyticCutSweepCoversTopologyFractionsRotationsAndPhaseReversal
+[       OK ] LevelSetInterfaceLifecycle.AnalyticCutSweepCoversTopologyFractionsRotationsAndPhaseReversal (4054 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.HighOrderSubcellP2CircleSegmentApproximatesAreaAndLength
+[       OK ] LevelSetInterfaceLifecycle.HighOrderSubcellP2CircleSegmentApproximatesAreaAndLength (12 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.HighOrderSubcellTriangleCircleErrorsDecreaseUnderHRefinement
+[       OK ] LevelSetInterfaceLifecycle.HighOrderSubcellTriangleCircleErrorsDecreaseUnderHRefinement (4 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.HighOrderSubcellTriangleCircleErrorsDecreaseUnderPRefinement
+[       OK ] LevelSetInterfaceLifecycle.HighOrderSubcellTriangleCircleErrorsDecreaseUnderPRefinement (10 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.HighOrderSubcellTriangleVertexAndEdgeTouchesAreDegenerate
+[       OK ] LevelSetInterfaceLifecycle.HighOrderSubcellTriangleVertexAndEdgeTouchesAreDegenerate (0 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.BackendIndependentValidationFixturesCheckRuleInvariants
+[       OK ] LevelSetInterfaceLifecycle.BackendIndependentValidationFixturesCheckRuleInvariants (16 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.CurvedInterfaceMomentsUseIndependentBackendReferenceRules
+[       OK ] LevelSetInterfaceLifecycle.CurvedInterfaceMomentsUseIndependentBackendReferenceRules (110 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.GeneratedOrderSummariesMatchRuleProvenance
+[       OK ] LevelSetInterfaceLifecycle.GeneratedOrderSummariesMatchRuleProvenance (24 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.AffineCutsMatchLinearMeasuresForSupportedHighOrderCells
+[       OK ] LevelSetInterfaceLifecycle.AffineCutsMatchLinearMeasuresForSupportedHighOrderCells (59 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.AffinePlaneCutsStayPlanarOnHighOrderPhysicalCells
+[       OK ] LevelSetInterfaceLifecycle.AffinePlaneCutsStayPlanarOnHighOrderPhysicalCells (30 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.Affine2DCutRulesIntegratePolynomialMomentsToAdvertisedOrder
+[       OK ] LevelSetInterfaceLifecycle.Affine2DCutRulesIntegratePolynomialMomentsToAdvertisedOrder (3 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.Affine3DCutRulesIntegratePolynomialMomentsToAdvertisedOrder
+[       OK ] LevelSetInterfaceLifecycle.Affine3DCutRulesIntegratePolynomialMomentsToAdvertisedOrder (58 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.PromotedAffineCutRulesUseConsistentNormalsAndSides
+[       OK ] LevelSetInterfaceLifecycle.PromotedAffineCutRulesUseConsistentNormalsAndSides (57 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.Affine2DCutRulesImprovePolynomialMomentsUnderQRefinement
+[       OK ] LevelSetInterfaceLifecycle.Affine2DCutRulesImprovePolynomialMomentsUnderQRefinement (4 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.GeneratedRulesConserveParentMeasureAndUsePositiveWeights
+[       OK ] LevelSetInterfaceLifecycle.GeneratedRulesConserveParentMeasureAndUsePositiveWeights (7181 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.HighOrderSubcellP2SphereCapApproximatesVolumeAndArea
+[       OK ] LevelSetInterfaceLifecycle.HighOrderSubcellP2SphereCapApproximatesVolumeAndArea (7226 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.HighOrderSubcellTetraSphereCapErrorsDecreaseUnderHRefinement
+[       OK ] LevelSetInterfaceLifecycle.HighOrderSubcellTetraSphereCapErrorsDecreaseUnderHRefinement (11690 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.HighOrderSubcellTetraP2EdgeDofMovesCutVolume
+[       OK ] LevelSetInterfaceLifecycle.HighOrderSubcellTetraP2EdgeDofMovesCutVolume (800 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleQuadP3DofMovesGeometryAndQuadrature
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleQuadP3DofMovesGeometryAndQuadrature (38 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.HighOrderSubcellTriangleP3DofMovesGeometryAndQuadrature
+[       OK ] LevelSetInterfaceLifecycle.HighOrderSubcellTriangleP3DofMovesGeometryAndQuadrature (11 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleP2CircleApproximatesAreaAndLength
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleP2CircleApproximatesAreaAndLength (66 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleVolumeNormalsFollowSideConvention
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleVolumeNormalsFollowSideConvention (14 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleP2EllipseIntegratesAreaAndArcLength
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleP2EllipseIntegratesAreaAndArcLength (33 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleCircleErrorsDecreaseUnderHAndPRefinement
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleCircleErrorsDecreaseUnderHAndPRefinement (31 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleEllipseErrorsDecreaseUnderHRefinement
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleEllipseErrorsDecreaseUnderHRefinement (31 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SmallVolumeCutsReturnFinitePositiveRules
+[       OK ] LevelSetInterfaceLifecycle.SmallVolumeCutsReturnFinitePositiveRules (4 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.MultipleComponentsInSingleParentCellProduceSeparatedRules
+[       OK ] LevelSetInterfaceLifecycle.MultipleComponentsInSingleParentCellProduceSeparatedRules (20 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleNearTangentCircleReturnsRulesOrDiagnostic
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleNearTangentCircleReturnsRulesOrDiagnostic (59 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleP2SphereApproximatesVolumeAndArea
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleP2SphereApproximatesVolumeAndArea (92 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleP2EllipsoidApproximatesVolumeAndArea
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleP2EllipsoidApproximatesVolumeAndArea (330 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleSphereAndEllipsoidErrorsDecreaseUnderHRefinement
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleSphereAndEllipsoidErrorsDecreaseUnderHRefinement (747 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleRulesAssembleFixedGeometryMeasures
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleRulesAssembleFixedGeometryMeasures (32 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.GeneratedRulesUseReferenceCoordinatesOnPhysicalCells
+[       OK ] LevelSetInterfaceLifecycle.GeneratedRulesUseReferenceCoordinatesOnPhysicalCells (0 ms)
+[ RUN      ] LevelSetInterfaceLifecycle.SayeHyperrectangleReferenceRulesMapToCurvedHexGeometry
+[       OK ] LevelSetInterfaceLifecycle.SayeHyperrectangleReferenceRulesMapToCurvedHexGeometry (28 ms)
+[----------] 55 tests from LevelSetInterfaceLifecycle (32949 ms total)
+
+[----------] 5 tests from LevelSetVolume
+[ RUN      ] LevelSetVolume.GeneratedCutVolumeUsesPointwiseJacobianOnWarpedTensorProductCell
+[       OK ] LevelSetVolume.GeneratedCutVolumeUsesPointwiseJacobianOnWarpedTensorProductCell (0 ms)
+[ RUN      ] LevelSetVolume.GeneratedInterfaceVolumeDiscoversInteriorIsland
+[       OK ] LevelSetVolume.GeneratedInterfaceVolumeDiscoversInteriorIsland (674 ms)
+[ RUN      ] LevelSetVolume.GeneratedInterfaceGlobalShiftUsesGeneratedQuadrature
+[       OK ] LevelSetVolume.GeneratedInterfaceGlobalShiftUsesGeneratedQuadrature (0 ms)
+[ RUN      ] LevelSetVolume.WarpedGeneratedCorrectionTargetEqualsSnapshotConstantOneMeasure
+[23:41:05.189] [INFO] FESystem: sparsity setup diagnostic=constraint_sparsity_setup operator='constant_one_measure' master_bearing_lines=0 serial_base_nnz=16 serial_active_nnz=16 distributed_indexing=none distributed_base_diag_nnz=0 distributed_base_offdiag_nnz=0 distributed_active_diag_nnz=0 distributed_active_offdiag_nnz=0
+[23:41:05.202] [INFO] LLVM JIT: OrcJIT initialized (LLVM 14.0.0, triple=x86_64-pc-linux-gnu, opt=2, vectorize=false, fp_regs=16, simd=128b, target_aware=false, max_fused_terms=0)
+[23:41:05.203] [INFO] assembleOperator: cut-volume active-domain diagnostics diagnostic=cut_volume_assembly marker=719 side=Negative active_wet_volume=1.12311 cut_cell_active_wet_volume=1.12311 full_cell_active_wet_volume=0 rules=1 cut_cell_rules=1 full_cell_rules=0 quadrature_points=14 null_rules=0 zero_quadrature_rules=0 nonfinite_measure_rules=0 negative_measure_rules=0 nonfinite_volume_fraction_rules=0 min_rule_measure=1.12311 max_rule_measure=1.12311 min_volume_fraction=0.280776 max_volume_fraction=0.280776 min_exact_order=4 max_exact_order=4
+[       OK ] LevelSetVolume.WarpedGeneratedCorrectionTargetEqualsSnapshotConstantOneMeasure (16 ms)
+[ RUN      ] LevelSetVolume.GeneratedGlobalShiftRejectsNonAffineTensorProductQ1
+[       OK ] LevelSetVolume.GeneratedGlobalShiftRejectsNonAffineTensorProductQ1 (0 ms)
+[----------] 5 tests from LevelSetVolume (693 ms total)
+
+[----------] Global test environment tear-down
+[==========] 70 tests from 4 test suites ran. (39964 ms total)
+[  PASSED  ] 70 tests.
