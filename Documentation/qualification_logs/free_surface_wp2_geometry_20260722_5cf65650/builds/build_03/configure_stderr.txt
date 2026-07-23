@@ -1,0 +1,13 @@
+CMake Warning at CMakeLists.txt:340 (add_executable):
+  Cannot generate a safe runtime search path for target test_physics because
+  files in some directories may conflict with libraries in implicit
+  directories:
+
+    runtime library [libz.so.1] in /usr/lib/x86_64-linux-gnu may be hidden by files in:
+      /home/zack/miniconda3/lib
+    runtime library [libtinfo.so.6] in /usr/lib/x86_64-linux-gnu may be hidden by files in:
+      /home/zack/miniconda3/lib
+
+  Some of these libraries may not be found correctly.
+
+

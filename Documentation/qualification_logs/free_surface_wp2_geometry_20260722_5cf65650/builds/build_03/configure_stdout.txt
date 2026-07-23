@@ -1,0 +1,38 @@
+-- Physics: Building in STANDALONE mode
+-- Physics: Clang <16 detected; using libstdc++-11 headers to avoid <chrono> build failure with newer libstdc++
+-- svmesh: Detected Conda environment at: /home/zack/miniconda3
+-- MPI found - enabling distributed mesh support
+-- VTK support disabled
+-- EnableEIGEN: Ignoring Conda prefix for Eigen lookup: /home/zack/miniconda3
+-- System Eigen found (version 3.4.0) - enabling Eigen linear algebra support
+-- Eigen include directory: /usr/include/eigen3
+-- Building svmesh as static library
+-- 
+-- svMultiPhysics Mesh Configuration Summary:
+--   Build type: RelWithDebInfo
+--   C++ standard: 17
+--   MPI support: ON
+--   VTK support: OFF
+--   Eigen support: ON
+--   Adaptivity: OFF
+--   Build tests: OFF
+--   Build shared: OFF
+--   Standalone build: OFF
+-- 
+-- FE: Building as part of svMultiPhysics
+-- FE: Clang <16 detected; using libstdc++-11 headers to avoid <chrono> build failure with newer libstdc++
+-- FE: Configuring MPI support for distributed operations
+-- FE: Using manual MPI configuration via wrapper interrogation (bypassing FindMPI).
+-- FE: Configuring MPI via wrapper interrogation: /usr/bin/mpicxx
+-- FE: Found MPI executor: /usr/bin/mpiexec
+-- FE: MPI configuration complete
+-- FE: Auto-detecting LLVM OrcJIT support for Forms
+-- FE: Found LLVM 14.0.0 (LLVM_DIR='/usr/lib/llvm-14/cmake')
+-- FE: LLVM JIT configuration complete
+-- FE: OpenMP not found (no libomp), threading disabled
+-- Physics: Configuring Google Test for unit testing
+-- Physics: Found system Google Test
+-- Physics: svfe is built in-tree; skipping svphysics CMake package export (install svfe separately and rebuild Physics to export).
+-- Configuring done (1.8s)
+-- Generating done (0.2s)
+-- Build files have been written to: /tmp/svmp_wp2_clean_5cf65650/build-physics

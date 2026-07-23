@@ -1,0 +1,98 @@
+CMake Warning at /usr/share/cmake-4.1/Modules/FindBLAS.cmake:1367 (find_package):
+  By not providing "Findnvpl.cmake" in CMAKE_MODULE_PATH this project has
+  asked CMake to find a package configuration file provided by "nvpl", but
+  CMake did not find one.
+
+  Could not find a package configuration file provided by "nvpl" with any of
+  the following names:
+
+    nvplConfig.cmake
+    nvpl-config.cmake
+
+  Add the installation prefix of "nvpl" to CMAKE_PREFIX_PATH or set
+  "nvpl_DIR" to a directory containing one of the above files.  If "nvpl"
+  provides a separate development package or SDK, be sure it has been
+  installed.
+Call Stack (most recent call first):
+  Source/solver/CMakeLists.txt:191 (find_package)
+
+
+CMake Warning at /usr/share/cmake-4.1/Modules/FindBLAS.cmake:1367 (find_package):
+  By not providing "Findnvpl.cmake" in CMAKE_MODULE_PATH this project has
+  asked CMake to find a package configuration file provided by "nvpl", but
+  CMake did not find one.
+
+  Could not find a package configuration file provided by "nvpl" with any of
+  the following names:
+
+    nvplConfig.cmake
+    nvpl-config.cmake
+
+  Add the installation prefix of "nvpl" to CMAKE_PREFIX_PATH or set
+  "nvpl_DIR" to a directory containing one of the above files.  If "nvpl"
+  provides a separate development package or SDK, be sure it has been
+  installed.
+Call Stack (most recent call first):
+  /usr/share/cmake-4.1/Modules/FindLAPACK.cmake:262 (find_package)
+  /usr/share/cmake-4.1/Modules/FindLAPACK.cmake:308 (_lapack_find_dependency)
+  Source/solver/CMakeLists.txt:192 (find_package)
+
+
+CMake Warning at /usr/share/cmake-4.1/Modules/FindLAPACK.cmake:740 (find_package):
+  By not providing "Findnvpl.cmake" in CMAKE_MODULE_PATH this project has
+  asked CMake to find a package configuration file provided by "nvpl", but
+  CMake did not find one.
+
+  Could not find a package configuration file provided by "nvpl" with any of
+  the following names:
+
+    nvplConfig.cmake
+    nvpl-config.cmake
+
+  Add the installation prefix of "nvpl" to CMAKE_PREFIX_PATH or set
+  "nvpl_DIR" to a directory containing one of the above files.  If "nvpl"
+  provides a separate development package or SDK, be sure it has been
+  installed.
+Call Stack (most recent call first):
+  Source/solver/CMakeLists.txt:192 (find_package)
+
+
+CMake Deprecation Warning at /home/zack/Downloads/VTK/build/lib/cmake/vtk-9.5/vtk-use-file-deprecated.cmake:1 (message):
+  The `VTK_USE_FILE` is no longer used starting with 8.90.
+Call Stack (most recent call first):
+  Source/solver/CMakeLists.txt:203 (include)
+
+
+CMake Deprecation Warning at /home/zack/Downloads/VTK/build/lib/cmake/vtk-9.5/vtk-use-file-deprecated.cmake:1 (message):
+  The `VTK_USE_FILE` is no longer used starting with 8.90.
+Call Stack (most recent call first):
+  Source/solver/Mesh/cmake/EnableVTK.cmake:65 (include)
+  Source/solver/Mesh/CMakeLists.txt:181 (include)
+
+
+CMake Warning at Source/solver/Application/Tests/CMakeLists.txt:10 (add_executable):
+  Cannot generate a safe runtime search path for target test_application
+  because files in some directories may conflict with libraries in implicit
+  directories:
+
+    runtime library [libz.so.1] in /usr/lib/x86_64-linux-gnu may be hidden by files in:
+      /home/zack/miniconda3/lib
+    runtime library [libtinfo.so.6] in /usr/lib/x86_64-linux-gnu may be hidden by files in:
+      /home/zack/miniconda3/lib
+
+  Some of these libraries may not be found correctly.
+
+
+CMake Warning at Source/solver/Application/Tests/CMakeLists.txt:65 (add_executable):
+  Cannot generate a safe runtime search path for target test_application_mpi
+  because files in some directories may conflict with libraries in implicit
+  directories:
+
+    runtime library [libz.so.1] in /usr/lib/x86_64-linux-gnu may be hidden by files in:
+      /home/zack/miniconda3/lib
+    runtime library [libtinfo.so.6] in /usr/lib/x86_64-linux-gnu may be hidden by files in:
+      /home/zack/miniconda3/lib
+
+  Some of these libraries may not be found correctly.
+
+
