@@ -19,6 +19,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -230,6 +232,34 @@ struct NewtonOptions {
     // tests. Without this gate, a frozen-geometry trial norm can be mistaken
     // for the norm of the refreshed nonlinear problem.
     bool accepted_state_sync_invalidates_residual{false};
+
+    /**
+     * Maximum relative distance of the accepted static capillary load from
+     * the constrained discrete pressure-gradient range.
+     *
+     * An unset value leaves Newton convergence unchanged.  Setting a finite,
+     * nonnegative value opts a static qualification solve into a final-state
+     * acceptance gate.  The gate rejects convergence when the diagnostic is
+     * unavailable, fails to reach normal-equation stationarity, breaks down,
+     * is nonfinite, or exceeds the requested distance.
+     */
+    std::optional<double>
+        accepted_static_pressure_representability_max_relative_distance{};
+
+    /**
+     * Add the stationary least-squares pressure correction for the assembled
+     * discrete surface/Young load to the initial pressure coefficients once.
+     *
+     * Existing pressure coefficients (for example an imposed external or
+     * hydrostatic baseline) are preserved.  This changes only the current
+     * nonlinear initial guess; committed solution-history and rate slots are
+     * not rewritten.  It is not a force projection or balanced-force
+     * certificate: the production capillary residual is unchanged.  The
+     * pressure-range distance gate above must also be configured, and the
+     * initial guess fails closed before mutation when the LSQR certificate is
+     * unavailable or outside that gate.
+     */
+    bool initialize_static_compatible_free_surface_pressure{false};
 };
 
 struct NewtonReport {
@@ -245,6 +275,22 @@ struct NewtonReport {
     double auxiliary_residual_norm0{0.0};
     double auxiliary_residual_norm{0.0};
     bool component_residual_convergence{false};
+    bool pressure_representability_diagnostic_sampled{false};
+    bool pressure_representability_available{false};
+    bool pressure_representability_converged{false};
+    bool pressure_representability_breakdown{false};
+    double pressure_representability_relative_distance{
+        std::numeric_limits<double>::quiet_NaN()};
+    std::string pressure_representability_reason{"not_sampled"};
+    bool pressure_representability_distance_gate_applied{false};
+    bool pressure_representability_distance_gate_passed{false};
+    double pressure_representability_max_relative_distance{
+        std::numeric_limits<double>::quiet_NaN()};
+    bool static_compatible_pressure_initializer_requested{false};
+    bool static_compatible_pressure_initializer_applied{false};
+    bool static_compatible_pressure_initializer_passed{false};
+    std::string static_compatible_pressure_initializer_reason{
+        "not_requested"};
     backends::SolverReport linear{};
 };
 
@@ -273,6 +319,10 @@ struct NewtonWorkspace {
         pressure_representability_residual{};
     std::unique_ptr<backends::GenericVector>
         pressure_representability_normal_residual{};
+    // The compatible-pressure initial guess is intentionally one-shot across
+    // solveStep calls and workspace/Jacobian reallocations.  Construct a new
+    // NewtonWorkspace to begin a new lifecycle.
+    bool static_compatible_pressure_initialized{false};
     std::unique_ptr<backends::GenericVector> residual{};
     std::unique_ptr<backends::GenericVector> delta{};
     std::unique_ptr<backends::GenericVector> u_backup{};
@@ -325,6 +375,9 @@ public:
                                          const backends::GenericVector* residual_addition = nullptr) const;
 
 private:
+    NewtonSolver(NewtonOptions options,
+                 bool defer_pressure_representability_distance_gate);
+
     [[nodiscard]] NewtonReport solveStepFrozenExternalState(
         systems::TransientSystem& transient,
         backends::LinearSolver& linear,
@@ -341,7 +394,17 @@ private:
     void maybeReallocateJacobianForSparsity(const systems::FESystem& system,
                                             NewtonWorkspace& workspace) const;
 
+    /**
+     * Verify that every rank will enter the same optional pressure diagnostic,
+     * initializer, and one-shot lifecycle branches before any such branch can
+     * issue a collective operation or invoke a synchronization callback.
+     */
+    void validateStaticPressureCommunicatorState(
+        const systems::FESystem& system,
+        const NewtonWorkspace& workspace) const;
+
     NewtonOptions options_;
+    bool defer_pressure_representability_distance_gate_{false};
 };
 
 } // namespace timestepping

@@ -160,6 +160,53 @@ constexpr NewtonCommunicator kSerialNewtonCommunicator = 0;
     return false;
 }
 
+[[nodiscard]] std::optional<double>
+acceptedStaticPressureRepresentabilityDistanceFromEnvironment() noexcept
+{
+    constexpr std::array<const char*, 2> names{
+        "SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE",
+        "SVMP_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE",
+    };
+    for (const char* name : names) {
+        const char* text = std::getenv(name);
+        if (text == nullptr || text[0] == '\0') {
+            continue;
+        }
+        char* end = nullptr;
+        const double value = std::strtod(text, &end);
+        if (end == text || end == nullptr || end[0] != '\0') {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        return value;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] bool
+staticCompatibleFreeSurfacePressureInitializerFromEnvironment() noexcept
+{
+    constexpr std::array<const char*, 2> names{
+        "SVMP_NS_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER",
+        "SVMP_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER",
+    };
+    for (const char* name : names) {
+        const char* value = std::getenv(name);
+        if (value != nullptr && value[0] != '\0') {
+            return envBoolEnabled(name);
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool freeSurfaceConservativeBalanceDiagnosticRequested(
+    const NewtonOptions& options) noexcept
+{
+    return freeSurfaceConservativeBalanceDiagnosticEnabled() ||
+           options.initialize_static_compatible_free_surface_pressure ||
+           options.accepted_static_pressure_representability_max_relative_distance
+               .has_value();
+}
+
 [[nodiscard]] bool
 freeSurfaceConservativeBalanceDiagnosticEveryAssemblyRequested() noexcept
 {
@@ -10539,8 +10586,53 @@ void applyAuxiliaryDelta(systems::FESystem& system,
 } // namespace
 
 NewtonSolver::NewtonSolver(NewtonOptions options)
-    : options_(std::move(options))
+    : NewtonSolver(std::move(options), false)
 {
+}
+
+NewtonSolver::NewtonSolver(
+    NewtonOptions options,
+    bool defer_pressure_representability_distance_gate)
+    : options_(std::move(options))
+    , defer_pressure_representability_distance_gate_(
+          defer_pressure_representability_distance_gate)
+{
+    if (!options_
+             .accepted_static_pressure_representability_max_relative_distance
+             .has_value()) {
+        options_
+            .accepted_static_pressure_representability_max_relative_distance =
+            acceptedStaticPressureRepresentabilityDistanceFromEnvironment();
+    }
+#if FE_HAS_MPI
+    const bool defer_pressure_threshold_validation =
+        mpiMultiTaskActive(MPI_COMM_WORLD);
+#else
+    constexpr bool defer_pressure_threshold_validation = false;
+#endif
+    if (options_
+            .accepted_static_pressure_representability_max_relative_distance
+            .has_value() &&
+        !defer_pressure_threshold_validation) {
+        const double threshold =
+            *options_
+                 .accepted_static_pressure_representability_max_relative_distance;
+        FE_THROW_IF(
+            threshold < 0.0 || !std::isfinite(threshold),
+            InvalidArgumentException,
+            "NewtonSolver: accepted static pressure-representability maximum relative distance must be finite and >= 0");
+    }
+    options_.initialize_static_compatible_free_surface_pressure =
+        options_.initialize_static_compatible_free_surface_pressure ||
+        staticCompatibleFreeSurfacePressureInitializerFromEnvironment();
+    FE_THROW_IF(
+        options_.initialize_static_compatible_free_surface_pressure &&
+            !options_
+                 .accepted_static_pressure_representability_max_relative_distance
+                 .has_value() &&
+            !defer_pressure_threshold_validation,
+        InvalidArgumentException,
+        "NewtonSolver: the static compatible free-surface pressure initializer requires an accepted static pressure-representability maximum relative distance");
     FE_THROW_IF(options_.max_iterations <= 0, InvalidArgumentException,
                 "NewtonSolver: max_iterations must be > 0");
     FE_THROW_IF(options_.min_iterations < 0, InvalidArgumentException,
@@ -10650,6 +10742,127 @@ NewtonSolver::NewtonSolver(NewtonOptions options)
     }
 }
 
+void NewtonSolver::validateStaticPressureCommunicatorState(
+    const systems::FESystem& system,
+    const NewtonWorkspace& workspace) const
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    MPI_Finalized(&finalized);
+    const auto communicator = system.activeMpiCommunicator();
+    if (initialized == 0 || finalized != 0 ||
+        communicator == MPI_COMM_NULL) {
+        return;
+    }
+
+    const bool threshold_present = options_
+        .accepted_static_pressure_representability_max_relative_distance
+        .has_value();
+    const double threshold = threshold_present
+        ? *options_
+               .accepted_static_pressure_representability_max_relative_distance
+        : 0.0;
+    const bool threshold_valid =
+        !threshold_present ||
+        (threshold >= 0.0 && std::isfinite(threshold));
+    const std::array<int, 6> local_flags{
+        options_.initialize_static_compatible_free_surface_pressure ? 1 : 0,
+        threshold_present ? 1 : 0,
+        threshold_valid ? 1 : 0,
+        freeSurfaceConservativeBalanceDiagnosticRequested(options_) ? 1 : 0,
+        defer_pressure_representability_distance_gate_ ? 1 : 0,
+        workspace.static_compatible_pressure_initialized ? 1 : 0,
+    };
+    std::array<int, local_flags.size()> minimum_flags{};
+    std::array<int, local_flags.size()> maximum_flags{};
+    MPI_Allreduce(local_flags.data(),
+                  minimum_flags.data(),
+                  static_cast<int>(local_flags.size()),
+                  MPI_INT,
+                  MPI_MIN,
+                  communicator);
+    MPI_Allreduce(local_flags.data(),
+                  maximum_flags.data(),
+                  static_cast<int>(local_flags.size()),
+                  MPI_INT,
+                  MPI_MAX,
+                  communicator);
+
+    const std::uint64_t local_threshold_bits =
+        std::bit_cast<std::uint64_t>(threshold);
+    std::uint64_t minimum_threshold_bits = local_threshold_bits;
+    std::uint64_t maximum_threshold_bits = local_threshold_bits;
+    MPI_Allreduce(&local_threshold_bits,
+                  &minimum_threshold_bits,
+                  1,
+                  MPI_UINT64_T,
+                  MPI_MIN,
+                  communicator);
+    MPI_Allreduce(&local_threshold_bits,
+                  &maximum_threshold_bits,
+                  1,
+                  MPI_UINT64_T,
+                  MPI_MAX,
+                  communicator);
+
+    const auto differs = [&](std::size_t index) {
+        return minimum_flags[index] != maximum_flags[index];
+    };
+    FE_THROW_IF(
+        differs(0),
+        systems::InvalidStateException,
+        "NewtonSolver: static compatible pressure initializer enablement "
+        "differs across the active system communicator");
+    FE_THROW_IF(
+        differs(1),
+        systems::InvalidStateException,
+        "NewtonSolver: accepted static pressure-representability threshold "
+        "presence differs across the active system communicator");
+    FE_THROW_IF(
+        differs(2),
+        systems::InvalidStateException,
+        "NewtonSolver: accepted static pressure-representability threshold "
+        "validity differs across the active system communicator");
+    FE_THROW_IF(
+        threshold_present && maximum_flags[2] == 0,
+        InvalidArgumentException,
+        "NewtonSolver: accepted static pressure-representability maximum "
+        "relative distance must be finite and >= 0");
+    FE_THROW_IF(
+        threshold_present &&
+            minimum_threshold_bits != maximum_threshold_bits,
+        systems::InvalidStateException,
+        "NewtonSolver: accepted static pressure-representability threshold "
+        "value differs across the active system communicator");
+    FE_THROW_IF(
+        differs(3),
+        systems::InvalidStateException,
+        "NewtonSolver: free-surface conservative-balance diagnostic "
+        "enablement differs across the active system communicator");
+    FE_THROW_IF(
+        differs(4),
+        systems::InvalidStateException,
+        "NewtonSolver: deferred pressure-representability gate selection "
+        "differs across the active system communicator");
+    FE_THROW_IF(
+        differs(5),
+        systems::InvalidStateException,
+        "NewtonSolver: static compatible pressure initializer one-shot state "
+        "differs across the active system communicator");
+    FE_THROW_IF(
+        maximum_flags[0] != 0 && maximum_flags[1] == 0,
+        InvalidArgumentException,
+        "NewtonSolver: the static compatible free-surface pressure "
+        "initializer requires an accepted static pressure-representability "
+        "maximum relative distance");
+#else
+    (void)system;
+    (void)workspace;
+#endif
+}
+
 systems::SystemStateView NewtonSolver::makeStateView(const TimeHistory& history, double solve_time) const
 {
     systems::SystemStateView state;
@@ -10674,6 +10887,8 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
                                      const backends::BackendFactory& factory,
                                      NewtonWorkspace& workspace) const
 {
+    validateStaticPressureCommunicatorState(system, workspace);
+
     const auto n_dofs = system.dofHandler().getNumDofs();
     FE_THROW_IF(n_dofs <= 0, systems::InvalidStateException, "NewtonSolver::allocateWorkspace: system has no DOFs");
 
@@ -10692,7 +10907,7 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
     workspace.pressure_representability_normal_residual.reset();
 
     bool allocate_pressure_representability =
-        freeSurfaceConservativeBalanceDiagnosticEnabled() &&
+        freeSurfaceConservativeBalanceDiagnosticRequested(options_) &&
         system.hasOperator(std::string(
             kFreeSurfacePressureRepresentabilityPairOperator));
 #if FE_HAS_MPI
@@ -11040,6 +11255,9 @@ NewtonReport NewtonSolver::solveStep(
     NewtonWorkspace& workspace,
     const backends::GenericVector* residual_addition) const
 {
+    validateStaticPressureCommunicatorState(
+        transient.system(), workspace);
+
     if (!options_.external_state_fixed_point.enabled) {
         return solveStepFrozenExternalState(
             transient,
@@ -11063,6 +11281,8 @@ NewtonReport NewtonSolver::solveStep(
         transient.system().meshCoordinateTransactionActive(),
         systems::InvalidStateException,
         "NewtonSolver: external-state fixed point cannot start with an active mesh-coordinate transaction");
+    const bool static_compatible_pressure_initialized_at_entry =
+        workspace.static_compatible_pressure_initialized;
 
     auto& system = transient.system();
     FE_THROW_IF(!(history.dt() > 0.0), InvalidArgumentException,
@@ -11276,6 +11496,11 @@ NewtonReport NewtonSolver::solveStep(
         if (auto* registry = system.auxiliaryInputRegistryIfPresent()) {
             registry->invalidateAll();
         }
+        // Restore the lifecycle bit before invoking generated-state callbacks.
+        // A callback failure must not strand the workspace in the consumed
+        // inner-solve state and suppress the initializer on a later retry.
+        workspace.static_compatible_pressure_initialized =
+            static_compatible_pressure_initialized_at_entry;
         system.updateConstraints(solve_time, history.dt());
         synchronizeOuterState(
             NewtonOptions::StateSynchronizationPoint::
@@ -11313,11 +11538,84 @@ NewtonReport NewtonSolver::solveStep(
     for (auto& criterion : inner_options.field_residual_criteria) {
         criterion.rel_tolerance = 0.0;
     }
-    NewtonSolver inner_solver(std::move(inner_options));
+    NewtonSolver inner_solver(
+        std::move(inner_options),
+        /*defer_pressure_representability_distance_gate=*/true);
 
     NewtonReport aggregate{};
     backends::SolverReport last_nontrivial_linear{};
     int inner_iterations_total = 0;
+    auto applyDeferredPressureRepresentabilityDistanceGate =
+        [&](NewtonReport& candidate, int outer_iteration) {
+            const auto threshold = options_
+                .accepted_static_pressure_representability_max_relative_distance;
+            if (!threshold.has_value()) {
+                return true;
+            }
+
+            bool local_passed = true;
+            const char* reason = "within_threshold";
+            if (!candidate.pressure_representability_diagnostic_sampled) {
+                local_passed = false;
+                reason = "diagnostic_not_sampled";
+            } else if (!candidate.pressure_representability_available) {
+                local_passed = false;
+                reason = "diagnostic_unavailable";
+            } else if (candidate.pressure_representability_breakdown) {
+                local_passed = false;
+                reason = "diagnostic_breakdown";
+            } else if (!candidate.pressure_representability_converged) {
+                local_passed = false;
+                reason = "normal_equation_not_stationary";
+            } else if (!std::isfinite(
+                           candidate.pressure_representability_relative_distance)) {
+                local_passed = false;
+                reason = "relative_distance_nonfinite";
+            } else if (candidate.pressure_representability_relative_distance >
+                       *threshold) {
+                local_passed = false;
+                reason = "relative_distance_exceeds_threshold";
+            }
+            const bool passed = !anyRank(!local_passed);
+            if (!passed && local_passed) {
+                reason = "remote_rank_rejected";
+            }
+
+            candidate.pressure_representability_distance_gate_applied = true;
+            candidate.pressure_representability_distance_gate_passed = passed;
+            candidate.pressure_representability_max_relative_distance =
+                *threshold;
+            if (activeSystemRank(system) == 0) {
+                std::ostringstream oss;
+                oss << std::setprecision(17)
+                    << "NewtonSolver: accepted static pressure-representability distance gate"
+                    << " diagnostic=free_surface_pressure_representability_distance_gate"
+                    << " accepted_static_state=1"
+                    << " iteration=" << candidate.iterations
+                    << " outer_iteration=" << outer_iteration
+                    << " phase='external_state_fixed_point_convergence'"
+                    << " pressure_representability_distance_gate_applied=1"
+                    << " pressure_representability_available="
+                    << (candidate.pressure_representability_available ? 1 : 0)
+                    << " pressure_representability_converged="
+                    << (candidate.pressure_representability_converged ? 1 : 0)
+                    << " pressure_representability_breakdown="
+                    << (candidate.pressure_representability_breakdown ? 1 : 0)
+                    << " pressure_representability_relative_residual="
+                    << candidate.pressure_representability_relative_distance
+                    << " pressure_representability_max_relative_distance="
+                    << *threshold
+                    << " pressure_representability_distance_gate_passed="
+                    << (passed ? 1 : 0)
+                    << " pressure_representability_claimed="
+                    << (passed ? 1 : 0)
+                    << " pressure_representability_reason="
+                    << candidate.pressure_representability_reason
+                    << " reason=" << reason;
+                FE_LOG_INFO(oss.str());
+            }
+            return passed;
+        };
     try {
         // The generated active set at a generalized-alpha stage can differ
         // from the state prepared at the preceding endpoint.  Establish its
@@ -11407,6 +11705,12 @@ NewtonReport NewtonSolver::solveStep(
             // residual was assembled after G was regenerated from this exact
             // algebraic state and already met every absolute tolerance.
             if (inner_report.iterations == 0) {
+                if (!applyDeferredPressureRepresentabilityDistanceGate(
+                        aggregate, outer + 1)) {
+                    aggregate.converged = false;
+                    restoreEntryState();
+                    return aggregate;
+                }
                 aggregate.converged = true;
                 if (inner_iterations_total > 0 &&
                     aggregate.linear.iterations == 0) {
@@ -12446,6 +12750,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
     };
     FreeSurfacePressureRepresentabilityCache
         free_surface_pressure_representability_cache;
+    std::optional<FieldId> pressure_representability_pressure_field;
 
     bool free_surface_conservative_balance_unavailable_logged = false;
     auto assembleFreeSurfaceConservativeBalanceDiagnostic =
@@ -12453,13 +12758,23 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             const char* phase,
             StateSyncPoint sync_point) {
             const bool local_diagnostic_enabled =
-                freeSurfaceConservativeBalanceDiagnosticEnabled();
+                freeSurfaceConservativeBalanceDiagnosticRequested(options_);
             const bool diagnostic_enabled_on_any_rank =
                 anyRank(local_diagnostic_enabled);
             if (!diagnostic_enabled_on_any_rank) {
                 return;
             }
+            report.pressure_representability_diagnostic_sampled = true;
+            report.pressure_representability_available = false;
+            report.pressure_representability_converged = false;
+            report.pressure_representability_breakdown = false;
+            report.pressure_representability_relative_distance =
+                std::numeric_limits<double>::quiet_NaN();
+            report.pressure_representability_reason = "diagnostic_pending";
+            pressure_representability_pressure_field.reset();
             if (!allRanks(local_diagnostic_enabled)) {
+                report.pressure_representability_reason =
+                    "diagnostic_enablement_differs_across_communicator";
                 if (!free_surface_conservative_balance_unavailable_logged &&
                     communicatorRank(system_communicator) == 0) {
                     FE_LOG_INFO(
@@ -12508,6 +12823,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 const bool local_operator_installed =
                     transient.system().hasOperator(op);
                 if (!allRanks(local_operator_installed)) {
+                    report.pressure_representability_reason =
+                        "conservative_balance_operator_unavailable";
                     if (!free_surface_conservative_balance_unavailable_logged &&
                         communicatorRank(system_communicator) == 0) {
                         std::ostringstream skipped;
@@ -12795,6 +13112,9 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 if (!fields_identified_on_all_ranks) {
                     pressure_representability_reason =
                         "mixed_velocity_pressure_fields_not_identifiable";
+                } else {
+                    pressure_representability_pressure_field =
+                        *pressure_field;
                 }
             }
 
@@ -13006,6 +13326,23 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     ? std::abs(norms[0] - norms[1]) / denominator
                     : std::numeric_limits<double>::quiet_NaN();
 
+            report.pressure_representability_available =
+                pressure_representability_available;
+            report.pressure_representability_converged =
+                pressure_representability_available &&
+                pressure_representability.converged;
+            report.pressure_representability_breakdown =
+                pressure_representability_available &&
+                pressure_representability.breakdown;
+            report.pressure_representability_relative_distance =
+                pressure_representability_available
+                    ? pressure_representability.relative_residual
+                    : std::numeric_limits<double>::quiet_NaN();
+            report.pressure_representability_reason =
+                pressure_representability_available
+                    ? "available"
+                    : pressure_representability_reason;
+
             if (communicatorRank(system_communicator) == 0) {
                 std::ostringstream oss;
                 oss << std::setprecision(17)
@@ -13095,6 +13432,79 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 FE_LOG_INFO(oss.str());
             }
 
+        };
+
+    auto applyAcceptedStaticPressureRepresentabilityDistanceGate =
+        [&](int completed_iterations, const char* phase) {
+            const auto threshold = options_
+                .accepted_static_pressure_representability_max_relative_distance;
+            if (!threshold.has_value() ||
+                defer_pressure_representability_distance_gate_) {
+                return true;
+            }
+
+            bool local_passed = true;
+            const char* reason = "within_threshold";
+            if (!report.pressure_representability_diagnostic_sampled) {
+                local_passed = false;
+                reason = "diagnostic_not_sampled";
+            } else if (!report.pressure_representability_available) {
+                local_passed = false;
+                reason = "diagnostic_unavailable";
+            } else if (report.pressure_representability_breakdown) {
+                local_passed = false;
+                reason = "diagnostic_breakdown";
+            } else if (!report.pressure_representability_converged) {
+                local_passed = false;
+                reason = "normal_equation_not_stationary";
+            } else if (!std::isfinite(
+                           report.pressure_representability_relative_distance)) {
+                local_passed = false;
+                reason = "relative_distance_nonfinite";
+            } else if (report.pressure_representability_relative_distance >
+                       *threshold) {
+                local_passed = false;
+                reason = "relative_distance_exceeds_threshold";
+            }
+            const bool passed = allRanks(local_passed);
+            if (!passed && local_passed) {
+                reason = "remote_rank_rejected";
+            }
+
+            report.pressure_representability_distance_gate_applied = true;
+            report.pressure_representability_distance_gate_passed = passed;
+            report.pressure_representability_max_relative_distance =
+                *threshold;
+            if (communicatorRank(system_communicator) == 0) {
+                std::ostringstream oss;
+                oss << std::setprecision(17)
+                    << "NewtonSolver: accepted static pressure-representability distance gate"
+                    << " diagnostic=free_surface_pressure_representability_distance_gate"
+                    << " accepted_static_state=1"
+                    << " iteration=" << completed_iterations
+                    << " phase='"
+                    << (phase != nullptr ? phase : "unknown") << "'"
+                    << " pressure_representability_distance_gate_applied=1"
+                    << " pressure_representability_available="
+                    << (report.pressure_representability_available ? 1 : 0)
+                    << " pressure_representability_converged="
+                    << (report.pressure_representability_converged ? 1 : 0)
+                    << " pressure_representability_breakdown="
+                    << (report.pressure_representability_breakdown ? 1 : 0)
+                    << " pressure_representability_relative_residual="
+                    << report.pressure_representability_relative_distance
+                    << " pressure_representability_max_relative_distance="
+                    << *threshold
+                    << " pressure_representability_distance_gate_passed="
+                    << (passed ? 1 : 0)
+                    << " pressure_representability_claimed="
+                    << (passed ? 1 : 0)
+                    << " pressure_representability_reason="
+                    << report.pressure_representability_reason
+                    << " reason=" << reason;
+                FE_LOG_INFO(oss.str());
+            }
+            return passed;
         };
 
     auto assembleResidualOnly = [&](const systems::SystemStateView& state,
@@ -13467,6 +13877,357 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         }
         return true;
     };
+
+    auto initializeStaticCompatibleFreeSurfacePressure = [&]() {
+        if (!options_.initialize_static_compatible_free_surface_pressure) {
+            return true;
+        }
+
+        report.static_compatible_pressure_initializer_requested = true;
+        const double threshold =
+            *options_
+                 .accepted_static_pressure_representability_max_relative_distance;
+        const auto log_initializer = [&](bool applied,
+                                         bool passed,
+                                         std::string_view reason) {
+            report.static_compatible_pressure_initializer_applied = applied;
+            report.static_compatible_pressure_initializer_passed = passed;
+            report.static_compatible_pressure_initializer_reason =
+                std::string(reason);
+            if (communicatorRank(system_communicator) == 0) {
+                std::ostringstream oss;
+                oss << std::setprecision(17)
+                    << "NewtonSolver: static compatible free-surface pressure initializer"
+                    << " diagnostic=free_surface_static_compatible_pressure_initializer"
+                    << " requested=1"
+                    << " applied=" << (applied ? 1 : 0)
+                    << " passed=" << (passed ? 1 : 0)
+                    << " reason=" << reason
+                    << " pressure_representability_available="
+                    << (report.pressure_representability_available ? 1 : 0)
+                    << " pressure_representability_converged="
+                    << (report.pressure_representability_converged ? 1 : 0)
+                    << " pressure_representability_breakdown="
+                    << (report.pressure_representability_breakdown ? 1 : 0)
+                    << " pressure_representability_relative_residual="
+                    << report.pressure_representability_relative_distance
+                    << " pressure_representability_max_relative_distance="
+                    << threshold
+                    << " force_projection_applied=0"
+                    << " balanced_force_evidence=0"
+                    << " total_momentum_equilibrium_claimed=0"
+                    << " production_capillary_operator_changed=0"
+                    << " pressure_update=additive"
+                    << " existing_pressure_baseline_preserved=1"
+                    << " committed_history_or_rate_slots_mutated=0"
+                    << " scope=one_shot_current_pressure_initial_guess";
+                FE_LOG_INFO(oss.str());
+            }
+        };
+
+        if (workspace.static_compatible_pressure_initialized) {
+            log_initializer(/*applied=*/false,
+                            /*passed=*/true,
+                            "already_initialized");
+            return true;
+        }
+
+        // The application refreshes authoritative cut geometry before
+        // entering Newton.  Re-run the accepted-state synchronization here so
+        // the initial guess uses the same projected constraints and snapshot
+        // as the first production residual.
+        syncHistoryState();
+        auto initial_guess_state_holder =
+            makeNewtonState(history, solve_time);
+        synchronizeState(
+            initial_guess_state_holder.view,
+            StateSyncPoint::AcceptedNonlinearState);
+        maybeReallocateJacobianForSparsity(transient.system(), workspace);
+        assembleFreeSurfaceConservativeBalanceDiagnostic(
+            initial_guess_state_holder.view,
+            "static_compatible_pressure_initializer",
+            StateSyncPoint::AcceptedNonlinearState);
+
+        std::string_view failure_reason;
+        const bool local_storage_available =
+            workspace.pressure_representability_solution != nullptr &&
+            workspace.pressure_representability_work != nullptr &&
+            pressure_representability_pressure_field.has_value();
+        if (!report.pressure_representability_diagnostic_sampled) {
+            failure_reason = "diagnostic_not_sampled";
+        } else if (!report.pressure_representability_available) {
+            failure_reason = "diagnostic_unavailable";
+        } else if (report.pressure_representability_breakdown) {
+            failure_reason = "diagnostic_breakdown";
+        } else if (!report.pressure_representability_converged) {
+            failure_reason = "normal_equation_not_stationary";
+        } else if (!std::isfinite(
+                       report.pressure_representability_relative_distance)) {
+            failure_reason = "relative_distance_nonfinite";
+        } else if (report.pressure_representability_relative_distance >
+                   threshold) {
+            failure_reason = "relative_distance_exceeds_threshold";
+        } else if (!allRanks(local_storage_available)) {
+            failure_reason = "pressure_solution_storage_unavailable";
+        }
+        if (!failure_reason.empty()) {
+            log_initializer(/*applied=*/false,
+                            /*passed=*/false,
+                            failure_reason);
+            return false;
+        }
+
+        const auto pressure_field =
+            *pressure_representability_pressure_field;
+        const auto pressure_begin =
+            transient.system().fieldDofOffset(pressure_field);
+        const auto pressure_count = transient.system()
+                                        .fieldDofHandler(pressure_field)
+                                        .getNumDofs();
+        FE_THROW_IF(
+            pressure_begin < 0 || pressure_count <= 0 ||
+                pressure_begin + pressure_count > history.u().size(),
+            systems::InvalidStateException,
+            "NewtonSolver: static compatible pressure initializer found an invalid pressure DOF range");
+        std::vector<GlobalIndex> pressure_dofs(
+            static_cast<std::size_t>(pressure_count));
+        std::iota(
+            pressure_dofs.begin(), pressure_dofs.end(), pressure_begin);
+
+        auto& compatible_pressure =
+            *workspace.pressure_representability_solution;
+        auto& pair_layout_work =
+            *workspace.pressure_representability_work;
+        compatible_pressure.updateGhosts();
+
+        // A valid mixed-pair LSQR recurrence places the solution entirely in
+        // the pressure block.  Check that invariant explicitly before the
+        // monolithic state is touched; this prevents an accidentally polluted
+        // diagnostic pair from changing velocity or any auxiliary field.
+        pair_layout_work.copyFrom(compatible_pressure);
+        zeroVectorEntries(pressure_dofs, pair_layout_work);
+        const double nonpressure_solution_norm = pair_layout_work.norm();
+        const double pressure_solution_norm = compatible_pressure.norm();
+        const double subspace_tolerance =
+            100.0 * std::numeric_limits<Real>::epsilon() *
+            std::max(1.0, pressure_solution_norm);
+        if (!allRanks(
+                std::isfinite(nonpressure_solution_norm) &&
+                nonpressure_solution_norm <= subspace_tolerance)) {
+            log_initializer(/*applied=*/false,
+                            /*passed=*/false,
+                            "solution_outside_pressure_subspace");
+            return false;
+        }
+
+        // Pair and production vectors may have different ghost maps.  Use
+        // copyFrom for the authoritative owned-DOF transfer, then add the LSQR
+        // pressure block to the existing current state.  Remove the verified
+        // roundoff-sized non-pressure component before the addition so every
+        // other field remains bitwise unchanged.  Committed history and rate
+        // slots are deliberately not touched.
+        axpy(compatible_pressure, Real{-1.0}, pair_layout_work);
+        compatible_pressure.updateGhosts();
+        pair_layout_work.copyFrom(history.u());
+        axpy(pair_layout_work, Real{1.0}, compatible_pressure);
+        history.u().copyFrom(pair_layout_work);
+        history.u().updateGhosts();
+
+        // Let derived state observe the initial pressure guess before the first
+        // production residual.  The callback may refresh constraints, but it
+        // must not bypass their normal fixed-point projection contract.
+        auto initialized_state_holder = makeNewtonState(history, solve_time);
+        synchronizeState(
+            initialized_state_holder.view,
+            StateSyncPoint::AcceptedNonlinearState);
+        workspace.static_compatible_pressure_initialized = true;
+        log_initializer(/*applied=*/true,
+                        /*passed=*/true,
+                        "additive_initial_guess_within_threshold");
+        return true;
+    };
+
+    // A newly applied initial guess is provisional until the surrounding
+    // nonlinear solve succeeds.  Snapshot the complete algebraic history so a
+    // later nonlinear rejection or synchronization exception can retry from
+    // the exact pre-initializer state.  The ordinary (already-initialized)
+    // solve path pays none of this storage cost.
+    const bool static_pressure_initialized_at_entry =
+        workspace.static_compatible_pressure_initialized;
+    bool static_pressure_initial_guess_transaction_active = false;
+    std::unique_ptr<backends::GenericVector>
+        static_pressure_initial_guess_entry_u;
+    std::vector<std::unique_ptr<backends::GenericVector>>
+        static_pressure_initial_guess_entry_history;
+    TimeHistory::RateStateSnapshot
+        static_pressure_initial_guess_entry_rates;
+    ConstraintSemanticFingerprint
+        static_pressure_initial_guess_entry_constraint_semantics{};
+    std::vector<Real>
+        static_pressure_initial_guess_entry_auxiliary_state;
+    systems::FESystem::BorderedCouplingData
+        static_pressure_initial_guess_entry_bordered_state;
+    if (options_.initialize_static_compatible_free_surface_pressure &&
+        !static_pressure_initialized_at_entry) {
+        FE_CHECK_NOT_NULL(
+            workspace.factory,
+            "NewtonSolver: static pressure initial-guess transaction factory");
+        static_pressure_initial_guess_entry_u =
+            workspace.factory->createVector(history.u().size());
+        FE_CHECK_NOT_NULL(
+            static_pressure_initial_guess_entry_u.get(),
+            "NewtonSolver: static pressure initial-guess solution backup");
+        static_pressure_initial_guess_entry_u->copyFrom(history.u());
+        static_pressure_initial_guess_entry_history.resize(
+            static_cast<std::size_t>(history.historyDepth()));
+        for (int k = 1; k <= history.historyDepth(); ++k) {
+            auto& backup = static_pressure_initial_guess_entry_history[
+                static_cast<std::size_t>(k - 1)];
+            backup =
+                workspace.factory->createVector(history.uPrevK(k).size());
+            FE_CHECK_NOT_NULL(
+                backup.get(),
+                "NewtonSolver: static pressure initial-guess history backup");
+            backup->copyFrom(history.uPrevK(k));
+        }
+        history.snapshotRateState(
+            static_pressure_initial_guess_entry_rates,
+            *workspace.factory);
+        static_pressure_initial_guess_entry_constraint_semantics =
+            constraintSemanticFingerprint(constraints);
+        static_pressure_initial_guess_entry_auxiliary_state =
+            transient.system().checkpointAuxiliaryState();
+        static_pressure_initial_guess_entry_bordered_state =
+            transient.system().borderedCoupling();
+        static_pressure_initial_guess_transaction_active = true;
+    }
+
+    auto restoreStaticPressureInitialGuessTransaction = [&]() {
+        if (!static_pressure_initial_guess_transaction_active) {
+            return;
+        }
+        workspace.static_compatible_pressure_initialized =
+            static_pressure_initialized_at_entry;
+
+        auto restore_algebraic_snapshots = [&]() {
+            workspace.static_compatible_pressure_initialized =
+                static_pressure_initialized_at_entry;
+            FE_CHECK_NOT_NULL(
+                static_pressure_initial_guess_entry_u.get(),
+                "NewtonSolver: static pressure initial-guess solution restore");
+            history.u().copyFrom(*static_pressure_initial_guess_entry_u);
+            FE_THROW_IF(
+                static_pressure_initial_guess_entry_history.size() !=
+                    static_cast<std::size_t>(history.historyDepth()),
+                systems::InvalidStateException,
+                "NewtonSolver: static pressure initial-guess transaction changed history depth");
+            for (int k = 1; k <= history.historyDepth(); ++k) {
+                auto& backup = static_pressure_initial_guess_entry_history[
+                    static_cast<std::size_t>(k - 1)];
+                FE_CHECK_NOT_NULL(
+                    backup.get(),
+                    "NewtonSolver: static pressure initial-guess history restore");
+                history.uPrevK(k).copyFrom(*backup);
+            }
+            history.restoreRateState(
+                static_pressure_initial_guess_entry_rates);
+            // restoreRateState swaps buffers.  Refill the checkpoint so a
+            // callback failure can retry the complete restoration from the
+            // same immutable entry values and allocation state.
+            history.snapshotRateState(
+                static_pressure_initial_guess_entry_rates,
+                *workspace.factory);
+            history.updateGhosts();
+            if (!static_pressure_initial_guess_entry_auxiliary_state.empty()) {
+                transient.system().restoreAuxiliaryState(
+                    static_pressure_initial_guess_entry_auxiliary_state);
+            }
+            transient.system().borderedCoupling() =
+                static_pressure_initial_guess_entry_bordered_state;
+            transient.system().clearLocalCondensedRecovery();
+            if (auto* registry =
+                    transient.system().auxiliaryInputRegistryIfPresent()) {
+                registry->invalidateAll();
+            }
+        };
+
+        auto close_speculative_geometry = [&](const char* message) {
+            transient.system().rollbackGeometricNonlinearityTrial(
+                /*force=*/true);
+            FE_THROW_IF(
+                anyRank(
+                    transient.system().meshCoordinateTransactionActive()),
+                systems::InvalidStateException,
+                message);
+        };
+
+        // The initializer invokes the accepted-state callback speculatively.
+        // Roll back coordinates and all registered algebraic state before
+        // asking that callback to rebuild its reversible side effects from the
+        // exact pre-initializer state.
+        close_speculative_geometry(
+            "NewtonSolver: static pressure initial-guess rollback left an "
+            "active mesh-coordinate transaction");
+        restore_algebraic_snapshots();
+        syncOwnedRowHaloIfNeeded(history.u());
+        auto restored_state_holder =
+            makeNewtonState(history, solve_time);
+        try {
+            synchronizeState(
+                restored_state_holder.view,
+                StateSyncPoint::RestoredNonlinearState);
+        } catch (...) {
+            const auto callback_failure = std::current_exception();
+            try {
+                // A failing callback may have reopened geometry or partially
+                // changed auxiliary/bordered state.  Leave a retryable exact
+                // algebraic snapshot even before the outer recovery retries
+                // the restoration callback.
+                close_speculative_geometry(
+                    "NewtonSolver: static pressure initial-guess restoration "
+                    "callback left an active mesh-coordinate transaction");
+                restore_algebraic_snapshots();
+            } catch (...) {
+                std::throw_with_nested(systems::InvalidStateException(
+                    "NewtonSolver: static pressure initial-guess restoration "
+                    "callback failed and snapshot recovery also failed"));
+            }
+            std::rethrow_exception(callback_failure);
+        }
+        // Constraint projection during restoration can open a base-state
+        // geometry transaction.  Close it against the exact coordinate backup;
+        // restored generated state already describes this base algebraic state.
+        close_speculative_geometry(
+            "NewtonSolver: static pressure initial-guess base geometry "
+            "transaction remained active after restoration");
+        FE_THROW_IF(
+            anyRank(constraintSemanticFingerprint(constraints) !=
+                    static_pressure_initial_guess_entry_constraint_semantics),
+            systems::InvalidStateException,
+            "NewtonSolver: static pressure initial-guess restoration did not "
+            "reproduce the entry affine-constraint state");
+        static_pressure_initial_guess_transaction_active = false;
+    };
+
+    auto finishStaticPressureInitialGuessTransaction =
+        [&](NewtonReport result) {
+            if (static_pressure_initial_guess_transaction_active) {
+                if (result.converged &&
+                    workspace.static_compatible_pressure_initialized) {
+                    static_pressure_initial_guess_transaction_active = false;
+                } else {
+                    restoreStaticPressureInitialGuessTransaction();
+                }
+            }
+            return result;
+        };
+
+    try {
+        if (!initializeStaticCompatibleFreeSurfacePressure()) {
+            report.converged = false;
+            return finishStaticPressureInitialGuessTransaction(
+                std::move(report));
+        }
 
     auto scalarToleranceSatisfied = [](double norm,
                                        double norm0,
@@ -13898,13 +14659,21 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
 
         if (minIterationsSatisfied(it) &&
             tolerancesSatisfied(/*pre_first_update=*/it == 0)) {
-            report.converged = true;
             report.iterations = it;
+            if (!applyAcceptedStaticPressureRepresentabilityDistanceGate(
+                    it, "pre_linear_convergence")) {
+                report.converged = false;
+                printNewtonProfile(it);
+                return finishStaticPressureInitialGuessTransaction(
+                    std::move(report));
+            }
+            report.converged = true;
             if (oopTraceEnabled()) {
                 traceLog("NewtonSolver: converged before linear solve (tolerances satisfied).");
             }
             printNewtonProfile(it);
-            return report;
+            return finishStaticPressureInitialGuessTransaction(
+                std::move(report));
         }
 
         // Stagnation is diagnostic only unless the configured nonlinear
@@ -16578,7 +17347,10 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             const bool step_tolerance_requires_residual =
                 options_.accepted_state_sync_invalidates_residual ||
                 accepted_sync_invalidated_residual ||
-                !field_residual_states.empty();
+                !field_residual_states.empty() ||
+                options_
+                    .accepted_static_pressure_representability_max_relative_distance
+                    .has_value();
             if (step_tolerance_requires_residual &&
                 options_.step_tolerance > 0.0) {
                 current_residual_norm = assembleResidualOnly(
@@ -16601,17 +17373,25 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     actual_step_norm <= options_.step_tolerance &&
                     (!step_tolerance_requires_residual ||
                      tolerancesSatisfied(/*pre_first_update=*/false))) {
-                    report.converged = true;
                     report.iterations = it + 1;
                     if (have_residual) {
                         updateResidualReport();
                     }
+                    if (!applyAcceptedStaticPressureRepresentabilityDistanceGate(
+                            it + 1, "accepted_step_convergence")) {
+                        report.converged = false;
+                        printNewtonProfile(it + 1);
+                        return finishStaticPressureInitialGuessTransaction(
+                            std::move(report));
+                    }
+                    report.converged = true;
                     if (oopTraceEnabled()) {
                         traceLog(
                             "NewtonSolver: converged by step tolerance on the synchronized residual state.");
                     }
                     printNewtonProfile(it + 1);
-                    return report;
+                    return finishStaticPressureInitialGuessTransaction(
+                        std::move(report));
                 }
             }
             continue;
@@ -16957,7 +17737,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 traceLog("NewtonSolver: line search failed to reduce residual; returning nonlinear failure.");
             }
             printNewtonProfile(it + 1);
-            return report;
+            return finishStaticPressureInitialGuessTransaction(
+                std::move(report));
         }
 
         // A genuinely zero full Newton correction is a valid step-tolerance
@@ -16988,29 +17769,45 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 ((!options_.accepted_state_sync_invalidates_residual &&
                   field_residual_states.empty()) ||
                  tolerancesSatisfied(/*pre_first_update=*/false))) {
-                report.converged = true;
                 report.iterations = it + 1;
                 updateResidualReport();
+                if (!applyAcceptedStaticPressureRepresentabilityDistanceGate(
+                        it + 1, "line_search_step_convergence")) {
+                    report.converged = false;
+                    printNewtonProfile(it + 1);
+                    return finishStaticPressureInitialGuessTransaction(
+                        std::move(report));
+                }
+                report.converged = true;
                 if (oopTraceEnabled()) {
                     traceLog(
                         "NewtonSolver: converged by step tolerance on the synchronized residual state.");
                 }
                 printNewtonProfile(it + 1);
-                return report;
+                return finishStaticPressureInitialGuessTransaction(
+                    std::move(report));
             }
         }
 
         if (!reverted_to_original &&
             minIterationsSatisfied(it + 1) &&
             tolerancesSatisfied(/*pre_first_update=*/false)) {
-            report.converged = true;
             report.iterations = it + 1;
             updateResidualReport();
+            if (!applyAcceptedStaticPressureRepresentabilityDistanceGate(
+                    it + 1, "line_search_convergence")) {
+                report.converged = false;
+                printNewtonProfile(it + 1);
+                return finishStaticPressureInitialGuessTransaction(
+                    std::move(report));
+            }
+            report.converged = true;
             if (oopTraceEnabled()) {
                 traceLog("NewtonSolver: converged after line search update (tolerances satisfied).");
             }
             printNewtonProfile(it + 1);
-            return report;
+            return finishStaticPressureInitialGuessTransaction(
+                std::move(report));
         }
     }
 
@@ -17039,7 +17836,26 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         traceLog("NewtonSolver: reached max iterations without convergence.");
     }
     printNewtonProfile(max_it);
-    return report;
+    return finishStaticPressureInitialGuessTransaction(std::move(report));
+    } catch (...) {
+        const auto original_failure = std::current_exception();
+        try {
+            restoreStaticPressureInitialGuessTransaction();
+        } catch (...) {
+            // The restoration callback is itself user code.  A transient
+            // failure there must not suppress the still-active transaction;
+            // retry once from the immutable snapshots before declaring that
+            // exact rollback is unavailable.
+            try {
+                restoreStaticPressureInitialGuessTransaction();
+            } catch (...) {
+                std::throw_with_nested(systems::InvalidStateException(
+                    "NewtonSolver: static pressure initial-guess failure was "
+                    "followed by repeated rollback failure"));
+            }
+        }
+        std::rethrow_exception(original_failure);
+    }
 }
 
 } // namespace timestepping

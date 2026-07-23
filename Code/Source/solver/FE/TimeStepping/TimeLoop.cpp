@@ -370,32 +370,42 @@ void copyVector(backends::GenericVector& dst, const backends::GenericVector& src
 }
 
 /**
- * Roll back optional rate vectors unless the enclosing step attempt commits.
+ * Roll back optional rate vectors and one-shot nonlinear workspace state
+ * unless the enclosing step attempt commits.
  *
  * Generalized-alpha and structural schemes update uDot/uDDot while forming a
  * converged candidate.  Acceptance callbacks and adaptive controllers run
  * after that update and can still reject the candidate.  `u()` is reset from
  * accepted solution history on the next attempt, but rate vectors have no
  * equivalent history slot, so they require an explicit transaction guard.
+ * A pressure initializer consumed by a converged implicit stage is equally
+ * provisional: a rejected multistage/adaptive attempt must restore its
+ * one-shot bit so the retry reconstructs that discarded pressure update.
  */
-class AttemptRateStateGuard {
+class AttemptStateGuard {
 public:
-    AttemptRateStateGuard(TimeHistory& history,
-                          const backends::BackendFactory& factory,
-                          TimeHistory::RateStateSnapshot& snapshot)
+    AttemptStateGuard(TimeHistory& history,
+                      const backends::BackendFactory& factory,
+                      TimeHistory::RateStateSnapshot& snapshot,
+                      NewtonWorkspace& workspace)
         : history_(history)
         , snapshot_(snapshot)
+        , workspace_(workspace)
+        , static_pressure_initialized_(
+              workspace.static_compatible_pressure_initialized)
     {
         history_.snapshotRateState(snapshot_, factory);
     }
 
-    AttemptRateStateGuard(const AttemptRateStateGuard&) = delete;
-    AttemptRateStateGuard& operator=(const AttemptRateStateGuard&) = delete;
+    AttemptStateGuard(const AttemptStateGuard&) = delete;
+    AttemptStateGuard& operator=(const AttemptStateGuard&) = delete;
 
-    ~AttemptRateStateGuard() noexcept
+    ~AttemptStateGuard() noexcept
     {
         if (!committed_) {
             history_.restoreRateState(snapshot_);
+            workspace_.static_compatible_pressure_initialized =
+                static_pressure_initialized_;
         }
     }
 
@@ -404,7 +414,41 @@ public:
 private:
     TimeHistory& history_;
     TimeHistory::RateStateSnapshot& snapshot_;
+    NewtonWorkspace& workspace_;
+    bool static_pressure_initialized_{false};
     bool committed_{false};
+};
+
+/**
+ * A reference/embedded solve may produce a useful comparison state without
+ * owning the enclosing time-step attempt.  Its algebraic solution is copied
+ * out and then discarded, so consuming the one-shot pressure initializer in
+ * that solve must be rolled back before the actual candidate solve begins.
+ */
+class DiscardedStaticPressureInitializationGuard {
+public:
+    explicit DiscardedStaticPressureInitializationGuard(
+        NewtonWorkspace& workspace) noexcept
+        : workspace_(workspace)
+        , initialized_at_entry_(
+              workspace.static_compatible_pressure_initialized)
+    {
+    }
+
+    DiscardedStaticPressureInitializationGuard(
+        const DiscardedStaticPressureInitializationGuard&) = delete;
+    DiscardedStaticPressureInitializationGuard& operator=(
+        const DiscardedStaticPressureInitializationGuard&) = delete;
+
+    ~DiscardedStaticPressureInitializationGuard() noexcept
+    {
+        workspace_.static_compatible_pressure_initialized =
+            initialized_at_entry_;
+    }
+
+private:
+    NewtonWorkspace& workspace_;
+    bool initialized_at_entry_{false};
 };
 
 systems::SystemStateView makeAcceptedTimeStepStateView(const TimeHistory& history,
@@ -2064,8 +2108,11 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             // reaches the irreversible system/history acceptance boundary.
             // Every earlier continue/return/throw path restores both values
             // and allocation state automatically.
-            AttemptRateStateGuard attempt_rate_state(
-                history, factory, attempt_rate_state_snapshot);
+            AttemptStateGuard attempt_state(
+                history,
+                factory,
+                attempt_rate_state_snapshot,
+                workspace);
 
             const double remaining = t_end - t;
             if (options_.adjust_last_step) {
@@ -2695,9 +2742,11 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                    const bool need_startup_reference =
 	                        (order == 1) &&
 	                        ((system_temporal_order <= 1 && history.stepIndex() == 0) || system_temporal_order == 2);
-	                    bool have_reference_solution = false;
-	                    if (need_startup_reference) {
-                        // Bootstrap VSVO error estimation on the very first step. With no "real" history
+		                    bool have_reference_solution = false;
+		                    if (need_startup_reference) {
+                        DiscardedStaticPressureInitializationGuard
+                            reference_initializer_state(workspace);
+	                        // Bootstrap VSVO error estimation on the very first step. With no "real" history
                         // yet, extrapolation-based predictors reduce to u_pred = u^n and the correction
                         // u^{n+1} - u_pred measures solution change (O(dt)), not the local truncation
                         // error (O(dt^2) for BDF1). Use an embedded pair (BE vs CN) to obtain an
@@ -3526,7 +3575,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         std::rethrow_exception(commit_failure);
                     }
                 }
-                attempt_rate_state.commit();
+                attempt_state.commit();
                 transient.system().acceptGeometricNonlinearityState(
                     accepted_time_step_state,
                     systems::GeometricNonlinearityUpdatePoint::AcceptedTimeStep);

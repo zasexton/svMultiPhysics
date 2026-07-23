@@ -53,13 +53,16 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <cstdint>
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -68,6 +71,41 @@ namespace {
 
 using svmp::FE::GlobalIndex;
 using svmp::FE::Real;
+
+class ScopedEnvironmentValue {
+public:
+    ScopedEnvironmentValue(std::string name, const char* value)
+        : name_(std::move(name))
+    {
+        if (const char* original = std::getenv(name_.c_str());
+            original != nullptr) {
+            original_ = std::string(original);
+        }
+        if (value != nullptr) {
+            (void)::setenv(name_.c_str(), value, 1);
+        } else {
+            (void)::unsetenv(name_.c_str());
+        }
+    }
+
+    ScopedEnvironmentValue(const ScopedEnvironmentValue&) = delete;
+    ScopedEnvironmentValue& operator=(
+        const ScopedEnvironmentValue&) = delete;
+
+    ~ScopedEnvironmentValue()
+    {
+        if (original_.has_value()) {
+            (void)::setenv(
+                name_.c_str(), original_->c_str(), 1);
+        } else {
+            (void)::unsetenv(name_.c_str());
+        }
+    }
+
+private:
+    std::string name_;
+    std::optional<std::string> original_;
+};
 
 int mpiRank(MPI_Comm comm)
 {
@@ -2558,6 +2596,242 @@ TEST(TimeLoopFsilsConvergenceMPI, FixedStepRejectsNonconvergedNewtonStep)
     EXPECT_THROW((void)loop.run(transient, factory, *linear, history, callbacks), FEException);
     EXPECT_EQ(nonconverged_steps, 1);
     EXPECT_EQ(accepted_steps, 0);
+#endif
+}
+
+TEST(TimeLoopFsilsConvergenceMPI,
+     StaticPressureInitializerConfigurationMismatchFailsCollectively)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    constexpr int n_cells = 4;
+    if (size < 2 || size > n_cells) {
+        GTEST_SKIP() << "Run with 2-4 MPI ranks to enable this test";
+    }
+
+    auto sys = buildOutletCoupledTransientSystem(
+        comm, rank, size, n_cells);
+    ASSERT_TRUE(sys);
+    ASSERT_TRUE(sys->isSetup());
+
+    constexpr int dof_per_node = 3;
+    dofs::DofDistributionOptions dof_options;
+    dof_options.global_numbering =
+        dofs::GlobalNumberingMode::DenseGlobalIds;
+    dof_options.ownership =
+        dofs::OwnershipStrategy::LowestRank;
+    dof_options.my_rank = rank;
+    dof_options.world_size = size;
+    dof_options.mpi_comm = comm;
+    auto permutation =
+        getFsilsDofPermutation(*sys, dof_per_node, dof_options);
+    ASSERT_TRUE(permutation);
+    backends::FsilsFactory factory(dof_per_node, permutation);
+
+    const auto require_collective_rejection =
+        [&](timestepping::NewtonOptions options,
+            bool initialized,
+            std::string_view expected_reason) {
+            timestepping::NewtonSolver newton(std::move(options));
+            timestepping::NewtonWorkspace workspace;
+            workspace.static_compatible_pressure_initialized =
+                initialized;
+
+            bool caught = false;
+            std::string message;
+            try {
+                newton.allocateWorkspace(*sys, factory, workspace);
+            } catch (const systems::InvalidStateException& error) {
+                caught = true;
+                message = error.what();
+            }
+
+            const int local_caught = caught ? 1 : 0;
+            const int local_reason =
+                message.find(expected_reason) != std::string::npos
+                    ? 1
+                    : 0;
+            int caught_min = 0;
+            int caught_max = 0;
+            int reason_min = 0;
+            MPI_Allreduce(&local_caught,
+                          &caught_min,
+                          1,
+                          MPI_INT,
+                          MPI_MIN,
+                          comm);
+            MPI_Allreduce(&local_caught,
+                          &caught_max,
+                          1,
+                          MPI_INT,
+                          MPI_MAX,
+                          comm);
+            MPI_Allreduce(&local_reason,
+                          &reason_min,
+                          1,
+                          MPI_INT,
+                          MPI_MIN,
+                          comm);
+            EXPECT_EQ(caught_min, 1);
+            EXPECT_EQ(caught_max, 1);
+            EXPECT_EQ(reason_min, 1);
+        };
+
+    {
+        timestepping::NewtonOptions options;
+        options.initialize_static_compatible_free_surface_pressure =
+            rank == 0;
+        options
+            .accepted_static_pressure_representability_max_relative_distance =
+            1.0e-10;
+        require_collective_rejection(
+            std::move(options),
+            /*initialized=*/false,
+            "initializer enablement differs");
+    }
+    {
+        timestepping::NewtonOptions options;
+        options.initialize_static_compatible_free_surface_pressure =
+            true;
+        if (rank == 0) {
+            options
+                .accepted_static_pressure_representability_max_relative_distance =
+                1.0e-10;
+        }
+        require_collective_rejection(
+            std::move(options),
+            /*initialized=*/false,
+            "threshold presence differs");
+    }
+    {
+        timestepping::NewtonOptions options;
+        options.initialize_static_compatible_free_surface_pressure =
+            true;
+        options
+            .accepted_static_pressure_representability_max_relative_distance =
+            rank == 0 ? 1.0e-10 : 2.0e-10;
+        require_collective_rejection(
+            std::move(options),
+            /*initialized=*/false,
+            "threshold value differs");
+    }
+    {
+        timestepping::NewtonOptions options;
+        options.initialize_static_compatible_free_surface_pressure =
+            true;
+        options
+            .accepted_static_pressure_representability_max_relative_distance =
+            rank == 0 ? -1.0 : 1.0e-10;
+        require_collective_rejection(
+            std::move(options),
+            /*initialized=*/false,
+            "threshold validity differs");
+    }
+    {
+        constexpr const char* threshold_environment =
+            "SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE";
+        ScopedEnvironmentValue scoped_threshold(
+            threshold_environment,
+            rank == 0 ? "not-a-number" : nullptr);
+        timestepping::NewtonOptions options;
+        options.initialize_static_compatible_free_surface_pressure =
+            true;
+        if (rank != 0) {
+            options
+                .accepted_static_pressure_representability_max_relative_distance =
+                1.0e-10;
+        }
+        require_collective_rejection(
+            std::move(options),
+            /*initialized=*/false,
+            "threshold validity differs");
+    }
+    {
+        timestepping::NewtonOptions options;
+        options.initialize_static_compatible_free_surface_pressure =
+            true;
+        options
+            .accepted_static_pressure_representability_max_relative_distance =
+            1.0e-10;
+        require_collective_rejection(
+            std::move(options),
+            /*initialized=*/rank == 0,
+            "one-shot state differs");
+    }
+
+    timestepping::NewtonOptions baseline_options;
+    baseline_options.residual_op = "op";
+    baseline_options.jacobian_op = "op";
+    timestepping::NewtonSolver baseline_newton(baseline_options);
+    timestepping::NewtonWorkspace workspace;
+    baseline_newton.allocateWorkspace(*sys, factory, workspace);
+
+    auto linear =
+        factory.createLinearSolver(fsilsGmresDiagOptions());
+    ASSERT_TRUE(linear);
+    auto history = timestepping::TimeHistory::allocate(
+        factory,
+        sys->dofHandler().getNumDofs(),
+        /*history_depth=*/2,
+        /*allocate_second_order_state=*/false);
+    history.setTime(0.0);
+    history.setDt(0.1);
+    history.setPrevDt(0.1);
+    history.uPrev().zero();
+    history.uPrev2().zero();
+    history.resetCurrentToPrevious();
+    auto integrator =
+        std::make_shared<systems::BackwardDifferenceIntegrator>();
+    systems::TransientSystem transient(*sys, std::move(integrator));
+
+    int synchronization_calls = 0;
+    timestepping::NewtonOptions divergent_options =
+        baseline_options;
+    divergent_options
+        .initialize_static_compatible_free_surface_pressure =
+        rank == 0;
+    divergent_options
+        .accepted_static_pressure_representability_max_relative_distance =
+        1.0e-10;
+    divergent_options.synchronize_state =
+        [&](const systems::SystemStateView&,
+            timestepping::NewtonOptions::StateSynchronizationPoint) {
+            ++synchronization_calls;
+        };
+    timestepping::NewtonSolver divergent_newton(
+        std::move(divergent_options));
+    bool solve_caught = false;
+    try {
+        (void)divergent_newton.solveStep(
+            transient,
+            *linear,
+            /*solve_time=*/0.1,
+            history,
+            workspace);
+    } catch (const systems::InvalidStateException&) {
+        solve_caught = true;
+    }
+    const int local_solve_caught = solve_caught ? 1 : 0;
+    int solve_caught_min = 0;
+    int synchronization_calls_max = 0;
+    MPI_Allreduce(&local_solve_caught,
+                  &solve_caught_min,
+                  1,
+                  MPI_INT,
+                  MPI_MIN,
+                  comm);
+    MPI_Allreduce(&synchronization_calls,
+                  &synchronization_calls_max,
+                  1,
+                  MPI_INT,
+                  MPI_MAX,
+                  comm);
+    EXPECT_EQ(solve_caught_min, 1);
+    EXPECT_EQ(synchronization_calls_max, 0);
 #endif
 }
 
