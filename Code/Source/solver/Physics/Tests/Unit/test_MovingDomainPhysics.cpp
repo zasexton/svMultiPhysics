@@ -103,6 +103,7 @@ concept HasContactAnglePenalty = requires(Configuration value) {
 
 static_assert(!HasContactMobility<FreeSurfaceContactLine::PrescribedAngle>);
 static_assert(!HasContactSlipLength<FreeSurfaceContactLine::PrescribedAngle>);
+static_assert(!HasContactAnglePenalty<FreeSurfaceContactLine::PrescribedAngle>);
 static_assert(!HasContactAnglePenalty<FreeSurfaceContactLine::DynamicRenE>);
 
 FreeSurfaceContactLine pinnedContactLine(int wall_marker = -1,
@@ -120,7 +121,6 @@ FreeSurfaceContactLine prescribedContactLine(
     int wall_marker,
     FE::Real angle,
     std::array<FE::Real, 3> wall_normal,
-    FE::Real penalty = 1.0,
     int contact_marker = -1)
 {
     return FreeSurfaceContactLine{
@@ -129,7 +129,6 @@ FreeSurfaceContactLine prescribedContactLine(
             .contact_line_marker = contact_marker,
             .contact_angle_radians = angle,
             .wall_normal = {wall_normal[0], wall_normal[1], wall_normal[2]},
-            .contact_angle_penalty = penalty,
         },
     };
 }
@@ -725,16 +724,22 @@ FE::systems::SetupInputs makeSingleTriangleSetupInputs()
 class SingleTetraBoundaryMeshAccess final : public FE::assembly::IMeshAccess {
 public:
     explicit SingleTetraBoundaryMeshAccess(int marker,
-                                           bool expose_all_faces = false)
+                                           bool expose_all_faces = false,
+                                           bool reverse_wall_orientation = false)
         : expose_all_faces_(expose_all_faces)
     {
         face_markers_.fill(marker);
-        reference_nodes_ = {
-            {0.0, 0.0, 0.0},
-            {1.0, 0.0, 0.0},
-            {0.0, 1.0, 0.0},
-            {0.0, 0.0, 1.0}
-        };
+        reference_nodes_ = reverse_wall_orientation
+            ? std::vector<std::array<FE::Real, 3>>{
+                  {0.0, 0.0, 0.0},
+                  {0.0, 1.0, 0.0},
+                  {1.0, 0.0, 0.0},
+                  {0.0, 0.0, -1.0}}
+            : std::vector<std::array<FE::Real, 3>>{
+                  {0.0, 0.0, 0.0},
+                  {1.0, 0.0, 0.0},
+                  {0.0, 1.0, 0.0},
+                  {0.0, 0.0, 1.0}};
         current_nodes_ = reference_nodes_;
         cell_ = {0, 1, 2, 3};
     }
@@ -1280,6 +1285,146 @@ makeSingleTetraContactLineCutContext(int interface_marker,
     return cut_context;
 }
 
+enum class ContactGeometryPreflightLaw {
+    PrescribedAngle,
+    DynamicRenE,
+};
+
+void expectInvalidPreinstalledContactGeometryRejectedBeforeMutation(
+    ContactGeometryPreflightLaw law)
+{
+    constexpr int interface_marker = 168;
+    constexpr int wall_marker = 58;
+    constexpr FE::Real angle = FE::Real{1.0471975511965977462};
+    constexpr std::array<FE::Real, 3> configured_wall_normal{
+        0.0, 0.0, -1.0};
+    const bool dynamic = law == ContactGeometryPreflightLaw::DynamicRenE;
+
+    const auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(
+        wall_marker, /*expose_all_faces=*/false);
+    auto velocity_space = makeVelocitySpace(mesh);
+    auto pressure_space = makePressureSpace(mesh);
+    auto options = baseNavierStokesOptions();
+    options.enable_convection = false;
+    if (dynamic) {
+        options.velocity_dirichlet.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+                .boundary_marker = wall_marker,
+                .value = {0.0, 0.0, 0.0},
+                .active_components = {false, false, true},
+            });
+    }
+    auto boundary =
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = interface_marker,
+            .level_set_field_name = "phi_contact_preflight",
+            .active_domain =
+                ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            .active_domain_method =
+                ns::FreeSurfaceActiveDomainMethod::CutVolume,
+            .active_domain_smoothing_width = 0.0,
+            .surface_tension = FE::Real{0.8},
+            .surface_tension_form =
+                ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction,
+            .curvature = FE::Real{0.0},
+            .use_level_set_curvature = false,
+            .small_cut_aggregation = false,
+        };
+    boundary.contact_lines.push_back(
+        dynamic
+            ? dynamicRenEContactLine(
+                  wall_marker,
+                  angle,
+                  configured_wall_normal,
+                  FE::Real{0.5},
+                  FE::Real{0.2})
+            : prescribedContactLine(
+                  wall_marker, angle, configured_wall_normal));
+    options.free_surface.push_back(std::move(boundary));
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi_contact_preflight",
+        .space = pressure_space,
+        .components = 1,
+    });
+    system.addOperator("equations");
+    const auto phi_state = FE::forms::StateField(
+        phi, *pressure_space, "phi_contact_preflight_owner");
+    const auto eta = FE::forms::TestField(
+        phi, *pressure_space, "eta_contact_preflight_owner");
+    (void)FE::systems::installFormulation(
+        system,
+        "equations",
+        {phi},
+        (FE::forms::dt(phi_state) * eta).dx());
+
+    const int contact_marker =
+        stableContactLineMarker(phi, interface_marker, wall_marker);
+    const std::array<FE::Real, 3> invalid_boundary_normal =
+        dynamic ? configured_wall_normal
+                : std::array<FE::Real, 3>{0.0, 0.0, 1.0};
+    const std::array<FE::Real, 3> invalid_interface_normal =
+        dynamic ? configured_wall_normal
+                : std::array<FE::Real, 3>{1.0, 0.0, 0.0};
+    auto invalid_context = makeSingleTetraContactLineCutContext(
+        interface_marker,
+        wall_marker,
+        contact_marker,
+        phi,
+        invalid_boundary_normal,
+        invalid_interface_normal);
+    system.setCutIntegrationContext(invalid_context);
+
+    const auto field_count = system.fieldMap().numFields();
+    const auto formulation_count = system.formulationRecords().size();
+    const auto functional_count =
+        system.freeSurfaceDiscreteFunctionalDeclarations().size();
+    const auto policy_count =
+        system.meshTangentialBoundaryPolicies().size();
+    ASSERT_FALSE(
+        system.isGeneratedEmbeddedInterfaceMarkerRegistered(contact_marker));
+
+    ns::IncompressibleNavierStokesVMSModule module(
+        velocity_space, pressure_space, std::move(options));
+    try {
+        module.registerOn(system);
+        FAIL() << "Expected preinstalled invalid contact geometry to reject "
+                  "registration";
+    } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        EXPECT_NE(
+            message.find(dynamic ? "not transverse to its wall"
+                                 : "does not match the physical outward normal"),
+            std::string::npos)
+            << message;
+    }
+
+    EXPECT_EQ(system.fieldMap().numFields(), field_count);
+    EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.formulationRecords().size(), formulation_count);
+    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalDeclarations().size(),
+              functional_count);
+    EXPECT_EQ(system.meshTangentialBoundaryPolicies().size(), policy_count);
+    EXPECT_FALSE(
+        system.isGeneratedEmbeddedInterfaceMarkerRegistered(contact_marker));
+    EXPECT_EQ(system.cutIntegrationContext(), invalid_context.get());
+
+    // A leaked update callback would re-run the same failing validation.
+    auto callback_probe = makeSingleTetraContactLineCutContext(
+        interface_marker,
+        wall_marker,
+        contact_marker,
+        phi,
+        invalid_boundary_normal,
+        invalid_interface_normal);
+    EXPECT_NO_THROW(system.setCutIntegrationContext(callback_probe));
+    EXPECT_EQ(system.cutIntegrationContext(), callback_probe.get());
+}
+
 FE::Real residualNorm(FE::systems::FESystem& system,
                       const FE::systems::SystemStateView& state,
                       std::string_view op)
@@ -1361,7 +1506,8 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
         ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction,
     FE::Real liquid_pressure = FE::Real{0.0},
     FE::Real external_pressure = FE::Real{0.0},
-    bool use_constitutive_viscosity = false)
+    bool use_constitutive_viscosity = false,
+    bool reverse_wall_orientation = false)
 {
     constexpr int interface_marker = 167;
     constexpr int wall_marker = 57;
@@ -1370,8 +1516,10 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     constexpr FE::Real slip_length = 0.2;
     constexpr FE::Real contact_x = 0.2;
 
-    const auto mesh =
-        std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker);
+    const auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(
+        wall_marker,
+        /*expose_all_faces=*/false,
+        reverse_wall_orientation);
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
@@ -1397,7 +1545,7 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
             .active_domain = active_domain,
             .active_domain_method =
                 ns::FreeSurfaceActiveDomainMethod::CutVolume,
-            .active_domain_smoothing_width = 0.25,
+            .active_domain_smoothing_width = 0.0,
             .external_pressure = external_pressure,
             .surface_tension = gamma,
             .surface_tension_form = surface_tension_form,
@@ -1406,10 +1554,14 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
             .small_cut_aggregation = false,
         };
     if (include_dynamic_contact_angle) {
+        const std::array<FE::Real, 3> configured_wall_normal =
+            reverse_wall_orientation
+            ? std::array<FE::Real, 3>{0.0, 0.0, 1.0}
+            : std::array<FE::Real, 3>{0.0, 0.0, -1.0};
         free_surface.contact_lines.push_back(dynamicRenEContactLine(
             wall_marker,
             equilibrium_angle,
-            {0.0, 0.0, -1.0},
+            configured_wall_normal,
             mobility,
             slip_length));
     }
@@ -1448,7 +1600,11 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     const int contact_marker =
         stableContactLineMarker(phi, interface_marker, wall_marker);
     std::array<FE::Real, 3> level_set_gradient{
-        std::sin(dynamic_angle), 0.0, std::cos(dynamic_angle)};
+        std::sin(dynamic_angle),
+        0.0,
+        reverse_wall_orientation
+            ? -std::cos(dynamic_angle)
+            : std::cos(dynamic_angle)};
     const auto retained_volume_side =
         active_domain == ns::FreeSurfaceActiveDomain::LevelSetPositive
             ? FE::geometry::CutIntegrationSide::Positive
@@ -1467,15 +1623,30 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     const auto active_boundary_measure =
         clipped_wet_limit -
         FE::Real{0.5} * clipped_wet_limit * clipped_wet_limit;
+    auto context_boundary_normal = generated_boundary_normal;
+    auto context_interface_normal = level_set_gradient;
+    std::array<FE::Real, 3> context_contact_tangent{0.0, 1.0, 0.0};
+    if (reverse_wall_orientation) {
+        const auto physical_to_reference_covector =
+            [](const std::array<FE::Real, 3>& physical) {
+                return std::array<FE::Real, 3>{
+                    physical[1], physical[0], -physical[2]};
+            };
+        context_boundary_normal =
+            physical_to_reference_covector(generated_boundary_normal);
+        context_interface_normal =
+            physical_to_reference_covector(level_set_gradient);
+        context_contact_tangent = {-1.0, 0.0, 0.0};
+    }
     system.setCutIntegrationContext(makeSingleTetraContactLineCutContext(
         interface_marker,
         wall_marker,
         contact_marker,
         phi,
-        generated_boundary_normal,
-        level_set_gradient,
+        context_boundary_normal,
+        context_interface_normal,
         {contact_x, 0.2, 0.0},
-        {0.0, 1.0, 0.0},
+        context_contact_tangent,
         retained_volume_side,
         active_boundary_measure));
     system.setup({}, makeSingleTetraSetupInputs());
@@ -1498,10 +1669,18 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
         level_set_scale * level_set_gradient[0],
         level_set_scale * level_set_gradient[1],
         level_set_scale * level_set_gradient[2]};
-    auto phi_values = affineScalarTetraCoefficients(
+    const auto level_set_offset =
         -scaled_level_set_gradient[0] * contact_x +
-            level_set_scale * level_set_shift,
-        scaled_level_set_gradient);
+        level_set_scale * level_set_shift;
+    std::vector<FE::Real> phi_values(4u, FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto point = mesh->getNodeCoordinates(vertex);
+        phi_values[static_cast<std::size_t>(vertex)] =
+            level_set_offset +
+            scaled_level_set_gradient[0] * point[0] +
+            scaled_level_set_gradient[1] * point[1] +
+            scaled_level_set_gradient[2] * point[2];
+    }
     const auto* velocity_entity_map =
         system.fieldDofHandler(velocity).getEntityDofMap();
     if (velocity_entity_map == nullptr) {
@@ -1690,8 +1869,7 @@ std::vector<FE::Real> unfittedContactAngleResidualVector(
         free_surface.contact_lines.push_back(prescribedContactLine(
             wall_marker,
             contact_angle_radians,
-            outward_wall_normal,
-            3.0));
+            outward_wall_normal));
     }
     opts.free_surface.push_back(std::move(free_surface));
 
@@ -1837,6 +2015,424 @@ FE::Real vectorNorm(std::span<const FE::Real> values)
     return std::sqrt(norm2);
 }
 
+enum class SharpBoundaryOperatorFamily {
+    Traction,
+    Robin,
+    PressureFlux,
+    Outflow,
+    SymmetricNitsche,
+    UnsymmetricNitsche,
+    WallSlip
+};
+
+std::string_view sharpBoundaryOperatorFamilyName(
+    SharpBoundaryOperatorFamily family)
+{
+    switch (family) {
+    case SharpBoundaryOperatorFamily::Traction:
+        return "traction";
+    case SharpBoundaryOperatorFamily::Robin:
+        return "robin";
+    case SharpBoundaryOperatorFamily::PressureFlux:
+        return "pressure_flux";
+    case SharpBoundaryOperatorFamily::Outflow:
+        return "outflow";
+    case SharpBoundaryOperatorFamily::SymmetricNitsche:
+        return "symmetric_nitsche";
+    case SharpBoundaryOperatorFamily::UnsymmetricNitsche:
+        return "unsymmetric_nitsche";
+    case SharpBoundaryOperatorFamily::WallSlip:
+        return "wall_slip";
+    }
+    throw std::logic_error("unknown sharp-boundary operator family");
+}
+
+struct SharpBoundaryAssemblySample {
+    std::vector<FE::Real> residual{};
+    std::vector<FE::Real> jacobian{};
+};
+
+class SharpBoundaryOperatorAssemblyHarness {
+public:
+    SharpBoundaryOperatorAssemblyHarness(
+        SharpBoundaryOperatorFamily family,
+        FE::geometry::CutIntegrationSide active_side)
+        : family_(family)
+        , active_side_(active_side)
+        , mesh_(std::make_shared<SingleTetraBoundaryMeshAccess>(wall_marker_))
+        , system_(std::make_unique<FE::systems::FESystem>(mesh_))
+    {
+        auto velocity_space = makeVelocitySpace(mesh_);
+        auto pressure_space = makePressureSpace(mesh_);
+        auto options = baseNavierStokesOptions();
+        options.enable_convection = false;
+        options.enable_vms = false;
+        options.jit_policy.enable = false;
+
+        auto free_surface =
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+                .implementation =
+                    ns::FreeSurfaceImplementation::UnfittedLevelSet,
+                .interface_marker = interface_marker_,
+                .level_set_field_name = "phi_sharp_operator_work",
+                .generated_interface_domain_id = "free_surface",
+                .active_domain =
+                    active_side == FE::geometry::CutIntegrationSide::Positive
+                        ? ns::FreeSurfaceActiveDomain::LevelSetPositive
+                        : ns::FreeSurfaceActiveDomain::LevelSetNegative,
+                .active_domain_method =
+                    ns::FreeSurfaceActiveDomainMethod::CutVolume,
+                .surface_tension = FE::Real{0.0},
+                .small_cut_aggregation = false,
+            };
+
+        switch (family_) {
+        case SharpBoundaryOperatorFamily::Traction:
+            options.traction_neumann.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::TractionNeumannBC{
+                    .boundary_marker = wall_marker_,
+                    .traction = {1.25, -0.5, 0.75},
+                });
+            break;
+        case SharpBoundaryOperatorFamily::Robin:
+            options.traction_robin.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::TractionRobinBC{
+                    .boundary_marker = wall_marker_,
+                    .alpha = 1.7,
+                    .rhs = {0.1, -0.2, 0.3},
+                });
+            break;
+        case SharpBoundaryOperatorFamily::PressureFlux:
+            options.pressure_outflow.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::PressureOutflowBC{
+                    .boundary_marker = wall_marker_,
+                    .pressure = 1.2,
+                    .backflow_beta = 0.0,
+                });
+            break;
+        case SharpBoundaryOperatorFamily::Outflow:
+            options.pressure_outflow.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::PressureOutflowBC{
+                    .boundary_marker = wall_marker_,
+                    .pressure = 1.2,
+                    .backflow_beta = 0.25,
+                });
+            break;
+        case SharpBoundaryOperatorFamily::SymmetricNitsche:
+        case SharpBoundaryOperatorFamily::UnsymmetricNitsche:
+            options.velocity_dirichlet_weak.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+                    .boundary_marker = wall_marker_,
+                    .value = {0.1, -0.05, 0.2},
+                });
+            options.nitsche_gamma = 12.0;
+            options.nitsche_symmetric =
+                family_ == SharpBoundaryOperatorFamily::SymmetricNitsche;
+            options.nitsche_scale_with_p = false;
+            break;
+        case SharpBoundaryOperatorFamily::WallSlip:
+            options.velocity_dirichlet.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+                    .boundary_marker = wall_marker_,
+                    .value = {0.0, 0.0, 0.0},
+                    .active_components = {false, false, true},
+                });
+            free_surface.surface_tension = 0.8;
+            free_surface.surface_tension_form =
+                ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction;
+            free_surface.curvature = 0.0;
+            free_surface.use_level_set_curvature = false;
+            free_surface.contact_lines.push_back(dynamicRenEContactLine(
+                wall_marker_,
+                FE::Real{1.57079632679489661923},
+                {0.0, 0.0, -1.0},
+                0.5,
+                0.2));
+            break;
+        }
+        options.free_surface.push_back(std::move(free_surface));
+
+        phi_ = system_->addField(FE::systems::FieldSpec{
+            .name = "phi_sharp_operator_work",
+            .space = pressure_space,
+            .components = 1,
+            .source_kind =
+                family_ == SharpBoundaryOperatorFamily::WallSlip
+                    ? FE::systems::FieldSourceKind::Unknown
+                    : FE::systems::FieldSourceKind::PrescribedData,
+        });
+        if (family_ == SharpBoundaryOperatorFamily::WallSlip) {
+            system_->addOperator("equations");
+            const auto phi_state = FE::forms::StateField(
+                phi_, *pressure_space, "phi_sharp_operator_owner");
+            const auto eta = FE::forms::TestField(
+                phi_, *pressure_space, "eta_sharp_operator_owner");
+            (void)FE::systems::installFormulation(
+                *system_,
+                "equations",
+                {phi_},
+                (FE::forms::dt(phi_state) * eta).dx());
+            system_->gaugeRegistry().addAnchoring(
+                FE::gauge::AnchoringEvidence{
+                    .field = phi_,
+                    .component = -1,
+                    .region = -1,
+                    .family = FE::gauge::NullspaceModeFamily::ScalarConstant,
+                    .verdict = FE::gauge::AnchoringVerdict::Anchored,
+                    .source =
+                        "Transient level-set owner in sharp-boundary operator fixture",
+                });
+        }
+        ns::IncompressibleNavierStokesVMSModule module(
+            velocity_space, pressure_space, std::move(options));
+        module.registerOn(*system_);
+        velocity_ = system_->findFieldByName("u");
+        pressure_ = system_->findFieldByName("p");
+        if (velocity_ == FE::INVALID_FIELD_ID ||
+            pressure_ == FE::INVALID_FIELD_ID) {
+            throw std::runtime_error(
+                "sharp-boundary operator harness did not register fluid fields");
+        }
+
+        FE::interfaces::GeneratedActiveBoundaryMarkerKey marker_key;
+        marker_key.source =
+            FE::interfaces::LevelSetInterfaceSource::fromField(phi_);
+        marker_key.domain_id = "free_surface";
+        marker_key.interface_marker = interface_marker_;
+        marker_key.boundary_marker = wall_marker_;
+        marker_key.side = active_side_;
+        active_marker_ =
+            FE::interfaces::stableGeneratedActiveBoundaryMarker(marker_key);
+        contact_marker_ =
+            stableContactLineMarker(phi_, interface_marker_, wall_marker_);
+
+        system_->setCutIntegrationContext(context(std::nullopt));
+        system_->setup({}, makeSingleTetraSetupInputs());
+        const std::array<FE::Real, 3> level_set_gradient =
+            active_side_ == FE::geometry::CutIntegrationSide::Positive
+                ? std::array<FE::Real, 3>{{0.0, -1.0, 0.0}}
+                : std::array<FE::Real, 3>{{0.0, 1.0, 0.0}};
+        const auto level_set_values =
+            affineScalarTetraCoefficients(-0.2, level_set_gradient);
+        if (family_ != SharpBoundaryOperatorFamily::WallSlip) {
+            system_->setPrescribedFieldCoefficients(phi_, level_set_values);
+        }
+
+        solution_.assign(
+            static_cast<std::size_t>(system_->dofHandler().getNumDofs()),
+            FE::Real{0.0});
+        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            setFieldComponentValue(
+                solution_, *system_, velocity_, vertex, 0, 0.4);
+            setFieldComponentValue(
+                solution_, *system_, velocity_, vertex, 1, -0.2);
+            setFieldComponentValue(
+                solution_, *system_, velocity_, vertex, 2, 0.4);
+            setFieldComponentValue(
+                solution_, *system_, pressure_, vertex, 0, 0.0);
+            if (family_ == SharpBoundaryOperatorFamily::WallSlip) {
+                setFieldComponentValue(
+                    solution_,
+                    *system_,
+                    phi_,
+                    vertex,
+                    0,
+                    level_set_values[static_cast<std::size_t>(vertex)]);
+            }
+        }
+        previous_solution_ = solution_;
+    }
+
+    [[nodiscard]] SharpBoundaryAssemblySample assemble(
+        std::optional<FE::Real> active_measure)
+    {
+        system_->setCutIntegrationContext(context(active_measure));
+        const auto dof_count = system_->dofHandler().getNumDofs();
+        FE::assembly::DenseMatrixView jacobian(dof_count);
+        FE::assembly::DenseVectorView residual(dof_count);
+        jacobian.zero();
+        residual.zero();
+
+        FE::systems::SystemStateView state;
+        state.dt = 1.0;
+        state.u = std::span<const FE::Real>(solution_);
+        state.u_prev = std::span<const FE::Real>(previous_solution_);
+        const FE::systems::BackwardDifferenceIntegrator integrator;
+        const auto time_context =
+            integrator.buildContext(/*max_time_derivative_order=*/1, state);
+        state.time_integration = &time_context;
+
+        FE::systems::AssemblyRequest request;
+        request.op = "equations";
+        request.want_matrix = true;
+        request.want_vector = true;
+        const auto result =
+            system_->assemble(request, state, &jacobian, &residual);
+        if (!result.success) {
+            throw std::runtime_error(
+                "sharp-boundary operator assembly failed: " +
+                result.error_message);
+        }
+
+        SharpBoundaryAssemblySample sample;
+        sample.residual.resize(static_cast<std::size_t>(dof_count));
+        sample.jacobian.resize(
+            static_cast<std::size_t>(dof_count * dof_count));
+        for (FE::GlobalIndex row = 0; row < dof_count; ++row) {
+            sample.residual[static_cast<std::size_t>(row)] = residual[row];
+            for (FE::GlobalIndex column = 0; column < dof_count; ++column) {
+                sample.jacobian[static_cast<std::size_t>(
+                    row * dof_count + column)] =
+                    jacobian.getMatrixEntry(row, column);
+            }
+        }
+        return sample;
+    }
+
+    [[nodiscard]] std::size_t activeRuleCount() const
+    {
+        const auto* cut_context = system_->cutIntegrationContext();
+        return cut_context == nullptr
+                   ? 0u
+                   : cut_context->interfaceRulesForMarker(active_marker_).size();
+    }
+
+    [[nodiscard]] bool usesWholePhysicalBoundary() const
+    {
+        return formulationRecordsContainBoundaryMarker(*system_, wall_marker_);
+    }
+
+    [[nodiscard]] FE::Real velocityResidualComponentContribution(
+        const SharpBoundaryAssemblySample& sample,
+        const SharpBoundaryAssemblySample& dry,
+        int component) const
+    {
+        FE::Real contribution{0.0};
+        for (const auto dof : velocityComponentDofs(component)) {
+            contribution += sample.residual.at(static_cast<std::size_t>(dof)) -
+                            dry.residual.at(static_cast<std::size_t>(dof));
+        }
+        return contribution;
+    }
+
+    [[nodiscard]] FE::Real velocityJacobianComponentContribution(
+        const SharpBoundaryAssemblySample& sample,
+        const SharpBoundaryAssemblySample& dry,
+        int component) const
+    {
+        const auto dofs = velocityComponentDofs(component);
+        const auto dof_count = system_->dofHandler().getNumDofs();
+        FE::Real contribution{0.0};
+        for (const auto row : dofs) {
+            for (const auto column : dofs) {
+                const auto index = static_cast<std::size_t>(
+                    row * dof_count + column);
+                contribution += sample.jacobian.at(index) -
+                                dry.jacobian.at(index);
+            }
+        }
+        return contribution;
+    }
+
+private:
+    [[nodiscard]] std::vector<FE::GlobalIndex> velocityComponentDofs(
+        int component) const
+    {
+        const auto* entity_map =
+            system_->fieldDofHandler(velocity_).getEntityDofMap();
+        if (entity_map == nullptr || component < 0 || component >= 3) {
+            throw std::runtime_error(
+                "sharp-boundary velocity component has no entity DOF map");
+        }
+        const auto offset = system_->fieldDofOffset(velocity_);
+        std::vector<FE::GlobalIndex> dofs;
+        dofs.reserve(4u);
+        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+            if (static_cast<std::size_t>(component) >= vertex_dofs.size()) {
+                throw std::runtime_error(
+                    "sharp-boundary velocity component DOF is missing");
+            }
+            dofs.push_back(
+                offset + vertex_dofs[static_cast<std::size_t>(component)]);
+        }
+        return dofs;
+    }
+
+    [[nodiscard]] std::shared_ptr<FE::assembly::CutIntegrationContext> context(
+        std::optional<FE::Real> active_measure) const
+    {
+        const std::array<FE::Real, 3> interface_normal =
+            active_side_ == FE::geometry::CutIntegrationSide::Positive
+                ? std::array<FE::Real, 3>{{0.0, -1.0, 0.0}}
+                : std::array<FE::Real, 3>{{0.0, 1.0, 0.0}};
+        return makeSingleTetraContactLineCutContext(
+            interface_marker_,
+            wall_marker_,
+            contact_marker_,
+            phi_,
+            {0.0, 0.0, -1.0},
+            interface_normal,
+            {0.2, 0.2, 0.0},
+            {1.0, 0.0, 0.0},
+            active_side_,
+            active_measure);
+    }
+
+    static constexpr int interface_marker_{231};
+    static constexpr int wall_marker_{232};
+    SharpBoundaryOperatorFamily family_;
+    FE::geometry::CutIntegrationSide active_side_;
+    std::shared_ptr<SingleTetraBoundaryMeshAccess> mesh_{};
+    std::unique_ptr<FE::systems::FESystem> system_{};
+    FE::FieldId phi_{FE::INVALID_FIELD_ID};
+    FE::FieldId velocity_{FE::INVALID_FIELD_ID};
+    FE::FieldId pressure_{FE::INVALID_FIELD_ID};
+    int active_marker_{-1};
+    int contact_marker_{-1};
+    std::vector<FE::Real> solution_{};
+    std::vector<FE::Real> previous_solution_{};
+};
+
+FE::Real maximumAbsoluteDifference(std::span<const FE::Real> a,
+                                   std::span<const FE::Real> b)
+{
+    if (a.size() != b.size()) {
+        throw std::invalid_argument(
+            "sharp-boundary sample vectors have different sizes");
+    }
+    FE::Real maximum{0.0};
+    for (std::size_t i = 0u; i < a.size(); ++i) {
+        maximum = std::max(maximum, std::abs(a[i] - b[i]));
+    }
+    return maximum;
+}
+
+FE::Real maximumWetFractionScalingError(
+    std::span<const FE::Real> sample,
+    std::span<const FE::Real> dry,
+    std::span<const FE::Real> full,
+    FE::Real fraction)
+{
+    if (sample.size() != dry.size() || sample.size() != full.size()) {
+        throw std::invalid_argument(
+            "sharp-boundary scaling vectors have different sizes");
+    }
+    FE::Real maximum{0.0};
+    for (std::size_t i = 0u; i < sample.size(); ++i) {
+        const FE::Real expected =
+            dry[i] + fraction * (full[i] - dry[i]);
+        maximum = std::max(maximum, std::abs(sample[i] - expected));
+    }
+    return maximum;
+}
+
+FE::Real maximumContributionMagnitude(std::span<const FE::Real> sample,
+                                      std::span<const FE::Real> dry)
+{
+    return maximumAbsoluteDifference(sample, dry);
+}
+
 std::vector<FE::Real> fittedFreeSurfaceResidualVector(FE::Real external_pressure,
                                                       FE::Real surface_tension,
                                                       FE::Real curvature,
@@ -1849,6 +2445,8 @@ std::vector<FE::Real> fittedFreeSurfaceResidualVector(FE::Real external_pressure
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
+    opts.input_configuration_schema_version = 1;
+    opts.explicit_legacy_configuration = true;
     opts.enable_convection = false;
 
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -2448,6 +3046,8 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceAddsBoundaryResidual)
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
+    opts.input_configuration_schema_version = 1;
+    opts.explicit_legacy_configuration = true;
     opts.enable_convection = false;
 
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -2831,6 +3431,8 @@ TEST(MovingDomainPhysics, StaticFlatWaterSurfaceWithGravityRemainsAtRest)
     auto p_space = scalar_space;
 
     auto opts = baseNavierStokesOptions();
+    opts.input_configuration_schema_version = 1;
+    opts.explicit_legacy_configuration = true;
     opts.enable_convection = false;
     opts.density = density;
     opts.viscosity = 1.0e-3;
@@ -2941,6 +3543,8 @@ TEST(MovingDomainPhysics, FittedAndUnfittedFlatStaticFreeSurfaceAgree)
                                             fitted_middle_y,
                                             interface_y);
     auto fitted_opts = baseNavierStokesOptions();
+    fitted_opts.input_configuration_schema_version = 1;
+    fitted_opts.explicit_legacy_configuration = true;
     fitted_opts.enable_convection = false;
     fitted_opts.density = density;
     fitted_opts.viscosity = 1.0e-3;
@@ -3139,6 +3743,8 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeo
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
+    opts.input_configuration_schema_version = 1;
+    opts.explicit_legacy_configuration = true;
     opts.enable_ale = true;
     opts.enable_convection = false;
 
@@ -3235,6 +3841,8 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceCanUseCurrentGeometryCurv
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
+    opts.input_configuration_schema_version = 1;
+    opts.explicit_legacy_configuration = true;
     opts.enable_ale = true;
     opts.enable_convection = false;
 
@@ -3259,6 +3867,8 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfacePenaltyKinematicsAddsBoun
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
+    opts.input_configuration_schema_version = 1;
+    opts.explicit_legacy_configuration = true;
     opts.enable_ale = true;
     opts.enable_convection = false;
     opts.mesh_velocity_field_name = "mesh_velocity";
@@ -3352,6 +3962,8 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceNitscheKinematicsAddsBoun
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
+    opts.input_configuration_schema_version = 1;
+    opts.explicit_legacy_configuration = true;
     opts.enable_ale = true;
     opts.enable_convection = false;
     opts.mesh_velocity_field_name = "mesh_velocity";
@@ -3447,6 +4059,8 @@ TEST(MovingDomainPhysics,
         auto u_space = makeVelocitySpace(mesh);
         auto p_space = makePressureSpace(mesh);
         auto opts = baseNavierStokesOptions();
+        opts.input_configuration_schema_version = 1;
+        opts.explicit_legacy_configuration = true;
         opts.enable_ale = true;
         opts.enable_convection = false;
         opts.mesh_velocity_field_name = "mesh_velocity";
@@ -3598,6 +4212,72 @@ TEST(MovingDomainPhysics, FittedFreeSurfaceKinematicPolicyOptionsAreExplicit)
 }
 
 TEST(MovingDomainPhysics,
+     FittedFreeSurfaceQualifiedContractRejectsBeforeMutation)
+{
+    constexpr int marker = 38;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+
+    const auto valid_options = [&]() {
+        auto opts = baseNavierStokesOptions();
+        opts.enable_ale = true;
+        opts.mesh_velocity_source =
+            ns::ALEMeshVelocitySource::CoupledDisplacement;
+        opts.auto_register_mesh_displacement_field = true;
+        opts.free_surface.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+                .implementation =
+                    ns::FreeSurfaceImplementation::FittedALE,
+                .boundary_marker = marker,
+                .tangential_mesh_policy =
+                    ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
+                .kinematic_enforcement =
+                    ns::FreeSurfaceKinematicEnforcement::Penalty,
+                .kinematic_penalty = FE::Real{4.0},
+            });
+        return opts;
+    };
+    const auto expect_rejected_before_mutation =
+        [&](const auto& mutate) {
+            auto opts = valid_options();
+            mutate(opts);
+            FE::systems::FESystem system(mesh);
+            ns::IncompressibleNavierStokesVMSModule module(
+                u_space, p_space, std::move(opts));
+            EXPECT_THROW(module.registerOn(system),
+                         std::invalid_argument);
+            EXPECT_EQ(system.fieldMap().numFields(), 0u);
+            EXPECT_TRUE(system.formulationRecords().empty());
+            EXPECT_TRUE(
+                system.meshTangentialBoundaryPolicies().empty());
+        };
+
+    expect_rejected_before_mutation(
+        [](auto& opts) { opts.enable_ale = false; });
+    expect_rejected_before_mutation([](auto& opts) {
+        opts.mesh_velocity_source =
+            ns::ALEMeshVelocitySource::PrescribedData;
+    });
+    expect_rejected_before_mutation([](auto& opts) {
+        opts.free_surface.front().normal_kinematic_policy =
+            ns::FreeSurfaceNormalKinematicPolicy::None;
+    });
+    expect_rejected_before_mutation([](auto& opts) {
+        opts.free_surface.front().kinematic_enforcement =
+            ns::FreeSurfaceKinematicEnforcement::None;
+    });
+    expect_rejected_before_mutation([](auto& opts) {
+        opts.free_surface.front().tangential_mesh_policy =
+            ns::FreeSurfaceTangentialMeshPolicy::Free;
+    });
+    expect_rejected_before_mutation([](auto& opts) {
+        opts.free_surface.front().tangential_mesh_policy =
+            ns::FreeSurfaceTangentialMeshPolicy::SmoothingOnly;
+    });
+}
+
+TEST(MovingDomainPhysics,
      FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership)
 {
     constexpr int marker = 39;
@@ -3620,11 +4300,23 @@ TEST(MovingDomainPhysics,
         opts.mesh_velocity_source =
             ns::ALEMeshVelocitySource::CoupledDisplacement;
         opts.auto_register_mesh_displacement_field = true;
+        if (policy !=
+            ns::FreeSurfaceTangentialMeshPolicy::Prescribed) {
+            opts.input_configuration_schema_version = 1;
+            opts.explicit_legacy_configuration = true;
+        }
         auto boundary =
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
                 .implementation = ns::FreeSurfaceImplementation::FittedALE,
                 .boundary_marker = marker,
                 .tangential_mesh_policy = policy,
+                .kinematic_enforcement =
+                    policy ==
+                            ns::FreeSurfaceTangentialMeshPolicy::
+                                Prescribed
+                        ? ns::FreeSurfaceKinematicEnforcement::Penalty
+                        : ns::FreeSurfaceKinematicEnforcement::None,
+                .kinematic_penalty = FE::Real{4.0},
             };
         if (policy ==
             ns::FreeSurfaceTangentialMeshPolicy::Prescribed) {
@@ -3660,6 +4352,36 @@ TEST(MovingDomainPhysics,
         EXPECT_EQ(
             has_tangential_descriptor,
             policy == ns::FreeSurfaceTangentialMeshPolicy::Prescribed);
+        const auto artifact =
+            module.effectiveConfigurationArtifact();
+        ASSERT_TRUE(artifact.has_value());
+        EXPECT_NE(
+            artifact->json.find(
+                "\"tangential_mesh_owner\":"
+                "\"IncompressibleNavierStokesVMSModule."
+                "FreeSurfaceBoundary\""),
+            std::string::npos);
+        EXPECT_EQ(
+            artifact->json.find("\"policy_consumed\":true") !=
+                std::string::npos,
+            policy ==
+                ns::FreeSurfaceTangentialMeshPolicy::Prescribed);
+        EXPECT_EQ(
+            artifact->json.find(
+                "\"operator_tag\":\"equations\"") !=
+                std::string::npos,
+            policy ==
+                ns::FreeSurfaceTangentialMeshPolicy::Prescribed);
+        EXPECT_NE(
+            artifact->json.find(
+                policy ==
+                        ns::FreeSurfaceTangentialMeshPolicy::
+                            Prescribed
+                    ? "\"policy_qualification\":"
+                      "\"supported_configuration_envelope\""
+                    : "\"policy_qualification\":"
+                      "\"unqualified_explicit_legacy\""),
+            std::string::npos);
     }
 }
 
@@ -3692,6 +4414,54 @@ TEST(MovingDomainPhysics,
 }
 
 TEST(MovingDomainPhysics,
+     FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy)
+{
+    constexpr int marker = 40;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.input_configuration_schema_version = 1;
+    opts.explicit_legacy_configuration = true;
+    opts.enable_ale = true;
+    opts.mesh_velocity_source =
+        ns::ALEMeshVelocitySource::PrescribedData;
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::FittedALE,
+            .boundary_marker = marker,
+            .tangential_mesh_policy =
+                ns::FreeSurfaceTangentialMeshPolicy::SmoothingOnly,
+        });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    ASSERT_NO_THROW(module.registerOn(system));
+    EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
+    const auto artifact = module.effectiveConfigurationArtifact();
+    ASSERT_TRUE(artifact.has_value());
+    EXPECT_NE(
+        artifact->json.find("\"tangential_mesh_owner\":null"),
+        std::string::npos);
+    EXPECT_NE(
+        artifact->json.find("\"policy_consumed\":false"),
+        std::string::npos);
+    EXPECT_NE(
+        artifact->json.find("\"operator_tag\":null"),
+        std::string::npos);
+    EXPECT_NE(
+        artifact->json.find("\"operator_source\":null"),
+        std::string::npos);
+    EXPECT_NE(
+        artifact->json.find(
+            "\"policy_qualification\":"
+            "\"unqualified_explicit_legacy\""),
+        std::string::npos);
+}
+
+TEST(MovingDomainPhysics,
      FittedFreeSurfaceRejectsMeshMotionTangentialOwnerInEitherOrder)
 {
     constexpr int marker = 41;
@@ -3701,6 +4471,8 @@ TEST(MovingDomainPhysics,
 
     const auto make_fluid_options = [&]() {
         auto opts = baseNavierStokesOptions();
+        opts.input_configuration_schema_version = 1;
+        opts.explicit_legacy_configuration = true;
         opts.enable_ale = true;
         opts.mesh_velocity_source =
             ns::ALEMeshVelocitySource::CoupledDisplacement;
@@ -3751,6 +4523,62 @@ TEST(MovingDomainPhysics,
                      FE::InvalidArgumentException);
         EXPECT_FALSE(system.hasOperator("mesh_motion"));
     }
+
+    {
+        constexpr int accepted_history_marker = marker + 1;
+        FE::systems::FESystem system(mesh);
+        const auto displacement = system.addField(
+            FE::systems::FieldSpec{
+                .name = "accepted_history_mesh_displacement",
+                .space = u_space,
+                .components = 3,
+            });
+        system.bindMeshMotionField(
+            FE::systems::MeshMotionFieldRole::Displacement,
+            displacement);
+        system.declareMeshTangentialBoundaryPolicy(
+            FE::systems::MeshTangentialBoundaryPolicyDeclaration{
+                .mesh_displacement_field = displacement,
+                .boundary_marker = accepted_history_marker,
+                .policy =
+                    FE::systems::MeshTangentialBoundaryPolicy::Prescribed,
+                .owner_component = "accepted_history_owner",
+            });
+        ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+        ASSERT_NO_THROW(
+            system.recordAcceptedMeshTangentialBoundaryPolicies(
+                /*accepted_step=*/1u,
+                FE::Real{0.1},
+                FE::Real{0.1},
+                /*state_revision=*/2u));
+        ASSERT_EQ(system.meshTangentialBoundaryPolicyHistory().size(), 1u);
+
+        const auto field_count = system.fieldMap().numFields();
+        const auto formulation_count = system.formulationRecords().size();
+        const auto policy_count =
+            system.meshTangentialBoundaryPolicies().size();
+        ns::IncompressibleNavierStokesVMSModule fluid_module(
+            u_space, p_space, make_fluid_options());
+        try {
+            fluid_module.registerOn(system);
+            FAIL() << "Expected accepted tangential-policy history to reject "
+                      "a new fitted free-surface policy";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(
+                std::string(error.what()).find(
+                    "accepted tangential-policy history"),
+                std::string::npos)
+                << error.what();
+        }
+        EXPECT_EQ(system.fieldMap().numFields(), field_count);
+        EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.formulationRecords().size(), formulation_count);
+        EXPECT_EQ(system.meshTangentialBoundaryPolicies().size(),
+                  policy_count);
+        EXPECT_EQ(system.meshTangentialBoundaryPolicyHistory().size(), 1u);
+        EXPECT_FALSE(system.hasOperator("equations"));
+    }
 }
 
 TEST(MovingDomainPhysics,
@@ -3785,6 +4613,9 @@ TEST(MovingDomainPhysics,
                 .prescribed_tangential_mesh_velocity = {
                     target[0], target[1], target[2]},
                 .tangential_mesh_penalty = FE::Real{7.0},
+                .kinematic_enforcement =
+                    ns::FreeSurfaceKinematicEnforcement::Penalty,
+                .kinematic_penalty = FE::Real{5.0},
             });
 
         FE::systems::FESystem system(mesh);
@@ -3838,6 +4669,8 @@ TEST(MovingDomainPhysics,
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
+    opts.input_configuration_schema_version = 1;
+    opts.explicit_legacy_configuration = true;
     opts.enable_ale = true;
     opts.enable_convection = false;
     opts.mesh_velocity_source =
@@ -4256,6 +5089,7 @@ TEST(MovingDomainPhysics,
             .contact_position_integral = {{0.02, 0.03, 0.04}},
             .wall_normal_integral = {{0.0, 0.0, -0.1}},
             .footprint_direction_integral = {{0.1, 0.0, 0.0}},
+            .contact_line_tangent_integral = {{0.0, -0.1, 0.0}},
         });
     FE::interfaces::finalizeFreeSurfaceDynamicContactState(contact_state);
 
@@ -4308,6 +5142,10 @@ TEST(MovingDomainPhysics,
     EXPECT_NEAR(stage.state.walls.front().mean_contact_position[0],
                 FE::Real{0.2},
                 1.0e-14);
+    EXPECT_NEAR(
+        stage.state.walls.front().mean_contact_line_tangent[1],
+        FE::Real{-1.0},
+        1.0e-14);
     ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
         7u, FE::Real{0.35}, FE::Real{0.05}, 13u, accepted_states));
 
@@ -4404,7 +5242,6 @@ TEST(MovingDomainPhysics, FreeSurfaceContactLineOptionsAreExplicit)
         7,
         0.78539816339744830962,
         {0.0, 1.0, 0.0},
-        12.0,
         8));
 
     ASSERT_EQ(free_surface.contact_lines.size(), 1u);
@@ -4415,9 +5252,6 @@ TEST(MovingDomainPhysics, FreeSurfaceContactLineOptionsAreExplicit)
     EXPECT_EQ(prescribed.contact_line_marker, 8);
     EXPECT_DOUBLE_EQ(std::get<FE::Real>(prescribed.contact_angle_radians),
                      0.78539816339744830962);
-    EXPECT_DOUBLE_EQ(std::get<FE::Real>(prescribed.contact_angle_penalty),
-                     12.0);
-
     const auto dynamic = dynamicRenEContactLine(
         9, 1.1, {1.0, 0.0, 0.0}, 0.25, 0.01, 10);
     const auto& ren_e = std::get<FreeSurfaceContactLine::DynamicRenE>(
@@ -4452,6 +5286,11 @@ TEST(MovingDomainPhysics, FittedPinnedContactLineConstrainsMeshDisplacement)
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
         .implementation = ns::FreeSurfaceImplementation::FittedALE,
         .boundary_marker = marker,
+        .tangential_mesh_policy =
+            ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
+        .kinematic_enforcement =
+            ns::FreeSurfaceKinematicEnforcement::Penalty,
+        .kinematic_penalty = FE::Real{6.0},
         .contact_lines = {
             pinnedContactLine(/*wall_marker=*/-1, marker),
         },
@@ -4562,8 +5401,13 @@ TEST(MovingDomainPhysics, FittedPrescribedContactAngleFailsClosedWithoutContactL
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
         .implementation = ns::FreeSurfaceImplementation::FittedALE,
         .boundary_marker = marker,
+        .tangential_mesh_policy =
+            ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
+        .kinematic_enforcement =
+            ns::FreeSurfaceKinematicEnforcement::Penalty,
+        .kinematic_penalty = FE::Real{6.0},
         .contact_lines = {
-            prescribedContactLine(marker, 1.0, {1.0, 0.0, 0.0}, 5.0),
+            prescribedContactLine(marker, 1.0, {1.0, 0.0, 0.0}),
         },
     });
 
@@ -4601,6 +5445,10 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceReservesBoundaryMarker)
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.mesh_velocity_source =
+        ns::ALEMeshVelocitySource::CoupledDisplacement;
+    opts.auto_register_mesh_displacement_field = true;
 
     opts.velocity_dirichlet.push_back(ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
         .boundary_marker = marker,
@@ -4610,6 +5458,11 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceReservesBoundaryMarker)
         .implementation = ns::FreeSurfaceImplementation::FittedALE,
         .boundary_marker = marker,
         .external_pressure = 1.0,
+        .tangential_mesh_policy =
+            ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
+        .kinematic_enforcement =
+            ns::FreeSurfaceKinematicEnforcement::Penalty,
+        .kinematic_penalty = FE::Real{6.0},
     });
 
     FE::systems::FESystem system(mesh);
@@ -4813,12 +5666,18 @@ TEST(MovingDomainPhysics,
 {
     constexpr int physical_marker = 214;
     constexpr int interface_marker = 215;
+    constexpr std::size_t natural_variant_count = 3u;
+    constexpr std::size_t weak_variant_count = 4u;
     const auto mesh =
         std::make_shared<SingleTetraBoundaryMeshAccess>(physical_marker);
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
 
-    const auto verify = [&](const auto& configure_boundary) {
+    std::size_t generated_trace_count = 0u;
+    std::size_t whole_face_fallback_count = 0u;
+    const auto verify = [&](std::string_view variant,
+                            const auto& configure_boundary) {
+        SCOPED_TRACE(variant);
         auto opts = baseNavierStokesOptions();
         opts.enable_convection = false;
         opts.jit_policy.enable = false;
@@ -4855,20 +5714,26 @@ TEST(MovingDomainPhysics,
         ns::IncompressibleNavierStokesVMSModule module(
             u_space, p_space, std::move(opts));
         module.registerOn(system);
-        EXPECT_TRUE(formulationRecordsContainInterfaceMarker(
-            system, sharp_marker));
-        EXPECT_FALSE(formulationRecordsContainBoundaryMarker(
-            system, physical_marker));
+        const bool uses_generated_trace =
+            formulationRecordsContainInterfaceMarker(system, sharp_marker);
+        const bool uses_whole_face =
+            formulationRecordsContainBoundaryMarker(system, physical_marker);
+        EXPECT_TRUE(uses_generated_trace);
+        EXPECT_FALSE(uses_whole_face);
+        generated_trace_count +=
+            static_cast<std::size_t>(uses_generated_trace && !uses_whole_face);
+        whole_face_fallback_count +=
+            static_cast<std::size_t>(uses_whole_face);
     };
 
-    verify([](auto& opts) {
+    verify("traction_neumann", [](auto& opts) {
         opts.traction_neumann.push_back(
             ns::IncompressibleNavierStokesVMSOptions::TractionNeumannBC{
                 .boundary_marker = physical_marker,
                 .traction = {1.0, 2.0, 3.0},
             });
     });
-    verify([](auto& opts) {
+    verify("traction_robin", [](auto& opts) {
         opts.traction_robin.push_back(
             ns::IncompressibleNavierStokesVMSOptions::TractionRobinBC{
                 .boundary_marker = physical_marker,
@@ -4876,7 +5741,7 @@ TEST(MovingDomainPhysics,
                 .rhs = {1.0, 0.0, 0.0},
             });
     });
-    verify([](auto& opts) {
+    verify("pressure_outflow", [](auto& opts) {
         opts.pressure_outflow.push_back(
             ns::IncompressibleNavierStokesVMSOptions::PressureOutflowBC{
                 .boundary_marker = physical_marker,
@@ -4884,23 +5749,519 @@ TEST(MovingDomainPhysics,
                 .backflow_beta = 0.25,
             });
     });
-    verify([](auto& opts) {
-        opts.velocity_dirichlet_weak.push_back(
-            ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
-                .boundary_marker = physical_marker,
-                .value = {0.0, 0.0, 0.0},
+    for (const bool symmetric : {true, false}) {
+        for (const bool scale_with_p : {true, false}) {
+            const std::string variant =
+                std::string("weak_nitsche_") +
+                (symmetric ? "symmetric" : "unsymmetric") +
+                (scale_with_p ? "_p_scaled" : "_unscaled");
+            verify(variant, [=](auto& opts) {
+                opts.velocity_dirichlet_weak.push_back(
+                    ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+                        .boundary_marker = physical_marker,
+                        .value = {0.0, 0.0, 0.0},
+                    });
+                opts.nitsche_gamma = 12.0;
+                opts.nitsche_symmetric = symmetric;
+                opts.nitsche_scale_with_p = scale_with_p;
             });
-        opts.nitsche_gamma = 12.0;
-    });
-    verify([](auto& opts) {
-        opts.velocity_dirichlet_weak.push_back(
-            ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
-                .boundary_marker = physical_marker,
-                .value = {0.0, 0.0, 0.0},
+        }
+    }
+
+    const auto supported_variant_count =
+        natural_variant_count + weak_variant_count;
+    EXPECT_EQ(generated_trace_count, supported_variant_count);
+    EXPECT_EQ(whole_face_fallback_count, 0u);
+    RecordProperty("sharp_natural_operator_variant_count",
+                   natural_variant_count);
+    RecordProperty("sharp_weak_operator_variant_count", weak_variant_count);
+    RecordProperty("sharp_operator_generated_trace_count",
+                   generated_trace_count);
+    RecordProperty("sharp_operator_whole_face_fallback_count",
+                   whole_face_fallback_count);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesUnfittedBoundaryOperatorsRejectMultipleActiveOwners)
+{
+    constexpr int physical_marker = 216;
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(physical_marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.jit_policy.enable = false;
+    opts.traction_neumann.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::TractionNeumannBC{
+            .boundary_marker = physical_marker,
+            .traction = {1.0, 0.0, 0.0},
+        });
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = 217,
+            .level_set_field_name = "phi_active_owner_a",
+            .generated_interface_domain_id = "active_owner_a",
+            .active_domain =
+                ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            .active_domain_method =
+                ns::FreeSurfaceActiveDomainMethod::CutVolume,
+        });
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = 218,
+            .level_set_field_name = "phi_active_owner_b",
+            .generated_interface_domain_id = "active_owner_b",
+            .active_domain =
+                ns::FreeSurfaceActiveDomain::LevelSetPositive,
+            .active_domain_method =
+                ns::FreeSurfaceActiveDomainMethod::CutVolume,
+        });
+
+    FE::systems::FESystem system(mesh);
+    for (const auto* field_name :
+         {"phi_active_owner_a", "phi_active_owner_b"}) {
+        system.addField(FE::systems::FieldSpec{
+            .name = field_name,
+            .space = p_space,
+            .components = 1,
+            .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+        });
+    }
+
+    std::size_t rejection_count = 0u;
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    try {
+        module.registerOn(system);
+        FAIL() << "multiple active-domain owners must fail closed";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find(
+                      "at most one active-domain free surface"),
+                  std::string::npos);
+        rejection_count = 1u;
+    }
+    EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(rejection_count, 1u);
+    RecordProperty("sharp_ambiguous_active_domain_rejection_count",
+                   rejection_count);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesUnfittedBoundaryOperatorsRejectCoupledOutflowFamilies)
+{
+    constexpr int physical_marker = 219;
+    constexpr int interface_marker = 220;
+    constexpr std::size_t coupled_family_count = 2u;
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(physical_marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+
+    std::size_t rejection_count = 0u;
+    const auto verify_rejection = [&](std::string_view family,
+                                      const auto& configure_outflow) {
+        SCOPED_TRACE(family);
+        auto opts = baseNavierStokesOptions();
+        opts.enable_convection = false;
+        opts.jit_policy.enable = false;
+        opts.free_surface.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+                .implementation =
+                    ns::FreeSurfaceImplementation::UnfittedLevelSet,
+                .interface_marker = interface_marker,
+                .level_set_field_name = "phi_coupled_outflow",
+                .generated_interface_domain_id =
+                    "coupled_outflow_rejection",
+                .active_domain =
+                    ns::FreeSurfaceActiveDomain::LevelSetNegative,
+                .active_domain_method =
+                    ns::FreeSurfaceActiveDomainMethod::CutVolume,
             });
-        opts.nitsche_gamma = 12.0;
-        opts.nitsche_symmetric = false;
+        configure_outflow(opts);
+
+        FE::systems::FESystem system(mesh);
+        system.addField(FE::systems::FieldSpec{
+            .name = "phi_coupled_outflow",
+            .space = p_space,
+            .components = 1,
+            .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+        });
+        ns::IncompressibleNavierStokesVMSModule module(
+            u_space, p_space, std::move(opts));
+        try {
+            module.registerOn(system);
+            FAIL() << "coupled outflow on a sharp active boundary must fail closed";
+        } catch (const std::invalid_argument& error) {
+            const auto message = std::string(error.what());
+            EXPECT_NE(message.find(std::string(family)), std::string::npos);
+            EXPECT_NE(message.find("unsupported"), std::string::npos);
+            ++rejection_count;
+        }
+        EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+    };
+
+    verify_rejection("coupled RCR outflow", [](auto& opts) {
+        opts.coupled_outflow_rcr.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::CoupledRCROutflowBC{
+                .boundary_marker = physical_marker,
+                .Rp = 1.0,
+                .C = 1.0,
+                .Rd = 1.0,
+            });
     });
+    verify_rejection("coupled RCRCR outflow", [](auto& opts) {
+        opts.coupled_outflow_rcrcr.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::CoupledRCRCROutflowBC{
+                .boundary_marker = physical_marker,
+                .Rp = 1.0,
+                .C1 = 1.0,
+                .Rm = 1.0,
+                .C2 = 1.0,
+                .Rd = 1.0,
+            });
+    });
+
+    EXPECT_EQ(rejection_count, coupled_family_count);
+    RecordProperty("sharp_unsupported_coupled_outflow_rejection_count",
+                   rejection_count);
+    RecordProperty("sharp_supported_coupled_outflow_on_active_boundary_count",
+                   coupled_family_count - rejection_count);
+}
+
+TEST(FreeSurfaceSharpBoundaryOperators,
+     SyntheticSingleTetraInjectedMeasureWetFractionSweepMatchesAnalyticOperatorWork)
+{
+    constexpr FE::Real full_face_measure = 0.5;
+    const std::array<FE::Real, 8> fractions{{
+        1.0e-8, 1.0e-6, 1.0e-4, 1.0e-2, 0.1, 0.25, 0.49, 1.0}};
+    const std::array<FE::geometry::CutIntegrationSide, 2> active_sides{{
+        FE::geometry::CutIntegrationSide::Negative,
+        FE::geometry::CutIntegrationSide::Positive,
+    }};
+    const std::array<SharpBoundaryOperatorFamily, 7> families{{
+        SharpBoundaryOperatorFamily::Traction,
+        SharpBoundaryOperatorFamily::Robin,
+        SharpBoundaryOperatorFamily::PressureFlux,
+        SharpBoundaryOperatorFamily::Outflow,
+        SharpBoundaryOperatorFamily::SymmetricNitsche,
+        SharpBoundaryOperatorFamily::UnsymmetricNitsche,
+        SharpBoundaryOperatorFamily::WallSlip,
+    }};
+
+    FE::Real maximum_force_error{0.0};
+    FE::Real maximum_flux_error{0.0};
+    FE::Real maximum_robin_error{0.0};
+    FE::Real maximum_penalty_error{0.0};
+    std::size_t nonzero_family_side_count{0u};
+    for (const auto family : families) {
+        for (const auto active_side : active_sides) {
+            SCOPED_TRACE(sharpBoundaryOperatorFamilyName(family));
+            SCOPED_TRACE(static_cast<int>(active_side));
+            SharpBoundaryOperatorAssemblyHarness harness(family, active_side);
+            const auto dry = harness.assemble(FE::Real{0.0});
+            EXPECT_EQ(harness.activeRuleCount(), 0u);
+            const auto full = harness.assemble(full_face_measure);
+            EXPECT_EQ(harness.activeRuleCount(), 1u);
+
+            const FE::Real reference_magnitude = std::max(
+                maximumContributionMagnitude(full.residual, dry.residual),
+                maximumContributionMagnitude(full.jacobian, dry.jacobian));
+            EXPECT_GT(reference_magnitude, FE::Real{1.0e-12});
+            nonzero_family_side_count +=
+                static_cast<std::size_t>(reference_magnitude >
+                                         FE::Real{1.0e-12});
+
+            int work_component{0};
+            FE::Real expected_residual_work{0.0};
+            FE::Real expected_jacobian_work{0.0};
+            bool closed_form_work_supported{true};
+            switch (family) {
+            case SharpBoundaryOperatorFamily::Traction:
+                work_component = 0;
+                expected_residual_work = -1.25 * full_face_measure;
+                break;
+            case SharpBoundaryOperatorFamily::Robin:
+                work_component = 0;
+                expected_residual_work =
+                    (1.7 * 0.4 - 0.1) * full_face_measure;
+                expected_jacobian_work = 1.7 * full_face_measure;
+                break;
+            case SharpBoundaryOperatorFamily::PressureFlux:
+                work_component = 2;
+                expected_residual_work = -1.2 * full_face_measure;
+                break;
+            case SharpBoundaryOperatorFamily::Outflow:
+                work_component = 2;
+                expected_residual_work =
+                    -(1.2 - 0.25 * 0.4 * 0.4) * full_face_measure;
+                expected_jacobian_work =
+                    (2.0 * 0.25 * 0.4) * full_face_measure;
+                break;
+            case SharpBoundaryOperatorFamily::SymmetricNitsche:
+            case SharpBoundaryOperatorFamily::UnsymmetricNitsche:
+                // The mixed Nitsche trace has no isolated constant-mode work
+                // probe in this harness. Its residual and Jacobian are checked
+                // entrywise against the exact wet-fraction scaling below.
+                closed_form_work_supported = false;
+                break;
+            case SharpBoundaryOperatorFamily::WallSlip:
+                work_component = 0;
+                expected_residual_work =
+                    (0.01 / 0.2) * 0.4 * full_face_measure;
+                expected_jacobian_work =
+                    (0.01 / 0.2) * full_face_measure;
+                break;
+            }
+            if (closed_form_work_supported) {
+                const FE::Real actual_residual_work =
+                    harness.velocityResidualComponentContribution(
+                        full, dry, work_component);
+                const FE::Real actual_jacobian_work =
+                    harness.velocityJacobianComponentContribution(
+                        full, dry, work_component);
+                const FE::Real analytic_error = std::max(
+                    std::abs(actual_residual_work - expected_residual_work),
+                    std::abs(actual_jacobian_work - expected_jacobian_work));
+                EXPECT_NEAR(actual_residual_work,
+                            expected_residual_work,
+                            FE::Real{1.0e-12});
+                EXPECT_NEAR(actual_jacobian_work,
+                            expected_jacobian_work,
+                            FE::Real{1.0e-12});
+                switch (family) {
+                case SharpBoundaryOperatorFamily::Traction:
+                case SharpBoundaryOperatorFamily::WallSlip:
+                    maximum_force_error =
+                        std::max(maximum_force_error, analytic_error);
+                    break;
+                case SharpBoundaryOperatorFamily::PressureFlux:
+                case SharpBoundaryOperatorFamily::Outflow:
+                    maximum_flux_error =
+                        std::max(maximum_flux_error, analytic_error);
+                    break;
+                case SharpBoundaryOperatorFamily::Robin:
+                    maximum_robin_error =
+                        std::max(maximum_robin_error, analytic_error);
+                    break;
+                case SharpBoundaryOperatorFamily::SymmetricNitsche:
+                case SharpBoundaryOperatorFamily::UnsymmetricNitsche:
+                    break;
+                }
+            }
+
+            for (const FE::Real fraction : fractions) {
+                SCOPED_TRACE(fraction);
+                const auto sample =
+                    harness.assemble(full_face_measure * fraction);
+                EXPECT_EQ(harness.activeRuleCount(), 1u);
+                const FE::Real residual_error =
+                    maximumWetFractionScalingError(
+                        sample.residual,
+                        dry.residual,
+                        full.residual,
+                        fraction);
+                const FE::Real jacobian_error =
+                    maximumWetFractionScalingError(
+                        sample.jacobian,
+                        dry.jacobian,
+                        full.jacobian,
+                        fraction);
+                const FE::Real error =
+                    std::max(residual_error, jacobian_error);
+                EXPECT_LE(error, FE::Real{1.0e-10});
+
+                switch (family) {
+                case SharpBoundaryOperatorFamily::Traction:
+                case SharpBoundaryOperatorFamily::WallSlip:
+                    maximum_force_error =
+                        std::max(maximum_force_error, error);
+                    break;
+                case SharpBoundaryOperatorFamily::PressureFlux:
+                case SharpBoundaryOperatorFamily::Outflow:
+                    maximum_flux_error =
+                        std::max(maximum_flux_error, error);
+                    break;
+                case SharpBoundaryOperatorFamily::Robin:
+                    maximum_robin_error =
+                        std::max(maximum_robin_error, error);
+                    break;
+                case SharpBoundaryOperatorFamily::SymmetricNitsche:
+                case SharpBoundaryOperatorFamily::UnsymmetricNitsche:
+                    maximum_penalty_error =
+                        std::max(maximum_penalty_error, error);
+                    break;
+                }
+            }
+        }
+    }
+
+    EXPECT_EQ(nonzero_family_side_count,
+              families.size() * active_sides.size());
+    RecordProperty("sharp_operator_fraction_case_count", fractions.size());
+    RecordProperty("sharp_operator_family_count", families.size());
+    RecordProperty("sharp_operator_active_side_case_count",
+                   active_sides.size());
+    RecordProperty("sharp_operator_maximum_scaled_force_error",
+                   ::testing::PrintToString(maximum_force_error));
+    RecordProperty("sharp_operator_maximum_scaled_flux_error",
+                   ::testing::PrintToString(maximum_flux_error));
+    RecordProperty("sharp_operator_maximum_scaled_robin_error",
+                   ::testing::PrintToString(maximum_robin_error));
+    RecordProperty("sharp_operator_maximum_scaled_penalty_error",
+                   ::testing::PrintToString(maximum_penalty_error));
+}
+
+TEST(FreeSurfaceSharpBoundaryOperators,
+     SyntheticSingleTetraInjectedMeasureActiveSideReversalUsesComplementarySharpSubset)
+{
+    constexpr FE::Real full_face_measure = 0.5;
+    constexpr FE::Real negative_fraction = 0.25;
+    constexpr FE::Real positive_fraction = 1.0 - negative_fraction;
+    SharpBoundaryOperatorAssemblyHarness negative(
+        SharpBoundaryOperatorFamily::Traction,
+        FE::geometry::CutIntegrationSide::Negative);
+    SharpBoundaryOperatorAssemblyHarness positive(
+        SharpBoundaryOperatorFamily::Traction,
+        FE::geometry::CutIntegrationSide::Positive);
+
+    const auto negative_dry = negative.assemble(FE::Real{0.0});
+    const auto positive_dry = positive.assemble(FE::Real{0.0});
+    const auto negative_full = negative.assemble(full_face_measure);
+    const auto positive_full = positive.assemble(full_face_measure);
+    const auto negative_quarter =
+        negative.assemble(full_face_measure * negative_fraction);
+    const std::size_t negative_rule_count = negative.activeRuleCount();
+    const auto positive_complement =
+        positive.assemble(full_face_measure * positive_fraction);
+    const std::size_t positive_rule_count = positive.activeRuleCount();
+
+    const auto complementary_error = [](std::span<const FE::Real> negative_part,
+                                        std::span<const FE::Real> negative_zero,
+                                        std::span<const FE::Real> positive_part,
+                                        std::span<const FE::Real> positive_zero,
+                                        std::span<const FE::Real> full,
+                                        std::span<const FE::Real> full_zero) {
+        if (negative_part.size() != positive_part.size() ||
+            negative_part.size() != full.size()) {
+            throw std::invalid_argument(
+                "sharp active-side samples have different sizes");
+        }
+        FE::Real maximum{0.0};
+        for (std::size_t i = 0u; i < full.size(); ++i) {
+            const FE::Real combined =
+                (negative_part[i] - negative_zero[i]) +
+                (positive_part[i] - positive_zero[i]);
+            maximum = std::max(
+                maximum,
+                std::abs(combined - (full[i] - full_zero[i])));
+        }
+        return maximum;
+    };
+    FE::Real maximum_complement_error = complementary_error(
+        negative_quarter.residual,
+        negative_dry.residual,
+        positive_complement.residual,
+        positive_dry.residual,
+        negative_full.residual,
+        negative_dry.residual);
+    maximum_complement_error = std::max(
+        maximum_complement_error,
+        complementary_error(negative_quarter.jacobian,
+                            negative_dry.jacobian,
+                            positive_complement.jacobian,
+                            positive_dry.jacobian,
+                            negative_full.jacobian,
+                            negative_dry.jacobian));
+    maximum_complement_error = std::max(
+        maximum_complement_error,
+        complementary_error(negative_full.residual,
+                            negative_dry.residual,
+                            positive_dry.residual,
+                            positive_dry.residual,
+                            positive_full.residual,
+                            positive_dry.residual));
+    maximum_complement_error = std::max(
+        maximum_complement_error,
+        complementary_error(negative_full.jacobian,
+                            negative_dry.jacobian,
+                            positive_dry.jacobian,
+                            positive_dry.jacobian,
+                            positive_full.jacobian,
+                            positive_dry.jacobian));
+    EXPECT_LE(maximum_complement_error, FE::Real{1.0e-12});
+
+    const std::size_t marker_mismatch_count =
+        static_cast<std::size_t>(negative_rule_count != 1u) +
+        static_cast<std::size_t>(positive_rule_count != 1u);
+    EXPECT_EQ(marker_mismatch_count, 0u);
+    RecordProperty("sharp_active_side_case_count", 2);
+    RecordProperty("sharp_active_side_maximum_complement_error",
+                   ::testing::PrintToString(maximum_complement_error));
+    RecordProperty("sharp_active_side_marker_mismatch_count",
+                   marker_mismatch_count);
+}
+
+TEST(FreeSurfaceSharpBoundaryOperators,
+     SyntheticSingleTetraInjectedMeasureCompletelyDryBoundaryProducesExactlyZeroWetRows)
+{
+    const std::array<SharpBoundaryOperatorFamily, 7> families{{
+        SharpBoundaryOperatorFamily::Traction,
+        SharpBoundaryOperatorFamily::Robin,
+        SharpBoundaryOperatorFamily::PressureFlux,
+        SharpBoundaryOperatorFamily::Outflow,
+        SharpBoundaryOperatorFamily::SymmetricNitsche,
+        SharpBoundaryOperatorFamily::UnsymmetricNitsche,
+        SharpBoundaryOperatorFamily::WallSlip,
+    }};
+    const std::array<FE::geometry::CutIntegrationSide, 2> active_sides{{
+        FE::geometry::CutIntegrationSide::Negative,
+        FE::geometry::CutIntegrationSide::Positive,
+    }};
+
+    std::size_t generated_rule_count{0u};
+    std::size_t whole_face_contribution_count{0u};
+    FE::Real maximum_dry_repeatability_error{0.0};
+    for (const auto family : families) {
+        for (const auto active_side : active_sides) {
+            SCOPED_TRACE(sharpBoundaryOperatorFamilyName(family));
+            SCOPED_TRACE(static_cast<int>(active_side));
+            SharpBoundaryOperatorAssemblyHarness harness(family, active_side);
+            const auto dry = harness.assemble(FE::Real{0.0});
+            const auto repeated_dry = harness.assemble(FE::Real{0.0});
+            generated_rule_count += harness.activeRuleCount();
+            const FE::Real residual_error = maximumAbsoluteDifference(
+                dry.residual, repeated_dry.residual);
+            const FE::Real jacobian_error = maximumAbsoluteDifference(
+                dry.jacobian, repeated_dry.jacobian);
+            EXPECT_EQ(residual_error, FE::Real{0.0});
+            EXPECT_EQ(jacobian_error, FE::Real{0.0});
+            EXPECT_FALSE(harness.usesWholePhysicalBoundary());
+            maximum_dry_repeatability_error = std::max(
+                maximum_dry_repeatability_error,
+                std::max(residual_error, jacobian_error));
+            whole_face_contribution_count += static_cast<std::size_t>(
+                harness.usesWholePhysicalBoundary());
+        }
+    }
+
+    EXPECT_EQ(generated_rule_count, 0u);
+    EXPECT_EQ(whole_face_contribution_count, 0u);
+    // With no generated quadrature rules and no whole-face expression, the
+    // second assembly certifies that the empty sharp domain is deterministic.
+    RecordProperty("sharp_dry_operator_family_count", families.size());
+    RecordProperty("sharp_dry_generated_rule_count", generated_rule_count);
+    RecordProperty("sharp_dry_repeatability_maximum_error",
+                   ::testing::PrintToString(
+                       maximum_dry_repeatability_error));
+    RecordProperty("sharp_dry_whole_face_contribution_count",
+                   whole_face_contribution_count);
 }
 
 TEST(MovingDomainPhysics, NavierStokesUnfittedSurfaceTensionRejectsRawLevelSetCurvature)
@@ -6572,7 +7933,8 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsALEUntilTranspor
     }
 }
 
-TEST(MovingDomainPhysics, NavierStokesUnfittedContactAngleUsesOwningEquationsOperator)
+TEST(MovingDomainPhysics,
+     NavierStokesPrescribedAngleRegistersGeometryWithoutLevelSetResidual)
 {
     constexpr int interface_marker = 44;
     constexpr int wall_marker = 12;
@@ -6591,8 +7953,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedContactAngleUsesOwningEquationsOpe
             prescribedContactLine(
                 wall_marker,
                 1.0471975511965977462,
-                {1.0, 0.0, 0.0},
-                4.0),
+                {1.0, 0.0, 0.0}),
         },
     });
 
@@ -6618,13 +7979,28 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedContactAngleUsesOwningEquationsOpe
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
     module.registerOn(system);
 
+    const auto declarations =
+        system.freeSurfaceDiscreteFunctionalDeclarations();
+    ASSERT_EQ(declarations.size(), 1u);
+    EXPECT_EQ(declarations.front().interface_marker, interface_marker);
+    EXPECT_EQ(declarations.front().level_set_field, phi);
+    EXPECT_EQ(declarations.front().velocity_field, FE::INVALID_FIELD_ID);
+    ASSERT_EQ(
+        declarations.front().parameters.young_wall_coefficients.size(),
+        1u);
+    EXPECT_EQ(
+        declarations.front()
+            .parameters.young_wall_coefficients.front()
+            .boundary_marker,
+        wall_marker);
+    EXPECT_TRUE(
+        declarations.front().parameters.dynamic_contact_coefficients.empty());
     EXPECT_TRUE(system.hasOperator("equations"));
     EXPECT_FALSE(system.hasOperator("level_set"));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
-    EXPECT_TRUE(formulationRecordsContainInterfaceMarker(system, contact_marker));
-    EXPECT_FALSE(formulationRecordsContainInterfaceMarker(system,
-                                                         interface_marker));
+    EXPECT_TRUE(
+        system.isGeneratedEmbeddedInterfaceMarkerRegistered(contact_marker));
+    EXPECT_FALSE(
+        formulationRecordsContainInterfaceMarker(system, contact_marker));
     bool found_contact_record = false;
     for (const auto& record : system.formulationRecords()) {
         if (!record.residual_expr) {
@@ -6637,12 +8013,259 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedContactAngleUsesOwningEquationsOpe
             continue;
         }
         found_contact_record = true;
-        EXPECT_EQ(record.operator_tag, "equations");
     }
-    EXPECT_TRUE(found_contact_record);
+    EXPECT_FALSE(found_contact_record);
+    const auto effective = module.effectiveConfigurationArtifact();
+    ASSERT_TRUE(effective.has_value());
+    EXPECT_NE(effective->json.find(
+                  "\"prescribed_angle_operator\":"
+                  "\"wall_aware_geometry_only\""),
+              std::string::npos);
 }
 
-TEST(MovingDomainPhysics, NavierStokesUnfittedContactAnglePropagatesExistingFieldOwner)
+TEST(MovingDomainPhysics,
+     NavierStokesCurvatureTractionPrescribedAngleDeclaresWallAwareFunctional)
+{
+    constexpr int interface_marker = 46;
+    constexpr int wall_marker = 14;
+    constexpr FE::Real angle = FE::Real{1.0471975511965977462};
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = interface_marker,
+            .level_set_field_name = "phi",
+            .active_domain =
+                ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            .surface_tension = FE::Real{0.8},
+            .surface_tension_form =
+                ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction,
+            .curvature = FE::Real{0.0},
+            .use_level_set_curvature = false,
+            .contact_lines = {
+                prescribedContactLine(
+                    wall_marker,
+                    angle,
+                    {1.0, 0.0, 0.0}),
+            },
+        });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+    });
+    system.addOperator("equations");
+    const auto phi_state =
+        FE::forms::StateField(phi, *p_space, "phi_curvature_owner");
+    const auto eta =
+        FE::forms::TestField(phi, *p_space, "eta_curvature_owner");
+    (void)FE::systems::installFormulation(
+        system,
+        "equations",
+        {phi},
+        (phi_state * eta).dx());
+
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    ASSERT_NO_THROW(module.registerOn(system));
+
+    const auto declarations =
+        system.freeSurfaceDiscreteFunctionalDeclarations();
+    ASSERT_EQ(declarations.size(), 1u);
+    EXPECT_EQ(declarations.front().interface_marker, interface_marker);
+    EXPECT_EQ(declarations.front().level_set_field, phi);
+    EXPECT_EQ(declarations.front().velocity_field, FE::INVALID_FIELD_ID);
+    EXPECT_DOUBLE_EQ(declarations.front().parameters.surface_tension,
+                     FE::Real{0.8});
+    ASSERT_EQ(
+        declarations.front().parameters.young_wall_coefficients.size(),
+        1u);
+    EXPECT_EQ(
+        declarations.front()
+            .parameters.young_wall_coefficients.front()
+            .boundary_marker,
+        wall_marker);
+    EXPECT_TRUE(
+        declarations.front().parameters.dynamic_contact_coefficients.empty());
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesDiscreteFunctionalOwnerConflictRejectsBeforeFluidMutation)
+{
+    constexpr int interface_marker = 45;
+    constexpr int wall_marker = 13;
+    constexpr FE::Real angle = FE::Real{1.0471975511965977462};
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = interface_marker,
+            .level_set_field_name = "phi",
+            .active_domain =
+                ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            .surface_tension = FE::Real{0.8},
+            .surface_tension_form =
+                ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction,
+            .curvature = FE::Real{0.0},
+            .use_level_set_curvature = false,
+            .contact_lines = {
+                prescribedContactLine(
+                    wall_marker,
+                    angle,
+                    {1.0, 0.0, 0.0}),
+            },
+        });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+    });
+    system.addOperator("equations");
+    const auto phi_state =
+        FE::forms::StateField(phi, *p_space, "phi_existing_owner");
+    const auto eta =
+        FE::forms::TestField(phi, *p_space, "eta_existing_owner");
+    (void)FE::systems::installFormulation(
+        system,
+        "equations",
+        {phi},
+        (phi_state * eta).dx());
+
+    FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+    parameters.liquid_side = FE::geometry::CutIntegrationSide::Negative;
+    parameters.young_wall_coefficients.push_back(
+        FE::interfaces::FreeSurfaceYoungWallCoefficient{
+            .boundary_marker = wall_marker,
+            .equilibrium_contact_angle_radians = angle,
+        });
+    system.declareFreeSurfaceDiscreteFunctional(
+        FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+            .interface_marker = interface_marker,
+            .level_set_field = phi,
+            .geometry_domain_id = "existing_functional",
+            .parameters = std::move(parameters),
+            .owner_component = "existing_functional_owner",
+        });
+
+    const auto field_count = system.fieldMap().numFields();
+    const auto formulation_count = system.formulationRecords().size();
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    try {
+        module.registerOn(system);
+        FAIL() << "Expected the existing discrete-functional owner to reject "
+                  "registration";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "already has discrete-functional owner"),
+            std::string::npos)
+            << error.what();
+    }
+
+    EXPECT_EQ(system.fieldMap().numFields(), field_count);
+    EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.formulationRecords().size(), formulation_count);
+    ASSERT_EQ(system.freeSurfaceDiscreteFunctionalDeclarations().size(), 1u);
+    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalDeclarations()
+                  .front()
+                  .owner_component,
+              "existing_functional_owner");
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesPrescribedAngleRequiresActiveLiquidSideBeforeMutation)
+{
+    constexpr int interface_marker = 47;
+    constexpr int wall_marker = 15;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = interface_marker,
+            .level_set_field_name = "phi",
+            .allow_full_domain_unfitted_free_surface = true,
+            .contact_lines = {
+                prescribedContactLine(
+                    wall_marker,
+                    FE::Real{1.0471975511965977462},
+                    {1.0, 0.0, 0.0}),
+            },
+        });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+    });
+    system.addOperator("equations");
+    const auto phi_state =
+        FE::forms::StateField(phi, *p_space, "phi_side_owner");
+    const auto eta = FE::forms::TestField(phi, *p_space, "eta_side_owner");
+    (void)FE::systems::installFormulation(
+        system,
+        "equations",
+        {phi},
+        (phi_state * eta).dx());
+
+    const auto field_count = system.fieldMap().numFields();
+    const auto formulation_count = system.formulationRecords().size();
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    try {
+        module.registerOn(system);
+        FAIL() << "Expected a prescribed contact angle without an active "
+                  "liquid side to fail";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("active liquid side"),
+                  std::string::npos)
+            << error.what();
+    }
+
+    EXPECT_EQ(system.fieldMap().numFields(), field_count);
+    EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.formulationRecords().size(), formulation_count);
+    EXPECT_TRUE(system.freeSurfaceDiscreteFunctionalDeclarations().empty());
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesPrescribedAngleRejectsPreinstalledInvalidContactGeometryBeforeMutation)
+{
+    expectInvalidPreinstalledContactGeometryRejectedBeforeMutation(
+        ContactGeometryPreflightLaw::PrescribedAngle);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesDynamicContactAngleRejectsPreinstalledInvalidContactGeometryBeforeMutation)
+{
+    expectInvalidPreinstalledContactGeometryRejectedBeforeMutation(
+        ContactGeometryPreflightLaw::DynamicRenE);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesPrescribedAngleLeavesExistingFieldOwnerUnmodified)
 {
     constexpr int interface_marker = 54;
     constexpr int wall_marker = 22;
@@ -6662,8 +8285,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedContactAnglePropagatesExistingFiel
                 prescribedContactLine(
                     wall_marker,
                     1.0471975511965977462,
-                    {1.0, 0.0, 0.0},
-                    4.0),
+                    {1.0, 0.0, 0.0}),
             },
         });
 
@@ -6688,6 +8310,8 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedContactAnglePropagatesExistingFiel
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
     module.registerOn(system);
 
+    EXPECT_TRUE(
+        system.isGeneratedEmbeddedInterfaceMarkerRegistered(contact_marker));
     bool found_contact_record = false;
     for (const auto& record : system.formulationRecords()) {
         if (!record.residual_expr) {
@@ -6700,9 +8324,9 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedContactAnglePropagatesExistingFiel
             continue;
         }
         found_contact_record = true;
-        EXPECT_EQ(record.operator_tag, owner_tag);
     }
-    EXPECT_TRUE(found_contact_record);
+    EXPECT_FALSE(found_contact_record);
+    EXPECT_TRUE(system.hasOperator(std::string(owner_tag)));
     EXPECT_FALSE(system.hasOperator("level_set"));
 }
 
@@ -6727,8 +8351,7 @@ TEST(MovingDomainPhysics,
                 prescribedContactLine(
                     wall_marker,
                     1.0471975511965977462,
-                    {1.0, 0.0, 0.0},
-                    4.0),
+                    {1.0, 0.0, 0.0}),
             },
         });
 
@@ -6940,6 +8563,9 @@ TEST(MovingDomainPhysics,
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
+    opts.mesh_velocity_source =
+        ns::ALEMeshVelocitySource::CoupledDisplacement;
+    opts.auto_register_mesh_displacement_field = true;
     opts.nitsche_gamma = 23.0;
     opts.nitsche_symmetric = false;
     opts.nitsche_scale_with_p = false;
@@ -6950,6 +8576,8 @@ TEST(MovingDomainPhysics,
             .external_pressure = 2.25,
             .surface_tension = 0.5,
             .curvature = 3.0,
+            .tangential_mesh_policy =
+                ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
             .kinematic_enforcement =
                 ns::FreeSurfaceKinematicEnforcement::Nitsche,
             .kinematic_nitsche_gamma = 17.0,
@@ -6969,7 +8597,7 @@ TEST(MovingDomainPhysics,
     const auto artifact = module.effectiveConfigurationArtifact();
     ASSERT_TRUE(artifact.has_value());
     constexpr std::string_view expected =
-        R"json({"artifact_schema_version":1,"component":"incompressible_navier_stokes_free_surface","configuration_schema":{"input_version":2,"effective_version":2,"migration_mode":"current"},"capability_label":"one_phase_liquid_sharp_interface","units":{"system":"consistent_solver_units","angle":"radian","length":"solver_length","pressure":"solver_pressure","surface_tension":"force_per_length"},"fields":{"velocity":"u","pressure":"p","operator":"equations","dimension":3},"ale":{"enabled":true,"mesh_velocity_source":"PrescribedData","mesh_velocity_field":"mesh_velocity","mesh_displacement_field":"mesh_displacement","geometry_tangent_path":"SymbolicRequired"},"generic_velocity_nitsche":{"gamma":23,"symmetric":false,"scale_with_polynomial_order":false},"stabilization":{"vms_enabled":false,"ct_m":1,"ct_c":36,"epsilon":9.9999999999999998e-13},"maintenance_policy":{"owner_component":"level_set_transport","coupling":"one_way_velocity_to_extension_to_level_set"},"extension_guards":{"physical_momentum_dry_extension_allowed":false,"auxiliary_extension_owner":"level_set_transport","external_owner_required":true},"free_surfaces":[{"implementation":"FittedALE","boundary_marker":172,"interface_marker":-1,"level_set_field":"level_set","generated_interface_domain":"free_surface","generated_interface_geometry":"LinearCorner","geometry_tangent_policy":"RefreshedFrozenQuadrature","level_set_isovalue":0,"active_domain":"None","active_phase_sign":"full_domain","active_domain_method":"CutVolume","active_domain_smoothing_width":0,"smoothing_width_unit":"length","allow_full_domain_unfitted_free_surface":false,"external_pressure":2.25,"surface_tension":0.5,"surface_tension_form_requested":"Automatic","surface_tension_form_effective":"CurvatureTraction","curvature_policy":"supplied_scalar","curvature_tangent_policy":"supplied_scalar_frozen","kinematic":{"normal_policy":"MatchFluidNormalVelocity","tangential_mesh_policy":"SmoothingOnly","prescribed_tangential_mesh_velocity":[0,0,0],"enforcement":"Nitsche","penalty":0,"nitsche":{"gamma":17,"symmetric":false,"scale_with_polynomial_order":false}},"stabilization":{"enabled":false,"small_cut_aggregation":true,"pressure_policy":"Enabled","pressure_gradient_penalty":1,"use_cut_metadata_scale":false,"cut_metadata_scale_cap":null},"pruning":{"decision_owner":"authoritative_geometry_snapshot","fallback_to_whole_face":false},"legacy_dry_velocity_diffusion":{"enabled":false,"diffusivity":1,"production_allowed":false},"contact_lines":[{"model":"None"}]}]})json";
+        R"json({"artifact_schema_version":1,"component":"incompressible_navier_stokes_free_surface","configuration_schema":{"input_version":2,"effective_version":2,"migration_mode":"current"},"capability_label":"one_phase_liquid_sharp_interface","units":{"system":"consistent_solver_units","angle":"radian","length":"solver_length","pressure":"solver_pressure","surface_tension":"force_per_length"},"fields":{"velocity":"u","pressure":"p","operator":"equations","dimension":3},"ale":{"enabled":true,"mesh_velocity_source":"CoupledDisplacement","mesh_velocity_field":"mesh_velocity","mesh_displacement_field":"mesh_displacement","geometry_tangent_path":"SymbolicRequired"},"generic_velocity_nitsche":{"gamma":23,"symmetric":false,"scale_with_polynomial_order":false},"stabilization":{"vms_enabled":false,"ct_m":1,"ct_c":36,"epsilon":9.9999999999999998e-13},"maintenance_policy":{"owner_component":"level_set_transport","coupling":"one_way_velocity_to_extension_to_level_set"},"extension_guards":{"physical_momentum_dry_extension_allowed":false,"auxiliary_extension_owner":"level_set_transport","external_owner_required":true},"free_surfaces":[{"implementation":"FittedALE","boundary_marker":172,"interface_marker":-1,"level_set_field":"level_set","generated_interface_domain":"free_surface","generated_interface_geometry":"LinearCorner","geometry_tangent_policy":"RefreshedFrozenQuadrature","level_set_isovalue":0,"active_domain":"None","active_phase_sign":"full_domain","active_domain_method":"CutVolume","active_domain_smoothing_width":0,"smoothing_width_unit":"length","allow_full_domain_unfitted_free_surface":false,"external_pressure":2.25,"surface_tension":0.5,"surface_tension_form_requested":"Automatic","surface_tension_form_effective":"CurvatureTraction","curvature_policy":"supplied_scalar","curvature_tangent_policy":"supplied_scalar_frozen","kinematic":{"normal_policy":"MatchFluidNormalVelocity","tangential_mesh_policy":"Prescribed","prescribed_tangential_mesh_velocity":[0,0,0],"enforcement":"Nitsche","penalty":0,"nitsche":{"gamma":17,"symmetric":false,"scale_with_polynomial_order":false}},"stabilization":{"enabled":false,"small_cut_aggregation":true,"pressure_policy":"Enabled","pressure_gradient_penalty":1,"use_cut_metadata_scale":false,"cut_metadata_scale_cap":null},"pruning":{"decision_owner":"authoritative_geometry_snapshot","fallback_to_whole_face":false},"legacy_dry_velocity_diffusion":{"enabled":false,"diffusivity":1,"production_allowed":false},"contact_lines":[{"model":"None"}]}]})json";
     std::string expected_with_aggregation_guards(expected);
     constexpr std::string_view cut_scale_fragment =
         "\"cut_metadata_scale_cap\":null";
@@ -6991,7 +8619,13 @@ TEST(MovingDomainPhysics,
     expected_with_aggregation_guards.insert(
         tangential_insertion + tangential_velocity_fragment.size(),
         ",\"tangential_mesh_penalty\":1,"
-        "\"tangential_mesh_owner\":\"FreeSurfaceBoundary\"");
+        "\"tangential_mesh_owner\":"
+        "\"IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary\","
+        "\"policy_consumed\":true,"
+        "\"operator_tag\":\"equations\","
+        "\"operator_source\":\"Fitted free-surface prescribed tangential "
+        "mesh velocity on marker 172\","
+        "\"policy_qualification\":\"supported_configuration_envelope\"");
     EXPECT_EQ(artifact->json, expected_with_aggregation_guards);
 }
 
@@ -7035,9 +8669,11 @@ TEST(MovingDomainPhysics,
 }
 
 TEST(MovingDomainPhysics,
-     NavierStokesUnfittedContactAngleUsesThroughLiquidConventionOnAllWallOrientations)
+     NavierStokesPrescribedAngleAddsNoLiteralLevelSetResidualAcrossOrientations)
 {
     constexpr FE::Real pi = 3.14159265358979323846;
+    FE::Real maximum_added_residual{0.0};
+    std::size_t orientation_case_count{0u};
     for (const FE::Real angle : {pi / 3.0, 2.0 * pi / 3.0}) {
         for (int axis = 0; axis < 3; ++axis) {
             for (const FE::Real orientation : {-1.0, 1.0}) {
@@ -7049,34 +8685,51 @@ TEST(MovingDomainPhysics,
                 active_outward_normal[static_cast<std::size_t>((axis + 1) % 3)] =
                     std::sin(angle);
 
-                const auto negative_active = unfittedContactAngleResidualVector(
-                    ns::FreeSurfaceActiveDomain::LevelSetNegative,
-                    angle,
-                    active_outward_normal,
-                    wall);
-                EXPECT_NEAR(vectorNorm(negative_active), 0.0, 1.0e-11)
-                    << "angle=" << angle << " axis=" << axis
-                    << " orientation=" << orientation
-                    << " active=negative";
-
-                for (auto& component : active_outward_normal) {
-                    component = -component;
+                for (const auto active_domain : {
+                         ns::FreeSurfaceActiveDomain::LevelSetNegative,
+                         ns::FreeSurfaceActiveDomain::LevelSetPositive}) {
+                    auto signed_gradient = active_outward_normal;
+                    if (active_domain ==
+                        ns::FreeSurfaceActiveDomain::LevelSetPositive) {
+                        for (auto& component : signed_gradient) {
+                            component = -component;
+                        }
+                    }
+                    const auto configured =
+                        unfittedContactAngleResidualVector(
+                            active_domain,
+                            angle,
+                            signed_gradient,
+                            wall);
+                    const auto owner_only =
+                        unfittedContactAngleResidualVector(
+                            active_domain,
+                            angle,
+                            signed_gradient,
+                            wall,
+                            nullptr,
+                            /*include_contact_angle=*/false);
+                    ASSERT_EQ(configured.size(), owner_only.size());
+                    for (std::size_t i = 0; i < configured.size(); ++i) {
+                        maximum_added_residual = std::max(
+                            maximum_added_residual,
+                            std::abs(configured[i] - owner_only[i]));
+                    }
+                    ++orientation_case_count;
                 }
-                const auto positive_active = unfittedContactAngleResidualVector(
-                    ns::FreeSurfaceActiveDomain::LevelSetPositive,
-                    angle,
-                    active_outward_normal,
-                    wall);
-                EXPECT_NEAR(vectorNorm(positive_active), 0.0, 1.0e-11)
-                    << "angle=" << angle << " axis=" << axis
-                    << " orientation=" << orientation
-                    << " active=positive";
             }
         }
     }
+    EXPECT_EQ(maximum_added_residual, FE::Real{0.0});
+    EXPECT_EQ(orientation_case_count, 24u);
+    RecordProperty("retired_contact_residual_orientation_case_count",
+                   orientation_case_count);
+    RecordProperty("retired_contact_residual_maximum_added_value",
+                   ::testing::PrintToString(maximum_added_residual));
 }
 
-TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleResidualChangesSignWithLevelSetNormal)
+TEST(MovingDomainPhysics,
+     NavierStokesLiteralContactResidualIsAbsentFromResidualAndJacobian)
 {
     constexpr FE::Real half_pi = 1.57079632679489661923;
     constexpr FE::Real inv_sqrt_two = 0.70710678118654752440;
@@ -7084,44 +8737,44 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleResidualChan
         inv_sqrt_two, 0.0, inv_sqrt_two};
     const std::array<FE::Real, 3> wall{0.0, 0.0, 1.0};
     ContactAngleAssemblyProbe contact_probe;
-    const auto positive_gap = unfittedContactAngleResidualVector(
+    const auto configured = unfittedContactAngleResidualVector(
         ns::FreeSurfaceActiveDomain::LevelSetNegative,
         half_pi,
         gradient,
         wall,
         &contact_probe);
     ContactAngleAssemblyProbe owner_probe;
-    (void)unfittedContactAngleResidualVector(
+    const auto owner_only = unfittedContactAngleResidualVector(
         ns::FreeSurfaceActiveDomain::LevelSetNegative,
         half_pi,
         gradient,
         wall,
         &owner_probe,
         /*include_contact_angle=*/false);
-    const auto negative_gap = unfittedContactAngleResidualVector(
-        ns::FreeSurfaceActiveDomain::LevelSetNegative,
-        half_pi,
-        std::array<FE::Real, 3>{-inv_sqrt_two, 0.0, -inv_sqrt_two});
-
-    ASSERT_EQ(positive_gap.size(), negative_gap.size());
+    ASSERT_EQ(configured.size(), owner_only.size());
     ASSERT_EQ(contact_probe.phi_jacobian.size(),
               owner_probe.phi_jacobian.size());
-    EXPECT_GT(vectorNorm(positive_gap), 1.0e-12);
-    EXPECT_GT(vectorNorm(negative_gap), 1.0e-12);
-    FE::Real contact_jacobian_norm2 = 0.0;
+    FE::Real maximum_added_residual{0.0};
+    for (std::size_t i = 0; i < configured.size(); ++i) {
+        maximum_added_residual = std::max(
+            maximum_added_residual,
+            std::abs(configured[i] - owner_only[i]));
+    }
+    FE::Real maximum_added_jacobian{0.0};
     for (std::size_t i = 0; i < contact_probe.phi_jacobian.size(); ++i) {
-        const auto contact_entry =
-            contact_probe.phi_jacobian[i] - owner_probe.phi_jacobian[i];
-        contact_jacobian_norm2 += contact_entry * contact_entry;
+        maximum_added_jacobian = std::max(
+            maximum_added_jacobian,
+            std::abs(contact_probe.phi_jacobian[i] -
+                     owner_probe.phi_jacobian[i]));
     }
-    EXPECT_GT(std::sqrt(contact_jacobian_norm2), 1.0e-12);
-    for (std::size_t i = 0; i < positive_gap.size(); ++i) {
-        EXPECT_NEAR(positive_gap[i], -negative_gap[i], 1.0e-12);
-    }
+    EXPECT_EQ(maximum_added_residual, FE::Real{0.0});
+    EXPECT_EQ(maximum_added_jacobian, FE::Real{0.0});
+    RecordProperty("retired_contact_residual_maximum_added_jacobian",
+                   ::testing::PrintToString(maximum_added_jacobian));
 }
 
 TEST(MovingDomainPhysics,
-     NavierStokesSurfaceStressPrescribedAngleUsesGeneratedContactNormal)
+     NavierStokesPrescribedWallEnergyDoesNotWriteLevelSetRows)
 {
     constexpr FE::Real theta = FE::Real{1.0471975511965977462};
     constexpr FE::Real gamma = FE::Real{0.8};
@@ -7171,6 +8824,26 @@ TEST(MovingDomainPhysics,
                     2.0e-11)
             << "the generated contact normal satisfies the target even though "
                "the separately evaluated Q1 gradient does not";
+        const auto surface_only = unfittedContactAngleResidualVector(
+            active_domain,
+            theta,
+            signed_raw_normal(wrong_outward_normal, active_domain),
+            wall_normal,
+            nullptr,
+            /*include_contact_angle=*/false,
+            /*include_transient_owner=*/true,
+            signed_raw_normal(target_outward_normal, active_domain),
+            gamma,
+            ns::FreeSurfaceSurfaceTensionForm::SurfaceStress);
+        ASSERT_EQ(generated_target.size(), surface_only.size());
+        FE::Real wall_energy_norm2{0.0};
+        for (std::size_t i = 0; i < generated_target.size(); ++i) {
+            const auto added = generated_target[i] - surface_only[i];
+            wall_energy_norm2 += added * added;
+        }
+        EXPECT_GT(std::sqrt(wall_energy_norm2), FE::Real{1.0e-10})
+            << "retiring the level-set residual must retain Young wall "
+               "energy in momentum";
 
         ContactAngleAssemblyProbe zero_gamma_probe;
         const auto zero_gamma = unfittedContactAngleResidualVector(
@@ -7202,111 +8875,67 @@ TEST(MovingDomainPhysics,
             signed_raw_normal(wrong_outward_normal, active_domain),
             gamma,
             ns::FreeSurfaceSurfaceTensionForm::SurfaceStress);
-        EXPECT_GT(phi_row_norm(generated_wrong, generated_wrong_probe),
-                  FE::Real{1.0e-10})
-            << "the generated contact normal must control the SurfaceStress "
-               "angle gap even when the Q1 gradient satisfies the target";
+        EXPECT_NEAR(phi_row_norm(generated_wrong, generated_wrong_probe),
+                    FE::Real{0.0},
+                    2.0e-11)
+            << "Young wall energy belongs to momentum, while prescribed "
+               "level-set geometry is maintained by accepted-state repair";
     }
 }
 
 TEST(MovingDomainPhysics,
-     NavierStokesUnfittedContactAngleJacobianMatchesFiniteDifferenceOnEquations)
+     NavierStokesRetiredContactResidualIsIndependentOfPositivePhiScale)
 {
     constexpr FE::Real half_pi = 1.57079632679489661923;
     constexpr FE::Real inv_sqrt_two = 0.70710678118654752440;
-    constexpr FE::Real epsilon = 1.0e-6;
     const std::array<FE::Real, 3> wall{0.0, 0.0, 1.0};
-    const std::array<FE::Real, 3> gradient{
-        inv_sqrt_two, 0.0, inv_sqrt_two};
-
-    ContactAngleAssemblyProbe contact_probe;
-    (void)unfittedContactAngleResidualVector(
-        ns::FreeSurfaceActiveDomain::LevelSetNegative,
-        half_pi,
-        gradient,
-        wall,
-        &contact_probe);
-    ContactAngleAssemblyProbe owner_probe;
-    (void)unfittedContactAngleResidualVector(
-        ns::FreeSurfaceActiveDomain::LevelSetNegative,
-        half_pi,
-        gradient,
-        wall,
-        &owner_probe,
-        /*include_contact_angle=*/false);
-
-    auto plus_gradient = gradient;
-    auto minus_gradient = gradient;
-    plus_gradient[0] += epsilon;
-    minus_gradient[0] -= epsilon;
-    const auto plus_residual = unfittedContactAngleResidualVector(
-        ns::FreeSurfaceActiveDomain::LevelSetNegative,
-        half_pi,
-        plus_gradient,
-        wall);
-    const auto plus_owner_residual = unfittedContactAngleResidualVector(
-        ns::FreeSurfaceActiveDomain::LevelSetNegative,
-        half_pi,
-        plus_gradient,
-        wall,
-        nullptr,
-        /*include_contact_angle=*/false);
-    const auto minus_residual = unfittedContactAngleResidualVector(
-        ns::FreeSurfaceActiveDomain::LevelSetNegative,
-        half_pi,
-        minus_gradient,
-        wall);
-    const auto minus_owner_residual = unfittedContactAngleResidualVector(
-        ns::FreeSurfaceActiveDomain::LevelSetNegative,
-        half_pi,
-        minus_gradient,
-        wall,
-        nullptr,
-        /*include_contact_angle=*/false);
-
-    ASSERT_EQ(contact_probe.phi_dofs, owner_probe.phi_dofs);
-    ASSERT_EQ(contact_probe.phi_offset, owner_probe.phi_offset);
-    ASSERT_EQ(contact_probe.vertex_one_phi_dof,
-              owner_probe.vertex_one_phi_dof);
-    ASSERT_EQ(contact_probe.phi_jacobian.size(),
-              owner_probe.phi_jacobian.size());
-    ASSERT_EQ(plus_residual.size(), minus_residual.size());
-    ASSERT_EQ(plus_residual.size(), plus_owner_residual.size());
-    ASSERT_EQ(minus_residual.size(), minus_owner_residual.size());
-    ASSERT_LE(static_cast<std::size_t>(
-                  contact_probe.phi_offset + contact_probe.phi_dofs),
-              plus_residual.size());
-
-    FE::Real analytic_norm2 = 0.0;
-    FE::Real error_norm2 = 0.0;
-    for (FE::GlobalIndex row = 0; row < contact_probe.phi_dofs; ++row) {
-        const auto index = static_cast<std::size_t>(
-            row * contact_probe.phi_dofs +
-            contact_probe.vertex_one_phi_dof);
-        const auto analytic = contact_probe.phi_jacobian[index] -
-                              owner_probe.phi_jacobian[index];
-        const auto global_row = static_cast<std::size_t>(
-            contact_probe.phi_offset + row);
-        const auto finite_difference =
-            ((plus_residual[global_row] - plus_owner_residual[global_row]) -
-             (minus_residual[global_row] - minus_owner_residual[global_row])) /
-            (FE::Real{2.0} * epsilon);
-        const auto error = analytic - finite_difference;
-        EXPECT_NEAR(analytic, finite_difference, 1.0e-7)
-            << "phi row=" << row
-            << " analytic=" << analytic
-            << " finite_difference=" << finite_difference;
-        analytic_norm2 += analytic * analytic;
-        error_norm2 += error * error;
+    FE::Real maximum_added_residual{0.0};
+    FE::Real maximum_added_jacobian{0.0};
+    for (const FE::Real scale : {
+             FE::Real{1.0e-6}, FE::Real{1.0}, FE::Real{1.0e6}}) {
+        const std::array<FE::Real, 3> gradient{
+            scale * inv_sqrt_two,
+            FE::Real{0.0},
+            scale * inv_sqrt_two};
+        ContactAngleAssemblyProbe configured_probe;
+        const auto configured = unfittedContactAngleResidualVector(
+            ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            half_pi,
+            gradient,
+            wall,
+            &configured_probe);
+        ContactAngleAssemblyProbe owner_probe;
+        const auto owner_only = unfittedContactAngleResidualVector(
+            ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            half_pi,
+            gradient,
+            wall,
+            &owner_probe,
+            /*include_contact_angle=*/false);
+        ASSERT_EQ(configured.size(), owner_only.size());
+        ASSERT_EQ(configured_probe.phi_jacobian.size(),
+                  owner_probe.phi_jacobian.size());
+        for (std::size_t i = 0; i < configured.size(); ++i) {
+            maximum_added_residual = std::max(
+                maximum_added_residual,
+                std::abs(configured[i] - owner_only[i]));
+        }
+        for (std::size_t i = 0;
+             i < configured_probe.phi_jacobian.size();
+             ++i) {
+            maximum_added_jacobian = std::max(
+                maximum_added_jacobian,
+                std::abs(configured_probe.phi_jacobian[i] -
+                         owner_probe.phi_jacobian[i]));
+        }
     }
-    const auto analytic_norm = std::sqrt(analytic_norm2);
-    EXPECT_GT(analytic_norm, 1.0e-10);
-    EXPECT_LT(std::sqrt(error_norm2),
-              1.0e-5 * std::max(FE::Real{1.0}, analytic_norm));
+    EXPECT_EQ(maximum_added_residual, FE::Real{0.0});
+    EXPECT_EQ(maximum_added_jacobian, FE::Real{0.0});
+    RecordProperty("retired_contact_residual_positive_scale_case_count", 3);
 }
 
 TEST(MovingDomainPhysics,
-     NavierStokesContactAngleGaugeEvidenceRequiresTransientPhiOwner)
+     NavierStokesRetiredContactResidualAddsNoGaugeConstraint)
 {
     constexpr FE::Real half_pi = 1.57079632679489661923;
     constexpr FE::Real inv_sqrt_two = 0.70710678118654752440;
@@ -7314,25 +8943,44 @@ TEST(MovingDomainPhysics,
         inv_sqrt_two, 0.0, inv_sqrt_two};
     const std::array<FE::Real, 3> wall{0.0, 0.0, 1.0};
 
-    ContactAngleAssemblyProbe transient_probe;
+    ContactAngleAssemblyProbe transient_configured;
     (void)unfittedContactAngleResidualVector(
         ns::FreeSurfaceActiveDomain::LevelSetNegative,
         half_pi,
         gradient,
         wall,
-        &transient_probe);
-    EXPECT_FALSE(transient_probe.phi_has_constraint);
+        &transient_configured);
+    ContactAngleAssemblyProbe transient_owner;
+    (void)unfittedContactAngleResidualVector(
+        ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        half_pi,
+        gradient,
+        wall,
+        &transient_owner,
+        /*include_contact_angle=*/false);
+    EXPECT_EQ(transient_configured.phi_has_constraint,
+              transient_owner.phi_has_constraint);
 
-    ContactAngleAssemblyProbe gradient_only_probe;
+    ContactAngleAssemblyProbe gradient_configured;
     (void)unfittedContactAngleResidualVector(
         ns::FreeSurfaceActiveDomain::LevelSetNegative,
         half_pi,
         gradient,
         wall,
-        &gradient_only_probe,
+        &gradient_configured,
         /*include_contact_angle=*/true,
         /*include_transient_owner=*/false);
-    EXPECT_TRUE(gradient_only_probe.phi_has_constraint);
+    ContactAngleAssemblyProbe gradient_owner;
+    (void)unfittedContactAngleResidualVector(
+        ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        half_pi,
+        gradient,
+        wall,
+        &gradient_owner,
+        /*include_contact_angle=*/false,
+        /*include_transient_owner=*/false);
+    EXPECT_EQ(gradient_configured.phi_has_constraint,
+              gradient_owner.phi_has_constraint);
 }
 
 TEST(MovingDomainPhysics,
@@ -7915,6 +9563,25 @@ TEST(MovingDomainPhysics,
     ns::IncompressibleNavierStokesVMSModule module(
         velocity_space, scalar_space, opts);
     module.registerOn(system);
+    const auto declarations =
+        system.freeSurfaceDiscreteFunctionalDeclarations();
+    ASSERT_EQ(declarations.size(), 1u);
+    EXPECT_EQ(declarations.front().interface_marker, interface_marker);
+    EXPECT_EQ(declarations.front().level_set_field, phi);
+    EXPECT_EQ(
+        declarations.front().velocity_field,
+        system.findFieldByName(opts.velocity_field_name));
+    ASSERT_EQ(
+        declarations.front().parameters.young_wall_coefficients.size(),
+        1u);
+    ASSERT_EQ(
+        declarations.front().parameters.dynamic_contact_coefficients.size(),
+        1u);
+    EXPECT_EQ(
+        declarations.front()
+            .parameters.dynamic_contact_coefficients.front()
+            .boundary_marker,
+        bottom_marker);
     ASSERT_NO_THROW(system.setup());
 
     const int contact_marker =
@@ -8194,6 +9861,87 @@ TEST(MovingDomainPhysics,
         contact_measure;
     EXPECT_NEAR(advancing_residual, expected_advancing_residual, 2.0e-11);
     EXPECT_NEAR(receding_residual, expected_receding_residual, 2.0e-11);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesDynamicRenEReversalsPreserveThroughLiquidLawAcrossWallOrientationAndActiveSide)
+{
+    constexpr FE::Real pi = 3.14159265358979323846;
+    constexpr FE::Real equilibrium_angle = pi / 2.0;
+    constexpr FE::Real gamma = 0.8;
+    constexpr FE::Real contact_measure = 0.125;
+    constexpr std::array<FE::Real, 4> zero_velocity{
+        0.0, 0.0, 0.0, 0.0};
+    constexpr std::array<FE::Real, 4> no_perturbation{
+        0.0, 0.0, 0.0, 0.0};
+
+    const auto resultant =
+        [&](FE::Real dynamic_angle,
+            ns::FreeSurfaceActiveDomain active_domain,
+            bool reverse_wall_orientation) {
+            const std::array<FE::Real, 3> wall_normal =
+                reverse_wall_orientation
+                ? std::array<FE::Real, 3>{0.0, 0.0, 1.0}
+                : std::array<FE::Real, 3>{0.0, 0.0, -1.0};
+            const auto assemble = [&](bool include_dynamic_contact_angle) {
+                return assembleDynamicContactAngleCase(
+                    equilibrium_angle,
+                    dynamic_angle,
+                    zero_velocity,
+                    include_dynamic_contact_angle,
+                    /*assemble_jacobian=*/false,
+                    no_perturbation,
+                    wall_normal,
+                    /*level_set_scale=*/1.0,
+                    /*level_set_shift=*/0.0,
+                    /*velocity_component=*/0,
+                    active_domain,
+                    ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction,
+                    /*liquid_pressure=*/0.0,
+                    /*external_pressure=*/0.0,
+                    /*use_constitutive_viscosity=*/false,
+                    reverse_wall_orientation);
+            };
+            const auto dynamic = assemble(true);
+            const auto baseline = assemble(false);
+            FE::Real x_resultant = 0.0;
+            for (const auto dof : dynamic.velocity_x_dofs) {
+                x_resultant +=
+                    dynamic.residual[static_cast<std::size_t>(dof)] -
+                    baseline.residual[static_cast<std::size_t>(dof)];
+            }
+            return x_resultant;
+        };
+
+    const auto expected = [&](FE::Real dynamic_angle) {
+        return -gamma *
+               (std::cos(equilibrium_angle) -
+                std::cos(dynamic_angle)) *
+               contact_measure;
+    };
+    for (const auto active_domain : {
+             ns::FreeSurfaceActiveDomain::LevelSetNegative,
+             ns::FreeSurfaceActiveDomain::LevelSetPositive}) {
+        for (const bool reverse_wall_orientation : {false, true}) {
+            const auto advancing = resultant(
+                2.0 * pi / 3.0,
+                active_domain,
+                reverse_wall_orientation);
+            const auto receding = resultant(
+                pi / 3.0,
+                active_domain,
+                reverse_wall_orientation);
+            EXPECT_NEAR(advancing, expected(2.0 * pi / 3.0), 2.0e-11)
+                << "active_domain=" << static_cast<int>(active_domain)
+                << " reverse_wall_orientation="
+                << reverse_wall_orientation;
+            EXPECT_NEAR(receding, expected(pi / 3.0), 2.0e-11)
+                << "active_domain=" << static_cast<int>(active_domain)
+                << " reverse_wall_orientation="
+                << reverse_wall_orientation;
+            EXPECT_NEAR(advancing, -receding, 2.0e-11);
+        }
+    }
 }
 
 TEST(MovingDomainPhysics,
@@ -8531,27 +10279,36 @@ TEST(MovingDomainPhysics,
     EXPECT_NEAR(std::sqrt(added_jacobian_norm2), 0.0, 2.0e-12);
 }
 
-TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleResidualFollowsActiveDomainSign)
+TEST(MovingDomainPhysics,
+     NavierStokesRetiredContactResidualIsAbsentForBothActiveSides)
 {
     constexpr FE::Real half_pi = 1.57079632679489661923;
     constexpr FE::Real inv_sqrt_two = 0.70710678118654752440;
     const std::array<FE::Real, 3> transverse_gradient{
         inv_sqrt_two, 0.0, inv_sqrt_two};
-    const auto negative_active = unfittedContactAngleResidualVector(
-        ns::FreeSurfaceActiveDomain::LevelSetNegative,
-        half_pi,
-        transverse_gradient);
-    const auto positive_active = unfittedContactAngleResidualVector(
-        ns::FreeSurfaceActiveDomain::LevelSetPositive,
-        half_pi,
-        transverse_gradient);
-
-    ASSERT_EQ(negative_active.size(), positive_active.size());
-    EXPECT_GT(vectorNorm(negative_active), 1.0e-12);
-    EXPECT_GT(vectorNorm(positive_active), 1.0e-12);
-    for (std::size_t i = 0; i < negative_active.size(); ++i) {
-        EXPECT_NEAR(negative_active[i], -positive_active[i], 1.0e-12);
+    FE::Real maximum_added_residual{0.0};
+    for (const auto active_domain : {
+             ns::FreeSurfaceActiveDomain::LevelSetNegative,
+             ns::FreeSurfaceActiveDomain::LevelSetPositive}) {
+        const auto configured = unfittedContactAngleResidualVector(
+            active_domain,
+            half_pi,
+            transverse_gradient);
+        const auto owner_only = unfittedContactAngleResidualVector(
+            active_domain,
+            half_pi,
+            transverse_gradient,
+            std::array<FE::Real, 3>{0.0, 0.0, 1.0},
+            nullptr,
+            /*include_contact_angle=*/false);
+        ASSERT_EQ(configured.size(), owner_only.size());
+        for (std::size_t i = 0; i < configured.size(); ++i) {
+            maximum_added_residual = std::max(
+                maximum_added_residual,
+                std::abs(configured[i] - owner_only[i]));
+        }
     }
+    EXPECT_EQ(maximum_added_residual, FE::Real{0.0});
 }
 
 TEST(MovingDomainPhysics, NavierStokesFreeSurfaceRejectsInvalidScalarParameters)
@@ -8660,21 +10417,6 @@ TEST(MovingDomainPhysics, NavierStokesContactAngleRejectsInvalidParameters)
         FE::Real{3.14159265358979323846};
     expect_rejected(complete_wetting_angle);
 
-    auto zero_penalty = invalid_angle;
-    prescribedContactConfiguration(zero_penalty).contact_angle_radians = 1.0;
-    prescribedContactConfiguration(zero_penalty).contact_angle_penalty = 0.0;
-    expect_rejected(zero_penalty);
-
-    auto variable_penalty = invalid_angle;
-    prescribedContactConfiguration(variable_penalty).contact_angle_radians =
-        1.0;
-    prescribedContactConfiguration(variable_penalty).contact_angle_penalty =
-        FE::forms::ScalarCoefficient{
-        [](FE::Real x, FE::Real, FE::Real) {
-            return FE::Real{1.0} + x;
-        }};
-    expect_rejected(variable_penalty);
-
     auto nonfinite_normal = invalid_angle;
     prescribedContactConfiguration(nonfinite_normal).contact_angle_radians =
         1.0;
@@ -8754,7 +10496,7 @@ TEST(MovingDomainPhysics,
                     ns::FreeSurfaceActiveDomain::LevelSetNegative,
                 .contact_lines = {
                     prescribedContactLine(
-                        wall_marker, 1.0, wall_normal, 1.0)},
+                        wall_marker, 1.0, wall_normal)},
             });
 
         FE::systems::FESystem system(mesh);
@@ -8916,6 +10658,9 @@ TEST(MovingDomainPhysics,
             ns::FreeSurfaceActiveDomainMethod::SmoothedIndicator;
     });
     expect_rejected([](auto& opts) {
+        opts.free_surface.front().active_domain_smoothing_width = 0.25;
+    });
+    expect_rejected([](auto& opts) {
         opts.velocity_dirichlet.clear();
     });
     expect_rejected([](auto& opts) {
@@ -8972,9 +10717,9 @@ TEST(MovingDomainPhysics,
                 ns::FreeSurfaceActiveDomain::LevelSetNegative,
             .contact_lines = {
                 prescribedContactLine(
-                    wall_marker, 1.0, {0.0, 0.0, -1.0}, 1.0, 2216),
+                    wall_marker, 1.0, {0.0, 0.0, -1.0}, 2216),
                 prescribedContactLine(
-                    wall_marker, 1.1, {0.0, 0.0, -1.0}, 1.0, 2217),
+                    wall_marker, 1.1, {0.0, 0.0, -1.0}, 2217),
             },
         });
 
@@ -9047,8 +10792,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleHonorsExplic
             prescribedContactLine(
                 wall_marker,
                 1.0471975511965977462,
-                {1.0, 0.0, 0.0},
-                1.0),
+                {1.0, 0.0, 0.0}),
         },
     });
 
@@ -9097,13 +10841,11 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedContactMarkersRejectDefinitionTime
                     31,
                     1.0,
                     {1.0, 0.0, 0.0},
-                    1.0,
                     explicit_contact_marker),
                 prescribedContactLine(
                     32,
                     1.0,
                     {0.0, 1.0, 0.0},
-                    1.0,
                     explicit_contact_marker),
             },
         });

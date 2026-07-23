@@ -2661,8 +2661,6 @@ void append_free_surface_contact_line(
       "Contact_line_wall_normal", "ContactLineWallNormal",
       "Contact_angle_wall_normal", "ContactAngleWallNormal",
       "Wall_normal", "WallNormal",
-      "Contact_angle_penalty", "ContactAnglePenalty",
-      "Contact_line_angle_penalty", "ContactLineAnglePenalty",
       "Contact_line_mobility", "ContactLineMobility", "Mobility",
       "Wall_slip_model", "WallSlipModel",
       "Contact_line_wall_slip_model", "ContactLineWallSlipModel",
@@ -2746,11 +2744,6 @@ void append_free_surface_contact_line(
       "contact wall normal(s)");
   reject_duplicate_aliases(
       params,
-      {"Contact_angle_penalty", "ContactAnglePenalty",
-       "Contact_line_angle_penalty", "ContactLineAnglePenalty"},
-      "contact-angle penalty");
-  reject_duplicate_aliases(
-      params,
       {"Contact_line_mobility", "ContactLineMobility", "Mobility"},
       "contact-line mobility");
   reject_duplicate_aliases(
@@ -2813,10 +2806,6 @@ void append_free_surface_contact_line(
        "Contact_line_wall_normal", "ContactLineWallNormal",
        "Contact_angle_wall_normal", "ContactAngleWallNormal",
        "Wall_normal", "WallNormal"});
-  const bool has_penalty = any_parameter_defined(
-      params,
-      {"Contact_angle_penalty", "ContactAnglePenalty",
-       "Contact_line_angle_penalty", "ContactLineAnglePenalty"});
   const bool has_mobility = any_parameter_defined(
       params,
       {"Contact_line_mobility", "ContactLineMobility", "Mobility"});
@@ -2831,11 +2820,11 @@ void append_free_surface_contact_line(
       params, {"Contact_line_marker", "ContactLineMarker"});
 
   if (parsed_model == ParsedFreeSurfaceContactModel::None) {
-    if (has_angle || has_wall_marker || has_wall_normal || has_penalty ||
-        has_mobility || has_slip_model || has_slip_length ||
+    if (has_angle || has_wall_marker || has_wall_normal || has_mobility ||
+        has_slip_model || has_slip_length ||
         has_contact_marker) {
       throw std::runtime_error(
-          "[svMultiPhysics::Physics] Contact_line_model=None does not accept contact-angle, wall, mobility, slip, penalty, or contact-marker parameters.");
+          "[svMultiPhysics::Physics] Contact_line_model=None does not accept contact-angle, wall, mobility, slip, or contact-marker parameters.");
     }
     fs.contact_lines.push_back(ContactLine{
         .configuration = ContactLine::None{},
@@ -2847,7 +2836,7 @@ void append_free_surface_contact_line(
       throw std::runtime_error(
           "[svMultiPhysics::Physics] Contact_line_model=Pinned requires Contact_line_marker or a contact wall marker.");
     }
-    if (has_angle || has_wall_normal || has_penalty || has_mobility ||
+    if (has_angle || has_wall_normal || has_mobility ||
         has_slip_model || has_slip_length) {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] Contact_line_model=Pinned accepts only its contact-line or wall marker.");
@@ -2865,9 +2854,6 @@ void append_free_surface_contact_line(
     } else if (!has_mobility || !has_slip_model || !has_slip_length) {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] DynamicRenE requires explicit mobility, wall-slip model, and wall-slip length parameters.");
-    } else if (has_penalty) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] DynamicRenE does not use Contact_angle_penalty.");
     }
   }
 
@@ -2901,15 +2887,6 @@ void append_free_surface_contact_line(
        "Contact_angle_wall_normal", "ContactAngleWallNormal",
        "Wall_normal", "WallNormal"},
       "Free-surface Contact_line_wall_normal");
-
-  IncompressibleNavierStokesVMSOptions::ScalarValue contact_angle_penalty{
-      svmp::FE::Real{1.0}};
-  if (const auto penalty = first_defined_double(
-          params,
-          {"Contact_angle_penalty", "ContactAnglePenalty",
-           "Contact_line_angle_penalty", "ContactLineAnglePenalty"})) {
-    contact_angle_penalty = static_cast<svmp::FE::Real>(*penalty);
-  }
 
   IncompressibleNavierStokesVMSOptions::ScalarValue mobility{
       svmp::FE::Real{0.0}};
@@ -2983,7 +2960,6 @@ void append_free_surface_contact_line(
               .contact_line_marker = contact_marker,
               .contact_angle_radians = contact_angle,
               .wall_normal = wall_normal,
-              .contact_angle_penalty = contact_angle_penalty,
           },
       });
       break;
@@ -3212,20 +3188,32 @@ void append_free_surface_bc(
         "accepted only by the explicit schema-1 legacy mode.");
   }
 
-  if (const auto enforcement = first_defined_string(
-          bc.params,
-          {"Kinematic_enforcement", "KinematicEnforcement"})) {
+  const auto enforcement = first_defined_string(
+      bc.params,
+      {"Kinematic_enforcement", "KinematicEnforcement"});
+  if (enforcement.has_value()) {
     fs.kinematic_enforcement =
-        parse_free_surface_kinematic_enforcement(*enforcement, "Free-surface Kinematic_enforcement");
+        parse_free_surface_kinematic_enforcement(
+            *enforcement, "Free-surface Kinematic_enforcement");
   }
-  if (const auto penalty = first_defined_double(
-          bc.params,
-          {"Kinematic_penalty", "KinematicPenalty"})) {
+  const auto penalty = first_defined_double(
+      bc.params,
+      {"Kinematic_penalty", "KinematicPenalty"});
+  if (penalty.has_value()) {
     fs.kinematic_penalty = IncompressibleNavierStokesVMSOptions::ScalarValue{
         static_cast<svmp::FE::Real>(*penalty)};
-    if (fs.kinematic_enforcement == FreeSurfaceKinematicEnforcement::None) {
+    if (!enforcement.has_value() && explicit_legacy_configuration) {
       fs.kinematic_enforcement = FreeSurfaceKinematicEnforcement::Penalty;
     }
+  }
+  if (penalty.has_value() &&
+      fs.kinematic_enforcement != FreeSurfaceKinematicEnforcement::Penalty &&
+      !explicit_legacy_configuration) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Kinematic_penalty requires explicit "
+        "Kinematic_enforcement=Penalty; it cannot promote None and unused "
+        "penalty settings are accepted only by the explicit schema-1 "
+        "legacy mode.");
   }
   const auto kinematic_nitsche_gamma = first_defined_double(
           bc.params,

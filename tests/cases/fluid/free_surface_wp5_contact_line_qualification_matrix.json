@@ -1,0 +1,420 @@
+{
+  "schema_version": 1,
+  "matrix_id": "free_surface_wp5_contact_line_v1",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "work_package": "WP-5",
+  "findings": [
+    "FSR-04",
+    "FSR-05"
+  ],
+  "milestone": "Q4",
+  "model_envelope": "one_phase_unfitted_sharp_contact_line_low_level_prerequisite",
+  "architecture_record": "Documentation/free_surface_wp5_contact_line_architecture.md",
+  "audit_basis": {
+    "head_at_freeze": "6306165b436ba6d81b50a2e348025038bf049fa2",
+    "dirty_tracked_sources_reviewed": true,
+    "source_binary_correspondence_claimed_for_dirty_runs": false
+  },
+  "closure_state": "OPEN_REQUIRED_METHOD_AND_PHYSICAL_CAMPAIGNS_NOT_EXECUTED",
+  "qualification_disposition": {
+    "fsr04_closed": false,
+    "fsr05_closed": false,
+    "wp5_closed": false,
+    "q4_closed": false
+  },
+  "freeze_scope": "This matrix freezes low-level contact-line enforcement, accepted-stage provenance, wall-aware maintenance, fitted pinning behavior, sharp wall/contact integration, and two-rank ownership checks. It does not qualify the mesh/time/slip/smoothing refinement studies or the integral dynamic-wetting benchmarks required to close WP-5 or Q4.",
+  "prospective_tests": [],
+  "closure_request_policy": {
+    "accepted_claim": "low_level_prerequisite",
+    "rejected_claims": [
+      "fsr05_closure",
+      "wp5_closure",
+      "q4_closure"
+    ],
+    "diagnostic": "The frozen low-level slice cannot establish physical refinement, benchmark uncertainty, or full dynamic-wetting closure."
+  },
+  "sign_convention": {
+    "footprint_direction": "outward_from_wetted_footprint",
+    "positive_contact_speed": "advancing",
+    "negative_contact_speed": "receding",
+    "dynamic_law": "V_CL=gamma*mobility*(cos(theta_e)-cos(theta_d))",
+    "zero_velocity_residual_sign": "opposite_predicted_contact_speed"
+  },
+  "independent_parameter_contract": {
+    "slip_length": "physical_length",
+    "line_mobility": "physical_mobility",
+    "numerical_wall_width": "independent_physical_length_when_enabled",
+    "mesh_size": "discretization_length_not_a_contact_parameter",
+    "sharp_matrix_numerical_wall_width": 0
+  },
+  "accepted_stage_record_contract": [
+    "accepted_step",
+    "accepted_time",
+    "generalized_alpha_stage_time",
+    "generalized_alpha_stage_fraction",
+    "previous_state_revision",
+    "endpoint_state_revision",
+    "stage_state_revision",
+    "geometry_snapshot_revision",
+    "wall_normal",
+    "contact_line_tangent",
+    "footprint_direction",
+    "advancing_receding_state",
+    "contact_position",
+    "dynamic_angle",
+    "contact_speed",
+    "wall_slip_speed",
+    "constitutive_residual",
+    "line_friction_dissipation",
+    "wall_slip_dissipation"
+  ],
+  "numeric_threshold_basis": {
+    "prescribed_angle_error_degrees": "The 1e-10 degree gate applies to exactly representable affine P1 wall constraints and is looser than observed roundoff.",
+    "contact_displacement": "The 1e-12 gate applies to an exactly representable accepted contact point on a unit fixture.",
+    "positive_phi_scale_difference": "The 1e-12 coefficient gate verifies invariance after redistancing three positive scalings of the same affine zero set.",
+    "distributed_coefficient_difference": "The 1e-12 gate compares globally numbered coefficients on a deterministic two-rank partition.",
+    "distributed_frame_difference": "The exact-zero gate compares the canonical accepted wall frame replicated across two ranks.",
+    "history_rejection_count": "Exactly one injected snapshot mismatch must be rejected without changing accepted history."
+  },
+  "build_targets": {
+    "geometry": "test_fe_geometry",
+    "level_set": "test_fe_levelset",
+    "systems": "test_fe_levelset",
+    "assembly": "test_fe_levelset",
+    "physics": "test_physics",
+    "application": "test_application",
+    "assembly_mpi": "test_fe_levelset_mpi",
+    "application_mpi": "test_application_mpi"
+  },
+  "build_cmake_homes": {
+    "geometry": "Code/Source/solver/FE",
+    "level_set": "Code/Source/solver/FE",
+    "systems": "Code/Source/solver/FE",
+    "assembly": "Code/Source/solver/FE",
+    "physics": "Code/Source/solver/Physics",
+    "application": "Code",
+    "assembly_mpi": "Code/Source/solver/FE",
+    "application_mpi": "Code"
+  },
+  "groups": [
+    {
+      "id": "contact_line_operator_and_history_serial",
+      "binary": "physics",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "MovingDomainPhysics.FreeSurfaceDynamicContactStageHistoryPreservesLawAndFrameProvenance",
+        "MovingDomainPhysics.FittedPinnedContactLineConstrainsMeshDisplacement",
+        "MovingDomainPhysics.FittedPinnedContactLineRequiresALE",
+        "MovingDomainPhysics.FittedPinnedContactLineRejectsPrescribedALEBeforeSystemMutation",
+        "MovingDomainPhysics.NavierStokesDynamicRenEReversalsPreserveThroughLiquidLawAcrossWallOrientationAndActiveSide",
+        "MovingDomainPhysics.NavierStokesCurvatureTractionDynamicContactAngleEquilibriumHasZeroAddedResidual",
+        "MovingDomainPhysics.NavierStokesSurfaceStressContactWallEnergyMatchesCombinedVirtualWorkForBothActiveSides",
+        "MovingDomainPhysics.NavierStokesDynamicContactRejectsConstitutiveViscosityUntilAcceptedStageEvaluationExists",
+        "MovingDomainPhysics.NavierStokesCurvatureTractionDynamicContactAngleReportsLiveQ1OperatorGeometry",
+        "MovingDomainPhysics.NavierStokesCurvatureTractionPrescribedAngleDeclaresWallAwareFunctional",
+        "MovingDomainPhysics.NavierStokesDiscreteFunctionalOwnerConflictRejectsBeforeFluidMutation",
+        "MovingDomainPhysics.NavierStokesPrescribedAngleRequiresActiveLiquidSideBeforeMutation",
+        "MovingDomainPhysics.NavierStokesPrescribedAngleRejectsPreinstalledInvalidContactGeometryBeforeMutation",
+        "MovingDomainPhysics.NavierStokesDynamicContactAngleRejectsPreinstalledInvalidContactGeometryBeforeMutation",
+        "MovingDomainPhysics.NavierStokesDynamicContactAngleRejectsMismatchedGeneratedWallNormal",
+        "MovingDomainPhysics.NavierStokesDynamicContactAngleRejectsNontransverseGeneratedContact",
+        "MovingDomainPhysics.NavierStokesCurvatureTractionDynamicContactAngleAdvancingAndRecedingForcesHaveOppositeSigns",
+        "MovingDomainPhysics.NavierStokesDynamicContactAngleWallAndLineDissipationAreNonnegative",
+        "MovingDomainPhysics.NavierStokesDynamicContactAngleVelocityJacobianMatchesFiniteDifference",
+        "MovingDomainPhysics.NavierStokesCurvatureTractionDynamicContactAngleLevelSetJacobianMatchesFiniteDifference",
+        "MovingDomainPhysics.NavierStokesDynamicContactAngleWettedWallIsInvariantToPhiRescaling",
+        "MovingDomainPhysics.NavierStokesDynamicContactAngleCompactIndicatorHasZeroDryWallResidual",
+        "MovingDomainPhysics.NavierStokesDynamicContactAngleRejectsIncompatibleConfigurations",
+        "FreeSurfaceSharpBoundaryOperators.WetFractionSweepMatchesAnalyticOperatorWork"
+      ],
+      "execution": {
+        "wall_time_seconds": 1800,
+        "memory_mib": 6144,
+        "output_mib": 256
+      }
+    },
+    {
+      "id": "contact_geometry_snapshot_serial",
+      "binary": "geometry",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "FreeSurfaceGeometrySnapshot.OwnsOneRevisionAndPointwisePhysicalMappingForEveryRuleFamily"
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    },
+    {
+      "id": "wall_aware_reinitialization_serial",
+      "binary": "level_set",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "LevelSetReinitialization.WallConstraintPreservesAcceptedCrossingAndAngleByPositiveScale",
+        "LevelSetReinitialization.PrescribedAngleConstraintEnforcesTargetInTwoDimensions",
+        "LevelSetReinitialization.PrescribedAngleConstraintEnforcesTargetInThreeDimensions",
+        "LevelSetReinitialization.PrescribedAngleConstraintIsInvariantUnderPositivePhiScaling",
+        "LevelSetReinitialization.ProjectionManufacturedPlanarRefinementConvergesWithoutMovingWallContacts",
+        "LevelSetReinitialization.ProjectionPreservesObliqueWallContactAngleWhileRedistancing",
+        "LevelSetReinitialization.ProjectionPreservesThreeDimensionalWallContactAngleWhileRedistancing"
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    },
+    {
+      "id": "accepted_contact_maintenance_serial",
+      "binary": "application",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "ApplicationDriverLevelSetWorkflows.AcceptedFunctionalUsesAuthoritativeSnapshotAndRecordsGlobalState",
+        "ApplicationDriverLevelSetWorkflows.ConsumedContactMarkerAcceptsCurvedHighOrderFragments",
+        "ApplicationDriverLevelSetWorkflows.AcceptedSnapshotPrescribedFrameIsCompleteAndFailsClosed",
+        "ApplicationDriverLevelSetWorkflows.PrescribedWallSnapshotDrivesEndpointReinitialization",
+        "ApplicationDriverLevelSetVolumeCorrection.ReportsAuthoritativeFreeSurfacePotentialChange",
+        "ApplicationDriverLevelSetVolumeCorrection.CumulativeContactLineBudgetRejectsBeforeMutatingAccountingState",
+        "ApplicationDriverLevelSetVolumeCorrection.LaterContactLineOnlyBudgetRejectionRollsBackEarlierRequestAndHistory"
+      ],
+      "execution": {
+        "wall_time_seconds": 1800,
+        "memory_mib": 6144,
+        "output_mib": 256
+      }
+    },
+    {
+      "id": "wall_aware_reinitialization_mpi",
+      "binary": "assembly_mpi",
+      "mpi_ranks": 2,
+      "gtest_output_copies": 2,
+      "tests": [
+        "LevelSetReinitializationMPI.ProjectionUsesGlobalOwnerStateAndInterfaceSnapshot",
+        "LevelSetReinitializationMPI.PrescribedAngleProjectionIsPartitionInvariant"
+      ],
+      "recorded_properties": [
+        {
+          "test": "LevelSetReinitializationMPI.PrescribedAngleProjectionIsPartitionInvariant",
+          "property": "prescribed_target_mpi_max_coefficient_difference",
+          "type": "real",
+          "relation": "less_than_or_equal",
+          "threshold": 1e-12
+        }
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    },
+    {
+      "id": "accepted_contact_frame_mpi",
+      "binary": "application_mpi",
+      "mpi_ranks": 2,
+      "gtest_output_copies": 2,
+      "tests": [
+        "ApplicationDriverLevelSetWorkflowsMPI.AcceptedSnapshotPrescribedFrameIsPartitionInvariantAndConflictsFailClosed"
+      ],
+      "recorded_properties": [
+        {
+          "test": "ApplicationDriverLevelSetWorkflowsMPI.AcceptedSnapshotPrescribedFrameIsPartitionInvariantAndConflictsFailClosed",
+          "property": "application_prescribed_frame_mpi_max_difference",
+          "type": "real",
+          "relation": "equal",
+          "threshold": 0
+        }
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    }
+  ],
+  "quantitative_evidence": [
+    {
+      "test": "MovingDomainPhysics.FreeSurfaceDynamicContactStageHistoryPreservesLawAndFrameProvenance",
+      "property": "contact_snapshot_mismatch_rejected",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "LevelSetReinitialization.PrescribedAngleConstraintEnforcesTargetInTwoDimensions",
+      "property": "prescribed_target_angle_max_error_degrees",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    },
+    {
+      "test": "LevelSetReinitialization.PrescribedAngleConstraintEnforcesTargetInTwoDimensions",
+      "property": "prescribed_target_contact_displacement_max",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-12
+    },
+    {
+      "test": "LevelSetReinitialization.PrescribedAngleConstraintEnforcesTargetInThreeDimensions",
+      "property": "prescribed_target_angle_max_error_degrees",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    },
+    {
+      "test": "LevelSetReinitialization.PrescribedAngleConstraintEnforcesTargetInThreeDimensions",
+      "property": "prescribed_target_contact_displacement_max",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-12
+    },
+    {
+      "test": "LevelSetReinitialization.PrescribedAngleConstraintIsInvariantUnderPositivePhiScaling",
+      "property": "prescribed_target_phi_scale_max_difference",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-12
+    },
+    {
+      "test": "ApplicationDriverLevelSetWorkflows.PrescribedWallSnapshotDrivesEndpointReinitialization",
+      "property": "application_prescribed_target_angle_max_error_degrees",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    },
+    {
+      "test": "ApplicationDriverLevelSetWorkflows.PrescribedWallSnapshotDrivesEndpointReinitialization",
+      "property": "application_prescribed_target_contact_displacement_max",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-12
+    }
+  ],
+  "gates": {
+    "expected_group_count": 6,
+    "expected_distinct_test_count": 42,
+    "expected_quantitative_evidence_count": 8,
+    "expected_failures": 0,
+    "expected_errors": 0,
+    "expected_disabled": 0,
+    "expected_skipped": 0
+  },
+  "closure_contract": [
+    {
+      "claim": "dynamic_contact_records_bind_law_frame_dissipation_state_and_geometry_to_one_accepted_stage",
+      "evidence": [
+        "MovingDomainPhysics.FreeSurfaceDynamicContactStageHistoryPreservesLawAndFrameProvenance",
+        "ApplicationDriverLevelSetWorkflows.ConsumedContactMarkerAcceptsCurvedHighOrderFragments",
+        "ApplicationDriverLevelSetWorkflows.AcceptedFunctionalUsesAuthoritativeSnapshotAndRecordsGlobalState"
+      ]
+    },
+    {
+      "claim": "both_contact_force_forms_register_wall_aware_functionals_and_owner_conflicts_fail_before_fluid_mutation",
+      "evidence": [
+        "MovingDomainPhysics.NavierStokesCurvatureTractionDynamicContactAngleReportsLiveQ1OperatorGeometry",
+        "MovingDomainPhysics.NavierStokesCurvatureTractionPrescribedAngleDeclaresWallAwareFunctional",
+        "MovingDomainPhysics.NavierStokesDiscreteFunctionalOwnerConflictRejectsBeforeFluidMutation",
+        "MovingDomainPhysics.NavierStokesPrescribedAngleRequiresActiveLiquidSideBeforeMutation",
+        "MovingDomainPhysics.NavierStokesPrescribedAngleRejectsPreinstalledInvalidContactGeometryBeforeMutation",
+        "MovingDomainPhysics.NavierStokesDynamicContactAngleRejectsPreinstalledInvalidContactGeometryBeforeMutation"
+      ]
+    },
+    {
+      "claim": "advancing_receding_signs_wall_frames_active_sides_and_operator_tangents_follow_the_declared_convention",
+      "evidence": [
+        "MovingDomainPhysics.NavierStokesDynamicRenEReversalsPreserveThroughLiquidLawAcrossWallOrientationAndActiveSide",
+        "MovingDomainPhysics.NavierStokesCurvatureTractionDynamicContactAngleAdvancingAndRecedingForcesHaveOppositeSigns",
+        "MovingDomainPhysics.NavierStokesDynamicContactAngleVelocityJacobianMatchesFiniteDifference",
+        "MovingDomainPhysics.NavierStokesCurvatureTractionDynamicContactAngleLevelSetJacobianMatchesFiniteDifference"
+      ]
+    },
+    {
+      "claim": "sharp_wall_and_contact_terms_have_nonnegative_dissipation_analytic_measure_and_zero_dry_work",
+      "evidence": [
+        "MovingDomainPhysics.NavierStokesDynamicContactAngleWallAndLineDissipationAreNonnegative",
+        "MovingDomainPhysics.NavierStokesDynamicContactAngleCompactIndicatorHasZeroDryWallResidual",
+        "FreeSurfaceSharpBoundaryOperators.WetFractionSweepMatchesAnalyticOperatorWork",
+        "FreeSurfaceGeometrySnapshot.OwnsOneRevisionAndPointwisePhysicalMappingForEveryRuleFamily"
+      ]
+    },
+    {
+      "claim": "prescribed_and_accepted_dynamic_wall_constraints_preserve_contact_position_and_angle_through_redistancing",
+      "evidence": [
+        "LevelSetReinitialization.WallConstraintPreservesAcceptedCrossingAndAngleByPositiveScale",
+        "LevelSetReinitialization.PrescribedAngleConstraintEnforcesTargetInTwoDimensions",
+        "LevelSetReinitialization.PrescribedAngleConstraintEnforcesTargetInThreeDimensions",
+        "LevelSetReinitialization.ProjectionPreservesObliqueWallContactAngleWhileRedistancing",
+        "LevelSetReinitialization.ProjectionPreservesThreeDimensionalWallContactAngleWhileRedistancing",
+        "ApplicationDriverLevelSetWorkflows.PrescribedWallSnapshotDrivesEndpointReinitialization"
+      ]
+    },
+    {
+      "claim": "wall_aware_maintenance_is_invariant_to_positive_phi_scaling_and_rejects_stale_or_conflicting_frames",
+      "evidence": [
+        "LevelSetReinitialization.PrescribedAngleConstraintIsInvariantUnderPositivePhiScaling",
+        "ApplicationDriverLevelSetWorkflows.AcceptedSnapshotPrescribedFrameIsCompleteAndFailsClosed",
+        "MovingDomainPhysics.NavierStokesDynamicContactAngleRejectsMismatchedGeneratedWallNormal",
+        "MovingDomainPhysics.NavierStokesDynamicContactAngleRejectsNontransverseGeneratedContact"
+      ]
+    },
+    {
+      "claim": "fitted_pinning_is_explicit_and_unsupported_fitted_contact_combinations_fail_before_mutation",
+      "evidence": [
+        "MovingDomainPhysics.FittedPinnedContactLineConstrainsMeshDisplacement",
+        "MovingDomainPhysics.FittedPinnedContactLineRequiresALE",
+        "MovingDomainPhysics.FittedPinnedContactLineRejectsPrescribedALEBeforeSystemMutation"
+      ]
+    },
+    {
+      "claim": "distributed_wall_constraints_have_deterministic_owner_state_parallel_coefficients_and_conflict_rejection",
+      "evidence": [
+        "LevelSetReinitializationMPI.ProjectionUsesGlobalOwnerStateAndInterfaceSnapshot",
+        "LevelSetReinitializationMPI.PrescribedAngleProjectionIsPartitionInvariant",
+        "ApplicationDriverLevelSetWorkflowsMPI.AcceptedSnapshotPrescribedFrameIsPartitionInvariantAndConflictsFailClosed"
+      ]
+    },
+    {
+      "claim": "emergency_volume_correction_reports_work_and_rejects_excess_contact_motion_transactionally",
+      "evidence": [
+        "ApplicationDriverLevelSetVolumeCorrection.ReportsAuthoritativeFreeSurfacePotentialChange",
+        "ApplicationDriverLevelSetVolumeCorrection.CumulativeContactLineBudgetRejectsBeforeMutatingAccountingState",
+        "ApplicationDriverLevelSetVolumeCorrection.LaterContactLineOnlyBudgetRejectionRollsBackEarlierRequestAndHistory"
+      ]
+    }
+  ],
+  "unqualified_required_campaigns": [
+    {
+      "id": "four_advancing_receding_cases_three_meshes_three_time_steps",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "five_angle_bottom_and_side_wall_sessile_relaxation",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "reusken_spreading_and_contracting_drops",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "resolved_slip_dynamic_wetting_at_ratios_2_4_8",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "wall_width_ratios_0_0p5_1_2_independent_limit",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "public_capillary_rise_uncertainty_comparison",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "representative_partition_sweeps_after_low_level_mpi_gate",
+      "status": "REQUIRED_NOT_CLAIMED"
+    }
+  ],
+  "qualification_scope": "Low-level WP-5 prerequisite evidence only; this matrix does not close FSR-05, WP-5, or Q4."
+}

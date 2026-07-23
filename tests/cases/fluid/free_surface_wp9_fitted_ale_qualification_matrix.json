@@ -1,0 +1,325 @@
+{
+  "schema_version": 1,
+  "matrix_id": "free_surface_wp9_fitted_ale_prerequisite_v2",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "work_package": "WP-9",
+  "findings": [
+    "FSR-10",
+    "FSR-11"
+  ],
+  "milestone": "Q4",
+  "model_envelope": "one_phase_fitted_ale_prerequisite_nonclosure",
+  "qualification_scope": "Low-level WP-9 prerequisite and non-closure evidence only; this matrix does not close FSR-10, FSR-11, WP-9, or Q4 and does not qualify physical fitted-ALE campaigns.",
+  "closure_state": "OPEN_METHOD_AND_PHYSICAL_ALE_CAMPAIGNS_REQUIRED",
+  "architecture_record": "Documentation/free_surface_wp9_fitted_ale_architecture.md",
+  "audit_basis": {
+    "head_at_freeze": "963cb4c256a2e7db7dede519ea8dafe5a52aacd0",
+    "dirty_tracked_sources_reviewed": true,
+    "source_binary_correspondence_claimed_for_dirty_runs": false
+  },
+  "configuration_contract": {
+    "schema_2": {
+      "qualification": "supported_configuration_envelope",
+      "accepted_consumed_path": {
+        "ale_enabled": true,
+        "mesh_velocity_source": "CoupledDisplacement",
+        "normal_policy": "MatchFluidNormalVelocity",
+        "normal_enforcement": [
+          "Penalty",
+          "Nitsche"
+        ],
+        "tangential_policy": "Prescribed",
+        "policy_consumed": true
+      },
+      "rejected_before_system_mutation": [
+        "ALE_disabled",
+        "PrescribedData_mesh_velocity_source",
+        "normal_policy_None",
+        "normal_enforcement_None",
+        "tangential_policy_Free",
+        "tangential_policy_SmoothingOnly"
+      ],
+      "kinematic_penalty_auto_promotes_none": false
+    },
+    "schema_1": {
+      "qualification": "unqualified_explicit_legacy",
+      "explicit_opt_in_required": true,
+      "modes_retained_for_regression_only": [
+        "Free",
+        "SmoothingOnly",
+        "Prescribed",
+        "PrescribedData_mesh_velocity"
+      ],
+      "supported_capability_claimed": false
+    }
+  },
+  "current_supported_slice": {
+    "input_schema": 2,
+    "ale_mesh_velocity_source": "CoupledDisplacement",
+    "normal_policy": "MatchFluidNormalVelocity",
+    "normal_enforcement": [
+      "Penalty",
+      "Nitsche"
+    ],
+    "tangential_policy": "Prescribed",
+    "prescribed_tangential_enforcement": "weak_current_geometry_projected_velocity_penalty",
+    "tangential_owner_registry": "FESystem_mesh_displacement_field_and_boundary_marker",
+    "fitted_surface_tension_form": "CurvatureTraction",
+    "fitted_contact_models": [
+      "None",
+      "Pinned"
+    ]
+  },
+  "policy_provenance_contract": {
+    "owner_source": "matching_central_mesh_tangential_policy_declaration",
+    "consumption_source": "matching_fitted_prescribed_tangential_boundary_descriptor",
+    "required_consumed_fields": [
+      "tangential_mesh_owner",
+      "policy_consumed",
+      "operator_tag",
+      "operator_source",
+      "policy_qualification"
+    ],
+    "unconsumed_representation": {
+      "policy_consumed": false,
+      "operator_tag": null,
+      "operator_source": null
+    },
+    "hardcoded_owner_claim_allowed": false
+  },
+  "current_capability_exclusions": [
+    "Schema-2 Free tangential mesh policy is unsupported and must fail before system mutation.",
+    "Schema-2 SmoothingOnly tangential mesh policy is unsupported and must fail before system mutation.",
+    "Schema-2 fitted ALE with prescribed mesh-velocity data is unsupported and must fail before system mutation.",
+    "Schema-2 normal policy None or normal enforcement None is unsupported and must fail before system mutation.",
+    "Fitted SurfaceStress is unsupported and must fail closed.",
+    "Fitted prescribed and dynamic contact-angle models are unsupported and must fail closed.",
+    "The prerequisite slice does not qualify geometric conservation, phase-volume history, surface-work history, mesh-quality history, or physical fitted-ALE campaigns."
+  ],
+  "execution": {
+    "mpi_ranks": 1,
+    "threads": 1,
+    "wall_time_seconds": 900,
+    "memory_mib": 6144,
+    "output_mib": 128
+  },
+  "test_binary_by_suite": {
+    "EquationTranslatorMeshMotion": "application",
+    "EquationTranslatorFreeSurface": "application",
+    "NavierStokesLegacyBCs": "physics",
+    "MovingDomainPhysics": "physics"
+  },
+  "source_test_files": {
+    "EquationTranslatorMeshMotion": "Code/Source/solver/Application/Tests/Unit/test_EquationTranslator.cpp",
+    "EquationTranslatorFreeSurface": "Code/Source/solver/Application/Tests/Unit/test_EquationTranslator.cpp",
+    "NavierStokesLegacyBCs": "Code/Source/solver/Physics/Tests/Unit/test_NavierStokesLegacyBCs.cpp",
+    "MovingDomainPhysics": "Code/Source/solver/Physics/Tests/Unit/test_MovingDomainPhysics.cpp"
+  },
+  "test_groups": {
+    "xml_translation_and_truthful_provenance": [
+      "EquationTranslatorMeshMotion.XmlAliasesReachTangentialPolicyModuleRegistration",
+      "EquationTranslatorFreeSurface.XmlTangentialPenaltyAliasesReachTruthfulFittedModule",
+      "EquationTranslatorFreeSurface.XmlExplicitNoneCannotBePromotedByKinematicPenalty",
+      "NavierStokesLegacyBCs.FittedFreeSurfaceBCTranslation_SetupSucceeds",
+      "NavierStokesLegacyBCs.FittedFreeSurfaceKinematicBCTranslation_UsesCurrentGeometry",
+      "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedTangentialMeshPolicyTranslation",
+      "MovingDomainPhysics.NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults"
+    ],
+    "schema_2_supported_prescribed_and_mode_provenance": [
+      "MovingDomainPhysics.FittedFreeSurfaceQualifiedContractRejectsBeforeMutation",
+      "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership",
+      "MovingDomainPhysics.FittedFreeSurfacePrescribedTangentialVelocityProjectsOutNormalTarget",
+      "MovingDomainPhysics.CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup"
+    ],
+    "fail_closed_capability_and_owner_conflict": [
+      "MovingDomainPhysics.FittedFreeSurfacePrescribedTangentialVelocityRequiresCoupledDisplacement",
+      "MovingDomainPhysics.FittedFreeSurfaceRejectsMeshMotionTangentialOwnerInEitherOrder",
+      "MovingDomainPhysics.FittedPinnedContactLineRejectsPrescribedALEBeforeSystemMutation",
+      "MovingDomainPhysics.FittedPrescribedContactAngleFailsClosedWithoutContactLineIntegration",
+      "MovingDomainPhysics.FittedPrescribedContactAngleFailsClosedWithoutALEToo",
+      "MovingDomainPhysics.NavierStokesFittedSurfaceStressFailsClosed",
+      "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedAngleTranslationFailsClosed"
+    ],
+    "schema_1_unqualified_legacy_operator_regressions": [
+      "MovingDomainPhysics.FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy",
+      "MovingDomainPhysics.NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeometry",
+      "MovingDomainPhysics.NavierStokesFittedFreeSurfaceCanUseCurrentGeometryCurvature",
+      "MovingDomainPhysics.NavierStokesFittedFreeSurfacePenaltyKinematicsAddsBoundaryResidual",
+      "MovingDomainPhysics.NavierStokesFittedFreeSurfaceNitscheKinematicsAddsBoundaryResidual",
+      "MovingDomainPhysics.FittedFreeSurfaceNitschePoliciesAreBoundaryLocalAndOrderInvariant",
+      "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal"
+    ],
+    "mesh_motion_policy_consumers": [
+      "MovingDomainPhysics.HarmonicMeshMotionTangentialPoliciesSelectBoundaryTerms",
+      "MovingDomainPhysics.MeshMotionModulesInstallEquivalentBoundaryConditionDescriptors"
+    ],
+    "pinned_capability_boundary": [
+      "MovingDomainPhysics.FittedPinnedContactLineConstrainsMeshDisplacement",
+      "MovingDomainPhysics.FittedPinnedContactLineRequiresALE"
+    ]
+  },
+  "tests": [
+    "EquationTranslatorMeshMotion.XmlAliasesReachTangentialPolicyModuleRegistration",
+    "EquationTranslatorFreeSurface.XmlTangentialPenaltyAliasesReachTruthfulFittedModule",
+    "EquationTranslatorFreeSurface.XmlExplicitNoneCannotBePromotedByKinematicPenalty",
+    "NavierStokesLegacyBCs.FittedFreeSurfaceBCTranslation_SetupSucceeds",
+    "NavierStokesLegacyBCs.FittedFreeSurfaceKinematicBCTranslation_UsesCurrentGeometry",
+    "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedTangentialMeshPolicyTranslation",
+    "MovingDomainPhysics.NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults",
+    "MovingDomainPhysics.FittedFreeSurfaceQualifiedContractRejectsBeforeMutation",
+    "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership",
+    "MovingDomainPhysics.FittedFreeSurfacePrescribedTangentialVelocityProjectsOutNormalTarget",
+    "MovingDomainPhysics.CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup",
+    "MovingDomainPhysics.FittedFreeSurfacePrescribedTangentialVelocityRequiresCoupledDisplacement",
+    "MovingDomainPhysics.FittedFreeSurfaceRejectsMeshMotionTangentialOwnerInEitherOrder",
+    "MovingDomainPhysics.FittedPinnedContactLineRejectsPrescribedALEBeforeSystemMutation",
+    "MovingDomainPhysics.FittedPrescribedContactAngleFailsClosedWithoutContactLineIntegration",
+    "MovingDomainPhysics.FittedPrescribedContactAngleFailsClosedWithoutALEToo",
+    "MovingDomainPhysics.NavierStokesFittedSurfaceStressFailsClosed",
+    "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedAngleTranslationFailsClosed",
+    "MovingDomainPhysics.FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy",
+    "MovingDomainPhysics.NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeometry",
+    "MovingDomainPhysics.NavierStokesFittedFreeSurfaceCanUseCurrentGeometryCurvature",
+    "MovingDomainPhysics.NavierStokesFittedFreeSurfacePenaltyKinematicsAddsBoundaryResidual",
+    "MovingDomainPhysics.NavierStokesFittedFreeSurfaceNitscheKinematicsAddsBoundaryResidual",
+    "MovingDomainPhysics.FittedFreeSurfaceNitschePoliciesAreBoundaryLocalAndOrderInvariant",
+    "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal",
+    "MovingDomainPhysics.HarmonicMeshMotionTangentialPoliciesSelectBoundaryTerms",
+    "MovingDomainPhysics.MeshMotionModulesInstallEquivalentBoundaryConditionDescriptors",
+    "MovingDomainPhysics.FittedPinnedContactLineConstrainsMeshDisplacement",
+    "MovingDomainPhysics.FittedPinnedContactLineRequiresALE"
+  ],
+  "gates": {
+    "expected_test_count": 29,
+    "expected_failures": 0,
+    "expected_errors": 0,
+    "expected_disabled": 0,
+    "unexpected_tests_allowed": false,
+    "skipped_tests_allowed": false
+  },
+  "exit_contract": [
+    "xml_boundary_aliases_reach_mesh_motion_and_fitted_free_surface_modules",
+    "schema_2_fitted_ale_accepts_only_coupled_prescribed_tangential_motion_with_explicit_normal_enforcement",
+    "schema_2_free_smoothing_none_and_prescribed_data_paths_fail_before_system_mutation",
+    "effective_configuration_queries_the_central_owner_and_exact_consuming_operator",
+    "schema_1_modes_are_labeled_unqualified_explicit_legacy",
+    "unsupported_fitted_surface_stress_and_contact_models_remain_fail_closed"
+  ],
+  "prerequisite_claims": [
+    {
+      "claim": "xml_aliases_and_explicit_none_fail_closed_are_wired_end_to_end",
+      "evidence": [
+        "EquationTranslatorMeshMotion.XmlAliasesReachTangentialPolicyModuleRegistration",
+        "EquationTranslatorFreeSurface.XmlTangentialPenaltyAliasesReachTruthfulFittedModule",
+        "EquationTranslatorFreeSurface.XmlExplicitNoneCannotBePromotedByKinematicPenalty"
+      ]
+    },
+    {
+      "claim": "schema_2_prescribed_is_the_only_consumed_supported_tangential_path",
+      "evidence": [
+        "MovingDomainPhysics.FittedFreeSurfaceQualifiedContractRejectsBeforeMutation",
+        "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership",
+        "MovingDomainPhysics.NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults"
+      ]
+    },
+    {
+      "claim": "schema_1_paths_are_explicitly_unqualified_and_can_report_no_owner_or_operator",
+      "evidence": [
+        "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership",
+        "MovingDomainPhysics.FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy"
+      ]
+    },
+    {
+      "claim": "owner_conflicts_and_unsupported_fitted_capabilities_fail_closed",
+      "evidence": [
+        "MovingDomainPhysics.FittedFreeSurfaceRejectsMeshMotionTangentialOwnerInEitherOrder",
+        "MovingDomainPhysics.FittedPinnedContactLineRejectsPrescribedALEBeforeSystemMutation",
+        "MovingDomainPhysics.FittedPrescribedContactAngleFailsClosedWithoutContactLineIntegration",
+        "MovingDomainPhysics.NavierStokesFittedSurfaceStressFailsClosed"
+      ]
+    }
+  ],
+  "prospective_tests": [],
+  "unqualified_required_method_exits": [
+    {
+      "id": "free_and_smoothing_supported_operator_contract",
+      "status": "REQUIRED_NOT_CLAIMED",
+      "contract": "Free and SmoothingOnly remain outside schema-2 support until each has a consumed, distinguishable operator contract or the policies are consolidated."
+    },
+    {
+      "id": "tangential_penalty_dimensional_h_dt_and_polynomial_scaling",
+      "status": "REQUIRED_NOT_CLAIMED",
+      "contract": "The prescribed tangential penalty has a derived scaling rule and passes independent mesh and time-step refinement."
+    },
+    {
+      "id": "coupled_fluid_mesh_consistency_stability_and_work_argument",
+      "status": "REQUIRED_NOT_CLAIMED",
+      "contract": "The combined normal and tangential fluid and mesh rows have a stated consistency, stability, and surface-work contract."
+    },
+    {
+      "id": "actual_boundary_mesh_velocity_projection_error_and_surface_work_history",
+      "status": "REQUIRED_NOT_CLAIMED",
+      "contract": "Accepted history records measured boundary mesh velocity, normal and tangential projections, target error, kinematic error, and surface work."
+    },
+    {
+      "id": "serialized_policy_history_and_restart_continuity",
+      "status": "REQUIRED_NOT_CLAIMED",
+      "contract": "Policy and velocity histories are immutable run artifacts and remain continuous across restart."
+    },
+    {
+      "id": "rotation_numbering_and_mpi_partition_equivalence",
+      "status": "REQUIRED_NOT_CLAIMED",
+      "contract": "Operators, histories, and accepted solutions agree under rotations, numbering changes, and representative MPI partitions."
+    },
+    {
+      "id": "explicit_fitted_dynamic_contact_rejection_and_capability_provenance",
+      "status": "REQUIRED_NOT_CLAIMED",
+      "contract": "A dedicated regression rejects fitted dynamic contact before mutation and the exclusion is present in effective capability provenance."
+    },
+    {
+      "id": "normal_mesh_constraint_and_fluid_kinematic_compatibility_matrix",
+      "status": "REQUIRED_NOT_CLAIMED",
+      "contract": "Conflicting or intentionally combined mesh-motion normal constraints and fluid kinematic policies have predeclared compatibility outcomes."
+    },
+    {
+      "id": "geometric_conservation_volume_surface_work_and_mesh_quality_metric_contract",
+      "status": "REQUIRED_NOT_CLAIMED",
+      "contract": "The physical campaign metrics, norms, time stages, and acceptance thresholds are frozen before fitted simulations."
+    }
+  ],
+  "unqualified_required_simulations": [
+    {
+      "id": "flat_translating_ale_interface",
+      "status": "REQUIRED_NOT_CLAIMED",
+      "contract": "Run rotated spatial and temporal refinement while reporting normal kinematic error, geometric-conservation error, phase volume, surface work, policy-specific boundary velocity, and mesh quality."
+    },
+    {
+      "id": "prescribed_tangential_shear",
+      "status": "REQUIRED_NOT_CLAIMED",
+      "contract": "Run rotated spatial and temporal refinement while reporting projected target error, normal leakage, geometric conservation, surface work, and mesh quality."
+    },
+    {
+      "id": "fitted_sloshing",
+      "status": "REQUIRED_NOT_CLAIMED",
+      "contract": "Run at least three spatial and temporal levels, both registration orders, and representative MPI partitions with volume, surface work, geometric conservation, mesh velocity, and mesh-quality histories."
+    }
+  ],
+  "qualification_disposition": {
+    "fsr10_closed": false,
+    "fsr11_closed": false,
+    "wp9_closed": false,
+    "q4_closed": false,
+    "physical_fitted_ale_qualified": false
+  },
+  "closure_request_policy": {
+    "accepted_claim": "low_level_prerequisite",
+    "rejected_claims": [
+      "fsr10_closure",
+      "fsr11_closure",
+      "wp9_closure",
+      "q4_closure",
+      "fitted_ale_qualified"
+    ],
+    "diagnostic": "This matrix is prerequisite-only: schema-2 Free and SmoothingOnly have no consumed supported operator, method exits remain open, and no required physical fitted-ALE campaign has run."
+  }
+}

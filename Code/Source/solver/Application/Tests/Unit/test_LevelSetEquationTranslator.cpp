@@ -897,7 +897,7 @@ TEST(LevelSetEquationTranslator, RoutesCoupledTransportToEquationsOperator)
 }
 
 TEST(LevelSetEquationTranslator,
-     CoupledFreeSurfaceContactAngleUsesTranslatedEquationsOperator)
+     CoupledPrescribedAngleRegistersGeometryWithoutScalarResidual)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -964,8 +964,6 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "1.0 0.0 0.0"};
   free_surface.params["Contact_angle_degrees"] =
       svmp::Physics::ParameterValue{true, "60.0"};
-  free_surface.params["Contact_angle_penalty"] =
-      svmp::Physics::ParameterValue{true, "4.0"};
   fluid_input.boundary_conditions.push_back(std::move(free_surface));
 
   auto fluid_module =
@@ -983,15 +981,16 @@ TEST(LevelSetEquationTranslator,
   const int contact_marker = svmp::FE::interfaces::
       stableGeneratedInterfaceBoundaryIntersectionMarker(key);
 
+  EXPECT_TRUE(
+      system.isGeneratedEmbeddedInterfaceMarkerRegistered(contact_marker));
   bool found_contact_residual = false;
   for (const auto& record : system.formulationRecords()) {
     if (!containsInterfaceMarker(record.residual_expr.get(), contact_marker)) {
       continue;
     }
     found_contact_residual = true;
-    EXPECT_EQ(record.operator_tag, "equations");
   }
-  EXPECT_TRUE(found_contact_residual);
+  EXPECT_FALSE(found_contact_residual);
   EXPECT_TRUE(system.hasOperator("equations"));
   EXPECT_FALSE(system.hasOperator("level_set"));
 #endif

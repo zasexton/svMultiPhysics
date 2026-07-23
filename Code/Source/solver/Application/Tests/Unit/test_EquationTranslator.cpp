@@ -1,12 +1,16 @@
 #include <gtest/gtest.h>
 
 #include "Application/Translators/EquationTranslator.h"
+#include "FE/Systems/FESystem.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
 #include "Parameters.h"
 #include "Physics/Core/EquationModuleInput.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
 
+#include <algorithm>
+#include <array>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -365,6 +369,202 @@ TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
   EXPECT_EQ(bc.params.at("Surface_tension_form").value, "SurfaceStress");
   EXPECT_EQ(bc.params.at("Active_domain_smoothing_width").value, "0.02");
   EXPECT_EQ(bc.params.at("Enable_cut_cell_stabilization").value, "true");
+}
+
+TEST(EquationTranslatorMeshMotion,
+     XmlAliasesReachTangentialPolicyModuleRegistration)
+{
+  auto mesh = buildTranslatorMesh();
+  mesh->base().register_label("primary_wall", 51);
+  mesh->base().register_label("alias_wall", 52);
+
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="mesh_motion">
+  <Model>Harmonic</Model>
+  <Field_name>mesh_displacement</Field_name>
+  <Add_BC name="primary_wall">
+    <Type>TangentialPolicy</Type>
+    <Policy>Prescribed</Policy>
+    <Quantity>Velocity</Quantity>
+    <Target>0.25 -0.50</Target>
+    <Penalty>4.0</Penalty>
+    <Velocity_time_scale>2.0</Velocity_time_scale>
+  </Add_BC>
+  <Add_BC name="alias_wall">
+    <Type>TangentialPolicy</Type>
+    <Tangential_policy>Prescribed</Tangential_policy>
+    <Constraint_quantity>Displacement</Constraint_quantity>
+    <Target>-0.125 0.375</Target>
+    <Penalty_scale>5.0</Penalty_scale>
+    <Time_scale>3.0</Time_scale>
+  </Add_BC>
+</Add_equation>
+)xml");
+
+  const auto meshes = singleMeshMap(mesh);
+  const auto input =
+      application::translators::EquationTranslator::buildInput(
+          *params, meshes);
+  ASSERT_EQ(input.boundary_conditions.size(), 2u);
+  EXPECT_EQ(input.boundary_conditions[0].params.at("Policy").value,
+            "Prescribed");
+  EXPECT_EQ(input.boundary_conditions[0].params.at("Quantity").value,
+            "Velocity");
+  EXPECT_EQ(
+      input.boundary_conditions[0].params.at("Velocity_time_scale").value,
+      "2.0");
+  EXPECT_EQ(
+      input.boundary_conditions[1].params.at("Tangential_policy").value,
+      "Prescribed");
+  EXPECT_EQ(
+      input.boundary_conditions[1].params.at("Constraint_quantity").value,
+      "Displacement");
+  EXPECT_EQ(input.boundary_conditions[1].params.at("Time_scale").value,
+            "3.0");
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto module =
+      application::translators::EquationTranslator::createModule(
+          *params, system, meshes);
+  ASSERT_TRUE(module);
+  const auto policies = system.meshTangentialBoundaryPolicies();
+  ASSERT_EQ(policies.size(), 2u);
+  EXPECT_EQ(
+      policies[0].policy,
+      svmp::FE::systems::MeshTangentialBoundaryPolicy::Prescribed);
+  EXPECT_EQ(
+      policies[1].policy,
+      svmp::FE::systems::MeshTangentialBoundaryPolicy::Prescribed);
+  EXPECT_EQ(
+      std::count_if(
+          system.boundaryConditionDescriptors().begin(),
+          system.boundaryConditionDescriptors().end(),
+          [](const auto& descriptor) {
+            return descriptor.trace_kind ==
+                   svmp::FE::analysis::TraceKind::TangentialComponent;
+          }),
+      2);
+}
+
+TEST(EquationTranslatorFreeSurface,
+     XmlTangentialPenaltyAliasesReachTruthfulFittedModule)
+{
+  svmp::Physics::formulations::navier_stokes::
+      forceLink_NavierStokesRegister();
+  auto mesh = buildTranslatorMesh();
+  mesh->base().register_label("free_surface", 81);
+  const auto meshes = singleMeshMap(mesh);
+  constexpr std::array<std::string_view, 4> penalty_aliases{
+      "Tangential_mesh_penalty",
+      "TangentialMeshPenalty",
+      "Prescribed_tangential_mesh_penalty",
+      "PrescribedTangentialMeshPenalty",
+  };
+
+  for (const auto alias : penalty_aliases) {
+    const std::string xml =
+        std::string(R"xml(
+<Add_equation type="fluid">
+  <Enable_ALE>true</Enable_ALE>
+  <Mesh_velocity_source>coupled_displacement</Mesh_velocity_source>
+  <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>
+  <Density>1.0</Density>
+  <Viscosity model="Constant">
+    <Value>0.01</Value>
+  </Viscosity>
+  <Add_BC name="free_surface">
+    <Type>Free_surface</Type>
+    <Implementation>FittedALE</Implementation>
+    <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
+    <Kinematic_enforcement>Penalty</Kinematic_enforcement>
+    <Kinematic_penalty>11.0</Kinematic_penalty>
+    <Tangential_mesh_policy>Prescribed</Tangential_mesh_policy>
+    <Prescribed_tangential_mesh_velocity>0.25 -0.5 0.0</Prescribed_tangential_mesh_velocity>
+    <)xml") +
+        std::string(alias) + R"xml(>7.0</)xml" +
+        std::string(alias) + R"xml(>
+  </Add_BC>
+</Add_equation>
+)xml";
+    auto params = parseEquationXml(xml.c_str());
+    svmp::FE::systems::FESystem system(mesh);
+    auto module =
+        application::translators::EquationTranslator::createModule(
+            *params, system, meshes);
+    ASSERT_TRUE(module) << alias;
+
+    const auto artifact = module->effectiveConfigurationArtifact();
+    ASSERT_TRUE(artifact.has_value()) << alias;
+    EXPECT_NE(
+        artifact->json.find("\"tangential_mesh_penalty\":7"),
+        std::string::npos)
+        << alias;
+    EXPECT_NE(
+        artifact->json.find(
+            "\"tangential_mesh_owner\":"
+            "\"IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary\""),
+        std::string::npos)
+        << alias;
+    EXPECT_NE(
+        artifact->json.find("\"policy_consumed\":true"),
+        std::string::npos)
+        << alias;
+    EXPECT_NE(
+        artifact->json.find("\"operator_tag\":\"equations\""),
+        std::string::npos)
+        << alias;
+    EXPECT_NE(
+        artifact->json.find(
+            "\"operator_source\":"
+            "\"Fitted free-surface prescribed tangential mesh velocity on "
+            "marker 81\""),
+        std::string::npos)
+        << alias;
+    EXPECT_NE(
+        artifact->json.find(
+            "\"policy_qualification\":"
+            "\"supported_configuration_envelope\""),
+        std::string::npos)
+        << alias;
+  }
+}
+
+TEST(EquationTranslatorFreeSurface,
+     XmlExplicitNoneCannotBePromotedByKinematicPenalty)
+{
+  svmp::Physics::formulations::navier_stokes::
+      forceLink_NavierStokesRegister();
+  auto mesh = buildTranslatorMesh();
+  mesh->base().register_label("free_surface", 82);
+  const auto meshes = singleMeshMap(mesh);
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="fluid">
+  <Enable_ALE>true</Enable_ALE>
+  <Mesh_velocity_source>coupled_displacement</Mesh_velocity_source>
+  <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>
+  <Density>1.0</Density>
+  <Viscosity model="Constant">
+    <Value>0.01</Value>
+  </Viscosity>
+  <Add_BC name="free_surface">
+    <Type>Free_surface</Type>
+    <Implementation>FittedALE</Implementation>
+    <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
+    <Kinematic_enforcement>None</Kinematic_enforcement>
+    <Kinematic_penalty>11.0</Kinematic_penalty>
+    <Tangential_mesh_policy>Prescribed</Tangential_mesh_policy>
+  </Add_BC>
+</Add_equation>
+)xml");
+
+  svmp::FE::systems::FESystem system(mesh);
+  EXPECT_THROW(
+      (void)application::translators::EquationTranslator::createModule(
+          *params, system, meshes),
+      std::runtime_error);
+  EXPECT_EQ(system.fieldMap().numFields(), 0u);
+  EXPECT_TRUE(system.formulationRecords().empty());
+  EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
 }
 
 TEST(EquationTranslatorFreeSurface, BuildInputResolvesUnfittedContactLineWallFaces)

@@ -1867,19 +1867,6 @@ contactLineAngleRadians(const FreeSurfaceContactLine& contact_line)
 }
 
 [[nodiscard]] const IncompressibleNavierStokesVMSOptions::ScalarValue&
-contactLineAnglePenalty(const FreeSurfaceContactLine& contact_line)
-{
-    const auto* configuration =
-        std::get_if<FreeSurfaceContactLine::PrescribedAngle>(
-            &contact_line.configuration);
-    if (configuration == nullptr) {
-        throw std::logic_error(
-            "contactLineAnglePenalty requires PrescribedAngle");
-    }
-    return configuration->contact_angle_penalty;
-}
-
-[[nodiscard]] const IncompressibleNavierStokesVMSOptions::ScalarValue&
 contactLineMobility(const FreeSurfaceContactLine& contact_line)
 {
     const auto* configuration =
@@ -2141,6 +2128,67 @@ void validateGeneratedFreeSurfaceMarkerUniqueness(
     return *real;
 }
 
+[[nodiscard]] bool hasWallAwareContactLaw(
+    const FreeSurfaceBoundary& boundary)
+{
+    return std::any_of(
+        boundary.contact_lines.begin(),
+        boundary.contact_lines.end(),
+        [](const auto& contact_line) {
+            const auto kind = contactLineKind(contact_line);
+            return kind == ContactLineKind::PrescribedAngle ||
+                   kind == ContactLineKind::DynamicRenE;
+        });
+}
+
+[[nodiscard]] bool shouldDeclareFreeSurfaceDiscreteFunctional(
+    const FreeSurfaceBoundary& boundary)
+{
+    return isUnfittedLevelSet(boundary) &&
+           boundary.active_domain != FreeSurfaceActiveDomain::None &&
+           (usesSurfaceStress(boundary) ||
+            hasWallAwareContactLaw(boundary));
+}
+
+void validateFreeSurfaceDiscreteFunctionalPreflight(
+    std::span<const FreeSurfaceBoundary> free_surfaces,
+    const FE::systems::FESystem& system)
+{
+    const bool has_pending_declaration = std::any_of(
+        free_surfaces.begin(),
+        free_surfaces.end(),
+        shouldDeclareFreeSurfaceDiscreteFunctional);
+    if (!has_pending_declaration) {
+        return;
+    }
+    if (!system.freeSurfaceDiscreteFunctionalHistory().empty()) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: free-surface discrete-functional declarations cannot be installed after accepted history has begun");
+    }
+
+    const auto existing =
+        system.freeSurfaceDiscreteFunctionalDeclarations();
+    for (const auto& boundary : free_surfaces) {
+        if (!shouldDeclareFreeSurfaceDiscreteFunctional(boundary)) {
+            continue;
+        }
+        const auto conflict = std::find_if(
+            existing.begin(),
+            existing.end(),
+            [&](const auto& declaration) {
+                return declaration.interface_marker ==
+                       boundary.interface_marker;
+            });
+        if (conflict != existing.end()) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: free-surface interface marker " +
+                std::to_string(boundary.interface_marker) +
+                " already has discrete-functional owner '" +
+                conflict->owner_component + "'");
+        }
+    }
+}
+
 void declareFreeSurfaceDiscreteFunctionals(
     const std::vector<FreeSurfaceBoundary>& free_surfaces,
     FE::systems::FESystem& system,
@@ -2148,8 +2196,7 @@ void declareFreeSurfaceDiscreteFunctionals(
     FE::Real dynamic_viscosity)
 {
     for (const auto& bc : free_surfaces) {
-        if (!isUnfittedLevelSet(bc) || !usesSurfaceStress(bc) ||
-            bc.active_domain == FreeSurfaceActiveDomain::None) {
+        if (!shouldDeclareFreeSurfaceDiscreteFunctional(bc)) {
             continue;
         }
         FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
@@ -2356,21 +2403,6 @@ void validatePositiveConstantScalar(
     throw std::invalid_argument(
         "IncompressibleNavierStokesVMSModule: " + std::string(context) +
         " has no installed owner formulation; install the level-set equation before the free-surface contact condition");
-}
-
-[[nodiscard]] bool operatorHasTransientOwnerForField(
-    const FE::systems::FESystem& system,
-    FE::FieldId field,
-    std::string_view operator_tag)
-{
-    return std::any_of(
-        system.formulationRecords().begin(),
-        system.formulationRecords().end(),
-        [&](const FE::analysis::FormulationRecord& record) {
-            return record.operator_tag == operator_tag &&
-                   record.has_time_derivative &&
-                   formulationOwnsFieldRows(record, field);
-        });
 }
 
 [[nodiscard]] FE::Real dot3(const std::array<FE::Real, 3>& a,
@@ -2891,6 +2923,34 @@ void validateUnfittedContactWallNormal(
         " alignment_tolerance=1e-8" +
         " minimum_transverse_sine=1e-6" +
         " diagnostic=unfitted_contact_wall_normal_validation");
+}
+
+void validateFreeSurfaceContactGeometryPreflight(
+    std::span<const FreeSurfaceBoundary> free_surfaces,
+    const FE::systems::FESystem& system)
+{
+    const auto* context = system.cutIntegrationContext();
+    if (context == nullptr) {
+        return;
+    }
+    for (const auto& boundary : free_surfaces) {
+        if (!isUnfittedLevelSet(boundary)) {
+            continue;
+        }
+        for (const auto& contact_line : boundary.contact_lines) {
+            const auto kind = contactLineKind(contact_line);
+            if (kind != ContactLineKind::PrescribedAngle &&
+                kind != ContactLineKind::DynamicRenE) {
+                continue;
+            }
+            validateUnfittedContactWallNormal(
+                system,
+                context,
+                contact_line,
+                generatedUnfittedContactLineMarker(
+                    contact_line, boundary, system));
+        }
+    }
 }
 
 [[nodiscard]] FE::Real clampUnit(FE::Real value) noexcept
@@ -3686,6 +3746,47 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: velocity extension is only valid for unfitted level-set free surfaces");
         }
+        if (!options.explicit_legacy_configuration) {
+            if (!ale_enabled) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: the qualified "
+                    "fitted-ALE free-surface contract requires ALE to be "
+                    "enabled");
+            }
+            if (options.mesh_velocity_source !=
+                ALEMeshVelocitySource::CoupledDisplacement) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: the qualified "
+                    "fitted-ALE free-surface contract requires mesh velocity "
+                    "derived from a coupled mesh-displacement unknown");
+            }
+            if (bc.normal_kinematic_policy !=
+                FreeSurfaceNormalKinematicPolicy::
+                    MatchFluidNormalVelocity) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: the qualified "
+                    "fitted-ALE free-surface contract requires "
+                    "MatchFluidNormalVelocity");
+            }
+            if (bc.kinematic_enforcement !=
+                    FreeSurfaceKinematicEnforcement::Penalty &&
+                bc.kinematic_enforcement !=
+                    FreeSurfaceKinematicEnforcement::Nitsche) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: the qualified "
+                    "fitted-ALE free-surface contract requires explicit "
+                    "Penalty or Nitsche normal enforcement");
+            }
+            if (bc.tangential_mesh_policy !=
+                FreeSurfaceTangentialMeshPolicy::Prescribed) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: Free and "
+                    "SmoothingOnly fitted tangential policies do not yet "
+                    "have a consumed mesh-motion operator in the current "
+                    "capability; use Prescribed or the explicitly "
+                    "unqualified schema-1 legacy mode");
+            }
+        }
         if (bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
             !ale_enabled) {
             throw std::invalid_argument(
@@ -3789,13 +3890,11 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: contact-line contact_angle_radians must be finite and strictly in (0, pi); complete-wetting endpoints are not a transverse codimension-two contact configuration");
             }
-            (void)constantScalarValueOrThrow(
-                contactLineAnglePenalty(contact_line),
-                "contact-line contact_angle_penalty");
-            validatePositiveConstantScalar(
-                contactLineAnglePenalty(contact_line),
-                "contact-line contact_angle_penalty");
             if (isUnfittedLevelSet(bc)) {
+                if (bc.active_domain == FreeSurfaceActiveDomain::None) {
+                    throw std::invalid_argument(
+                        "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angles require an active liquid side (LevelSetNegative or LevelSetPositive)");
+                }
                 if (normalizedFreeSurfaceOptionToken(
                         bc.generated_interface_geometry) != "linearcorner") {
                     throw std::invalid_argument(
@@ -3862,6 +3961,10 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                 FreeSurfaceActiveDomainMethod::CutVolume) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: DynamicContactAngle requires Active_domain_method=CutVolume for a sharp liquid domain; SmoothedIndicator remains a diffuse diagnostic path");
+            }
+            if (bc.active_domain_smoothing_width != FE::Real{0.0}) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: DynamicContactAngle with Active_domain_method=CutVolume requires active_domain_smoothing_width=0 because the sharp operator has no smoothing-width parameter");
             }
             if (normalizedFreeSurfaceOptionToken(
                     bc.generated_interface_geometry) != "linearcorner") {
@@ -3968,6 +4071,53 @@ void validateNavierStokesBoundaryConfiguration(
             return sharpActiveBoundaryMarkerFor(
                 physical_boundary_marker, free_surfaces, system);
         };
+
+    bool uses_sharp_active_boundary_form = false;
+    const auto inspect_boundary_markers =
+        [&](const auto& conditions) {
+            for (const auto& condition : conditions) {
+                uses_sharp_active_boundary_form =
+                    uses_sharp_active_boundary_form ||
+                    generated_active_boundary_for(
+                        condition.boundary_marker).has_value();
+            }
+        };
+    inspect_boundary_markers(options.traction_neumann);
+    inspect_boundary_markers(options.traction_robin);
+    inspect_boundary_markers(options.pressure_outflow);
+    inspect_boundary_markers(options.velocity_dirichlet_weak);
+    for (const auto& free_surface : free_surfaces) {
+        if (!isUnfittedLevelSet(free_surface) ||
+            free_surface.active_domain == FreeSurfaceActiveDomain::None) {
+            continue;
+        }
+        uses_sharp_active_boundary_form =
+            uses_sharp_active_boundary_form ||
+            std::any_of(
+                free_surface.contact_lines.begin(),
+                free_surface.contact_lines.end(),
+                [](const auto& contact_line) {
+                    return contactLineKind(contact_line) ==
+                           ContactLineKind::DynamicRenE;
+                });
+    }
+    if (uses_sharp_active_boundary_form) {
+        if (velocity_space.polynomial_order() != 1 ||
+            pressure_space.polynomial_order() != 1) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: sharp generated exterior-boundary forms currently require order-1 velocity and pressure spaces; high-order active-boundary quadrature and entity measures are not qualified");
+        }
+        for (const auto& free_surface : free_surfaces) {
+            if (isUnfittedLevelSet(free_surface) &&
+                free_surface.active_domain != FreeSurfaceActiveDomain::None &&
+                normalizedFreeSurfaceOptionToken(
+                    free_surface.generated_interface_geometry) !=
+                    "linearcorner") {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: sharp generated exterior-boundary forms currently require Generated_interface_geometry=LinearCorner; high-order active-boundary quadrature and entity measures are not qualified");
+            }
+        }
+    }
 
     FE::systems::BoundaryConditionManager velocity_conditions;
     velocity_conditions.install(options.traction_neumann, [&](const auto& bc) {
@@ -4185,17 +4335,12 @@ void logUnfittedContactLineMeasure(
     FE::Real max_abs_angle_error = 0.0;
     FE::Real min_angle = std::numeric_limits<FE::Real>::infinity();
     FE::Real max_angle = -std::numeric_limits<FE::Real>::infinity();
-    FE::Real penalty_gap_l1 = 0.0;
-    FE::Real residual_integrand_l2_square = 0.0;
-    FE::Real residual_integrand_linf = 0.0;
     std::size_t angle_sample_count = 0u;
     const auto wall_n = normalizedWallNormal(contact_line);
     const auto target_angle = constantScalarValueOrThrow(
         contactLineAngleRadians(contact_line),
         "contact-line contact_angle_radians");
     const auto desired_cos = std::cos(target_angle);
-    const auto penalty_value =
-        constantScalarValue(contactLineAnglePenalty(contact_line));
     const auto* cut_context = system.cutIntegrationContext();
     const bool context_present = cut_context != nullptr;
     const bool marker_available =
@@ -4217,7 +4362,7 @@ void logUnfittedContactLineMeasure(
                 // Reference normals and d-2 weights cannot be interpreted as
                 // physical contact angles or measures before the cell map is
                 // applied. StandardAssembler performs that mapping exactly
-                // once while assembling the contact residual.
+                // once while consuming the prescribed contact geometry.
                 continue;
             }
             ++current_rule_count;
@@ -4253,16 +4398,6 @@ void logUnfittedContactLineMeasure(
                     std::max(max_abs_angle_error, std::abs(angle_error));
                 min_angle = std::min(min_angle, angle);
                 max_angle = std::max(max_angle, angle);
-                if (penalty_value.has_value()) {
-                    const auto residual_density =
-                        (*penalty_value) * cos_gap;
-                    penalty_gap_l1 += weight * std::abs(residual_density);
-                    residual_integrand_l2_square +=
-                        weight * residual_density * residual_density;
-                    residual_integrand_linf = std::max(
-                        residual_integrand_linf,
-                        std::abs(residual_density));
-                }
                 ++angle_sample_count;
             }
         }
@@ -4299,8 +4434,11 @@ void logUnfittedContactLineMeasure(
 
     std::ostringstream msg;
     msg << "IncompressibleNavierStokesVMSModule: prescribed unfitted contact "
-           "angle uses generated interface-boundary intersection measure"
-        << " diagnostic=unfitted_contact_line_measure"
+           "angle uses generated interface-boundary intersection geometry"
+        << " diagnostic=unfitted_prescribed_contact_geometry"
+        << " level_set_geometry_owner=accepted_state_wall_aware_repair"
+        << " momentum_owner=young_wall_energy"
+        << " literal_codimension_two_level_set_residual=retired"
         << " interface_marker=" << bc.interface_marker
         << " wall_boundary_marker=" << contactLineWallBoundaryMarker(contact_line)
         << " contact_line_marker=" << contact_marker
@@ -4337,26 +4475,7 @@ void logUnfittedContactLineMeasure(
         << " max_abs_angle_error_degrees="
         << static_cast<double>(max_abs_angle_error * radians_to_degrees)
         << " wall_normal_dot_boundary_normal_mean="
-        << static_cast<double>(mean_boundary_normal_alignment)
-        << " penalty_is_constant="
-        << (penalty_value.has_value() ? "true" : "false")
-        << " constant_penalty_gap_l1="
-        << static_cast<double>(penalty_value.has_value()
-                                   ? penalty_gap_l1
-                                   : std::numeric_limits<FE::Real>::quiet_NaN())
-        << " constant_residual_integrand_l1="
-        << static_cast<double>(penalty_value.has_value()
-                                   ? penalty_gap_l1
-                                   : std::numeric_limits<FE::Real>::quiet_NaN())
-        << " constant_residual_integrand_l2="
-        << static_cast<double>(
-               penalty_value.has_value()
-                   ? std::sqrt(residual_integrand_l2_square)
-                   : std::numeric_limits<FE::Real>::quiet_NaN())
-        << " constant_residual_integrand_linf="
-        << static_cast<double>(penalty_value.has_value()
-                                   ? residual_integrand_linf
-                                   : std::numeric_limits<FE::Real>::quiet_NaN());
+        << static_cast<double>(mean_boundary_normal_alignment);
 
     FE_LOG_INFO(
         msg.str());
@@ -4769,13 +4888,14 @@ void applyDynamicContactAngleResidual(
         if (contactLineKind(contact_line) ==
                 ContactLineKind::PrescribedAngle &&
             !FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension)) {
-            // The phi equation enforces the geometric angle, while the
-            // momentum equation still needs the solid--liquid/solid--gas wall
-            // force.  SurfaceStress already supplies the dynamic conormal and
-            // therefore adds only -gamma*cos(theta_e); CurvatureTraction needs
-            // the full cos(theta_d)-cos(theta_e) line force.  If all
-            // wall-tangential test traces are essential, either form performs
-            // no virtual work and contributes only to the reaction.
+            // Accepted-state wall-aware repair enforces the geometric angle,
+            // while the momentum equation still needs the solid--liquid/
+            // solid--gas wall force.  SurfaceStress already supplies the
+            // dynamic conormal and therefore adds only -gamma*cos(theta_e);
+            // CurvatureTraction needs the full cos(theta_d)-cos(theta_e) line
+            // force.  If all wall-tangential test traces are essential, either
+            // form performs no virtual work and contributes only to the
+            // reaction.
             const auto phi_id = resolveLevelSetFieldId(bc, system);
             const auto& phi_record = system.fieldRecord(phi_id);
             const auto phi = StateField(
@@ -5591,25 +5711,14 @@ void applyFreeSurfaceContactLineConstraints(
     }
 }
 
-void applyFreeSurfaceContactAngleResidual(
+void registerFreeSurfacePrescribedAngleGeometry(
     FE::systems::FESystem& system,
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FormInstallOptions& base_install_options,
-    int dim)
+    const FreeSurfaceBoundary& bc)
 {
     for (const auto& contact_line : bc.contact_lines) {
         if (contactLineKind(contact_line) != ContactLineKind::PrescribedAngle) {
             continue;
         }
-        const auto wall_n = wallNormalExpression(contact_line, dim);
-        const auto desired = FE::forms::FormExpr::constant(std::cos(
-            constantScalarValueOrThrow(
-                contactLineAngleRadians(contact_line),
-                "contact-line contact_angle_radians")));
-        const auto penalty = FE::forms::bc::toScalarExpr(
-            contactLineAnglePenalty(contact_line),
-            freeSurfaceValueName("ns_free_surface_contact_angle_penalty", bc));
-
         if (isUnfittedLevelSet(bc)) {
             const auto phi_id = system.findFieldByName(bc.level_set_field_name);
             if (phi_id == FE::INVALID_FIELD_ID) {
@@ -5628,14 +5737,6 @@ void applyFreeSurfaceContactAngleResidual(
                     "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angles require the level-set field to be an unknown");
             }
 
-            const auto phi = FE::forms::StateField(
-                phi_id,
-                *rec.space,
-                bc.level_set_field_name);
-            const auto eta = FE::forms::FormExpr::testFunction(
-                phi_id,
-                *rec.space,
-                "eta_contact_angle");
             const int contact_marker =
                 generatedUnfittedContactLineMarker(
                     contact_line,
@@ -5644,7 +5745,7 @@ void applyFreeSurfaceContactAngleResidual(
             system.registerGeneratedEmbeddedInterfaceMarker(contact_marker);
             system.addCutIntegrationContextUpdateCallback(
                 FE::systems::CutIntegrationContextUpdateCallback{
-                    .name = "navier_stokes_unfitted_contact_line_measure:" +
+                    .name = "navier_stokes_prescribed_contact_geometry:" +
                             std::to_string(contact_marker),
                     .callback =
                         [&system, bc, contact_line, contact_marker](
@@ -5664,66 +5765,6 @@ void applyFreeSurfaceContactAngleResidual(
                                 contact_line,
                                 contact_marker);
                         }});
-            // A SurfaceStress contact condition must use the same
-            // generated LinearCorner normal as the surface and wall energies.
-            // CurvatureTraction retains its live Q1-gradient normal and
-            // analytic local tangent.
-            const auto n = usesSurfaceStress(bc)
-                               ? generatedInterfaceOutwardNormal(bc)
-                               : unfittedInterfaceNormal(bc, phi);
-            const auto angle_gap = FE::forms::dot(n, wall_n) + desired;
-            const auto residual = FE::forms::dInterfaceBoundary(
-                penalty * angle_gap * eta,
-                contact_marker);
-
-            const auto operator_tag = owningOperatorTagForField(
-                system,
-                phi_id,
-                "prescribed contact-angle level-set field '" +
-                    bc.level_set_field_name + "'");
-            // The angle subform depends only on grad(phi) and therefore emits
-            // a scalar-constant nullspace candidate when analyzed in
-            // isolation.  Preserve that candidate for a genuinely steady,
-            // gradient-only owner.  If the already-installed owning
-            // formulation contains dt(phi), however, its mass term removes
-            // the algebraic constant mode; record that aggregate-operator
-            // evidence so the subform cannot spuriously impose a mean-zero
-            // constraint and replace a production contact row.
-            if (operatorHasTransientOwnerForField(
-                    system, phi_id, operator_tag)) {
-                auto& gauge_registry = system.gaugeRegistry();
-                constexpr std::string_view transient_owner_anchor =
-                    "Transient owning level-set formulation anchors constant phi shifts";
-                const bool anchor_already_registered = std::any_of(
-                    gauge_registry.anchoring().begin(),
-                    gauge_registry.anchoring().end(),
-                    [&](const FE::gauge::AnchoringEvidence& evidence) {
-                        return evidence.field == phi_id &&
-                               evidence.family ==
-                                   FE::gauge::NullspaceModeFamily::ScalarConstant &&
-                               evidence.source == transient_owner_anchor;
-                    });
-                if (!anchor_already_registered) {
-                    gauge_registry.addAnchoring(FE::gauge::AnchoringEvidence{
-                        .field = phi_id,
-                        .component = -1,
-                        .region = -1,
-                        .family =
-                            FE::gauge::NullspaceModeFamily::ScalarConstant,
-                        .verdict = FE::gauge::AnchoringVerdict::Anchored,
-                        .source = std::string(transient_owner_anchor),
-                    });
-                }
-            }
-            if (!system.hasOperator(operator_tag)) {
-                system.addOperator(operator_tag);
-            }
-            (void)FE::systems::installFormulation(
-                system,
-                operator_tag,
-                {phi_id},
-                residual,
-                base_install_options);
             validateUnfittedContactWallNormal(
                 system,
                 system.cutIntegrationContext(),
@@ -5734,6 +5775,15 @@ void applyFreeSurfaceContactAngleResidual(
                 bc,
                 contact_line,
                 contact_marker);
+            FE_LOG_INFO(
+                std::string("IncompressibleNavierStokesVMSModule: registered prescribed-angle contact geometry without a level-set residual") +
+                " interface_marker=" +
+                std::to_string(bc.interface_marker) +
+                " contact_marker=" + std::to_string(contact_marker) +
+                " level_set_geometry_owner=accepted_state_wall_aware_repair"
+                " momentum_owner=young_wall_energy"
+                " literal_codimension_two_level_set_residual=retired"
+                " diagnostic=navier_stokes_prescribed_contact_geometry");
             continue;
         }
 
@@ -6082,6 +6132,13 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
 [[nodiscard]] const char* tangentialMeshPolicyName(
     FreeSurfaceTangentialMeshPolicy policy) noexcept;
 
+[[nodiscard]] std::string fittedTangentialOperatorSource(int boundary_marker)
+{
+    return "Fitted free-surface prescribed tangential mesh velocity on "
+           "marker " +
+           std::to_string(boundary_marker);
+}
+
 void installFittedFreeSurfaceMeshKinematics(
     FE::systems::FESystem& system,
     const FreeSurfaceBoundary& bc,
@@ -6239,9 +6296,7 @@ void installFittedFreeSurfaceMeshKinematics(
         descriptor.enforcement_kind =
             FE::analysis::EnforcementKind::WeakPenalty;
         descriptor.source =
-            "Fitted free-surface prescribed tangential mesh velocity on "
-            "marker " +
-            std::to_string(bc.boundary_marker);
+            fittedTangentialOperatorSource(bc.boundary_marker);
         system.addBoundaryConditionDescriptor(std::move(descriptor));
     }
 }
@@ -6428,8 +6483,9 @@ void installFittedFreeSurfaceMeshKinematics(
             << ']';
     }
     if (kind == ContactLineKind::PrescribedAngle) {
-        out << ",\"penalty\":"
-            << jsonScalarValue(contactLineAnglePenalty(contact_line));
+        out << ",\"level_set_geometry_owner\":"
+            << "\"accepted_state_wall_aware_repair\""
+            << ",\"prescribed_angle_operator\":\"wall_aware_geometry_only\"";
     }
     if (kind == ContactLineKind::DynamicRenE) {
         const auto mobility = constantScalarValueOrThrow(
@@ -6474,6 +6530,66 @@ void installFittedFreeSurfaceMeshKinematics(
            std::tuple{contactLineKind(rhs),
                       contactLineWallBoundaryMarker(rhs),
                       contactLineMarker(rhs)};
+}
+
+struct TangentialPolicyProvenance {
+    const FE::systems::MeshTangentialBoundaryPolicyDeclaration*
+        declaration{nullptr};
+    const FE::analysis::BoundaryConditionDescriptor* consumed_operator{
+        nullptr};
+};
+
+[[nodiscard]] TangentialPolicyProvenance
+tangentialPolicyProvenance(
+    const FreeSurfaceBoundary& boundary,
+    const FE::systems::FESystem& system)
+{
+    if (boundary.implementation !=
+        FreeSurfaceImplementation::FittedALE) {
+        return {};
+    }
+    const auto displacement = system.meshMotionField(
+        FE::systems::MeshMotionFieldRole::Displacement);
+    if (!displacement.has_value()) {
+        return {};
+    }
+    const auto declarations =
+        system.meshTangentialBoundaryPolicies();
+    const auto declaration = std::find_if(
+        declarations.begin(),
+        declarations.end(),
+        [&](const auto& candidate) {
+            return candidate.mesh_displacement_field == *displacement &&
+                   candidate.boundary_marker ==
+                       boundary.boundary_marker;
+        });
+    if (declaration == declarations.end()) {
+        return {};
+    }
+
+    const auto& descriptors =
+        system.boundaryConditionDescriptors();
+    const auto consumed = std::find_if(
+        descriptors.begin(),
+        descriptors.end(),
+        [&](const auto& candidate) {
+            return candidate.primary_variable.field_id ==
+                       declaration->mesh_displacement_field &&
+                   candidate.boundary_marker ==
+                       declaration->boundary_marker &&
+                   candidate.trace_kind ==
+                       FE::analysis::TraceKind::TangentialComponent &&
+                   candidate.enforcement_kind ==
+                       FE::analysis::EnforcementKind::WeakPenalty &&
+                   candidate.source ==
+                       fittedTangentialOperatorSource(
+                           boundary.boundary_marker);
+        });
+    return TangentialPolicyProvenance{
+        .declaration = &*declaration,
+        .consumed_operator =
+            consumed == descriptors.end() ? nullptr : &*consumed,
+    };
 }
 
 [[nodiscard]] EffectiveConfigurationArtifact makeEffectiveConfigurationArtifact(
@@ -6544,6 +6660,8 @@ void installFittedFreeSurfaceMeshKinematics(
             out << ',';
         }
         const auto& boundary = free_surfaces[surface_index];
+        const auto tangential_provenance =
+            tangentialPolicyProvenance(boundary, system);
         auto contacts = boundary.contact_lines;
         std::sort(contacts.begin(), contacts.end(), contactConfigurationLess);
 
@@ -6613,7 +6731,37 @@ void installFittedFreeSurfaceMeshKinematics(
             << ']'
             << ",\"tangential_mesh_penalty\":"
             << jsonScalarValue(boundary.tangential_mesh_penalty)
-            << ",\"tangential_mesh_owner\":\"FreeSurfaceBoundary\""
+            << ",\"tangential_mesh_owner\":";
+        if (tangential_provenance.declaration != nullptr) {
+            out << jsonString(
+                tangential_provenance.declaration->owner_component);
+        } else {
+            out << "null";
+        }
+        out << ",\"policy_consumed\":"
+            << jsonBool(
+                   tangential_provenance.consumed_operator != nullptr)
+            << ",\"operator_tag\":";
+        if (tangential_provenance.consumed_operator != nullptr) {
+            out << jsonString(options.operator_tag);
+        } else {
+            out << "null";
+        }
+        out << ",\"operator_source\":";
+        if (tangential_provenance.consumed_operator != nullptr) {
+            out << jsonString(
+                tangential_provenance.consumed_operator->source);
+        } else {
+            out << "null";
+        }
+        out << ",\"policy_qualification\":"
+            << jsonString(
+                   boundary.implementation !=
+                           FreeSurfaceImplementation::FittedALE
+                       ? "not_applicable"
+                       : options.explicit_legacy_configuration
+                             ? "unqualified_explicit_legacy"
+                             : "supported_configuration_envelope")
             << ",\"enforcement\":"
             << jsonString(kinematicEnforcementName(
                    boundary.kinematic_enforcement))
@@ -6947,6 +7095,12 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             options_.enable_ale &&
             options_.mesh_velocity_source ==
                 ALEMeshVelocitySource::CoupledDisplacement) {
+            if (!system.meshTangentialBoundaryPolicyHistory().empty()) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: fitted "
+                    "free-surface tangential policies cannot be installed "
+                    "after accepted tangential-policy history has begun");
+            }
             auto displacement_field = system.meshMotionField(
                 FE::systems::MeshMotionFieldRole::Displacement);
             if (!displacement_field.has_value()) {
@@ -7043,6 +7197,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         *velocity_space_,
         *pressure_space_,
         dim);
+    validateFreeSurfaceContactGeometryPreflight(
+        effective_free_surfaces, system);
+    validateFreeSurfaceDiscreteFunctionalPreflight(
+        effective_free_surfaces, system);
 
     const FE::FieldId u_id = ensureCompatibleUnknownField(
         system,
@@ -7875,14 +8033,11 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     // Reserve the marker here so validate() catches conflicts with other BC types.
     bc_manager.install(options_.velocity_dirichlet_weak, Factories::reserveMarker);
 
-    auto free_surface_contact_angle_install = physicsInstallOptions(options_.jit_policy);
+    auto free_surface_kinematics_install =
+        physicsInstallOptions(options_.jit_policy);
     for (const auto& effective_bc : effective_free_surfaces) {
         applyFreeSurfaceContactLineConstraints(system, effective_bc, ale_binding, dim);
-        applyFreeSurfaceContactAngleResidual(
-            system,
-            effective_bc,
-            free_surface_contact_angle_install,
-            dim);
+        registerFreeSurfacePrescribedAngleGeometry(system, effective_bc);
         applyDynamicContactAngleResidual(
             momentum_form,
             system,
@@ -7930,7 +8085,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             ale_binding,
             u,
             options_,
-            free_surface_contact_angle_install,
+            free_surface_kinematics_install,
             u_id);
         applyFreeSurfaceCutCellStabilization(
             momentum_form,

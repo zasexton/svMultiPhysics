@@ -219,7 +219,6 @@ struct IncompressibleNavierStokesVMSOptions {
             ScalarValue contact_angle_radians{1.57079632679489661923};
             std::array<ScalarValue, 3> wall_normal{
                 ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
-            ScalarValue contact_angle_penalty{1.0};
         };
 
         struct DynamicRenE {

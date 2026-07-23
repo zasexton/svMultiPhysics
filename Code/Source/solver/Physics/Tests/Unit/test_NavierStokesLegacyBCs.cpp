@@ -583,6 +583,11 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceBCTranslation_SetupSucceeds)
     input.equation_type = "fluid";
     input.mesh_name = "single_tetra";
     input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Enable_ALE"] = defined("true");
+    input.equation_params["Mesh_velocity_source"] =
+        defined("coupled_displacement");
+    input.equation_params["Auto_register_mesh_displacement_field"] =
+        defined("true");
     input.default_domain.params["Density"] = defined("1.0");
     input.default_domain.params["Viscosity.model"] = defined("Constant");
     input.default_domain.params["Viscosity.Value"] = defined("0.01");
@@ -594,13 +599,19 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceBCTranslation_SetupSucceeds)
     bc.params["Implementation"] = defined("FittedALE");
     bc.params["External_pressure"] = defined("12.5");
     bc.params["Surface_tension"] = defined("0.0");
+    bc.params["Normal_kinematic_policy"] =
+        defined("MatchFluidNormalVelocity");
+    bc.params["Kinematic_enforcement"] = defined("Penalty");
+    bc.params["Kinematic_penalty"] = defined("9.0");
+    bc.params["Tangential_mesh_policy"] = defined("Prescribed");
     input.boundary_conditions.push_back(std::move(bc));
 
     svmp::FE::systems::FESystem system(mesh);
     auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
     ASSERT_TRUE(module);
     ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::BoundaryIntegral));
-    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::Normal));
+    ASSERT_TRUE(formulationRecordsContain(
+        system, svmp::FE::forms::FormExprType::CurrentNormal));
     ASSERT_NO_THROW(system.setup());
 #endif
 }
@@ -622,7 +633,10 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
     input.mesh = mesh->local_mesh_ptr();
 
     input.equation_params["Enable_ALE"] = defined("true");
-    input.equation_params["Mesh_velocity_source"] = defined("prescribed_data");
+    input.equation_params["Mesh_velocity_source"] =
+        defined("coupled_displacement");
+    input.equation_params["Auto_register_mesh_displacement_field"] =
+        defined("true");
     input.default_domain.params["Density"] = defined("1.0");
     input.default_domain.params["Viscosity.model"] = defined("Constant");
     input.default_domain.params["Viscosity.Value"] = defined("0.01");
@@ -637,7 +651,7 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
     bc.params["Use_current_geometry_curvature"] = defined("true");
     bc.params["Kinematic_enforcement"] = defined("Nitsche");
     bc.params["Normal_kinematic_policy"] = defined("MatchFluidNormalVelocity");
-    bc.params["Tangential_mesh_policy"] = defined("SmoothingOnly");
+    bc.params["Tangential_mesh_policy"] = defined("Prescribed");
     bc.params["Kinematic_nitsche_gamma"] = defined("18.0");
     input.boundary_conditions.push_back(std::move(bc));
 
@@ -690,6 +704,10 @@ TEST(NavierStokesLegacyBCs,
     bc.params["Prescribed_tangential_mesh_velocity"] =
         defined("0.2, -0.1, 0.0");
     bc.params["Tangential_mesh_penalty"] = defined("6.0");
+    bc.params["Normal_kinematic_policy"] =
+        defined("MatchFluidNormalVelocity");
+    bc.params["Kinematic_enforcement"] = defined("Penalty");
+    bc.params["Kinematic_penalty"] = defined("8.0");
     input.boundary_conditions.push_back(std::move(bc));
 
     svmp::FE::systems::FESystem system(mesh);
@@ -713,7 +731,15 @@ TEST(NavierStokesLegacyBCs,
         std::string::npos);
     EXPECT_NE(
         artifact->json.find(
-            "\"tangential_mesh_owner\":\"FreeSurfaceBoundary\""),
+            "\"tangential_mesh_owner\":"
+            "\"IncompressibleNavierStokesVMSModule."
+            "FreeSurfaceBoundary\""),
+        std::string::npos);
+    EXPECT_NE(
+        artifact->json.find("\"policy_consumed\":true"),
+        std::string::npos);
+    EXPECT_NE(
+        artifact->json.find("\"operator_tag\":\"equations\""),
         std::string::npos);
     ASSERT_NO_THROW(system.setup());
 
@@ -760,12 +786,16 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfacePrescribedAngleTranslationFailsClos
     bc.params["Type"] = defined("Free_surface");
     bc.params["Implementation"] = defined("FittedALE");
     bc.params["External_pressure"] = defined("0.0");
+    bc.params["Normal_kinematic_policy"] =
+        defined("MatchFluidNormalVelocity");
+    bc.params["Kinematic_enforcement"] = defined("Penalty");
+    bc.params["Kinematic_penalty"] = defined("8.0");
+    bc.params["Tangential_mesh_policy"] = defined("Prescribed");
     bc.params["Contact_line_model"] = defined("PrescribedContactAngle");
     bc.params["Contact_line_wall_marker"] = defined("88");
     bc.params["Contact_line_marker"] = defined("89");
     bc.params["Contact_angle_degrees"] = defined("60.0");
     bc.params["Contact_line_wall_normal"] = defined("1.0, 0.0, 0.0");
-    bc.params["Contact_angle_penalty"] = defined("7.5");
     input.boundary_conditions.push_back(std::move(bc));
 
     svmp::FE::systems::FESystem system(mesh);
@@ -987,7 +1017,7 @@ TEST(NavierStokesLegacyBCs,
             "PrescribedAngle does not accept mobility",
         },
         {
-            "dynamic with penalty state",
+            "removed prescribed-angle coefficient",
             {
                 {"Contact_line_model", "DynamicRenE"},
                 {"Contact_line_wall_marker", "80"},
@@ -998,7 +1028,7 @@ TEST(NavierStokesLegacyBCs,
                 {"Wall_slip_length", "0.1"},
                 {"Contact_angle_penalty", "2.0"},
             },
-            "DynamicRenE does not use Contact_angle_penalty",
+            "Unknown free-surface contact key",
         },
         {
             "dynamic without navier slip",
@@ -1181,6 +1211,11 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceContactNoneIsExplicitAndComplete)
     input.equation_type = "fluid";
     input.mesh_name = "single_tetra";
     input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Free_surface_configuration_schema_version"] =
+        defined("1");
+    input.equation_params[
+        "Enable_explicit_legacy_free_surface_configuration"] =
+        defined("true");
     input.default_domain.params["Density"] = defined("1.0");
     input.default_domain.params["Viscosity.model"] = defined("Constant");
     input.default_domain.params["Viscosity.Value"] = defined("0.01");
@@ -1218,6 +1253,11 @@ TEST(NavierStokesLegacyBCs, FreeSurfacePinnedIsExplicitAndComplete)
     input.equation_type = "fluid";
     input.mesh_name = "single_tetra";
     input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Free_surface_configuration_schema_version"] =
+        defined("1");
+    input.equation_params[
+        "Enable_explicit_legacy_free_surface_configuration"] =
+        defined("true");
     input.equation_params["Enable_ALE"] = defined("true");
     input.equation_params["Mesh_velocity_source"] =
         defined("coupled_displacement");
@@ -1286,7 +1326,6 @@ TEST(NavierStokesLegacyBCs,
     bc.params["Contact_line_wall_normals"] =
         defined("1.0 0.0 0.0; 0.0 1.0 0.0");
     bc.params["Contact_angle_degrees"] = defined("90.0");
-    bc.params["Contact_angle_penalty"] = defined("4.0");
     input.boundary_conditions.push_back(std::move(bc));
 
     svmp::FE::systems::FESystem system(mesh);
@@ -1315,9 +1354,14 @@ TEST(NavierStokesLegacyBCs,
 
     auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
     ASSERT_TRUE(module);
-    EXPECT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::InterfaceIntegral));
-    EXPECT_TRUE(formulationRecordsContainInterfaceMarker(system, first_contact_marker));
-    EXPECT_TRUE(formulationRecordsContainInterfaceMarker(system, second_contact_marker));
+    EXPECT_TRUE(system.isGeneratedEmbeddedInterfaceMarkerRegistered(
+        first_contact_marker));
+    EXPECT_TRUE(system.isGeneratedEmbeddedInterfaceMarkerRegistered(
+        second_contact_marker));
+    EXPECT_FALSE(formulationRecordsContainInterfaceMarker(
+        system, first_contact_marker));
+    EXPECT_FALSE(formulationRecordsContainInterfaceMarker(
+        system, second_contact_marker));
 #endif
 }
 
