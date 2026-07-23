@@ -276,6 +276,69 @@ struct FreeSurfaceDiscreteFunctionalState {
     Real total_potential{0.0};
 };
 
+using FreeSurfaceDiscreteFunctionalPhysicalGradient =
+    std::array<std::array<Real, 3>, 3>;
+
+/**
+ * Physical deformation used to differentiate the snapshot-owned functional.
+ *
+ * The callback coordinate is the parent reference coordinate of the
+ * authoritative rule point.  `value` returns the physical deformation there,
+ * while `physical_gradient[i][j]` is d(value_i)/d(x_j).  The deformation is
+ * understood to preserve the fixed physical wall: its contact trace is wall
+ * tangential and every non-contact exterior flux vanishes.
+ */
+struct FreeSurfaceDiscreteFunctionalDeformationEvaluator {
+    std::function<std::array<Real, 3>(
+        GlobalIndex,
+        const std::array<Real, 3>&,
+        const geometry::CutQuadratureProvenance&)>
+        value{};
+    std::function<FreeSurfaceDiscreteFunctionalPhysicalGradient(
+        GlobalIndex,
+        const std::array<Real, 3>&,
+        const geometry::CutQuadratureProvenance&)>
+        physical_gradient{};
+
+    [[nodiscard]] bool canEvaluateValue() const noexcept {
+        return static_cast<bool>(value);
+    }
+    [[nodiscard]] bool canEvaluatePhysicalGradient() const noexcept {
+        return static_cast<bool>(physical_gradient);
+    }
+};
+
+struct FreeSurfaceDiscreteWallFunctionalVariationState {
+    int boundary_marker{-1};
+    std::optional<Real> equilibrium_contact_angle_radians{};
+    Real owned_wetted_wall_area_variation{0.0};
+    Real young_wall_energy_variation{0.0};
+};
+
+/**
+ * Rank-owned first variation of the immutable snapshot's capillary functional.
+ *
+ * The liquid--gas area uses the surface-divergence identity on retained
+ * interface rules.  Wetted-wall area uses the outward wetted-footprint flux
+ * on retained contact rules, and liquid volume uses the outward-liquid flux
+ * on retained interface rules.  Ghost rules are deliberately excluded.
+ */
+struct FreeSurfaceDiscreteFunctionalVariationState {
+    std::uint64_t snapshot_revision_key{0};
+    geometry::CutIntegrationSide liquid_side{
+        geometry::CutIntegrationSide::Negative};
+    Real surface_tension{0.0};
+    Real volume_multiplier{0.0};
+    std::vector<FreeSurfaceDiscreteWallFunctionalVariationState> walls{};
+    Real owned_liquid_volume_variation{0.0};
+    Real owned_liquid_gas_area_variation{0.0};
+    Real owned_wetted_wall_area_variation{0.0};
+    Real liquid_gas_surface_energy_variation{0.0};
+    Real young_wall_energy_variation{0.0};
+    Real volume_constraint_potential_variation{0.0};
+    Real total_potential_variation{0.0};
+};
+
 enum class FreeSurfaceContactMotion : std::uint8_t {
     Absent,
     Stationary,
@@ -320,6 +383,7 @@ struct FreeSurfaceDynamicContactWallState {
     std::array<Real, 3> contact_position_integral{{0.0, 0.0, 0.0}};
     std::array<Real, 3> wall_normal_integral{{0.0, 0.0, 0.0}};
     std::array<Real, 3> footprint_direction_integral{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> contact_line_tangent_integral{{0.0, 0.0, 0.0}};
     std::optional<Real> mean_dynamic_angle_radians{};
     std::optional<Real> mean_dynamic_cosine{};
     std::optional<Real> mean_contact_speed{};
@@ -331,6 +395,7 @@ struct FreeSurfaceDynamicContactWallState {
     std::array<Real, 3> mean_contact_position{{0.0, 0.0, 0.0}};
     std::array<Real, 3> mean_wall_normal{{0.0, 0.0, 0.0}};
     std::array<Real, 3> mean_footprint_direction{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> mean_contact_line_tangent{{0.0, 0.0, 0.0}};
     FreeSurfaceContactMotion motion{FreeSurfaceContactMotion::Absent};
 };
 
@@ -428,6 +493,12 @@ private:
 evaluateFreeSurfaceDiscreteFunctional(
     const FreeSurfaceGeometrySnapshot& snapshot,
     const FreeSurfaceDiscreteFunctionalParameters& parameters);
+
+[[nodiscard]] FreeSurfaceDiscreteFunctionalVariationState
+evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    const FreeSurfaceDiscreteFunctionalParameters& parameters,
+    const FreeSurfaceDiscreteFunctionalDeformationEvaluator& deformation);
 
 [[nodiscard]] std::shared_ptr<const FreeSurfaceGeometrySnapshot>
 buildFreeSurfaceGeometrySnapshot(

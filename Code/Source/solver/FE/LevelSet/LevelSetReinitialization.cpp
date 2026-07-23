@@ -672,6 +672,26 @@ void appendDeserializedPrimitiveSet(std::span<const std::byte> bytes,
                       static_cast<std::uint8_t>(constraint.kind)};
 }
 
+[[nodiscard]] bool finiteVector(
+    const std::array<Real, 3>& values) noexcept
+{
+    return std::all_of(values.begin(), values.end(), [](Real value) {
+        return std::isfinite(value);
+    });
+}
+
+[[nodiscard]] bool sameWallContactConstraintPayload(
+    const LevelSetWallContactConstraint& left,
+    const LevelSetWallContactConstraint& right) noexcept
+{
+    return left.geometry_revision == right.geometry_revision &&
+           left.target_angle_radians == right.target_angle_radians &&
+           left.physical_wall_normal == right.physical_wall_normal &&
+           left.accepted_contact_point == right.accepted_contact_point &&
+           left.accepted_contact_line_tangent ==
+               right.accepted_contact_line_tangent;
+}
+
 void validateWallContactConstraint(
     const LevelSetWallContactConstraint& constraint)
 {
@@ -686,6 +706,36 @@ void validateWallContactConstraint(
         constraint.geometry_revision == 0u) {
         throw std::invalid_argument(
             "level-set wall-contact constraint requires a known kind, nonnegative markers, a valid global parent cell, and a nonzero geometry revision");
+    }
+    if (constraint.kind !=
+        LevelSetWallContactConstraintKind::PrescribedAngle) {
+        return;
+    }
+
+    const Real pi = std::acos(Real{-1.0});
+    const Real wall_normal_norm = norm(constraint.physical_wall_normal);
+    const Real line_tangent_norm =
+        norm(constraint.accepted_contact_line_tangent);
+    if (!std::isfinite(constraint.target_angle_radians) ||
+        !(constraint.target_angle_radians > Real{0.0}) ||
+        !(constraint.target_angle_radians < pi) ||
+        !finiteVector(constraint.physical_wall_normal) ||
+        !finiteVector(constraint.accepted_contact_point) ||
+        !finiteVector(constraint.accepted_contact_line_tangent) ||
+        !(wall_normal_norm > Real{0.0}) ||
+        !std::isfinite(wall_normal_norm) ||
+        !(line_tangent_norm > Real{0.0}) ||
+        !std::isfinite(line_tangent_norm)) {
+        throw std::invalid_argument(
+            "prescribed level-set wall contact requires an angle in (0, pi), finite physical frame vectors, and nonzero wall-normal and contact-line directions");
+    }
+    const Real relative_alignment =
+        std::abs(dot(constraint.physical_wall_normal,
+                     constraint.accepted_contact_line_tangent)) /
+        (wall_normal_norm * line_tangent_norm);
+    if (relative_alignment > Real{1.0e-10}) {
+        throw std::invalid_argument(
+            "prescribed level-set wall contact requires an orthogonal physical wall normal and contact-line tangent");
     }
 }
 
@@ -716,6 +766,17 @@ globalizeWallContactConstraints(
                       static_cast<std::int64_t>(
                           constraint.parent_cell_global_id));
             appendPod(local_bytes, constraint.geometry_revision);
+            appendPod(local_bytes, constraint.target_angle_radians);
+            for (const Real value : constraint.physical_wall_normal) {
+                appendPod(local_bytes, value);
+            }
+            for (const Real value : constraint.accepted_contact_point) {
+                appendPod(local_bytes, value);
+            }
+            for (const Real value :
+                 constraint.accepted_contact_line_tangent) {
+                appendPod(local_bytes, value);
+            }
         }
         if (local_bytes.size() >
             static_cast<std::size_t>(std::numeric_limits<int>::max())) {
@@ -781,6 +842,18 @@ globalizeWallContactConstraints(
                         readPod<std::int64_t>(bytes, offset));
                 constraint.geometry_revision =
                     readPod<std::uint64_t>(bytes, offset);
+                constraint.target_angle_radians =
+                    readPod<Real>(bytes, offset);
+                for (Real& value : constraint.physical_wall_normal) {
+                    value = readPod<Real>(bytes, offset);
+                }
+                for (Real& value : constraint.accepted_contact_point) {
+                    value = readPod<Real>(bytes, offset);
+                }
+                for (Real& value :
+                     constraint.accepted_contact_line_tangent) {
+                    value = readPod<Real>(bytes, offset);
+                }
                 validateWallContactConstraint(constraint);
                 constraints.push_back(constraint);
             }
@@ -830,10 +903,10 @@ globalizeWallContactConstraints(
         if (!unique.empty() &&
             wallContactConstraintKey(unique.back()) ==
                 wallContactConstraintKey(constraint)) {
-            if (unique.back().geometry_revision !=
-                constraint.geometry_revision) {
+            if (!sameWallContactConstraintPayload(unique.back(),
+                                                  constraint)) {
                 throw std::invalid_argument(
-                    "distributed level-set wall-contact constraint has conflicting geometry revisions");
+                    "distributed level-set wall-contact constraint has conflicting geometry or prescribed-frame data");
             }
             continue;
         }
@@ -1084,6 +1157,167 @@ struct ZeroSetDisplacementEvaluation {
     return evaluation;
 }
 
+struct PrescribedContactFrame {
+    std::array<Real, 3> wall_normal{};
+    std::array<Real, 3> line_tangent{};
+    std::array<Real, 3> wall_conormal{};
+    std::array<Real, 3> target_normal{};
+};
+
+[[nodiscard]] PrescribedContactFrame prescribedContactFrame(
+    const LevelSetWallContactConstraint& constraint,
+    int dimension)
+{
+    if (dimension != 2 && dimension != 3) {
+        throw std::invalid_argument(
+            "prescribed level-set wall contact requires a two- or three-dimensional mesh");
+    }
+    validateWallContactConstraint(constraint);
+    PrescribedContactFrame frame;
+    frame.wall_normal = scale(
+        constraint.physical_wall_normal,
+        Real{1.0} / norm(constraint.physical_wall_normal));
+    frame.line_tangent = scale(
+        constraint.accepted_contact_line_tangent,
+        Real{1.0} / norm(constraint.accepted_contact_line_tangent));
+    frame.wall_conormal = cross(frame.line_tangent, frame.wall_normal);
+    const Real conormal_norm = norm(frame.wall_conormal);
+    if (!(conormal_norm > Real{0.0}) || !std::isfinite(conormal_norm)) {
+        throw std::invalid_argument(
+            "prescribed level-set wall contact has a degenerate contact-line frame");
+    }
+    frame.wall_conormal =
+        scale(frame.wall_conormal, Real{1.0} / conormal_norm);
+    frame.target_normal = add(
+        scale(frame.wall_normal,
+              -std::cos(constraint.target_angle_radians)),
+        scale(frame.wall_conormal,
+              std::sin(constraint.target_angle_radians)));
+    const Real target_norm = norm(frame.target_normal);
+    if (!(target_norm > Real{0.0}) || !std::isfinite(target_norm)) {
+        throw std::invalid_argument(
+            "prescribed level-set wall contact produced a degenerate target normal");
+    }
+    frame.target_normal =
+        scale(frame.target_normal, Real{1.0} / target_norm);
+
+    if (dimension == 2) {
+        const Real frame_tolerance = Real{1.0e-10};
+        if (std::abs(frame.wall_normal[2]) > frame_tolerance ||
+            std::hypot(frame.line_tangent[0], frame.line_tangent[1]) >
+                frame_tolerance ||
+            std::abs(frame.target_normal[2]) > frame_tolerance) {
+            throw std::invalid_argument(
+                "prescribed two-dimensional wall contact requires an in-plane wall normal and an out-of-plane contact-line tangent");
+        }
+    }
+    return frame;
+}
+
+struct AffineFieldFit {
+    bool valid{false};
+    Real intercept{0.0};
+    std::array<Real, 3> gradient{{0.0, 0.0, 0.0}};
+    Real max_value_residual{0.0};
+};
+
+[[nodiscard]] AffineFieldFit fitAffineFieldOnCell(
+    const CutCellPrimitiveData& cell,
+    std::span<const std::array<Real, 3>> dof_points,
+    std::span<const Real> coefficients,
+    int dimension)
+{
+    AffineFieldFit fit;
+    const std::size_t parameter_count =
+        static_cast<std::size_t>(dimension + 1);
+    if ((dimension != 2 && dimension != 3) ||
+        cell.dofs.size() < parameter_count) {
+        return fit;
+    }
+
+    std::array<std::array<Real, 5>, 4> system{};
+    Real matrix_scale = Real{1.0};
+    for (const GlobalIndex dof : cell.dofs) {
+        if (dof < 0 ||
+            static_cast<std::size_t>(dof) >= dof_points.size() ||
+            static_cast<std::size_t>(dof) >= coefficients.size()) {
+            return fit;
+        }
+        const auto index = static_cast<std::size_t>(dof);
+        std::array<Real, 4> row{{Real{1.0},
+                                 dof_points[index][0],
+                                 dof_points[index][1],
+                                 dof_points[index][2]}};
+        for (std::size_t i = 0; i < parameter_count; ++i) {
+            for (std::size_t j = 0; j < parameter_count; ++j) {
+                system[i][j] += row[i] * row[j];
+                matrix_scale =
+                    std::max(matrix_scale, std::abs(system[i][j]));
+            }
+            system[i][parameter_count] +=
+                row[i] * coefficients[index];
+        }
+    }
+
+    const Real pivot_tolerance =
+        Real{4096.0} * std::numeric_limits<Real>::epsilon() *
+        matrix_scale;
+    for (std::size_t column = 0; column < parameter_count; ++column) {
+        std::size_t pivot = column;
+        for (std::size_t row = column + 1u;
+             row < parameter_count;
+             ++row) {
+            if (std::abs(system[row][column]) >
+                std::abs(system[pivot][column])) {
+                pivot = row;
+            }
+        }
+        if (!(std::abs(system[pivot][column]) > pivot_tolerance)) {
+            return fit;
+        }
+        if (pivot != column) {
+            std::swap(system[pivot], system[column]);
+        }
+        const Real inverse_pivot = Real{1.0} / system[column][column];
+        for (std::size_t entry = column;
+             entry <= parameter_count;
+             ++entry) {
+            system[column][entry] *= inverse_pivot;
+        }
+        for (std::size_t row = 0; row < parameter_count; ++row) {
+            if (row == column) {
+                continue;
+            }
+            const Real multiplier = system[row][column];
+            for (std::size_t entry = column;
+                 entry <= parameter_count;
+                 ++entry) {
+                system[row][entry] -=
+                    multiplier * system[column][entry];
+            }
+        }
+    }
+
+    fit.intercept = system[0][parameter_count];
+    for (int component = 0; component < dimension; ++component) {
+        fit.gradient[static_cast<std::size_t>(component)] =
+            system[static_cast<std::size_t>(component + 1)]
+                  [parameter_count];
+    }
+    for (const GlobalIndex dof : cell.dofs) {
+        const auto index = static_cast<std::size_t>(dof);
+        const Real fitted_value =
+            fit.intercept + dot(fit.gradient, dof_points[index]);
+        fit.max_value_residual = std::max(
+            fit.max_value_residual,
+            std::abs(fitted_value - coefficients[index]));
+    }
+    fit.valid = finiteVector(fit.gradient) &&
+                std::isfinite(fit.intercept) &&
+                std::isfinite(fit.max_value_residual);
+    return fit;
+}
+
 template <typename ForEachDofPoint>
 [[nodiscard]] LevelSetSignedDistanceRepairResult repairSignedDistanceCoefficientsFromPrimitives(
     const assembly::IMeshAccess& mesh,
@@ -1143,9 +1377,17 @@ template <typename ForEachDofPoint>
     }
 
     std::set<GlobalIndex> constrained_parent_cells;
+    std::map<GlobalIndex, LevelSetWallContactConstraint>
+        wall_constraint_by_parent;
     for (const auto& constraint : wall_contact_constraints) {
         constrained_parent_cells.insert(
             constraint.parent_cell_global_id);
+        const auto insertion = wall_constraint_by_parent.emplace(
+            constraint.parent_cell_global_id, constraint);
+        if (!insertion.second) {
+            throw std::invalid_argument(
+                "level-set wall-contact projection supports one physical contact frame per parent cell");
+        }
     }
     std::set<GlobalIndex> matched_constrained_parent_cells;
     for (const auto& cell : primitive_set.cut_cells) {
@@ -1219,11 +1461,30 @@ template <typename ForEachDofPoint>
     DisjointSet wall_contact_components(expected);
     std::vector<unsigned char> in_cut_patch(expected, 0u);
     std::vector<unsigned char> in_wall_contact_patch(expected, 0u);
+    std::vector<unsigned char> in_prescribed_contact_patch(expected, 0u);
+    std::vector<unsigned char> in_dynamic_contact_patch(expected, 0u);
+    std::vector<unsigned char> prescribed_target_bound(expected, 0u);
+    std::vector<Real> prescribed_contact_target(expected, Real{0.0});
     for (const auto& cell : primitive_set.cut_cells) {
         std::optional<std::size_t> first;
-        std::optional<std::size_t> first_wall_contact;
+        std::optional<std::size_t> first_dynamic_contact;
+        const auto constraint_position =
+            wall_constraint_by_parent.find(cell.parent_cell);
         const bool wall_contact_cell =
-            constrained_parent_cells.contains(cell.parent_cell);
+            constraint_position != wall_constraint_by_parent.end();
+        const bool prescribed_contact_cell =
+            wall_contact_cell &&
+            constraint_position->second.kind ==
+                LevelSetWallContactConstraintKind::PrescribedAngle;
+        const bool dynamic_contact_cell =
+            wall_contact_cell &&
+            constraint_position->second.kind ==
+                LevelSetWallContactConstraintKind::AcceptedDynamicAngle;
+        std::optional<PrescribedContactFrame> prescribed_frame;
+        if (prescribed_contact_cell) {
+            prescribed_frame = prescribedContactFrame(
+                constraint_position->second, mesh.dimension());
+        }
         for (const auto dof : cell.dofs) {
             if (dof < 0 || static_cast<std::size_t>(dof) >= expected) {
                 throw std::invalid_argument(
@@ -1238,13 +1499,49 @@ template <typename ForEachDofPoint>
             }
             if (wall_contact_cell) {
                 in_wall_contact_patch[index] = 1u;
-                if (first_wall_contact.has_value()) {
-                    wall_contact_components.unite(*first_wall_contact,
+            }
+            if (dynamic_contact_cell) {
+                in_dynamic_contact_patch[index] = 1u;
+                if (first_dynamic_contact.has_value()) {
+                    wall_contact_components.unite(*first_dynamic_contact,
                                                   index);
                 } else {
-                    first_wall_contact = index;
+                    first_dynamic_contact = index;
                 }
             }
+            if (prescribed_contact_cell) {
+                in_prescribed_contact_patch[index] = 1u;
+                const Real prescribed_value = dot(
+                    prescribed_frame->target_normal,
+                    sub(dof_points[index],
+                        constraint_position->second
+                            .accepted_contact_point));
+                if (prescribed_target_bound[index] != 0u) {
+                    const Real compatibility_tolerance =
+                        Real{4096.0} *
+                        std::numeric_limits<Real>::epsilon() *
+                        std::max({Real{1.0},
+                                  std::abs(prescribed_value),
+                                  std::abs(
+                                      prescribed_contact_target[index])});
+                    if (std::abs(prescribed_value -
+                                 prescribed_contact_target[index]) >
+                        compatibility_tolerance) {
+                        throw std::invalid_argument(
+                            "prescribed level-set wall-contact frames assign incompatible targets to a shared degree of freedom");
+                    }
+                } else {
+                    prescribed_contact_target[index] = prescribed_value;
+                    prescribed_target_bound[index] = 1u;
+                }
+            }
+        }
+    }
+    for (std::size_t i = 0; i < expected; ++i) {
+        if (in_prescribed_contact_patch[i] != 0u &&
+            in_dynamic_contact_patch[i] != 0u) {
+            throw std::invalid_argument(
+                "level-set wall-contact projection cannot overlap prescribed and accepted-dynamic contact patches");
         }
     }
     result.wall_contact_dofs = static_cast<std::size_t>(std::count(
@@ -1294,7 +1591,7 @@ template <typename ForEachDofPoint>
 
     std::map<std::size_t, std::pair<Real, Real>> wall_contact_scale_sums;
     for (std::size_t i = 0; i < expected; ++i) {
-        if (in_wall_contact_patch[i] == 0u) {
+        if (in_dynamic_contact_patch[i] == 0u) {
             continue;
         }
         auto& sums = wall_contact_scale_sums[
@@ -1320,10 +1617,12 @@ template <typename ForEachDofPoint>
     for (std::size_t i = 0; i < expected; ++i) {
         if (in_cut_patch[i] != 0u) {
             const auto root = components.find(i);
-            if (component_requires_common_scale.at(root)) {
+            if (in_prescribed_contact_patch[i] != 0u) {
+                target[i] = prescribed_contact_target[i];
+            } else if (component_requires_common_scale.at(root)) {
                 target[i] = component_target_scale.at(root) *
                             input_coefficients[i];
-            } else if (in_wall_contact_patch[i] != 0u) {
+            } else if (in_dynamic_contact_patch[i] != 0u) {
                 target[i] = wall_contact_target_scale.at(
                                 wall_contact_components.find(i)) *
                             input_coefficients[i];
@@ -1445,7 +1744,7 @@ template <typename ForEachDofPoint>
         std::map<std::size_t, std::pair<Real, Real>> repaired_scale_sums;
         Real constraint_scale = Real{1.0};
         for (std::size_t i = 0; i < expected; ++i) {
-            if (in_wall_contact_patch[i] == 0u) {
+            if (in_dynamic_contact_patch[i] == 0u) {
                 continue;
             }
             auto& sums = repaired_scale_sums[
@@ -1473,7 +1772,7 @@ template <typename ForEachDofPoint>
             repaired_scales[root] = fitted;
         }
         for (std::size_t i = 0; i < expected; ++i) {
-            if (in_wall_contact_patch[i] == 0u) {
+            if (in_dynamic_contact_patch[i] == 0u) {
                 continue;
             }
             const auto found = repaired_scales.find(
@@ -1490,20 +1789,147 @@ template <typename ForEachDofPoint>
         const Real constraint_tolerance =
             Real{4096.0} * std::numeric_limits<Real>::epsilon() *
             constraint_scale;
-        result.wall_contact_constraints_satisfied =
+        const bool dynamic_constraints_satisfied =
             positive_scales &&
             result.max_wall_contact_scale_residual <=
                 constraint_tolerance;
+
+        bool prescribed_constraints_satisfied = true;
+        for (const auto& cell : primitive_set.cut_cells) {
+            const auto constraint_position =
+                wall_constraint_by_parent.find(cell.parent_cell);
+            if (constraint_position == wall_constraint_by_parent.end() ||
+                constraint_position->second.kind !=
+                    LevelSetWallContactConstraintKind::PrescribedAngle) {
+                continue;
+            }
+            const auto& constraint = constraint_position->second;
+            const auto frame = prescribedContactFrame(
+                constraint, mesh.dimension());
+            const auto repaired_fit = fitAffineFieldOnCell(
+                cell, dof_points, repaired_coefficients, mesh.dimension());
+            const auto input_fit = fitAffineFieldOnCell(
+                cell, dof_points, input_coefficients, mesh.dimension());
+            if (!repaired_fit.valid) {
+                prescribed_constraints_satisfied = false;
+                continue;
+            }
+
+            Real prescribed_value_scale = Real{1.0};
+            Real cell_value_residual = repaired_fit.max_value_residual;
+            Real cell_length = Real{0.0};
+            for (const GlobalIndex dof : cell.dofs) {
+                const auto index = static_cast<std::size_t>(dof);
+                cell_value_residual = std::max(
+                    cell_value_residual,
+                    std::abs(repaired_coefficients[index] -
+                             prescribed_contact_target[index]));
+                prescribed_value_scale = std::max(
+                    {prescribed_value_scale,
+                     std::abs(repaired_coefficients[index]),
+                     std::abs(prescribed_contact_target[index])});
+                for (const GlobalIndex other_dof : cell.dofs) {
+                    cell_length = std::max(
+                        cell_length,
+                        distance(dof_points[index],
+                                 dof_points[static_cast<std::size_t>(
+                                     other_dof)]));
+                }
+            }
+            result.max_prescribed_contact_value_residual = std::max(
+                result.max_prescribed_contact_value_residual,
+                cell_value_residual);
+            if (!(cell_length > Real{0.0}) ||
+                !std::isfinite(cell_length)) {
+                prescribed_constraints_satisfied = false;
+                continue;
+            }
+            const Real value_tolerance = std::max(
+                Real{64.0} * options.signed_distance_tolerance,
+                Real{4096.0} * std::numeric_limits<Real>::epsilon() *
+                    prescribed_value_scale);
+            const Real gradient_tolerance = std::max(
+                Real{4096.0} * std::numeric_limits<Real>::epsilon(),
+                value_tolerance / cell_length);
+            const Real angle_tolerance = gradient_tolerance;
+            const Real contact_tolerance = std::max(
+                Real{64.0} * options.signed_distance_tolerance,
+                Real{4096.0} * std::numeric_limits<Real>::epsilon() *
+                    cell_length);
+
+            const Real gradient_norm = norm(repaired_fit.gradient);
+            if (!(gradient_norm > gradient_tolerance) ||
+                !std::isfinite(gradient_norm)) {
+                prescribed_constraints_satisfied = false;
+                continue;
+            }
+            const auto unit_gradient = scale(
+                repaired_fit.gradient, Real{1.0} / gradient_norm);
+            const Real actual_angle = std::acos(std::clamp(
+                -dot(unit_gradient, frame.wall_normal),
+                Real{-1.0},
+                Real{1.0}));
+            const Real angle_error = std::abs(
+                actual_angle - constraint.target_angle_radians);
+            result.max_prescribed_contact_angle_error_radians = std::max(
+                result.max_prescribed_contact_angle_error_radians,
+                angle_error);
+
+            const Real wall_gradient =
+                dot(repaired_fit.gradient, frame.wall_normal);
+            const auto tangential_gradient = sub(
+                repaired_fit.gradient,
+                scale(frame.wall_normal, wall_gradient));
+            const Real tangential_gradient_norm =
+                norm(tangential_gradient);
+            const Real contact_value =
+                repaired_fit.intercept +
+                dot(repaired_fit.gradient,
+                    constraint.accepted_contact_point);
+            if (!(tangential_gradient_norm > gradient_tolerance) ||
+                !std::isfinite(tangential_gradient_norm)) {
+                prescribed_constraints_satisfied = false;
+                continue;
+            }
+            const Real contact_displacement =
+                std::abs(contact_value) / tangential_gradient_norm;
+            result.max_contact_line_displacement = std::max(
+                result.max_contact_line_displacement,
+                contact_displacement);
+            const Real line_alignment = std::abs(
+                dot(unit_gradient, frame.line_tangent));
+
+            if (input_fit.valid &&
+                norm(input_fit.gradient) > gradient_tolerance) {
+                const auto input_normal = scale(
+                    input_fit.gradient,
+                    Real{1.0} / norm(input_fit.gradient));
+                result.max_contact_angle_change_radians = std::max(
+                    result.max_contact_angle_change_radians,
+                    std::acos(std::clamp(dot(input_normal, unit_gradient),
+                                         Real{-1.0},
+                                         Real{1.0})));
+            }
+            prescribed_constraints_satisfied =
+                prescribed_constraints_satisfied &&
+                cell_value_residual <= value_tolerance &&
+                angle_error <= angle_tolerance &&
+                contact_displacement <= contact_tolerance &&
+                line_alignment <= angle_tolerance;
+        }
+
+        result.wall_contact_constraints_satisfied =
+            dynamic_constraints_satisfied &&
+            prescribed_constraints_satisfied;
         if (!result.wall_contact_constraints_satisfied) {
             result.success = false;
             result.diagnostic =
-                "level-set signed-distance repair violated an accepted wall-contact scale constraint";
+                "level-set signed-distance repair violated a wall-contact geometry constraint";
             return result;
         }
-        // A positive common scale leaves the finite-element zero set and its
-        // unit normal unchanged on every constrained contact cell.
-        result.max_contact_line_displacement = Real{0.0};
-        result.max_contact_angle_change_radians = Real{0.0};
+        // AcceptedDynamicAngle patches remain a positive common scale, so
+        // their accepted crossing and unit normal are unchanged.  Prescribed
+        // patches instead match the wall-frame target above.
     }
 
     if (!displacement.topology_preserved) {

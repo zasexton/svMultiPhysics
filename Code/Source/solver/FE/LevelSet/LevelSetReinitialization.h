@@ -12,6 +12,7 @@
 #include "LevelSet/LevelSetOptions.h"
 #include "Systems/FESystem.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -26,7 +27,7 @@ enum class LevelSetWallContactConstraintKind : std::uint8_t {
 };
 
 /**
- * Accepted wall-contact geometry that a redistance projection must preserve.
+ * Wall-contact law and accepted physical frame for redistance projection.
  *
  * The parent identity is partition independent.  A caller may provide only
  * the locally owned records; the distributed projection forms one sorted,
@@ -39,6 +40,18 @@ struct LevelSetWallContactConstraint {
     int boundary_marker{-1};
     GlobalIndex parent_cell_global_id{INVALID_GLOBAL_INDEX};
     std::uint64_t geometry_revision{0u};
+    // PrescribedAngle uses the convention
+    //   grad(phi) . physical_wall_normal
+    //       = -cos(target_angle_radians) |grad(phi)|.
+    // The caller supplies the physical wall-normal orientation used by this
+    // equation; reversing it changes the prescribed-angle convention.
+    Real target_angle_radians{0.0};
+    std::array<Real, 3> physical_wall_normal{{0.0, 0.0, 0.0}};
+    // The accepted contact point and oriented contact-line tangent form the
+    // physical frame held fixed by the prescribed update.  In two dimensions
+    // the tangent is the oriented out-of-plane direction.
+    std::array<Real, 3> accepted_contact_point{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> accepted_contact_line_tangent{{0.0, 0.0, 0.0}};
 };
 
 struct LevelSetSignedDistanceRepairResult {
@@ -69,6 +82,8 @@ struct LevelSetSignedDistanceRepairResult {
     std::size_t wall_contact_dofs{0u};
     bool wall_contact_constraints_satisfied{false};
     Real max_wall_contact_scale_residual{0.0};
+    Real max_prescribed_contact_value_residual{0.0};
+    Real max_prescribed_contact_angle_error_radians{0.0};
     Real max_contact_line_displacement{0.0};
     Real max_contact_angle_change_radians{0.0};
     // Retained for output compatibility.  The corrected algorithm no longer
@@ -106,11 +121,13 @@ struct LevelSetSignedDistanceRepairResult {
  * taken from their unique owners, cut primitives and zero-crossing guards are
  * gathered from owned cells, and every rank evaluates the same immutable
  * global projection snapshot.  Locally owned wall-contact constraints are
- * gathered and canonicalized the same way.  Every constrained contact patch
- * is projected onto a positive common coefficient scale, which leaves its
- * finite-element crossing and unit normal unchanged while minimizing its
- * signed-distance discrepancy.  Consequently, convergence applies to the
- * unconstrained signed-distance error and the constrained optimum; the total
+ * gathered and canonicalized the same way.  AcceptedDynamicAngle patches are
+ * projected onto a positive common coefficient scale, leaving their accepted
+ * finite-element crossing and unit normal unchanged.  PrescribedAngle patches
+ * instead receive a unit-gradient affine target through the accepted contact
+ * point and oriented contact-line frame, satisfying the declared wall-normal
+ * angle relation.  Consequently, convergence applies to the unconstrained
+ * signed-distance error and the appropriate constrained optimum; the total
  * discrepancy remains visible in the result.  The output candidate is
  * assigned only after all collective validation and projection work
  * completes.

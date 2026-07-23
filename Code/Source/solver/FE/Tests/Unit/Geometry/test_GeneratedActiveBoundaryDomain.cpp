@@ -216,6 +216,86 @@ private:
     std::uint64_t numbering_revision_{0u};
 };
 
+class SingleHexBoundaryMesh final : public FE::assembly::IMeshAccess {
+public:
+    explicit SingleHexBoundaryMesh(int marker = 17)
+        : marker_(marker)
+    {
+        coordinates_.reserve(8u);
+        for (std::size_t node = 0u; node < 8u; ++node) {
+            const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(
+                FE::ElementType::Hex8, node);
+            coordinates_.push_back({{xi[0], xi[1], xi[2]}});
+        }
+    }
+
+    [[nodiscard]] FE::GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] FE::GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override { return 1; }
+    [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+    [[nodiscard]] bool isOwnedCell(FE::GlobalIndex cell) const override {
+        return cell == 0;
+    }
+    [[nodiscard]] FE::ElementType getCellType(
+        FE::GlobalIndex) const override {
+        return FE::ElementType::Hex8;
+    }
+    void getCellNodes(FE::GlobalIndex,
+                      std::vector<FE::GlobalIndex>& nodes) const override {
+        nodes.resize(coordinates_.size());
+        std::iota(nodes.begin(), nodes.end(), FE::GlobalIndex{0});
+    }
+    [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
+        FE::GlobalIndex node) const override {
+        return coordinates_.at(static_cast<std::size_t>(node));
+    }
+    void getCellCoordinates(
+        FE::GlobalIndex,
+        std::vector<std::array<FE::Real, 3>>& coordinates) const override {
+        coordinates = coordinates_;
+    }
+    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
+        FE::GlobalIndex face,
+        FE::GlobalIndex cell) const override {
+        return face == 0 && cell == 0 ? FE::LocalIndex{0}
+                                     : FE::INVALID_LOCAL_INDEX;
+    }
+    [[nodiscard]] int getBoundaryFaceMarker(
+        FE::GlobalIndex face) const override {
+        return face == 0 ? marker_ : -1;
+    }
+    [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
+    getInteriorFaceCells(FE::GlobalIndex) const override {
+        return {-1, -1};
+    }
+    void forEachCell(
+        std::function<void(FE::GlobalIndex)> callback) const override {
+        callback(0);
+    }
+    void forEachOwnedCell(
+        std::function<void(FE::GlobalIndex)> callback) const override {
+        callback(0);
+    }
+    void forEachBoundaryFace(
+        int marker,
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex)> callback)
+        const override {
+        if (marker < 0 || marker == marker_) {
+            callback(0, 0);
+        }
+    }
+    void forEachInteriorFace(
+        std::function<void(FE::GlobalIndex,
+                           FE::GlobalIndex,
+                           FE::GlobalIndex)>) const override {
+    }
+
+private:
+    int marker_{17};
+    std::vector<std::array<FE::Real, 3>> coordinates_{};
+};
+
 interfaces::CutInterfaceDomainRequest interfaceRequest(int marker)
 {
     interfaces::CutInterfaceDomainRequest request;
@@ -305,6 +385,48 @@ interfaces::LevelSetInterfaceDomain verticalInterfaceAtX(
             .weight = 2.0,
             .reference_measure_factor = 2.0,
             .gradient_norm = 1.0},
+    };
+    domain.addFragment(std::move(fragment));
+    return domain;
+}
+
+interfaces::LevelSetInterfaceDomain diagonalHexInterface(int marker)
+{
+    auto domain = interfaces::LevelSetInterfaceDomain(interfaceRequest(marker));
+    interfaces::CutInterfaceFragment fragment;
+    fragment.parent_cell = 0;
+    fragment.kind = interfaces::CutInterfaceFragmentKind::Polygon;
+    fragment.measure = FE::Real{4.0} * std::sqrt(FE::Real{2.0});
+    const FE::Real inverse_sqrt_two =
+        FE::Real{1.0} / std::sqrt(FE::Real{2.0});
+    fragment.normal = {{inverse_sqrt_two, inverse_sqrt_two, 0.0}};
+    fragment.min_gradient_norm = std::sqrt(FE::Real{2.0});
+    fragment.negative_volume_fraction = 0.5;
+    fragment.positive_volume_fraction = 0.5;
+    fragment.min_level_set_value = -2.0;
+    fragment.max_level_set_value = 2.0;
+    fragment.vertices = {
+        interfaces::CutInterfaceVertex{
+            .point = {{-1.0, 1.0, -1.0}},
+            .parent_coordinate = {{-1.0, 1.0, -1.0}}},
+        interfaces::CutInterfaceVertex{
+            .point = {{1.0, -1.0, -1.0}},
+            .parent_coordinate = {{1.0, -1.0, -1.0}}},
+        interfaces::CutInterfaceVertex{
+            .point = {{1.0, -1.0, 1.0}},
+            .parent_coordinate = {{1.0, -1.0, 1.0}}},
+        interfaces::CutInterfaceVertex{
+            .point = {{-1.0, 1.0, 1.0}},
+            .parent_coordinate = {{-1.0, 1.0, 1.0}}},
+    };
+    fragment.quadrature_points = {
+        interfaces::CutInterfaceQuadraturePoint{
+            .point = {{0.0, 0.0, 0.0}},
+            .parent_coordinate = {{0.0, 0.0, 0.0}},
+            .normal = fragment.normal,
+            .weight = fragment.measure,
+            .reference_measure_factor = fragment.measure,
+            .gradient_norm = fragment.min_gradient_norm},
     };
     domain.addFragment(std::move(fragment));
     return domain;
@@ -798,6 +920,43 @@ interfaces::GeneratedActiveBoundaryRequest activeRequest(
     return request;
 }
 
+struct ActiveBoundaryMoments {
+    FE::Real constant{0.0};
+    FE::Real x{0.0};
+    FE::Real y{0.0};
+    FE::Real x_squared{0.0};
+    FE::Real x_y{0.0};
+    FE::Real y_squared{0.0};
+};
+
+ActiveBoundaryMoments activeBoundaryMoments(
+    const interfaces::GeneratedActiveBoundaryDomain& domain)
+{
+    ActiveBoundaryMoments moments;
+    for (const auto& rule : domain.boundaryQuadratureRules()) {
+        for (const auto& point : rule.points) {
+            const FE::Real x = point.parent_coordinate[0];
+            const FE::Real y = point.parent_coordinate[1];
+            moments.constant += point.weight;
+            moments.x += point.weight * x;
+            moments.y += point.weight * y;
+            moments.x_squared += point.weight * x * x;
+            moments.x_y += point.weight * x * y;
+            moments.y_squared += point.weight * y * y;
+        }
+    }
+    return moments;
+}
+
+FE::Real intervalMonomialMoment(FE::Real lower,
+                                FE::Real upper,
+                                int degree)
+{
+    const int exponent = degree + 1;
+    return (std::pow(upper, exponent) - std::pow(lower, exponent)) /
+           static_cast<FE::Real>(exponent);
+}
+
 } // namespace
 
 TEST(GeneratedActiveBoundaryDomain,
@@ -865,6 +1024,225 @@ TEST(GeneratedActiveBoundaryDomain,
     EXPECT_EQ(context.interfaceRulesForMarker(positive.marker()).size(), 1u);
 }
 
+TEST(GeneratedActiveBoundaryDomain,
+     PlanarHalfAndQuarterFacesIntegratePolynomialsForBothSides)
+{
+    constexpr int wall_marker = 18;
+    const SingleQuadBoundaryMesh mesh(wall_marker);
+    struct Scenario {
+        FE::Real negative_fraction;
+        int interface_marker;
+    };
+    const std::array<Scenario, 2> scenarios{{
+        {0.5, 281},
+        {0.25, 282},
+    }};
+
+    FE::Real maximum_constant_error{0.0};
+    FE::Real maximum_polynomial_error{0.0};
+    FE::Real maximum_partition_error{0.0};
+    std::size_t side_count{0u};
+    for (const auto& scenario : scenarios) {
+        SCOPED_TRACE(scenario.negative_fraction);
+        const FE::Real root =
+            -1.0 + 2.0 * scenario.negative_fraction;
+        const auto interface_domain =
+            verticalInterfaceAtX(scenario.interface_marker, root);
+        const auto contact_domain =
+            interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+                contactRequest(scenario.interface_marker, wall_marker),
+                interface_domain,
+                mesh);
+        ASSERT_EQ(contact_domain.summary().active_fragment_count, 1u);
+
+        const std::array<FE::Real, 4> nodal_values{{
+            -scenario.negative_fraction,
+            1.0 - scenario.negative_fraction,
+            1.0 - scenario.negative_fraction,
+            -scenario.negative_fraction}};
+        interfaces::GeneratedActiveBoundaryScalarField field;
+        field.value_at_node = [&nodal_values](FE::GlobalIndex node) {
+            return nodal_values.at(static_cast<std::size_t>(node));
+        };
+        const auto negative = interfaces::buildGeneratedActiveBoundaryDomain(
+            activeRequest(scenario.interface_marker,
+                          wall_marker,
+                          FE::geometry::CutIntegrationSide::Negative),
+            interface_domain,
+            contact_domain,
+            mesh,
+            field);
+        const auto positive = interfaces::buildGeneratedActiveBoundaryDomain(
+            activeRequest(scenario.interface_marker,
+                          wall_marker,
+                          FE::geometry::CutIntegrationSide::Positive),
+            interface_domain,
+            contact_domain,
+            mesh,
+            field);
+
+        const auto check_side = [&](const auto& domain,
+                                    FE::Real lower,
+                                    FE::Real upper) {
+            const auto rules = domain.boundaryQuadratureRules();
+            ASSERT_EQ(rules.size(), 1u);
+            const auto moments = activeBoundaryMoments(domain);
+            const FE::Real expected_constant =
+                intervalMonomialMoment(lower, upper, 0);
+            const FE::Real expected_linear =
+                intervalMonomialMoment(lower, upper, 1);
+            const FE::Real expected_quadratic =
+                intervalMonomialMoment(lower, upper, 2);
+            const FE::Real constant_error =
+                std::abs(moments.constant - expected_constant);
+            const FE::Real polynomial_error = std::max(
+                std::abs(moments.x - expected_linear),
+                std::abs(moments.x_squared - expected_quadratic));
+            EXPECT_NEAR(moments.constant, expected_constant, 1.0e-14);
+            EXPECT_NEAR(moments.x, expected_linear, 1.0e-14);
+            EXPECT_NEAR(moments.x_squared, expected_quadratic, 1.0e-14);
+            maximum_constant_error =
+                std::max(maximum_constant_error, constant_error);
+            maximum_polynomial_error =
+                std::max(maximum_polynomial_error, polynomial_error);
+            ++side_count;
+        };
+        check_side(negative, -1.0, root);
+        check_side(positive, root, 1.0);
+
+        const auto partition =
+            interfaces::validateGeneratedActiveBoundaryPartition(
+                negative,
+                positive,
+                interface_domain,
+                contact_domain,
+                mesh);
+        EXPECT_NEAR(partition.total_boundary_measure, 2.0, 1.0e-14);
+        maximum_partition_error =
+            std::max(maximum_partition_error, partition.max_partition_error);
+    }
+
+    EXPECT_EQ(side_count, 4u);
+    RecordProperty("active_boundary_planar_fraction_case_count",
+                   scenarios.size());
+    RecordProperty("active_boundary_planar_fraction_side_count", side_count);
+    RecordProperty("active_boundary_planar_max_constant_moment_error",
+                   ::testing::PrintToString(maximum_constant_error));
+    RecordProperty("active_boundary_planar_max_polynomial_moment_error",
+                   ::testing::PrintToString(maximum_polynomial_error));
+    RecordProperty("active_boundary_planar_max_partition_error",
+                   ::testing::PrintToString(maximum_partition_error));
+}
+
+TEST(GeneratedActiveBoundaryDomain,
+     ObliqueHexFaceIntegratesQuadraticMomentsForBothSides)
+{
+    constexpr int interface_marker = 283;
+    constexpr int wall_marker = 20;
+    const SingleHexBoundaryMesh mesh(wall_marker);
+    const auto interface_domain = diagonalHexInterface(interface_marker);
+    const auto contact_domain =
+        interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+            contactRequest(interface_marker, wall_marker),
+            interface_domain,
+            mesh);
+    ASSERT_EQ(contact_domain.summary().active_fragment_count, 1u);
+    EXPECT_NEAR(contact_domain.summary().measure,
+                2.0 * std::sqrt(2.0),
+                1.0e-14);
+
+    interfaces::GeneratedActiveBoundaryScalarField field;
+    field.value_at_node = [](FE::GlobalIndex node) {
+        const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(
+            FE::ElementType::Hex8, static_cast<std::size_t>(node));
+        return xi[0] + xi[1];
+    };
+    const auto negative = interfaces::buildGeneratedActiveBoundaryDomain(
+        activeRequest(interface_marker,
+                      wall_marker,
+                      FE::geometry::CutIntegrationSide::Negative),
+        interface_domain,
+        contact_domain,
+        mesh,
+        field);
+    const auto positive = interfaces::buildGeneratedActiveBoundaryDomain(
+        activeRequest(interface_marker,
+                      wall_marker,
+                      FE::geometry::CutIntegrationSide::Positive),
+        interface_domain,
+        contact_domain,
+        mesh,
+        field);
+    ASSERT_EQ(negative.fragments().size(), 1u);
+    ASSERT_EQ(positive.fragments().size(), 1u);
+    EXPECT_EQ(negative.fragments().front().vertices.size(), 3u);
+    EXPECT_EQ(positive.fragments().front().vertices.size(), 3u);
+
+    const auto negative_moments = activeBoundaryMoments(negative);
+    const auto positive_moments = activeBoundaryMoments(positive);
+    struct ExpectedMoments {
+        FE::Real constant;
+        FE::Real x;
+        FE::Real y;
+        FE::Real x_squared;
+        FE::Real x_y;
+        FE::Real y_squared;
+    };
+    const std::array<ExpectedMoments, 2> expected{{
+        {2.0, -2.0 / 3.0, -2.0 / 3.0, 2.0 / 3.0, 0.0, 2.0 / 3.0},
+        {2.0, 2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 0.0, 2.0 / 3.0},
+    }};
+    const std::array<ActiveBoundaryMoments, 2> observed{{
+        negative_moments,
+        positive_moments,
+    }};
+    FE::Real maximum_constant_error{0.0};
+    FE::Real maximum_polynomial_error{0.0};
+    for (std::size_t side = 0u; side < observed.size(); ++side) {
+        SCOPED_TRACE(side);
+        const auto& actual = observed[side];
+        const auto& reference = expected[side];
+        maximum_constant_error = std::max(
+            maximum_constant_error,
+            std::abs(actual.constant - reference.constant));
+        maximum_polynomial_error = std::max(
+            maximum_polynomial_error,
+            std::max({std::abs(actual.x - reference.x),
+                      std::abs(actual.y - reference.y),
+                      std::abs(actual.x_squared - reference.x_squared),
+                      std::abs(actual.x_y - reference.x_y),
+                      std::abs(actual.y_squared - reference.y_squared)}));
+        EXPECT_NEAR(actual.constant, reference.constant, 1.0e-14);
+        EXPECT_NEAR(actual.x, reference.x, 1.0e-14);
+        EXPECT_NEAR(actual.y, reference.y, 1.0e-14);
+        EXPECT_NEAR(actual.x_squared, reference.x_squared, 1.0e-14);
+        EXPECT_NEAR(actual.x_y, reference.x_y, 1.0e-14);
+        EXPECT_NEAR(actual.y_squared, reference.y_squared, 1.0e-14);
+    }
+
+    const auto partition =
+        interfaces::validateGeneratedActiveBoundaryPartition(
+            negative,
+            positive,
+            interface_domain,
+            contact_domain,
+            mesh);
+    EXPECT_EQ(partition.boundary_face_count, 1u);
+    EXPECT_EQ(partition.cut_boundary_face_count, 2u);
+    EXPECT_NEAR(partition.total_boundary_measure, 4.0, 1.0e-14);
+    EXPECT_NEAR(partition.negative_boundary_measure, 2.0, 1.0e-14);
+    EXPECT_NEAR(partition.positive_boundary_measure, 2.0, 1.0e-14);
+
+    RecordProperty("active_boundary_oblique_face_spatial_dimension", 3);
+    RecordProperty("active_boundary_oblique_face_side_count", observed.size());
+    RecordProperty("active_boundary_oblique_face_max_constant_moment_error",
+                   ::testing::PrintToString(maximum_constant_error));
+    RecordProperty("active_boundary_oblique_face_max_polynomial_moment_error",
+                   ::testing::PrintToString(maximum_polynomial_error));
+    RecordProperty("active_boundary_oblique_face_max_partition_error",
+                   ::testing::PrintToString(partition.max_partition_error));
+}
+
 TEST(GeneratedActiveBoundaryDomain, CompletelyDrySideHasExactlyZeroRules)
 {
     constexpr int interface_marker = 102;
@@ -898,11 +1276,18 @@ TEST(GeneratedActiveBoundaryDomain, CompletelyDrySideHasExactlyZeroRules)
         field);
     EXPECT_TRUE(negative.empty());
     EXPECT_TRUE(negative.boundaryQuadratureRules().empty());
+    EXPECT_EQ(negative.summary().measure, FE::Real{0.0});
     ASSERT_EQ(positive.fragments().size(), 1u);
     EXPECT_TRUE(positive.fragments().front().full_face_equivalent);
     EXPECT_NEAR(positive.summary().measure, 2.0, 1.0e-14);
     EXPECT_NO_THROW(interfaces::validateGeneratedActiveBoundaryPartition(
         negative, positive, interface_domain, contact_domain, mesh));
+    RecordProperty("active_boundary_dry_rule_count",
+                   negative.boundaryQuadratureRules().size());
+    RecordProperty("active_boundary_dry_measure",
+                   ::testing::PrintToString(negative.summary().measure));
+    RecordProperty("active_boundary_full_measure",
+                   ::testing::PrintToString(positive.summary().measure));
 }
 
 TEST(GeneratedActiveBoundaryDomain,
@@ -1522,6 +1907,12 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_NEAR(contact.mean_contact_position[1], 0.0, 1.0e-14);
     EXPECT_NEAR(contact.mean_footprint_direction[0], 1.0, 1.0e-14);
     EXPECT_NEAR(contact.mean_footprint_direction[1], 0.0, 1.0e-14);
+    EXPECT_NEAR(contact.contact_line_tangent_integral[2],
+                expected_contact_measure,
+                1.0e-14);
+    EXPECT_NEAR(contact.mean_contact_line_tangent[0], 0.0, 1.0e-14);
+    EXPECT_NEAR(contact.mean_contact_line_tangent[1], 0.0, 1.0e-14);
+    EXPECT_NEAR(contact.mean_contact_line_tangent[2], 1.0, 1.0e-14);
     EXPECT_NEAR(dynamic_contact.owned_contact_measure,
                 contact.owned_contact_measure,
                 1.0e-14);
@@ -2495,6 +2886,292 @@ TEST(FreeSurfaceGeometrySnapshot,
 }
 
 TEST(FreeSurfaceGeometrySnapshot,
+     DiscreteFunctionalFirstVariationMatchesCentralDifference)
+{
+    constexpr int interface_marker = 118;
+    constexpr int wall_marker = 19;
+    constexpr FE::Real interface_intercept = 0.40;
+    constexpr FE::Real interface_slope = 0.20;
+    constexpr FE::Real translation = 0.12;
+    constexpr FE::Real deformation_x_gradient = 0.30;
+    constexpr FE::Real deformation_y_gradient = 0.10;
+    constexpr FE::Real epsilon = 2.0e-6;
+    const SingleQuadBoundaryMesh mesh(wall_marker);
+
+    const auto nodal_values = [](FE::Real perturbation) {
+        constexpr std::array<std::array<FE::Real, 2>, 4> points{{
+            {{0.0, 0.0}},
+            {{1.0, 0.0}},
+            {{1.0, 1.0}},
+            {{0.0, 1.0}},
+        }};
+        std::array<FE::Real, 4> values{};
+        for (std::size_t node = 0u; node < points.size(); ++node) {
+            const FE::Real x = points[node][0];
+            const FE::Real y = points[node][1];
+            const FE::Real moved_interface_x =
+                (FE::Real{1.0} +
+                 perturbation * deformation_x_gradient) *
+                    (interface_intercept + interface_slope * y) +
+                perturbation *
+                    (deformation_y_gradient * y + translation);
+            values[node] = x - moved_interface_x;
+        }
+        return values;
+    };
+    const auto build_snapshot = [&](FE::Real perturbation,
+                                    std::string domain_id) {
+        const auto values = nodal_values(perturbation);
+        auto interface_domain =
+            linearQuadCutDomain(interface_marker, values);
+        auto contact_domain =
+            interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+                contactRequest(interface_marker, wall_marker),
+                interface_domain,
+                mesh);
+        interfaces::GeneratedActiveBoundaryScalarField nodal_field;
+        nodal_field.value_at_node = [values](FE::GlobalIndex node) {
+            return values.at(static_cast<std::size_t>(node));
+        };
+        auto negative = interfaces::buildGeneratedActiveBoundaryDomain(
+            activeRequest(interface_marker,
+                          wall_marker,
+                          FE::geometry::CutIntegrationSide::Negative),
+            interface_domain,
+            contact_domain,
+            mesh,
+            nodal_field);
+        auto positive = interfaces::buildGeneratedActiveBoundaryDomain(
+            activeRequest(interface_marker,
+                          wall_marker,
+                          FE::geometry::CutIntegrationSide::Positive),
+            interface_domain,
+            contact_domain,
+            mesh,
+            nodal_field);
+        return interfaces::buildFreeSurfaceGeometrySnapshot(
+            std::move(interface_domain),
+            {std::move(contact_domain)},
+            {std::move(negative), std::move(positive)},
+            mesh,
+            {},
+            bilinearQuadScalar(values),
+            std::move(domain_id));
+    };
+
+    const auto base_snapshot = build_snapshot(0.0, "functional_fd_base");
+    const auto plus_snapshot =
+        build_snapshot(epsilon, "functional_fd_plus");
+    const auto minus_snapshot =
+        build_snapshot(-epsilon, "functional_fd_minus");
+
+    interfaces::FreeSurfaceDiscreteFunctionalDeformationEvaluator
+        deformation;
+    deformation.value =
+        [](FE::GlobalIndex,
+           const std::array<FE::Real, 3>& xi,
+           const FE::geometry::CutQuadratureProvenance&) {
+            const FE::Real x = FE::Real{0.5} * (xi[0] + FE::Real{1.0});
+            const FE::Real y = FE::Real{0.5} * (xi[1] + FE::Real{1.0});
+            return std::array<FE::Real, 3>{{
+                translation + deformation_x_gradient * x +
+                    deformation_y_gradient * y,
+                0.0,
+                0.0,
+            }};
+        };
+    deformation.physical_gradient =
+        [](FE::GlobalIndex,
+           const std::array<FE::Real, 3>&,
+           const FE::geometry::CutQuadratureProvenance&) {
+            return interfaces::FreeSurfaceDiscreteFunctionalPhysicalGradient{{
+                {{deformation_x_gradient, deformation_y_gradient, 0.0}},
+                {{0.0, 0.0, 0.0}},
+                {{0.0, 0.0, 0.0}},
+            }};
+        };
+
+    const auto central_difference = [](FE::Real plus, FE::Real minus) {
+        return (plus - minus) / (FE::Real{2.0} * epsilon);
+    };
+    const auto relative_error = [](FE::Real actual, FE::Real expected) {
+        return std::abs(actual - expected) /
+               std::max({FE::Real{1.0e-12},
+                         std::abs(actual),
+                         std::abs(expected)});
+    };
+    FE::Real maximum_surface_area_error{0.0};
+    FE::Real maximum_surface_energy_error{0.0};
+    FE::Real maximum_wall_area_error{0.0};
+    FE::Real maximum_young_wall_error{0.0};
+    FE::Real maximum_volume_error{0.0};
+    FE::Real maximum_volume_potential_error{0.0};
+    FE::Real maximum_total_error{0.0};
+    std::size_t case_count{0u};
+
+    for (const auto liquid_side : {
+             FE::geometry::CutIntegrationSide::Negative,
+             FE::geometry::CutIntegrationSide::Positive}) {
+        SCOPED_TRACE(static_cast<int>(liquid_side));
+        interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+        parameters.liquid_side = liquid_side;
+        parameters.surface_tension = FE::Real{1.7};
+        parameters.young_wall_coefficients.push_back(
+            {wall_marker, std::numbers::pi_v<FE::Real> / FE::Real{3.0}});
+        parameters.volume_multiplier = FE::Real{-0.8};
+
+        const auto base =
+            interfaces::evaluateFreeSurfaceDiscreteFunctional(
+                *base_snapshot, parameters);
+        const auto plus =
+            interfaces::evaluateFreeSurfaceDiscreteFunctional(
+                *plus_snapshot, parameters);
+        const auto minus =
+            interfaces::evaluateFreeSurfaceDiscreteFunctional(
+                *minus_snapshot, parameters);
+        const auto variation =
+            interfaces::evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
+                *base_snapshot, parameters, deformation);
+
+        EXPECT_EQ(variation.snapshot_revision_key,
+                  base.snapshot_revision_key);
+        EXPECT_EQ(variation.liquid_side, liquid_side);
+        EXPECT_DOUBLE_EQ(variation.surface_tension,
+                         parameters.surface_tension);
+        EXPECT_DOUBLE_EQ(variation.volume_multiplier,
+                         parameters.volume_multiplier);
+        ASSERT_EQ(base.walls.size(), 1u);
+        ASSERT_EQ(plus.walls.size(), 1u);
+        ASSERT_EQ(minus.walls.size(), 1u);
+        ASSERT_EQ(variation.walls.size(), 1u);
+        EXPECT_EQ(variation.walls.front().boundary_marker, wall_marker);
+        EXPECT_EQ(variation.walls.front()
+                      .equilibrium_contact_angle_radians,
+                  base.walls.front().equilibrium_contact_angle_radians);
+
+        const FE::Real surface_area_fd = central_difference(
+            plus.owned_liquid_gas_area,
+            minus.owned_liquid_gas_area);
+        const FE::Real surface_energy_fd = central_difference(
+            plus.liquid_gas_surface_energy,
+            minus.liquid_gas_surface_energy);
+        const FE::Real wall_area_fd = central_difference(
+            plus.owned_wetted_wall_area,
+            minus.owned_wetted_wall_area);
+        const FE::Real young_wall_fd = central_difference(
+            plus.young_wall_energy,
+            minus.young_wall_energy);
+        const FE::Real volume_fd = central_difference(
+            plus.owned_liquid_volume,
+            minus.owned_liquid_volume);
+        const FE::Real volume_potential_fd = central_difference(
+            plus.volume_constraint_potential,
+            minus.volume_constraint_potential);
+        const FE::Real total_fd = central_difference(
+            plus.total_potential,
+            minus.total_potential);
+
+        EXPECT_NEAR(
+            variation.walls.front().owned_wetted_wall_area_variation,
+            wall_area_fd,
+            1.0e-10);
+        EXPECT_NEAR(variation.walls.front().young_wall_energy_variation,
+                    young_wall_fd,
+                    1.0e-10);
+        EXPECT_DOUBLE_EQ(
+            variation.walls.front().owned_wetted_wall_area_variation,
+            variation.owned_wetted_wall_area_variation);
+        EXPECT_DOUBLE_EQ(
+            variation.walls.front().young_wall_energy_variation,
+            variation.young_wall_energy_variation);
+
+        const FE::Real surface_area_error = relative_error(
+            variation.owned_liquid_gas_area_variation,
+            surface_area_fd);
+        const FE::Real surface_energy_error = relative_error(
+            variation.liquid_gas_surface_energy_variation,
+            surface_energy_fd);
+        const FE::Real wall_area_error = relative_error(
+            variation.owned_wetted_wall_area_variation,
+            wall_area_fd);
+        const FE::Real young_wall_error = relative_error(
+            variation.young_wall_energy_variation,
+            young_wall_fd);
+        const FE::Real volume_error = relative_error(
+            variation.owned_liquid_volume_variation,
+            volume_fd);
+        const FE::Real volume_potential_error = relative_error(
+            variation.volume_constraint_potential_variation,
+            volume_potential_fd);
+        const FE::Real total_error = relative_error(
+            variation.total_potential_variation,
+            total_fd);
+
+        EXPECT_LT(surface_area_error, 2.0e-7);
+        EXPECT_LT(surface_energy_error, 2.0e-7);
+        EXPECT_LT(wall_area_error, 2.0e-7);
+        EXPECT_LT(young_wall_error, 2.0e-7);
+        EXPECT_LT(volume_error, 2.0e-7);
+        EXPECT_LT(volume_potential_error, 2.0e-7);
+        EXPECT_LT(total_error, 2.0e-7);
+        EXPECT_NE(variation.owned_liquid_volume_variation, 0.0);
+        EXPECT_NE(variation.owned_liquid_gas_area_variation, 0.0);
+        EXPECT_NE(variation.owned_wetted_wall_area_variation, 0.0);
+        EXPECT_NE(variation.total_potential_variation, 0.0);
+
+        EXPECT_NEAR(
+            variation.liquid_gas_surface_energy_variation,
+            parameters.surface_tension *
+                variation.owned_liquid_gas_area_variation,
+            1.0e-14);
+        EXPECT_NEAR(
+            variation.volume_constraint_potential_variation,
+            parameters.volume_multiplier *
+                variation.owned_liquid_volume_variation,
+            1.0e-14);
+        EXPECT_NEAR(
+            variation.total_potential_variation,
+            variation.liquid_gas_surface_energy_variation +
+                variation.young_wall_energy_variation +
+                variation.volume_constraint_potential_variation,
+            1.0e-14);
+
+        maximum_surface_area_error =
+            std::max(maximum_surface_area_error, surface_area_error);
+        maximum_surface_energy_error =
+            std::max(maximum_surface_energy_error, surface_energy_error);
+        maximum_wall_area_error =
+            std::max(maximum_wall_area_error, wall_area_error);
+        maximum_young_wall_error =
+            std::max(maximum_young_wall_error, young_wall_error);
+        maximum_volume_error =
+            std::max(maximum_volume_error, volume_error);
+        maximum_volume_potential_error =
+            std::max(maximum_volume_potential_error,
+                     volume_potential_error);
+        maximum_total_error =
+            std::max(maximum_total_error, total_error);
+        ++case_count;
+    }
+
+    RecordProperty("functional_first_variation_fd_case_count", case_count);
+    RecordProperty("functional_surface_area_fd_max_relative_error",
+                   ::testing::PrintToString(maximum_surface_area_error));
+    RecordProperty("functional_surface_energy_fd_max_relative_error",
+                   ::testing::PrintToString(maximum_surface_energy_error));
+    RecordProperty("functional_wetted_wall_area_fd_max_relative_error",
+                   ::testing::PrintToString(maximum_wall_area_error));
+    RecordProperty("functional_young_wall_fd_max_relative_error",
+                   ::testing::PrintToString(maximum_young_wall_error));
+    RecordProperty("functional_volume_fd_max_relative_error",
+                   ::testing::PrintToString(maximum_volume_error));
+    RecordProperty("functional_volume_potential_fd_max_relative_error",
+                   ::testing::PrintToString(maximum_volume_potential_error));
+    RecordProperty("functional_total_fd_max_relative_error",
+                   ::testing::PrintToString(maximum_total_error));
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
      DiscreteFunctionalExcludesGhostRuleContributions)
 {
     constexpr int interface_marker = 117;
@@ -2533,11 +3210,36 @@ TEST(FreeSurfaceGeometrySnapshot,
 
     interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
     parameters.surface_tension = 2.0;
+    parameters.volume_multiplier = 3.0;
+    interfaces::FreeSurfaceDiscreteFunctionalDeformationEvaluator
+        deformation;
+    deformation.value =
+        [](FE::GlobalIndex,
+           const std::array<FE::Real, 3>&,
+           const FE::geometry::CutQuadratureProvenance&) {
+            return std::array<FE::Real, 3>{{0.25, 0.0, 0.0}};
+        };
+    deformation.physical_gradient =
+        [](FE::GlobalIndex,
+           const std::array<FE::Real, 3>&,
+           const FE::geometry::CutQuadratureProvenance&) {
+            return interfaces::FreeSurfaceDiscreteFunctionalPhysicalGradient{{
+                {{0.0, 0.0, 0.0}},
+                {{0.0, 0.2, 0.0}},
+                {{0.0, 0.0, 0.0}},
+            }};
+        };
     const auto owner_state =
         interfaces::evaluateFreeSurfaceDiscreteFunctional(
             *owner_snapshot, parameters);
+    const auto owner_variation =
+        interfaces::evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
+            *owner_snapshot, parameters, deformation);
     EXPECT_GT(owner_state.owned_liquid_volume, 0.0);
     EXPECT_GT(owner_state.owned_liquid_gas_area, 0.0);
+    EXPECT_GT(owner_variation.owned_liquid_volume_variation, 0.0);
+    EXPECT_GT(owner_variation.owned_liquid_gas_area_variation, 0.0);
+    EXPECT_GT(owner_variation.total_potential_variation, 0.0);
 
     const SingleQuadBoundaryMesh ghost_mesh(
         /*marker=*/7,
@@ -2572,6 +3274,9 @@ TEST(FreeSurfaceGeometrySnapshot,
     const auto ghost_state =
         interfaces::evaluateFreeSurfaceDiscreteFunctional(
             *ghost_snapshot, parameters);
+    const auto ghost_variation =
+        interfaces::evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
+            *ghost_snapshot, parameters, deformation);
     EXPECT_EQ(ghost_snapshot->revision().snapshot_revision_key,
               owner_snapshot->revision().snapshot_revision_key);
     EXPECT_EQ(ghost_state.owned_liquid_volume, 0.0);
@@ -2579,6 +3284,14 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_EQ(ghost_state.owned_wetted_wall_area, 0.0);
     EXPECT_EQ(ghost_state.owned_contact_measure, 0.0);
     EXPECT_EQ(ghost_state.total_potential, 0.0);
+    EXPECT_EQ(ghost_variation.owned_liquid_volume_variation, 0.0);
+    EXPECT_EQ(ghost_variation.owned_liquid_gas_area_variation, 0.0);
+    EXPECT_EQ(ghost_variation.owned_wetted_wall_area_variation, 0.0);
+    EXPECT_EQ(ghost_variation.liquid_gas_surface_energy_variation, 0.0);
+    EXPECT_EQ(ghost_variation.young_wall_energy_variation, 0.0);
+    EXPECT_EQ(ghost_variation.volume_constraint_potential_variation, 0.0);
+    EXPECT_EQ(ghost_variation.total_potential_variation, 0.0);
+    RecordProperty("functional_first_variation_ghost_contribution_count", 0);
 }
 
 TEST(FreeSurfaceGeometrySnapshot, RejectsPointOutsideParentReferenceCell)

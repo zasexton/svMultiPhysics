@@ -968,7 +968,7 @@ TEST(LevelSetReinitialization,
     const std::array constraints{
         level_set::LevelSetWallContactConstraint{
             .kind = level_set::LevelSetWallContactConstraintKind::
-                PrescribedAngle,
+                AcceptedDynamicAngle,
             .interface_marker = 77,
             .boundary_marker = 5,
             .parent_cell_global_id = 0,
@@ -1021,6 +1021,274 @@ TEST(LevelSetReinitialization,
     EXPECT_FALSE(stale.success);
     EXPECT_NE(stale.diagnostic.find("accepted cut-cell snapshot"),
               std::string::npos);
+}
+
+TEST(LevelSetReinitialization,
+     PrescribedAngleConstraintEnforcesTargetInTwoDimensions)
+{
+    const QuadScalarFieldFixture fixture;
+    const auto& field_dofs = fixture.system.fieldDofHandler(fixture.phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    const FE::Real target_angle = pi / FE::Real{3.0};
+    const FE::Real initial_angle = pi / FE::Real{6.0};
+    constexpr std::array<FE::Real, 3> contact_point{{0.35, 0.0, 0.0}};
+    std::vector<FE::Real> distorted(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        const auto point = fixture.mesh->getNodeCoordinates(vertex);
+        distorted[static_cast<std::size_t>(dofs.front())] =
+            FE::Real{4.0} *
+            (std::sin(initial_angle) *
+                 (point[0] - contact_point[0]) +
+             std::cos(initial_angle) *
+                 (point[1] - contact_point[1]));
+    }
+
+    level_set::LevelSetReinitializationOptions options{};
+    options.signed_distance_tolerance = 1.0e-12;
+    options.interface_band_width = 2.0;
+    options.max_iterations = 2;
+    options.pseudo_time_step_scale = 1.0;
+    options.max_zero_set_displacement = 1.0;
+    const std::array constraints{
+        level_set::LevelSetWallContactConstraint{
+            .kind = level_set::LevelSetWallContactConstraintKind::
+                PrescribedAngle,
+            .interface_marker = 91,
+            .boundary_marker = 7,
+            .parent_cell_global_id = 0,
+            .geometry_revision = 31u,
+            .target_angle_radians = target_angle,
+            .physical_wall_normal = {{0.0, -1.0, 0.0}},
+            .accepted_contact_point = contact_point,
+            .accepted_contact_line_tangent = {{0.0, 0.0, 1.0}},
+        }};
+
+    std::vector<FE::Real> repaired;
+    const auto result = level_set::repairLevelSetSignedDistanceByProjection(
+        *fixture.mesh,
+        field_dofs,
+        options,
+        distorted,
+        repaired,
+        constraints);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_TRUE(result.converged) << result.diagnostic;
+    EXPECT_TRUE(result.wall_contact_constraints_satisfied);
+    const FE::Real origin = vertexValue(*entity_map, repaired, 0);
+    const FE::Real gx = vertexValue(*entity_map, repaired, 1) - origin;
+    const FE::Real gy = vertexValue(*entity_map, repaired, 3) - origin;
+    const FE::Real gradient_norm = std::hypot(gx, gy);
+    ASSERT_GT(gradient_norm, 0.0);
+    const FE::Real condition_residual = std::abs(
+        -gy / gradient_norm + std::cos(target_angle));
+    const FE::Real actual_angle =
+        std::acos(std::clamp(gy / gradient_norm,
+                            FE::Real{-1.0},
+                            FE::Real{1.0}));
+    const FE::Real angle_error_degrees =
+        std::abs(actual_angle - target_angle) *
+        FE::Real{180.0} / pi;
+    const FE::Real contact_x = -origin / gx;
+    const FE::Real contact_displacement =
+        std::abs(contact_x - contact_point[0]);
+    EXPECT_NEAR(gradient_norm, 1.0, 1.0e-12);
+    EXPECT_LE(condition_residual, 1.0e-12);
+    EXPECT_LE(angle_error_degrees, 1.0e-10);
+    EXPECT_LE(contact_displacement, 1.0e-12);
+    EXPECT_LE(result.max_prescribed_contact_angle_error_radians,
+              1.0e-12);
+    EXPECT_LE(result.max_contact_line_displacement, 1.0e-12);
+    EXPECT_GT(result.max_contact_angle_change_radians, 0.5);
+    RecordProperty("prescribed_target_angle_max_error_degrees",
+                   ::testing::PrintToString(angle_error_degrees));
+    RecordProperty("prescribed_target_contact_displacement_max",
+                   ::testing::PrintToString(contact_displacement));
+}
+
+TEST(LevelSetReinitialization,
+     PrescribedAngleConstraintEnforcesTargetInThreeDimensions)
+{
+    const ScalarFieldFixture fixture;
+    const auto& field_dofs = fixture.system.fieldDofHandler(fixture.phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    const FE::Real target_angle = pi / FE::Real{3.0};
+    const FE::Real initial_angle = pi / FE::Real{6.0};
+    constexpr std::array<FE::Real, 3> contact_point{{0.2, 0.2, 0.0}};
+    constexpr std::array<FE::Real, 3> wall_conormal{{0.6, 0.8, 0.0}};
+    std::vector<FE::Real> distorted(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        const auto point = fixture.mesh->getNodeCoordinates(vertex);
+        const FE::Real tangential_offset =
+            wall_conormal[0] * (point[0] - contact_point[0]) +
+            wall_conormal[1] * (point[1] - contact_point[1]);
+        distorted[static_cast<std::size_t>(dofs.front())] =
+            FE::Real{3.5} *
+            (std::sin(initial_angle) * tangential_offset +
+             std::cos(initial_angle) * point[2]);
+    }
+
+    level_set::LevelSetReinitializationOptions options{};
+    options.signed_distance_tolerance = 1.0e-12;
+    options.interface_band_width = 2.0;
+    options.max_iterations = 2;
+    options.pseudo_time_step_scale = 1.0;
+    options.max_zero_set_displacement = 1.0;
+    const std::array constraints{
+        level_set::LevelSetWallContactConstraint{
+            .kind = level_set::LevelSetWallContactConstraintKind::
+                PrescribedAngle,
+            .interface_marker = 92,
+            .boundary_marker = 8,
+            .parent_cell_global_id = 0,
+            .geometry_revision = 32u,
+            .target_angle_radians = target_angle,
+            .physical_wall_normal = {{0.0, 0.0, -1.0}},
+            .accepted_contact_point = contact_point,
+            .accepted_contact_line_tangent = {{0.8, -0.6, 0.0}},
+        }};
+
+    std::vector<FE::Real> repaired;
+    const auto result = level_set::repairLevelSetSignedDistanceByProjection(
+        *fixture.mesh,
+        field_dofs,
+        options,
+        distorted,
+        repaired,
+        constraints);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_TRUE(result.converged) << result.diagnostic;
+    const FE::Real origin = vertexValue(*entity_map, repaired, 0);
+    const std::array<FE::Real, 3> gradient{{
+        vertexValue(*entity_map, repaired, 1) - origin,
+        vertexValue(*entity_map, repaired, 2) - origin,
+        vertexValue(*entity_map, repaired, 3) - origin}};
+    const FE::Real gradient_norm = std::sqrt(
+        gradient[0] * gradient[0] + gradient[1] * gradient[1] +
+        gradient[2] * gradient[2]);
+    ASSERT_GT(gradient_norm, 0.0);
+    const FE::Real actual_angle = std::acos(std::clamp(
+        gradient[2] / gradient_norm, FE::Real{-1.0}, FE::Real{1.0}));
+    const FE::Real angle_error_degrees =
+        std::abs(actual_angle - target_angle) *
+        FE::Real{180.0} / pi;
+    const FE::Real line_alignment = std::abs(
+        (FE::Real{0.8} * gradient[0] -
+         FE::Real{0.6} * gradient[1]) /
+        gradient_norm);
+    const FE::Real contact_value =
+        origin + gradient[0] * contact_point[0] +
+        gradient[1] * contact_point[1];
+    const FE::Real tangential_gradient_norm =
+        std::hypot(gradient[0], gradient[1]);
+    ASSERT_GT(tangential_gradient_norm, 0.0);
+    const FE::Real contact_displacement =
+        std::abs(contact_value) / tangential_gradient_norm;
+    EXPECT_NEAR(gradient_norm, 1.0, 1.0e-12);
+    EXPECT_LE(line_alignment, 1.0e-12);
+    EXPECT_LE(angle_error_degrees, 1.0e-10);
+    EXPECT_LE(contact_displacement, 1.0e-12);
+    EXPECT_LE(result.max_prescribed_contact_value_residual, 1.0e-12);
+    EXPECT_LE(result.max_prescribed_contact_angle_error_radians,
+              1.0e-12);
+    EXPECT_GT(result.max_contact_angle_change_radians, 0.5);
+    RecordProperty("prescribed_target_angle_max_error_degrees",
+                   ::testing::PrintToString(angle_error_degrees));
+    RecordProperty("prescribed_target_contact_displacement_max",
+                   ::testing::PrintToString(contact_displacement));
+}
+
+TEST(LevelSetReinitialization,
+     PrescribedAngleConstraintIsInvariantUnderPositivePhiScaling)
+{
+    const QuadScalarFieldFixture fixture;
+    const auto& field_dofs = fixture.system.fieldDofHandler(fixture.phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    const FE::Real target_angle = pi / FE::Real{3.0};
+    const FE::Real initial_angle = pi / FE::Real{6.0};
+    constexpr std::array<FE::Real, 3> contact_point{{0.35, 0.0, 0.0}};
+    level_set::LevelSetReinitializationOptions options{};
+    options.signed_distance_tolerance = 1.0e-12;
+    options.interface_band_width = 2.0;
+    options.max_iterations = 2;
+    options.pseudo_time_step_scale = 1.0;
+    options.max_zero_set_displacement = 1.0;
+    const std::array constraints{
+        level_set::LevelSetWallContactConstraint{
+            .kind = level_set::LevelSetWallContactConstraintKind::
+                PrescribedAngle,
+            .interface_marker = 93,
+            .boundary_marker = 9,
+            .parent_cell_global_id = 0,
+            .geometry_revision = 33u,
+            .target_angle_radians = target_angle,
+            .physical_wall_normal = {{0.0, -1.0, 0.0}},
+            .accepted_contact_point = contact_point,
+            .accepted_contact_line_tangent = {{0.0, 0.0, 1.0}},
+        }};
+
+    std::vector<std::vector<FE::Real>> repaired_states;
+    for (const FE::Real positive_scale :
+         {FE::Real{0.125}, FE::Real{2.0}, FE::Real{1.0e6}}) {
+        SCOPED_TRACE(positive_scale);
+        std::vector<FE::Real> distorted(
+            static_cast<std::size_t>(field_dofs.getNumDofs()), 0.0);
+        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            const auto dofs = entity_map->getVertexDofs(vertex);
+            ASSERT_EQ(dofs.size(), 1u);
+            const auto point = fixture.mesh->getNodeCoordinates(vertex);
+            distorted[static_cast<std::size_t>(dofs.front())] =
+                positive_scale *
+                (std::sin(initial_angle) *
+                     (point[0] - contact_point[0]) +
+                 std::cos(initial_angle) * point[1]);
+        }
+        std::vector<FE::Real> repaired;
+        const auto result =
+            level_set::repairLevelSetSignedDistanceByProjection(
+                *fixture.mesh,
+                field_dofs,
+                options,
+                distorted,
+                repaired,
+                constraints);
+        ASSERT_TRUE(result.success) << result.diagnostic;
+        ASSERT_TRUE(result.converged) << result.diagnostic;
+        repaired_states.push_back(std::move(repaired));
+    }
+
+    FE::Real maximum_difference = 0.0;
+    for (std::size_t state = 1u; state < repaired_states.size(); ++state) {
+        ASSERT_EQ(repaired_states[state].size(),
+                  repaired_states.front().size());
+        for (std::size_t index = 0;
+             index < repaired_states.front().size();
+             ++index) {
+            maximum_difference = std::max(
+                maximum_difference,
+                std::abs(repaired_states[state][index] -
+                         repaired_states.front()[index]));
+        }
+    }
+    EXPECT_LE(maximum_difference, 1.0e-12);
+    RecordProperty("prescribed_target_phi_scale_max_difference",
+                   ::testing::PrintToString(maximum_difference));
 }
 
 TEST(LevelSetReinitialization,

@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstddef>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -193,6 +194,164 @@ TEST(LevelSetReinitializationMPI,
                   MPI_MAX,
                   MPI_COMM_WORLD);
     EXPECT_LE(global_max_error, 1.0e-12);
+}
+
+TEST(LevelSetReinitializationMPI,
+     PrescribedAngleProjectionIsPartitionInvariant)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    ASSERT_GE(size, 2) << "This partition test requires at least two ranks.";
+
+    auto mesh = makeTwoRankQuadPartition(rank, MPI_COMM_WORLD);
+    auto space = std::make_shared<FE::spaces::H1Space>(
+        FE::ElementType::Quad4, /*order=*/1);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = space, .components = 1});
+    system.setup(mpiSetupOptions(rank, size, MPI_COMM_WORLD));
+
+    const auto count =
+        static_cast<std::size_t>(system.dofHandler().getNumDofs());
+    const auto& mesh_access = system.meshAccess();
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    std::vector<FE::Real> local_coordinate_sum(2u * count, 0.0);
+    std::vector<int> local_coordinate_count(count, 0);
+    std::vector<std::array<FE::Real, 3>> coordinates;
+    mesh_access.forEachCell([&](FE::GlobalIndex cell) {
+        mesh_access.getCellCoordinates(cell, coordinates);
+        const auto dofs = field_dofs.getCellDofs(cell);
+        ASSERT_EQ(dofs.size(), coordinates.size());
+        for (std::size_t local = 0; local < dofs.size(); ++local) {
+            const auto dof = static_cast<std::size_t>(dofs[local]);
+            ASSERT_LT(dof, count);
+            local_coordinate_sum[2u * dof] += coordinates[local][0];
+            local_coordinate_sum[2u * dof + 1u] +=
+                coordinates[local][1];
+            ++local_coordinate_count[dof];
+        }
+    });
+    std::vector<FE::Real> global_coordinate_sum(
+        local_coordinate_sum.size(), 0.0);
+    std::vector<int> global_coordinate_count(count, 0);
+    MPI_Allreduce(local_coordinate_sum.data(),
+                  global_coordinate_sum.data(),
+                  static_cast<int>(global_coordinate_sum.size()),
+                  MPI_DOUBLE,
+                  MPI_SUM,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(local_coordinate_count.data(),
+                  global_coordinate_count.data(),
+                  static_cast<int>(count),
+                  MPI_INT,
+                  MPI_SUM,
+                  MPI_COMM_WORLD);
+
+    const FE::Real pi = std::acos(FE::Real{-1.0});
+    const FE::Real target_angle = pi / FE::Real{3.0};
+    const FE::Real initial_angle = pi / FE::Real{6.0};
+    constexpr FE::Real contact_x = 0.35;
+    std::vector<FE::Real> accepted_state(count, 0.0);
+    std::vector<std::array<FE::Real, 2>> global_coordinates(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        ASSERT_GT(global_coordinate_count[i], 0);
+        const FE::Real inverse_count =
+            FE::Real{1.0} /
+            static_cast<FE::Real>(global_coordinate_count[i]);
+        global_coordinates[i] = {{
+            global_coordinate_sum[2u * i] * inverse_count,
+            global_coordinate_sum[2u * i + 1u] * inverse_count}};
+        accepted_state[i] = FE::Real{5.0} *
+                            (std::sin(initial_angle) *
+                                 (global_coordinates[i][0] - contact_x) +
+                             std::cos(initial_angle) *
+                                 global_coordinates[i][1]);
+    }
+
+    level_set::LevelSetReinitializationOptions options;
+    options.max_iterations = 2;
+    options.pseudo_time_step_scale = 1.0;
+    options.interface_band_width = 4.0;
+    options.signed_distance_tolerance = 1.0e-12;
+    options.max_zero_set_displacement = 1.0;
+    std::vector<level_set::LevelSetWallContactConstraint>
+        local_wall_constraints;
+    if (rank == 0) {
+        local_wall_constraints.push_back(
+            level_set::LevelSetWallContactConstraint{
+                .kind = level_set::LevelSetWallContactConstraintKind::
+                    PrescribedAngle,
+                .interface_marker = 82,
+                .boundary_marker = 7,
+                .parent_cell_global_id = 10,
+                .geometry_revision = 28u,
+                .target_angle_radians = target_angle,
+                .physical_wall_normal = {{0.0, -1.0, 0.0}},
+                .accepted_contact_point = {{contact_x, 0.0, 0.0}},
+                .accepted_contact_line_tangent = {{0.0, 0.0, 1.0}},
+            });
+    }
+    std::vector<FE::Real> candidate;
+    const auto result = level_set::repairLevelSetSignedDistanceByProjection(
+        system,
+        phi,
+        options,
+        accepted_state,
+        candidate,
+        local_wall_constraints);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_TRUE(result.converged) << result.diagnostic;
+    EXPECT_TRUE(result.wall_contact_constraints_satisfied);
+    EXPECT_EQ(result.wall_contact_constraints, 1u);
+    ASSERT_EQ(candidate.size(), count);
+
+    std::vector<FE::Real> coefficient_min(count, 0.0);
+    std::vector<FE::Real> coefficient_max(count, 0.0);
+    MPI_Allreduce(candidate.data(),
+                  coefficient_min.data(),
+                  static_cast<int>(count),
+                  MPI_DOUBLE,
+                  MPI_MIN,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(candidate.data(),
+                  coefficient_max.data(),
+                  static_cast<int>(count),
+                  MPI_DOUBLE,
+                  MPI_MAX,
+                  MPI_COMM_WORLD);
+    FE::Real maximum_coefficient_difference = 0.0;
+    for (std::size_t i = 0; i < count; ++i) {
+        maximum_coefficient_difference = std::max(
+            maximum_coefficient_difference,
+            std::abs(coefficient_max[i] - coefficient_min[i]));
+    }
+    EXPECT_LE(maximum_coefficient_difference, 1.0e-12);
+
+    const auto coefficient_at = [&](FE::Real x, FE::Real y) {
+        for (std::size_t i = 0; i < count; ++i) {
+            if (std::abs(global_coordinates[i][0] - x) <= 1.0e-12 &&
+                std::abs(global_coordinates[i][1] - y) <= 1.0e-12) {
+                return candidate[i];
+            }
+        }
+        throw std::runtime_error(
+            "partitioned prescribed-angle test could not find a coordinate");
+    };
+    const FE::Real origin = coefficient_at(0.0, 0.0);
+    const FE::Real gx = coefficient_at(1.0, 0.0) - origin;
+    const FE::Real gy = coefficient_at(0.0, 1.0) - origin;
+    const FE::Real gradient_norm = std::hypot(gx, gy);
+    ASSERT_GT(gradient_norm, 0.0);
+    EXPECT_NEAR(-gy / gradient_norm,
+                -std::cos(target_angle),
+                1.0e-12);
+    EXPECT_NEAR(-origin / gx, contact_x, 1.0e-12);
+    RecordProperty("prescribed_target_mpi_max_coefficient_difference",
+                   ::testing::PrintToString(
+                       maximum_coefficient_difference));
 }
 
 } // namespace

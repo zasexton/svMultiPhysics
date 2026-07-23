@@ -2485,6 +2485,228 @@ FreeSurfaceDiscreteFunctionalState evaluateFreeSurfaceDiscreteFunctional(
     return state;
 }
 
+FreeSurfaceDiscreteFunctionalVariationState
+evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    const FreeSurfaceDiscreteFunctionalParameters& parameters,
+    const FreeSurfaceDiscreteFunctionalDeformationEvaluator& deformation)
+{
+    if (parameters.liquid_side != geometry::CutIntegrationSide::Negative &&
+        parameters.liquid_side != geometry::CutIntegrationSide::Positive) {
+        throw std::invalid_argument(
+            "free-surface functional first variation requires a physical liquid side");
+    }
+    if (!deformation.canEvaluateValue() ||
+        !deformation.canEvaluatePhysicalGradient()) {
+        throw std::invalid_argument(
+            "free-surface functional first variation requires deformation value and physical-gradient evaluators");
+    }
+
+    // Reuse the scalar functional's validation and wall canonicalization so
+    // the value and first variation cannot silently accept different
+    // coefficients, geometry revisions, or wall sets.
+    const auto functional =
+        evaluateFreeSurfaceDiscreteFunctional(snapshot, parameters);
+
+    FreeSurfaceDiscreteFunctionalVariationState state;
+    state.snapshot_revision_key = functional.snapshot_revision_key;
+    state.liquid_side = functional.liquid_side;
+    state.surface_tension = functional.surface_tension;
+    state.volume_multiplier = functional.volume_multiplier;
+    state.walls.reserve(functional.walls.size());
+    std::map<int, std::size_t> wall_index;
+    for (const auto& functional_wall : functional.walls) {
+        const auto index = state.walls.size();
+        if (!wall_index.emplace(functional_wall.boundary_marker, index).second) {
+            throw std::logic_error(
+                "free-surface functional first variation found a duplicate canonical wall");
+        }
+        state.walls.push_back(
+            FreeSurfaceDiscreteWallFunctionalVariationState{
+                .boundary_marker = functional_wall.boundary_marker,
+                .equilibrium_contact_angle_radians =
+                    functional_wall.equilibrium_contact_angle_radians,
+            });
+    }
+
+    const auto finite_gradient = [](const auto& gradient) noexcept {
+        return std::all_of(
+            gradient.begin(), gradient.end(), [](const auto& row) {
+                return std::all_of(row.begin(), row.end(), [](Real value) {
+                    return std::isfinite(value);
+                });
+            });
+    };
+    const auto unit_direction = [](std::array<Real, 3> direction,
+                                   const char* diagnostic) {
+        const Real magnitude = norm(direction);
+        if (!finitePoint(direction) || !std::isfinite(magnitude) ||
+            !(magnitude > Real{0.0})) {
+            throw std::invalid_argument(diagnostic);
+        }
+        for (auto& component : direction) {
+            component /= magnitude;
+        }
+        return direction;
+    };
+    const bool positive_liquid =
+        parameters.liquid_side == geometry::CutIntegrationSide::Positive;
+
+    for (const auto& record : snapshot.rules()) {
+        if (!record.locally_owned ||
+            record.retention != FreeSurfaceGeometryRetention::Retained ||
+            (record.role != FreeSurfaceGeometryRuleRole::Interface &&
+             record.role != FreeSurfaceGeometryRuleRole::Contact)) {
+            continue;
+        }
+        if (record.reference_rule.points.size() !=
+            record.physical_rule.points.size()) {
+            throw std::invalid_argument(
+                "free-surface functional first variation found mismatched reference and physical rule points");
+        }
+        const int codimension =
+            record.role == FreeSurfaceGeometryRuleRole::Interface ? 1 : 2;
+        const int ambient_dimension =
+            record.physical_rule.geometric_dimension + codimension;
+        if (ambient_dimension <= 0 || ambient_dimension > 3) {
+            throw std::invalid_argument(
+                "free-surface functional first variation found an invalid ambient dimension");
+        }
+
+        for (std::size_t point_index = 0;
+             point_index < record.physical_rule.points.size();
+             ++point_index) {
+            const auto& physical =
+                record.physical_rule.points[point_index];
+            const auto& reference =
+                record.reference_rule.points[point_index];
+            const Real weight = physical.physical_weight;
+            if (!std::isfinite(weight) || !(weight > Real{0.0})) {
+                throw std::invalid_argument(
+                    "free-surface functional first variation found an invalid physical weight");
+            }
+            const auto value = deformation.value(
+                record.reference_rule.provenance.parent_entity,
+                reference.parent_coordinate,
+                record.reference_rule.provenance);
+            if (!finitePoint(value)) {
+                throw std::invalid_argument(
+                    "free-surface functional first variation deformation returned a non-finite value");
+            }
+
+            auto liquid_normal = unit_direction(
+                physical.normal,
+                "free-surface functional first variation found a degenerate interface normal");
+            if (positive_liquid) {
+                for (auto& component : liquid_normal) {
+                    component = -component;
+                }
+            }
+
+            if (record.role == FreeSurfaceGeometryRuleRole::Interface) {
+                const auto gradient = deformation.physical_gradient(
+                    record.reference_rule.provenance.parent_entity,
+                    reference.parent_coordinate,
+                    record.reference_rule.provenance);
+                if (!finite_gradient(gradient)) {
+                    throw std::invalid_argument(
+                        "free-surface functional first variation deformation returned a non-finite physical gradient");
+                }
+                Real surface_divergence{0.0};
+                for (int i = 0; i < ambient_dimension; ++i) {
+                    surface_divergence += gradient[static_cast<std::size_t>(i)]
+                                                  [static_cast<std::size_t>(i)];
+                    for (int j = 0; j < ambient_dimension; ++j) {
+                        surface_divergence -=
+                            liquid_normal[static_cast<std::size_t>(i)] *
+                            gradient[static_cast<std::size_t>(i)]
+                                    [static_cast<std::size_t>(j)] *
+                            liquid_normal[static_cast<std::size_t>(j)];
+                    }
+                }
+                const Real area_variation = surface_divergence * weight;
+                const Real volume_variation =
+                    dot(value, liquid_normal) * weight;
+                if (!std::isfinite(area_variation) ||
+                    !std::isfinite(volume_variation)) {
+                    throw std::invalid_argument(
+                        "free-surface functional first variation produced a non-finite interface contribution");
+                }
+                state.owned_liquid_gas_area_variation += area_variation;
+                state.owned_liquid_volume_variation += volume_variation;
+                continue;
+            }
+
+            if (record.physical_boundary_marker < 0) {
+                throw std::invalid_argument(
+                    "free-surface functional first variation found contact geometry without a physical marker");
+            }
+            const auto found_wall =
+                wall_index.find(record.physical_boundary_marker);
+            if (found_wall == wall_index.end()) {
+                throw std::logic_error(
+                    "free-surface functional first variation could not resolve a canonical contact wall");
+            }
+            const auto wall_normal = unit_direction(
+                physical.boundary_normal,
+                "free-surface functional first variation found a degenerate wall normal");
+            const Real normal_dot = dot(liquid_normal, wall_normal);
+            std::array<Real, 3> footprint_direction{};
+            for (int component = 0; component < ambient_dimension;
+                 ++component) {
+                const auto index = static_cast<std::size_t>(component);
+                footprint_direction[index] =
+                    liquid_normal[index] - normal_dot * wall_normal[index];
+            }
+            footprint_direction = unit_direction(
+                footprint_direction,
+                "free-surface functional first variation found a degenerate wetted-footprint direction");
+            const Real wall_area_variation =
+                dot(value, footprint_direction) * weight;
+            if (!std::isfinite(wall_area_variation)) {
+                throw std::invalid_argument(
+                    "free-surface functional first variation produced a non-finite wetted-wall contribution");
+            }
+            state.owned_wetted_wall_area_variation += wall_area_variation;
+            state.walls[found_wall->second]
+                .owned_wetted_wall_area_variation += wall_area_variation;
+        }
+    }
+
+    state.liquid_gas_surface_energy_variation =
+        parameters.surface_tension *
+        state.owned_liquid_gas_area_variation;
+    for (auto& wall : state.walls) {
+        if (!wall.equilibrium_contact_angle_radians.has_value()) {
+            continue;
+        }
+        wall.young_wall_energy_variation =
+            -parameters.surface_tension *
+            std::cos(*wall.equilibrium_contact_angle_radians) *
+            wall.owned_wetted_wall_area_variation;
+        state.young_wall_energy_variation +=
+            wall.young_wall_energy_variation;
+    }
+    state.volume_constraint_potential_variation =
+        parameters.volume_multiplier *
+        state.owned_liquid_volume_variation;
+    state.total_potential_variation =
+        state.liquid_gas_surface_energy_variation +
+        state.young_wall_energy_variation +
+        state.volume_constraint_potential_variation;
+    if (!std::isfinite(state.owned_liquid_volume_variation) ||
+        !std::isfinite(state.owned_liquid_gas_area_variation) ||
+        !std::isfinite(state.owned_wetted_wall_area_variation) ||
+        !std::isfinite(state.liquid_gas_surface_energy_variation) ||
+        !std::isfinite(state.young_wall_energy_variation) ||
+        !std::isfinite(state.volume_constraint_potential_variation) ||
+        !std::isfinite(state.total_potential_variation)) {
+        throw std::invalid_argument(
+            "free-surface functional first variation produced a non-finite total");
+    }
+    return state;
+}
+
 void finalizeFreeSurfaceDynamicContactState(
     FreeSurfaceDynamicContactState& state)
 {
@@ -2542,7 +2764,8 @@ void finalizeFreeSurfaceDynamicContactState(
             !finite_array(wall.wall_tangential_velocity_integral) ||
             !finite_array(wall.contact_position_integral) ||
             !finite_array(wall.wall_normal_integral) ||
-            !finite_array(wall.footprint_direction_integral)) {
+            !finite_array(wall.footprint_direction_integral) ||
+            !finite_array(wall.contact_line_tangent_integral)) {
             throw std::invalid_argument(
                 "free-surface dynamic-contact state has invalid additive data");
         }
@@ -2606,6 +2829,7 @@ void finalizeFreeSurfaceDynamicContactState(
             wall.mean_contact_position = {{0.0, 0.0, 0.0}};
             wall.mean_wall_normal = {{0.0, 0.0, 0.0}};
             wall.mean_footprint_direction = {{0.0, 0.0, 0.0}};
+            wall.mean_contact_line_tangent = {{0.0, 0.0, 0.0}};
             wall.motion = FreeSurfaceContactMotion::Absent;
             continue;
         }
@@ -2629,6 +2853,9 @@ void finalizeFreeSurfaceDynamicContactState(
                 wall.wall_normal_integral[component] * inverse_measure;
             wall.mean_footprint_direction[component] =
                 wall.footprint_direction_integral[component] *
+                inverse_measure;
+            wall.mean_contact_line_tangent[component] =
+                wall.contact_line_tangent_integral[component] *
                 inverse_measure;
         }
         if (wall.owned_advancing_point_count != 0u &&
@@ -2880,6 +3107,17 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
             for (auto& component : footprint_direction) {
                 component /= footprint_norm;
             }
+            auto contact_line_tangent =
+                crossPoint(unit_wall_normal, footprint_direction);
+            const Real tangent_norm = norm(contact_line_tangent);
+            if (!(tangent_norm > Real{0.0}) ||
+                !std::isfinite(tangent_norm)) {
+                throw std::invalid_argument(
+                    "free-surface dynamic-contact rule has no oriented contact-line tangent");
+            }
+            for (auto& component : contact_line_tangent) {
+                component /= tangent_norm;
+            }
             const auto value = velocity.value(
                 record.reference_rule.provenance.parent_entity,
                 reference.parent_coordinate,
@@ -2921,6 +3159,8 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
                     unit_wall_normal[component] * weight;
                 wall.footprint_direction_integral[component] +=
                     footprint_direction[component] * weight;
+                wall.contact_line_tangent_integral[component] +=
+                    contact_line_tangent[component] * weight;
             }
         }
     }

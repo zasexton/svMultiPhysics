@@ -6579,6 +6579,8 @@ bool sameFreeSurfaceDynamicContactWallState(
            lhs.wall_normal_integral == rhs.wall_normal_integral &&
            lhs.footprint_direction_integral ==
                rhs.footprint_direction_integral &&
+           lhs.contact_line_tangent_integral ==
+               rhs.contact_line_tangent_integral &&
            lhs.mean_dynamic_angle_radians ==
                rhs.mean_dynamic_angle_radians &&
            lhs.mean_dynamic_cosine == rhs.mean_dynamic_cosine &&
@@ -6594,6 +6596,8 @@ bool sameFreeSurfaceDynamicContactWallState(
            lhs.mean_wall_normal == rhs.mean_wall_normal &&
            lhs.mean_footprint_direction ==
                rhs.mean_footprint_direction &&
+           lhs.mean_contact_line_tangent ==
+               rhs.mean_contact_line_tangent &&
            lhs.motion == rhs.motion;
 }
 
@@ -7374,7 +7378,10 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                             wall.wall_normal_integral.end(), finite) ||
                         !std::all_of(
                             wall.footprint_direction_integral.begin(),
-                            wall.footprint_direction_integral.end(), finite),
+                            wall.footprint_direction_integral.end(), finite) ||
+                        !std::all_of(
+                            wall.contact_line_tangent_integral.begin(),
+                            wall.contact_line_tangent_integral.end(), finite),
                     InvalidArgumentException,
                     "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
                     "contact-stage wall state is inconsistent or non-finite");
@@ -7424,6 +7431,10 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                                 measure_tolerance ||
                         vector_norm(
                             wall.footprint_direction_integral) >
+                            wall.owned_contact_measure +
+                                measure_tolerance ||
+                        vector_norm(
+                            wall.contact_line_tangent_integral) >
                             wall.owned_contact_measure +
                                 measure_tolerance ||
                         wall.contact_speed_squared_integral *
@@ -7537,6 +7548,11 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                             wall.footprint_direction_integral[component] *
                                 inverse_measure,
                             "mean contact footprint frame");
+                        require_near(
+                            wall.mean_contact_line_tangent[component],
+                            wall.contact_line_tangent_integral[component] *
+                                inverse_measure,
+                            "mean oriented contact-line tangent");
                     }
                 } else {
                     for (const auto value : wall.mean_contact_position) {
@@ -7551,6 +7567,13 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                          wall.mean_footprint_direction) {
                         require_near(value, Real{0.0},
                                      "absent contact footprint frame");
+                    }
+                    for (const auto value :
+                         wall.mean_contact_line_tangent) {
+                        require_near(
+                            value,
+                            Real{0.0},
+                            "absent oriented contact-line tangent");
                     }
                 }
                 const bool has_wetted_wall_measure =
@@ -7901,6 +7924,9 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                         << " contact_mean_footprint_direction_" << component
                         << "="
                         << contact.mean_footprint_direction[component]
+                        << " contact_mean_contact_line_tangent_"
+                        << component << "="
+                        << contact.mean_contact_line_tangent[component]
                         << " contact_mean_wall_tangential_velocity_"
                         << component << "="
                         << contact.mean_wall_tangential_velocity[component];
