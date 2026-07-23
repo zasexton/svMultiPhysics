@@ -30,6 +30,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -1314,6 +1315,21 @@ TEST(ApplicationDriverLevelSetWorkflows,
       lifecycle,
       "application-driver-accepted-functional-test");
   ASSERT_TRUE(report.refreshed);
+  const auto current_functionals =
+      evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+  const auto maintenance_functionals =
+      levelSetMaintenanceFunctionalValues(sim, current_functionals);
+  ASSERT_EQ(maintenance_functionals.size(), 1u);
+  EXPECT_EQ(
+      maintenance_functionals.front().snapshot_revision,
+      current_functionals.front()
+          .geometry_revision.snapshot_revision_key);
+  EXPECT_EQ(
+      maintenance_functionals.front().mesh_topology_revision,
+      current_functionals.front()
+          .geometry_revision.mesh_topology_revision);
+  EXPECT_NE(
+      maintenance_functionals.front().cut_topology_revision, 0u);
   ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
       sim,
       /*accepted_step=*/3u,
@@ -1505,9 +1521,40 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const auto phi_dof_count = static_cast<std::size_t>(
       sim.fe_system->fieldDofHandler(phi).getNumDofs());
   ASSERT_LE(phi_offset + phi_dof_count, solution.size());
+  std::vector<svmp::FE::Real> endpoint_phi_values(
+      mesh->n_vertices(), svmp::FE::Real{0.0});
+  std::vector<svmp::FE::Real> previous_phi_values(
+      mesh->n_vertices(), svmp::FE::Real{0.0});
+  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+    const auto point = workflowVertexPoint(*mesh, vertex);
+    endpoint_phi_values[vertex] =
+        svmp::FE::Real{2.0} * (point[0] - svmp::FE::Real{0.60});
+    previous_phi_values[vertex] =
+        svmp::FE::Real{2.0} * (point[0] - svmp::FE::Real{0.30});
+  }
+  const auto endpoint_coefficients = projectWorkflowVertexValues(
+      *sim.fe_system,
+      phi,
+      endpoint_phi_values,
+      1u,
+      "ApplicationDriver endpoint contact-stage phi");
+  const auto previous_coefficients = projectWorkflowVertexValues(
+      *sim.fe_system,
+      phi,
+      previous_phi_values,
+      1u,
+      "ApplicationDriver previous contact-stage phi");
+  writeWorkflowFieldSlice(
+      *sim.fe_system, phi, endpoint_coefficients, endpoint_solution);
+  writeWorkflowFieldSlice(
+      *sim.fe_system, phi, previous_coefficients, previous_solution);
   for (std::size_t i = 0; i < phi_dof_count; ++i) {
-    endpoint_solution[phi_offset + i] *= svmp::FE::Real{1.1};
-    previous_solution[phi_offset + i] *= svmp::FE::Real{0.9};
+    EXPECT_NEAR(
+        svmp::FE::Real{0.5} *
+            (endpoint_solution[phi_offset + i] +
+             previous_solution[phi_offset + i]),
+        solution[phi_offset + i],
+        1.0e-13);
   }
   auto factory = svmp::FE::backends::BackendFactory::create(
       svmp::FE::backends::BackendKind::FSILS);
@@ -1525,34 +1572,91 @@ TEST(ApplicationDriverLevelSetWorkflows,
   scatterFeOrderedSolution(time_history.uPrev(), previous_solution);
   scatterFeOrderedSolution(time_history.uPrev2(), previous_solution);
 
-  const auto contact_stages = evaluateAcceptedFreeSurfaceContactStages(
+  ASSERT_NO_THROW((void)refreshActiveCutIntegrationContextFromSolution(
       sim,
-      svmp::FE::Real{0.075},
-      svmp::FE::Real{0.5},
-      time_history.uPrev().valueRevision(),
-      time_history.u().valueRevision(),
-      std::span<const svmp::FE::Real>(solution.data(), solution.size()));
+      *params,
+      endpoint_solution,
+      lifecycle,
+      "application-driver-contact-endpoint-before-stage-test"));
+  ActiveCutContextRefreshCache contact_stage_refresh_cache;
+  const auto active_cut_requests = activeCutVolumeRequests(*params);
+  const auto contact_stage_candidate =
+      buildAcceptedFreeSurfaceContactStageCandidate(
+          sim,
+          *params,
+          lifecycle,
+          contact_stage_refresh_cache,
+          active_cut_requests,
+          svmp::FE::Real{0.075},
+          svmp::FE::Real{0.5},
+          time_history.uPrev().valueRevision(),
+          time_history.u().valueRevision(),
+          previous_solution,
+          endpoint_solution,
+          nullptr);
+  const auto& contact_stages = contact_stage_candidate.stages;
+  const auto& contact_stage_constraints =
+      contact_stage_candidate.constraints;
   ASSERT_EQ(contact_stages.size(), 1u);
   ASSERT_EQ(contact_stages.front().state.walls.size(), 1u);
   EXPECT_GT(contact_stages.front().state.owned_contact_measure, 0.0);
   EXPECT_GT(contact_stages.front().state.line_friction_dissipation, 0.0);
-  const auto contact_stage_constraints =
-      captureAcceptedContactStageWallConstraints(sim, contact_stages);
+  EXPECT_NEAR(
+      contact_stages.front().state.walls.front().mean_contact_position[0],
+      svmp::FE::Real{0.45},
+      1.0e-12);
+  for (const auto component :
+       contact_stages.front()
+           .state.walls.front()
+           .mean_contact_line_tangent) {
+    EXPECT_TRUE(std::isfinite(component));
+  }
+  EXPECT_EQ(
+      contact_stages.front().stage_state_revision,
+      acceptedContactStageRevision(
+          time_history.uPrev().valueRevision(),
+          time_history.u().valueRevision(),
+          contact_stages.front().geometry_revision.snapshot_revision_key,
+          svmp::FE::Real{0.075},
+          svmp::FE::Real{0.5},
+          contact_stage_candidate.stage_solution));
+  auto changed_stage_solution = contact_stage_candidate.stage_solution;
+  ASSERT_FALSE(changed_stage_solution.empty());
+  changed_stage_solution.back() += svmp::FE::Real{0.125};
+  EXPECT_NE(
+      contact_stages.front().stage_state_revision,
+      acceptedContactStageRevision(
+          time_history.uPrev().valueRevision(),
+          time_history.u().valueRevision(),
+          contact_stages.front().geometry_revision.snapshot_revision_key,
+          svmp::FE::Real{0.075},
+          svmp::FE::Real{0.5},
+          changed_stage_solution));
   time_history.updateGhosts();
   EXPECT_NE(contact_stages.front().endpoint_state_revision,
             time_history.u().valueRevision());
-  ASSERT_NO_THROW((void)refreshActiveCutIntegrationContextFromSolution(
-      sim,
-      *params,
-      std::span<const svmp::FE::Real>(endpoint_solution.data(),
-                                      endpoint_solution.size()),
-      lifecycle,
-      "application-driver-contact-endpoint-finalization-test"));
+  const auto endpoint_contact_stages =
+      evaluateAcceptedFreeSurfaceContactStages(
+          sim,
+          svmp::FE::Real{0.10},
+          svmp::FE::Real{1.0},
+          time_history.uPrev().valueRevision(),
+          time_history.u().valueRevision(),
+          endpoint_solution);
+  ASSERT_EQ(endpoint_contact_stages.size(), 1u);
+  ASSERT_EQ(endpoint_contact_stages.front().state.walls.size(), 1u);
+  EXPECT_NEAR(
+      endpoint_contact_stages.front()
+          .state.walls.front()
+          .mean_contact_position[0],
+      svmp::FE::Real{0.60},
+      1.0e-12);
   const auto endpoint_snapshot_revision =
       sim.fe_system->cutIntegrationContext()
           ->freeSurfaceGeometrySnapshotRevisionForMarker(interface_marker);
   EXPECT_NE(endpoint_snapshot_revision,
-            snapshot->revision().snapshot_revision_key);
+            contact_stages.front()
+                .geometry_revision.snapshot_revision_key);
 
   LevelSetMaintenanceRequest maintenance_request{};
   maintenance_request.level_set_field_name = "phi";
@@ -1574,7 +1678,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           candidate_only_solution,
           contact_stages,
           contact_stage_constraints,
-          std::span<const svmp::FE::Real>(solution.data(), solution.size()));
+          contact_stage_candidate.stage_solution);
   time_history.setTime(0.10);
   EXPECT_TRUE(candidate_only_reinitialization.applied);
   EXPECT_TRUE(candidate_only_reinitialization.repair.converged);
@@ -1601,7 +1705,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       maintenance_requests,
       contact_stages,
       contact_stage_constraints,
-      std::span<const svmp::FE::Real>(solution.data(), solution.size()));
+      contact_stage_candidate.stage_solution);
   const auto maintenance_output = testing::internal::GetCapturedStdout();
   ASSERT_TRUE(maintenance_changed);
   EXPECT_NE(maintenance_output.find(
@@ -1663,8 +1767,110 @@ TEST(ApplicationDriverLevelSetWorkflows,
                    svmp::FE::Real{0.5});
   EXPECT_EQ(history.front().contact_stage->geometry_revision
                 .snapshot_revision_key,
-            snapshot->revision().snapshot_revision_key);
+            contact_stages.front()
+                .geometry_revision.snapshot_revision_key);
 #endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     AcceptedSnapshotPrescribedFrameIsCompleteAndFailsClosed)
+{
+  constexpr int interface_marker = 1706;
+  constexpr int wall_marker = 129;
+  constexpr std::uint64_t revision = 41u;
+  constexpr svmp::FE::GlobalIndex parent = 17;
+  constexpr svmp::FE::Real half_pi =
+      svmp::FE::Real{1.57079632679489661923132169163975144};
+  constexpr svmp::FE::Real inv_sqrt_two =
+      svmp::FE::Real{0.70710678118654752440084436210484904};
+
+  svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord record;
+  record.role =
+      svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::Contact;
+  record.retention =
+      svmp::FE::interfaces::FreeSurfaceGeometryRetention::Retained;
+  record.physical_boundary_marker = wall_marker;
+  record.locally_owned = true;
+  record.reference_rule.geometric_dimension = 0;
+  record.reference_rule.provenance.parent_entity_global_id = parent;
+  record.reference_rule.provenance.free_surface_snapshot_revision_key =
+      revision;
+  record.reference_rule.points.resize(1u);
+  record.physical_rule.geometric_dimension = 0;
+  record.physical_rule.free_surface_snapshot_revision_key = revision;
+  record.physical_rule.physical_measure = 1.0;
+  record.physical_rule.points.push_back(
+      svmp::FE::geometry::MappedCutQuadraturePoint{
+          .physical_point = {{0.25, 0.0, 0.0}},
+          .physical_weight = 1.0,
+          .normal = {{inv_sqrt_two, inv_sqrt_two, 0.0}},
+          .boundary_normal = {{0.0, -1.0, 0.0}},
+      });
+
+  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+  parameters.liquid_side =
+      svmp::FE::geometry::CutIntegrationSide::Negative;
+  parameters.young_wall_coefficients.push_back(
+      svmp::FE::interfaces::FreeSurfaceYoungWallCoefficient{
+          .boundary_marker = wall_marker,
+          .equilibrium_contact_angle_radians = half_pi,
+      });
+  const auto constraint = makeAcceptedSnapshotWallConstraint(
+      record,
+      svmp::FE::level_set::LevelSetWallContactConstraintKind::
+          PrescribedAngle,
+      interface_marker,
+      revision,
+      parameters,
+      /*dimension=*/2);
+  EXPECT_EQ(constraint.parent_cell_global_id, parent);
+  EXPECT_DOUBLE_EQ(constraint.target_angle_radians, half_pi);
+  EXPECT_EQ(constraint.physical_wall_normal,
+            (std::array<svmp::FE::Real, 3>{{0.0, -1.0, 0.0}}));
+  EXPECT_EQ(constraint.accepted_contact_point,
+            (std::array<svmp::FE::Real, 3>{{0.25, 0.0, 0.0}}));
+  EXPECT_EQ(constraint.accepted_contact_line_tangent,
+            (std::array<svmp::FE::Real, 3>{{0.0, 0.0, 1.0}}));
+
+  const std::vector duplicates{constraint, constraint};
+  const auto canonical = canonicalizeAcceptedWallConstraints(
+      duplicates,
+      svmp::MeshComm::world(),
+      "Application prescribed-frame test");
+  ASSERT_EQ(canonical.size(), 1u);
+  auto conflict = constraint;
+  conflict.accepted_contact_point[0] += svmp::FE::Real{0.125};
+  EXPECT_THROW(
+      (void)canonicalizeAcceptedWallConstraints(
+          std::vector{constraint, conflict},
+          svmp::MeshComm::world(),
+          "Application prescribed-frame conflict test"),
+      std::runtime_error);
+
+  auto missing = record;
+  missing.physical_rule.points.clear();
+  EXPECT_THROW(
+      (void)makeAcceptedSnapshotWallConstraint(
+          missing,
+          svmp::FE::level_set::LevelSetWallContactConstraintKind::
+              PrescribedAngle,
+          interface_marker,
+          revision,
+          parameters,
+          /*dimension=*/2),
+      std::runtime_error);
+  auto stale = record;
+  stale.physical_rule.free_surface_snapshot_revision_key = revision + 1u;
+  EXPECT_THROW(
+      (void)makeAcceptedSnapshotWallConstraint(
+          stale,
+          svmp::FE::level_set::LevelSetWallContactConstraintKind::
+              PrescribedAngle,
+          interface_marker,
+          revision,
+          parameters,
+          /*dimension=*/2),
+      std::runtime_error);
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -1791,6 +1997,45 @@ TEST(ApplicationDriverLevelSetWorkflows,
   request.reinitialization.max_iterations = 100;
   request.reinitialization.signed_distance_tolerance = 1.0e-10;
   std::vector<LevelSetMaintenanceRequest> requests{request};
+  auto staged_solution = solution;
+  const auto staged = stageLevelSetProjectionReinitialization(
+      sim,
+      history,
+      request,
+      phi,
+      svmp::FE::Real{0.1},
+      staged_solution,
+      {},
+      {},
+      {});
+  ASSERT_TRUE(staged.applied);
+  ASSERT_TRUE(staged.repair.converged);
+  ASSERT_EQ(staged.wall_context.local_constraints.size(), 2u);
+  EXPECT_EQ(staged.wall_context.global_prescribed_contact_rules, 2u);
+  for (const auto& constraint : staged.wall_context.local_constraints) {
+    EXPECT_DOUBLE_EQ(
+        constraint.target_angle_radians,
+        svmp::FE::Real{1.57079632679489661923132169163975144});
+    EXPECT_TRUE(acceptedWallConstraintFrameIsComplete(
+        constraint,
+        parameters,
+        /*dimension=*/2));
+    EXPECT_NE(std::abs(constraint.accepted_contact_line_tangent[2]), 0.0);
+  }
+  EXPECT_LE(staged.repair.max_prescribed_contact_value_residual,
+            svmp::FE::Real{1.0e-9});
+  EXPECT_LE(staged.repair.max_prescribed_contact_angle_error_radians,
+            svmp::FE::Real{1.0e-12});
+  EXPECT_DOUBLE_EQ(staged.repair.max_contact_line_displacement,
+                   svmp::FE::Real{0.0});
+  ::testing::Test::RecordProperty(
+      "application_prescribed_target_angle_max_error_degrees",
+      staged.repair.max_prescribed_contact_angle_error_radians *
+          svmp::FE::Real{180.0} /
+          std::acos(svmp::FE::Real{-1.0}));
+  ::testing::Test::RecordProperty(
+      "application_prescribed_target_contact_displacement_max",
+      staged.repair.max_contact_line_displacement);
   testing::internal::CaptureStdout();
   const bool changed = applyLevelSetMaintenance(sim, history, requests);
   const auto output = testing::internal::GetCapturedStdout();
@@ -1800,6 +2045,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_NE(output.find("prescribed_contact_rules=2"),
             std::string::npos);
   EXPECT_NE(output.find("dynamic_contact_rules=0"), std::string::npos);
+  EXPECT_NE(output.find("max_prescribed_contact_value_residual="),
+            std::string::npos);
+  EXPECT_NE(output.find("max_prescribed_contact_angle_error_radians="),
+            std::string::npos);
   EXPECT_NE(output.find("max_contact_line_displacement=0"),
             std::string::npos);
   EXPECT_NE(output.find("max_contact_angle_change_radians=0"),
@@ -1816,6 +2065,16 @@ TEST(ApplicationDriverLevelSetWorkflows,
                 svmp::FE::Real{0.5} * solution[field_offset + i],
                 1.0e-10);
   }
+  mesh->event_bus().notify(svmp::MeshEvent::GeometryChanged);
+  EXPECT_THROW(
+      (void)resolveLevelSetWallAwareMaintenanceContext(
+          sim,
+          history,
+          phi,
+          svmp::FE::Real{0.1},
+          {},
+          {}),
+      std::runtime_error);
 #endif
 }
 
@@ -4349,6 +4608,315 @@ TEST(ApplicationDriverLevelSetWorkflows,
 #endif
 }
 
+application::core::LevelSetAuthoritativeFunctionalValue
+makeMaintenanceFunctionalValue(
+    double total_potential,
+    std::uint64_t snapshot_revision,
+    std::uint64_t mesh_topology_revision = 19u,
+    std::uint64_t cut_topology_revision = 23u)
+{
+  return application::core::LevelSetAuthoritativeFunctionalValue{
+      .interface_marker = 407,
+      .snapshot_revision = snapshot_revision,
+      .mesh_topology_revision = mesh_topology_revision,
+      .cut_topology_revision = cut_topology_revision,
+      .liquid_volume = 1.25,
+      .liquid_gas_area = 2.5,
+      .wetted_wall_area = 0.75,
+      .contact_measure = 0.5,
+      .surface_energy = 3.0,
+      .young_wall_energy = -0.25,
+      .volume_constraint_potential = total_potential - 2.75,
+      .total_potential = total_potential,
+  };
+}
+
+application::core::LevelSetMaintenanceWorkTransaction
+makeMaintenanceWorkTransaction(std::uint64_t transaction_id)
+{
+  return application::core::LevelSetMaintenanceWorkTransaction{
+      .transaction_id = transaction_id,
+      .step = 8u,
+      .attempt = 2u,
+      .time = 0.4,
+      .dt = 0.05,
+      .declared_stage =
+          application::core::LevelSetMaintenanceDeclaredStage::
+              AcceptedEndpointPostStep,
+      .extension_map_revision = 313u,
+  };
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceWorkLedgerPublishesReinitializationOnlyAtCommit)
+{
+  application::core::LevelSetMaintenanceWorkLedger ledger;
+  ledger.beginTransaction(makeMaintenanceWorkTransaction(101u));
+  ledger.stageRow(
+      application::core::LevelSetMaintenanceWorkSubstage::
+          Reinitialization,
+      1001u,
+      1002u,
+      {makeMaintenanceFunctionalValue(2.0, 501u)},
+      {makeMaintenanceFunctionalValue(2.125, 502u)});
+
+  ASSERT_EQ(ledger.trialRows().size(), 1u);
+  EXPECT_TRUE(ledger.acceptedRows().empty());
+  EXPECT_EQ(
+      ledger.trialRows().front().status,
+      application::core::LevelSetMaintenanceWorkStatus::Trial);
+  EXPECT_DOUBLE_EQ(
+      ledger.trialRows().front().accepted_numerical_work, 0.0);
+
+  ledger.commitTransaction();
+  ASSERT_EQ(ledger.acceptedRows().size(), 1u);
+  const auto& row = ledger.acceptedRows().front();
+  EXPECT_EQ(
+      row.status,
+      application::core::LevelSetMaintenanceWorkStatus::Accepted);
+  EXPECT_EQ(
+      row.substage,
+      application::core::LevelSetMaintenanceWorkSubstage::
+          Reinitialization);
+  EXPECT_EQ(row.step, 8u);
+  EXPECT_EQ(row.attempt, 2u);
+  EXPECT_DOUBLE_EQ(row.time, 0.4);
+  EXPECT_DOUBLE_EQ(row.dt, 0.05);
+  ASSERT_TRUE(row.extension_map_revision_before.has_value());
+  ASSERT_TRUE(row.extension_map_revision_after.has_value());
+  EXPECT_EQ(*row.extension_map_revision_before, 313u);
+  EXPECT_EQ(*row.extension_map_revision_after, 313u);
+  EXPECT_DOUBLE_EQ(row.numerical_work, 0.125);
+  EXPECT_DOUBLE_EQ(row.accepted_numerical_work, 0.125);
+  ASSERT_EQ(ledger.acceptedAttempts().size(), 1u);
+  EXPECT_EQ(
+      ledger.acceptedAttempts().front().status,
+      application::core::LevelSetMaintenanceWorkStatus::Accepted);
+  EXPECT_EQ(ledger.acceptedAttempts().front().row_count, 1u);
+  EXPECT_DOUBLE_EQ(
+      ledger.acceptedAttempts().front().accepted_numerical_work,
+      0.125);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceWorkLedgerKeepsReinitializationAndCorrectionAdditive)
+{
+  application::core::LevelSetMaintenanceWorkLedger ledger;
+  ledger.beginTransaction(makeMaintenanceWorkTransaction(102u));
+  ledger.stageRow(
+      application::core::LevelSetMaintenanceWorkSubstage::
+          Reinitialization,
+      2001u,
+      2002u,
+      {makeMaintenanceFunctionalValue(3.0, 601u)},
+      {makeMaintenanceFunctionalValue(3.25, 602u)});
+  ledger.stageRow(
+      application::core::LevelSetMaintenanceWorkSubstage::
+          GlobalCorrection,
+      2002u,
+      2003u,
+      {makeMaintenanceFunctionalValue(3.25, 602u)},
+      {makeMaintenanceFunctionalValue(3.10, 603u)});
+  ledger.commitTransaction();
+
+  ASSERT_EQ(ledger.acceptedRows().size(), 2u);
+  EXPECT_EQ(
+      ledger.acceptedRows()[0].substage,
+      application::core::LevelSetMaintenanceWorkSubstage::
+          Reinitialization);
+  EXPECT_EQ(
+      ledger.acceptedRows()[1].substage,
+      application::core::LevelSetMaintenanceWorkSubstage::
+          GlobalCorrection);
+  EXPECT_EQ(
+      ledger.acceptedRows()[0].algebraic_state_revision_after,
+      ledger.acceptedRows()[1].algebraic_state_revision_before);
+  EXPECT_EQ(
+      ledger.acceptedRows()[0].after,
+      ledger.acceptedRows()[1].before);
+  const auto accepted_sum =
+      ledger.acceptedRows()[0].accepted_numerical_work +
+      ledger.acceptedRows()[1].accepted_numerical_work;
+  EXPECT_NEAR(accepted_sum, 0.10, 1.0e-15);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceWorkLedgerReportsSameStateAsZeroWork)
+{
+  application::core::LevelSetMaintenanceWorkLedger ledger;
+  ledger.beginTransaction(makeMaintenanceWorkTransaction(103u));
+  const auto state = makeMaintenanceFunctionalValue(4.5, 701u);
+  ledger.stageRow(
+      application::core::LevelSetMaintenanceWorkSubstage::
+          GlobalCorrection,
+      3001u,
+      3001u,
+      {state},
+      {state});
+  ledger.commitTransaction();
+
+  ASSERT_EQ(ledger.acceptedRows().size(), 1u);
+  EXPECT_DOUBLE_EQ(ledger.acceptedRows().front().numerical_work, 0.0);
+  EXPECT_DOUBLE_EQ(
+      ledger.acceptedRows().front().accepted_numerical_work, 0.0);
+  EXPECT_EQ(
+      ledger.acceptedRows().front().snapshot_set_revision_before,
+      ledger.acceptedRows().front().snapshot_set_revision_after);
+  EXPECT_EQ(
+      ledger.acceptedRows().front().mesh_topology_set_revision_before,
+      ledger.acceptedRows().front().mesh_topology_set_revision_after);
+  EXPECT_EQ(
+      ledger.acceptedRows().front().cut_topology_set_revision_before,
+      ledger.acceptedRows().front().cut_topology_set_revision_after);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceWorkLedgerRollbackPublishesNoAcceptedRow)
+{
+  application::core::LevelSetMaintenanceWorkLedger ledger;
+  ledger.beginTransaction(makeMaintenanceWorkTransaction(104u));
+  ledger.stageRow(
+      application::core::LevelSetMaintenanceWorkSubstage::
+          Reinitialization,
+      4001u,
+      4002u,
+      {makeMaintenanceFunctionalValue(5.0, 801u)},
+      {makeMaintenanceFunctionalValue(5.75, 802u)});
+  ledger.rejectTransaction();
+
+  EXPECT_TRUE(ledger.trialRows().empty());
+  EXPECT_TRUE(ledger.acceptedRows().empty());
+  ASSERT_EQ(ledger.rejectedRows().size(), 1u);
+  EXPECT_EQ(
+      ledger.rejectedRows().front().status,
+      application::core::LevelSetMaintenanceWorkStatus::Rejected);
+  EXPECT_DOUBLE_EQ(
+      ledger.rejectedRows().front().numerical_work, 0.75);
+  EXPECT_DOUBLE_EQ(
+      ledger.rejectedRows().front().accepted_numerical_work, 0.0);
+  ASSERT_EQ(ledger.rejectedAttempts().size(), 1u);
+  EXPECT_EQ(
+      ledger.rejectedAttempts().front().status,
+      application::core::LevelSetMaintenanceWorkStatus::Rejected);
+  EXPECT_EQ(ledger.rejectedAttempts().front().row_count, 1u);
+  EXPECT_DOUBLE_EQ(
+      ledger.rejectedAttempts().front().accepted_numerical_work,
+      0.0);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceWorkLedgerRejectsDiscontinuousRows)
+{
+  application::core::LevelSetMaintenanceWorkLedger ledger;
+  ledger.beginTransaction(makeMaintenanceWorkTransaction(105u));
+  const auto initial =
+      makeMaintenanceFunctionalValue(6.0, 901u, 21u, 31u);
+  const auto intermediate =
+      makeMaintenanceFunctionalValue(6.2, 902u, 21u, 31u);
+  const auto final =
+      makeMaintenanceFunctionalValue(6.1, 903u, 21u, 31u);
+  ledger.stageRow(
+      application::core::LevelSetMaintenanceWorkSubstage::
+          Reinitialization,
+      5001u,
+      5002u,
+      {initial},
+      {intermediate},
+      314u);
+
+  EXPECT_THROW(
+      ledger.stageRow(
+          application::core::LevelSetMaintenanceWorkSubstage::
+              GlobalCorrection,
+          5999u,
+          5003u,
+          {intermediate},
+          {final}),
+      std::invalid_argument);
+  auto discontinuous_functional = intermediate;
+  discontinuous_functional.total_potential += 0.25;
+  EXPECT_THROW(
+      ledger.stageRow(
+          application::core::LevelSetMaintenanceWorkSubstage::
+              GlobalCorrection,
+          5002u,
+          5003u,
+          {discontinuous_functional},
+          {final}),
+      std::invalid_argument);
+  ASSERT_TRUE(ledger.transactionActive());
+  ASSERT_EQ(ledger.trialRows().size(), 1u);
+
+  ledger.stageRow(
+      application::core::LevelSetMaintenanceWorkSubstage::
+          GlobalCorrection,
+      5002u,
+      5003u,
+      {intermediate},
+      {final});
+  ledger.commitTransaction();
+  ASSERT_EQ(ledger.acceptedRows().size(), 2u);
+  ASSERT_TRUE(
+      ledger.acceptedRows()[1].extension_map_revision_before.has_value());
+  ASSERT_TRUE(
+      ledger.acceptedRows()[1].extension_map_revision_after.has_value());
+  EXPECT_EQ(
+      *ledger.acceptedRows()[1].extension_map_revision_before, 314u);
+  EXPECT_EQ(
+      *ledger.acceptedRows()[1].extension_map_revision_after, 314u);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceWorkLedgerPublishesZeroRowAttemptOutcomes)
+{
+  application::core::LevelSetMaintenanceWorkLedger ledger;
+  ledger.beginTransaction(makeMaintenanceWorkTransaction(106u));
+  ledger.rejectTransaction();
+  EXPECT_TRUE(ledger.rejectedRows().empty());
+  ASSERT_EQ(ledger.rejectedAttempts().size(), 1u);
+  EXPECT_EQ(ledger.rejectedAttempts().front().row_count, 0u);
+  EXPECT_DOUBLE_EQ(
+      ledger.rejectedAttempts().front().numerical_work, 0.0);
+  EXPECT_DOUBLE_EQ(
+      ledger.rejectedAttempts().front().accepted_numerical_work,
+      0.0);
+
+  ledger.beginTransaction(makeMaintenanceWorkTransaction(107u));
+  ledger.commitTransaction();
+  EXPECT_TRUE(ledger.acceptedRows().empty());
+  ASSERT_EQ(ledger.acceptedAttempts().size(), 1u);
+  EXPECT_EQ(ledger.acceptedAttempts().front().row_count, 0u);
+  EXPECT_DOUBLE_EQ(
+      ledger.acceptedAttempts().front().accepted_numerical_work,
+      0.0);
+  EXPECT_THROW(
+      ledger.beginTransaction(makeMaintenanceWorkTransaction(107u)),
+      std::invalid_argument);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     MaintenanceWorkLedgerRequiresExplicitCutTopologyProvenance)
+{
+  application::core::LevelSetMaintenanceWorkLedger ledger;
+  ledger.beginTransaction(makeMaintenanceWorkTransaction(108u));
+  auto missing_topology =
+      makeMaintenanceFunctionalValue(7.0, 1001u);
+  missing_topology.cut_topology_revision = 0u;
+  EXPECT_THROW(
+      ledger.stageRow(
+          application::core::LevelSetMaintenanceWorkSubstage::
+              Reinitialization,
+          6001u,
+          6002u,
+          {missing_topology},
+          {makeMaintenanceFunctionalValue(7.1, 1002u)}),
+      std::invalid_argument);
+  EXPECT_TRUE(ledger.trialRows().empty());
+  ledger.rejectTransaction();
+  ASSERT_EQ(ledger.rejectedAttempts().size(), 1u);
+  EXPECT_EQ(ledger.rejectedAttempts().front().row_count, 0u);
+}
+
 TEST(ApplicationDriverLevelSetWorkflows,
      NonconvergedReinitializationDoesNotModifyAcceptedHistory)
 {
@@ -4524,12 +5092,43 @@ TEST(ApplicationDriverLevelSetWorkflows,
   request.reinitialization.max_iterations = 100;
   request.reinitialization.signed_distance_tolerance = 1.0e-10;
   std::vector<LevelSetMaintenanceRequest> requests{request};
+  std::vector<application::core::LevelSetMaintenanceWorkSubstage>
+      observed_substages;
+  std::vector<std::pair<std::uint64_t, std::uint64_t>>
+      observed_state_revisions;
+  const LevelSetMaintenanceStageObserver observe_stage =
+      [&](application::core::LevelSetMaintenanceWorkSubstage substage,
+          std::span<const svmp::FE::Real> before,
+          std::span<const svmp::FE::Real> after) {
+        observed_substages.push_back(substage);
+        observed_state_revisions.emplace_back(
+            levelSetMaintenanceAlgebraicRevision(before),
+            levelSetMaintenanceAlgebraicRevision(after));
+      };
 
   testing::internal::CaptureStdout();
-  const bool changed = applyLevelSetMaintenance(sim, history, requests);
+  const bool changed = applyLevelSetMaintenance(
+      sim,
+      history,
+      requests,
+      {},
+      {},
+      {},
+      nullptr,
+      {},
+      observe_stage);
   const auto output = testing::internal::GetCapturedStdout();
   ASSERT_TRUE(changed);
   EXPECT_NE(output.find("temporal_increments=preserved"), std::string::npos);
+  ASSERT_EQ(observed_substages.size(), 1u);
+  EXPECT_EQ(
+      observed_substages.front(),
+      application::core::LevelSetMaintenanceWorkSubstage::
+          Reinitialization);
+  ASSERT_EQ(observed_state_revisions.size(), 1u);
+  EXPECT_NE(
+      observed_state_revisions.front().first,
+      observed_state_revisions.front().second);
 
   const auto current_after = gatherFeOrderedSolution(history.u());
   const auto previous_after = gatherFeOrderedSolution(history.uPrev());
@@ -4788,6 +5387,8 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
       "application-driver-conservative-phase-commit-raw");
   const auto previous_phase = fieldSlice(
       gatherFeOrderedSolution(history().uPrev()), phase_);
+  std::vector<application::core::LevelSetMaintenanceWorkSubstage>
+      observed_substages;
 
   auto result = applyConservativePhaseCandidates(
       sim_,
@@ -4796,10 +5397,30 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
       *params_,
       lifecycle_,
       refresh_cache_,
-      active_requests_);
+      active_requests_,
+      {},
+      [&](application::core::LevelSetMaintenanceWorkSubstage substage,
+          std::span<const svmp::FE::Real>,
+          std::span<const svmp::FE::Real>) {
+        observed_substages.push_back(substage);
+      });
   EXPECT_TRUE(result.accept_step);
   EXPECT_TRUE(result.changed);
   ASSERT_NE(result.geometry_transaction, nullptr);
+  ASSERT_GE(observed_substages.size(), 2u);
+  EXPECT_EQ(
+      observed_substages[0],
+      application::core::LevelSetMaintenanceWorkSubstage::Transport);
+  EXPECT_EQ(
+      observed_substages[1],
+      application::core::LevelSetMaintenanceWorkSubstage::Limiting);
+  EXPECT_NE(
+      std::find(
+          observed_substages.begin(),
+          observed_substages.end(),
+          application::core::LevelSetMaintenanceWorkSubstage::
+              GeometryReconciliation),
+      observed_substages.end());
   EXPECT_EQ(fieldSlice(gatherFeOrderedSolution(history().u()), phase_),
             previous_phase);
   EXPECT_EQ(fieldSlice(gatherFeOrderedSolution(history().uPrev()), phase_),

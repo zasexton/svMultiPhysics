@@ -1616,6 +1616,138 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
 }
 
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     AcceptedSnapshotPrescribedFrameIsPartitionInvariantAndConflictsFailClosed)
+{
+  int rank = 0;
+  int size = 1;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  ASSERT_GE(size, 2)
+      << "This partition-invariance test requires at least two MPI ranks.";
+
+  constexpr int interface_marker = 1721;
+  constexpr int wall_marker = 151;
+  constexpr std::uint64_t revision = 73u;
+  constexpr svmp::FE::GlobalIndex parent = 23;
+  const auto pi = std::acos(svmp::FE::Real{-1.0});
+  const auto target_angle = pi / svmp::FE::Real{3.0};
+
+  svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord record;
+  record.role =
+      svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::Contact;
+  record.retention =
+      svmp::FE::interfaces::FreeSurfaceGeometryRetention::Retained;
+  record.physical_boundary_marker = wall_marker;
+  record.locally_owned = true;
+  record.reference_rule.geometric_dimension = 0;
+  record.reference_rule.provenance.parent_entity_global_id = parent;
+  record.reference_rule.provenance.free_surface_snapshot_revision_key =
+      revision;
+  record.reference_rule.points.resize(1u);
+  record.physical_rule.geometric_dimension = 0;
+  record.physical_rule.free_surface_snapshot_revision_key = revision;
+  record.physical_rule.physical_measure = 1.0;
+  record.physical_rule.points.push_back(
+      svmp::FE::geometry::MappedCutQuadraturePoint{
+          .physical_point = {{0.5, 0.0, 0.0}},
+          .physical_weight = 1.0,
+          .normal = {{std::sin(target_angle),
+                      std::cos(target_angle),
+                      0.0}},
+          .boundary_normal = {{0.0, -1.0, 0.0}},
+      });
+  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+  parameters.liquid_side =
+      svmp::FE::geometry::CutIntegrationSide::Negative;
+  parameters.young_wall_coefficients.push_back(
+      svmp::FE::interfaces::FreeSurfaceYoungWallCoefficient{
+          .boundary_marker = wall_marker,
+          .equilibrium_contact_angle_radians = target_angle,
+      });
+  const auto constraint = makeAcceptedSnapshotWallConstraint(
+      record,
+      svmp::FE::level_set::LevelSetWallContactConstraintKind::
+          PrescribedAngle,
+      interface_marker,
+      revision,
+      parameters,
+      /*dimension=*/2);
+  EXPECT_NEAR(constraint.target_angle_radians, target_angle, 1.0e-15);
+  EXPECT_EQ(constraint.accepted_contact_line_tangent,
+            (std::array<svmp::FE::Real, 3>{{0.0, 0.0, 1.0}}));
+
+  const auto canonical = canonicalizeAcceptedWallConstraints(
+      std::vector{constraint, constraint},
+      svmp::MeshComm(MPI_COMM_WORLD),
+      "MPI prescribed-frame duplicate test");
+  ASSERT_EQ(canonical.size(), 1u);
+  std::array<double, 8> payload{{
+      canonical.front().target_angle_radians,
+      canonical.front().physical_wall_normal[0],
+      canonical.front().physical_wall_normal[1],
+      canonical.front().physical_wall_normal[2],
+      canonical.front().accepted_contact_point[0],
+      canonical.front().accepted_contact_line_tangent[0],
+      canonical.front().accepted_contact_line_tangent[1],
+      canonical.front().accepted_contact_line_tangent[2],
+  }};
+  double local_max_difference = 0.0;
+  for (const auto value : payload) {
+    double minimum = 0.0;
+    double maximum = 0.0;
+    MPI_Allreduce(&value,
+                  &minimum,
+                  1,
+                  MPI_DOUBLE,
+                  MPI_MIN,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(&value,
+                  &maximum,
+                  1,
+                  MPI_DOUBLE,
+                  MPI_MAX,
+                  MPI_COMM_WORLD);
+    local_max_difference =
+        std::max(local_max_difference, std::abs(maximum - minimum));
+  }
+  EXPECT_DOUBLE_EQ(local_max_difference, 0.0);
+  if (rank == 0) {
+    ::testing::Test::RecordProperty(
+        "application_prescribed_frame_mpi_max_difference",
+        local_max_difference);
+  }
+
+  auto conflict = constraint;
+  conflict.accepted_contact_point[0] += svmp::FE::Real{0.25};
+  std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
+      rank_local_constraints{constraint};
+  if (rank == 0) {
+    rank_local_constraints.push_back(conflict);
+  }
+  EXPECT_THROW(
+      (void)canonicalizeAcceptedWallConstraints(
+          std::move(rank_local_constraints),
+          svmp::MeshComm(MPI_COMM_WORLD),
+          "MPI prescribed-frame conflict test"),
+      std::runtime_error);
+
+  auto positive_parameters = parameters;
+  positive_parameters.liquid_side =
+      svmp::FE::geometry::CutIntegrationSide::Positive;
+  const auto positive_constraint = makeAcceptedSnapshotWallConstraint(
+      record,
+      svmp::FE::level_set::LevelSetWallContactConstraintKind::
+          PrescribedAngle,
+      interface_marker,
+      revision,
+      positive_parameters,
+      /*dimension=*/2);
+  EXPECT_NEAR(positive_constraint.target_angle_radians,
+              pi - target_angle,
+              1.0e-15);
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
      ActiveCutRefreshUsesCommunicatorWideSortedBoundaryMarkerUnion)
 {
   int rank = 0;
@@ -1802,6 +1934,18 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   EXPECT_NEAR(report.positive_volume, 16.0, 1.0e-12);
   EXPECT_NEAR(report.negative_physical_volume, 4.0, 1.0e-12);
   EXPECT_NEAR(report.positive_physical_volume, 4.0, 1.0e-12);
+  const auto current_functionals =
+      evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+  const auto maintenance_functionals =
+      levelSetMaintenanceFunctionalValues(sim, current_functionals);
+  ASSERT_EQ(maintenance_functionals.size(), 1u);
+  EXPECT_NE(
+      maintenance_functionals.front().cut_topology_revision, 0u);
+  const auto [minimum_cut_topology, maximum_cut_topology] =
+      globalMinMaxUint64(
+          maintenance_functionals.front().cut_topology_revision,
+          svmp::MeshComm(MPI_COMM_WORLD));
+  EXPECT_EQ(minimum_cut_topology, maximum_cut_topology);
 
   const auto active_cut_requests = activeCutVolumeRequests(*params);
   ASSERT_EQ(active_cut_requests.size(), 1u);
@@ -2558,6 +2702,188 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
     EXPECT_FALSE(cleanup_error);
   }
   MPI_Barrier(MPI_COMM_WORLD);
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     MaintenanceWorkRowsAreIdenticalAcrossTwoRanks)
+{
+  int size = 0;
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  if (size != 2) {
+    GTEST_SKIP() << "This equality fixture requires two ranks.";
+  }
+
+  const auto value = [](double total, std::uint64_t snapshot) {
+    return application::core::LevelSetAuthoritativeFunctionalValue{
+        .interface_marker = 902,
+        .snapshot_revision = snapshot,
+        .mesh_topology_revision = 44u,
+        .cut_topology_revision = 45u,
+        .liquid_volume = 1.5,
+        .liquid_gas_area = 2.25,
+        .wetted_wall_area = 0.625,
+        .contact_measure = 0.25,
+        .surface_energy = 3.5,
+        .young_wall_energy = -0.375,
+        .volume_constraint_potential = total - 3.125,
+        .total_potential = total,
+    };
+  };
+
+  application::core::LevelSetMaintenanceWorkLedger ledger;
+  ledger.beginTransaction(
+      application::core::LevelSetMaintenanceWorkTransaction{
+          .transaction_id = 601u,
+          .step = 12u,
+          .attempt = 3u,
+          .time = 0.6,
+          .dt = 0.05,
+          .declared_stage =
+              application::core::LevelSetMaintenanceDeclaredStage::
+                  ProspectiveAcceptedEndpoint,
+          .extension_map_revision = 77u,
+      });
+  ledger.stageRow(
+      application::core::LevelSetMaintenanceWorkSubstage::
+          Reinitialization,
+      7001u,
+      7002u,
+      {value(4.0, 810u)},
+      {value(4.2, 811u)});
+  ledger.stageRow(
+      application::core::LevelSetMaintenanceWorkSubstage::
+          GlobalCorrection,
+      7002u,
+      7003u,
+      {value(4.2, 811u)},
+      {value(4.1, 812u)});
+  ledger.commitTransaction();
+  ASSERT_EQ(ledger.acceptedRows().size(), 2u);
+  ASSERT_EQ(ledger.acceptedAttempts().size(), 1u);
+
+  const auto& attempt = ledger.acceptedAttempts().front();
+  const std::array<std::uint64_t, 8> local_attempt_metadata{
+      attempt.transaction_id,
+      static_cast<std::uint64_t>(attempt.status),
+      attempt.step,
+      attempt.attempt,
+      static_cast<std::uint64_t>(attempt.declared_stage),
+      attempt.extension_map_revision.value_or(0u),
+      static_cast<std::uint64_t>(attempt.row_count),
+      static_cast<std::uint64_t>(
+          attempt.accepted_numerical_work != 0.0)};
+  std::array<std::uint64_t, 8> minimum_attempt_metadata{};
+  std::array<std::uint64_t, 8> maximum_attempt_metadata{};
+  MPI_Allreduce(
+      local_attempt_metadata.data(),
+      minimum_attempt_metadata.data(),
+      static_cast<int>(local_attempt_metadata.size()),
+      MPI_UINT64_T,
+      MPI_MIN,
+      MPI_COMM_WORLD);
+  MPI_Allreduce(
+      local_attempt_metadata.data(),
+      maximum_attempt_metadata.data(),
+      static_cast<int>(local_attempt_metadata.size()),
+      MPI_UINT64_T,
+      MPI_MAX,
+      MPI_COMM_WORLD);
+  EXPECT_EQ(minimum_attempt_metadata, maximum_attempt_metadata);
+
+  for (const auto& row : ledger.acceptedRows()) {
+    const std::array<std::uint64_t, 16> local_metadata{
+        row.transaction_id,
+        static_cast<std::uint64_t>(row.status),
+        static_cast<std::uint64_t>(row.substage),
+        row.step,
+        row.attempt,
+        row.algebraic_state_revision_before,
+        row.algebraic_state_revision_after,
+        row.snapshot_set_revision_before,
+        row.snapshot_set_revision_after,
+        row.mesh_topology_set_revision_before,
+        row.mesh_topology_set_revision_after,
+        row.cut_topology_set_revision_before,
+        row.cut_topology_set_revision_after,
+        row.extension_map_revision_before.value_or(0u),
+        row.extension_map_revision_after.value_or(0u),
+        static_cast<std::uint64_t>(row.declared_stage),
+    };
+    std::array<std::uint64_t, 16> minimum_metadata{};
+    std::array<std::uint64_t, 16> maximum_metadata{};
+    MPI_Allreduce(
+        local_metadata.data(),
+        minimum_metadata.data(),
+        static_cast<int>(local_metadata.size()),
+        MPI_UINT64_T,
+        MPI_MIN,
+        MPI_COMM_WORLD);
+    MPI_Allreduce(
+        local_metadata.data(),
+        maximum_metadata.data(),
+        static_cast<int>(local_metadata.size()),
+        MPI_UINT64_T,
+        MPI_MAX,
+        MPI_COMM_WORLD);
+    EXPECT_EQ(minimum_metadata, maximum_metadata);
+
+    ASSERT_EQ(row.before.size(), 1u);
+    ASSERT_EQ(row.after.size(), 1u);
+    const std::array<double, 6> local_values{
+        row.time,
+        row.dt,
+        row.before.front().total_potential,
+        row.after.front().total_potential,
+        row.numerical_work,
+        row.accepted_numerical_work,
+    };
+    std::array<double, 6> minimum_values{};
+    std::array<double, 6> maximum_values{};
+    MPI_Allreduce(
+        local_values.data(),
+        minimum_values.data(),
+        static_cast<int>(local_values.size()),
+        MPI_DOUBLE,
+        MPI_MIN,
+        MPI_COMM_WORLD);
+    MPI_Allreduce(
+        local_values.data(),
+        maximum_values.data(),
+        static_cast<int>(local_values.size()),
+        MPI_DOUBLE,
+        MPI_MAX,
+        MPI_COMM_WORLD);
+    EXPECT_EQ(minimum_values, maximum_values);
+  }
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     MaintenanceAlgebraicRevisionRejectsRankLocalSlices)
+{
+  int rank = 0;
+  int size = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  if (size != 2) {
+    GTEST_SKIP() << "This collective provenance fixture requires two ranks.";
+  }
+
+  const std::vector<svmp::FE::Real> gathered_fe_state{
+      1.0, -2.0, 3.5, 4.25};
+  const auto revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          gathered_fe_state, svmp::MeshComm(MPI_COMM_WORLD));
+  const auto [minimum_revision, maximum_revision] =
+      globalMinMaxUint64(
+          revision, svmp::MeshComm(MPI_COMM_WORLD));
+  EXPECT_EQ(minimum_revision, maximum_revision);
+
+  const std::vector<svmp::FE::Real> rank_local_slice{
+      static_cast<svmp::FE::Real>(rank + 1)};
+  EXPECT_THROW(
+      (void)collectiveLevelSetMaintenanceAlgebraicRevision(
+          rank_local_slice, svmp::MeshComm(MPI_COMM_WORLD)),
+      std::runtime_error);
 }
 
 int main(int argc, char** argv)

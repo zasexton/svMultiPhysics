@@ -1,0 +1,413 @@
+{
+  "schema_version": 1,
+  "matrix_id": "free_surface_wp8_energy_prerequisite_v1",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "work_package": "WP-8",
+  "findings": [
+    "FSR-09"
+  ],
+  "model_envelope": "one_phase_unfitted_geometry_coupling_and_energy_low_level_prerequisite",
+  "freeze_scope": "This matrix freezes prerequisite evidence for the selected generated-state outer fixed point, transactional rollback, discrete surface/wall/volume functional evaluation, a fixed-topology first variation, extension refresh behavior, topology-event diagnostics, and the accepted/rejected level-set maintenance ledger. The ledger evidence covers ordered transport, limiting, reinitialization, geometry-reconciliation, and global-correction potential-change rows with explicit revision provenance; it does not establish an energy-stable split, a complete physical and numerical energy identity, outer contraction, topology-event acceptance, or any WP-8 simulation exit.",
+  "prospective_tests": [],
+  "architecture_record": "Documentation/free_surface_wp8_geometry_energy_architecture.md",
+  "selected_ad5_strategy": {
+    "strategy": "energy_stable_partitioned_outer_iteration_target",
+    "implemented_solver_form": "regenerate_generated_state_then_solve_frozen_inner_newton_problem",
+    "generated_state": [
+      "authoritative_cut_geometry",
+      "projected_curvature",
+      "state_dependent_constraints",
+      "bounded_velocity_extension_map"
+    ],
+    "inner_problem": "R(u,G_k)=0_with_G_k_frozen",
+    "current_convergence_certificate": "zero_inner_update_after_regenerating_G_from_the_same_algebraic_state",
+    "complete_shape_tangent_selected": false,
+    "discrete_energy_stability_proved": false,
+    "wp8_closure_claimed": false
+  },
+  "current_energy_account_coverage": {
+    "implemented_low_level_channels": [
+      "liquid_gas_surface_functional",
+      "young_wetted_wall_functional",
+      "volume_constraint_potential",
+      "accepted_dynamic_contact_line_dissipation",
+      "accepted_sharp_wall_slip_dissipation",
+      "maintenance_transport_surface_wall_volume_potential_change",
+      "maintenance_limiting_surface_wall_volume_potential_change",
+      "maintenance_reinitialization_surface_wall_volume_potential_change",
+      "maintenance_geometry_reconciliation_surface_wall_volume_potential_change",
+      "maintenance_global_correction_surface_wall_volume_potential_change",
+      "maintenance_rejected_attempt_zero_accepted_contribution",
+      "maintenance_zero_row_accepted_and_rejected_attempt_outcomes"
+    ],
+    "not_yet_complete_channels": [
+      "kinetic_energy",
+      "gravitational_energy",
+      "gas_or_compressibility_energy_when_applicable",
+      "bulk_viscous_dissipation",
+      "external_pressure_work",
+      "body_force_work",
+      "vms_pspg_numerical_work",
+      "ghost_penalty_or_aggregation_numerical_work",
+      "extension_numerical_work",
+      "pruning_numerical_work",
+      "complete_rejected_attempt_energy_account_across_all_channels"
+    ],
+    "complete_balance_residual_available": false
+  },
+  "numeric_threshold_basis": {
+    "functional_first_variation": "The 2e-7 relative bound is frozen for an affine fixed-topology central-difference fixture and is not a complete residual shape-tangent threshold.",
+    "ghost_exclusion": "The exact-zero gate checks that nonowning snapshot rules do not enter the discrete functional or its first variation.",
+    "outer_fixed_point": "The selected tests require exact fixture convergence or transactional restoration under their existing unit-test tolerances; they do not freeze a physical contraction factor.",
+    "maintenance_ledger": "The maintenance gates freeze exact row-chain, transaction-publication, revision-provenance, and communicator-agreement invariants. They do not assign a tolerance to a complete energy residual.",
+    "energy_account": "No complete energy-residual threshold is invented by this prerequisite matrix."
+  },
+  "build_targets": {
+    "geometry": "test_fe_geometry",
+    "level_set": "test_fe_geometry",
+    "systems": "test_fe_timestepping",
+    "assembly": "test_fe_timestepping",
+    "physics": "test_fe_timestepping",
+    "application": "test_application",
+    "assembly_mpi": "test_application_mpi",
+    "application_mpi": "test_application_mpi"
+  },
+  "build_cmake_homes": {
+    "geometry": "Code/Source/solver/FE",
+    "level_set": "Code/Source/solver/FE",
+    "systems": "Code/Source/solver/FE",
+    "assembly": "Code/Source/solver/FE",
+    "physics": "Code/Source/solver/FE",
+    "application": "Code",
+    "assembly_mpi": "Code",
+    "application_mpi": "Code"
+  },
+  "groups": [
+    {
+      "id": "discrete_functional_variation_serial",
+      "binary": "geometry",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+        "FreeSurfaceGeometrySnapshot.DiscreteFunctionalExcludesGhostRuleContributions"
+      ],
+      "execution": {
+        "wall_time_seconds": 900,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    },
+    {
+      "id": "generated_state_outer_fixed_point_serial",
+      "binary": "systems",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "NewtonSolverExternalStateFixedPoint.RequiresFreshlyRegeneratedResidualBeforeConvergence",
+        "NewtonSolverExternalStateFixedPoint.OuterIterationFailureRestoresSolutionHistoryAndRateState",
+        "NewtonSolverExternalStateFixedPoint.RefreshFailureRestoresAuxiliaryAndBorderedStateBeforeCallback",
+        "NewtonSolverExternalStateFixedPoint.StageTimeConstraintIsEstablishedBeforeSnapshotAndRollback",
+        "NewtonSolverExternalStateFixedPoint.ReallocatesJacobianAfterOuterConstraintSparsityChange",
+        "NewtonSolverExternalStateFixedPoint.FirstGeneratedConstraintRefreshDefinesCanonicalRollbackEntry"
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    },
+    {
+      "id": "application_geometry_energy_prerequisites_serial",
+      "binary": "application",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "ApplicationDriverLevelSetWorkflows.OuterFixedPointReportsFrozenInnerJacobianGeometry",
+        "ApplicationDriverLevelSetWorkflows.CutTopologyChangeTraceIdentifiesNonsmoothNewtonEvent",
+        "ApplicationDriverLevelSetWorkflows.RefreshesMultipleGeneratedCutDomainsIntoOneContext",
+        "ApplicationDriverLevelSetWorkflows.AcceptedFunctionalUsesAuthoritativeSnapshotAndRecordsGlobalState",
+        "ApplicationDriverLevelSetWorkflows.AlgebraicExtensionRefreshReprojectsStateAndChangesRevision",
+        "ApplicationDriverLevelSetWorkflows.ReducedD38MapFailureUsesBoundedRefreshNeutralFallback",
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerPublishesReinitializationOnlyAtCommit",
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerKeepsReinitializationAndCorrectionAdditive",
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerReportsSameStateAsZeroWork",
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerRollbackPublishesNoAcceptedRow",
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerRejectsDiscontinuousRows",
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerPublishesZeroRowAttemptOutcomes",
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerRequiresExplicitCutTopologyProvenance",
+        "ApplicationDriverLevelSetWorkflows.ConvergedMaintenanceAppliesOneRepresentationDeltaToEveryHistoryLevel",
+        "ApplicationDriverConservativePhaseCandidatesTest.StagesAndCommitsTheTransportedPhaseAgainstAuthoritativeGeometry",
+        "ApplicationDriverLevelSetVolumeCorrection.ReportsAuthoritativeFreeSurfacePotentialChange",
+        "ApplicationDriverLevelSetVolumeCorrection.CandidateGeometryFailureRestoresCompleteMaintenanceTransaction"
+      ],
+      "execution": {
+        "wall_time_seconds": 1800,
+        "memory_mib": 6144,
+        "output_mib": 256
+      }
+    },
+    {
+      "id": "distributed_geometry_refresh_prerequisite",
+      "binary": "application_mpi",
+      "mpi_ranks": 2,
+      "gtest_output_copies": 2,
+      "tests": [
+        "ApplicationDriverLevelSetWorkflowsMPI.ActiveCutRefreshUsesCommunicatorWideSortedBoundaryMarkerUnion",
+        "ApplicationDriverLevelSetWorkflowsMPI.MaintenanceWorkRowsAreIdenticalAcrossTwoRanks",
+        "ApplicationDriverLevelSetWorkflowsMPI.MaintenanceAlgebraicRevisionRejectsRankLocalSlices"
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    }
+  ],
+  "quantitative_evidence": [
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_first_variation_fd_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 2
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_surface_area_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_surface_energy_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_wetted_wall_area_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_young_wall_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_volume_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_volume_potential_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_total_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalExcludesGhostRuleContributions",
+      "property": "functional_first_variation_ghost_contribution_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    }
+  ],
+  "gates": {
+    "expected_group_count": 4,
+    "expected_distinct_test_count": 28,
+    "expected_quantitative_evidence_count": 9,
+    "expected_failures": 0,
+    "expected_errors": 0,
+    "expected_disabled": 0,
+    "expected_skipped": 0
+  },
+  "closure_contract": [
+    {
+      "claim": "prerequisite_surface_wall_and_volume_functional_first_variation_matches_a_fixed_topology_fixture",
+      "evidence": [
+        "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+        "FreeSurfaceGeometrySnapshot.DiscreteFunctionalExcludesGhostRuleContributions"
+      ]
+    },
+    {
+      "claim": "prerequisite_generated_state_outer_iteration_requires_a_fresh_same_state_residual_and_restores_failed_attempts",
+      "evidence": [
+        "NewtonSolverExternalStateFixedPoint.RequiresFreshlyRegeneratedResidualBeforeConvergence",
+        "NewtonSolverExternalStateFixedPoint.OuterIterationFailureRestoresSolutionHistoryAndRateState",
+        "NewtonSolverExternalStateFixedPoint.RefreshFailureRestoresAuxiliaryAndBorderedStateBeforeCallback",
+        "NewtonSolverExternalStateFixedPoint.FirstGeneratedConstraintRefreshDefinesCanonicalRollbackEntry"
+      ]
+    },
+    {
+      "claim": "prerequisite_stage_constraints_and_constraint_topology_are_reestablished_before_each_frozen_inner_problem",
+      "evidence": [
+        "NewtonSolverExternalStateFixedPoint.StageTimeConstraintIsEstablishedBeforeSnapshotAndRollback",
+        "NewtonSolverExternalStateFixedPoint.ReallocatesJacobianAfterOuterConstraintSparsityChange",
+        "ApplicationDriverLevelSetWorkflows.OuterFixedPointReportsFrozenInnerJacobianGeometry"
+      ]
+    },
+    {
+      "claim": "prerequisite_topology_changes_are_identified_as_nonsmooth_diagnostics_without_claiming_an_acceptance_policy",
+      "evidence": [
+        "ApplicationDriverLevelSetWorkflows.CutTopologyChangeTraceIdentifiesNonsmoothNewtonEvent"
+      ]
+    },
+    {
+      "claim": "prerequisite_accepted_surface_wall_volume_state_and_global_shift_work_are_revision_bound_low_level_records",
+      "evidence": [
+        "ApplicationDriverLevelSetWorkflows.AcceptedFunctionalUsesAuthoritativeSnapshotAndRecordsGlobalState",
+        "ApplicationDriverLevelSetVolumeCorrection.ReportsAuthoritativeFreeSurfacePotentialChange",
+        "ApplicationDriverLevelSetVolumeCorrection.CandidateGeometryFailureRestoresCompleteMaintenanceTransaction"
+      ]
+    },
+    {
+      "claim": "prerequisite_extension_and_multi_domain_refresh_are_deterministic_in_the_selected_fixtures",
+      "evidence": [
+        "ApplicationDriverLevelSetWorkflows.RefreshesMultipleGeneratedCutDomainsIntoOneContext",
+        "ApplicationDriverLevelSetWorkflows.AlgebraicExtensionRefreshReprojectsStateAndChangesRevision",
+        "ApplicationDriverLevelSetWorkflows.ReducedD38MapFailureUsesBoundedRefreshNeutralFallback",
+        "ApplicationDriverLevelSetWorkflows.ConvergedMaintenanceAppliesOneRepresentationDeltaToEveryHistoryLevel"
+      ]
+    },
+    {
+      "claim": "prerequisite_maintenance_rows_form_one_continuous_revision_chain_with_distinct_substages",
+      "evidence": [
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerKeepsReinitializationAndCorrectionAdditive",
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerRejectsDiscontinuousRows",
+        "ApplicationDriverConservativePhaseCandidatesTest.StagesAndCommitsTheTransportedPhaseAgainstAuthoritativeGeometry"
+      ]
+    },
+    {
+      "claim": "prerequisite_maintenance_attempt_publication_follows_the_physical_transaction_outcome",
+      "evidence": [
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerPublishesReinitializationOnlyAtCommit",
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerReportsSameStateAsZeroWork",
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerRollbackPublishesNoAcceptedRow",
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerPublishesZeroRowAttemptOutcomes",
+        "ApplicationDriverLevelSetVolumeCorrection.CandidateGeometryFailureRestoresCompleteMaintenanceTransaction"
+      ]
+    },
+    {
+      "claim": "prerequisite_maintenance_rows_bind_snapshot_mesh_cut_and_extension_revision_provenance",
+      "evidence": [
+        "ApplicationDriverLevelSetWorkflows.AcceptedFunctionalUsesAuthoritativeSnapshotAndRecordsGlobalState",
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerRejectsDiscontinuousRows",
+        "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerRequiresExplicitCutTopologyProvenance"
+      ]
+    },
+    {
+      "claim": "prerequisite_distributed_geometry_and_maintenance_provenance_is_communicator_deterministic",
+      "evidence": [
+        "ApplicationDriverLevelSetWorkflowsMPI.ActiveCutRefreshUsesCommunicatorWideSortedBoundaryMarkerUnion",
+        "ApplicationDriverLevelSetWorkflowsMPI.MaintenanceWorkRowsAreIdenticalAcrossTwoRanks",
+        "ApplicationDriverLevelSetWorkflowsMPI.MaintenanceAlgebraicRevisionRejectsRankLocalSlices"
+      ]
+    }
+  ],
+  "unqualified_required_method_exits": [
+    {
+      "id": "partitioned_split_discrete_energy_argument",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "backward_euler_constant_surface_tension_closed_balance",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "complete_accepted_state_energy_dissipation_external_and_numerical_work_ledger",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "common_stage_geometry_state_transport_contact_and_maintenance_contract",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "same_state_full_geometry_curvature_constraint_and_extension_refresh_neutrality",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "geometry_dependent_residual_directional_derivative_matrix",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "outer_fixed_point_contraction_under_h_dt_cut_shift_and_mpi_refinement",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "topology_detection_snapshot_invalidation_restart_or_rejection_energy_jump_and_minimum_feature_policy",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "generalized_alpha_stage_consistency_after_backward_euler_closure",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "energy_residual_threshold_and_refinement_rule_frozen_before_simulation",
+      "status": "REQUIRED_NOT_CLAIMED"
+    }
+  ],
+  "unqualified_required_simulations": [
+    {
+      "id": "static_cap_complete_energy_residual_refinement",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "capillary_relaxation_complete_energy_residual_refinement",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "linear_capillary_wave_complete_energy_residual_refinement",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "droplet_oscillation_complete_energy_residual_refinement",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "sloshing_complete_energy_residual_refinement",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "wetting_relaxation_complete_energy_residual_refinement",
+      "status": "REQUIRED_NOT_CLAIMED"
+    }
+  ],
+  "closure_request_policy": {
+    "accepted_claim": "low_level_prerequisite",
+    "rejected_claims": [
+      "fsr09_closure",
+      "wp8_closure",
+      "q3_closure",
+      "q4_closure",
+      "complete_energy_law"
+    ],
+    "reject_any_claim_suffix": "_closure",
+    "diagnostic": "The frozen prerequisite slice verifies the implemented maintenance ledger but does not prove split-energy stability, complete the physical and numerical energy identity, establish contraction, define topology-event acceptance, or execute the required simulations."
+  },
+  "qualification_disposition": {
+    "prerequisite_evidence_frozen": true,
+    "fsr09_closed": false,
+    "wp8_closed": false,
+    "q3_closed": false,
+    "q4_closed": false,
+    "complete_energy_law_available": false
+  },
+  "qualification_scope": "WP-8 maintenance-ledger and existing low-level prerequisite evidence only; this matrix does not close FSR-09, WP-8, Q3, or Q4 and does not establish a complete discrete energy law."
+}

@@ -89,6 +89,352 @@
 #include <mpi.h>
 #endif
 
+namespace application::core {
+namespace {
+
+void mixMaintenanceRevision(
+    std::uint64_t& revision,
+    std::uint64_t value) noexcept
+{
+  constexpr std::uint64_t prime = 1099511628211ull;
+  for (std::size_t byte = 0u; byte < sizeof(value); ++byte) {
+    revision ^= (value >> (byte * 8u)) & 0xffu;
+    revision *= prime;
+  }
+}
+
+enum class MaintenanceRevisionKind : std::uint8_t {
+  Snapshot,
+  MeshTopology,
+  CutTopology
+};
+
+std::uint64_t maintenanceRevisionSet(
+    const std::vector<LevelSetAuthoritativeFunctionalValue>& values,
+    MaintenanceRevisionKind kind) noexcept
+{
+  if (values.empty()) {
+    return 0u;
+  }
+  std::uint64_t revision = 1469598103934665603ull;
+  for (const auto& value : values) {
+    mixMaintenanceRevision(
+        revision, static_cast<std::uint64_t>(value.interface_marker));
+    switch (kind) {
+      case MaintenanceRevisionKind::Snapshot:
+        mixMaintenanceRevision(revision, value.snapshot_revision);
+        break;
+      case MaintenanceRevisionKind::MeshTopology:
+        mixMaintenanceRevision(revision, value.mesh_topology_revision);
+        break;
+      case MaintenanceRevisionKind::CutTopology:
+        mixMaintenanceRevision(revision, value.cut_topology_revision);
+        break;
+    }
+  }
+  return revision == 0u ? 1u : revision;
+}
+
+void validateMaintenanceFunctionalValues(
+    const std::vector<LevelSetAuthoritativeFunctionalValue>& values)
+{
+  int previous_marker = -1;
+  for (const auto& value : values) {
+    const std::array<double, 8> scalars{
+        value.liquid_volume,
+        value.liquid_gas_area,
+        value.wetted_wall_area,
+        value.contact_measure,
+        value.surface_energy,
+        value.young_wall_energy,
+        value.volume_constraint_potential,
+        value.total_potential};
+    if (value.interface_marker < 0 ||
+        value.interface_marker <= previous_marker ||
+        value.snapshot_revision == 0u ||
+        value.cut_topology_revision == 0u ||
+        !std::all_of(scalars.begin(), scalars.end(), [](double scalar) {
+          return std::isfinite(scalar);
+        })) {
+      throw std::invalid_argument(
+          "Level-set maintenance work values require unique ordered markers, "
+          "complete snapshot and cut-topology revisions, and finite scalars.");
+    }
+    previous_marker = value.interface_marker;
+  }
+}
+
+LevelSetMaintenanceWorkAttempt makeMaintenanceWorkAttempt(
+    const LevelSetMaintenanceWorkTransaction& transaction,
+    LevelSetMaintenanceWorkStatus status,
+    const std::vector<LevelSetMaintenanceWorkRow>& rows) noexcept
+{
+  double numerical_work = 0.0;
+  for (const auto& row : rows) {
+    numerical_work += row.numerical_work;
+  }
+  return LevelSetMaintenanceWorkAttempt{
+      .transaction_id = transaction.transaction_id,
+      .status = status,
+      .step = transaction.step,
+      .attempt = transaction.attempt,
+      .time = transaction.time,
+      .dt = transaction.dt,
+      .declared_stage = transaction.declared_stage,
+      .extension_map_revision = transaction.extension_map_revision,
+      .row_count = rows.size(),
+      .numerical_work = numerical_work,
+      .accepted_numerical_work =
+          status == LevelSetMaintenanceWorkStatus::Accepted
+              ? numerical_work
+              : 0.0,
+  };
+}
+
+} // namespace
+
+void LevelSetMaintenanceWorkLedger::beginTransaction(
+    LevelSetMaintenanceWorkTransaction transaction)
+{
+  if (active_transaction_.has_value()) {
+    throw std::logic_error(
+        "A level-set maintenance work transaction is already active.");
+  }
+  if (!trial_rows_.empty()) {
+    throw std::logic_error(
+        "A level-set maintenance work transaction has unpublished trial rows.");
+  }
+  if (transaction.transaction_id == 0u || transaction.attempt == 0u ||
+      !std::isfinite(transaction.time) ||
+      !std::isfinite(transaction.dt) || transaction.dt < 0.0 ||
+      (transaction.extension_map_revision.has_value() &&
+       *transaction.extension_map_revision == 0u)) {
+    throw std::invalid_argument(
+        "Level-set maintenance work transaction metadata is incomplete.");
+  }
+  if (transaction.transaction_id <= last_transaction_id_) {
+    throw std::invalid_argument(
+        "Level-set maintenance work transaction identifiers must increase.");
+  }
+  // Reserve both possible publication destinations before making the
+  // transaction active. Commit and rejection can then publish their outcome
+  // without allocating after geometry has been committed or rolled back.
+  accepted_attempts_.reserve(accepted_attempts_.size() + 1u);
+  rejected_attempts_.reserve(rejected_attempts_.size() + 1u);
+  last_transaction_id_ = transaction.transaction_id;
+  active_transaction_ = std::move(transaction);
+}
+
+void LevelSetMaintenanceWorkLedger::stageRow(
+    LevelSetMaintenanceWorkSubstage substage,
+    std::uint64_t algebraic_state_revision_before,
+    std::uint64_t algebraic_state_revision_after,
+    std::vector<LevelSetAuthoritativeFunctionalValue> before,
+    std::vector<LevelSetAuthoritativeFunctionalValue> after,
+    std::optional<std::uint64_t> extension_map_revision_after)
+{
+  if (!active_transaction_.has_value()) {
+    throw std::logic_error(
+        "Level-set maintenance work rows require an active transaction.");
+  }
+  if (algebraic_state_revision_before == 0u ||
+      algebraic_state_revision_after == 0u) {
+    throw std::invalid_argument(
+        "Level-set maintenance work rows require complete algebraic state revisions.");
+  }
+  if (extension_map_revision_after.has_value() &&
+      *extension_map_revision_after == 0u) {
+    throw std::invalid_argument(
+        "Level-set maintenance work rows require a nonzero extension-map revision when present.");
+  }
+  const auto by_marker = [](const auto& left, const auto& right) {
+    return left.interface_marker < right.interface_marker;
+  };
+  std::sort(before.begin(), before.end(), by_marker);
+  std::sort(after.begin(), after.end(), by_marker);
+  validateMaintenanceFunctionalValues(before);
+  validateMaintenanceFunctionalValues(after);
+  if (before.size() != after.size()) {
+    throw std::invalid_argument(
+        "Level-set maintenance work rows require matching functional coverage.");
+  }
+
+  double numerical_work = 0.0;
+  for (std::size_t index = 0u; index < before.size(); ++index) {
+    if (before[index].interface_marker != after[index].interface_marker) {
+      throw std::invalid_argument(
+          "Level-set maintenance work rows require matching functional markers.");
+    }
+    numerical_work +=
+        after[index].total_potential - before[index].total_potential;
+  }
+  if (!std::isfinite(numerical_work)) {
+    throw std::invalid_argument(
+        "Level-set maintenance numerical work is not finite.");
+  }
+
+  const auto& transaction = *active_transaction_;
+  const auto extension_map_revision_before =
+      trial_rows_.empty()
+          ? transaction.extension_map_revision
+          : trial_rows_.back().extension_map_revision_after;
+  if (!trial_rows_.empty()) {
+    const auto& previous = trial_rows_.back();
+    if (previous.algebraic_state_revision_after !=
+            algebraic_state_revision_before ||
+        previous.after != before) {
+      throw std::invalid_argument(
+          "Level-set maintenance work rows must form one continuous algebraic and functional state chain.");
+    }
+  }
+  const auto resolved_extension_map_revision_after =
+      extension_map_revision_after.has_value()
+          ? extension_map_revision_after
+          : extension_map_revision_before;
+
+  // Preflight both terminal row destinations while candidate geometry is
+  // still rollback-capable. Neither commitTransaction nor rejectTransaction
+  // then needs to allocate after the physical outcome is known.
+  const auto terminal_row_count =
+      accepted_rows_.size() + trial_rows_.size() + 1u;
+  accepted_rows_.reserve(terminal_row_count);
+  rejected_rows_.reserve(
+      rejected_rows_.size() + trial_rows_.size() + 1u);
+  trial_rows_.reserve(trial_rows_.size() + 1u);
+  trial_rows_.push_back(LevelSetMaintenanceWorkRow{
+      .transaction_id = transaction.transaction_id,
+      .status = LevelSetMaintenanceWorkStatus::Trial,
+      .substage = substage,
+      .step = transaction.step,
+      .attempt = transaction.attempt,
+      .time = transaction.time,
+      .dt = transaction.dt,
+      .algebraic_state_revision_before =
+          algebraic_state_revision_before,
+      .algebraic_state_revision_after =
+          algebraic_state_revision_after,
+      .snapshot_set_revision_before =
+          maintenanceRevisionSet(
+              before, MaintenanceRevisionKind::Snapshot),
+      .snapshot_set_revision_after =
+          maintenanceRevisionSet(
+              after, MaintenanceRevisionKind::Snapshot),
+      .mesh_topology_set_revision_before =
+          maintenanceRevisionSet(
+              before, MaintenanceRevisionKind::MeshTopology),
+      .mesh_topology_set_revision_after =
+          maintenanceRevisionSet(
+              after, MaintenanceRevisionKind::MeshTopology),
+      .cut_topology_set_revision_before =
+          maintenanceRevisionSet(
+              before, MaintenanceRevisionKind::CutTopology),
+      .cut_topology_set_revision_after =
+          maintenanceRevisionSet(
+              after, MaintenanceRevisionKind::CutTopology),
+      .extension_map_revision_before =
+          extension_map_revision_before,
+      .extension_map_revision_after =
+          resolved_extension_map_revision_after,
+      .declared_stage = transaction.declared_stage,
+      .before = std::move(before),
+      .after = std::move(after),
+      .numerical_work = numerical_work,
+      // Trial and rejected rows never contribute to the accepted-state
+      // account. This channel is a maintenance term only, not a complete
+      // time-discrete energy identity.
+      .accepted_numerical_work = 0.0,
+  });
+}
+
+void LevelSetMaintenanceWorkLedger::commitTransaction()
+{
+  if (!active_transaction_.has_value()) {
+    throw std::logic_error(
+        "No level-set maintenance work transaction is active.");
+  }
+  if (accepted_attempts_.capacity() < accepted_attempts_.size() + 1u ||
+      accepted_rows_.capacity() <
+          accepted_rows_.size() + trial_rows_.size()) {
+    throw std::logic_error(
+        "Level-set maintenance work commit was not allocation-preflighted.");
+  }
+  const auto attempt = makeMaintenanceWorkAttempt(
+      *active_transaction_,
+      LevelSetMaintenanceWorkStatus::Accepted,
+      trial_rows_);
+  for (auto& row : trial_rows_) {
+    row.status = LevelSetMaintenanceWorkStatus::Accepted;
+    row.accepted_numerical_work = row.numerical_work;
+    accepted_rows_.push_back(std::move(row));
+  }
+  accepted_attempts_.push_back(attempt);
+  trial_rows_.clear();
+  active_transaction_.reset();
+}
+
+void LevelSetMaintenanceWorkLedger::rejectTransaction()
+{
+  if (!active_transaction_.has_value()) {
+    throw std::logic_error(
+        "No level-set maintenance work transaction is active.");
+  }
+  if (rejected_attempts_.capacity() < rejected_attempts_.size() + 1u ||
+      rejected_rows_.capacity() <
+          rejected_rows_.size() + trial_rows_.size()) {
+    throw std::logic_error(
+        "Level-set maintenance work rejection was not allocation-preflighted.");
+  }
+  const auto attempt = makeMaintenanceWorkAttempt(
+      *active_transaction_,
+      LevelSetMaintenanceWorkStatus::Rejected,
+      trial_rows_);
+  for (auto& row : trial_rows_) {
+    row.status = LevelSetMaintenanceWorkStatus::Rejected;
+    row.accepted_numerical_work = 0.0;
+    rejected_rows_.push_back(std::move(row));
+  }
+  rejected_attempts_.push_back(attempt);
+  trial_rows_.clear();
+  active_transaction_.reset();
+}
+
+bool LevelSetMaintenanceWorkLedger::transactionActive() const noexcept
+{
+  return active_transaction_.has_value();
+}
+
+const std::vector<LevelSetMaintenanceWorkRow>&
+LevelSetMaintenanceWorkLedger::trialRows() const noexcept
+{
+  return trial_rows_;
+}
+
+const std::vector<LevelSetMaintenanceWorkRow>&
+LevelSetMaintenanceWorkLedger::acceptedRows() const noexcept
+{
+  return accepted_rows_;
+}
+
+const std::vector<LevelSetMaintenanceWorkRow>&
+LevelSetMaintenanceWorkLedger::rejectedRows() const noexcept
+{
+  return rejected_rows_;
+}
+
+const std::vector<LevelSetMaintenanceWorkAttempt>&
+LevelSetMaintenanceWorkLedger::acceptedAttempts() const noexcept
+{
+  return accepted_attempts_;
+}
+
+const std::vector<LevelSetMaintenanceWorkAttempt>&
+LevelSetMaintenanceWorkLedger::rejectedAttempts() const noexcept
+{
+  return rejected_attempts_;
+}
+
+} // namespace application::core
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -4348,7 +4694,8 @@ std::uint64_t acceptedContactStageRevision(
     std::uint64_t endpoint_state_revision,
     std::uint64_t snapshot_revision,
     svmp::FE::Real stage_time,
-    svmp::FE::Real stage_alpha_f)
+    svmp::FE::Real stage_alpha_f,
+    std::span<const svmp::FE::Real> stage_solution)
 {
   constexpr std::uint64_t offset = 1469598103934665603ull;
   constexpr std::uint64_t prime = 1099511628211ull;
@@ -4371,6 +4718,10 @@ std::uint64_t acceptedContactStageRevision(
   mix(snapshot_revision);
   mix(real_bits(stage_time));
   mix(real_bits(stage_alpha_f));
+  mix(static_cast<std::uint64_t>(stage_solution.size()));
+  for (const auto value : stage_solution) {
+    mix(real_bits(value));
+  }
   return hash == 0u ? 1u : hash;
 }
 
@@ -4633,6 +4984,8 @@ evaluateAcceptedFreeSurfaceContactStages(
             global_sum(wall.wall_normal_integral[component]);
         wall.footprint_direction_integral[component] =
             global_sum(wall.footprint_direction_integral[component]);
+        wall.contact_line_tangent_integral[component] =
+            global_sum(wall.contact_line_tangent_integral[component]);
       }
     }
     svmp::FE::interfaces::finalizeFreeSurfaceDynamicContactState(state);
@@ -4647,7 +5000,8 @@ evaluateAcceptedFreeSurfaceContactStages(
                 endpoint_state_revision,
                 snapshot_revision,
                 stage_time,
-                stage_alpha_f),
+                stage_alpha_f,
+                stage_solution),
             .geometry_revision = snapshot.revision(),
             .state = std::move(state),
         });
@@ -4830,6 +5184,334 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
         });
   }
   return states;
+}
+
+std::uint64_t levelSetMaintenanceCutTopologyRevision(
+    const svmp::FE::interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+    const svmp::MeshComm& comm)
+{
+  std::vector<std::uint64_t> local_rule_revisions;
+  local_rule_revisions.reserve(snapshot.rules().size());
+  for (const auto& rule : snapshot.rules()) {
+    if (!rule.locally_owned) {
+      continue;
+    }
+    std::uint64_t revision = kCutContextHashOffset;
+    mixCutContextHash(
+        revision, static_cast<std::uint64_t>(rule.role));
+    mixCutContextHash(
+        revision, static_cast<std::uint64_t>(rule.retention));
+    mixCutContextHash(
+        revision,
+        static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(rule.physical_boundary_marker)));
+    mixCutContextHash(
+        revision,
+        static_cast<std::uint64_t>(
+            rule.reference_rule.geometric_dimension));
+    mixCutContextHash(
+        revision,
+        static_cast<std::uint64_t>(
+            rule.reference_rule.provenance.parent_entity_global_id));
+    mixCutContextHash(
+        revision,
+        rule.reference_rule.provenance.cut_topology_revision);
+    mixCutContextHash(
+        revision,
+        rule.physical_rule.cut_topology_revision);
+    mixCutContextHash(
+        revision,
+        static_cast<std::uint64_t>(rule.component_id));
+    mixCutContextHash(revision, rule.topology_id);
+    mixCutContextHash(
+        revision,
+        static_cast<std::uint64_t>(
+            rule.source_fragment_stable_ids.size()));
+    for (const auto stable_id : rule.source_fragment_stable_ids) {
+      mixCutContextHash(revision, stable_id);
+    }
+    local_rule_revisions.push_back(
+        revision == 0u ? 1u : revision);
+  }
+
+  const auto collective = snapshotOwnershipCollective(comm);
+  auto global_rule_revisions =
+      collective.all_gather_owned_rule_identity_values(
+          local_rule_revisions);
+  std::sort(
+      global_rule_revisions.begin(), global_rule_revisions.end());
+  std::uint64_t revision = kCutContextHashOffset;
+  mixCutContextHash(
+      revision,
+      static_cast<std::uint64_t>(
+          snapshot.revision().interface_marker));
+  mixCutContextHash(
+      revision,
+      static_cast<std::uint64_t>(global_rule_revisions.size()));
+  for (const auto rule_revision : global_rule_revisions) {
+    mixCutContextHash(revision, rule_revision);
+  }
+  return revision == 0u ? 1u : revision;
+}
+
+std::vector<application::core::LevelSetAuthoritativeFunctionalValue>
+levelSetMaintenanceFunctionalValues(
+    application::core::SimulationComponents& sim,
+    std::span<const svmp::FE::systems::
+                        AcceptedFreeSurfaceDiscreteFunctionalState> states)
+{
+  std::vector<application::core::LevelSetAuthoritativeFunctionalValue>
+      values;
+  values.reserve(states.size());
+  if (states.empty()) {
+    return values;
+  }
+  if (!sim.fe_system || !sim.fe_system->cutIntegrationContext()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Level-set maintenance work provenance requires an authoritative cut-integration context.");
+  }
+  const auto* context = sim.fe_system->cutIntegrationContext();
+  const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  for (const auto& state : states) {
+    const auto found = std::find_if(
+        snapshots.begin(), snapshots.end(), [&](const auto& snapshot) {
+          return snapshot &&
+                 snapshot->revision().snapshot_revision_key ==
+                     state.geometry_revision.snapshot_revision_key;
+        });
+    if (found == snapshots.end()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set maintenance work could not resolve its authoritative geometry snapshot.");
+    }
+    values.push_back(
+        application::core::LevelSetAuthoritativeFunctionalValue{
+            .interface_marker = state.interface_marker,
+            .snapshot_revision =
+                state.geometry_revision.snapshot_revision_key,
+            .mesh_topology_revision =
+                state.geometry_revision.mesh_topology_revision,
+            .cut_topology_revision =
+                levelSetMaintenanceCutTopologyRevision(
+                    **found, comm),
+            .liquid_volume = state.state.owned_liquid_volume,
+            .liquid_gas_area = state.state.owned_liquid_gas_area,
+            .wetted_wall_area = state.state.owned_wetted_wall_area,
+            .contact_measure = state.state.owned_contact_measure,
+            .surface_energy = state.state.liquid_gas_surface_energy,
+            .young_wall_energy = state.state.young_wall_energy,
+            .volume_constraint_potential =
+                state.state.volume_constraint_potential,
+            .total_potential = state.state.total_potential,
+        });
+  }
+  std::sort(
+      values.begin(), values.end(), [](const auto& left, const auto& right) {
+        return left.interface_marker < right.interface_marker;
+      });
+  return values;
+}
+
+std::uint64_t levelSetMaintenanceAlgebraicRevision(
+    std::span<const svmp::FE::Real> state) noexcept
+{
+  std::uint64_t revision = 1469598103934665603ull;
+  constexpr std::uint64_t prime = 1099511628211ull;
+  const auto mix = [&](std::uint64_t value) {
+    for (std::size_t byte = 0u; byte < sizeof(value); ++byte) {
+      revision ^= (value >> (byte * 8u)) & 0xffu;
+      revision *= prime;
+    }
+  };
+  mix(static_cast<std::uint64_t>(state.size()));
+  for (const auto value : state) {
+    std::uint64_t bits = 0u;
+    static_assert(sizeof(bits) == sizeof(value));
+    std::memcpy(&bits, &value, sizeof(bits));
+    mix(bits);
+  }
+  return revision == 0u ? 1u : revision;
+}
+
+std::uint64_t collectiveLevelSetMaintenanceAlgebraicRevision(
+    std::span<const svmp::FE::Real> state,
+    const svmp::MeshComm& comm)
+{
+  const auto revision = levelSetMaintenanceAlgebraicRevision(state);
+  const auto [minimum, maximum] =
+      globalMinMaxUint64(revision, comm);
+  if (minimum != maximum) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Level-set maintenance algebraic state revision differs across the FE communicator.");
+  }
+  return revision;
+}
+
+const char* levelSetMaintenanceWorkStatusName(
+    application::core::LevelSetMaintenanceWorkStatus status) noexcept
+{
+  using Status = application::core::LevelSetMaintenanceWorkStatus;
+  switch (status) {
+    case Status::Trial:
+      return "trial";
+    case Status::Accepted:
+      return "accepted";
+    case Status::Rejected:
+      return "rejected";
+  }
+  return "unknown";
+}
+
+const char* levelSetMaintenanceWorkSubstageName(
+    application::core::LevelSetMaintenanceWorkSubstage substage) noexcept
+{
+  using Substage = application::core::LevelSetMaintenanceWorkSubstage;
+  switch (substage) {
+    case Substage::Transport:
+      return "transport";
+    case Substage::Limiting:
+      return "limiting";
+    case Substage::Reinitialization:
+      return "reinitialization";
+    case Substage::GeometryReconciliation:
+      return "geometry_reconciliation";
+    case Substage::GlobalCorrection:
+      return "global_correction";
+  }
+  return "unknown";
+}
+
+const char* levelSetMaintenanceDeclaredStageName(
+    application::core::LevelSetMaintenanceDeclaredStage stage) noexcept
+{
+  using Stage = application::core::LevelSetMaintenanceDeclaredStage;
+  switch (stage) {
+    case Stage::ProspectiveAcceptedEndpoint:
+      return "prospective_accepted_endpoint";
+    case Stage::AcceptedEndpointPostStep:
+      return "accepted_endpoint_post_step";
+  }
+  return "unknown";
+}
+
+void logLevelSetMaintenanceWorkRows(
+    std::span<const application::core::LevelSetMaintenanceWorkRow> rows)
+{
+  for (const auto& row : rows) {
+    std::ostringstream log;
+    log << std::setprecision(17)
+        << "[svMultiPhysics::Application] Level-set maintenance work row"
+        << " diagnostic=level_set_maintenance_work"
+        << " transaction_id=" << row.transaction_id
+        << " status=" << levelSetMaintenanceWorkStatusName(row.status)
+        << " substage="
+        << levelSetMaintenanceWorkSubstageName(row.substage)
+        << " step=" << row.step
+        << " attempt=" << row.attempt
+        << " time=" << row.time
+        << " dt=" << row.dt
+        << " declared_stage="
+        << levelSetMaintenanceDeclaredStageName(row.declared_stage)
+        << " algebraic_state_revision_before="
+        << row.algebraic_state_revision_before
+        << " algebraic_state_revision_after="
+        << row.algebraic_state_revision_after
+        << " snapshot_set_revision_before="
+        << row.snapshot_set_revision_before
+        << " snapshot_set_revision_after="
+        << row.snapshot_set_revision_after
+        << " mesh_topology_set_revision_before="
+        << row.mesh_topology_set_revision_before
+        << " mesh_topology_set_revision_after="
+        << row.mesh_topology_set_revision_after
+        << " cut_topology_set_revision_before="
+        << row.cut_topology_set_revision_before
+        << " cut_topology_set_revision_after="
+        << row.cut_topology_set_revision_after
+        << " extension_map_revision_before="
+        << row.extension_map_revision_before.value_or(0u)
+        << " extension_map_revision_after="
+        << row.extension_map_revision_after.value_or(0u)
+        << " authoritative_functional_count=" << row.before.size()
+        << " numerical_work_sign=potential_after_minus_before"
+        << " numerical_work=" << row.numerical_work
+        << " accepted_numerical_work="
+        << row.accepted_numerical_work
+        << " account_scope=maintenance_surface_wall_volume_only"
+        << " complete_time_discrete_energy_identity=false";
+    for (std::size_t index = 0u; index < row.before.size(); ++index) {
+      const auto& before = row.before[index];
+      const auto& after = row.after[index];
+      log << " interface_marker=" << before.interface_marker
+          << " before_snapshot_revision="
+          << before.snapshot_revision
+          << " after_snapshot_revision=" << after.snapshot_revision
+          << " before_mesh_topology_revision="
+          << before.mesh_topology_revision
+          << " after_mesh_topology_revision="
+          << after.mesh_topology_revision
+          << " before_cut_topology_revision="
+          << before.cut_topology_revision
+          << " after_cut_topology_revision="
+          << after.cut_topology_revision
+          << " before_liquid_volume=" << before.liquid_volume
+          << " after_liquid_volume=" << after.liquid_volume
+          << " before_liquid_gas_area=" << before.liquid_gas_area
+          << " after_liquid_gas_area=" << after.liquid_gas_area
+          << " before_wetted_wall_area=" << before.wetted_wall_area
+          << " after_wetted_wall_area=" << after.wetted_wall_area
+          << " before_contact_measure=" << before.contact_measure
+          << " after_contact_measure=" << after.contact_measure
+          << " before_surface_energy=" << before.surface_energy
+          << " after_surface_energy=" << after.surface_energy
+          << " before_young_wall_energy="
+          << before.young_wall_energy
+          << " after_young_wall_energy=" << after.young_wall_energy
+          << " before_volume_constraint_potential="
+          << before.volume_constraint_potential
+          << " after_volume_constraint_potential="
+          << after.volume_constraint_potential
+          << " before_total_potential=" << before.total_potential
+          << " after_total_potential=" << after.total_potential;
+    }
+    application::core::oopCout() << log.str() << std::endl;
+  }
+}
+
+void logLevelSetMaintenanceWorkAttempts(
+    std::span<const
+        application::core::LevelSetMaintenanceWorkAttempt> attempts)
+{
+  for (const auto& attempt : attempts) {
+    std::ostringstream log;
+    log << std::setprecision(17)
+        << "[svMultiPhysics::Application] Level-set maintenance work attempt"
+        << " diagnostic=level_set_maintenance_work_attempt"
+        << " transaction_id=" << attempt.transaction_id
+        << " status="
+        << levelSetMaintenanceWorkStatusName(attempt.status)
+        << " step=" << attempt.step
+        << " attempt=" << attempt.attempt
+        << " time=" << attempt.time
+        << " dt=" << attempt.dt
+        << " declared_stage="
+        << levelSetMaintenanceDeclaredStageName(
+               attempt.declared_stage)
+        << " extension_map_revision="
+        << attempt.extension_map_revision.value_or(0u)
+        << " row_count=" << attempt.row_count
+        << " numerical_work=" << attempt.numerical_work
+        << " accepted_numerical_work="
+        << attempt.accepted_numerical_work
+        << " accepted_account_publication="
+        << (attempt.status ==
+                    application::core::
+                        LevelSetMaintenanceWorkStatus::Accepted
+                ? "accepted_rows"
+                : "zero_for_rejection")
+        << " complete_time_discrete_energy_identity=false";
+    application::core::oopCout() << log.str() << std::endl;
+  }
 }
 
 void recordAcceptedFreeSurfaceDiscreteFunctionals(
@@ -5224,12 +5906,18 @@ struct LevelSetBoundPreservingApplicationResult {
   bool changed{false};
 };
 
+using LevelSetMaintenanceStageObserver = std::function<void(
+    application::core::LevelSetMaintenanceWorkSubstage,
+    std::span<const svmp::FE::Real>,
+    std::span<const svmp::FE::Real>)>;
+
 LevelSetBoundPreservingApplicationResult
 applyLevelSetBoundPreservingCandidates(
     application::core::SimulationComponents& sim,
     svmp::FE::timestepping::TimeHistory& history,
     const std::vector<LevelSetMaintenanceRequest>& requests,
-    double /*generalized_alpha_gamma*/)
+    double /*generalized_alpha_gamma*/,
+    const LevelSetMaintenanceStageObserver& observe_stage = {})
 {
   LevelSetBoundPreservingApplicationResult application_result;
   if (!sim.fe_system || requests.empty()) {
@@ -5356,6 +6044,13 @@ applyLevelSetBoundPreservingCandidates(
         << limiter.negative_patch_sign_flips_prevented
         << " conservative=false" << std::endl;
     if (limiter.applied) {
+      if (observe_stage) {
+        observe_stage(
+            application::core::LevelSetMaintenanceWorkSubstage::
+                Limiting,
+            candidate,
+            limited);
+      }
       // Mutating a converged Newton candidate after its final residual check
       // would accept a state that was never a solution of the coupled
       // transport/capillary operator.  Reject without touching history so an
@@ -5479,6 +6174,410 @@ void accountAppliedLevelSetVolumeCorrection(
       next_contact_line_displacement;
 }
 
+svmp::FE::level_set::LevelSetWallContactConstraint
+makeAcceptedSnapshotWallConstraint(
+    const svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord& record,
+    svmp::FE::level_set::LevelSetWallContactConstraintKind kind,
+    int interface_marker,
+    std::uint64_t snapshot_revision,
+    const svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters&
+        parameters,
+    int dimension)
+{
+  using Constraint =
+      svmp::FE::level_set::LevelSetWallContactConstraint;
+  using Kind =
+      svmp::FE::level_set::LevelSetWallContactConstraintKind;
+  using Point = std::array<svmp::FE::Real, 3>;
+
+  const auto fail = [&](std::string_view reason) -> Constraint {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact geometry cannot "
+        "provide a prescribed level-set frame for interface marker " +
+        std::to_string(interface_marker) + ", boundary marker " +
+        std::to_string(record.physical_boundary_marker) + ": " +
+        std::string(reason) + ".");
+  };
+  const auto parent =
+      record.reference_rule.provenance.parent_entity_global_id;
+  if (record.role !=
+          svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::Contact ||
+      record.retention !=
+          svmp::FE::interfaces::FreeSurfaceGeometryRetention::Retained ||
+      parent == svmp::FE::INVALID_GLOBAL_INDEX || snapshot_revision == 0u ||
+      record.reference_rule.provenance.free_surface_snapshot_revision_key !=
+          snapshot_revision ||
+      record.physical_rule.free_surface_snapshot_revision_key !=
+          snapshot_revision) {
+    return fail("the retained rule has incomplete or stale provenance");
+  }
+
+  Constraint constraint{
+      .kind = kind,
+      .interface_marker = interface_marker,
+      .boundary_marker = record.physical_boundary_marker,
+      .parent_cell_global_id = parent,
+      .geometry_revision = snapshot_revision,
+  };
+  if (kind != Kind::PrescribedAngle) {
+    return constraint;
+  }
+  if (dimension != 2 && dimension != 3) {
+    return fail("the mesh dimension is not two or three");
+  }
+
+  const auto coefficient = std::find_if(
+      parameters.young_wall_coefficients.begin(),
+      parameters.young_wall_coefficients.end(),
+      [&](const auto& candidate) {
+        return candidate.boundary_marker ==
+               record.physical_boundary_marker;
+      });
+  if (coefficient == parameters.young_wall_coefficients.end()) {
+    return fail("the prescribed Young datum is unavailable");
+  }
+  const auto pi = std::acos(svmp::FE::Real{-1.0});
+  const auto physical_angle =
+      coefficient->equilibrium_contact_angle_radians;
+  if (!std::isfinite(physical_angle) ||
+      !(physical_angle > svmp::FE::Real{0.0}) ||
+      !(physical_angle < pi)) {
+    return fail("the prescribed Young angle is invalid");
+  }
+  if (parameters.liquid_side ==
+      svmp::FE::geometry::CutIntegrationSide::Negative) {
+    constraint.target_angle_radians = physical_angle;
+  } else if (parameters.liquid_side ==
+             svmp::FE::geometry::CutIntegrationSide::Positive) {
+    // The snapshot normal is grad(phi)/|grad(phi)|.  The positive-side
+    // liquid normal reverses it, so the equivalent level-set angle is the
+    // supplement of the through-liquid Young angle.
+    constraint.target_angle_radians = pi - physical_angle;
+  } else {
+    return fail("the declaration has no physical liquid side");
+  }
+
+  if (record.physical_rule.geometric_dimension != dimension - 2 ||
+      record.physical_rule.points.empty() ||
+      record.physical_rule.points.size() !=
+          record.reference_rule.points.size() ||
+      !std::isfinite(record.physical_rule.physical_measure) ||
+      !(record.physical_rule.physical_measure > svmp::FE::Real{0.0})) {
+    return fail("the accepted codimension-two rule is unavailable");
+  }
+  const auto finite = [](const Point& value) noexcept {
+    return std::all_of(value.begin(), value.end(), [](const auto component) {
+      return std::isfinite(component);
+    });
+  };
+  const auto dot = [](const Point& left, const Point& right) noexcept {
+    return left[0] * right[0] + left[1] * right[1] +
+           left[2] * right[2];
+  };
+  const auto norm = [&](const Point& value) noexcept {
+    return std::sqrt(dot(value, value));
+  };
+  const auto cross = [](const Point& left, const Point& right) noexcept {
+    return Point{{left[1] * right[2] - left[2] * right[1],
+                  left[2] * right[0] - left[0] * right[2],
+                  left[0] * right[1] - left[1] * right[0]}};
+  };
+  const auto normalized = [&](Point value) -> std::optional<Point> {
+    const auto magnitude = norm(value);
+    if (!finite(value) || !std::isfinite(magnitude) ||
+        !(magnitude > svmp::FE::Real{1.0e-14})) {
+      return std::nullopt;
+    }
+    for (auto& component : value) {
+      component /= magnitude;
+    }
+    return value;
+  };
+
+  struct FrameSample {
+    Point point{};
+    Point wall_normal{};
+    Point phi_wall_conormal{};
+    Point line_tangent{};
+  };
+  std::vector<FrameSample> samples;
+  samples.reserve(record.physical_rule.points.size());
+  Point point_integral{};
+  Point wall_normal_integral{};
+  Point line_tangent_integral{};
+  svmp::FE::Real measure = 0.0;
+  for (const auto& point : record.physical_rule.points) {
+    if (!finite(point.physical_point) ||
+        !std::isfinite(point.physical_weight) ||
+        !(point.physical_weight > svmp::FE::Real{0.0})) {
+      return fail("a physical contact point or weight is invalid");
+    }
+    const auto phi_normal = normalized(point.normal);
+    const auto wall_normal = normalized(point.boundary_normal);
+    if (!phi_normal || !wall_normal) {
+      return fail("an accepted interface or wall normal is unavailable");
+    }
+    Point phi_wall_conormal{};
+    const auto normal_component = dot(*phi_normal, *wall_normal);
+    for (std::size_t component = 0u; component < 3u; ++component) {
+      phi_wall_conormal[component] =
+          (*phi_normal)[component] -
+          normal_component * (*wall_normal)[component];
+    }
+    const auto unit_phi_wall_conormal = normalized(phi_wall_conormal);
+    if (!unit_phi_wall_conormal) {
+      return fail("the accepted contact is not transverse to the wall");
+    }
+    const auto line_tangent =
+        normalized(cross(*wall_normal, *unit_phi_wall_conormal));
+    if (!line_tangent) {
+      return fail("the oriented contact-line direction is unavailable");
+    }
+    if (dimension == 3) {
+      const auto recorded_tangent = normalized(point.tangent);
+      if (!recorded_tangent ||
+          std::abs(dot(*recorded_tangent, *line_tangent)) <
+              svmp::FE::Real{1.0} - svmp::FE::Real{1.0e-8}) {
+        return fail("the accepted contact-line tangent is inconsistent");
+      }
+    }
+    samples.push_back(FrameSample{
+        .point = point.physical_point,
+        .wall_normal = *wall_normal,
+        .phi_wall_conormal = *unit_phi_wall_conormal,
+        .line_tangent = *line_tangent,
+    });
+    measure += point.physical_weight;
+    for (std::size_t component = 0u; component < 3u; ++component) {
+      point_integral[component] +=
+          point.physical_point[component] * point.physical_weight;
+      wall_normal_integral[component] +=
+          (*wall_normal)[component] * point.physical_weight;
+      line_tangent_integral[component] +=
+          (*line_tangent)[component] * point.physical_weight;
+    }
+  }
+  if (!std::isfinite(measure) || !(measure > svmp::FE::Real{0.0})) {
+    return fail("the accepted contact measure is invalid");
+  }
+  const auto measure_tolerance =
+      svmp::FE::Real{4096.0} *
+      std::numeric_limits<svmp::FE::Real>::epsilon() *
+      std::max({svmp::FE::Real{1.0},
+                measure,
+                record.physical_rule.physical_measure});
+  if (std::abs(measure - record.physical_rule.physical_measure) >
+      measure_tolerance) {
+    return fail("the accepted physical contact measure is inconsistent");
+  }
+  for (auto& component : point_integral) {
+    component /= measure;
+  }
+  const auto wall_normal = normalized(wall_normal_integral);
+  if (!wall_normal) {
+    return fail("the accepted wall-normal frame cancels");
+  }
+  const auto tangent_wall_component =
+      dot(line_tangent_integral, *wall_normal);
+  for (std::size_t component = 0u; component < 3u; ++component) {
+    line_tangent_integral[component] -=
+        tangent_wall_component * (*wall_normal)[component];
+  }
+  const auto line_tangent = normalized(line_tangent_integral);
+  if (!line_tangent) {
+    return fail("the accepted contact-line frame cancels");
+  }
+  const auto phi_wall_conormal =
+      normalized(cross(*line_tangent, *wall_normal));
+  if (!phi_wall_conormal) {
+    return fail("the accepted contact-line frame is degenerate");
+  }
+
+  const auto direction_tolerance = svmp::FE::Real{1.0e-8};
+  const auto point_scale =
+      std::max({svmp::FE::Real{1.0}, norm(point_integral), measure});
+  const auto point_tolerance =
+      svmp::FE::Real{1.0e-9} * point_scale;
+  for (const auto& sample : samples) {
+    if (dot(sample.wall_normal, *wall_normal) <
+            svmp::FE::Real{1.0} - direction_tolerance ||
+        dot(sample.line_tangent, *line_tangent) <
+            svmp::FE::Real{1.0} - direction_tolerance ||
+        dot(sample.phi_wall_conormal, *phi_wall_conormal) <
+            svmp::FE::Real{1.0} - direction_tolerance) {
+      return fail(
+          "one affine prescribed frame cannot represent the accepted rule");
+    }
+    Point from_centroid{};
+    for (std::size_t component = 0u; component < 3u; ++component) {
+      from_centroid[component] =
+          sample.point[component] - point_integral[component];
+    }
+    const auto along_line = dot(from_centroid, *line_tangent);
+    for (std::size_t component = 0u; component < 3u; ++component) {
+      from_centroid[component] -=
+          along_line * (*line_tangent)[component];
+    }
+    if (norm(from_centroid) > point_tolerance) {
+      return fail("the accepted contact points do not form one affine line");
+    }
+  }
+  if (dimension == 2 &&
+      (std::abs((*wall_normal)[2]) > direction_tolerance ||
+       std::hypot((*line_tangent)[0], (*line_tangent)[1]) >
+           direction_tolerance)) {
+    return fail("the accepted two-dimensional frame is not planar");
+  }
+
+  constraint.physical_wall_normal = *wall_normal;
+  constraint.accepted_contact_point = point_integral;
+  constraint.accepted_contact_line_tangent = *line_tangent;
+  return constraint;
+}
+
+[[nodiscard]] bool sameAcceptedWallConstraint(
+    const svmp::FE::level_set::LevelSetWallContactConstraint& left,
+    const svmp::FE::level_set::LevelSetWallContactConstraint& right) noexcept
+{
+  return left.kind == right.kind &&
+         left.interface_marker == right.interface_marker &&
+         left.boundary_marker == right.boundary_marker &&
+         left.parent_cell_global_id == right.parent_cell_global_id &&
+         left.geometry_revision == right.geometry_revision &&
+         left.target_angle_radians == right.target_angle_radians &&
+         left.physical_wall_normal == right.physical_wall_normal &&
+         left.accepted_contact_point == right.accepted_contact_point &&
+         left.accepted_contact_line_tangent ==
+             right.accepted_contact_line_tangent;
+}
+
+[[nodiscard]] bool acceptedWallConstraintFrameIsComplete(
+    const svmp::FE::level_set::LevelSetWallContactConstraint& constraint,
+    const svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters&
+        parameters,
+    int dimension) noexcept
+{
+  using Kind =
+      svmp::FE::level_set::LevelSetWallContactConstraintKind;
+  if (constraint.kind != Kind::PrescribedAngle) {
+    return true;
+  }
+  const auto coefficient = std::find_if(
+      parameters.young_wall_coefficients.begin(),
+      parameters.young_wall_coefficients.end(),
+      [&](const auto& candidate) {
+        return candidate.boundary_marker == constraint.boundary_marker;
+      });
+  if (coefficient == parameters.young_wall_coefficients.end() ||
+      (dimension != 2 && dimension != 3)) {
+    return false;
+  }
+  const auto pi = std::acos(svmp::FE::Real{-1.0});
+  svmp::FE::Real expected_angle = 0.0;
+  if (parameters.liquid_side ==
+      svmp::FE::geometry::CutIntegrationSide::Negative) {
+    expected_angle = coefficient->equilibrium_contact_angle_radians;
+  } else if (parameters.liquid_side ==
+             svmp::FE::geometry::CutIntegrationSide::Positive) {
+    expected_angle =
+        pi - coefficient->equilibrium_contact_angle_radians;
+  } else {
+    return false;
+  }
+  const auto finite = [](const auto& value) noexcept {
+    return std::all_of(value.begin(), value.end(), [](const auto component) {
+      return std::isfinite(component);
+    });
+  };
+  const auto dot = [](const auto& left, const auto& right) noexcept {
+    return left[0] * right[0] + left[1] * right[1] +
+           left[2] * right[2];
+  };
+  const auto wall_norm =
+      std::sqrt(dot(constraint.physical_wall_normal,
+                    constraint.physical_wall_normal));
+  const auto tangent_norm =
+      std::sqrt(dot(constraint.accepted_contact_line_tangent,
+                    constraint.accepted_contact_line_tangent));
+  const auto relative_alignment =
+      wall_norm > svmp::FE::Real{0.0} &&
+              tangent_norm > svmp::FE::Real{0.0}
+          ? std::abs(dot(constraint.physical_wall_normal,
+                         constraint.accepted_contact_line_tangent)) /
+                (wall_norm * tangent_norm)
+          : std::numeric_limits<svmp::FE::Real>::infinity();
+  const auto frame_tolerance = svmp::FE::Real{1.0e-10};
+  return std::isfinite(expected_angle) &&
+         constraint.target_angle_radians == expected_angle &&
+         finite(constraint.physical_wall_normal) &&
+         finite(constraint.accepted_contact_point) &&
+         finite(constraint.accepted_contact_line_tangent) &&
+         std::isfinite(wall_norm) &&
+         wall_norm > svmp::FE::Real{0.0} &&
+         std::isfinite(tangent_norm) &&
+         tangent_norm > svmp::FE::Real{0.0} &&
+         relative_alignment <= frame_tolerance &&
+         (dimension != 2 ||
+          (std::abs(constraint.physical_wall_normal[2]) <=
+               frame_tolerance * wall_norm &&
+           std::hypot(constraint.accepted_contact_line_tangent[0],
+                      constraint.accepted_contact_line_tangent[1]) <=
+               frame_tolerance * tangent_norm));
+}
+
+[[nodiscard]] std::vector<
+    svmp::FE::level_set::LevelSetWallContactConstraint>
+canonicalizeAcceptedWallConstraints(
+    std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
+        constraints,
+    const svmp::MeshComm& comm,
+    std::string_view source)
+{
+  const auto order = [](const auto& left, const auto& right) {
+    return std::tie(left.parent_cell_global_id,
+                    left.interface_marker,
+                    left.boundary_marker,
+                    left.kind,
+                    left.geometry_revision,
+                    left.target_angle_radians,
+                    left.physical_wall_normal,
+                    left.accepted_contact_point,
+                    left.accepted_contact_line_tangent) <
+           std::tie(right.parent_cell_global_id,
+                    right.interface_marker,
+                    right.boundary_marker,
+                    right.kind,
+                    right.geometry_revision,
+                    right.target_angle_radians,
+                    right.physical_wall_normal,
+                    right.accepted_contact_point,
+                    right.accepted_contact_line_tangent);
+  };
+  std::sort(constraints.begin(), constraints.end(), order);
+  std::vector<svmp::FE::level_set::LevelSetWallContactConstraint> unique;
+  unique.reserve(constraints.size());
+  bool local_conflict = false;
+  for (const auto& constraint : constraints) {
+    if (!unique.empty() &&
+        unique.back().parent_cell_global_id ==
+            constraint.parent_cell_global_id) {
+      if (sameAcceptedWallConstraint(unique.back(), constraint)) {
+        continue;
+      }
+      local_conflict = true;
+      continue;
+    }
+    unique.push_back(constraint);
+  }
+  if (globalMinDouble(local_conflict ? 0.0 : 1.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] " + std::string(source) +
+        " assigns distinct accepted wall-contact frames to one parent cell; "
+        "the projection supports exactly one physical frame per parent.");
+  }
+  return unique;
+}
+
 std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
 captureAcceptedContactStageWallConstraints(
     application::core::SimulationComponents& sim,
@@ -5494,8 +6593,17 @@ captureAcceptedContactStageWallConstraints(
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted contact-stage constraint capture requires an authoritative geometry snapshot on every rank.");
   }
-  context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
-      sim.fe_system->meshAccess());
+  bool local_snapshots_current = true;
+  try {
+    context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+        sim.fe_system->meshAccess());
+  } catch (const std::exception&) {
+    local_snapshots_current = false;
+  }
+  if (globalMinDouble(local_snapshots_current ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact-stage constraint capture rejected a stale authoritative geometry snapshot.");
+  }
   std::map<
       int,
       const svmp::FE::systems::FreeSurfaceAcceptedContactStageState*>
@@ -5564,6 +6672,10 @@ captureAcceptedContactStageWallConstraints(
               AcceptedDynamicAngle;
     }
     bool local_parent_ids_valid = true;
+    bool local_frames_valid = true;
+    std::string local_frame_diagnostic;
+    std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
+        declaration_constraints;
     for (const auto& record : snapshot.rules()) {
       if (record.role != svmp::FE::interfaces::
                              FreeSurfaceGeometryRuleRole::Contact ||
@@ -5585,20 +6697,37 @@ captureAcceptedContactStageWallConstraints(
       if (parent == svmp::FE::INVALID_GLOBAL_INDEX) {
         continue;
       }
-      captured.push_back(
-          svmp::FE::level_set::LevelSetWallContactConstraint{
-              .kind = law->second,
-              .interface_marker = declaration.interface_marker,
-              .boundary_marker = record.physical_boundary_marker,
-              .parent_cell_global_id = parent,
-              .geometry_revision =
-                  stage.geometry_revision.snapshot_revision_key,
-          });
+      try {
+        declaration_constraints.push_back(makeAcceptedSnapshotWallConstraint(
+            record,
+            law->second,
+            declaration.interface_marker,
+            stage.geometry_revision.snapshot_revision_key,
+            declaration.parameters,
+            sim.fe_system->meshAccess().dimension()));
+      } catch (const std::exception& error) {
+        local_frames_valid = false;
+        local_frame_diagnostic = error.what();
+      }
     }
     if (globalMinDouble(local_parent_ids_valid ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Accepted contact-stage constraint capture found a rule without a partition-independent parent identity.");
     }
+    if (globalMinDouble(local_frames_valid ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage constraint capture rejected an unavailable, degenerate, or stale physical contact frame" +
+          (local_frame_diagnostic.empty()
+               ? std::string{"."}
+               : std::string{": "} + local_frame_diagnostic));
+    }
+    declaration_constraints = canonicalizeAcceptedWallConstraints(
+        std::move(declaration_constraints),
+        comm,
+        "Accepted contact-stage constraint capture");
+    captured.insert(captured.end(),
+                    declaration_constraints.begin(),
+                    declaration_constraints.end());
   }
   return captured;
 }
@@ -5638,6 +6767,12 @@ resolveLevelSetWallAwareMaintenanceContext(
     declaration_signature ^= value;
     declaration_signature *= 1099511628211ull;
   };
+  const auto mix_declaration_real = [&](svmp::FE::Real value) {
+    static_assert(sizeof(value) <= sizeof(std::uint64_t));
+    std::uint64_t bits = 0u;
+    std::memcpy(&bits, &value, sizeof(value));
+    mix_declaration_value(bits);
+  };
   mix_declaration_value(static_cast<std::uint64_t>(declarations.size()));
   for (const auto& declaration : declarations) {
     mix_declaration_value(static_cast<std::uint64_t>(
@@ -5645,11 +6780,15 @@ resolveLevelSetWallAwareMaintenanceContext(
     mix_declaration_value(static_cast<std::uint64_t>(
         static_cast<std::int64_t>(declaration.interface_marker)));
     mix_declaration_value(static_cast<std::uint64_t>(
+        declaration.parameters.liquid_side));
+    mix_declaration_value(static_cast<std::uint64_t>(
         declaration.parameters.young_wall_coefficients.size()));
     for (const auto& coefficient :
          declaration.parameters.young_wall_coefficients) {
       mix_declaration_value(static_cast<std::uint64_t>(
           static_cast<std::int64_t>(coefficient.boundary_marker)));
+      mix_declaration_real(
+          coefficient.equilibrium_contact_angle_radians);
     }
     mix_declaration_value(static_cast<std::uint64_t>(
         declaration.parameters.dynamic_contact_coefficients.size()));
@@ -5657,6 +6796,11 @@ resolveLevelSetWallAwareMaintenanceContext(
          declaration.parameters.dynamic_contact_coefficients) {
       mix_declaration_value(static_cast<std::uint64_t>(
           static_cast<std::int64_t>(coefficient.boundary_marker)));
+      mix_declaration_real(
+          coefficient.equilibrium_contact_angle_radians);
+      mix_declaration_real(coefficient.mobility);
+      mix_declaration_real(coefficient.slip_length);
+      mix_declaration_real(coefficient.dynamic_viscosity);
     }
   }
   const auto [minimum_declaration_signature,
@@ -5832,6 +6976,8 @@ resolveLevelSetWallAwareMaintenanceContext(
       }
       resolved.requires_accepted_dynamic_stage = true;
       std::map<int, std::size_t> local_rule_count_by_wall;
+      std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
+          declaration_constraints;
       bool local_constraints_valid = true;
       for (const auto& constraint : accepted_contact_stage_constraints) {
         if (constraint.interface_marker != declaration.interface_marker) {
@@ -5847,6 +6993,10 @@ resolveLevelSetWallAwareMaintenanceContext(
             constraint.geometry_revision ==
                 accepted_dynamic_stage->geometry_revision
                     .snapshot_revision_key &&
+            acceptedWallConstraintFrameIsComplete(
+                constraint,
+                declaration.parameters,
+                sim.fe_system->meshAccess().dimension()) &&
             local_constraints_valid;
         if (law == contact_law_by_wall.end() ||
             law->second != constraint.kind ||
@@ -5854,16 +7004,27 @@ resolveLevelSetWallAwareMaintenanceContext(
                 svmp::FE::INVALID_GLOBAL_INDEX ||
             constraint.geometry_revision !=
                 accepted_dynamic_stage->geometry_revision
-                    .snapshot_revision_key) {
+                    .snapshot_revision_key ||
+            !acceptedWallConstraintFrameIsComplete(
+                constraint,
+                declaration.parameters,
+                sim.fe_system->meshAccess().dimension())) {
           continue;
         }
-        resolved.local_constraints.push_back(constraint);
-        ++local_rule_count_by_wall[constraint.boundary_marker];
+        declaration_constraints.push_back(constraint);
       }
       if (globalMinDouble(local_constraints_valid ? 1.0 : 0.0, comm) !=
           1.0) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Wall-aware level-set maintenance rejected a captured contact constraint that does not match its accepted stage.");
+      }
+      declaration_constraints = canonicalizeAcceptedWallConstraints(
+          std::move(declaration_constraints),
+          comm,
+          "Accepted contact-stage wall-aware maintenance");
+      for (const auto& constraint : declaration_constraints) {
+        resolved.local_constraints.push_back(constraint);
+        ++local_rule_count_by_wall[constraint.boundary_marker];
       }
       for (const auto& [boundary_marker, kind] : contact_law_by_wall) {
         const auto global_rule_count = globalSumSize(
@@ -5967,8 +7128,11 @@ resolveLevelSetWallAwareMaintenanceContext(
           std::to_string(declaration.interface_marker) + ".");
     }
     for (const auto& [boundary_marker, kind] : contact_law_by_wall) {
-      std::size_t local_rule_count = 0u;
+      std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
+          wall_constraints;
       bool local_parent_ids_valid = true;
+      bool local_frames_valid = true;
+      std::string local_frame_diagnostic;
       for (const auto& record : snapshot.rules()) {
         if (record.role != svmp::FE::interfaces::
                                FreeSurfaceGeometryRuleRole::Contact ||
@@ -5986,26 +7150,49 @@ resolveLevelSetWallAwareMaintenanceContext(
         if (parent == svmp::FE::INVALID_GLOBAL_INDEX) {
           continue;
         }
-        resolved.local_constraints.push_back(
-            svmp::FE::level_set::LevelSetWallContactConstraint{
-                .kind = kind,
-                .interface_marker = declaration.interface_marker,
-                .boundary_marker = boundary_marker,
-                .parent_cell_global_id = parent,
-                .geometry_revision = snapshot_revision,
-            });
-        ++local_rule_count;
+        try {
+          wall_constraints.push_back(makeAcceptedSnapshotWallConstraint(
+              record,
+              kind,
+              declaration.interface_marker,
+              snapshot_revision,
+              declaration.parameters,
+              sim.fe_system->meshAccess().dimension()));
+        } catch (const std::exception& error) {
+          local_frames_valid = false;
+          local_frame_diagnostic = error.what();
+        }
       }
       if (globalMinDouble(local_parent_ids_valid ? 1.0 : 0.0, comm) != 1.0) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Wall-aware level-set maintenance found a contact rule without a partition-independent parent identity.");
       }
+      if (globalMinDouble(local_frames_valid ? 1.0 : 0.0, comm) != 1.0) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Wall-aware level-set maintenance rejected an unavailable, degenerate, or stale prescribed physical contact frame" +
+            (local_frame_diagnostic.empty()
+                 ? std::string{"."}
+                 : std::string{": "} + local_frame_diagnostic));
+      }
+      wall_constraints = canonicalizeAcceptedWallConstraints(
+          std::move(wall_constraints),
+          comm,
+          "Prescribed wall-aware level-set maintenance");
+      const auto local_rule_count = wall_constraints.size();
+      resolved.local_constraints.insert(
+          resolved.local_constraints.end(),
+          wall_constraints.begin(),
+          wall_constraints.end());
       const auto global_rule_count = globalSumSize(local_rule_count, comm);
       resolved.has_global_contact_constraints =
           resolved.has_global_contact_constraints || global_rule_count > 0u;
       resolved.global_prescribed_contact_rules += global_rule_count;
     }
   }
+  resolved.local_constraints = canonicalizeAcceptedWallConstraints(
+      std::move(resolved.local_constraints),
+      comm,
+      "Wall-aware level-set maintenance");
   return resolved;
 }
 
@@ -6027,8 +7214,10 @@ void assertCollectiveWallAwareRepairResult(
       require_consistent_count(result.wall_contact_constraints) &&
       require_consistent_count(result.wall_contact_cells) &&
       require_consistent_count(result.wall_contact_dofs);
-  const std::array<svmp::FE::Real, 6> metrics{
+  const std::array<svmp::FE::Real, 8> metrics{
       result.max_wall_contact_scale_residual,
+      result.max_prescribed_contact_value_residual,
+      result.max_prescribed_contact_angle_error_radians,
       result.max_contact_line_displacement,
       result.max_contact_angle_change_radians,
       result.max_unconstrained_signed_distance_error,
@@ -6185,7 +7374,8 @@ bool applyLevelSetMaintenance(
     std::span<const svmp::FE::Real> accepted_contact_stage_solution = {},
     std::vector<LevelSetVolumeCorrectionMaintenanceEvent>*
         applied_volume_corrections = nullptr,
-    const LevelSetMaintenanceCandidateValidator& validate_candidate = {})
+    const LevelSetMaintenanceCandidateValidator& validate_candidate = {},
+    const LevelSetMaintenanceStageObserver& observe_stage = {})
 {
   if (applied_volume_corrections != nullptr) {
     applied_volume_corrections->clear();
@@ -6236,6 +7426,7 @@ bool applyLevelSetMaintenance(
     }
 
     if (do_reinit) {
+      const auto before_reinitialization = fe_solution;
       const auto staged_reinitialization =
           stageLevelSetProjectionReinitialization(
               sim,
@@ -6276,6 +7467,10 @@ bool applyLevelSetMaintenance(
             << (result.wall_contact_constraints_satisfied ? "true" : "false")
             << " max_wall_contact_scale_residual="
             << result.max_wall_contact_scale_residual
+            << " max_prescribed_contact_value_residual="
+            << result.max_prescribed_contact_value_residual
+            << " max_prescribed_contact_angle_error_radians="
+            << result.max_prescribed_contact_angle_error_radians
             << " max_contact_line_displacement="
             << result.max_contact_line_displacement
             << " max_contact_angle_change_radians="
@@ -6296,6 +7491,13 @@ bool applyLevelSetMaintenance(
         }
         changed = true;
         modified_level_set_fields.insert(field);
+        if (observe_stage) {
+          observe_stage(
+              application::core::LevelSetMaintenanceWorkSubstage::
+                  Reinitialization,
+              before_reinitialization,
+              fe_solution);
+        }
         for (auto& event : staged_volume_corrections) {
           if (event.level_set_field == field) {
             event.includes_other_maintenance = true;
@@ -6351,6 +7553,10 @@ bool applyLevelSetMaintenance(
           << (result.wall_contact_constraints_satisfied ? "true" : "false")
           << " max_wall_contact_scale_residual="
           << result.max_wall_contact_scale_residual
+          << " max_prescribed_contact_value_residual="
+          << result.max_prescribed_contact_value_residual
+          << " max_prescribed_contact_angle_error_radians="
+          << result.max_prescribed_contact_angle_error_radians
           << " max_contact_line_displacement="
           << result.max_contact_line_displacement
           << " max_contact_angle_change_radians="
@@ -6361,6 +7567,7 @@ bool applyLevelSetMaintenance(
     }
 
     if (do_volume) {
+      const auto before_correction = fe_solution;
       const bool includes_other_maintenance =
           modified_level_set_fields.contains(field);
       if (!request.volume_target_initialized) {
@@ -6421,6 +7628,13 @@ bool applyLevelSetMaintenance(
         fe_solution = std::move(corrected);
         changed = true;
         modified_level_set_fields.insert(field);
+      }
+      if (observe_stage) {
+        observe_stage(
+            application::core::LevelSetMaintenanceWorkSubstage::
+                GlobalCorrection,
+            before_correction,
+            fe_solution);
       }
       std::ostringstream log;
       log << std::setprecision(17)
@@ -9385,6 +10599,79 @@ std::uint64_t acceptedVelocityExtensionMapKeyFingerprint(
   return fingerprint == 0u ? 1u : fingerprint;
 }
 
+std::optional<std::uint64_t> acceptedVelocityExtensionMapRegistryRevision(
+    const AcceptedVelocityExtensionMapRegistry& accepted_maps) noexcept
+{
+  if (accepted_maps.empty()) {
+    return std::nullopt;
+  }
+  std::uint64_t revision = 1469598103934665603ull;
+  constexpr std::uint64_t prime = 1099511628211ull;
+  const auto mix = [&](std::uint64_t value) {
+    for (std::size_t byte = 0u; byte < sizeof(value); ++byte) {
+      revision ^= (value >> (byte * 8u)) & 0xffu;
+      revision *= prime;
+    }
+  };
+  for (const auto& [key, snapshot] : accepted_maps) {
+    mix(acceptedVelocityExtensionMapKeyFingerprint(key));
+    mix(snapshot ? snapshot->revision().key() : 0u);
+  }
+  return revision == 0u ? std::optional<std::uint64_t>{1u}
+                        : std::optional<std::uint64_t>{revision};
+}
+
+std::optional<std::uint64_t> currentLevelSetVelocityExtensionRevision(
+    const svmp::FE::systems::FESystem& system,
+    const std::vector<LevelSetAdvectionVelocityRequest>& requests,
+    const AcceptedVelocityExtensionMapRegistry& accepted_maps)
+{
+  std::uint64_t revision = 1469598103934665603ull;
+  constexpr std::uint64_t prime = 1099511628211ull;
+  const auto mix = [&](std::uint64_t value) {
+    for (std::size_t byte = 0u; byte < sizeof(value); ++byte) {
+      revision ^= (value >> (byte * 8u)) & 0xffu;
+      revision *= prime;
+    }
+  };
+  bool found_current = false;
+  for (const auto& request : requests) {
+    const auto target =
+        system.findFieldByName(request.target_velocity_field_name);
+    if (target == svmp::FE::INVALID_FIELD_ID) {
+      continue;
+    }
+    const auto kernel = svmp::FE::level_set::
+        findLevelSetVelocityExtensionConstraintKernel(
+            system, request.operator_tag, target);
+    if (!kernel || !kernel->hasFrozenMap()) {
+      continue;
+    }
+    found_current = true;
+    mix(acceptedVelocityExtensionMapKeyFingerprint(
+        request.level_set_field_name));
+    mix(acceptedVelocityExtensionMapKeyFingerprint(
+        request.target_velocity_field_name));
+    mix(acceptedVelocityExtensionMapKeyFingerprint(
+        request.operator_tag));
+    mix(static_cast<std::uint64_t>(target));
+    mix(kernel->frozenMapRevision());
+  }
+  const auto resolved =
+      !found_current
+          ? acceptedVelocityExtensionMapRegistryRevision(accepted_maps)
+          : (revision == 0u
+                 ? std::optional<std::uint64_t>{1u}
+                 : std::optional<std::uint64_t>{revision});
+  const auto [minimum, maximum] = globalMinMaxUint64(
+      resolved.value_or(0u), activeFESystemCommunicator(system));
+  if (minimum != maximum) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Level-set maintenance extension-map revision differs across the FE communicator.");
+  }
+  return resolved;
+}
+
 void writeAcceptedVelocityExtensionMapArtifacts(
     const Parameters& params,
     const std::vector<AcceptedVelocityExtensionMapRecord>& records,
@@ -11913,7 +13200,75 @@ struct ConservativePhaseContactStageCandidate {
 
 using ConservativePhaseContactStageBuilder = std::function<
     ConservativePhaseContactStageCandidate(
-        std::span<const svmp::FE::Real>)>;
+        std::span<const svmp::FE::Real>,
+        LevelSetMaintenanceGeometryTransaction*)>;
+
+ConservativePhaseContactStageCandidate
+buildAcceptedFreeSurfaceContactStageCandidate(
+    application::core::SimulationComponents& sim,
+    const Parameters& params,
+    svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
+    ActiveCutContextRefreshCache& refresh_cache,
+    const std::vector<ActiveCutVolumeRequest>& active_cut_requests,
+    svmp::FE::Real stage_time,
+    svmp::FE::Real stage_alpha_f,
+    std::uint64_t previous_state_revision,
+    std::uint64_t endpoint_state_revision,
+    std::span<const svmp::FE::Real> previous_solution,
+    std::span<const svmp::FE::Real> endpoint_solution,
+    LevelSetMaintenanceGeometryTransaction* active_transaction)
+{
+  if (endpoint_solution.size() != previous_solution.size()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Contact-stage reconstruction requires equal endpoint and previous solution layouts.");
+  }
+
+  ConservativePhaseContactStageCandidate contact_stage;
+  contact_stage.stage_solution.assign(
+      endpoint_solution.size(), svmp::FE::Real{0.0});
+  for (std::size_t i = 0; i < contact_stage.stage_solution.size(); ++i) {
+    contact_stage.stage_solution[i] =
+        (svmp::FE::Real{1.0} - stage_alpha_f) * previous_solution[i] +
+        stage_alpha_f * endpoint_solution[i];
+  }
+
+  std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
+      owned_transaction;
+  if (active_transaction == nullptr) {
+    owned_transaction =
+        std::make_unique<LevelSetMaintenanceGeometryTransaction>(
+            sim, lifecycle, refresh_cache, active_cut_requests);
+    active_transaction = owned_transaction.get();
+  }
+
+  try {
+    (void)active_transaction->refresh(
+        params,
+        std::span<const svmp::FE::Real>(
+            contact_stage.stage_solution.data(),
+            contact_stage.stage_solution.size()));
+    contact_stage.stages = evaluateAcceptedFreeSurfaceContactStages(
+        sim,
+        stage_time,
+        stage_alpha_f,
+        previous_state_revision,
+        endpoint_state_revision,
+        contact_stage.stage_solution);
+    contact_stage.constraints =
+        captureAcceptedContactStageWallConstraints(
+            sim, contact_stage.stages);
+  } catch (...) {
+    const auto stage_failure = std::current_exception();
+    (void)active_transaction->refresh(params, endpoint_solution);
+    std::rethrow_exception(stage_failure);
+  }
+
+  (void)active_transaction->refresh(params, endpoint_solution);
+  if (owned_transaction) {
+    owned_transaction->commit();
+  }
+  return contact_stage;
+}
 
 struct ConservativePhaseMomentMismatch {
   svmp::FE::Real maximum_nodal_residual{0.0};
@@ -12650,7 +14005,8 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
     ActiveCutContextRefreshCache& refresh_cache,
     const std::vector<ActiveCutVolumeRequest>& active_cut_requests,
-    const ConservativePhaseContactStageBuilder& contact_stage_builder = {})
+    const ConservativePhaseContactStageBuilder& contact_stage_builder = {},
+    const LevelSetMaintenanceStageObserver& observe_stage = {})
 {
   ConservativePhaseCandidateResult result;
   if (!sim.fe_system || requests.empty()) {
@@ -12676,6 +14032,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         "[svMultiPhysics::Application] Conservative phase transport requires equal endpoint and previous FE solution layouts.");
   }
   auto candidate = result.original_solution;
+  auto raw_transport_candidate = result.original_solution;
   std::vector<svmp::FE::Real> accepted_phase_measures(
       requests.size(), std::numeric_limits<svmp::FE::Real>::quiet_NaN());
   std::vector<std::vector<svmp::FE::Real>> accepted_phase_masses(
@@ -12807,14 +14164,20 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     }
     std::vector<svmp::FE::Real> limited_phase(graph.nodes,
                                                 svmp::FE::Real{0.0});
+    std::vector<svmp::FE::Real> raw_phase(
+        graph.nodes, svmp::FE::Real{0.0});
     if (stage.correction.nodes.size() != graph.nodes) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase graph stage returned an incomplete nodal ledger.");
     }
     for (std::size_t node = 0u; node < graph.nodes; ++node) {
+      raw_phase[node] =
+          stage.correction.nodes[node].raw_target_liquid_indicator;
       limited_phase[node] =
           stage.correction.nodes[node].limited_liquid_indicator;
     }
+    assignConservativePhaseSlice(
+        system, phase_field, raw_phase, raw_transport_candidate);
     assignConservativePhaseSlice(
         system, phase_field, limited_phase, candidate);
     const auto phase_measure =
@@ -12914,7 +14277,22 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           sim, lifecycle, refresh_cache, active_cut_requests);
   try {
     const auto raw_transport_refresh_report =
+        transaction->refresh(params, raw_transport_candidate);
+    if (observe_stage) {
+      observe_stage(
+          application::core::LevelSetMaintenanceWorkSubstage::Transport,
+          result.original_solution,
+          raw_transport_candidate);
+    }
+    const auto post_limit_refresh_report =
         transaction->refresh(params, candidate);
+    if (observe_stage) {
+      observe_stage(
+          application::core::LevelSetMaintenanceWorkSubstage::
+              Limiting,
+          raw_transport_candidate,
+          candidate);
+    }
     for (std::size_t request_index = 0u;
          request_index < requests.size(); ++request_index) {
       auto& request = requests[request_index];
@@ -12935,9 +14313,12 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     }
 
     if (contact_stage_builder) {
-      result.contact_stage = contact_stage_builder(candidate);
+      result.contact_stage =
+          contact_stage_builder(candidate, transaction.get());
     }
 
+    const auto before_reinitialization_candidate = candidate;
+    bool any_reinitialization_applied = false;
     for (std::size_t request_index = 0u;
          request_index < requests.size(); ++request_index) {
       auto& request = requests[request_index];
@@ -12989,6 +14370,9 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           staged_reinitialization.repair;
       maintenance_ledger.reinitialization_applied =
           staged_reinitialization.applied;
+      any_reinitialization_applied =
+          any_reinitialization_applied ||
+          staged_reinitialization.applied;
       if (!staged_reinitialization.repair.converged) {
         application::core::oopCout()
             << "[svMultiPhysics::Application] Conservative phase candidate rejected"
@@ -13022,6 +14406,15 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
 
     const auto post_reinitialization_refresh_report =
         transaction->refresh(params, candidate);
+    if (observe_stage && any_reinitialization_applied) {
+      observe_stage(
+          application::core::LevelSetMaintenanceWorkSubstage::
+              Reinitialization,
+          before_reinitialization_candidate,
+          candidate);
+    }
+    const auto before_reconciliation_candidate = candidate;
+    bool any_reconciliation = false;
     for (std::size_t request_index = 0u;
          request_index < requests.size(); ++request_index) {
       auto& request = requests[request_index];
@@ -13053,6 +14446,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           !request.conservative_phase.reconcile_geometry) {
         continue;
       }
+      any_reconciliation = true;
       auto reconciliation = reconcileConservativePhaseGeometry(
           sim,
           request,
@@ -13105,6 +14499,13 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         result.accept_step = false;
         return result;
       }
+    }
+    if (observe_stage && any_reconciliation) {
+      observe_stage(
+          application::core::LevelSetMaintenanceWorkSubstage::
+              GeometryReconciliation,
+          before_reconciliation_candidate,
+          candidate);
     }
     for (std::size_t request_index = 0u;
          request_index < requests.size(); ++request_index) {
@@ -13182,6 +14583,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           << projection.cut_context_revision
           << " cut_context_refreshed="
           << (raw_transport_refresh_report.refreshed ||
+                      post_limit_refresh_report.refreshed ||
                       post_reinitialization_refresh_report.refreshed ||
                       reconciliation.geometry_rebuilds > 0
                   ? "true"
@@ -14189,9 +15591,19 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   svmp::FE::timestepping::TimeLoopCallbacks callbacks{};
   std::vector<svmp::FE::Real> accepted_pressure_update_previous_solution;
   AcceptedVelocityExtensionMapRegistry accepted_velocity_extension_maps;
+  application::core::LevelSetMaintenanceWorkLedger
+      level_set_maintenance_work;
+  std::uint64_t level_set_maintenance_transaction_sequence{0u};
+  std::uint64_t step_acceptance_attempt{0u};
+  std::optional<int> step_acceptance_attempt_step{};
   const auto velocity_extension_artifact_comm =
       activeFESystemCommunicator(*sim.fe_system);
   callbacks.on_step_start = [&](const svmp::FE::timestepping::TimeHistory& h) {
+    if (!step_acceptance_attempt_step.has_value() ||
+        *step_acceptance_attempt_step != h.stepIndex()) {
+      step_acceptance_attempt_step = h.stepIndex();
+      step_acceptance_attempt = 0u;
+    }
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_start step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
   };
@@ -14343,6 +15755,20 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   const auto generalized_alpha_first_order =
       svmp::FE::timestepping::utils::generalizedAlphaFirstOrderFromRhoInf(
           opts.generalized_alpha_rho_inf);
+  const bool has_conservative_phase = std::any_of(
+      level_set_maintenance.begin(),
+      level_set_maintenance.end(),
+      [](const auto& request) {
+        return request.conservative_phase.enabled;
+      });
+  const bool has_bound_preserving_maintenance = std::any_of(
+      level_set_maintenance.begin(),
+      level_set_maintenance.end(),
+      [](const auto& request) {
+        return request.bound_preserving.enabled;
+      });
+  const bool has_precommit_maintenance =
+      has_conservative_phase || has_bound_preserving_maintenance;
   const bool has_dynamic_contact_stage = std::any_of(
       sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations().begin(),
       sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations().end(),
@@ -14364,10 +15790,49 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   std::vector<svmp::FE::Real> pending_contact_stage_solution;
   ConservativePhaseCandidateResult pending_phase_candidate;
   ConservativePhaseCandidateResult accepted_phase_candidate;
+  std::size_t pending_phase_accepted_row_begin{0u};
+  std::size_t pending_phase_rejected_row_begin{0u};
+  std::size_t pending_phase_accepted_attempt_begin{0u};
+  std::size_t pending_phase_rejected_attempt_begin{0u};
+  const auto reject_pending_phase_work = [&] {
+    if (!level_set_maintenance_work.transactionActive()) {
+      return;
+    }
+    level_set_maintenance_work.rejectTransaction();
+    const auto& attempts =
+        level_set_maintenance_work.rejectedAttempts();
+    logLevelSetMaintenanceWorkAttempts(
+        std::span<const application::core::
+                            LevelSetMaintenanceWorkAttempt>(attempts)
+            .subspan(pending_phase_rejected_attempt_begin));
+    const auto& rows = level_set_maintenance_work.rejectedRows();
+    logLevelSetMaintenanceWorkRows(
+        std::span<const application::core::
+                            LevelSetMaintenanceWorkRow>(rows)
+            .subspan(pending_phase_rejected_row_begin));
+  };
+  const auto commit_pending_phase_work = [&] {
+    if (!level_set_maintenance_work.transactionActive()) {
+      return;
+    }
+    level_set_maintenance_work.commitTransaction();
+    const auto& attempts =
+        level_set_maintenance_work.acceptedAttempts();
+    logLevelSetMaintenanceWorkAttempts(
+        std::span<const application::core::
+                            LevelSetMaintenanceWorkAttempt>(attempts)
+            .subspan(pending_phase_accepted_attempt_begin));
+    const auto& rows = level_set_maintenance_work.acceptedRows();
+    logLevelSetMaintenanceWorkRows(
+        std::span<const application::core::
+                            LevelSetMaintenanceWorkRow>(rows)
+            .subspan(pending_phase_accepted_row_begin));
+  };
   callbacks.on_before_step_accept =
       [&](svmp::FE::timestepping::TimeHistory& h,
           const svmp::FE::timestepping::NewtonReport& nr) {
         (void)nr;
+        ++step_acceptance_attempt;
         pending_contact_stages.clear();
         pending_contact_stage_constraints.clear();
         pending_contact_stage_solution.clear();
@@ -14375,13 +15840,54 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           throw std::logic_error(
               "[svMultiPhysics::Application] A conservative phase candidate remained active at the start of a new acceptance attempt.");
         }
+        if (level_set_maintenance_work.transactionActive()) {
+          throw std::logic_error(
+              "[svMultiPhysics::Application] A level-set maintenance work transaction remained active at the start of a new acceptance attempt.");
+        }
         pending_phase_candidate = ConservativePhaseCandidateResult{};
         try {
+          std::vector<
+              application::core::LevelSetAuthoritativeFunctionalValue>
+              staged_phase_functionals;
+          if (has_precommit_maintenance) {
+            pending_phase_accepted_row_begin =
+                level_set_maintenance_work.acceptedRows().size();
+            pending_phase_rejected_row_begin =
+                level_set_maintenance_work.rejectedRows().size();
+            pending_phase_accepted_attempt_begin =
+                level_set_maintenance_work.acceptedAttempts().size();
+            pending_phase_rejected_attempt_begin =
+                level_set_maintenance_work.rejectedAttempts().size();
+            level_set_maintenance_work.beginTransaction(
+                application::core::LevelSetMaintenanceWorkTransaction{
+                    .transaction_id =
+                        ++level_set_maintenance_transaction_sequence,
+                    .step = static_cast<std::uint64_t>(
+                        h.stepIndex() + 1),
+                    .attempt = step_acceptance_attempt,
+                    .time = h.time() + h.dt(),
+                    .dt = h.dt(),
+                    .declared_stage =
+                        application::core::
+                            LevelSetMaintenanceDeclaredStage::
+                                ProspectiveAcceptedEndpoint,
+                    .extension_map_revision =
+                        currentLevelSetVelocityExtensionRevision(
+                            *sim.fe_system,
+                            level_set_advection_velocity,
+                            accepted_velocity_extension_maps),
+                });
+            staged_phase_functionals =
+                levelSetMaintenanceFunctionalValues(
+                    sim,
+                    evaluateCurrentFreeSurfaceDiscreteFunctionals(sim));
+          }
           const auto build_contact_stage_candidate =
-              [&](std::span<const svmp::FE::Real> endpoint_solution) {
-                ConservativePhaseContactStageCandidate contact_stage;
+              [&](std::span<const svmp::FE::Real> endpoint_solution,
+                  LevelSetMaintenanceGeometryTransaction*
+                      active_transaction) {
                 if (!has_dynamic_contact_stage) {
-                  return contact_stage;
+                  return ConservativePhaseContactStageCandidate{};
                 }
                 const svmp::FE::Real alpha_f =
                     opts.scheme == svmp::FE::timestepping::SchemeKind::
@@ -14391,38 +15897,50 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                     : svmp::FE::Real{1.0};
                 const auto previous_solution =
                     gatherFeOrderedSolution(h.uPrev());
-                if (endpoint_solution.size() != previous_solution.size()) {
-                  throw std::runtime_error(
-                      "[svMultiPhysics::Application] Contact-stage reconstruction requires equal endpoint and previous solution layouts.");
-                }
-                contact_stage.stage_solution.assign(
-                    endpoint_solution.size(), svmp::FE::Real{0.0});
-                for (std::size_t i = 0;
-                     i < contact_stage.stage_solution.size(); ++i) {
-                  contact_stage.stage_solution[i] =
-                      (svmp::FE::Real{1.0} - alpha_f) *
-                          previous_solution[i] +
-                      alpha_f * endpoint_solution[i];
-                }
-                contact_stage.stages =
-                    evaluateAcceptedFreeSurfaceContactStages(
-                        sim,
-                        static_cast<svmp::FE::Real>(h.time()) +
-                            alpha_f *
-                                static_cast<svmp::FE::Real>(h.dt()),
-                        alpha_f,
-                        h.uPrev().valueRevision(),
-                        h.u().valueRevision(),
-                        contact_stage.stage_solution);
-                contact_stage.constraints =
-                    captureAcceptedContactStageWallConstraints(
-                        sim, contact_stage.stages);
-                return contact_stage;
+                return buildAcceptedFreeSurfaceContactStageCandidate(
+                    sim,
+                    params,
+                    *cut_lifecycle,
+                    *cut_refresh_cache,
+                    transient_active_cut_requests,
+                    static_cast<svmp::FE::Real>(h.time()) +
+                        alpha_f * static_cast<svmp::FE::Real>(h.dt()),
+                    alpha_f,
+                    h.uPrev().valueRevision(),
+                    h.u().valueRevision(),
+                    previous_solution,
+                    endpoint_solution,
+                    active_transaction);
               };
           ConservativePhaseContactStageBuilder contact_stage_builder;
           if (has_dynamic_contact_stage) {
             contact_stage_builder = build_contact_stage_candidate;
           }
+          const LevelSetMaintenanceStageObserver observe_phase_stage =
+              [&](application::core::LevelSetMaintenanceWorkSubstage
+                      substage,
+                  std::span<const svmp::FE::Real> before_candidate,
+                  std::span<const svmp::FE::Real> after_candidate) {
+                const auto after_functionals =
+                    levelSetMaintenanceFunctionalValues(
+                        sim,
+                        evaluateCurrentFreeSurfaceDiscreteFunctionals(sim));
+                level_set_maintenance_work.stageRow(
+                    substage,
+                    collectiveLevelSetMaintenanceAlgebraicRevision(
+                        before_candidate,
+                        velocity_extension_artifact_comm),
+                    collectiveLevelSetMaintenanceAlgebraicRevision(
+                        after_candidate,
+                        velocity_extension_artifact_comm),
+                    staged_phase_functionals,
+                    after_functionals,
+                    currentLevelSetVelocityExtensionRevision(
+                        *sim.fe_system,
+                        level_set_advection_velocity,
+                        accepted_velocity_extension_maps));
+                staged_phase_functionals = after_functionals;
+              };
           pending_phase_candidate = applyConservativePhaseCandidates(
               sim,
               h,
@@ -14431,10 +15949,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               *cut_lifecycle,
               *cut_refresh_cache,
               transient_active_cut_requests,
-              contact_stage_builder);
+              contact_stage_builder,
+              has_conservative_phase
+                  ? observe_phase_stage
+                  : LevelSetMaintenanceStageObserver{});
           if (!pending_phase_candidate.accept_step) {
             rollbackConservativePhaseCandidate(
                 h, pending_phase_candidate);
+            reject_pending_phase_work();
             return false;
           }
           if (activePressureUpdateRejectOnTriggerEnabled() &&
@@ -14458,6 +15980,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             if (triggered) {
               rollbackConservativePhaseCandidate(
                   h, pending_phase_candidate);
+              reject_pending_phase_work();
               return false;
             }
           }
@@ -14468,7 +15991,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               const auto endpoint_solution =
                   gatherFeOrderedSolution(h.u());
               contact_stage = build_contact_stage_candidate(
-                  endpoint_solution);
+                  endpoint_solution, nullptr);
             }
             pending_contact_stages = std::move(contact_stage.stages);
             pending_contact_stage_constraints =
@@ -14480,13 +16003,49 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               sim,
               h,
               level_set_maintenance,
-              generalized_alpha_first_order.gamma);
+              generalized_alpha_first_order.gamma,
+              [&](application::core::LevelSetMaintenanceWorkSubstage
+                      substage,
+                  std::span<const svmp::FE::Real> before_candidate,
+                  std::span<const svmp::FE::Real> after_candidate) {
+                if (!pending_phase_candidate.geometry_transaction) {
+                  pending_phase_candidate.geometry_transaction =
+                      std::make_unique<
+                          LevelSetMaintenanceGeometryTransaction>(
+                          sim,
+                          *cut_lifecycle,
+                          *cut_refresh_cache,
+                          transient_active_cut_requests);
+                }
+                (void)pending_phase_candidate.geometry_transaction
+                    ->refresh(params, after_candidate);
+                const auto after_functionals =
+                    levelSetMaintenanceFunctionalValues(
+                        sim,
+                        evaluateCurrentFreeSurfaceDiscreteFunctionals(sim));
+                level_set_maintenance_work.stageRow(
+                    substage,
+                    collectiveLevelSetMaintenanceAlgebraicRevision(
+                        before_candidate,
+                        velocity_extension_artifact_comm),
+                    collectiveLevelSetMaintenanceAlgebraicRevision(
+                        after_candidate,
+                        velocity_extension_artifact_comm),
+                    staged_phase_functionals,
+                    after_functionals,
+                    currentLevelSetVelocityExtensionRevision(
+                        *sim.fe_system,
+                        level_set_advection_velocity,
+                        accepted_velocity_extension_maps));
+                staged_phase_functionals = after_functionals;
+              });
           if (!bound_result.accept_step) {
             pending_contact_stages.clear();
             pending_contact_stage_constraints.clear();
             pending_contact_stage_solution.clear();
             rollbackConservativePhaseCandidate(
                 h, pending_phase_candidate);
+            reject_pending_phase_work();
             return false;
           }
           return true;
@@ -14500,6 +16059,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 "[svMultiPhysics::Application] Conservative phase candidate rollback failed: " +
                 std::string(rollback_error.what()));
           }
+          reject_pending_phase_work();
           std::rethrow_exception(failure);
         }
       };
@@ -14510,6 +16070,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         pending_contact_stage_solution.clear();
         rollbackConservativePhaseCandidate(h, pending_phase_candidate);
         pending_phase_candidate = ConservativePhaseCandidateResult{};
+        reject_pending_phase_work();
       };
   callbacks.on_step_commit_ready =
       [&](svmp::FE::timestepping::TimeHistory& h) {
@@ -14526,6 +16087,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << (changed ? "true" : "false")
               << std::endl;
         }
+        commit_pending_phase_work();
         accepted_phase_candidate = std::move(pending_phase_candidate);
         pending_phase_candidate = ConservativePhaseCandidateResult{};
       };
@@ -14568,10 +16130,21 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           return svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
               request.volume_correction, h.stepIndex());
         });
+    const bool maintenance_work_due = std::any_of(
+        level_set_maintenance.begin(),
+        level_set_maintenance.end(),
+        [&](const auto& request) {
+          return !request.conservative_phase.enabled &&
+                 (svmp::FE::level_set::shouldReinitializeLevelSet(
+                      request.reinitialization, h.stepIndex()) ||
+                  svmp::FE::level_set::
+                      shouldApplyLevelSetVolumeCorrection(
+                          request.volume_correction, h.stepIndex()));
+        });
     std::vector<
         svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
         pre_maintenance_functionals;
-    if (volume_maintenance_due) {
+    if (maintenance_work_due || volume_maintenance_due) {
       pre_maintenance_functionals =
           evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
     }
@@ -14582,17 +16155,86 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
         maintenance_geometry_transaction;
     bool level_set_maintenance_changed = false;
+    const auto accepted_row_begin =
+        level_set_maintenance_work.acceptedRows().size();
+    const auto rejected_row_begin =
+        level_set_maintenance_work.rejectedRows().size();
+    const auto accepted_attempt_begin =
+        level_set_maintenance_work.acceptedAttempts().size();
+    const auto rejected_attempt_begin =
+        level_set_maintenance_work.rejectedAttempts().size();
+    auto staged_maintenance_functionals =
+        levelSetMaintenanceFunctionalValues(
+            sim,
+            pre_maintenance_functionals);
+    if (maintenance_work_due) {
+      level_set_maintenance_work.beginTransaction(
+          application::core::LevelSetMaintenanceWorkTransaction{
+              .transaction_id =
+                  ++level_set_maintenance_transaction_sequence,
+              .step = static_cast<std::uint64_t>(h.stepIndex()),
+              .attempt = std::max<std::uint64_t>(
+                  1u, step_acceptance_attempt),
+              .time = h.time(),
+              .dt = h.dt(),
+              .declared_stage =
+                  application::core::
+                      LevelSetMaintenanceDeclaredStage::
+                          AcceptedEndpointPostStep,
+              .extension_map_revision =
+                  currentLevelSetVelocityExtensionRevision(
+                      *sim.fe_system,
+                      level_set_advection_velocity,
+                      accepted_velocity_extension_maps),
+          });
+    }
     try {
+      const auto ensure_maintenance_geometry_transaction = [&] {
+        if (!maintenance_geometry_transaction) {
+          maintenance_geometry_transaction =
+              std::make_unique<LevelSetMaintenanceGeometryTransaction>(
+                  sim,
+                  *cut_lifecycle,
+                  *cut_refresh_cache,
+                  transient_active_cut_requests);
+        }
+      };
+      const LevelSetMaintenanceStageObserver observe_stage =
+          [&](application::core::LevelSetMaintenanceWorkSubstage
+                  substage,
+              std::span<const svmp::FE::Real> before_candidate,
+              std::span<const svmp::FE::Real> after_candidate) {
+            ensure_maintenance_geometry_transaction();
+            cut_report = maintenance_geometry_transaction->refresh(
+                params, after_candidate);
+            const auto after_functional_states =
+                evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+            auto after_functionals =
+                levelSetMaintenanceFunctionalValues(
+                    sim,
+                    after_functional_states);
+            level_set_maintenance_work.stageRow(
+                substage,
+                collectiveLevelSetMaintenanceAlgebraicRevision(
+                    before_candidate,
+                    velocity_extension_artifact_comm),
+                collectiveLevelSetMaintenanceAlgebraicRevision(
+                    after_candidate,
+                    velocity_extension_artifact_comm),
+                staged_maintenance_functionals,
+                after_functionals,
+                currentLevelSetVelocityExtensionRevision(
+                    *sim.fe_system,
+                    level_set_advection_velocity,
+                    accepted_velocity_extension_maps));
+            staged_maintenance_functionals =
+                std::move(after_functionals);
+          };
       const LevelSetMaintenanceCandidateValidator validate_candidate =
           [&](std::span<const svmp::FE::Real> candidate,
               std::span<const LevelSetVolumeCorrectionMaintenanceEvent>
                   staged_volume_corrections) {
-            maintenance_geometry_transaction =
-                std::make_unique<LevelSetMaintenanceGeometryTransaction>(
-                    sim,
-                    *cut_lifecycle,
-                    *cut_refresh_cache,
-                    transient_active_cut_requests);
+            ensure_maintenance_geometry_transaction();
             cut_report = maintenance_geometry_transaction->refresh(
                 params, candidate);
             if (!staged_volume_corrections.empty()) {
@@ -14614,7 +16256,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           pending_contact_stage_constraints,
           pending_contact_stage_solution,
           &applied_volume_corrections,
-          validate_candidate);
+          validate_candidate,
+          observe_stage);
       if (maintenance_geometry_transaction) {
         maintenance_geometry_transaction->commit();
         oopCout()
@@ -14623,9 +16266,25 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             << " step=" << h.stepIndex()
             << " outcome=committed"
             << " geometry_validated_before_commit=true"
-            << " accepted_state_change=true"
+            << " accepted_state_change="
+            << (level_set_maintenance_changed ? "true" : "false")
             << " volume_corrections="
             << applied_volume_corrections.size() << std::endl;
+      }
+      if (level_set_maintenance_work.transactionActive()) {
+        level_set_maintenance_work.commitTransaction();
+        const auto& accepted_attempts =
+            level_set_maintenance_work.acceptedAttempts();
+        logLevelSetMaintenanceWorkAttempts(
+            std::span<const application::core::
+                                LevelSetMaintenanceWorkAttempt>(
+                accepted_attempts).subspan(accepted_attempt_begin));
+        const auto& accepted_rows =
+            level_set_maintenance_work.acceptedRows();
+        logLevelSetMaintenanceWorkRows(
+            std::span<const
+                application::core::LevelSetMaintenanceWorkRow>(
+                accepted_rows).subspan(accepted_row_begin));
       }
     } catch (...) {
       const auto failure = std::current_exception();
@@ -14643,14 +16302,32 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           << "[svMultiPhysics::Application] Level-set maintenance transaction"
           << " diagnostic=level_set_maintenance_transaction"
           << " step=" << h.stepIndex()
-          << " outcome=rolled_back"
+          << " outcome="
+          << (rollback_failure.empty() ? "rolled_back"
+                                       : "rollback_failed")
           << " accepted_state_change=false"
           << " geometry_state_restored="
           << (rollback_failure.empty() ? "true" : "false")
           << std::endl;
+      if (rollback_failure.empty() &&
+          level_set_maintenance_work.transactionActive()) {
+        level_set_maintenance_work.rejectTransaction();
+        const auto& rejected_attempts =
+            level_set_maintenance_work.rejectedAttempts();
+        logLevelSetMaintenanceWorkAttempts(
+            std::span<const application::core::
+                                LevelSetMaintenanceWorkAttempt>(
+                rejected_attempts).subspan(rejected_attempt_begin));
+        const auto& rejected_rows =
+            level_set_maintenance_work.rejectedRows();
+        logLevelSetMaintenanceWorkRows(
+            std::span<const
+                application::core::LevelSetMaintenanceWorkRow>(
+                rejected_rows).subspan(rejected_row_begin));
+      }
       if (!rollback_failure.empty()) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set maintenance rollback failed after candidate rejection: " +
+            "[svMultiPhysics::Application] Level-set maintenance rollback failed after candidate failure: " +
             rollback_failure);
       }
       std::rethrow_exception(failure);
