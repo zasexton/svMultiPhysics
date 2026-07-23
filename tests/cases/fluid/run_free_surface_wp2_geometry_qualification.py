@@ -284,6 +284,7 @@ def load_registry(path: Path) -> dict[str, Any]:
     group_ids: set[str] = set()
     test_names: set[str] = set()
     test_groups: dict[str, dict[str, Any]] = {}
+    recorded_property_keys: set[tuple[str, str]] = set()
     for group in groups:
         group_id = group.get("id")
         if (
@@ -302,9 +303,18 @@ def load_registry(path: Path) -> dict[str, Any]:
             raise ValueError(f"unsupported binary key in group {group_id}")
         ranks = group.get("mpi_ranks")
         copies = group.get("gtest_output_copies")
-        if not isinstance(ranks, int) or ranks <= 0:
+        if (
+            not isinstance(ranks, int)
+            or isinstance(ranks, bool)
+            or ranks <= 0
+        ):
             raise ValueError(f"group {group_id} needs positive mpi_ranks")
-        if not isinstance(copies, int) or copies <= 0 or copies > ranks:
+        if (
+            not isinstance(copies, int)
+            or isinstance(copies, bool)
+            or copies <= 0
+            or copies > ranks
+        ):
             raise ValueError(
                 f"group {group_id} needs gtest_output_copies in [1, mpi_ranks]"
             )
@@ -324,9 +334,75 @@ def load_registry(path: Path) -> dict[str, Any]:
             test_groups[name] = group
         execution = group.get("execution", {})
         for key in ("wall_time_seconds", "memory_mib", "output_mib"):
-            if not isinstance(execution.get(key), int) or execution[key] <= 0:
+            if (
+                not isinstance(execution.get(key), int)
+                or isinstance(execution.get(key), bool)
+                or execution[key] <= 0
+            ):
                 raise ValueError(
                     f"group {group_id} execution envelope {key} must be positive"
+                )
+        recorded_properties = group.get("recorded_properties", [])
+        if not isinstance(recorded_properties, list):
+            raise ValueError(f"group {group_id} recorded properties must be a list")
+        for contract in recorded_properties:
+            if not isinstance(contract, dict):
+                raise ValueError(
+                    f"group {group_id} recorded property must be an object"
+                )
+            contract_keys = set(contract)
+            common_keys = {"property", "type", "relation", "threshold"}
+            if contract_keys == common_keys:
+                if len(tests) != 1:
+                    raise ValueError(
+                        f"group {group_id} must name the test for each"
+                        " recorded property"
+                    )
+                test = tests[0]
+            elif contract_keys == common_keys | {"test"}:
+                test = contract["test"]
+                if not isinstance(test, str) or test not in tests:
+                    raise ValueError(
+                        f"group {group_id} recorded property cites a test outside"
+                        " the group"
+                    )
+            else:
+                raise ValueError(
+                    f"group {group_id} recorded property has unexpected keys"
+                )
+            property_name = contract["property"]
+            value_type = contract["type"]
+            relation = contract["relation"]
+            threshold = contract["threshold"]
+            if (
+                not isinstance(property_name, str)
+                or not property_name
+                or property_name in GTEST_RESULT_FIELDS
+            ):
+                raise ValueError(
+                    f"group {group_id} has an invalid recorded property name"
+                )
+            property_key = (test, property_name)
+            if property_key in recorded_property_keys:
+                raise ValueError(f"duplicate recorded property: {test}.{property_name}")
+            recorded_property_keys.add(property_key)
+            if not isinstance(value_type, str) or value_type not in QUANTITATIVE_TYPES:
+                raise ValueError(f"unsupported recorded property type: {value_type}")
+            if not isinstance(relation, str) or relation not in QUANTITATIVE_RELATIONS:
+                raise ValueError(f"unsupported recorded property relation: {relation}")
+            if value_type == "integer":
+                valid_threshold = isinstance(threshold, int) and not isinstance(
+                    threshold, bool
+                )
+            else:
+                valid_threshold = (
+                    isinstance(threshold, (int, float))
+                    and not isinstance(threshold, bool)
+                    and math.isfinite(threshold)
+                )
+            if not valid_threshold:
+                raise ValueError(
+                    f"invalid {value_type} threshold for {test}.{property_name}"
                 )
     if gates.get("expected_distinct_test_count") != len(test_names):
         raise ValueError("expected distinct test count does not match the frozen list")
@@ -564,6 +640,115 @@ def evaluate_quantitative_evidence(
     }
 
 
+def evaluate_group_recorded_properties(
+    registry: dict[str, Any], output_root: Path
+) -> dict[str, Any]:
+    declarations: list[dict[str, Any]] = []
+    for group in registry["groups"]:
+        for contract in group.get("recorded_properties", []):
+            declarations.append(
+                {
+                    **contract,
+                    "test": contract.get("test", group["tests"][0]),
+                    "group_id": group["id"],
+                    "mpi_ranks": group["mpi_ranks"],
+                }
+            )
+    declarations.sort(
+        key=lambda contract: (
+            contract["group_id"],
+            contract["test"],
+            contract["property"],
+        )
+    )
+
+    flattened_by_group: dict[str, dict[str, dict[str, Any]] | None] = {}
+    diagnostics_by_group: dict[str, str | None] = {}
+    result_path_by_group: dict[str, str] = {}
+    checks: list[dict[str, Any]] = []
+    for contract in declarations:
+        group_id = contract["group_id"]
+        result_name = (
+            "gtest.json" if contract["mpi_ranks"] == 1 else "gtest_rank_0.json"
+        )
+        relative_result_path = f"groups/{group_id}/{result_name}"
+        if group_id not in flattened_by_group:
+            result_path_by_group[group_id] = relative_result_path
+            result_path = output_root / relative_result_path
+            if not result_path.is_file():
+                flattened_by_group[group_id] = None
+                diagnostics_by_group[group_id] = "gtest_result_missing"
+            else:
+                try:
+                    document = json.loads(result_path.read_text(encoding="utf-8"))
+                    if not isinstance(document, dict):
+                        raise ValueError("gtest result is not an object")
+                    flattened_by_group[group_id] = flatten_gtest(document)
+                    diagnostics_by_group[group_id] = None
+                except (
+                    AttributeError,
+                    json.JSONDecodeError,
+                    OSError,
+                    RecursionError,
+                    TypeError,
+                    ValueError,
+                ):
+                    flattened_by_group[group_id] = None
+                    diagnostics_by_group[group_id] = "gtest_result_invalid"
+
+        result = flattened_by_group[group_id]
+        diagnostic = diagnostics_by_group[group_id]
+        test_result = result.get(contract["test"]) if result is not None else None
+        if diagnostic is None and test_result is None:
+            diagnostic = "test_result_missing"
+        property_name = contract["property"]
+        raw_value = (
+            test_result.get(property_name)
+            if test_result is not None and property_name in test_result
+            else None
+        )
+        if (
+            diagnostic is None
+            and test_result is not None
+            and property_name not in test_result
+        ):
+            diagnostic = "property_missing"
+        actual = None
+        if diagnostic is None:
+            actual, diagnostic = coerce_quantitative_value(raw_value, contract["type"])
+        passed = False
+        if diagnostic is None:
+            passed = quantitative_relation_passes(
+                actual, contract["relation"], contract["threshold"]
+            )
+            if not passed:
+                diagnostic = "relation_not_satisfied"
+        checks.append(
+            {
+                "test": contract["test"],
+                "property": property_name,
+                "type": contract["type"],
+                "relation": contract["relation"],
+                "threshold": contract["threshold"],
+                "group_id": group_id,
+                "gtest_result": result_path_by_group[group_id],
+                "result_rank": 0 if contract["mpi_ranks"] > 1 else None,
+                "raw_value": raw_value,
+                "actual": actual,
+                "diagnostic": diagnostic,
+                "passed": passed,
+            }
+        )
+    passed_count = sum(1 for check in checks if check["passed"])
+    return {
+        "artifact_schema_version": 1,
+        "declared_check_count": len(checks),
+        "passed_check_count": passed_count,
+        "checks": checks,
+        "outcome": "PASS" if passed_count == len(checks) else "FAIL_METHOD",
+    }
+
+
 def evaluate_serial_result(
     expected_tests: list[str],
     document: dict[str, Any],
@@ -676,6 +861,70 @@ def evaluate_mpi_result(
             )
         )
     return checks
+
+
+def evaluate_mpi_gtest_results(
+    group_directory: Path,
+    expected_tests: list[str],
+    ranks: int,
+    gates: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    expected_names = sorted(f"gtest_rank_{rank}.json" for rank in range(ranks))
+    observed_names = sorted(
+        path.name for path in group_directory.glob("gtest_rank_*.json")
+    )
+    checks = [equal_check("mpi_gtest_result_files", observed_names, expected_names)]
+    records: list[dict[str, Any]] = []
+    for rank in range(ranks):
+        name = f"gtest_rank_{rank}.json"
+        path = group_directory / name
+        relative_path = f"groups/{group_directory.name}/{name}"
+        present = path.is_file()
+        checks.append(equal_check(f"mpi_gtest_result_present:{rank}", present, True))
+        valid = False
+        error_name: str | None = None
+        document: dict[str, Any] | None = None
+        if present:
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(loaded, dict):
+                    raise ValueError("MPI gtest result is not an object")
+                document = loaded
+                flatten_gtest(document)
+                valid = True
+            except (
+                AttributeError,
+                json.JSONDecodeError,
+                OSError,
+                RecursionError,
+                TypeError,
+                ValueError,
+            ) as error:
+                error_name = type(error).__name__
+        checks.append(equal_check(f"mpi_gtest_result_valid:{rank}", valid, True))
+        if document is not None and valid:
+            for document_check in evaluate_serial_result(
+                expected_tests,
+                document,
+                0,
+                None,
+                gates,
+            ):
+                document_check["metric"] = (
+                    f"mpi_gtest_rank_{rank}:{document_check['metric']}"
+                )
+                checks.append(document_check)
+        records.append(
+            {
+                "rank": rank,
+                "gtest_result": relative_path,
+                "present": present,
+                "valid": valid,
+                "error": error_name,
+                "sha256": sha256_file(path) if present else None,
+            }
+        )
+    return checks, records
 
 
 def directory_size(path: Path) -> int:
@@ -1723,14 +1972,28 @@ def run_gtest_group(
         ]
     else:
         gtest_path = None
+        rank_wrapper = (
+            'rank_value="${OMPI_COMM_WORLD_RANK:-'
+            "${PMI_RANK:-${PMIX_RANK:-${MV2_COMM_WORLD_RANK:-"
+            '${SLURM_PROCID:-}}}}}"; '
+            'case "$rank_value" in ""|*[!0-9]*) '
+            'echo "invalid or missing MPI rank" >&2; exit 97;; esac; '
+            'exec "$1" "$2" "$3" '
+            '"--gtest_output=json:${4}/gtest_rank_${rank_value}.json"'
+        )
         command = [
             str(mpiexec),
             "--oversubscribe",
             "-n",
             str(ranks),
+            "/bin/sh",
+            "-c",
+            rank_wrapper,
+            "qualification-rank",
             str(binary),
             f"--gtest_filter={test_filter}",
             "--gtest_color=no",
+            str(group_directory),
         ]
     environment = os.environ.copy()
     environment.update(
@@ -1758,6 +2021,7 @@ def run_gtest_group(
     stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
     diagnostic: str | None = None
     gtest_result_error: str | None = None
+    mpi_gtest_results: list[dict[str, Any]] = []
     if ranks == 1 and gtest_path is not None and gtest_path.is_file():
         try:
             document = json.loads(gtest_path.read_text(encoding="utf-8"))
@@ -1805,6 +2069,15 @@ def run_gtest_group(
             resources["termination_reason"],
             gates,
         )
+        mpi_gtest_checks, mpi_gtest_results = evaluate_mpi_gtest_results(
+            group_directory,
+            group["tests"],
+            ranks,
+            gates,
+        )
+        checks.extend(mpi_gtest_checks)
+        if not all(check["passed"] for check in mpi_gtest_checks):
+            diagnostic = "mpi_gtest_result_contract_failed"
     checks.append(
         equal_check(
             "resource_monitoring_outcome",
@@ -1833,6 +2106,7 @@ def run_gtest_group(
         "resources": resources,
         "diagnostic": diagnostic,
         "gtest_result_error": gtest_result_error,
+        "mpi_gtest_results": mpi_gtest_results,
         "checks": checks,
         "outcome": "PASS" if passed else "FAIL_METHOD",
     }
@@ -2202,6 +2476,13 @@ def main() -> int:
     ]
     quantitative_result = evaluate_quantitative_evidence(registry, output_directory)
     write_json(output_directory / "quantitative_evidence.json", quantitative_result)
+    recorded_properties_result = evaluate_group_recorded_properties(
+        registry, output_directory
+    )
+    write_json(
+        output_directory / "group_recorded_properties.json",
+        recorded_properties_result,
+    )
     groups_passed = all(result["outcome"] == "PASS" for result in group_results)
     final_provenance = final_provenance_record(
         source_root,
@@ -2219,6 +2500,7 @@ def main() -> int:
     passed = (
         groups_passed
         and quantitative_result["outcome"] == "PASS"
+        and recorded_properties_result["outcome"] == "PASS"
         and final_provenance["outcome"] == "PASS"
     )
     summary = {
@@ -2230,6 +2512,10 @@ def main() -> int:
         },
         "quantitative_evidence_outcome": quantitative_result["outcome"],
         "quantitative_evidence_check_count": quantitative_result[
+            "declared_check_count"
+        ],
+        "group_recorded_properties_outcome": recorded_properties_result["outcome"],
+        "group_recorded_properties_check_count": recorded_properties_result[
             "declared_check_count"
         ],
         "final_provenance_outcome": final_provenance["outcome"],
@@ -2249,6 +2535,9 @@ def main() -> int:
         "- Quantitative evidence: "
         f"**{quantitative_result['outcome']}** "
         f"({quantitative_result['declared_check_count']} checks)",
+        "- Group recorded properties: "
+        f"**{recorded_properties_result['outcome']}** "
+        f"({recorded_properties_result['declared_check_count']} checks)",
         f"- Final provenance: **{final_provenance['outcome']}**",
         "",
         registry["qualification_scope"] + ".",
