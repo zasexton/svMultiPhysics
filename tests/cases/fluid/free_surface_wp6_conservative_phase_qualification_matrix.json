@@ -1,0 +1,614 @@
+{
+  "schema_version": 1,
+  "matrix_id": "free_surface_wp6_conservative_phase_prerequisite_v1",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "work_package": "WP-6",
+  "findings": [
+    "FSR-06"
+  ],
+  "qualification_scope": "Low-level WP-6 prerequisite evidence only; this matrix does not close FSR-06, WP-6, or Q3.",
+  "closure_request_policy": {
+    "accepted_claim": "low_level_prerequisite",
+    "rejected_claims": [
+      "fsr06_closure",
+      "wp6_closure",
+      "q3_closure"
+    ],
+    "diagnostic": "The frozen low-level slice cannot establish the complete release refinement campaign, extension-field sweep, production maintenance comparison, momentum consistency, or smooth-dynamics closure."
+  },
+  "model_envelope": "one_phase_p1_mass_lumped_nodal_liquid_indicator_with_algebraic_edge_flux_correction",
+  "method_contract": {
+    "conserved_unknown": "nodal liquid indicator q with zero-to-one invariant bounds",
+    "declared_phase_measure": "sum of lumped nodal control volume times q",
+    "spatial_discretization": "continuous P1 graph with symmetric low-order graph viscosity and pairwise algebraic-edge antidiffusive flux correction",
+    "interior_flux_contract": "each canonical algebraic edge is stored once and its accepted pair transfer cancels exactly",
+    "physical_boundary_contract": "physical boundary transfer is retained separately in every nodal and component balance",
+    "divergence_contract": "the explicit discrete q times divergence source is retained and must vanish for a divergence-compatible advecting field",
+    "component_contract": "deterministic connected supports and subthreshold support retain raw, limited, boundary, divergence, and balance entries",
+    "geometry_contract": "the level set is provisional geometry while q is the phase-measure authority for local geometry reconciliation"
+  },
+  "maintenance_transaction_contract": [
+    "stage conservative transport without mutating accepted history",
+    "retain raw transport and every maintenance-stage ledger",
+    "reinitialize only when requested",
+    "perform local geometry reconciliation against the transported phase measure",
+    "validate Courant, bounds, component balance, displacement, contact protection, and geometry revisions",
+    "commit state, history, geometry, revisions, and artifacts together",
+    "restore raw candidate, accepted history, geometry, and revisions on any rejection"
+  ],
+  "global_shift_contract": {
+    "classification": "reported emergency fallback",
+    "may_establish_transport_conservation": false,
+    "required_visibility": [
+      "raw pre-correction drift",
+      "imposed geometry shift",
+      "applied correction shift",
+      "post-correction drift",
+      "iteration count"
+    ]
+  },
+  "numeric_threshold_basis": {
+    "algebraic_balance": "The selected tests enforce edge cancellation and nodal, component, and global balance at absolute tolerances between 1e-14 and 2e-11.",
+    "boundedness": "The selected tests enforce declared nodal bounds and reject an unsafe Courant stage or an unbounded low-order predictor.",
+    "modest_grid_shapes": "The 2D smoke bounds are the pre-existing fixed-test limits: translating and distorted-drop L1 below 0.08, Zalesak below 0.12, reversible deformation below 0.10, and wall film below 0.06.",
+    "modest_grid_measure": "Raw measure thresholds are 1e-8 for translation and reversible deformation, 1e-4 for the 3D and Zalesak smokes, 1e-7 for the wall film, and 1e-6 for separated drops.",
+    "separated_refinement": "The existing independent 2D studies require spatial orders above 0.35 and temporal orders above 0.5; these low-level values do not replace the frozen 18-point release gates.",
+    "emergency_correction": "The correction isolation test requires nonzero injected raw drift, pointwise geometry agreement, greater-than-first-order target-volume convergence, and post-correction drift at or below 1e-10.",
+    "distributed_scope": "The tracked distributed operator and artifact tests require exactly two ranks; no four-rank result is claimed."
+  },
+  "build_targets": {
+    "geometry": "test_fe_geometry",
+    "level_set": "test_fe_levelset",
+    "systems": "test_fe_systems",
+    "assembly": "test_fe_assembly",
+    "physics": "test_physics",
+    "application": "test_application",
+    "assembly_mpi": "test_fe_levelset_mpi",
+    "application_mpi": "test_application_mpi"
+  },
+  "build_cmake_homes": {
+    "geometry": "Code/Source/solver/FE",
+    "level_set": "Code/Source/solver/FE",
+    "systems": "Code/Source/solver/FE",
+    "assembly": "Code/Source/solver/FE",
+    "physics": "Code/Source/solver/Physics",
+    "application": "Code",
+    "assembly_mpi": "Code/Source/solver/FE",
+    "application_mpi": "Code"
+  },
+  "groups": [
+    {
+      "id": "phase_flux_algebra_serial",
+      "binary": "level_set",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "LevelSetConservativePhaseArtifact.AtomicallyWritesTheCompleteAcceptedStageAndRefusesReplacement",
+        "LevelSetConservativePhaseOperator.AssemblesExactUnitTriangleMassAndGradientCoefficients",
+        "LevelSetConservativePhaseOperator.UsesPointwiseMappingAndClosesIdentitiesOnADistortedQuadrilateral",
+        "LevelSetConservativePhaseOperator.PreservesAConstantWithVariableVelocityByBoundaryDivergenceCancellation",
+        "LevelSetConservativePhaseOperator.LimitsTheLumpedCentralTargetWithoutChangingExternalPhaseBalance",
+        "LevelSetConservativePhaseOperator.RejectsAnUnsafeTimeStepAndAFieldOutsideTheP1Contract",
+        "LevelSetConservativePhaseRegions.ReconstructsFilmSheetAndRimCrossingFluxes",
+        "LevelSetConservativePhaseRegions.RejectsAmbiguousOrMalformedMembership",
+        "LevelSetConservativePhaseRegions.EveryControlVolumeSubsetClosesAgainstItsCrossingEdges",
+        "LevelSetConservativePhaseRegions.ParsesAndEvaluatesPredeclaredEulerianBoxes",
+        "LevelSetConservativePhaseRegions.ExplicitlyClassifiesOnlyNonprimaryResolvedComponentsAsSatellites",
+        "LevelSetConservativePhaseState.ProjectsExactRetainedMomentsAndComplementOnACutTriangle",
+        "LevelSetConservativePhaseState.RejectsMissingCutProvenanceAndAStaleGraph",
+        "LevelSetConservativePhaseState.UsesPointwiseGeometryAndClosesComplementOnADistortedQuadrilateral",
+        "LevelSetConservativePhaseState.InterfaceSensitivityMatchesFiniteDifferencesAndItsScalingNullMode",
+        "LevelSetConservativePhaseState.SolvesTheRepresentableLocalMomentUpdateAndRejectsAPureScalingTarget",
+        "LevelSetConservativePhaseTransport.PreservesAConstantThroughClosedInteriorCirculations",
+        "LevelSetConservativePhaseTransport.LimitsAnOvershootWithOneSymmetricConservativeEdgeFactor",
+        "LevelSetConservativePhaseTransport.LimitsNegativeTransfersAndSharesAReceivingNodeBudget",
+        "LevelSetConservativePhaseTransport.EnforcesNodalBoundsTighterThanTheUnitInterval",
+        "LevelSetConservativePhaseTransport.ClosesLocalBalancesWithBoundaryAndDivergenceContributions",
+        "LevelSetConservativePhaseTransport.RejectsMalformedGraphsAndAnUnboundedLowOrderPredictor",
+        "LevelSetConservativePhaseTransport.RequiresAnExplicitWaiverForBoundaryDrivenConstantChange",
+        "LevelSetConservativePhaseTransport.TracksDisconnectedPhaseSupportsAndTheirBoundaryTransfers",
+        "LevelSetConservativePhaseTransport.RejectsInvalidNodalStageData"
+      ],
+      "execution": {
+        "wall_time_seconds": 900,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    },
+    {
+      "id": "phase_transport_modest_grid_serial",
+      "binary": "level_set",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "LevelSetConservativePhaseBenchmarks.TranslatingDiskConservesAndRefines",
+        "LevelSetConservativePhaseBenchmarks.DistortedMeshTranslatingDiskConservesAndRefines",
+        "LevelSetConservativePhaseBenchmarks.TranslatingDiskSeparatesSpaceAndTimeRefinement",
+        "LevelSetConservativePhaseBenchmarks.ThreeDimensionalReversibleDeformationSmoke",
+        "LevelSetConservativePhaseBenchmarks.ThreeDimensionalGraphClosesMeasureAtReleaseEntryResolution",
+        "LevelSetConservativePhaseBenchmarks.RotatesASlottedDiskThroughOnePeriod",
+        "LevelSetConservativePhaseBenchmarks.ReversibleDeformationReturnsWithoutMassDrift",
+        "LevelSetConservativePhaseBenchmarks.AdvectsAThinWallFilmTangentially",
+        "LevelSetConservativePhaseBenchmarks.KeepsSeparatedDropsInDistinctFluxComponents"
+      ],
+      "execution": {
+        "wall_time_seconds": 1800,
+        "memory_mib": 6144,
+        "output_mib": 256
+      }
+    },
+    {
+      "id": "emergency_global_shift_accounting_serial",
+      "binary": "level_set",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift"
+      ],
+      "execution": {
+        "wall_time_seconds": 900,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    },
+    {
+      "id": "phase_maintenance_transaction_serial",
+      "binary": "application",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "ApplicationDriverConservativePhaseCandidatesTest.InitializesEveryHistoryLevelAndOnlyItsRateSlices",
+        "ApplicationDriverConservativePhaseCandidatesTest.StagesAndCommitsTheTransportedPhaseAgainstAuthoritativeGeometry",
+        "ApplicationDriverConservativePhaseCandidatesTest.TransportOnlyKeepsAnAlreadyConsistentGeometryUnchanged",
+        "ApplicationDriverConservativePhaseCandidatesTest.ReconciliationOnlyRepairsTransportedGeometryLocally",
+        "ApplicationDriverConservativePhaseCandidatesTest.ReinitializesBeforeLocalReconciliationAndRetainsEveryStage",
+        "ApplicationDriverConservativePhaseCandidatesTest.WritesFluxArtifactOnlyAfterAnAcceptedCadenceStep",
+        "ApplicationDriverConservativePhaseCandidatesTest.NonconvergedReinitializationRejectsAndRestoresGeometry",
+        "ApplicationDriverConservativePhaseCandidatesTest.PostAcceptanceMaintenanceDoesNotRepeatCandidateOwnedRepair",
+        "ApplicationDriverConservativePhaseCandidatesTest.ContactParentProtectionRejectsAnIncompatibleGeometryTarget",
+        "ApplicationDriverConservativePhaseCandidatesTest.LaterRejectionRestoresTheRawCandidateAndEveryGeometryRevision",
+        "ApplicationDriverConservativePhaseCandidatesTest.CourantRejectionLeavesTheRawCandidateAndGeometryUntouched",
+        "ApplicationDriverConservativePhaseCandidatesTest.GeometryDisplacementRejectionLeavesTheRawCandidateAndGeometryUntouched"
+      ],
+      "execution": {
+        "wall_time_seconds": 1800,
+        "memory_mib": 6144,
+        "output_mib": 256
+      }
+    },
+    {
+      "id": "phase_operator_partition_mpi",
+      "binary": "assembly_mpi",
+      "mpi_ranks": 2,
+      "gtest_output_copies": 2,
+      "tests": [
+        "LevelSetConservativePhaseOperatorMPI.MergesOwnedCellFragmentsAndTransportsAcrossThePartition",
+        "LevelSetConservativePhaseOperatorMPI.ReportsTheSameOwnedCellAssemblyFailureOnEveryRank",
+        "LevelSetConservativePhaseOperatorMPI.ReportsRankLocalPreflightFailureWithoutStrandingPeers"
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    },
+    {
+      "id": "phase_artifact_collective_mpi",
+      "binary": "application_mpi",
+      "mpi_ranks": 2,
+      "gtest_output_copies": 2,
+      "tests": [
+        "ApplicationDriverLevelSetWorkflowsMPI.ConservativePhaseArtifactPublishesOnceAfterCollectivePreflight"
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    }
+  ],
+  "quantitative_evidence": [
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.TranslatingDiskConservesAndRefines",
+      "property": "coupled_l1_N64",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.08
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.TranslatingDiskConservesAndRefines",
+      "property": "coupled_centroid_error_N64",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.01
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.TranslatingDiskConservesAndRefines",
+      "property": "coupled_measure_error_N64",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-8
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.TranslatingDiskConservesAndRefines",
+      "property": "coupled_accounted_balance_error_N64",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-11
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedMeshTranslatingDiskConservesAndRefines",
+      "property": "distorted_l1_N64",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.08
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedMeshTranslatingDiskConservesAndRefines",
+      "property": "distorted_centroid_error_N64",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.01
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedMeshTranslatingDiskConservesAndRefines",
+      "property": "distorted_measure_error_N64",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-8
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.TranslatingDiskSeparatesSpaceAndTimeRefinement",
+      "property": "space_l1_order_16_to_32",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0.35
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.TranslatingDiskSeparatesSpaceAndTimeRefinement",
+      "property": "space_l1_order_32_to_64",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0.35
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.TranslatingDiskSeparatesSpaceAndTimeRefinement",
+      "property": "time_l1_order_32_to_64_steps",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0.5
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.TranslatingDiskSeparatesSpaceAndTimeRefinement",
+      "property": "time_l1_order_64_to_128_steps",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0.5
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.TranslatingDiskSeparatesSpaceAndTimeRefinement",
+      "property": "space_measure_error_N64",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-8
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.TranslatingDiskSeparatesSpaceAndTimeRefinement",
+      "property": "time_measure_error_steps128",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-8
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.ThreeDimensionalReversibleDeformationSmoke",
+      "property": "three_dimensional_smoke_l1",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.12
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.ThreeDimensionalReversibleDeformationSmoke",
+      "property": "three_dimensional_smoke_measure_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 0.0001
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.ThreeDimensionalReversibleDeformationSmoke",
+      "property": "three_dimensional_smoke_maximum_courant",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 0.800000000002
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.ThreeDimensionalReversibleDeformationSmoke",
+      "property": "three_dimensional_smoke_steps",
+      "type": "integer",
+      "relation": "greater_than_or_equal",
+      "threshold": 1
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.ThreeDimensionalGraphClosesMeasureAtReleaseEntryResolution",
+      "property": "three_dimensional_graph_nodes",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 35937
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.ThreeDimensionalGraphClosesMeasureAtReleaseEntryResolution",
+      "property": "three_dimensional_graph_edges",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.RotatesASlottedDiskThroughOnePeriod",
+      "property": "zalesak_l1",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.12
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.RotatesASlottedDiskThroughOnePeriod",
+      "property": "zalesak_measure_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 0.0001
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.RotatesASlottedDiskThroughOnePeriod",
+      "property": "zalesak_accounted_balance_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-11
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.RotatesASlottedDiskThroughOnePeriod",
+      "property": "zalesak_minimum_components",
+      "type": "integer",
+      "relation": "greater_than_or_equal",
+      "threshold": 1
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.ReversibleDeformationReturnsWithoutMassDrift",
+      "property": "deformation_l1",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.1
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.ReversibleDeformationReturnsWithoutMassDrift",
+      "property": "deformation_measure_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-8
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.ReversibleDeformationReturnsWithoutMassDrift",
+      "property": "deformation_accounted_balance_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-11
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.AdvectsAThinWallFilmTangentially",
+      "property": "wall_film_l1",
+      "type": "real",
+      "relation": "less_than",
+      "threshold": 0.06
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.AdvectsAThinWallFilmTangentially",
+      "property": "wall_film_measure_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-7
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.AdvectsAThinWallFilmTangentially",
+      "property": "wall_film_centroid_x_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 0.015
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.AdvectsAThinWallFilmTangentially",
+      "property": "wall_film_centroid_y_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 0.002
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.KeepsSeparatedDropsInDistinctFluxComponents",
+      "property": "separated_drops_measure_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-6
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.KeepsSeparatedDropsInDistinctFluxComponents",
+      "property": "separated_drops_accounted_balance_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-11
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.KeepsSeparatedDropsInDistinctFluxComponents",
+      "property": "separated_drops_minimum_components",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 2
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.KeepsSeparatedDropsInDistinctFluxComponents",
+      "property": "separated_drops_maximum_components",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 2
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.KeepsSeparatedDropsInDistinctFluxComponents",
+      "property": "separated_drops_centroid_x_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 0.015
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift",
+      "property": "runtime_target_measure_order_12_to_24",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 1
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift",
+      "property": "runtime_target_measure_order_24_to_48",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 1
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift",
+      "property": "runtime_maximum_snapshot_measure_difference",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-11
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift",
+      "property": "runtime_minimum_absolute_pre_correction_drift",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 1e-8
+    },
+    {
+      "test": "LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift",
+      "property": "runtime_maximum_absolute_post_correction_drift",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    }
+  ],
+  "gates": {
+    "expected_group_count": 6,
+    "expected_distinct_test_count": 51,
+    "expected_quantitative_evidence_count": 40,
+    "expected_failures": 0,
+    "expected_errors": 0,
+    "expected_disabled": 0,
+    "expected_skipped": 0
+  },
+  "closure_contract": [
+    {
+      "claim": "low_level_indicator_flux_and_limiter_balance_contract",
+      "evidence": [
+        "LevelSetConservativePhaseTransport.PreservesAConstantThroughClosedInteriorCirculations",
+        "LevelSetConservativePhaseTransport.LimitsAnOvershootWithOneSymmetricConservativeEdgeFactor",
+        "LevelSetConservativePhaseTransport.ClosesLocalBalancesWithBoundaryAndDivergenceContributions",
+        "LevelSetConservativePhaseTransport.TracksDisconnectedPhaseSupportsAndTheirBoundaryTransfers"
+      ]
+    },
+    {
+      "claim": "low_level_geometry_aware_graph_and_phase_state_contract",
+      "evidence": [
+        "LevelSetConservativePhaseOperator.UsesPointwiseMappingAndClosesIdentitiesOnADistortedQuadrilateral",
+        "LevelSetConservativePhaseOperator.PreservesAConstantWithVariableVelocityByBoundaryDivergenceCancellation",
+        "LevelSetConservativePhaseState.ProjectsExactRetainedMomentsAndComplementOnACutTriangle",
+        "LevelSetConservativePhaseState.UsesPointwiseGeometryAndClosesComplementOnADistortedQuadrilateral"
+      ]
+    },
+    {
+      "claim": "modest_grid_transport_regression_contract_without_release_closure",
+      "evidence": [
+        "LevelSetConservativePhaseBenchmarks.TranslatingDiskConservesAndRefines",
+        "LevelSetConservativePhaseBenchmarks.TranslatingDiskSeparatesSpaceAndTimeRefinement",
+        "LevelSetConservativePhaseBenchmarks.ThreeDimensionalReversibleDeformationSmoke",
+        "LevelSetConservativePhaseBenchmarks.RotatesASlottedDiskThroughOnePeriod",
+        "LevelSetConservativePhaseBenchmarks.ReversibleDeformationReturnsWithoutMassDrift",
+        "LevelSetConservativePhaseBenchmarks.AdvectsAThinWallFilmTangentially",
+        "LevelSetConservativePhaseBenchmarks.KeepsSeparatedDropsInDistinctFluxComponents"
+      ]
+    },
+    {
+      "claim": "candidate_maintenance_commit_and_rollback_contract",
+      "evidence": [
+        "ApplicationDriverConservativePhaseCandidatesTest.StagesAndCommitsTheTransportedPhaseAgainstAuthoritativeGeometry",
+        "ApplicationDriverConservativePhaseCandidatesTest.ReinitializesBeforeLocalReconciliationAndRetainsEveryStage",
+        "ApplicationDriverConservativePhaseCandidatesTest.NonconvergedReinitializationRejectsAndRestoresGeometry",
+        "ApplicationDriverConservativePhaseCandidatesTest.LaterRejectionRestoresTheRawCandidateAndEveryGeometryRevision",
+        "ApplicationDriverConservativePhaseCandidatesTest.CourantRejectionLeavesTheRawCandidateAndGeometryUntouched",
+        "ApplicationDriverConservativePhaseCandidatesTest.GeometryDisplacementRejectionLeavesTheRawCandidateAndGeometryUntouched"
+      ]
+    },
+    {
+      "claim": "two_rank_phase_flux_and_artifact_collective_contract",
+      "evidence": [
+        "LevelSetConservativePhaseOperatorMPI.MergesOwnedCellFragmentsAndTransportsAcrossThePartition",
+        "LevelSetConservativePhaseOperatorMPI.ReportsTheSameOwnedCellAssemblyFailureOnEveryRank",
+        "LevelSetConservativePhaseOperatorMPI.ReportsRankLocalPreflightFailureWithoutStrandingPeers",
+        "ApplicationDriverLevelSetWorkflowsMPI.ConservativePhaseArtifactPublishesOnceAfterCollectivePreflight"
+      ]
+    },
+    {
+      "claim": "emergency_global_shift_isolated_accounting_contract",
+      "evidence": [
+        "LevelSetConservativePhaseBenchmarks.DistortedTranslatingDiskGlobalVolumeCorrectionClosesRuntimeDrift"
+      ]
+    }
+  ],
+  "unqualified_required_campaigns": [
+    {
+      "id": "complete_18_point_translation_and_enright_release_matrix",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "immutable_raw_control_volume_component_history_and_final_flux_ledgers_for_every_release_point",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "extension_band_width_and_map_fallback_sweeps",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "maintenance_off_reinitialization_only_correction_only_and_production_transaction_comparison",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "four_or_more_rank_partition_sweeps",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "refined_wall_drop_rotation_film_sheet_rim_and_satellite_component_studies",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "raw_global_and_per_component_convergence_without_global_shift",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "phase_flux_and_momentum_flux_consistency",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "capillary_jet_and_filament_necking_after_raw_conservation_converges",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "complete_q3_capillary_wave_oscillating_drop_and_smooth_sloshing_campaigns",
+      "status": "REQUIRED_NOT_CLAIMED"
+    }
+  ],
+  "known_partition_limit": {
+    "tracked_operator_fixture_ranks": 2,
+    "tracked_artifact_fixture_ranks": 2,
+    "four_rank_disposition": "REQUIRED_NOT_CLAIMED"
+  },
+  "release_matrix_dependency": {
+    "matrix": "level_set_phase_transport_release_matrix.json",
+    "point_runner": "run_level_set_phase_transport_release.py",
+    "complete_orchestrator": "run_level_set_phase_transport_release_matrix.py",
+    "expected_points": 18,
+    "low_level_matrix_can_substitute_for_release_matrix": false
+  },
+  "prospective_tests": []
+}
