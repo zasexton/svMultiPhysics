@@ -327,6 +327,7 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_NavierStokesLegacyBCs.cpp
         Tests/Unit/test_NavierStokesOutletFactory.cpp
         Tests/Unit/test_MovingDomainPhysics.cpp
+        Tests/Unit/test_SharpBoundaryOperatorMPI.cpp
         Tests/Unit/test_FreeSurfaceCutStability.cpp
         Tests/Unit/test_CoreUtilities.cpp
         Tests/Unit/test_VtpMeshSupport.cpp
@@ -362,6 +363,16 @@ if(PHYSICS_BUILD_TESTS)
             TIMEOUT 180
             PROCESSORS 2
             LABELS "MPI;physics"
+        )
+        add_test(
+            NAME Physics_FreeSurfaceSharpBoundary_MPI_2
+            COMMAND ${MPIEXEC_EXECUTABLE} -np 2 $<TARGET_FILE:test_physics>
+                    --gtest_filter=GeneratedActiveBoundaryDomainMPI.WetFractionSweepIsOwnershipUniqueAndPartitionIndependent:FreeSurfaceSharpBoundaryOperatorsMPI.OperatorWorkIsPartitionIndependent:FreeSurfaceSharpBoundaryOperatorsMPI.StructuredChannelWorkIsInvariantUnderActualRepartition
+        )
+        set_tests_properties(Physics_FreeSurfaceSharpBoundary_MPI_2 PROPERTIES
+            TIMEOUT 1800
+            PROCESSORS 2
+            LABELS "MPI;physics;free-surface;sharp-boundary"
         )
         add_test(
             NAME Physics_FreeSurfaceCutStability_MPI_2

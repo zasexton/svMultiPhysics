@@ -663,9 +663,6 @@ public:
                 "generated interface-boundary intersection domain requires a nonnegative marker");
         }
         auto rules = domain.intersectionQuadratureRules();
-        if (rules.empty()) {
-            return;
-        }
         interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey marker_key;
         marker_key.source = domain.request().source;
         marker_key.domain_id = domain.request().generated_domain_id;
@@ -693,6 +690,9 @@ public:
         auto& indices = generated_interface_rule_indices_by_marker_[marker];
         if (indices.empty()) {
             generated_interface_markers_.push_back(marker);
+        }
+        if (rules.empty()) {
+            markModified();
         }
         for (auto& rule : rules) {
             indices.push_back(interface_rules_.size());

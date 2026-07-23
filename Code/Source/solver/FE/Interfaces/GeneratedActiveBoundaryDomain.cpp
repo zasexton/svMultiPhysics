@@ -775,6 +775,9 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
     mesh.forEachBoundaryFace(
         req.boundary_marker,
         [&](GlobalIndex face, GlobalIndex cell) {
+            if (!mesh.isOwnedCell(cell)) {
+                return;
+            }
             const auto type = mesh.getCellType(cell);
             const auto represented = representedImplicitForCell(
                 interface_domain, static_cast<MeshIndex>(cell));
