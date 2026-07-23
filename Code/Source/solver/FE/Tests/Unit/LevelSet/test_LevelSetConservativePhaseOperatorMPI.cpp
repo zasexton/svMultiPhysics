@@ -562,6 +562,186 @@ TEST(LevelSetConservativePhaseOperatorMPI,
 }
 
 TEST(LevelSetConservativePhaseOperatorMPI,
+     RejectsEveryReplicatedStageInputMismatchCollectively)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    ASSERT_EQ(size, 2) << "This test requires exactly two ranks.";
+
+    MPI_Comm source_communicator = MPI_COMM_NULL;
+    ASSERT_EQ(MPI_Comm_dup(MPI_COMM_WORLD, &source_communicator),
+              MPI_SUCCESS);
+    level_set::LevelSetP1PhaseTransportGraph graph;
+    {
+        auto mesh =
+            std::make_shared<TwoRankQuadPhaseMeshAccess>(rank);
+        FE::systems::FESystem system(mesh);
+        const auto indicator_field =
+            system.addField(FE::systems::FieldSpec{
+                .name = "liquid_indicator",
+                .space = std::make_shared<FE::spaces::H1Space>(
+                    FE::ElementType::Quad4, /*order=*/1),
+                .components = 1,
+            });
+        system.setup(phaseSetupOptions(rank, source_communicator),
+                     phaseSetupInputs());
+        graph = level_set::buildLevelSetP1PhaseTransportGraph(
+            system, indicator_field);
+    }
+    EXPECT_EQ(MPI_Comm_free(&source_communicator), MPI_SUCCESS);
+    ASSERT_TRUE(graph.success) << graph.diagnostic;
+
+    const std::vector<FE::Real> base_indicator(graph.nodes, 0.4);
+    const std::vector<FE::Real> base_lower(graph.nodes, 0.0);
+    const std::vector<FE::Real> base_upper(graph.nodes, 1.0);
+    const std::vector<std::array<FE::Real, 3>> base_velocity(
+        graph.nodes, {0.0, 0.0, 0.0});
+    const level_set::LevelSetP1PhaseStageOptions base_options{};
+
+    const auto expect_collective_rejection =
+        [&](const level_set::LevelSetP1PhaseTransportStageResult& stage,
+            const std::string& expected_text) {
+            EXPECT_FALSE(stage.success);
+            EXPECT_FALSE(stage.replicated_stage_inputs_satisfied);
+            EXPECT_NE(stage.diagnostic.find(expected_text),
+                      std::string::npos);
+            int root_length =
+                rank == 0
+                    ? static_cast<int>(stage.diagnostic.size())
+                    : 0;
+            MPI_Bcast(&root_length, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            std::string root_diagnostic(
+                static_cast<std::size_t>(root_length), '\0');
+            if (rank == 0) {
+                std::copy(stage.diagnostic.begin(),
+                          stage.diagnostic.end(),
+                          root_diagnostic.begin());
+            }
+            MPI_Bcast(root_diagnostic.data(), root_length, MPI_CHAR, 0,
+                      MPI_COMM_WORLD);
+            EXPECT_EQ(stage.diagnostic, root_diagnostic);
+        };
+
+    {
+        auto indicator = base_indicator;
+        if (rank == 1) {
+            indicator[2] = 0.45;
+        }
+        expect_collective_rejection(
+            level_set::advanceLevelSetP1ConservativePhaseStage(
+                graph, indicator, base_lower, base_upper,
+                base_velocity, 0.02, base_options),
+            "previous liquid indicator");
+    }
+    {
+        auto lower = base_lower;
+        if (rank == 1) {
+            lower[1] = 0.1;
+        }
+        expect_collective_rejection(
+            level_set::advanceLevelSetP1ConservativePhaseStage(
+                graph, base_indicator, lower, base_upper,
+                base_velocity, 0.02, base_options),
+            "lower liquid-indicator bound");
+    }
+    {
+        auto upper = base_upper;
+        if (rank == 1) {
+            upper[3] = 0.9;
+        }
+        expect_collective_rejection(
+            level_set::advanceLevelSetP1ConservativePhaseStage(
+                graph, base_indicator, base_lower, upper,
+                base_velocity, 0.02, base_options),
+            "upper liquid-indicator bound");
+    }
+    {
+        auto velocity = base_velocity;
+        if (rank == 1) {
+            velocity[4][1] = 0.2;
+        }
+        expect_collective_rejection(
+            level_set::advanceLevelSetP1ConservativePhaseStage(
+                graph, base_indicator, base_lower, base_upper,
+                velocity, 0.02, base_options),
+            "nodal velocity");
+    }
+    {
+        const FE::Real time_step = rank == 1 ? 0.03 : 0.02;
+        expect_collective_rejection(
+            level_set::advanceLevelSetP1ConservativePhaseStage(
+                graph, base_indicator, base_lower, base_upper,
+                base_velocity, time_step, base_options),
+            "time step");
+    }
+    {
+        auto options = base_options;
+        if (rank == 1) {
+            options.invariant_tolerance = 2.0e-12;
+        }
+        expect_collective_rejection(
+            level_set::advanceLevelSetP1ConservativePhaseStage(
+                graph, base_indicator, base_lower, base_upper,
+                base_velocity, 0.02, options),
+            "invariant tolerance");
+    }
+    {
+        auto options = base_options;
+        if (rank == 1) {
+            options.component_activity_tolerance = 2.0e-8;
+        }
+        expect_collective_rejection(
+            level_set::advanceLevelSetP1ConservativePhaseStage(
+                graph, base_indicator, base_lower, base_upper,
+                base_velocity, 0.02, options),
+            "component activity tolerance");
+    }
+    {
+        auto options = base_options;
+        if (rank == 1) {
+            options.maximum_courant = 0.9;
+        }
+        expect_collective_rejection(
+            level_set::advanceLevelSetP1ConservativePhaseStage(
+                graph, base_indicator, base_lower, base_upper,
+                base_velocity, 0.02, options),
+            "maximum Courant number");
+    }
+    {
+        auto options = base_options;
+        if (rank == 1) {
+            options.enforce_courant_limit = false;
+        }
+        expect_collective_rejection(
+            level_set::advanceLevelSetP1ConservativePhaseStage(
+                graph, base_indicator, base_lower, base_upper,
+                base_velocity, 0.02, options),
+            "Courant-limit enforcement");
+    }
+    {
+        auto options = base_options;
+        if (rank == 1) {
+            options.require_constant_preservation = false;
+        }
+        expect_collective_rejection(
+            level_set::advanceLevelSetP1ConservativePhaseStage(
+                graph, base_indicator, base_lower, base_upper,
+                base_velocity, 0.02, options),
+            "constant-preservation requirements");
+    }
+
+    const auto consistent_stage =
+        level_set::advanceLevelSetP1ConservativePhaseStage(
+            graph, base_indicator, base_lower, base_upper,
+            base_velocity, 0.02, base_options);
+    EXPECT_TRUE(consistent_stage.success)
+        << consistent_stage.diagnostic;
+    EXPECT_TRUE(consistent_stage.replicated_stage_inputs_satisfied);
+}
+
+TEST(LevelSetConservativePhaseOperatorMPI,
      ReportsTheSameOwnedCellAssemblyFailureOnEveryRank)
 {
     int rank = 0;

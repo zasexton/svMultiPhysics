@@ -13,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -22,6 +23,10 @@ class FESystem;
 }
 
 namespace svmp::FE::level_set {
+
+namespace detail {
+struct LevelSetP1PhaseCollectiveState;
+}
 
 /**
  * @brief One canonical algebraic edge of the assembled gradient matrix.
@@ -87,6 +92,9 @@ struct LevelSetP1PhaseTransportGraph {
     std::vector<std::array<Real, 3>> diagonal_gradient{};
     std::vector<std::array<Real, 3>> boundary_column_sum{};
     std::vector<LevelSetP1PhaseGradientEdge> edges{};
+    /// Opaque ownership of a duplicated communicator for stage validation.
+    std::shared_ptr<const detail::LevelSetP1PhaseCollectiveState>
+        collective_state{};
     std::string diagnostic{};
 };
 
@@ -123,6 +131,8 @@ struct LevelSetP1PhaseTransportStageResult {
     bool courant_satisfied{false};
     bool low_order_coefficients_nonnegative{false};
     bool strong_form_decomposition_satisfied{false};
+    /// True only after every replicated input has passed collective equality.
+    bool replicated_stage_inputs_satisfied{false};
     Real maximum_courant{0.0};
     Real minimum_low_order_coefficient{0.0};
     Real maximum_strong_form_decomposition_residual{0.0};
@@ -144,7 +154,10 @@ struct LevelSetP1PhaseTransportStageResult {
  *
  * The raw antidiffusive transfer removes this viscosity, recovering the
  * lumped strong-CG advective target. Boundary and discrete-divergence terms
- * are retained separately in the returned ledger.
+ * are retained separately in the returned ledger. A distributed graph makes
+ * this a collective call: nodal inputs, the time step, and every stage option
+ * must be identical on its field communicator. Constant-state validation
+ * covers the low-order, raw-target, and limited states.
  */
 [[nodiscard]] LevelSetP1PhaseTransportStageResult
 advanceLevelSetP1ConservativePhaseStage(

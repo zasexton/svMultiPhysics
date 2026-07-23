@@ -13,10 +13,14 @@
 #include <cstring>
 #include <exception>
 #include <initializer_list>
+#include <iomanip>
 #include <limits>
 #include <map>
+#include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -26,6 +30,33 @@
 #endif
 
 namespace svmp::FE::level_set {
+
+namespace detail {
+
+struct LevelSetP1PhaseCollectiveState {
+#if FE_HAS_MPI
+    MPI_Comm communicator{MPI_COMM_NULL};
+
+    ~LevelSetP1PhaseCollectiveState() noexcept
+    {
+        if (communicator == MPI_COMM_NULL) {
+            return;
+        }
+        int initialized = 0;
+        int finalized = 0;
+        MPI_Initialized(&initialized);
+        if (initialized != 0) {
+            MPI_Finalized(&finalized);
+        }
+        if (initialized != 0 && finalized == 0) {
+            MPI_Comm_free(&communicator);
+        }
+    }
+#endif
+};
+
+} // namespace detail
+
 namespace {
 
 using Vector3 = std::array<Real, 3>;
@@ -126,11 +157,61 @@ static_assert(sizeof(PackedGradientEdge) ==
     return context;
 }
 
+[[nodiscard]] PhaseGraphCollectiveContext phaseStageCollectiveContext(
+    const LevelSetP1PhaseTransportGraph& graph)
+{
+    PhaseGraphCollectiveContext context;
+    context.rank = graph.parallel_rank;
+    context.size = graph.parallel_size;
+    if (context.rank < 0 || context.size < 1 ||
+        context.rank >= context.size) {
+        throw std::invalid_argument(
+            "P1 conservative phase stage received invalid graph rank metadata");
+    }
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (graph.distributed || context.size > 1) {
+        if (!graph.distributed || !graph.replicated_sparse_graph ||
+            !graph.collective_state || initialized == 0 ||
+            finalized != 0 ||
+            graph.collective_state->communicator == MPI_COMM_NULL) {
+            throw std::invalid_argument(
+                "P1 conservative phase stage requires its active replicated graph communicator");
+        }
+        int communicator_rank = 0;
+        int communicator_size = 1;
+        MPI_Comm_rank(graph.collective_state->communicator,
+                      &communicator_rank);
+        MPI_Comm_size(graph.collective_state->communicator,
+                      &communicator_size);
+        if (communicator_rank != context.rank ||
+            communicator_size != context.size) {
+            throw std::invalid_argument(
+                "P1 conservative phase stage graph and field communicators disagree");
+        }
+        context.active = true;
+        context.communicator = graph.collective_state->communicator;
+    }
+#else
+    if (graph.distributed || context.size > 1) {
+        throw std::invalid_argument(
+            "P1 conservative phase stage cannot use a distributed graph without MPI support");
+    }
+#endif
+    return context;
+}
+
 [[nodiscard]] bool synchronizeLocalFailure(
     const PhaseGraphCollectiveContext& context,
     bool local_success,
     const std::string& local_diagnostic,
-    std::string& collective_diagnostic)
+    std::string& collective_diagnostic,
+    std::string_view operation = "graph")
 {
 #if FE_HAS_MPI
     if (context.active) {
@@ -157,7 +238,8 @@ static_assert(sizeof(PackedGradientEdge) ==
                           first_failed_rank, context.communicator);
             }
             collective_diagnostic =
-                "P1 conservative phase graph failed on rank " +
+                "P1 conservative phase " + std::string(operation) +
+                " failed on rank " +
                 std::to_string(first_failed_rank) + ": " +
                 std::string(bytes.begin(), bytes.end());
             return false;
@@ -312,6 +394,164 @@ void allReduceVector3Sum(const PhaseGraphCollectiveContext& context,
     (void)context;
     return local;
 #endif
+}
+
+struct ReplicatedRealMismatch {
+    bool present{false};
+    std::size_t index{0u};
+    Real minimum{0.0};
+    Real maximum{0.0};
+};
+
+[[nodiscard]] ReplicatedRealMismatch firstReplicatedRealMismatch(
+    const PhaseGraphCollectiveContext& context,
+    std::span<const Real> local)
+{
+    ReplicatedRealMismatch mismatch;
+#if FE_HAS_MPI
+    if (context.active && !local.empty()) {
+        constexpr std::size_t maximum_chunk =
+            static_cast<std::size_t>(std::numeric_limits<int>::max());
+        std::vector<Real> minimum(local.begin(), local.end());
+        std::vector<Real> maximum(local.begin(), local.end());
+        for (std::size_t offset = 0u; offset < local.size();) {
+            const std::size_t count =
+                std::min(maximum_chunk, local.size() - offset);
+            const auto displacement =
+                static_cast<std::ptrdiff_t>(offset);
+            MPI_Allreduce(local.data() + displacement,
+                          minimum.data() + displacement,
+                          static_cast<int>(count), mpiRealType(), MPI_MIN,
+                          context.communicator);
+            MPI_Allreduce(local.data() + displacement,
+                          maximum.data() + displacement,
+                          static_cast<int>(count), mpiRealType(), MPI_MAX,
+                          context.communicator);
+            offset += count;
+        }
+        for (std::size_t i = 0u; i < local.size(); ++i) {
+            if (minimum[i] != maximum[i]) {
+                mismatch.present = true;
+                mismatch.index = i;
+                mismatch.minimum = minimum[i];
+                mismatch.maximum = maximum[i];
+                break;
+            }
+        }
+    }
+#else
+    (void)context;
+    (void)local;
+#endif
+    return mismatch;
+}
+
+[[nodiscard]] std::string replicatedRealMismatchDiagnostic(
+    std::string_view quantity,
+    std::string location,
+    const ReplicatedRealMismatch& mismatch)
+{
+    std::ostringstream stream;
+    stream << std::setprecision(std::numeric_limits<Real>::max_digits10)
+           << "P1 conservative phase stage requires identical "
+           << quantity << " on every rank; first mismatch at "
+           << location << " (minimum=" << mismatch.minimum
+           << ", maximum=" << mismatch.maximum << ')';
+    return stream.str();
+}
+
+[[nodiscard]] bool replicatedStageInputsMatch(
+    const PhaseGraphCollectiveContext& context,
+    std::span<const Real> previous_liquid_indicator,
+    std::span<const Real> lower_liquid_indicator,
+    std::span<const Real> upper_liquid_indicator,
+    std::span<const std::array<Real, 3>> nodal_velocity,
+    Real time_step,
+    const LevelSetP1PhaseStageOptions& options,
+    std::string& diagnostic)
+{
+    const auto require_nodal_values =
+        [&](std::span<const Real> values,
+            std::string_view quantity) {
+            const auto mismatch =
+                firstReplicatedRealMismatch(context, values);
+            if (!mismatch.present) {
+                return true;
+            }
+            diagnostic = replicatedRealMismatchDiagnostic(
+                quantity, "node " + std::to_string(mismatch.index),
+                mismatch);
+            return false;
+        };
+    if (!require_nodal_values(previous_liquid_indicator,
+                              "previous liquid indicator") ||
+        !require_nodal_values(lower_liquid_indicator,
+                              "lower liquid-indicator bound") ||
+        !require_nodal_values(upper_liquid_indicator,
+                              "upper liquid-indicator bound")) {
+        return false;
+    }
+
+    std::vector<Real> flat_velocity;
+    flat_velocity.reserve(nodal_velocity.size() * 3u);
+    for (const auto& velocity : nodal_velocity) {
+        flat_velocity.insert(flat_velocity.end(),
+                             velocity.begin(), velocity.end());
+    }
+    const auto velocity_mismatch =
+        firstReplicatedRealMismatch(context, flat_velocity);
+    if (velocity_mismatch.present) {
+        diagnostic = replicatedRealMismatchDiagnostic(
+            "nodal velocity",
+            "node " + std::to_string(velocity_mismatch.index / 3u) +
+                ", component " +
+                std::to_string(velocity_mismatch.index % 3u),
+            velocity_mismatch);
+        return false;
+    }
+
+    const auto require_scalar =
+        [&](Real value,
+            std::string_view quantity,
+            std::string_view location) {
+            const auto mismatch = firstReplicatedRealMismatch(
+                context, std::span<const Real>(&value, 1u));
+            if (!mismatch.present) {
+                return true;
+            }
+            diagnostic = replicatedRealMismatchDiagnostic(
+                quantity, std::string(location), mismatch);
+            return false;
+        };
+    if (!require_scalar(time_step, "time step", "stage scalar") ||
+        !require_scalar(options.invariant_tolerance,
+                        "invariant tolerance", "stage option") ||
+        !require_scalar(options.component_activity_tolerance,
+                        "component activity tolerance", "stage option") ||
+        !require_scalar(options.maximum_courant,
+                        "maximum Courant number", "stage option")) {
+        return false;
+    }
+
+    const int minimum_enforce = allReduceIntMin(
+        context, options.enforce_courant_limit ? 1 : 0);
+    const int maximum_enforce = allReduceIntMax(
+        context, options.enforce_courant_limit ? 1 : 0);
+    if (minimum_enforce != maximum_enforce) {
+        diagnostic =
+            "P1 conservative phase stage requires identical Courant-limit enforcement on every rank (minimum=false, maximum=true)";
+        return false;
+    }
+    const int minimum_constant = allReduceIntMin(
+        context, options.require_constant_preservation ? 1 : 0);
+    const int maximum_constant = allReduceIntMax(
+        context, options.require_constant_preservation ? 1 : 0);
+    if (minimum_constant != maximum_constant) {
+        diagnostic =
+            "P1 conservative phase stage requires identical constant-preservation requirements on every rank (minimum=false, maximum=true)";
+        return false;
+    }
+    return true;
 }
 
 [[nodiscard]] std::uint64_t allReduceUnsigned64Sum(
@@ -577,6 +817,19 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
         result.parallel_size = collective.size;
         result.distributed = collective.active;
         result.replicated_sparse_graph = collective.active;
+#if FE_HAS_MPI
+        if (collective.active) {
+            auto collective_state =
+                std::make_shared<detail::LevelSetP1PhaseCollectiveState>();
+            if (MPI_Comm_dup(collective.communicator,
+                             &collective_state->communicator) !=
+                MPI_SUCCESS) {
+                throw std::runtime_error(
+                    "P1 conservative phase graph could not duplicate its field communicator");
+            }
+            result.collective_state = std::move(collective_state);
+        }
+#endif
 
         result.geometry_revision = mesh.geometryRevision();
         result.topology_revision = mesh.topologyRevision();
@@ -1121,8 +1374,18 @@ advanceLevelSetP1ConservativePhaseStage(
                 "P1 conservative phase stage requires a valid assembled graph";
             return result;
         }
+        const auto collective = phaseStageCollectiveContext(graph);
         const std::size_t node_count = graph.nodes;
+        bool local_preflight_success = true;
+        std::string local_preflight_diagnostic;
+        const auto reject_preflight = [&](std::string diagnostic) {
+            if (local_preflight_success) {
+                local_preflight_success = false;
+                local_preflight_diagnostic = std::move(diagnostic);
+            }
+        };
         if (node_count == 0u ||
+            graph.dimension < 2 || graph.dimension > 3 ||
             graph.lumped_control_volume.size() != node_count ||
             graph.diagonal_gradient.size() != node_count ||
             graph.boundary_column_sum.size() != node_count ||
@@ -1130,9 +1393,8 @@ advanceLevelSetP1ConservativePhaseStage(
             lower_liquid_indicator.size() != node_count ||
             upper_liquid_indicator.size() != node_count ||
             nodal_velocity.size() != node_count) {
-            result.diagnostic =
-                "P1 conservative phase stage received inconsistent nodal spans";
-            return result;
+            reject_preflight(
+                "P1 conservative phase stage received inconsistent nodal spans");
         }
         if (!(time_step > Real{0.0}) || !std::isfinite(time_step) ||
             !std::isfinite(options.invariant_tolerance) ||
@@ -1143,10 +1405,45 @@ advanceLevelSetP1ConservativePhaseStage(
             !(options.maximum_courant > Real{0.0}) ||
             options.maximum_courant > Real{1.0} ||
             !std::isfinite(options.maximum_courant)) {
-            result.diagnostic =
-                "P1 conservative phase stage requires a positive finite time step, nonnegative finite invariant tolerance, component activity tolerance in (0,1], and Courant limit in (0,1]";
+            reject_preflight(
+                "P1 conservative phase stage requires a positive finite time step, nonnegative finite invariant tolerance, component activity tolerance in (0,1], and Courant limit in (0,1]");
+        }
+        if (local_preflight_success) {
+            for (std::size_t node = 0u; node < node_count; ++node) {
+                if (!std::isfinite(graph.lumped_control_volume[node]) ||
+                    !(graph.lumped_control_volume[node] > Real{0.0}) ||
+                    !std::isfinite(previous_liquid_indicator[node]) ||
+                    !std::isfinite(lower_liquid_indicator[node]) ||
+                    !std::isfinite(upper_liquid_indicator[node])) {
+                    reject_preflight(
+                        "P1 conservative phase stage requires finite nodal inputs and positive control volumes");
+                    break;
+                }
+                for (const Real component : nodal_velocity[node]) {
+                    if (!std::isfinite(component)) {
+                        reject_preflight(
+                            "P1 conservative phase stage found a non-finite nodal velocity");
+                        break;
+                    }
+                }
+                if (!local_preflight_success) {
+                    break;
+                }
+            }
+        }
+        if (!synchronizeLocalFailure(
+                collective, local_preflight_success,
+                local_preflight_diagnostic, result.diagnostic, "stage")) {
             return result;
         }
+        if (!replicatedStageInputsMatch(
+                collective, previous_liquid_indicator,
+                lower_liquid_indicator, upper_liquid_indicator,
+                nodal_velocity, time_step, options,
+                result.diagnostic)) {
+            return result;
+        }
+        result.replicated_stage_inputs_satisfied = true;
 
         result.nodal_courant.assign(node_count, Real{0.0});
         result.physical_boundary_mass_transfer.assign(
@@ -1163,13 +1460,6 @@ advanceLevelSetP1ConservativePhaseStage(
 
         for (std::size_t node = 0; node < node_count; ++node) {
             const auto& velocity = nodal_velocity[node];
-            for (int d = 0; d < graph.dimension; ++d) {
-                if (!std::isfinite(velocity[static_cast<std::size_t>(d)])) {
-                    result.diagnostic =
-                        "P1 conservative phase stage found a non-finite nodal velocity";
-                    return result;
-                }
-            }
             const Real diagonal_velocity = dot(
                 graph.diagonal_gradient[node], velocity, graph.dimension);
             row_divergence[node] = diagonal_velocity;
@@ -1334,6 +1624,36 @@ advanceLevelSetP1ConservativePhaseStage(
                     .require_constant_preservation =
                         options.require_constant_preservation,
                 });
+        bool raw_target_constant_preservation_satisfied = true;
+        if (result.correction.constant_state_input &&
+            result.correction.nodes.size() == node_count) {
+            for (const auto& node : result.correction.nodes) {
+                const Real error = std::abs(
+                    node.raw_target_liquid_indicator -
+                    node.previous_liquid_indicator);
+                result.correction.maximum_constant_preservation_error =
+                    std::max(
+                        result.correction
+                            .maximum_constant_preservation_error,
+                        error);
+                const Real tolerance = scaledTolerance(
+                    options.invariant_tolerance,
+                    {node.previous_liquid_indicator,
+                     node.raw_target_liquid_indicator});
+                raw_target_constant_preservation_satisfied =
+                    raw_target_constant_preservation_satisfied &&
+                    error <= tolerance;
+            }
+            result.correction.constant_preservation_satisfied =
+                result.correction.constant_preservation_satisfied &&
+                raw_target_constant_preservation_satisfied;
+        }
+        if (result.correction.constant_preservation_required &&
+            !raw_target_constant_preservation_satisfied) {
+            result.correction.success = false;
+            result.correction.diagnostic =
+                "P1 conservative phase stage raw target failed constant-state preservation";
+        }
         if (!result.correction.success) {
             result.diagnostic = result.correction.diagnostic;
             return result;

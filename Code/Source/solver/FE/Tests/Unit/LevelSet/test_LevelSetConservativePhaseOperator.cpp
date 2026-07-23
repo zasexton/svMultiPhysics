@@ -292,6 +292,58 @@ TEST(LevelSetConservativePhaseOperator,
 }
 
 TEST(LevelSetConservativePhaseOperator,
+     RejectsRawTargetDriftHiddenByFluxLimitingForAConstantState)
+{
+    level_set::LevelSetP1PhaseTransportGraph graph;
+    graph.success = true;
+    graph.dimension = 2;
+    graph.nodes = 2u;
+    graph.lumped_control_volume = {1.0, 1.0};
+    graph.diagonal_gradient = {{
+        {-1.0, 0.0, 0.0},
+        {-1.0, 0.0, 0.0},
+    }};
+    graph.boundary_column_sum.resize(2u);
+    graph.edges.push_back(level_set::LevelSetP1PhaseGradientEdge{
+        .first_node = 0,
+        .second_node = 1,
+        .owner_rank = 0,
+        .first_test_second_gradient = {1.0, 0.0, 0.0},
+        .second_test_first_gradient = {1.0, 0.0, 0.0},
+    });
+
+    const std::array<FE::Real, 2> indicator{
+        0.5, 0.5 + 5.0e-13};
+    const std::array<FE::Real, 2> lower = indicator;
+    const std::array<FE::Real, 2> upper = indicator;
+    const std::array<std::array<FE::Real, 3>, 2> velocity{{
+        {1.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+    }};
+    const auto stage = level_set::advanceLevelSetP1ConservativePhaseStage(
+        graph, indicator, lower, upper, velocity, /*time_step=*/10.0);
+
+    EXPECT_FALSE(stage.success);
+    EXPECT_TRUE(stage.replicated_stage_inputs_satisfied);
+    EXPECT_TRUE(stage.correction.constant_state_input);
+    EXPECT_FALSE(stage.correction.constant_preservation_satisfied);
+    EXPECT_FALSE(stage.correction.success);
+    EXPECT_GT(stage.correction.maximum_constant_preservation_error,
+              4.0e-12);
+    EXPECT_NE(stage.diagnostic.find("raw target"),
+              std::string::npos);
+    ASSERT_EQ(stage.correction.nodes.size(), indicator.size());
+    for (std::size_t node = 0u; node < indicator.size(); ++node) {
+        EXPECT_EQ(
+            stage.correction.nodes[node].low_order_liquid_indicator,
+            indicator[node]);
+        EXPECT_EQ(
+            stage.correction.nodes[node].limited_liquid_indicator,
+            indicator[node]);
+    }
+}
+
+TEST(LevelSetConservativePhaseOperator,
      LimitsTheLumpedCentralTargetWithoutChangingExternalPhaseBalance)
 {
     auto fixture = makeUnitTriangleFixture();
