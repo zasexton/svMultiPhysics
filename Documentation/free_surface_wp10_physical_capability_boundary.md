@@ -38,9 +38,14 @@ its nonlocally conservative and locally conservative indicator variants as
 one-phase transport. The locally conservative indicator is a liquid-geometry
 transport variable; it is not a second-fluid momentum or pressure field.
 
-The validation scanner rejects controls that advertise two-sided traces,
-material jumps, exterior density or viscosity, or pressure enrichment. This
-is useful containment evidence, but it is not the missing formulation.
+The committed qualification scope guard parses representative XML, JSON, and
+already-decoded mapping inputs. It rejects keys, tags, model values, and
+name/key/option/parameter wrappers when they carry the frozen normalized
+`two_phase`, `two_fluid`, `multiphase`, `jump`, `gas`, or
+`pressure_enrichment` markers. Rejection uses the stable diagnostic
+`unsupported_two_phase_or_jump_free_surface_scope`. This is executable
+control-layer containment evidence. It is not a production formulation,
+production-schema qualification, or the missing physical implementation.
 
 The authoritative geometry snapshot retains negative- and positive-side
 quadrature on cut cells. References there to a two-sided volume family are
@@ -100,13 +105,19 @@ freeze only the following evidence:
 - the two level-set transport modes emit one-phase labels;
 - the production option record still contains a single liquid
   velocity/pressure/density/viscosity state; and
-- the existing validation scanner rejects controls that would otherwise
-  misrepresent unsupported two-fluid or jump physics.
+- the committed one-phase scope guard executes a frozen positive/negative
+  contract over representative XML, JSON, and mapping encodings, including
+  tag, attribute, model-value, coupled wrapper-name/value, nested-list, and
+  structured nested-value and XML tail forms. JSON configuration roots must
+  be mappings; a non-mapping root is structural invalidity rather than an
+  unsupported-physics diagnostic.
 
 The wrapper accepts only the claim `one_phase_capability_boundary`. It rejects
 requests for FSR-08 closure, WP-10 closure, Q7 closure, incompressible
 two-fluid qualification, or gas-sensitive qualification before executing any
-test binary. There are deliberately no invented numerical thresholds:
+test binary. Validation-only and full execution both run the frozen scope-guard
+contract and require its exact rejection diagnostic. There are deliberately
+no invented numerical thresholds:
 artifact-label tests are categorical containment checks, not physical
 validation.
 
@@ -153,7 +164,7 @@ matrix, so Q7 and WP-10 must remain unchecked.
 - One-phase transport capability artifacts:
   `Code/Source/solver/Application/Translators/LevelSetEquationTranslator.cpp`
 - Unsupported two-fluid/jump input containment:
-  `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/run_validation_matrix.py`
+  `tests/cases/fluid/free_surface_one_phase_scope_guard.py`
 - Artifact-label unit evidence:
   `Code/Source/solver/Physics/Tests/Unit/test_MovingDomainPhysics.cpp` and
   `Code/Source/solver/Application/Tests/Unit/test_LevelSetEquationTranslator.cpp`

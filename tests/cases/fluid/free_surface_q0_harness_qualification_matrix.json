@@ -5,7 +5,7 @@
   "campaign": "Q0",
   "audit_contract": "Documentation/free_surface_boundary_unfitted_audit_20260720.md",
   "architecture_record": "Documentation/free_surface_q0_harness_provenance_architecture.md",
-  "freeze_scope": "Executable control-layer prerequisite evidence only. This matrix freezes the committed WP-0 configuration-containment tests, including negative cases, qualification-runner result gates, campaign artifact-schema rejection tests, and exact source definitions for the committed WP-0, WP-1, WP-2, and WP-10 runners. It does not supply the missing accepted-step Q0 telemetry campaign or authorize Q0 closure.",
+  "freeze_scope": "Executable control-layer prerequisite evidence only. This matrix freezes the committed WP-0 configuration-containment tests, including negative cases, qualification-runner result gates, campaign artifact-schema rejection tests, and exact source definitions for the committed WP-0, WP-1, WP-2, and WP-10 runners plus the WP-10 one-phase scope guard. It does not supply the missing accepted-step Q0 telemetry campaign or authorize Q0 closure.",
   "source_definitions": [
     {
       "id": "q0_audit_contract",
@@ -88,10 +88,11 @@
       "id": "wp10_matrix",
       "role": "nonclosure_pattern_definition",
       "path": "tests/cases/fluid/free_surface_wp10_capability_boundary_matrix.json",
-      "sha256": "a93527ab230f98f340ff027836016958821a22f1abbea2eca05d3636677c579d",
+      "sha256": "1aa8c8eb57b65bcfcf00e5a2f0bf73c4434316da2edfdcd90c41230a1d32bf9f",
       "required_fragments": [
         "\"status\": \"FROZEN_CAPABILITY_BOUNDARY\"",
         "\"source_checks\"",
+        "\"scope_guard_contract\"",
         "\"closure_request_policy\""
       ]
     },
@@ -99,11 +100,29 @@
       "id": "wp10_runner",
       "role": "nonclosure_pattern_runner",
       "path": "tests/cases/fluid/run_free_surface_wp10_capability_boundary_qualification.py",
-      "sha256": "f3dc5072ac41a2cc0612faae16c0883958757e325d7ca671ca08380dc4fb889b",
+      "sha256": "0739f0a35a637ddc8bb753c09a6fec9541d4a8f0d338d508508bf5c44c65ed22",
       "required_fragments": [
         "validate_source_boundary",
+        "validate_scope_guard_contract",
+        "bind_scope_guard_source_record",
         "validate_requested_claim",
         "source_hashes_after"
+      ]
+    },
+    {
+      "id": "wp10_scope_guard",
+      "role": "nonclosure_scope_guard",
+      "path": "tests/cases/fluid/free_surface_one_phase_scope_guard.py",
+      "sha256": "6a749865f8a1a7ac5bad1605d6065001f93f98084b6371a807a32f3872c3f7f2",
+      "required_fragments": [
+        "unsupported_two_phase_or_jump_free_surface_scope",
+        "validate_xml_config",
+        "validate_json_config",
+        "validate_config_mapping",
+        "validate_mapping_wrapper_pairs",
+        "validate_xml_scope_subtree",
+        "WRAPPER_CONTROL_NAMES",
+        "WRAPPER_VALUE_NAMES"
       ]
     },
     {
@@ -154,7 +173,7 @@
       "id": "wp10_runner_tests",
       "role": "python_test_definition",
       "path": "tests/test_free_surface_wp10_capability_boundary_runner.py",
-      "sha256": "73381a310fd3b9606457ac7508e98606a0dddb820bbbcc44009a03db3794764a",
+      "sha256": "980b949890bfc741fcd203b23742b0d39307a8eed5bf7207aa1c4978fd1038d1",
       "required_fragments": [
         "test_cli_rejects_closure_before_binary_or_output_validation",
         "test_source_boundary_rejects_repository_escape",
@@ -278,6 +297,7 @@
     "invalid_result_inventories_fail_on_missing_unexpected_skipped_or_failed_tests",
     "duplicate_registry_tests_fail_closed",
     "source_definition_paths_and_bytes_are_frozen",
+    "wp10_one_phase_scope_guard_executes_frozen_xml_json_and_mapping_rejections",
     "campaign_artifact_layout_provenance_metrics_references_and_checksums_have_negative_tests",
     "prerequisite_only_campaign_evidence_is_refused_for_promotion",
     "q0_open_state_and_unresolved_campaign_child_are_machine_readable"

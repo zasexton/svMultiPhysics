@@ -29,7 +29,7 @@ DEFAULT_MATRIX = SCRIPT_PATH.with_name(
     "free_surface_q0_harness_qualification_matrix.json"
 )
 EXPECTED_MATRIX_SHA256 = (
-    "e6e9c170fea1691492bc149d91e9595bea0865e04faf9578652b103e5b84a386"
+    "44204326a345760a98e92db3cfd8a53a231a74e6e5c0b710694f29146df734e5"
 )
 EXPECTED_MATRIX_ID = "free_surface_q0_harness_prerequisite_v1"
 EXPECTED_STATUS = "FROZEN_PREREQUISITE_NONCLOSURE"
@@ -176,7 +176,7 @@ def validate_matrix_contract(matrix: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Q0 matrix campaign changed")
 
     definitions = matrix.get("source_definitions")
-    if not isinstance(definitions, list) or len(definitions) != 15:
+    if not isinstance(definitions, list) or len(definitions) != 16:
         raise ValueError("Q0 source-definition inventory changed")
     identifiers: set[str] = set()
     paths: set[str] = set()

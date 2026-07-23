@@ -16,9 +16,7 @@ RUNNER_PATH = (
     / "fluid"
     / "run_free_surface_wp10_capability_boundary_qualification.py"
 )
-MATRIX_PATH = RUNNER_PATH.with_name(
-    "free_surface_wp10_capability_boundary_matrix.json"
-)
+MATRIX_PATH = RUNNER_PATH.with_name("free_surface_wp10_capability_boundary_matrix.json")
 
 
 def load_runner():
@@ -46,9 +44,10 @@ def validate_mutated_matrix(runner, tmp_path, mutation):
     return runner.validate_matrix(path)
 
 
-def test_canonical_boundary_is_strict_and_explicitly_open():
+def test_canonical_boundary_is_strict_and_explicitly_open(tmp_path):
     runner = load_runner()
     matrix = runner.validate_matrix(MATRIX_PATH)
+    guard = runner.validate_scope_guard_contract(matrix, ROOT)
 
     assert matrix["status"] == "FROZEN_CAPABILITY_BOUNDARY"
     assert matrix["current_capability_boundary"]["wp10_closure_claimed"] is False
@@ -61,6 +60,20 @@ def test_canonical_boundary_is_strict_and_explicitly_open():
         entry["status"] == "BLOCKED_BY_MISSING_IMPLEMENTATION"
         for entry in matrix["blocked_wp10_qualification_exits"]
     )
+    assert guard["diagnostic"] == ("unsupported_two_phase_or_jump_free_surface_scope")
+    assert guard["accepted_case_count"] == 3
+    assert guard["rejected_case_count"] == 21
+    assert guard["invalid_case_count"] == 2
+    assert guard["outcome"] == "PASS"
+
+    with pytest.raises(ValueError, match="scope guard contract changed"):
+        validate_mutated_matrix(
+            runner,
+            tmp_path,
+            lambda document: document["scope_guard_contract"].__setitem__(
+                "diagnostic", "weakened_scope_diagnostic"
+            ),
+        )
 
 
 @pytest.mark.parametrize(
@@ -122,9 +135,7 @@ def test_unknown_claim_is_rejected():
         ),
     ],
 )
-def test_matrix_rejects_premature_scope_promotion(
-    tmp_path, mutation, message
-):
+def test_matrix_rejects_premature_scope_promotion(tmp_path, mutation, message):
     runner = load_runner()
 
     with pytest.raises(ValueError, match=message):
@@ -175,6 +186,18 @@ def test_source_boundary_rejects_symlink_escape(tmp_path):
     with pytest.raises(ValueError, match="source-check path is missing"):
         runner.validate_source_boundary(matrix, source_root)
 
+    real_guard = source_root / "real_guard.py"
+    real_guard.write_text("guard = True\n", encoding="utf-8")
+    linked_guard = source_root / "linked_guard.py"
+    linked_guard.symlink_to(real_guard.name)
+    guard_matrix = {
+        "scope_guard_contract": {
+            "path": linked_guard.name,
+        }
+    }
+    with pytest.raises(ValueError, match="symbolic-link component"):
+        runner.validate_scope_guard_contract(guard_matrix, source_root)
+
 
 def test_cli_rejects_closure_before_binary_or_output_validation(tmp_path):
     result = subprocess.run(
@@ -218,5 +241,8 @@ def test_validate_only_reports_boundary_without_claiming_closure():
     assert summary["unimplemented_wp10_requirement_count"] == 9
     assert summary["blocked_wp10_exit_count"] == 8
     assert summary["blocked_q7_exit_count"] == 8
+    assert summary["scope_guard_accepted_case_count"] == 3
+    assert summary["scope_guard_rejected_case_count"] == 21
+    assert summary["scope_guard_invalid_case_count"] == 2
     assert summary["wp10_closed"] is False
     assert summary["q7_closed"] is False

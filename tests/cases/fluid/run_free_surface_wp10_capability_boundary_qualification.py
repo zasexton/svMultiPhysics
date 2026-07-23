@@ -92,8 +92,7 @@ EXPECTED_SOURCE_CHECKS = {
     },
     "one_phase_transport_artifacts": {
         "path": (
-            "Code/Source/solver/Application/Translators/"
-            "LevelSetEquationTranslator.cpp"
+            "Code/Source/solver/Application/Translators/LevelSetEquationTranslator.cpp"
         ),
         "required_fragments": [
             '"one_phase_interface_transport_nonlocal_conservation"',
@@ -105,20 +104,25 @@ EXPECTED_SOURCE_CHECKS = {
         ],
     },
     "unsupported_scope_containment": {
-        "path": (
-            "tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/"
-            "run_validation_matrix.py"
-        ),
+        "path": "tests/cases/fluid/free_surface_one_phase_scope_guard.py",
         "required_fragments": [
-            '"enabletwophase"',
+            '"twophase"',
             '"pressureenrichment"',
             '"gasdensity"',
             '"gasviscosity"',
             '"unsupported_two_phase_or_jump_free_surface_scope"',
+            "def validate_xml_config(",
+            "def validate_json_config(",
+            "def validate_config_mapping(",
+            "def validate_mapping_wrapper_pairs(",
+            "def validate_xml_scope_subtree(",
         ],
         "forbidden_fragments": [],
     },
 }
+EXPECTED_SCOPE_GUARD_CONTRACT_SHA256 = (
+    "6caf114d8751e67191e36f4fbb7905aadb0414d63b65c624326a29f96c4d8b4f"
+)
 EXPECTED_GROUPS = {
     "momentum_capability_artifact_serial": {
         "binary_argument": "physics_binary",
@@ -292,6 +296,27 @@ def validate_matrix(path: Path) -> dict[str, Any]:
         }
     if actual_source_checks != EXPECTED_SOURCE_CHECKS:
         raise ValueError("source checks changed after freeze")
+    scope_guard_contract = matrix.get("scope_guard_contract")
+    if (
+        not isinstance(scope_guard_contract, dict)
+        or set(scope_guard_contract)
+        != {
+            "path",
+            "diagnostic",
+            "accepted_cases",
+            "rejected_cases",
+            "invalid_cases",
+        }
+        or sha256_bytes(
+            json.dumps(
+                scope_guard_contract,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        != EXPECTED_SCOPE_GUARD_CONTRACT_SHA256
+    ):
+        raise ValueError("scope guard contract changed after freeze")
 
     groups = matrix.get("groups")
     if not isinstance(groups, list):
@@ -315,8 +340,7 @@ def validate_matrix(path: Path) -> dict[str, Any]:
             or not isinstance(tests, list)
             or not tests
             or not isinstance(execution, dict)
-            or set(execution)
-            != {"wall_time_seconds", "memory_mib", "output_mib"}
+            or set(execution) != {"wall_time_seconds", "memory_mib", "output_mib"}
             or any(
                 not isinstance(execution[key], int) or execution[key] <= 0
                 for key in execution
@@ -385,8 +409,7 @@ def validate_requested_claim(matrix: dict[str, Any], claim: str) -> None:
     policy = matrix["closure_request_policy"]
     if claim in policy["rejected_claims"]:
         raise ValueError(
-            f"requested claim {claim!r} is outside this matrix: "
-            f"{policy['diagnostic']}"
+            f"requested claim {claim!r} is outside this matrix: {policy['diagnostic']}"
         )
     if claim != policy["accepted_claim"]:
         raise ValueError(
@@ -417,16 +440,15 @@ def validate_source_boundary(
         path = (source_root / relative).resolve()
         if not path.is_relative_to(source_root) or not path.is_file():
             raise ValueError(f"source-check path is missing: {relative}")
-        text = path.read_text(encoding="utf-8")
+        content = path.read_bytes()
+        text = content.decode("utf-8")
         missing = [
             fragment
             for fragment in contract["required_fragments"]
             if fragment not in text
         ]
         present_forbidden = [
-            fragment
-            for fragment in contract["forbidden_fragments"]
-            if fragment in text
+            fragment for fragment in contract["forbidden_fragments"] if fragment in text
         ]
         if missing:
             raise ValueError(
@@ -442,17 +464,130 @@ def validate_source_boundary(
             {
                 "id": contract["id"],
                 "path": relative.as_posix(),
-                "sha256": sha256_file(path),
-                "required_fragment_count": len(
-                    contract["required_fragments"]
-                ),
-                "forbidden_fragment_count": len(
-                    contract["forbidden_fragments"]
-                ),
+                "sha256": sha256_bytes(content),
+                "required_fragment_count": len(contract["required_fragments"]),
+                "forbidden_fragment_count": len(contract["forbidden_fragments"]),
                 "outcome": "PASS",
             }
         )
     return records
+
+
+def validate_scope_guard_contract(
+    matrix: dict[str, Any], source_root: Path
+) -> dict[str, Any]:
+    contract = matrix["scope_guard_contract"]
+    source_root = source_root.resolve()
+    relative = Path(contract["path"])
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("scope-guard path must be repository relative")
+    lexical_path = source_root
+    for component in relative.parts:
+        lexical_path = lexical_path / component
+        if lexical_path.is_symlink():
+            raise ValueError("scope-guard path contains a symbolic-link component")
+    path = (source_root / relative).resolve()
+    if not path.is_relative_to(source_root) or not path.is_file():
+        raise ValueError(f"scope-guard path is missing: {relative}")
+
+    guard_bytes = path.read_bytes()
+    guard_sha256 = sha256_bytes(guard_bytes)
+    namespace: dict[str, Any] = {
+        "__file__": str(path),
+        "__name__": "free_surface_one_phase_scope_guard_contract",
+    }
+    exec(compile(guard_bytes, str(path), "exec"), namespace)
+    diagnostic = namespace.get("UNSUPPORTED_SCOPE_DIAGNOSTIC")
+    validate_payload = namespace.get("validate_payload")
+    unsupported_error = namespace.get("UnsupportedFreeSurfaceScope")
+    if (
+        diagnostic != contract["diagnostic"]
+        or not callable(validate_payload)
+        or not isinstance(unsupported_error, type)
+        or not issubclass(unsupported_error, ValueError)
+    ):
+        raise ValueError("scope guard exports changed after freeze")
+
+    accepted_ids: list[str] = []
+    for case in contract["accepted_cases"]:
+        try:
+            validate_payload(case["format"], case["payload"])
+        except Exception as error:
+            raise ValueError(
+                f"scope guard rejected accepted case: {case['id']}"
+            ) from error
+        accepted_ids.append(case["id"])
+
+    rejected_ids: list[str] = []
+    for case in contract["rejected_cases"]:
+        try:
+            validate_payload(case["format"], case["payload"])
+        except unsupported_error as error:
+            if str(error) != diagnostic:
+                raise ValueError(
+                    f"scope guard diagnostic changed for case: {case['id']}"
+                ) from error
+        except Exception as error:
+            raise ValueError(
+                f"scope guard used the wrong rejection for case: {case['id']}"
+            ) from error
+        else:
+            raise ValueError(f"scope guard accepted unsupported case: {case['id']}")
+        rejected_ids.append(case["id"])
+
+    invalid_ids: list[str] = []
+    for case in contract["invalid_cases"]:
+        try:
+            validate_payload(case["format"], case["payload"])
+        except unsupported_error as error:
+            raise ValueError(
+                f"scope guard misclassified invalid case: {case['id']}"
+            ) from error
+        except ValueError as error:
+            if str(error) != case["diagnostic"]:
+                raise ValueError(
+                    f"scope guard structural diagnostic changed for case: {case['id']}"
+                ) from error
+        except Exception as error:
+            raise ValueError(
+                f"scope guard used the wrong invalidity for case: {case['id']}"
+            ) from error
+        else:
+            raise ValueError(
+                f"scope guard accepted structurally invalid case: {case['id']}"
+            )
+        invalid_ids.append(case["id"])
+
+    return {
+        "id": "one_phase_scope_guard_contract",
+        "path": relative.as_posix(),
+        "sha256": guard_sha256,
+        "diagnostic": diagnostic,
+        "accepted_case_ids": accepted_ids,
+        "rejected_case_ids": rejected_ids,
+        "invalid_case_ids": invalid_ids,
+        "accepted_case_count": len(accepted_ids),
+        "rejected_case_count": len(rejected_ids),
+        "invalid_case_count": len(invalid_ids),
+        "outcome": "PASS",
+    }
+
+
+def bind_scope_guard_source_record(
+    source_records: list[dict[str, Any]],
+    scope_guard_record: dict[str, Any],
+) -> None:
+    matching = [
+        record
+        for record in source_records
+        if record["id"] == "unsupported_scope_containment"
+    ]
+    if (
+        len(matching) != 1
+        or matching[0]["path"] != scope_guard_record["path"]
+        or matching[0]["sha256"] != scope_guard_record["sha256"]
+    ):
+        raise ValueError("scope guard changed between source and contract validation")
 
 
 def listed_gtests(binary: Path) -> set[str]:
@@ -523,9 +658,7 @@ def run_group(
     write_text_exclusive(group_root / "stdout.txt", result.stdout)
     write_text_exclusive(group_root / "stderr.txt", result.stderr)
     if result.returncode != 0:
-        raise RuntimeError(
-            f"group {group['id']} returned {result.returncode}"
-        )
+        raise RuntimeError(f"group {group['id']} returned {result.returncode}")
     if not result_path.is_file():
         raise RuntimeError(f"group {group['id']} did not write gtest JSON")
     document = json.loads(result_path.read_text(encoding="utf-8"))
@@ -578,9 +711,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
     parser.add_argument("--source-root", type=Path, default=REPOSITORY_ROOT)
-    parser.add_argument(
-        "--requested-claim", default=EXPECTED_POLICY["accepted_claim"]
-    )
+    parser.add_argument("--requested-claim", default=EXPECTED_POLICY["accepted_claim"])
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--physics-binary", type=Path)
     parser.add_argument("--application-binary", type=Path)
@@ -594,19 +725,22 @@ def main() -> int:
     validate_requested_claim(matrix, arguments.requested_claim)
     source_root = arguments.source_root.resolve()
     source_records = validate_source_boundary(matrix, source_root)
+    scope_guard_record = validate_scope_guard_contract(matrix, source_root)
+    bind_scope_guard_source_record(source_records, scope_guard_record)
     validation_summary = {
         "matrix_id": matrix["matrix_id"],
         "status": matrix["status"],
         "requested_claim": arguments.requested_claim,
         "source_check_count": len(source_records),
+        "scope_guard_accepted_case_count": scope_guard_record["accepted_case_count"],
+        "scope_guard_rejected_case_count": scope_guard_record["rejected_case_count"],
+        "scope_guard_invalid_case_count": scope_guard_record["invalid_case_count"],
         "group_count": len(matrix["groups"]),
         "test_count": sum(len(group["tests"]) for group in matrix["groups"]),
         "unimplemented_wp10_requirement_count": len(
             matrix["unimplemented_wp10_requirements"]
         ),
-        "blocked_wp10_exit_count": len(
-            matrix["blocked_wp10_qualification_exits"]
-        ),
+        "blocked_wp10_exit_count": len(matrix["blocked_wp10_qualification_exits"]),
         "blocked_q7_exit_count": len(matrix["blocked_q7_progression"]),
         "wp10_closed": False,
         "q7_closed": False,
@@ -633,8 +767,7 @@ def main() -> int:
         or arguments.output is None
     ):
         raise ValueError(
-            "execution requires --physics-binary, --application-binary, "
-            "and --output"
+            "execution requires --physics-binary, --application-binary, and --output"
         )
     output = arguments.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -656,11 +789,15 @@ def main() -> int:
         for group in matrix["groups"]
     ]
     source_records_after = validate_source_boundary(matrix, source_root)
+    scope_guard_record_after = validate_scope_guard_contract(matrix, source_root)
+    bind_scope_guard_source_record(source_records_after, scope_guard_record_after)
     source_hashes_after = {
         record["path"]: record["sha256"] for record in source_records_after
     }
     if source_hashes_after != source_hashes_before:
         raise RuntimeError("source boundary changed during execution")
+    if scope_guard_record_after != scope_guard_record:
+        raise RuntimeError("scope guard contract changed during execution")
     if (
         sha256_file(DEFAULT_MATRIX) != matrix_sha256
         or sha256_file(SCRIPT_PATH) != script_sha256
@@ -677,6 +814,7 @@ def main() -> int:
         "architecture_record": matrix["architecture_record"],
         "qualification_scope": matrix["qualification_scope"],
         "source_checks": source_records_after,
+        "scope_guard_contract": scope_guard_record_after,
         "groups": group_results,
         "provenance": provenance,
         "excluded_current_claims": matrix["excluded_current_claims"],

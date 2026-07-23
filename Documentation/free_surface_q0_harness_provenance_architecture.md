@@ -29,20 +29,22 @@ reclassified as Q0 accepted-step evidence.
 
 The frozen prerequisite harness checks:
 
-- the exact committed bytes and required semantics of the audit criteria,
+- all 16 exact committed source definitions and required semantics for the
+  audit criteria,
   WP-0, WP-1, WP-2, and WP-10 matrices and runners, and the central campaign
-  registry and validator;
+  registry and validator, plus the executable WP-10 one-phase scope guard;
 - all 24 WP-0 configuration-containment test names, including negative cases,
   in an executable Physics test binary;
 - all 44 committed Python control tests covering exact result inventories,
   duplicate tests, explicit supplemental sources, MPI output copies,
-  source-boundary containment, early closure rejection, artifact layout,
+  source-boundary containment, frozen XML/JSON/mapping one-phase scope-guard
+  acceptance and rejection, early closure rejection, artifact layout,
   source-tree and child hashes, references, expected metrics, and checksums;
 - refusal to promote a campaign from prerequisite-only evidence; and
 - the machine-readable unresolved Q0 state.
 
 The exact matrix SHA-256 is
-`e6e9c170fea1691492bc149d91e9595bea0865e04faf9578652b103e5b84a386`.
+`44204326a345760a98e92db3cfd8a53a231a74e6e5c0b710694f29146df734e5`.
 The runner accepts only the canonical, non-symbolic-link matrix path and
 rejects any byte mutation before discovery or execution. Every path component
 of every frozen source definition is checked for symbolic links before path

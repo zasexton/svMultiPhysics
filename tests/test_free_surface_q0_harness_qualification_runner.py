@@ -130,7 +130,7 @@ def test_q0_source_definitions_and_open_campaign_state_are_exact():
     )
     q0 = registry["campaigns"][0]
 
-    assert len(records) == 15
+    assert len(records) == 16
     assert q0["id"] == "Q0"
     assert q0["state"] == "UNRESOLVED"
     assert q0["child_programs"][1]["id"] == "q0_campaign_execution"
@@ -681,7 +681,7 @@ def test_q0_validate_only_reports_explicit_nonclosure():
     assert (
         summary["matrix_sha256"] == hashlib.sha256(MATRIX_PATH.read_bytes()).hexdigest()
     )
-    assert summary["source_definition_count"] == 15
+    assert summary["source_definition_count"] == 16
     assert summary["gtest_count"] == 24
     assert summary["pytest_count"] == 44
     assert summary["open_exit_count"] == 8

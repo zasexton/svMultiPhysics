@@ -72,17 +72,199 @@
     },
     {
       "id": "unsupported_scope_containment",
-      "path": "tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/run_validation_matrix.py",
+      "path": "tests/cases/fluid/free_surface_one_phase_scope_guard.py",
       "required_fragments": [
-        "\"enabletwophase\"",
+        "\"twophase\"",
         "\"pressureenrichment\"",
         "\"gasdensity\"",
         "\"gasviscosity\"",
-        "\"unsupported_two_phase_or_jump_free_surface_scope\""
+        "\"unsupported_two_phase_or_jump_free_surface_scope\"",
+        "def validate_xml_config(",
+        "def validate_json_config(",
+        "def validate_config_mapping(",
+        "def validate_mapping_wrapper_pairs(",
+        "def validate_xml_scope_subtree("
       ],
       "forbidden_fragments": []
     }
   ],
+  "scope_guard_contract": {
+    "path": "tests/cases/fluid/free_surface_one_phase_scope_guard.py",
+    "diagnostic": "unsupported_two_phase_or_jump_free_surface_scope",
+    "accepted_cases": [
+      {
+        "id": "xml_declared_one_phase",
+        "format": "xml",
+        "payload": "<FreeSurface><FluidModel>one_phase_liquid_sharp_interface</FluidModel><Option name=\"external_pressure\">101325</Option></FreeSurface>"
+      },
+      {
+        "id": "json_declared_one_phase",
+        "format": "json",
+        "payload": "{\"free_surface\":{\"type\":\"one_phase_liquid_sharp_interface\",\"interface_model\":\"sharp_interface\",\"options\":[{\"name\":\"external_pressure\",\"value\":0.0}]}}"
+      },
+      {
+        "id": "mapping_declared_one_phase_transport",
+        "format": "mapping",
+        "payload": {
+          "capability": "one_phase_interface_transport_nonlocal_conservation",
+          "implementation": "one_phase_liquid",
+          "interface_physics": "surface_tension",
+          "material_model": "newtonian_liquid",
+          "phase_model": "one_phase",
+          "density": 1000.0,
+          "viscosity": 0.001
+        }
+      }
+    ],
+    "rejected_cases": [
+      {
+        "id": "xml_two_phase_tag",
+        "format": "xml",
+        "payload": "<FreeSurface><EnableTwoPhase>true</EnableTwoPhase></FreeSurface>"
+      },
+      {
+        "id": "xml_two_phase_attribute_value",
+        "format": "xml",
+        "payload": "<FreeSurface><Interface type=\"two_phase\"/></FreeSurface>"
+      },
+      {
+        "id": "json_gas_key",
+        "format": "json",
+        "payload": "{\"free_surface\":{\"gas_density\":1.2}}"
+      },
+      {
+        "id": "json_jump_model_value",
+        "format": "json",
+        "payload": "{\"free_surface\":{\"interface_model\":\"one_field_pressure_jump\"}}"
+      },
+      {
+        "id": "xml_pressure_enrichment_wrapper_name",
+        "format": "xml",
+        "payload": "<FreeSurface><Option name=\"pressure_enrichment\">xfem</Option></FreeSurface>"
+      },
+      {
+        "id": "mapping_nested_gas_wrapper",
+        "format": "mapping",
+        "payload": {
+          "options": [
+            {
+              "name": "gas_viscosity",
+              "value": 0.000018
+            }
+          ]
+        }
+      },
+      {
+        "id": "mapping_wrapped_phase_model_value",
+        "format": "mapping",
+        "payload": {
+          "name": "phase_model",
+          "value": "two_fluid"
+        }
+      },
+      {
+        "id": "xml_wrapped_phase_model_value",
+        "format": "xml",
+        "payload": "<FreeSurface><Parameter name=\"phase_model\" value=\"two_phase\"/></FreeSurface>"
+      },
+      {
+        "id": "mapping_wrapped_interface_model_value",
+        "format": "mapping",
+        "payload": {
+          "key": "interface_model",
+          "value": "pressure_jump"
+        }
+      },
+      {
+        "id": "json_nested_direct_scope_value",
+        "format": "json",
+        "payload": "{\"scope\":{\"value\":\"two_phase\"}}"
+      },
+      {
+        "id": "mapping_nested_wrapped_scope_value",
+        "format": "mapping",
+        "payload": {
+          "name": "phase_model",
+          "value": {
+            "setting": "two_fluid"
+          }
+        }
+      },
+      {
+        "id": "xml_nested_direct_scope_value",
+        "format": "xml",
+        "payload": "<FreeSurface><Scope><Value>two_phase</Value></Scope></FreeSurface>"
+      },
+      {
+        "id": "xml_nested_wrapped_scope_value",
+        "format": "xml",
+        "payload": "<FreeSurface><Parameter><Name>phase_model</Name><Value><Setting>two_fluid</Setting></Value></Parameter></FreeSurface>"
+      },
+      {
+        "id": "xml_nested_wrapper_value_attribute",
+        "format": "xml",
+        "payload": "<FreeSurface><Parameter name=\"phase_model\"><Value setting=\"pressure_jump\"/></Parameter></FreeSurface>"
+      },
+      {
+        "id": "mapping_structured_wrapper_selector",
+        "format": "mapping",
+        "payload": {
+          "name": {
+            "value": "phase_model"
+          },
+          "value": "two_phase"
+        }
+      },
+      {
+        "id": "xml_direct_scope_tail_value",
+        "format": "xml",
+        "payload": "<FreeSurface><Scope><Label>one_phase</Label>two_phase</Scope></FreeSurface>"
+      },
+      {
+        "id": "xml_wrapped_scope_tail_value",
+        "format": "xml",
+        "payload": "<FreeSurface><Entry><Name>phase_model</Name><Value><Label>one_phase</Label>two_fluid</Value></Entry></FreeSurface>"
+      },
+      {
+        "id": "xml_structured_wrapper_selector",
+        "format": "xml",
+        "payload": "<FreeSurface><Entry><Name><Value>phase_model</Value></Name><Value>two_phase</Value></Entry></FreeSurface>"
+      },
+      {
+        "id": "xml_wrapper_selector_and_value_attributes",
+        "format": "xml",
+        "payload": "<FreeSurface><Entry><Name value=\"interface_model\"/><Value value=\"pressure_jump\"/></Entry></FreeSurface>"
+      },
+      {
+        "id": "mapping_two_fluid_scope_value",
+        "format": "mapping",
+        "payload": {
+          "phase_model": "incompressible_two_fluid"
+        }
+      },
+      {
+        "id": "mapping_pressure_enrichment_scope_value",
+        "format": "mapping",
+        "payload": {
+          "implementation": "pressure_enrichment"
+        }
+      }
+    ],
+    "invalid_cases": [
+      {
+        "id": "json_nonmapping_root",
+        "format": "json",
+        "payload": "[]",
+        "diagnostic": "configuration payload must be a mapping"
+      },
+      {
+        "id": "json_duplicate_scope_key",
+        "format": "json",
+        "payload": "{\"phase_model\":\"one_phase\",\"phase_model\":\"two_phase\"}",
+        "diagnostic": "duplicate JSON key: phase_model"
+      }
+    ]
+  },
   "groups": [
     {
       "id": "momentum_capability_artifact_serial",
