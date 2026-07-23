@@ -991,7 +991,7 @@ A work-package box is checked only after its source changes, required tests, and
 
 - [x] WP-0: configuration containment and effective-state provenance
 - [x] WP-1: remove physical dry-domain feedback and bound the transport extension
-- [ ] WP-2: one authoritative cut/interface/wet-wall/contact geometry snapshot
+- [x] WP-2: one authoritative cut/interface/wet-wall/contact geometry snapshot
 - [ ] WP-3: sharply clipped exterior boundary operators
 - [ ] WP-4: balanced capillary pressure, wall energy, and prescribed angle
 - [ ] WP-5: side-wall contact-line dynamics and wall-aware maintenance
@@ -1151,6 +1151,14 @@ Exit evidence:
 
 - A geometry ledger must show that every contact fragment references exactly one valid source-surface fragment, while allowing one surface fragment to have zero or multiple wall intersections. It must also show zero stale/orphan contact rules, quantitative maximum root/normal/moment errors, and constant-one volume equality.
 - All consumers must declare the same complete snapshot revision key. A mismatch should be a hard error, not a warning or implicit refresh.
+
+Qualification evidence recorded on 2026-07-22:
+
+- The frozen `free_surface_wp2_geometry_v4` matrix passed from clean source commit `5cf65650f93faf8d6f4c264ca50d03c70daea373` and source tree `24b20591ab27156b5dc8a25ea1243d99810a04df`.
+- All nine predeclared serial/MPI groups passed, covering 200 distinct tests and 130 quantitative evidence checks. The evidence includes affine, warped, and high-order geometry; tiny-cut and intersection sweeps; fault injection; contact provenance and ownership; revision consistency; constant-one assembly equality; curvature refinement; and snapshot lifecycle bounds.
+- Application, FE, and Physics targets were configured and built in three independent clean build homes before execution. Final provenance bound the clean source state, registry hash `7e89ac445669a7f3e9b5217132949ecbe59f276ccd2e0326b12982fd26c28361`, runner hash `87152bb031ac5b4cbcafb71bb39cd02fb3c5ce893d6f093d39f60e3429881583`, and executed binaries; every final provenance check passed with no diagnostic.
+- The checksum-bound [WP-2 qualification record](qualification_logs/free_surface_wp2_geometry_20260722_5cf65650/record.md), [summary](qualification_logs/free_surface_wp2_geometry_20260722_5cf65650/summary.json), and machine-readable artifacts are archived in commit `88ce5b60d28d273ebbe45eaa219da0960646feb2`; all 69 recorded artifact checksums pass.
+- This evidence closes WP-2 only. WP-3 through WP-10 and Q0 through Q7 remain separate gates and are not credited by this campaign.
 
 ### WP-3: sharply clipped exterior boundary operators
 
