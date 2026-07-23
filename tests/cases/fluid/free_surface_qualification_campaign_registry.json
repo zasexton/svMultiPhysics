@@ -1,0 +1,829 @@
+{
+  "schema_version": 1,
+  "registry_id": "free_surface_qualification_campaign_v1",
+  "disposition": "UNRESOLVED_CONTROL_SLICE",
+  "artifact_contract": {
+    "root": "Documentation/qualification_logs/free_surface_campaigns",
+    "directory_pattern": "{campaign_id_lower}/{run_id}",
+    "required_files": [
+      "benchmarks.json",
+      "checksums.json",
+      "dependencies.json",
+      "manifest.json",
+      "metrics.json",
+      "provenance.json"
+    ],
+    "hash_algorithm": "sha256"
+  },
+  "accepted_step_metric_sets": [
+    "accepted_stage",
+    "provenance",
+    "phase_inventory",
+    "energy_and_work",
+    "extension_map",
+    "geometry",
+    "solver",
+    "resources"
+  ],
+  "metric_sets": {
+    "accepted_stage": [
+      "step.accepted_index",
+      "step.accepted_time",
+      "step.nonlinear_stage",
+      "revision.state",
+      "revision.geometry",
+      "revision.map"
+    ],
+    "provenance": [
+      "source.commit",
+      "source.tree",
+      "source.dirty_tree_sha256",
+      "build.compiler",
+      "build.libraries_sha256",
+      "build.options_sha256",
+      "runtime.machine",
+      "runtime.mpi_ranks",
+      "runtime.threads",
+      "input.mesh_sha256",
+      "input.reference_data_sha256",
+      "input.dimensional_parameters_sha256",
+      "input.nondimensional_groups_sha256",
+      "input.acceptance_thresholds_sha256"
+    ],
+    "phase_inventory": [
+      "volume.raw_global",
+      "volume.post_maintenance_global",
+      "volume.raw_components",
+      "volume.post_maintenance_components",
+      "volume.raw_film",
+      "volume.post_maintenance_film",
+      "volume.raw_sheet",
+      "volume.post_maintenance_sheet",
+      "volume.raw_rim",
+      "volume.post_maintenance_rim",
+      "volume.raw_satellites",
+      "volume.post_maintenance_satellites"
+    ],
+    "energy_and_work": [
+      "energy.kinetic",
+      "energy.gravitational",
+      "energy.liquid_gas_surface",
+      "energy.solid_liquid_wall",
+      "energy.gas_compressibility",
+      "dissipation.bulk_viscous",
+      "dissipation.navier_slip",
+      "dissipation.line_friction",
+      "work.external_pressure",
+      "work.body_force",
+      "work.vms_pspg",
+      "work.ghost_penalty_aggregation",
+      "work.extension",
+      "work.pruning",
+      "work.limiting",
+      "work.redistancing",
+      "work.volume_reconciliation",
+      "energy.topology_jump",
+      "energy.accepted_balance_residual",
+      "energy.maintenance_substages"
+    ],
+    "extension_map": [
+      "extension.maximum_row_l1",
+      "extension.maximum_amplification",
+      "extension.fallback_count",
+      "extension.guard_rejection_count"
+    ],
+    "geometry": [
+      "geometry.minimum_cut_fraction",
+      "geometry.minimum_achieved_order",
+      "geometry.deleted_feature_count",
+      "geometry.pruned_feature_count",
+      "geometry.rootless_feature_count",
+      "geometry.aggregate_path_count",
+      "geometry.validation_maxima"
+    ],
+    "solver": [
+      "solver.nonlinear_iterations",
+      "solver.krylov_iterations",
+      "solver.rejected_attempts",
+      "solver.time_step_reductions",
+      "solver.fallback_modes",
+      "solver.rollback_reason"
+    ],
+    "resources": [
+      "resource.wall_clock_seconds",
+      "resource.peak_resident_memory_mib"
+    ],
+    "q0_harness": [
+      "q0.invalid_input_case_count",
+      "q0.deterministic_diagnostic_count",
+      "q0.artifact_layout_check_count",
+      "q0.provenance_check_count"
+    ],
+    "q1_exact": [
+      "q1.scaled_identity_residuals",
+      "q1.serial_partition_comparison",
+      "q1.mpi_partition_comparison",
+      "q1.numbering_permutation_comparison"
+    ],
+    "q2_equilibrium": [
+      "q2.interface_norms",
+      "q2.centroid",
+      "q2.pressure_jump",
+      "q2.pressure_range_distance",
+      "q2.capillary_residual",
+      "q2.divergence",
+      "q2.maximum_velocity",
+      "q2.mean_velocity",
+      "q2.parasitic_capillary_number",
+      "q2.contact_angle",
+      "q2.base_radius",
+      "q2.apex_height"
+    ],
+    "q3_smooth_dynamics": [
+      "q3.spatial_convergence",
+      "q3.temporal_convergence",
+      "q3.diagonal_convergence",
+      "q3.frequency_error",
+      "q3.damping_error",
+      "q3.phase_error",
+      "q3.profile_error"
+    ],
+    "q4_wetting": [
+      "q4.contact_position",
+      "q4.contact_speed",
+      "q4.apparent_angle",
+      "q4.microscopic_angle",
+      "q4.constitutive_residual",
+      "q4.wall_slip",
+      "q4.wall_measure",
+      "q4.contact_measure",
+      "q4.rise_height",
+      "q4.overshoot",
+      "q4.damping"
+    ],
+    "q5_violent_one_phase": [
+      "q5.front_position",
+      "q5.surface_probes",
+      "q5.wall_force",
+      "q5.wall_pressure",
+      "q5.wall_impulse",
+      "q5.run_up",
+      "q5.overturning_time",
+      "q5.volume_distribution"
+    ],
+    "q6_pre_breakup": [
+      "q6.base_diameter",
+      "q6.mid_diameter",
+      "q6.rim_diameter",
+      "q6.rim_height",
+      "q6.rim_radius",
+      "q6.rim_speed",
+      "q6.sheet_thickness",
+      "q6.residual_film",
+      "q6.finger_wavelength",
+      "q6.finger_count",
+      "q6.resolved_drop_distribution"
+    ],
+    "q7_gas_sensitive": [
+      "q7.liquid_phase_volume",
+      "q7.gas_phase_volume",
+      "q7.interface_position",
+      "q7.gas_pressure",
+      "q7.gas_velocity",
+      "q7.gas_compressibility_work",
+      "q7.phase_coupling_residual"
+    ]
+  },
+  "campaigns": [
+    {
+      "id": "Q0",
+      "sequence": 0,
+      "depends_on": [],
+      "work_package_dependencies": [
+        "WP-0"
+      ],
+      "state": "UNRESOLVED",
+      "scope": {
+        "claim": "Q0",
+        "evidence_class": "campaign_qualification",
+        "qualifies_only": [
+          "Q0"
+        ],
+        "excludes": [
+          "Q1",
+          "Q2",
+          "Q3",
+          "Q4",
+          "Q5",
+          "Q6",
+          "Q7"
+        ],
+        "capability_envelope": "qualification_control_only"
+      },
+      "child_programs": [
+        {
+          "id": "wp0_configuration_matrix",
+          "role": "prerequisite_only",
+          "registration_state": "REGISTERED",
+          "registry_path": "tests/cases/fluid/free_surface_configuration_qualification_matrix.json",
+          "registry_sha256": "c2a71701203f54abf3b2a7fc56c716f97e55ac9dd03895c5dfbba8539f66a823",
+          "runner_path": "tests/cases/fluid/run_free_surface_configuration_qualification.py",
+          "runner_sha256": "a0a465d99e1cefce7cc312c67c4c368254e093c211b7b58c738c4a998d11f73e"
+        },
+        {
+          "id": "q0_campaign_execution",
+          "role": "campaign_evidence",
+          "registration_state": "UNRESOLVED",
+          "registry_path": null,
+          "registry_sha256": null,
+          "runner_path": null,
+          "runner_sha256": null
+        }
+      ],
+      "metric_sets": [
+        "accepted_stage",
+        "provenance",
+        "phase_inventory",
+        "energy_and_work",
+        "extension_map",
+        "geometry",
+        "solver",
+        "resources",
+        "q0_harness"
+      ],
+      "benchmarks": [
+        {
+          "id": "q0_harness_and_invalid_configuration",
+          "description": "Campaign artifact, provenance, and deterministic invalid-input contract",
+          "reference": {
+            "kind": "contract_section",
+            "status": "CONTRACT_ONLY",
+            "title": "Free-surface boundary and unfitted-method audit",
+            "locator": "Qualification campaign Q0--Q7 / Q0",
+            "version": "2026-07-20",
+            "data_units": "not_applicable",
+            "uncertainty": "not_applicable",
+            "limitations": "The WP-0 matrix is prerequisite evidence and does not itself qualify Q0."
+          }
+        }
+      ],
+      "unresolved_exits": [
+        "accepted_step_telemetry_not_archived_under_the_campaign_contract",
+        "same_revision_q0_campaign_execution_not_registered",
+        "complete_q0_campaign_artifact_not_archived"
+      ]
+    },
+    {
+      "id": "Q1",
+      "sequence": 1,
+      "depends_on": [
+        "Q0"
+      ],
+      "work_package_dependencies": [
+        "WP-1",
+        "WP-2",
+        "WP-3",
+        "WP-4",
+        "WP-5",
+        "WP-6",
+        "WP-7"
+      ],
+      "state": "UNRESOLVED",
+      "scope": {
+        "claim": "Q1",
+        "evidence_class": "campaign_qualification",
+        "qualifies_only": [
+          "Q1"
+        ],
+        "excludes": [
+          "Q0",
+          "Q2",
+          "Q3",
+          "Q4",
+          "Q5",
+          "Q6",
+          "Q7"
+        ],
+        "capability_envelope": "low_level_discrete_contracts_only"
+      },
+      "child_programs": [
+        {
+          "id": "q1_exact_matrix_campaign",
+          "role": "campaign_evidence",
+          "registration_state": "UNRESOLVED",
+          "registry_path": null,
+          "registry_sha256": null,
+          "runner_path": null,
+          "runner_sha256": null
+        }
+      ],
+      "metric_sets": [
+        "accepted_stage",
+        "provenance",
+        "phase_inventory",
+        "energy_and_work",
+        "extension_map",
+        "geometry",
+        "solver",
+        "resources",
+        "q1_exact"
+      ],
+      "benchmarks": [
+        {
+          "id": "q1_exact_algebra_geometry_boundary_transport_cut",
+          "description": "Exact low-level identities, serial and distributed partitions, and numbering permutations",
+          "reference": {
+            "kind": "contract_section",
+            "status": "CONTRACT_ONLY",
+            "title": "Free-surface boundary and unfitted-method audit",
+            "locator": "Qualification campaign Q0--Q7 / Q1",
+            "version": "2026-07-20",
+            "data_units": "scaled_residuals",
+            "uncertainty": "predeclared_floating_point_tolerances",
+            "limitations": "Low-level identities do not qualify later physical campaigns."
+          }
+        }
+      ],
+      "unresolved_exits": [
+        "q0_not_qualified",
+        "wp1_through_wp7_same_revision_campaign_not_complete"
+      ]
+    },
+    {
+      "id": "Q2",
+      "sequence": 2,
+      "depends_on": [
+        "Q0",
+        "Q1"
+      ],
+      "work_package_dependencies": [
+        "WP-2",
+        "WP-4",
+        "WP-5",
+        "WP-7",
+        "WP-8"
+      ],
+      "state": "UNRESOLVED",
+      "scope": {
+        "claim": "Q2",
+        "evidence_class": "campaign_qualification",
+        "qualifies_only": [
+          "Q2"
+        ],
+        "excludes": [
+          "Q0",
+          "Q1",
+          "Q3",
+          "Q4",
+          "Q5",
+          "Q6",
+          "Q7"
+        ],
+        "capability_envelope": "one_phase_hydrostatic_and_capillary_equilibrium_only"
+      },
+      "child_programs": [
+        {
+          "id": "q2_equilibrium_campaign",
+          "role": "campaign_evidence",
+          "registration_state": "UNRESOLVED",
+          "registry_path": null,
+          "registry_sha256": null,
+          "runner_path": null,
+          "runner_sha256": null
+        }
+      ],
+      "metric_sets": [
+        "accepted_stage",
+        "provenance",
+        "phase_inventory",
+        "energy_and_work",
+        "extension_map",
+        "geometry",
+        "solver",
+        "resources",
+        "q2_equilibrium"
+      ],
+      "benchmarks": [
+        {
+          "id": "q2_flat_curved_and_sessile_equilibria",
+          "description": "Flat, circle, sphere, and five-angle sessile equilibrium matrix",
+          "reference": {
+            "kind": "contract_section",
+            "status": "REFERENCE_UNRESOLVED",
+            "title": "Free-surface boundary and unfitted-method audit",
+            "locator": "Qualification campaign Q0--Q7 / Q2",
+            "version": "2026-07-20",
+            "data_units": "case_specific",
+            "uncertainty": "published_and_discretization_uncertainty_not_yet_frozen",
+            "limitations": "Reference adaptations, finest-level thresholds, and uncertainty bands remain unresolved."
+          }
+        }
+      ],
+      "unresolved_exits": [
+        "q0_and_q1_not_qualified",
+        "balanced_curved_equilibrium_matrix_not_complete",
+        "reference_uncertainty_and_thresholds_not_frozen"
+      ]
+    },
+    {
+      "id": "Q3",
+      "sequence": 3,
+      "depends_on": [
+        "Q0",
+        "Q1",
+        "Q2"
+      ],
+      "work_package_dependencies": [
+        "WP-1",
+        "WP-2",
+        "WP-6",
+        "WP-7",
+        "WP-8"
+      ],
+      "state": "UNRESOLVED",
+      "scope": {
+        "claim": "Q3",
+        "evidence_class": "campaign_qualification",
+        "qualifies_only": [
+          "Q3"
+        ],
+        "excludes": [
+          "Q0",
+          "Q1",
+          "Q2",
+          "Q4",
+          "Q5",
+          "Q6",
+          "Q7"
+        ],
+        "capability_envelope": "smooth_one_phase_transport_and_dynamics_only"
+      },
+      "child_programs": [
+        {
+          "id": "q3_smooth_dynamics_campaign",
+          "role": "campaign_evidence",
+          "registration_state": "UNRESOLVED",
+          "registry_path": null,
+          "registry_sha256": null,
+          "runner_path": null,
+          "runner_sha256": null
+        }
+      ],
+      "metric_sets": [
+        "accepted_stage",
+        "provenance",
+        "phase_inventory",
+        "energy_and_work",
+        "extension_map",
+        "geometry",
+        "solver",
+        "resources",
+        "q3_smooth_dynamics"
+      ],
+      "benchmarks": [
+        {
+          "id": "q3_transport_and_smooth_dynamics_refinement",
+          "description": "Independent spatial, temporal, and diagonal refinement for transport and smooth dynamics",
+          "reference": {
+            "kind": "contract_section",
+            "status": "REFERENCE_UNRESOLVED",
+            "title": "Free-surface boundary and unfitted-method audit",
+            "locator": "Qualification campaign Q0--Q7 / Q3",
+            "version": "2026-07-20",
+            "data_units": "case_specific",
+            "uncertainty": "published_reference_uncertainty_not_yet_frozen",
+            "limitations": "The full refinement matrix and published-reference reconciliation are unresolved."
+          }
+        }
+      ],
+      "unresolved_exits": [
+        "q0_through_q2_not_qualified",
+        "full_spatial_temporal_and_diagonal_refinement_not_complete",
+        "reference_uncertainty_and_thresholds_not_frozen"
+      ]
+    },
+    {
+      "id": "Q4",
+      "sequence": 4,
+      "depends_on": [
+        "Q0",
+        "Q1",
+        "Q2",
+        "Q3"
+      ],
+      "work_package_dependencies": [
+        "WP-2",
+        "WP-3",
+        "WP-4",
+        "WP-5",
+        "WP-6",
+        "WP-7",
+        "WP-8"
+      ],
+      "state": "UNRESOLVED",
+      "scope": {
+        "claim": "Q4",
+        "evidence_class": "campaign_qualification",
+        "qualifies_only": [
+          "Q4"
+        ],
+        "excludes": [
+          "Q0",
+          "Q1",
+          "Q2",
+          "Q3",
+          "Q5",
+          "Q6",
+          "Q7"
+        ],
+        "capability_envelope": "one_phase_dynamic_wetting_only"
+      },
+      "child_programs": [
+        {
+          "id": "q4_dynamic_wetting_campaign",
+          "role": "campaign_evidence",
+          "registration_state": "UNRESOLVED",
+          "registry_path": null,
+          "registry_sha256": null,
+          "runner_path": null,
+          "runner_sha256": null
+        }
+      ],
+      "metric_sets": [
+        "accepted_stage",
+        "provenance",
+        "phase_inventory",
+        "energy_and_work",
+        "extension_map",
+        "geometry",
+        "solver",
+        "resources",
+        "q4_wetting"
+      ],
+      "benchmarks": [
+        {
+          "id": "q4_dynamic_contact_and_capillary_rise",
+          "description": "Local advancing and receding contact plus capillary-rise integral validation",
+          "reference": {
+            "kind": "contract_section",
+            "status": "REFERENCE_UNRESOLVED",
+            "title": "Free-surface boundary and unfitted-method audit",
+            "locator": "Qualification campaign Q0--Q7 / Q4",
+            "version": "2026-07-20",
+            "data_units": "case_specific",
+            "uncertainty": "experimental_uncertainty_band_not_yet_pinned",
+            "limitations": "Distributed wall-aware maintenance and the full capillary-rise matrix remain unresolved."
+          }
+        }
+      ],
+      "unresolved_exits": [
+        "q0_through_q3_not_qualified",
+        "dynamic_wetting_sign_speed_and_energy_matrix_not_complete",
+        "capillary_rise_reference_data_not_pinned"
+      ]
+    },
+    {
+      "id": "Q5",
+      "sequence": 5,
+      "depends_on": [
+        "Q0",
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4"
+      ],
+      "work_package_dependencies": [
+        "WP-1",
+        "WP-2",
+        "WP-3",
+        "WP-5",
+        "WP-6",
+        "WP-7",
+        "WP-8"
+      ],
+      "state": "UNRESOLVED",
+      "scope": {
+        "claim": "Q5",
+        "evidence_class": "campaign_qualification",
+        "qualifies_only": [
+          "Q5"
+        ],
+        "excludes": [
+          "Q0",
+          "Q1",
+          "Q2",
+          "Q3",
+          "Q4",
+          "Q6",
+          "Q7"
+        ],
+        "capability_envelope": "violent_one_phase_liquid_motion_without_gas_claims"
+      },
+      "child_programs": [
+        {
+          "id": "q5_violent_one_phase_campaign",
+          "role": "campaign_evidence",
+          "registration_state": "UNRESOLVED",
+          "registry_path": null,
+          "registry_sha256": null,
+          "runner_path": null,
+          "runner_sha256": null
+        }
+      ],
+      "metric_sets": [
+        "accepted_stage",
+        "provenance",
+        "phase_inventory",
+        "energy_and_work",
+        "extension_map",
+        "geometry",
+        "solver",
+        "resources",
+        "q5_violent_one_phase"
+      ],
+      "benchmarks": [
+        {
+          "id": "q5_dam_break_and_one_phase_impact",
+          "description": "Full-horizon stress tests and one-phase-compatible dam-break comparison",
+          "reference": {
+            "kind": "contract_section",
+            "status": "REFERENCE_UNRESOLVED",
+            "title": "Free-surface boundary and unfitted-method audit",
+            "locator": "Qualification campaign Q0--Q7 / Q5",
+            "version": "2026-07-20",
+            "data_units": "case_specific",
+            "uncertainty": "experimental_uncertainty_and_probe_contract_not_yet_pinned",
+            "limitations": "Gas-trapping roof impact is diagnostic only and cannot be promoted as pressure validation."
+          }
+        }
+      ],
+      "unresolved_exits": [
+        "q0_through_q4_not_qualified",
+        "full_horizon_one_phase_stress_matrix_not_complete",
+        "reference_probe_and_uncertainty_contract_not_pinned"
+      ]
+    },
+    {
+      "id": "Q6",
+      "sequence": 6,
+      "depends_on": [
+        "Q0",
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4",
+        "Q5"
+      ],
+      "work_package_dependencies": [
+        "WP-2",
+        "WP-3",
+        "WP-5",
+        "WP-6",
+        "WP-7",
+        "WP-8"
+      ],
+      "state": "UNRESOLVED",
+      "scope": {
+        "claim": "Q6",
+        "evidence_class": "campaign_qualification",
+        "qualifies_only": [
+          "Q6"
+        ],
+        "excludes": [
+          "Q0",
+          "Q1",
+          "Q2",
+          "Q3",
+          "Q4",
+          "Q5",
+          "Q7"
+        ],
+        "capability_envelope": "resolved_one_phase_film_filament_jet_and_pre_breakup_crown_only"
+      },
+      "child_programs": [
+        {
+          "id": "q6_resolved_thin_structure_campaign",
+          "role": "campaign_evidence",
+          "registration_state": "UNRESOLVED",
+          "registry_path": null,
+          "registry_sha256": null,
+          "runner_path": null,
+          "runner_sha256": null
+        }
+      ],
+      "metric_sets": [
+        "accepted_stage",
+        "provenance",
+        "phase_inventory",
+        "energy_and_work",
+        "extension_map",
+        "geometry",
+        "solver",
+        "resources",
+        "q6_pre_breakup"
+      ],
+      "benchmarks": [
+        {
+          "id": "q6_resolved_film_filament_jet_and_crown",
+          "description": "Resolved-thickness refinement before unresolved breakup",
+          "reference": {
+            "kind": "contract_section",
+            "status": "REFERENCE_UNRESOLVED",
+            "title": "Free-surface boundary and unfitted-method audit",
+            "locator": "Qualification campaign Q0--Q7 / Q6",
+            "version": "2026-07-20",
+            "data_units": "case_specific",
+            "uncertainty": "comparison_interval_and_measurement_uncertainty_not_yet_pinned",
+            "limitations": "Unresolved fingers or drops are outside this campaign claim."
+          }
+        }
+      ],
+      "unresolved_exits": [
+        "q0_through_q5_not_qualified",
+        "resolved_thickness_refinement_matrix_not_complete",
+        "comparison_interval_and_reference_uncertainty_not_frozen"
+      ]
+    },
+    {
+      "id": "Q7",
+      "sequence": 7,
+      "depends_on": [
+        "Q0",
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4",
+        "Q5",
+        "Q6"
+      ],
+      "work_package_dependencies": [
+        "WP-2",
+        "WP-6",
+        "WP-7",
+        "WP-8",
+        "WP-10"
+      ],
+      "state": "UNRESOLVED",
+      "scope": {
+        "claim": "Q7",
+        "evidence_class": "campaign_qualification",
+        "qualifies_only": [
+          "Q7"
+        ],
+        "excludes": [
+          "Q0",
+          "Q1",
+          "Q2",
+          "Q3",
+          "Q4",
+          "Q5",
+          "Q6"
+        ],
+        "capability_envelope": "two_phase_and_gas_sensitive_phenomena_only"
+      },
+      "child_programs": [
+        {
+          "id": "q7_two_phase_gas_campaign",
+          "role": "campaign_evidence",
+          "registration_state": "UNRESOLVED",
+          "registry_path": null,
+          "registry_sha256": null,
+          "runner_path": null,
+          "runner_sha256": null
+        }
+      ],
+      "metric_sets": [
+        "accepted_stage",
+        "provenance",
+        "phase_inventory",
+        "energy_and_work",
+        "extension_map",
+        "geometry",
+        "solver",
+        "resources",
+        "q7_gas_sensitive"
+      ],
+      "benchmarks": [
+        {
+          "id": "q7_two_phase_and_gas_sensitive_validation",
+          "description": "Two-phase waves and bubbles before gas-sensitive impact and splash",
+          "reference": {
+            "kind": "contract_section",
+            "status": "REFERENCE_UNRESOLVED",
+            "title": "Free-surface boundary and unfitted-method audit",
+            "locator": "Qualification campaign Q0--Q7 / Q7",
+            "version": "2026-07-20",
+            "data_units": "case_specific",
+            "uncertainty": "two_phase_and_gas_reference_bands_not_yet_pinned",
+            "limitations": "One-phase evidence is not admissible for this campaign."
+          }
+        }
+      ],
+      "unresolved_exits": [
+        "q0_through_q6_not_qualified",
+        "two_phase_and_gas_models_not_implemented_and_qualified",
+        "capability_specific_reference_data_not_pinned"
+      ]
+    }
+  ]
+}
