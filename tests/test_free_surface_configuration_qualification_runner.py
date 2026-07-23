@@ -121,7 +121,17 @@ def test_explicit_source_state_accepts_exact_supplement_set(tmp_path):
     tracked.write_text("tracked\n", encoding="utf-8")
     subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
     subprocess.run(
-        ["git", "commit", "-q", "-m", "fixture"], cwd=tmp_path, check=True
+        [
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+        cwd=tmp_path,
+        check=True,
     )
     supplement = tmp_path / "supplement.txt"
     supplement.write_text("supplement\n", encoding="utf-8")
