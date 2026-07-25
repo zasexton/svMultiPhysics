@@ -1558,6 +1558,7 @@ class GeneralSimulationParameters : public ParameterLists
     Parameter<std::string> name_prefix_of_saved_vtk_files;
     Parameter<std::string> restart_file_name; 
     Parameter<std::string> searched_file_name_to_trigger_stop; 
+    Parameter<std::string> transient_time_integration_scheme;
     Parameter<std::string> save_results_in_folder; 
     Parameter<std::string> simulation_initialization_file_path;
 };

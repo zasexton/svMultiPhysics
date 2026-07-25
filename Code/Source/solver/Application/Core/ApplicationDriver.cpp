@@ -1042,6 +1042,89 @@ bool generalizedAlphaPdeRateInitializationRequested(
   return parseBoolEnv("SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT", true);
 }
 
+struct TransientTimeIntegrationSelection {
+  svmp::FE::timestepping::SchemeKind scheme{
+      svmp::FE::timestepping::SchemeKind::GeneralizedAlpha};
+  std::string_view canonical_name{"GeneralizedAlpha"};
+  std::optional<double> generalized_alpha_rho_inf{0.5};
+  svmp::FE::Real stage_alpha_f{svmp::FE::Real{1.0}};
+};
+
+constexpr std::array<std::pair<
+    std::string_view,
+    svmp::FE::timestepping::SchemeKind>, 2>
+    kTransientTimeIntegrationSchemes{{
+        {"GeneralizedAlpha",
+         svmp::FE::timestepping::SchemeKind::GeneralizedAlpha},
+        {"BackwardEuler",
+         svmp::FE::timestepping::SchemeKind::BackwardEuler},
+    }};
+
+svmp::FE::timestepping::SchemeKind parseTransientTimeIntegrationScheme(
+    std::string_view name)
+{
+  const auto entry = std::find_if(
+      kTransientTimeIntegrationSchemes.begin(),
+      kTransientTimeIntegrationSchemes.end(),
+      [name](const auto& candidate) {
+        return candidate.first == name;
+      });
+  if (entry == kTransientTimeIntegrationSchemes.end()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Unsupported "
+        "<Transient_time_integration_scheme> '" +
+        std::string(name) +
+        "'. Supported values are exactly 'GeneralizedAlpha' and "
+        "'BackwardEuler'.");
+  }
+  return entry->second;
+}
+
+std::string_view transientTimeIntegrationSchemeName(
+    svmp::FE::timestepping::SchemeKind scheme)
+{
+  const auto entry = std::find_if(
+      kTransientTimeIntegrationSchemes.begin(),
+      kTransientTimeIntegrationSchemes.end(),
+      [scheme](const auto& candidate) {
+        return candidate.second == scheme;
+      });
+  if (entry == kTransientTimeIntegrationSchemes.end()) {
+    throw std::logic_error(
+        "[svMultiPhysics::Application] Transient scheme is outside the "
+        "application-supported set.");
+  }
+  return entry->first;
+}
+
+TransientTimeIntegrationSelection resolveTransientTimeIntegrationSelection(
+    const GeneralSimulationParameters& parameters)
+{
+  const auto scheme =
+      parseTransientTimeIntegrationScheme(
+          parameters.transient_time_integration_scheme.value());
+  TransientTimeIntegrationSelection selection;
+  selection.scheme = scheme;
+  selection.canonical_name = transientTimeIntegrationSchemeName(scheme);
+  if (scheme == svmp::FE::timestepping::SchemeKind::BackwardEuler) {
+    // A spectral radius is deliberately inapplicable to backward Euler,
+    // which uses the accepted endpoint.
+    selection.generalized_alpha_rho_inf = std::nullopt;
+    selection.stage_alpha_f = svmp::FE::Real{1.0};
+    return selection;
+  }
+
+  const double rho_inf =
+      parameters.spectral_radius_of_infinite_time_step.value();
+  const auto generalized_alpha =
+      svmp::FE::timestepping::utils::generalizedAlphaFirstOrderFromRhoInf(
+          rho_inf);
+  selection.generalized_alpha_rho_inf = rho_inf;
+  selection.stage_alpha_f =
+      static_cast<svmp::FE::Real>(generalized_alpha.alpha_f);
+  return selection;
+}
+
 double parseDoubleEnv(const char* name, double default_value)
 {
   const char* env = std::getenv(name);
@@ -6760,7 +6843,6 @@ applyLevelSetBoundPreservingCandidates(
     application::core::SimulationComponents& sim,
     svmp::FE::timestepping::TimeHistory& history,
     const std::vector<LevelSetMaintenanceRequest>& requests,
-    double /*generalized_alpha_gamma*/,
     const LevelSetMaintenanceStageObserver& observe_stage = {})
 {
   LevelSetBoundPreservingApplicationResult application_result;
@@ -16348,6 +16430,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     throw std::runtime_error("[svMultiPhysics::Application] Transient solve requires Time_step_size > 0.");
   }
 
+  const auto transient_scheme =
+      resolveTransientTimeIntegrationSelection(
+          params.general_simulation_parameters);
   svmp::FE::timestepping::TimeLoopOptions opts{};
   opts.t0 = params.general_simulation_parameters.start_time.defined()
                 ? params.general_simulation_parameters.start_time.value()
@@ -16355,9 +16440,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   opts.dt = dt;
   opts.t_end = opts.t0 + static_cast<double>(num_steps) * dt;
   opts.max_steps = num_steps;
-  opts.scheme = svmp::FE::timestepping::SchemeKind::GeneralizedAlpha;
-  if (params.general_simulation_parameters.spectral_radius_of_infinite_time_step.defined()) {
-    opts.generalized_alpha_rho_inf = params.general_simulation_parameters.spectral_radius_of_infinite_time_step.value();
+  opts.scheme = transient_scheme.scheme;
+  if (transient_scheme.generalized_alpha_rho_inf.has_value()) {
+    opts.generalized_alpha_rho_inf =
+        *transient_scheme.generalized_alpha_rho_inf;
   }
 
   applyMonolithicEquationNewtonControls(params, opts.newton);
@@ -16383,6 +16469,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // correctness default for active-cut systems.  Keep the environment switch
   // as an explicit legacy/performance comparison opt-out.
   opts.initialize_first_order_rate_from_pde =
+      opts.scheme == svmp::FE::timestepping::SchemeKind::GeneralizedAlpha &&
       generalizedAlphaPdeRateInitializationRequested(
           !transient_active_cut_requests.empty());
   const auto level_set_advection_velocity =
@@ -16471,14 +16558,25 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       parseDoubleEnv("SVMP_TIMELOOP_LAST_STEP_ABSORB_FRACTION",
                      opts.step_controller ? 1.0e-2 : 0.0);
 
-  oopCout() << "[svMultiPhysics::Application] Transient solve: t0=" << opts.t0 << " dt=" << opts.dt
+  oopCout() << "[svMultiPhysics::Application] Transient solve: t0="
+            << opts.t0 << " dt=" << opts.dt
             << " t_end=" << opts.t_end << " max_steps=" << opts.max_steps
-            << " scheme=GeneralizedAlpha rho_inf=" << opts.generalized_alpha_rho_inf
-            << " pde_udot_init=" << (opts.initialize_first_order_rate_from_pde ? 1 : 0)
-            << " last_step_absorb_fraction=" << opts.last_step_absorb_fraction
-            << " newton(max_it=" << opts.newton.max_iterations << ", min_it=" << opts.newton.min_iterations
+            << " scheme=" << transient_scheme.canonical_name;
+  if (transient_scheme.generalized_alpha_rho_inf.has_value()) {
+    oopCout() << " rho_inf="
+              << *transient_scheme.generalized_alpha_rho_inf;
+  } else {
+    oopCout() << " rho_inf=n/a";
+  }
+  oopCout() << " pde_udot_init="
+            << (opts.initialize_first_order_rate_from_pde ? 1 : 0)
+            << " last_step_absorb_fraction="
+            << opts.last_step_absorb_fraction
+            << " newton(max_it=" << opts.newton.max_iterations
+            << ", min_it=" << opts.newton.min_iterations
             << ", abs_tol=" << opts.newton.abs_tolerance
-            << ", rel_tol=" << opts.newton.rel_tolerance << ")" << std::endl;
+            << ", rel_tol=" << opts.newton.rel_tolerance << ")"
+            << std::endl;
 
   // Ensure time-history vectors use the same backend layout as the solver workspace.
   oopCout() << "[svMultiPhysics::Application] Transient: repacking TimeHistory for backend layout." << std::endl;
@@ -16763,9 +16861,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " iters=" << nr.linear.iterations
               << " rel=" << nr.linear.relative_residual << ")" << std::endl;
   };
-  const auto generalized_alpha_first_order =
-      svmp::FE::timestepping::utils::generalizedAlphaFirstOrderFromRhoInf(
-          opts.generalized_alpha_rho_inf);
   const bool has_conservative_phase = std::any_of(
       level_set_maintenance.begin(),
       level_set_maintenance.end(),
@@ -17026,11 +17121,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   return ConservativePhaseContactStageCandidate{};
                 }
                 const svmp::FE::Real alpha_f =
-                    opts.scheme == svmp::FE::timestepping::SchemeKind::
-                                       GeneralizedAlpha
-                    ? static_cast<svmp::FE::Real>(
-                          generalized_alpha_first_order.alpha_f)
-                    : svmp::FE::Real{1.0};
+                    transient_scheme.stage_alpha_f;
                 const auto previous_solution =
                     gatherFeOrderedSolution(h.uPrev());
                 const auto previous_state_revision =
@@ -17132,7 +17223,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               sim,
               h,
               level_set_maintenance,
-              generalized_alpha_first_order.gamma,
               [&](application::core::LevelSetMaintenanceWorkSubstage
                       substage,
                   std::span<const svmp::FE::Real> before_candidate,
@@ -17213,12 +17303,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   endpoint_solution,
                   velocity_extension_artifact_comm);
           const svmp::FE::Real alpha_f =
-              opts.scheme ==
-                      svmp::FE::timestepping::SchemeKind::
-                          GeneralizedAlpha
-                  ? static_cast<svmp::FE::Real>(
-                        generalized_alpha_first_order.alpha_f)
-                  : svmp::FE::Real{1.0};
+              transient_scheme.stage_alpha_f;
           try {
             auto contact_stage =
                 buildAcceptedFreeSurfaceContactStageCandidate(

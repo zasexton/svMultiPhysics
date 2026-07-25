@@ -832,6 +832,60 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     SelectsBackwardEulerAndRejectsUnsupportedTransientScheme)
+{
+  GeneralSimulationParameters parameters;
+
+  const auto default_selection =
+      resolveTransientTimeIntegrationSelection(parameters);
+  EXPECT_EQ(
+      default_selection.scheme,
+      svmp::FE::timestepping::SchemeKind::GeneralizedAlpha);
+  EXPECT_EQ(default_selection.canonical_name, "GeneralizedAlpha");
+  ASSERT_TRUE(
+      default_selection.generalized_alpha_rho_inf.has_value());
+  EXPECT_DOUBLE_EQ(
+      *default_selection.generalized_alpha_rho_inf, 0.5);
+  EXPECT_NEAR(
+      static_cast<double>(default_selection.stage_alpha_f),
+      2.0 / 3.0,
+      1.0e-15);
+
+  parameters.transient_time_integration_scheme.set_raw_value(
+      "BackwardEuler");
+  parameters.spectral_radius_of_infinite_time_step.set_raw_value(
+      std::numeric_limits<double>::quiet_NaN());
+  const auto backward_euler_selection =
+      resolveTransientTimeIntegrationSelection(parameters);
+  EXPECT_EQ(
+      backward_euler_selection.scheme,
+      svmp::FE::timestepping::SchemeKind::BackwardEuler);
+  EXPECT_EQ(
+      backward_euler_selection.canonical_name, "BackwardEuler");
+  EXPECT_FALSE(
+      backward_euler_selection.generalized_alpha_rho_inf.has_value());
+  EXPECT_DOUBLE_EQ(
+      static_cast<double>(backward_euler_selection.stage_alpha_f),
+      1.0);
+
+  parameters.transient_time_integration_scheme.set_raw_value(
+      "GeneralizedAlpha");
+  EXPECT_THROW(
+      (void)resolveTransientTimeIntegrationSelection(parameters),
+      svmp::FE::InvalidArgumentException);
+
+  parameters.transient_time_integration_scheme.set_raw_value(
+      "backwardeuler");
+  EXPECT_THROW(
+      (void)resolveTransientTimeIntegrationSelection(parameters),
+      std::runtime_error);
+  parameters.transient_time_integration_scheme.set_raw_value("BDF2");
+  EXPECT_THROW(
+      (void)resolveTransientTimeIntegrationSelection(parameters),
+      std::runtime_error);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      LinearCornerRefreshReportsRefreshedJacobianCheckGeometry)
 {
   application::core::ActiveCutVolumeRequest request{};
@@ -6353,8 +6407,7 @@ TEST_F(ApplicationDriverBoundPreservingCandidatesTest,
       sim_,
       history_,
       std::vector<LevelSetMaintenanceRequest>{
-          requestWithVelocity({0.0, 0.0, 0.0})},
-      /*generalized_alpha_gamma=*/0.5);
+          requestWithVelocity({0.0, 0.0, 0.0})});
   const auto output = testing::internal::GetCapturedStdout();
 
   EXPECT_FALSE(result.accept_step);
@@ -6384,8 +6437,7 @@ TEST_F(ApplicationDriverBoundPreservingCandidatesTest,
   const auto result = applyLevelSetBoundPreservingCandidates(
       sim_,
       history_,
-      std::vector<LevelSetMaintenanceRequest>{request},
-      /*generalized_alpha_gamma=*/0.5);
+      std::vector<LevelSetMaintenanceRequest>{request});
   const auto output = testing::internal::GetCapturedStdout();
 
   EXPECT_FALSE(result.accept_step);
@@ -6411,8 +6463,7 @@ TEST_F(ApplicationDriverBoundPreservingCandidatesTest,
         sim_,
         history_,
         std::vector<LevelSetMaintenanceRequest>{
-            requestWithVelocity({0.0, 0.5, 0.0})},
-        /*generalized_alpha_gamma=*/0.5);
+            requestWithVelocity({0.0, 0.5, 0.0})});
     FAIL() << "A nonzero normal wall velocity must fail closed";
   } catch (const std::runtime_error& error) {
     EXPECT_NE(std::string(error.what()).find(
@@ -6453,8 +6504,7 @@ TEST_F(ApplicationDriverBoundPreservingCandidatesTest,
       sim_,
       history_,
       std::vector<LevelSetMaintenanceRequest>{
-          requestWithVelocity({0.0, 0.0, 0.0})},
-      /*generalized_alpha_gamma=*/0.5);
+          requestWithVelocity({0.0, 0.0, 0.0})});
 
   EXPECT_TRUE(result.accept_step);
   EXPECT_FALSE(result.changed);

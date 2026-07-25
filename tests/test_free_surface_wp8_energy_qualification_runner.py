@@ -38,7 +38,7 @@ def test_wp8_matrix_bytes_are_exactly_frozen():
 
     assert digest == runner.EXPECTED_REGISTRY_SHA256
     matrix = runner.load_registry(MATRIX_PATH)
-    assert matrix["matrix_id"] == "free_surface_wp8_energy_prerequisite_v1"
+    assert matrix["matrix_id"] == "free_surface_wp8_energy_prerequisite_v2"
     assert matrix["status"] == "FROZEN_BEFORE_EXECUTION"
 
 
@@ -103,7 +103,21 @@ def test_wp8_maintenance_evidence_is_exactly_the_prerequisite_slice():
             "MaintenanceAlgebraicRevisionRejectsRankLocalSlices"
         ),
     } <= tests
-    assert len(tests) == 28
+    assert len(tests) == 31
+    assert {
+        (
+            "GeneralSimulationParameters."
+            "ParsesOptionalTransientTimeIntegrationScheme"
+        ),
+        (
+            "ApplicationDriverLevelSetWorkflows."
+            "SelectsBackwardEulerAndRejectsUnsupportedTransientScheme"
+        ),
+        (
+            "TimeLoopConvergence."
+            "BackwardEulerExternalStateFixedPointPreservesEndpointTransaction"
+        ),
+    } <= tests
     assert (
         matrix["current_energy_account_coverage"]["implemented_low_level_channels"]
         == runner.EXPECTED_IMPLEMENTED_ENERGY_CHANNELS
@@ -121,6 +135,7 @@ def test_wp8_maintenance_evidence_is_exactly_the_prerequisite_slice():
         "wp8_closure",
         "q3_closure",
         "q4_closure",
+        "q5_closure",
         "future_method_closure",
         "complete_energy_law",
     ],
@@ -146,6 +161,120 @@ def test_wp8_contract_rejects_premature_disposition_promotion():
 
     with pytest.raises(ValueError, match="nonclosure disposition changed"):
         runner.validate_wp8_contract(matrix)
+
+
+def test_wp8_transient_scheme_prerequisite_is_exact():
+    runner = load_runner()
+    matrix = runner.load_registry(MATRIX_PATH)
+
+    assert (
+        matrix["transient_scheme_prerequisite"]
+        == runner.EXPECTED_TRANSIENT_SCHEME_PREREQUISITE
+    )
+    assert (
+        "backward_euler_constant_surface_tension_closed_balance"
+        in runner.EXPECTED_METHOD_EXITS
+    )
+    assert (
+        matrix["qualification_disposition"]["wp8_closed"] is False
+    )
+    assert matrix["qualification_disposition"]["q4_closed"] is False
+    assert matrix["qualification_disposition"]["q5_closed"] is False
+
+
+def test_wp8_production_source_contract_is_fail_closed(tmp_path):
+    runner = load_runner()
+    assert runner.validate_wp8_production_source_contract() == {
+        "exact_supported_scheme_count": 2,
+        "endpoint_stage_sites": 2,
+        "optional_scheme_defaults": 1,
+        "scheme_guarded_rate_initialization_sites": 1,
+    }
+
+    parameters_source = runner.PARAMETERS_SOURCE.read_text(
+        encoding="utf-8"
+    )
+    required_spectral = parameters_source.replace(
+        (
+            'set_parameter("Spectral_radius_of_infinite_time_step", 0.5, '
+            "!required, spectral_radius_of_infinite_time_step);"
+        ),
+        (
+            'set_parameter("Spectral_radius_of_infinite_time_step", 0.5, '
+            "required, spectral_radius_of_infinite_time_step);"
+        ),
+        1,
+    )
+    assert required_spectral != parameters_source
+    mutated_parameters = tmp_path / "Parameters-required.cpp"
+    mutated_parameters.write_text(required_spectral, encoding="utf-8")
+    runner.PARAMETERS_SOURCE = mutated_parameters
+    with pytest.raises(ValueError, match="optional"):
+        runner.validate_wp8_production_source_contract()
+
+    runner = load_runner()
+    application_source = runner.APPLICATION_DRIVER_SOURCE.read_text(
+        encoding="utf-8"
+    )
+    expanded_scheme_table = application_source.replace(
+        (
+            "svmp::FE::timestepping::SchemeKind>, 2>\n"
+            "    kTransientTimeIntegrationSchemes{{"
+        ),
+        (
+            "svmp::FE::timestepping::SchemeKind>, 3>\n"
+            "    kTransientTimeIntegrationSchemes{{"
+        ),
+        1,
+    ).replace(
+        (
+            '        {"BackwardEuler",\n'
+            "         svmp::FE::timestepping::SchemeKind::BackwardEuler},\n"
+        ),
+        (
+            '        {"BackwardEuler",\n'
+            "         svmp::FE::timestepping::SchemeKind::BackwardEuler},\n"
+            '        {"BDF2",\n'
+            "         svmp::FE::timestepping::SchemeKind::BDF2},\n"
+        ),
+        1,
+    )
+    assert expanded_scheme_table != application_source
+    assert expanded_scheme_table.count('{"BDF2",') == 1
+    expanded_scheme_path = tmp_path / "ApplicationDriver-third-scheme.cpp"
+    expanded_scheme_path.write_text(
+        expanded_scheme_table, encoding="utf-8"
+    )
+    runner.APPLICATION_DRIVER_SOURCE = expanded_scheme_path
+    with pytest.raises(ValueError, match="exactly two"):
+        runner.validate_wp8_production_source_contract()
+
+    runner = load_runner()
+    mutations = {
+        "rho": (
+            "selection.generalized_alpha_rho_inf = std::nullopt;",
+            "selection.generalized_alpha_rho_inf = 0.5;",
+        ),
+        "stage": (
+            "transient_scheme.stage_alpha_f",
+            "svmp::FE::Real{0.5}",
+        ),
+        "rate": (
+            (
+                "opts.scheme == "
+                "svmp::FE::timestepping::SchemeKind::GeneralizedAlpha &&"
+            ),
+            "true &&",
+        ),
+    }
+    for label, (before, after) in mutations.items():
+        mutated = application_source.replace(before, after, 1)
+        assert mutated != application_source
+        path = tmp_path / f"ApplicationDriver-{label}.cpp"
+        path.write_text(mutated, encoding="utf-8")
+        runner.APPLICATION_DRIVER_SOURCE = path
+        with pytest.raises(ValueError, match="WP-8 production"):
+            runner.validate_wp8_production_source_contract()
 
 
 def test_wp8_matrix_single_byte_mutation_is_rejected(tmp_path):
@@ -195,7 +324,7 @@ def test_wp8_validate_only_reports_prerequisite_nonclosure():
 
     assert summary["outcome"] == "PASS_PREREQUISITE_NONCLOSURE"
     assert summary["requested_claim"] == "low_level_prerequisite"
-    assert summary["test_count"] == 28
+    assert summary["test_count"] == 31
     assert summary["group_count"] == 4
     assert summary["serial_quantitative_gate_count"] == 9
     assert summary["unqualified_method_exit_count"] == 10
@@ -208,4 +337,11 @@ def test_wp8_validate_only_reports_prerequisite_nonclosure():
     assert summary["wp8_closed"] is False
     assert summary["q3_closed"] is False
     assert summary["q4_closed"] is False
+    assert summary["q5_closed"] is False
     assert summary["complete_energy_law_available"] is False
+    assert summary["production_source_contract"] == {
+        "exact_supported_scheme_count": 2,
+        "endpoint_stage_sites": 2,
+        "optional_scheme_defaults": 1,
+        "scheme_guarded_rate_initialization_sites": 1,
+    }

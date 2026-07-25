@@ -4245,6 +4245,180 @@ TEST(TimeLoopConvergence,
 }
 
 TEST(TimeLoopConvergence,
+     BackwardEulerExternalStateFixedPointPreservesEndpointTransaction)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using StateSyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+
+    static constexpr double dt = 0.1;
+    static constexpr double endpoint_scale = 10.0 / 11.0;
+    const std::vector<Real> initial = {1.0, -0.5, 0.25, 2.0};
+
+    struct Observations {
+        int outer_callbacks{0};
+        int projected_callbacks{0};
+        int nonlinear_done_callbacks{0};
+        int before_accept_callbacks{0};
+        int commit_ready_callbacks{0};
+        int accepted_callbacks{0};
+    };
+    auto observations = std::make_shared<Observations>();
+
+    auto expect_scaled = [initial](std::span<const Real> values,
+                                   double scale) {
+        EXPECT_EQ(values.size(), initial.size());
+        if (values.size() != initial.size()) {
+            return;
+        }
+        for (std::size_t i = 0; i < initial.size(); ++i) {
+            EXPECT_NEAR(static_cast<double>(values[i]),
+                        scale * static_cast<double>(initial[i]),
+                        1.0e-12)
+                << "DOF " << i;
+        }
+    };
+
+    const auto accepted = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::BackwardEuler,
+        dt,
+        dt,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/-7.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1.0e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [observations, expect_scaled](
+            svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory& history) {
+            EXPECT_FALSE(history.hasUDotState());
+            callbacks.on_nonlinear_done =
+                [observations, expect_scaled](
+                    const svmp::FE::timestepping::TimeHistory& h,
+                    const svmp::FE::timestepping::NewtonReport& report) {
+                    ++observations->nonlinear_done_callbacks;
+                    EXPECT_TRUE(report.converged);
+                    EXPECT_EQ(report.outer_iterations, 2);
+                    EXPECT_EQ(report.inner_iterations_total, 1);
+                    EXPECT_EQ(report.iterations, 1);
+                    EXPECT_EQ(h.stepIndex(), 0);
+                    EXPECT_NEAR(h.time(), 0.0, 1.0e-15);
+                    EXPECT_FALSE(h.hasUDotState());
+                    expect_scaled(h.uSpan(), endpoint_scale);
+                    expect_scaled(h.uPrevSpan(), 1.0);
+                };
+            callbacks.on_before_step_accept =
+                [observations, expect_scaled](
+                    svmp::FE::timestepping::TimeHistory& h,
+                    const svmp::FE::timestepping::NewtonReport&) {
+                    ++observations->before_accept_callbacks;
+                    EXPECT_EQ(h.stepIndex(), 0);
+                    EXPECT_NEAR(h.time(), 0.0, 1.0e-15);
+                    EXPECT_FALSE(h.hasUDotState());
+                    expect_scaled(h.uSpan(), endpoint_scale);
+                    expect_scaled(h.uPrevSpan(), 1.0);
+                    expect_scaled(h.uPrev2Span(), 1.0);
+                    return true;
+                };
+            callbacks.on_step_commit_ready =
+                [observations, expect_scaled](
+                    svmp::FE::timestepping::TimeHistory& h) {
+                    ++observations->commit_ready_callbacks;
+                    EXPECT_EQ(h.stepIndex(), 0);
+                    EXPECT_NEAR(h.time(), 0.0, 1.0e-15);
+                    EXPECT_FALSE(h.hasUDotState());
+                    expect_scaled(h.uSpan(), endpoint_scale);
+                    expect_scaled(h.uPrevSpan(), 1.0);
+                    expect_scaled(h.uPrev2Span(), 1.0);
+                };
+            callbacks.on_step_accepted =
+                [observations, expect_scaled](
+                    svmp::FE::timestepping::TimeHistory& h) {
+                    ++observations->accepted_callbacks;
+                    EXPECT_EQ(h.stepIndex(), 1);
+                    EXPECT_NEAR(h.time(), dt, 1.0e-15);
+                    EXPECT_FALSE(h.hasUDotState());
+                    expect_scaled(h.uSpan(), endpoint_scale);
+                    expect_scaled(h.uPrevSpan(), endpoint_scale);
+                    expect_scaled(h.uPrev2Span(), 1.0);
+                };
+        },
+        /*inspect_expected_exception=*/{},
+        [observations, expect_scaled](
+            svmp::FE::timestepping::TimeLoopOptions& options,
+            svmp::FE::FieldId) {
+            // This deliberately remains true to prove that the option and
+            // generalized-alpha spectral radius are inert for backward Euler.
+            options.initialize_first_order_rate_from_pde = true;
+            options.newton.external_state_fixed_point.enabled = true;
+            options.newton.external_state_fixed_point.max_iterations = 4;
+            options.newton.synchronize_state =
+                [observations, expect_scaled](
+                    const svmp::FE::systems::SystemStateView& state,
+                    StateSyncPoint point) {
+                    if (point == StateSyncPoint::OuterFixedPointState) {
+                        ++observations->outer_callbacks;
+                    } else if (
+                        point ==
+                        StateSyncPoint::ProjectedOuterFixedPointState) {
+                        ++observations->projected_callbacks;
+                    } else {
+                        ADD_FAILURE()
+                            << "Backward Euler requested an intermediate-stage "
+                               "or rollback synchronization point";
+                        return;
+                    }
+                    EXPECT_NEAR(state.time, dt, 1.0e-15);
+                    EXPECT_NEAR(state.dt, dt, 1.0e-15);
+                    EXPECT_NEAR(state.effective_dt, dt, 1.0e-15);
+                    ASSERT_NE(state.time_integration, nullptr);
+                    EXPECT_EQ(
+                        state.time_integration->integrator_name,
+                        "BackwardDifference");
+                    ASSERT_TRUE(state.time_integration->dt1.has_value());
+                    const auto& stencil =
+                        *state.time_integration->dt1;
+                    ASSERT_EQ(stencil.a.size(), 2u);
+                    EXPECT_NEAR(
+                        static_cast<double>(stencil.a[0]),
+                        10.0,
+                        1.0e-13);
+                    EXPECT_NEAR(
+                        static_cast<double>(stencil.a[1]),
+                        -10.0,
+                        1.0e-13);
+                    expect_scaled(state.u_prev, 1.0);
+                };
+        });
+
+    ASSERT_EQ(accepted.size(), initial.size());
+    for (std::size_t i = 0; i < initial.size(); ++i) {
+        EXPECT_NEAR(static_cast<double>(accepted[i]),
+                    endpoint_scale * static_cast<double>(initial[i]),
+                    1.0e-12)
+            << "DOF " << i;
+    }
+    EXPECT_EQ(observations->outer_callbacks, 2);
+    EXPECT_EQ(observations->projected_callbacks, 2);
+    EXPECT_EQ(observations->nonlinear_done_callbacks, 1);
+    EXPECT_EQ(observations->before_accept_callbacks, 1);
+    EXPECT_EQ(observations->commit_ready_callbacks, 1);
+    EXPECT_EQ(observations->accepted_callbacks, 1);
+}
+
+TEST(TimeLoopConvergence,
      GeneralizedAlphaExternalStateFixedPointProjectsInjectedMpcRateHomogeneously)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN

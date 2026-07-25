@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import importlib.util
 import json
 import os
 import re
@@ -21,15 +22,45 @@ SCRIPT_DIRECTORY = Path(__file__).resolve().parent
 if str(SCRIPT_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIRECTORY))
 
-import run_free_surface_wp2_geometry_qualification as strict_runner  # noqa: E402
+_SHARED_RUNNER_IMPORT_PATH = (
+    SCRIPT_DIRECTORY / "run_free_surface_wp2_geometry_qualification.py"
+)
+_SHARED_RUNNER_MODULE_NAME = (
+    "_free_surface_wp8_private_geometry_qualification_runner"
+)
+_SHARED_RUNNER_SPEC = importlib.util.spec_from_file_location(
+    _SHARED_RUNNER_MODULE_NAME,
+    _SHARED_RUNNER_IMPORT_PATH,
+)
+if _SHARED_RUNNER_SPEC is None or _SHARED_RUNNER_SPEC.loader is None:
+    raise ImportError(f"cannot load shared runner: {_SHARED_RUNNER_IMPORT_PATH}")
+strict_runner = importlib.util.module_from_spec(_SHARED_RUNNER_SPEC)
+sys.modules[_SHARED_RUNNER_MODULE_NAME] = strict_runner
+_SHARED_RUNNER_SPEC.loader.exec_module(strict_runner)
 
 
 SCRIPT_PATH = Path(__file__).resolve()
+REPOSITORY_ROOT = SCRIPT_PATH.parents[3]
+PARAMETERS_HEADER = (
+    REPOSITORY_ROOT / "Code" / "Source" / "solver" / "Parameters.h"
+)
+PARAMETERS_SOURCE = (
+    REPOSITORY_ROOT / "Code" / "Source" / "solver" / "Parameters.cpp"
+)
+APPLICATION_DRIVER_SOURCE = (
+    REPOSITORY_ROOT
+    / "Code"
+    / "Source"
+    / "solver"
+    / "Application"
+    / "Core"
+    / "ApplicationDriver.cpp"
+)
 DEFAULT_REGISTRY = SCRIPT_PATH.with_name(
     "free_surface_wp8_energy_qualification_matrix.json"
 )
 EXPECTED_REGISTRY_SHA256 = (
-    "b83ec18605fdcdbc68ba5409efbe0926e9628a3a0f6bfd3dfdf0641e0bc5ec0a"
+    "9007fb06e64cf092d2d57e6ea49fda5fe99798e1b52b185e9d1e3fba0bb9e9b6"
 )
 SHARED_RUNNER_PATH = Path(strict_runner.__file__).resolve()
 SHARED_RUNNER_SHA256 = strict_runner.sha256_file(SHARED_RUNNER_PATH)
@@ -38,14 +69,16 @@ EXPECTED_ARCHITECTURE_RECORD = (
     "Documentation/free_surface_wp8_geometry_energy_architecture.md"
 )
 EXPECTED_FREEZE_SCOPE = (
-    "This matrix freezes prerequisite evidence for the selected generated-state "
-    "outer fixed point, transactional rollback, discrete surface/wall/volume "
-    "functional evaluation, a fixed-topology first variation, extension refresh "
-    "behavior, topology-event diagnostics, and the accepted/rejected level-set "
-    "maintenance ledger. The ledger evidence covers ordered transport, limiting, "
-    "reinitialization, geometry-reconciliation, and global-correction "
-    "potential-change rows with explicit revision provenance; it does not "
-    "establish an energy-stable split, a complete physical and numerical energy "
+    "This matrix freezes prerequisite evidence for explicit production selection "
+    "between generalized-alpha and backward Euler, the backward-Euler endpoint "
+    "transaction, the selected generated-state outer fixed point, transactional "
+    "rollback, discrete surface/wall/volume functional evaluation, a "
+    "fixed-topology first variation, extension refresh behavior, topology-event "
+    "diagnostics, and the accepted/rejected level-set maintenance ledger. The "
+    "ledger evidence covers ordered transport, limiting, reinitialization, "
+    "geometry-reconciliation, and global-correction potential-change rows with "
+    "explicit revision provenance; it does not establish a backward-Euler energy "
+    "balance, an energy-stable split, a complete physical and numerical energy "
     "identity, outer contraction, topology-event acceptance, or any WP-8 "
     "simulation exit."
 )
@@ -67,6 +100,25 @@ EXPECTED_SELECTED_STRATEGY = {
     "complete_shape_tangent_selected": False,
     "discrete_energy_stability_proved": False,
     "wp8_closure_claimed": False,
+}
+EXPECTED_TRANSIENT_SCHEME_PREREQUISITE = {
+    "xml_parameter": "Transient_time_integration_scheme",
+    "default": "GeneralizedAlpha",
+    "exact_supported_values": [
+        "GeneralizedAlpha",
+        "BackwardEuler",
+    ],
+    "backward_euler_contract": {
+        "stage_alpha_f": 1.0,
+        "spectral_radius": "inapplicable",
+        "pde_rate_initialization": False,
+        "generated_state_time": "accepted_endpoint",
+    },
+    "qualification_boundary": (
+        "Selection, rejection, and one-step endpoint transaction only; no "
+        "backward-Euler free-surface energy identity, refinement result, or "
+        "WP-8 simulation exit is claimed."
+    ),
 }
 EXPECTED_IMPLEMENTED_ENERGY_CHANNELS = [
     "liquid_gas_surface_functional",
@@ -123,6 +175,7 @@ EXPECTED_GROUP_TESTS = {
             "NewtonSolverExternalStateFixedPoint.StageTimeConstraintIsEstablishedBeforeSnapshotAndRollback",
             "NewtonSolverExternalStateFixedPoint.ReallocatesJacobianAfterOuterConstraintSparsityChange",
             "NewtonSolverExternalStateFixedPoint.FirstGeneratedConstraintRefreshDefinesCanonicalRollbackEntry",
+            "TimeLoopConvergence.BackwardEulerExternalStateFixedPointPreservesEndpointTransaction",
         ],
     ),
     "application_geometry_energy_prerequisites_serial": (
@@ -130,6 +183,8 @@ EXPECTED_GROUP_TESTS = {
         1,
         1,
         [
+            "GeneralSimulationParameters.ParsesOptionalTransientTimeIntegrationScheme",
+            "ApplicationDriverLevelSetWorkflows.SelectsBackwardEulerAndRejectsUnsupportedTransientScheme",
             "ApplicationDriverLevelSetWorkflows.OuterFixedPointReportsFrozenInnerJacobianGeometry",
             "ApplicationDriverLevelSetWorkflows.CutTopologyChangeTraceIdentifiesNonsmoothNewtonEvent",
             "ApplicationDriverLevelSetWorkflows.RefreshesMultipleGeneratedCutDomainsIntoOneContext",
@@ -225,6 +280,7 @@ EXPECTED_CLOSURE_REQUEST_POLICY = {
         "wp8_closure",
         "q3_closure",
         "q4_closure",
+        "q5_closure",
         "complete_energy_law",
     ],
     "reject_any_claim_suffix": "_closure",
@@ -242,13 +298,193 @@ EXPECTED_DISPOSITION = {
     "wp8_closed": False,
     "q3_closed": False,
     "q4_closed": False,
+    "q5_closed": False,
     "complete_energy_law_available": False,
 }
 EXPECTED_SCOPE = (
-    "WP-8 maintenance-ledger and existing low-level prerequisite evidence "
-    "only; this matrix does not close FSR-09, WP-8, Q3, or Q4 and does not "
-    "establish a complete discrete energy law."
+    "WP-8 transient-scheme, endpoint-transaction, maintenance-ledger, and "
+    "existing low-level prerequisite evidence only; this matrix does not "
+    "close FSR-09, WP-8, Q3, Q4, or Q5 and does not establish a complete "
+    "discrete energy law."
 )
+
+
+def _require_tokens_in_order(
+    source: str, tokens: tuple[str, ...], label: str
+) -> None:
+    offset = 0
+    for token in tokens:
+        location = source.find(token, offset)
+        if location < 0:
+            raise ValueError(
+                f"WP-8 production source contract lost {label}: {token}"
+            )
+        offset = location + len(token)
+
+
+def validate_wp8_production_source_contract() -> dict[str, int]:
+    parameters_header = PARAMETERS_HEADER.read_text(encoding="utf-8")
+    parameters_source = PARAMETERS_SOURCE.read_text(encoding="utf-8")
+    application_source = APPLICATION_DRIVER_SOURCE.read_text(
+        encoding="utf-8"
+    )
+
+    if (
+        parameters_header.count(
+            "Parameter<std::string> transient_time_integration_scheme;"
+        )
+        != 1
+    ):
+        raise ValueError(
+            "WP-8 production source contract requires one typed transient "
+            "scheme parameter"
+        )
+    for registration in (
+        (
+            'set_parameter("Spectral_radius_of_infinite_time_step", 0.5, '
+            "!required, spectral_radius_of_infinite_time_step);"
+        ),
+        (
+            'set_parameter("Transient_time_integration_scheme", '
+            '"GeneralizedAlpha",\n'
+            "      !required, transient_time_integration_scheme);"
+        ),
+    ):
+        if parameters_source.count(registration) != 1:
+            raise ValueError(
+                "WP-8 production source contract requires optional "
+                "spectral-radius and transient-scheme defaults"
+            )
+
+    resolver_start = application_source.find(
+        "TransientTimeIntegrationSelection "
+        "resolveTransientTimeIntegrationSelection("
+    )
+    resolver_end = application_source.find(
+        "double parseDoubleEnv(", resolver_start
+    )
+    if resolver_start < 0 or resolver_end < 0:
+        raise ValueError(
+            "WP-8 production source contract cannot locate the transient "
+            "scheme resolver"
+        )
+    resolver = application_source[resolver_start:resolver_end]
+    _require_tokens_in_order(
+        resolver,
+        (
+            "parseTransientTimeIntegrationScheme(",
+            "if (scheme == "
+            "svmp::FE::timestepping::SchemeKind::BackwardEuler)",
+            "selection.generalized_alpha_rho_inf = std::nullopt;",
+            "selection.stage_alpha_f = svmp::FE::Real{1.0};",
+            "return selection;",
+            "const double rho_inf =",
+            "spectral_radius_of_infinite_time_step.value();",
+            "generalizedAlphaFirstOrderFromRhoInf(",
+        ),
+        "fail-closed scheme semantics",
+    )
+    scheme_table_match = re.search(
+        (
+            r"constexpr\s+std::array\s*<\s*std::pair\s*<"
+            r"\s*std::string_view\s*,"
+            r"\s*svmp::FE::timestepping::SchemeKind\s*>\s*,"
+            r"\s*(?P<declared_count>\d+)\s*>\s*"
+            r"kTransientTimeIntegrationSchemes\s*\{\{"
+            r"(?P<entries>.*?)"
+            r"\}\};"
+        ),
+        application_source,
+        flags=re.DOTALL,
+    )
+    if scheme_table_match is None:
+        raise ValueError(
+            "WP-8 production source contract requires an exact-two "
+            "transient scheme table"
+        )
+    scheme_entry_pattern = re.compile(
+        (
+            r"\{\s*\"(?P<name>[^\"]+)\"\s*,"
+            r"\s*svmp::FE::timestepping::SchemeKind::"
+            r"(?P<kind>[A-Za-z0-9_]+)\s*\}"
+        )
+    )
+    scheme_entries_text = scheme_table_match.group("entries")
+    scheme_entries = [
+        (match.group("name"), match.group("kind"))
+        for match in scheme_entry_pattern.finditer(scheme_entries_text)
+    ]
+    scheme_table_residue = scheme_entry_pattern.sub(
+        "", scheme_entries_text
+    ).strip(" \t\r\n,")
+    expected_scheme_entries = [
+        ("GeneralizedAlpha", "GeneralizedAlpha"),
+        ("BackwardEuler", "BackwardEuler"),
+    ]
+    if (
+        int(scheme_table_match.group("declared_count")) != 2
+        or scheme_entries != expected_scheme_entries
+        or scheme_table_residue
+    ):
+        raise ValueError(
+            "WP-8 production source contract requires exactly two canonical "
+            "transient scheme entries"
+        )
+    _require_tokens_in_order(
+        application_source,
+        (
+            "\"'. Supported values are exactly 'GeneralizedAlpha' and \"",
+            "\"'BackwardEuler'.\"",
+        ),
+        "exact unsupported scheme diagnostic",
+    )
+
+    transient_start = application_source.find(
+        "void ApplicationDriver::runTransient("
+    )
+    transient_end = application_source.find(
+        "void ApplicationDriver::outputResults(", transient_start
+    )
+    if transient_start < 0 or transient_end < 0:
+        raise ValueError(
+            "WP-8 production source contract cannot isolate runTransient"
+        )
+    transient = application_source[transient_start:transient_end]
+    _require_tokens_in_order(
+        transient,
+        (
+            "resolveTransientTimeIntegrationSelection(",
+            "svmp::FE::timestepping::TimeLoopOptions opts{};",
+            "opts.scheme = transient_scheme.scheme;",
+            "if (transient_scheme.generalized_alpha_rho_inf.has_value())",
+            "opts.initialize_first_order_rate_from_pde =",
+            "opts.scheme == "
+            "svmp::FE::timestepping::SchemeKind::GeneralizedAlpha &&",
+            "sim.time_history->repack(*sim.backend);",
+        ),
+        "pre-solve scheme selection and rate initialization",
+    )
+    if transient.count("transient_scheme.stage_alpha_f") != 2:
+        raise ValueError(
+            "WP-8 production source contract requires the resolved endpoint "
+            "stage at both contact-stage sites"
+        )
+    if "generalizedAlphaFirstOrderFromRhoInf(" in transient:
+        raise ValueError(
+            "WP-8 production source contract forbids generalized-alpha "
+            "parameter construction in the scheme-independent transient body"
+        )
+    if 'oopCout() << " rho_inf=n/a";' not in transient:
+        raise ValueError(
+            "WP-8 production source contract requires explicit inapplicable "
+            "spectral-radius logging"
+        )
+    return {
+        "exact_supported_scheme_count": 2,
+        "endpoint_stage_sites": 2,
+        "optional_scheme_defaults": 1,
+        "scheme_guarded_rate_initialization_sites": 1,
+    }
 
 
 def _validate_unqualified_exits(value: Any, expected: set[str], label: str) -> None:
@@ -277,6 +513,13 @@ def validate_wp8_contract(registry: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("WP-8 architecture-record path changed after freeze")
     if registry.get("selected_ad5_strategy") != EXPECTED_SELECTED_STRATEGY:
         raise ValueError("WP-8 AD-5 strategy changed after freeze")
+    if (
+        registry.get("transient_scheme_prerequisite")
+        != EXPECTED_TRANSIENT_SCHEME_PREREQUISITE
+    ):
+        raise ValueError(
+            "WP-8 transient-scheme prerequisite changed after freeze"
+        )
 
     coverage = registry.get("current_energy_account_coverage")
     if (
@@ -391,19 +634,24 @@ def validate_wp8_contract(registry: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("WP-8 nonclosure disposition changed after freeze")
     if registry.get("qualification_scope") != EXPECTED_SCOPE:
         raise ValueError("WP-8 qualification scope changed after freeze")
+    validate_wp8_production_source_contract()
     return registry
 
 
 strict_runner.SCRIPT_PATH = SCRIPT_PATH
 strict_runner.DEFAULT_REGISTRY = DEFAULT_REGISTRY
-strict_runner.EXPECTED_MATRIX_ID = "free_surface_wp8_energy_prerequisite_v1"
+strict_runner.EXPECTED_MATRIX_ID = "free_surface_wp8_energy_prerequisite_v2"
 strict_runner.EXPECTED_MATRIX_STATUS = "FROZEN_BEFORE_EXECUTION"
 strict_runner.EXPECTED_WORK_PACKAGE = "WP-8"
 strict_runner.__doc__ = __doc__
 
-_shared_load_registry = strict_runner.load_registry
-_shared_write_json = strict_runner.write_json
-_shared_write_text = strict_runner.write_text
+if not hasattr(strict_runner, "_wp8_base_load_registry"):
+    strict_runner._wp8_base_load_registry = strict_runner.load_registry
+    strict_runner._wp8_base_write_json = strict_runner.write_json
+    strict_runner._wp8_base_write_text = strict_runner.write_text
+_shared_load_registry = strict_runner._wp8_base_load_registry
+_shared_write_json = strict_runner._wp8_base_write_json
+_shared_write_text = strict_runner._wp8_base_write_text
 
 
 def load_registry(path: Path) -> dict[str, Any]:
@@ -429,6 +677,9 @@ def write_json(path: Path, value: Any) -> None:
         }
         value["qualification_scope"] = EXPECTED_SCOPE
         value["selected_ad5_strategy"] = EXPECTED_SELECTED_STRATEGY
+        value["transient_scheme_prerequisite"] = (
+            EXPECTED_TRANSIENT_SCHEME_PREREQUISITE
+        )
         value["matrix_sha256"] = EXPECTED_REGISTRY_SHA256
         value["qualification_disposition"] = EXPECTED_DISPOSITION
         value["requested_claim"] = "low_level_prerequisite"
@@ -519,6 +770,9 @@ def validation_summary(registry: dict[str, Any], claim: str) -> dict[str, Any]:
         ),
         "unqualified_simulation_exit_count": len(
             registry["unqualified_required_simulations"]
+        ),
+        "production_source_contract": (
+            validate_wp8_production_source_contract()
         ),
         **registry["qualification_disposition"],
         "outcome": "PASS_PREREQUISITE_NONCLOSURE",

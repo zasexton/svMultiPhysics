@@ -528,6 +528,72 @@ TEST(GeneralSimulationParameters, ParsesOptionalStartTime)
   EXPECT_DOUBLE_EQ(general.start_time.value(), 0.9);
 }
 
+TEST(GeneralSimulationParameters, ParsesOptionalTransientTimeIntegrationScheme)
+{
+  tinyxml2::XMLDocument explicit_doc;
+  const auto explicit_status = explicit_doc.Parse(R"xml(
+<svMultiPhysicsFile>
+  <GeneralSimulationParameters>
+    <Continue_previous_simulation>false</Continue_previous_simulation>
+    <Number_of_time_steps>2</Number_of_time_steps>
+    <Save_results_to_VTK_format>true</Save_results_to_VTK_format>
+    <Start_saving_after_time_step>1</Start_saving_after_time_step>
+    <Time_step_size>0.000625</Time_step_size>
+    <Transient_time_integration_scheme>BackwardEuler</Transient_time_integration_scheme>
+  </GeneralSimulationParameters>
+</svMultiPhysicsFile>
+)xml");
+  ASSERT_EQ(explicit_status, tinyxml2::XML_SUCCESS)
+      << explicit_doc.ErrorStr();
+
+  auto* explicit_root =
+      explicit_doc.FirstChildElement("svMultiPhysicsFile");
+  ASSERT_NE(explicit_root, nullptr);
+  GeneralSimulationParameters explicit_general;
+  ASSERT_NO_THROW(explicit_general.set_values(explicit_root));
+  ASSERT_TRUE(
+      explicit_general.transient_time_integration_scheme.defined());
+  EXPECT_EQ(
+      explicit_general.transient_time_integration_scheme.value(),
+      "BackwardEuler");
+  EXPECT_FALSE(
+      explicit_general.spectral_radius_of_infinite_time_step.defined());
+  EXPECT_DOUBLE_EQ(
+      explicit_general.spectral_radius_of_infinite_time_step.value(),
+      0.5);
+
+  tinyxml2::XMLDocument omitted_doc;
+  const auto omitted_status = omitted_doc.Parse(R"xml(
+<svMultiPhysicsFile>
+  <GeneralSimulationParameters>
+    <Continue_previous_simulation>false</Continue_previous_simulation>
+    <Number_of_time_steps>2</Number_of_time_steps>
+    <Save_results_to_VTK_format>true</Save_results_to_VTK_format>
+    <Start_saving_after_time_step>1</Start_saving_after_time_step>
+    <Time_step_size>0.000625</Time_step_size>
+  </GeneralSimulationParameters>
+</svMultiPhysicsFile>
+)xml");
+  ASSERT_EQ(omitted_status, tinyxml2::XML_SUCCESS)
+      << omitted_doc.ErrorStr();
+
+  auto* omitted_root =
+      omitted_doc.FirstChildElement("svMultiPhysicsFile");
+  ASSERT_NE(omitted_root, nullptr);
+  GeneralSimulationParameters omitted_general;
+  ASSERT_NO_THROW(omitted_general.set_values(omitted_root));
+  EXPECT_FALSE(
+      omitted_general.transient_time_integration_scheme.defined());
+  EXPECT_EQ(
+      omitted_general.transient_time_integration_scheme.value(),
+      "GeneralizedAlpha");
+  EXPECT_FALSE(
+      omitted_general.spectral_radius_of_infinite_time_step.defined());
+  EXPECT_DOUBLE_EQ(
+      omitted_general.spectral_radius_of_infinite_time_step.value(),
+      0.5);
+}
+
 TEST(OpenVesselExamples, FittedAleCaseDeclaresRequiredControls)
 {
   const auto case_dir = openVesselCaseDir("fitted_ale");

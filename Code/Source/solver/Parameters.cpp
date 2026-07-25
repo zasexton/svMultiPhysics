@@ -3084,13 +3084,15 @@ GeneralSimulationParameters::GeneralSimulationParameters()
   set_parameter("Searched_file_name_to_trigger_stop", "", !required, searched_file_name_to_trigger_stop);
   set_parameter("Simulation_initialization_file_path", "", !required, simulation_initialization_file_path);
   set_parameter("Simulation_requires_remeshing", false, !required, simulation_requires_remeshing);
-  set_parameter("Spectral_radius_of_infinite_time_step", 0.5, required, spectral_radius_of_infinite_time_step);
+  set_parameter("Spectral_radius_of_infinite_time_step", 0.5, !required, spectral_radius_of_infinite_time_step);
   set_parameter("Start_averaging_from_zero", false, !required, start_averaging_from_zero);
   set_parameter("Start_saving_after_time_step", 0, required, start_saving_after_time_step);
   set_parameter("Start_time", 0.0, !required, start_time);
   set_parameter("Starting time step", 0, !required, starting_time_step);
 
   set_parameter("Time_step_size", 0.0, required, time_step_size);
+  set_parameter("Transient_time_integration_scheme", "GeneralizedAlpha",
+      !required, transient_time_integration_scheme);
   set_parameter("Verbose", false, !required, verbose);
   set_parameter("Warning", false, !required, warning);
 }

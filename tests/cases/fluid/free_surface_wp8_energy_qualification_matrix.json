@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "matrix_id": "free_surface_wp8_energy_prerequisite_v1",
+  "matrix_id": "free_surface_wp8_energy_prerequisite_v2",
   "status": "FROZEN_BEFORE_EXECUTION",
   "work_package": "WP-8",
   "findings": [
     "FSR-09"
   ],
   "model_envelope": "one_phase_unfitted_geometry_coupling_and_energy_low_level_prerequisite",
-  "freeze_scope": "This matrix freezes prerequisite evidence for the selected generated-state outer fixed point, transactional rollback, discrete surface/wall/volume functional evaluation, a fixed-topology first variation, extension refresh behavior, topology-event diagnostics, and the accepted/rejected level-set maintenance ledger. The ledger evidence covers ordered transport, limiting, reinitialization, geometry-reconciliation, and global-correction potential-change rows with explicit revision provenance; it does not establish an energy-stable split, a complete physical and numerical energy identity, outer contraction, topology-event acceptance, or any WP-8 simulation exit.",
+  "freeze_scope": "This matrix freezes prerequisite evidence for explicit production selection between generalized-alpha and backward Euler, the backward-Euler endpoint transaction, the selected generated-state outer fixed point, transactional rollback, discrete surface/wall/volume functional evaluation, a fixed-topology first variation, extension refresh behavior, topology-event diagnostics, and the accepted/rejected level-set maintenance ledger. The ledger evidence covers ordered transport, limiting, reinitialization, geometry-reconciliation, and global-correction potential-change rows with explicit revision provenance; it does not establish a backward-Euler energy balance, an energy-stable split, a complete physical and numerical energy identity, outer contraction, topology-event acceptance, or any WP-8 simulation exit.",
   "prospective_tests": [],
   "architecture_record": "Documentation/free_surface_wp8_geometry_energy_architecture.md",
   "selected_ad5_strategy": {
@@ -24,6 +24,21 @@
     "complete_shape_tangent_selected": false,
     "discrete_energy_stability_proved": false,
     "wp8_closure_claimed": false
+  },
+  "transient_scheme_prerequisite": {
+    "xml_parameter": "Transient_time_integration_scheme",
+    "default": "GeneralizedAlpha",
+    "exact_supported_values": [
+      "GeneralizedAlpha",
+      "BackwardEuler"
+    ],
+    "backward_euler_contract": {
+      "stage_alpha_f": 1.0,
+      "spectral_radius": "inapplicable",
+      "pde_rate_initialization": false,
+      "generated_state_time": "accepted_endpoint"
+    },
+    "qualification_boundary": "Selection, rejection, and one-step endpoint transaction only; no backward-Euler free-surface energy identity, refinement result, or WP-8 simulation exit is claimed."
   },
   "current_energy_account_coverage": {
     "implemented_low_level_channels": [
@@ -109,7 +124,8 @@
         "NewtonSolverExternalStateFixedPoint.RefreshFailureRestoresAuxiliaryAndBorderedStateBeforeCallback",
         "NewtonSolverExternalStateFixedPoint.StageTimeConstraintIsEstablishedBeforeSnapshotAndRollback",
         "NewtonSolverExternalStateFixedPoint.ReallocatesJacobianAfterOuterConstraintSparsityChange",
-        "NewtonSolverExternalStateFixedPoint.FirstGeneratedConstraintRefreshDefinesCanonicalRollbackEntry"
+        "NewtonSolverExternalStateFixedPoint.FirstGeneratedConstraintRefreshDefinesCanonicalRollbackEntry",
+        "TimeLoopConvergence.BackwardEulerExternalStateFixedPointPreservesEndpointTransaction"
       ],
       "execution": {
         "wall_time_seconds": 1200,
@@ -123,6 +139,8 @@
       "mpi_ranks": 1,
       "gtest_output_copies": 1,
       "tests": [
+        "GeneralSimulationParameters.ParsesOptionalTransientTimeIntegrationScheme",
+        "ApplicationDriverLevelSetWorkflows.SelectsBackwardEulerAndRejectsUnsupportedTransientScheme",
         "ApplicationDriverLevelSetWorkflows.OuterFixedPointReportsFrozenInnerJacobianGeometry",
         "ApplicationDriverLevelSetWorkflows.CutTopologyChangeTraceIdentifiesNonsmoothNewtonEvent",
         "ApplicationDriverLevelSetWorkflows.RefreshesMultipleGeneratedCutDomainsIntoOneContext",
@@ -231,7 +249,7 @@
   ],
   "gates": {
     "expected_group_count": 4,
-    "expected_distinct_test_count": 28,
+    "expected_distinct_test_count": 31,
     "expected_quantitative_evidence_count": 9,
     "expected_failures": 0,
     "expected_errors": 0,
@@ -253,6 +271,14 @@
         "NewtonSolverExternalStateFixedPoint.OuterIterationFailureRestoresSolutionHistoryAndRateState",
         "NewtonSolverExternalStateFixedPoint.RefreshFailureRestoresAuxiliaryAndBorderedStateBeforeCallback",
         "NewtonSolverExternalStateFixedPoint.FirstGeneratedConstraintRefreshDefinesCanonicalRollbackEntry"
+      ]
+    },
+    {
+      "claim": "prerequisite_transient_scheme_selection_is_exact_and_backward_euler_uses_one_endpoint_transaction",
+      "evidence": [
+        "GeneralSimulationParameters.ParsesOptionalTransientTimeIntegrationScheme",
+        "ApplicationDriverLevelSetWorkflows.SelectsBackwardEulerAndRejectsUnsupportedTransientScheme",
+        "TimeLoopConvergence.BackwardEulerExternalStateFixedPointPreservesEndpointTransaction"
       ]
     },
     {
@@ -396,6 +422,7 @@
       "wp8_closure",
       "q3_closure",
       "q4_closure",
+      "q5_closure",
       "complete_energy_law"
     ],
     "reject_any_claim_suffix": "_closure",
@@ -407,7 +434,8 @@
     "wp8_closed": false,
     "q3_closed": false,
     "q4_closed": false,
+    "q5_closed": false,
     "complete_energy_law_available": false
   },
-  "qualification_scope": "WP-8 maintenance-ledger and existing low-level prerequisite evidence only; this matrix does not close FSR-09, WP-8, Q3, or Q4 and does not establish a complete discrete energy law."
+  "qualification_scope": "WP-8 transient-scheme, endpoint-transaction, maintenance-ledger, and existing low-level prerequisite evidence only; this matrix does not close FSR-09, WP-8, Q3, Q4, or Q5 and does not establish a complete discrete energy law."
 }
