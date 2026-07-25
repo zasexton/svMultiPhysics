@@ -5,7 +5,7 @@
   "campaign": "Q0",
   "audit_contract": "Documentation/free_surface_boundary_unfitted_audit_20260720.md",
   "architecture_record": "Documentation/free_surface_q0_harness_provenance_architecture.md",
-  "freeze_scope": "Executable control-layer prerequisite evidence only. This matrix freezes the committed WP-0 configuration-containment tests, including negative cases, qualification-runner result gates, campaign artifact-schema rejection tests, and exact source definitions for the committed WP-0, WP-1, WP-2, and WP-10 runners plus the WP-10 one-phase scope guard. It does not supply the missing accepted-step Q0 telemetry campaign or authorize Q0 closure.",
+  "freeze_scope": "Executable control-layer prerequisite evidence only. This matrix freezes the committed WP-0 configuration-containment tests, including negative cases, their dedicated CTest registration and tracked push/pull-request CI route through the Ubuntu and macOS actions, qualification-runner result gates, campaign artifact-schema rejection tests, and exact source definitions for the committed WP-0, WP-1, WP-2, and WP-10 runners plus the WP-10 one-phase scope guard. Hosted same-revision CI execution is not archived by this source-only registration. This matrix does not supply the missing accepted-step Q0 telemetry campaign or authorize Q0 closure.",
   "source_definitions": [
     {
       "id": "q0_audit_contract",
@@ -38,6 +38,52 @@
         "qualification requires clean tracked sources",
         "source_state_sha256",
         "test_binary_sha256"
+      ]
+    },
+    {
+      "id": "wp0_ctest_registration",
+      "role": "ci_registration",
+      "path": "Code/Source/solver/Physics/CMakeLists.txt",
+      "sha256": "a2f1968748ea4881d89f66641ffc1636dcbf4a288173edb5d9a6c6ee9482e845",
+      "required_fragments": [
+        "set(_SVMP_WP0_CONFIGURATION_TESTS",
+        "NAME Physics_FreeSurfaceConfiguration_WP0",
+        "TIMEOUT 300",
+        "LABELS \"physics;free-surface;qualification;wp0\""
+      ]
+    },
+    {
+      "id": "tests_workflow",
+      "role": "ci_workflow",
+      "path": ".github/workflows/tests.yml",
+      "sha256": "5d88a16820093c8283df0c95cfcdb8c4d66fbf6781a81200c478f334bd42c5c5",
+      "required_fragments": [
+        "pull_request:",
+        "push:",
+        "uses: ./.github/actions/test-ubuntu",
+        "uses: ./.github/actions/test-macos"
+      ]
+    },
+    {
+      "id": "test_ubuntu_action",
+      "role": "ci_action",
+      "path": ".github/actions/test-ubuntu/action.yml",
+      "sha256": "5bc6a1a63e04e72927313a8d6b92abea1f0549751215ea5f6a59dca5f96a083a",
+      "required_fragments": [
+        "name: 'Test Ubuntu'",
+        "- name: Run unit tests",
+        "ctest --verbose"
+      ]
+    },
+    {
+      "id": "test_macos_action",
+      "role": "ci_action",
+      "path": ".github/actions/test-macos/action.yml",
+      "sha256": "9d318d094d790425dc32923626481cbb65ddc0cfbb7ebd33f1446b823e5fd55e",
+      "required_fragments": [
+        "name: 'Test macOS'",
+        "- name: Run unit tests",
+        "ctest --verbose"
       ]
     },
     {
@@ -321,11 +367,12 @@
     "wp10_one_phase_scope_guard_executes_frozen_xml_json_and_mapping_rejections",
     "campaign_artifact_layout_provenance_metrics_references_and_checksums_have_negative_tests",
     "prerequisite_only_campaign_evidence_is_refused_for_promotion",
-    "q0_open_state_and_unresolved_campaign_child_are_machine_readable"
+    "q0_open_state_and_unresolved_campaign_child_are_machine_readable",
+    "wp0_exact_24_test_ctest_is_registered_in_the_tracked_push_and_pull_request_ubuntu_and_macos_ci_chain"
   ],
   "open_exits": [
     {
-      "id": "wp0_invalid_input_matrix_not_wired_into_continuous_integration",
+      "id": "wp0_invalid_input_matrix_same_revision_hosted_ci_execution_not_archived",
       "status": "REQUIRED_NOT_CLAIMED"
     },
     {
@@ -371,6 +418,7 @@
   "qualification_disposition": {
     "prerequisite_controls_frozen": true,
     "wp0_invalid_configuration_evidence_available": true,
+    "wp0_invalid_input_matrix_ci_registered": true,
     "q0_campaign_execution_registered": false,
     "q0_complete_artifact_archived": false,
     "q0_closed": false,

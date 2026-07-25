@@ -349,6 +349,47 @@ if(PHYSICS_BUILD_TESTS)
     if(_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS)
         target_compile_options(test_physics PRIVATE ${_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS})
     endif()
+
+    set(_SVMP_WP0_CONFIGURATION_TESTS
+        NavierStokesLegacyBCs.FittedFreeSurfacePrescribedTangentialMeshPolicyTranslation
+        NavierStokesLegacyBCs.FittedFreeSurfacePrescribedAngleTranslationFailsClosed
+        NavierStokesLegacyBCs.FreeSurfaceContactAliasesFailClosedWhenIncomplete
+        NavierStokesLegacyBCs.FreeSurfaceContactConfigurationRejectsAmbiguityAndCrossModelFields
+        NavierStokesLegacyBCs.FreeSurfaceConfigurationSchemaAliasesAreExplicitAndUnambiguous
+        NavierStokesLegacyBCs.FreeSurfaceContactNoneIsExplicitAndComplete
+        NavierStokesLegacyBCs.FreeSurfacePinnedIsExplicitAndComplete
+        NavierStokesLegacyBCs.UnfittedFreeSurfaceContactLinePluralMarkersTranslation_AddsGeneratedMarkers
+        NavierStokesLegacyBCs.UnfittedDynamicContactAngleTranslationRoutesLineAndSharpWallGeometry
+        MovingDomainPhysics.FittedFreeSurfaceNitschePoliciesAreBoundaryLocalAndOrderInvariant
+        MovingDomainPhysics.FittedFreeSurfaceKinematicPolicyOptionsAreExplicit
+        MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership
+        MovingDomainPhysics.FittedFreeSurfacePrescribedTangentialVelocityRequiresCoupledDisplacement
+        MovingDomainPhysics.FittedFreeSurfaceRejectsMeshMotionTangentialOwnerInEitherOrder
+        MovingDomainPhysics.FittedFreeSurfacePrescribedTangentialVelocityProjectsOutNormalTarget
+        MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal
+        MovingDomainPhysics.FittedPrescribedContactAngleFailsClosedWithoutContactLineIntegration
+        MovingDomainPhysics.NavierStokesFittedSurfaceStressFailsClosed
+        MovingDomainPhysics.NavierStokesRejectsBoundaryConflictBeforeFluidMutation
+        MovingDomainPhysics.NavierStokesConfigurationSchemaRejectsBeforeSystemMutation
+        MovingDomainPhysics.NavierStokesLegacySchemaIsExplicitAndLosesCurrentCapabilityLabel
+        MovingDomainPhysics.NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults
+        MovingDomainPhysics.NavierStokesRejectsDuplicatePrescribedWallOwnershipWithUniqueMarkers
+        MovingDomainPhysics.FreeSurfaceContactAlternativesExcludeCrossModelState
+    )
+    list(JOIN _SVMP_WP0_CONFIGURATION_TESTS ":" _SVMP_WP0_CONFIGURATION_FILTER)
+
+    add_test(
+        NAME Physics_FreeSurfaceConfiguration_WP0
+        COMMAND test_physics
+                "--gtest_filter=${_SVMP_WP0_CONFIGURATION_FILTER}"
+    )
+    set_tests_properties(
+        Physics_FreeSurfaceConfiguration_WP0 PROPERTIES
+        TIMEOUT 300
+        PROCESSORS 1
+        LABELS "physics;free-surface;qualification;wp0"
+    )
+
     set(_SVMP_WP7_SERIAL_MATRIX_TEST
         "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations")
 

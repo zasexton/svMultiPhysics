@@ -12,11 +12,16 @@ that audit or authorize its Q0 checkbox.
 Q0 cannot close from the current executable evidence.
 
 The committed WP-0 matrix supplies 24 deterministic configuration tests and
-WP-0 has a separate archived qualification record. The central campaign
-validator defines a strict artifact layout and rejects malformed layouts,
-source-tree and child-program hash mismatches, missing metrics, incomplete
-references, checksum drift, and promotion based only on prerequisite
-evidence. Those controls are valuable and executable.
+WP-0 has a separate archived qualification record. Those exact 24 names now
+also have a dedicated `Physics_FreeSurfaceConfiguration_WP0` CTest with a
+frozen timeout, processor count, and labels. The tracked push/pull-request
+workflow routes both its Ubuntu and macOS jobs through actions whose unit-test
+steps invoke unfiltered `ctest --verbose`. This is executable CI registration,
+not evidence that a hosted runner executed the same revision. The central
+campaign validator defines a strict artifact layout and rejects malformed
+layouts, source-tree and child-program hash mismatches, missing metrics,
+incomplete references, checksum drift, and promotion based only on
+prerequisite evidence. Those controls are valuable and executable.
 
 They are not a Q0 campaign execution. The central registry still declares the
 Q0 campaign state and its campaign-evidence child unresolved. No artifact at
@@ -29,10 +34,12 @@ reclassified as Q0 accepted-step evidence.
 
 The frozen prerequisite harness checks:
 
-- all 16 exact committed source definitions and required semantics for the
+- all 20 exact committed source definitions and required semantics for the
   audit criteria,
   WP-0, WP-1, WP-2, and WP-10 matrices and runners, and the central campaign
   registry and validator, plus the executable WP-10 one-phase scope guard.
+  The inventory also pins the Physics CTest registration, the tracked
+  push/pull-request test workflow, and the Ubuntu and macOS composite actions.
   The WP-10 definition transitively pins its schema-2 physical-model artifact,
   canonical XML parser boundary, and direct-map production boundary. It
   freezes seven dedicated C++ test names and records the binaries when its
@@ -48,7 +55,7 @@ The frozen prerequisite harness checks:
 - the machine-readable unresolved Q0 state.
 
 The exact matrix SHA-256 is
-`27abb180aa7c18e72b794148a30899e0ddb3420c86038907f50352f4c99e1c14`.
+`74c6e2a01178b5d2946edf1e9572a000d6e32117bbb7bf30de9a5f1514274108`.
 The runner accepts only the canonical, non-symbolic-link matrix path and
 rejects any byte mutation before discovery or execution. Every path component
 of every frozen source definition is checked for symbolic links before path
@@ -71,8 +78,9 @@ identical; discovery must also have hashed the same binary.
 
 Eight exits remain:
 
-1. The complete WP-0 invalid-input matrix is not wired into continuous
-   integration.
+1. The complete WP-0 invalid-input matrix is registered as one exact CTest in
+   the tracked push/pull-request Ubuntu and macOS CI chain, but no hosted CI
+   execution artifact from this same source revision has been archived.
 2. Accepted step, time, nonlinear stage, and state/geometry/map revision
    histories are not archived under the campaign contract.
 3. Raw and post-maintenance global, component, film, sheet, rim, and satellite

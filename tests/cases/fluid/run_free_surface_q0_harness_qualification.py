@@ -29,7 +29,7 @@ DEFAULT_MATRIX = SCRIPT_PATH.with_name(
     "free_surface_q0_harness_qualification_matrix.json"
 )
 EXPECTED_MATRIX_SHA256 = (
-    "27abb180aa7c18e72b794148a30899e0ddb3420c86038907f50352f4c99e1c14"
+    "74c6e2a01178b5d2946edf1e9572a000d6e32117bbb7bf30de9a5f1514274108"
 )
 EXPECTED_MATRIX_ID = "free_surface_q0_harness_prerequisite_v1"
 EXPECTED_STATUS = "FROZEN_PREREQUISITE_NONCLOSURE"
@@ -43,13 +43,14 @@ REJECTED_CLAIMS = {
 EXPECTED_DISPOSITION = {
     "prerequisite_controls_frozen": True,
     "wp0_invalid_configuration_evidence_available": True,
+    "wp0_invalid_input_matrix_ci_registered": True,
     "q0_campaign_execution_registered": False,
     "q0_complete_artifact_archived": False,
     "q0_closed": False,
     "audit_q0_checkbox_may_be_checked": False,
 }
 EXPECTED_OPEN_EXITS = {
-    "wp0_invalid_input_matrix_not_wired_into_continuous_integration",
+    "wp0_invalid_input_matrix_same_revision_hosted_ci_execution_not_archived",
     "accepted_step_stage_time_and_state_geometry_map_revision_history_not_archived",
     "accepted_step_raw_and_post_maintenance_region_phase_inventory_incomplete",
     "accepted_step_complete_energy_dissipation_and_work_account_blocked_by_wp8",
@@ -62,6 +63,22 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 GTEST_NAME = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
 LDD_ADDRESS_SUFFIX = re.compile(r"^(?P<value>.+?)\s+\(0x[0-9A-Fa-f]+\)$")
+WP0_MATRIX_RELATIVE_PATH = Path(
+    "tests/cases/fluid/free_surface_configuration_qualification_matrix.json"
+)
+PHYSICS_CMAKE_RELATIVE_PATH = Path("Code/Source/solver/Physics/CMakeLists.txt")
+TESTS_WORKFLOW_RELATIVE_PATH = Path(".github/workflows/tests.yml")
+UBUNTU_ACTION_RELATIVE_PATH = Path(".github/actions/test-ubuntu/action.yml")
+MACOS_ACTION_RELATIVE_PATH = Path(".github/actions/test-macos/action.yml")
+WP0_CMAKE_TEST_LIST = "_SVMP_WP0_CONFIGURATION_TESTS"
+WP0_CMAKE_TEST_FILTER = "_SVMP_WP0_CONFIGURATION_FILTER"
+WP0_CTEST_NAME = "Physics_FreeSurfaceConfiguration_WP0"
+CI_CHAIN_RELATIVE_PATHS = (
+    PHYSICS_CMAKE_RELATIVE_PATH,
+    TESTS_WORKFLOW_RELATIVE_PATH,
+    UBUNTU_ACTION_RELATIVE_PATH,
+    MACOS_ACTION_RELATIVE_PATH,
+)
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -176,7 +193,7 @@ def validate_matrix_contract(matrix: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Q0 matrix campaign changed")
 
     definitions = matrix.get("source_definitions")
-    if not isinstance(definitions, list) or len(definitions) != 16:
+    if not isinstance(definitions, list) or len(definitions) != 20:
         raise ValueError("Q0 source-definition inventory changed")
     identifiers: set[str] = set()
     paths: set[str] = set()
@@ -345,6 +362,195 @@ def resolve_regular_repository_file(
     return path
 
 
+def extract_cmake_list(cmake_text: str, variable: str) -> list[str]:
+    pattern = re.compile(
+        rf"(?ms)^[ \t]*set\({re.escape(variable)}[ \t]*\n"
+        r"(?P<body>.*?)^[ \t]*\)[ \t]*$"
+    )
+    matches = list(pattern.finditer(cmake_text))
+    if len(matches) != 1:
+        raise ValueError(f"Q0 CMake list {variable} must be defined exactly once")
+    values = [
+        line.strip()
+        for line in matches[0].group("body").splitlines()
+        if line.strip()
+    ]
+    if (
+        not values
+        or len(values) != len(set(values))
+        or any(GTEST_NAME.fullmatch(value) is None for value in values)
+    ):
+        raise ValueError(f"Q0 CMake list {variable} has an invalid test inventory")
+    return values
+
+
+def extract_indented_yaml_block(text: str, key: str, indent: int) -> str:
+    lines = text.splitlines()
+    prefix = " " * indent + key + ":"
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if line == prefix
+    ]
+    if len(starts) != 1:
+        raise ValueError(
+            f"Q0 CI YAML key {key!r} at indentation {indent} "
+            "must appear exactly once"
+        )
+    start = starts[0]
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        stripped = lines[index].strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        current_indent = len(lines[index]) - len(lines[index].lstrip(" "))
+        if current_indent <= indent:
+            end = index
+            break
+    return "\n".join(lines[start + 1 : end])
+
+
+def require_unfiltered_ctest_action(action_text: str, action_name: str) -> None:
+    lines = action_text.splitlines()
+    step_starts = [
+        index
+        for index, line in enumerate(lines)
+        if line == "    - name: Run unit tests"
+    ]
+    if len(step_starts) != 1:
+        raise ValueError(
+            f"Q0 {action_name} action must have one Run unit tests step"
+        )
+    start = step_starts[0]
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if lines[index].startswith("    - "):
+            end = index
+            break
+    step_lines = [line.strip() for line in lines[start:end] if line.strip()]
+    ctest_commands = [
+        line for line in step_lines if line == "ctest --verbose" or line.startswith("ctest ")
+    ]
+    if ctest_commands != ["ctest --verbose"]:
+        raise ValueError(
+            f"Q0 {action_name} action must invoke one unfiltered 'ctest --verbose'"
+        )
+
+
+def validate_wp0_ci_registration(
+    matrix: dict[str, Any], source_root: Path
+) -> dict[str, Any]:
+    source_root = source_root.resolve(strict=True)
+    paths = {
+        relative: resolve_regular_repository_file(
+            source_root,
+            relative,
+            "Q0 CI-chain source",
+        )
+        for relative in (WP0_MATRIX_RELATIVE_PATH, *CI_CHAIN_RELATIVE_PATHS)
+    }
+    tracked_output = git_bytes(
+        source_root,
+        "ls-files",
+        "--",
+        *(relative.as_posix() for relative in CI_CHAIN_RELATIVE_PATHS),
+    ).decode("utf-8")
+    tracked_paths = {line for line in tracked_output.splitlines() if line}
+    expected_tracked_paths = {
+        relative.as_posix() for relative in CI_CHAIN_RELATIVE_PATHS
+    }
+    if tracked_paths != expected_tracked_paths:
+        raise ValueError(
+            "Q0 CI chain must use the exact tracked workflow, actions, and "
+            "Physics CMake files"
+        )
+
+    wp0_matrix = json.loads(
+        read_stable_bytes(paths[WP0_MATRIX_RELATIVE_PATH]).decode("utf-8"),
+        object_pairs_hook=reject_duplicate_keys,
+    )
+    wp0_tests = wp0_matrix.get("tests")
+    if (
+        wp0_matrix.get("work_package") != "WP-0"
+        or wp0_matrix.get("gates", {}).get("expected_test_count") != 24
+        or not isinstance(wp0_tests, list)
+        or len(wp0_tests) != 24
+    ):
+        raise ValueError("Q0 WP-0 configuration matrix contract changed")
+    q0_tests = matrix["gtest_group"]["tests"]
+    if wp0_tests != q0_tests:
+        raise ValueError("Q0 and WP-0 frozen test inventories differ")
+
+    cmake_text = read_stable_bytes(
+        paths[PHYSICS_CMAKE_RELATIVE_PATH]
+    ).decode("utf-8")
+    cmake_tests = extract_cmake_list(cmake_text, WP0_CMAKE_TEST_LIST)
+    if cmake_tests != wp0_tests:
+        raise ValueError(
+            "Q0 dedicated CTest inventory differs from the frozen WP-0 matrix"
+        )
+    if (
+        f'list(JOIN {WP0_CMAKE_TEST_LIST} ":" {WP0_CMAKE_TEST_FILTER})'
+        not in cmake_text
+    ):
+        raise ValueError("Q0 dedicated CTest filter is not joined exactly")
+    normalized_cmake = " ".join(cmake_text.split())
+    expected_add_test = (
+        f'add_test( NAME {WP0_CTEST_NAME} COMMAND test_physics '
+        f'"--gtest_filter=${{{WP0_CMAKE_TEST_FILTER}}}" )'
+    )
+    if expected_add_test not in normalized_cmake:
+        raise ValueError("Q0 dedicated CTest command changed")
+    expected_properties = (
+        f"set_tests_properties( {WP0_CTEST_NAME} PROPERTIES "
+        'TIMEOUT 300 PROCESSORS 1 '
+        'LABELS "physics;free-surface;qualification;wp0" )'
+    )
+    if expected_properties not in normalized_cmake:
+        raise ValueError("Q0 dedicated CTest properties changed")
+
+    workflow_text = read_stable_bytes(
+        paths[TESTS_WORKFLOW_RELATIVE_PATH]
+    ).decode("utf-8")
+    trigger_block = extract_indented_yaml_block(workflow_text, "on", 0)
+    trigger_keys = {
+        line.strip().removesuffix(":")
+        for line in trigger_block.splitlines()
+        if line.startswith("  ") and not line.startswith("    ") and line.strip()
+    }
+    if not {"push", "pull_request"}.issubset(trigger_keys):
+        raise ValueError("Q0 tests workflow must run for push and pull_request")
+    jobs_block = extract_indented_yaml_block(workflow_text, "jobs", 0)
+    for job_id, runner_name, action_path in (
+        ("test-ubuntu", "ubuntu-latest", "./.github/actions/test-ubuntu"),
+        ("test-macos", "macos-latest", "./.github/actions/test-macos"),
+    ):
+        job_block = extract_indented_yaml_block(jobs_block, job_id, 2)
+        if f"runs-on: {runner_name}" not in job_block:
+            raise ValueError(f"Q0 workflow job {job_id} runner changed")
+        if job_block.count(f"uses: {action_path}") != 1:
+            raise ValueError(
+                f"Q0 workflow job {job_id} must invoke {action_path} exactly once"
+            )
+
+    require_unfiltered_ctest_action(
+        read_stable_bytes(paths[UBUNTU_ACTION_RELATIVE_PATH]).decode("utf-8"),
+        "Ubuntu",
+    )
+    require_unfiltered_ctest_action(
+        read_stable_bytes(paths[MACOS_ACTION_RELATIVE_PATH]).decode("utf-8"),
+        "macOS",
+    )
+    return {
+        "ctest_name": WP0_CTEST_NAME,
+        "test_count": len(cmake_tests),
+        "workflow_triggers": ["pull_request", "push"],
+        "workflow_jobs": ["test-ubuntu", "test-macos"],
+        "hosted_execution_archived": False,
+        "outcome": "REGISTERED_AWAITING_HOSTED_EXECUTION",
+    }
+
+
 def validate_source_definitions(
     matrix: dict[str, Any], source_root: Path
 ) -> list[dict[str, Any]]:
@@ -384,6 +590,8 @@ def validate_source_definitions(
                 "outcome": "PASS",
             }
         )
+    if matrix.get("matrix_id") == EXPECTED_MATRIX_ID:
+        validate_wp0_ci_registration(matrix, source_root)
     return records
 
 

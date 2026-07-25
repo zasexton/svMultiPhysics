@@ -130,7 +130,7 @@ def test_q0_source_definitions_and_open_campaign_state_are_exact():
     )
     q0 = registry["campaigns"][0]
 
-    assert len(records) == 16
+    assert len(records) == 20
     assert q0["id"] == "Q0"
     assert q0["state"] == "UNRESOLVED"
     assert q0["child_programs"][1]["id"] == "q0_campaign_execution"
@@ -147,6 +147,10 @@ def test_q0_contract_freezes_only_control_prerequisites():
         runner.EXPECTED_OPEN_EXITS
     )
     assert matrix["qualification_disposition"] == runner.EXPECTED_DISPOSITION
+    assert (
+        matrix["qualification_disposition"]["wp0_invalid_input_matrix_ci_registered"]
+        is True
+    )
     assert matrix["qualification_disposition"]["q0_closed"] is False
     assert (
         matrix["qualification_disposition"]["audit_q0_checkbox_may_be_checked"] is False
@@ -243,6 +247,90 @@ def test_q0_canonical_source_root_rejects_symbolic_link_alias(tmp_path):
 
     with pytest.raises(ValueError, match="must not be a symbolic link"):
         runner.canonical_source_root(alias)
+
+
+def test_q0_wp0_ctest_and_hosted_ci_registration_chain_is_exact():
+    runner = load_runner()
+    matrix = runner.load_matrix(MATRIX_PATH)
+
+    record = runner.validate_wp0_ci_registration(matrix, ROOT)
+
+    assert record == {
+        "ctest_name": "Physics_FreeSurfaceConfiguration_WP0",
+        "test_count": 24,
+        "workflow_triggers": ["pull_request", "push"],
+        "workflow_jobs": ["test-ubuntu", "test-macos"],
+        "hosted_execution_archived": False,
+        "outcome": "REGISTERED_AWAITING_HOSTED_EXECUTION",
+    }
+
+
+def test_q0_wp0_ci_registration_rejects_q0_matrix_inventory_drift():
+    runner = load_runner()
+    matrix = copy.deepcopy(runner.load_matrix(MATRIX_PATH))
+    matrix["gtest_group"]["tests"][0] = (
+        "NavierStokesLegacyBCs.UnregisteredConfigurationCase"
+    )
+
+    with pytest.raises(ValueError, match="Q0 and WP-0 frozen test inventories differ"):
+        runner.validate_wp0_ci_registration(matrix, ROOT)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "old", "new", "diagnostic"),
+    [
+        (
+            "Code/Source/solver/Physics/CMakeLists.txt",
+            (
+                "NavierStokesLegacyBCs."
+                "FittedFreeSurfacePrescribedTangentialMeshPolicyTranslation"
+            ),
+            "NavierStokesLegacyBCs.UnregisteredConfigurationCase",
+            "dedicated CTest inventory differs",
+        ),
+        (
+            ".github/workflows/tests.yml",
+            "  push:\n",
+            "",
+            "must run for push and pull_request",
+        ),
+        (
+            ".github/actions/test-ubuntu/action.yml",
+            "ctest --verbose",
+            "ctest --verbose -R Physics_Tests",
+            "must invoke one unfiltered",
+        ),
+        (
+            ".github/actions/test-macos/action.yml",
+            "ctest --verbose",
+            "ctest --verbose -R Physics_Tests",
+            "must invoke one unfiltered",
+        ),
+    ],
+)
+def test_q0_wp0_ci_registration_rejects_chain_drift(
+    monkeypatch,
+    relative_path,
+    old,
+    new,
+    diagnostic,
+):
+    runner = load_runner()
+    matrix = runner.load_matrix(MATRIX_PATH)
+    changed_path = (ROOT / relative_path).resolve()
+    real_read_stable_bytes = runner.read_stable_bytes
+    original = real_read_stable_bytes(changed_path)
+    changed = original.decode("utf-8").replace(old, new, 1).encode("utf-8")
+    assert changed != original
+
+    def drifted_bytes(path):
+        if path.resolve() == changed_path:
+            return changed
+        return real_read_stable_bytes(path)
+
+    monkeypatch.setattr(runner, "read_stable_bytes", drifted_bytes)
+    with pytest.raises(ValueError, match=diagnostic):
+        runner.validate_wp0_ci_registration(matrix, ROOT)
 
 
 @pytest.mark.parametrize("symbolic_component", ["parent", "leaf"])
@@ -681,10 +769,11 @@ def test_q0_validate_only_reports_explicit_nonclosure():
     assert (
         summary["matrix_sha256"] == hashlib.sha256(MATRIX_PATH.read_bytes()).hexdigest()
     )
-    assert summary["source_definition_count"] == 16
+    assert summary["source_definition_count"] == 20
     assert summary["gtest_count"] == 24
     assert summary["pytest_count"] == 44
     assert summary["open_exit_count"] == 8
+    assert summary["wp0_invalid_input_matrix_ci_registered"] is True
     assert summary["q0_campaign_execution_registered"] is False
     assert summary["q0_complete_artifact_archived"] is False
     assert summary["q0_closed"] is False
