@@ -25,18 +25,22 @@ REPOSITORY_ROOT = SCRIPT_PATH.parents[3]
 DEFAULT_MATRIX = SCRIPT_PATH.with_name(
     "free_surface_wp10_capability_boundary_matrix.json"
 )
-EXPECTED_MATRIX_ID = "free_surface_wp10_capability_boundary_v1"
+EXPECTED_MATRIX_ID = "free_surface_wp10_capability_boundary_v2"
 EXPECTED_STATUS = "FROZEN_CAPABILITY_BOUNDARY"
 EXPECTED_ARCHITECTURE_RECORD = (
     "Documentation/free_surface_wp10_physical_capability_boundary.md"
 )
 EXPECTED_SCOPE = (
-    "Explicit one-phase capability labeling and unsupported-scope containment "
-    "only; this matrix does not close FSR-08, WP-10, or Q7 and does not "
+    "New-OOP Navier-Stokes explicit one-phase capability labeling and "
+    "unsupported-scope containment only; legacy-solver input is outside this "
+    "evidence. This matrix does not close FSR-08, WP-10, or Q7 and does not "
     "qualify any two-fluid or gas-sensitive phenomenon."
 )
 EXPECTED_CURRENT_BOUNDARY = {
+    "artifact_schema_version": 2,
     "momentum_capability_label": "one_phase_liquid_sharp_interface",
+    "physical_model_name": "one_phase_liquid_prescribed_exterior_pressure",
+    "legacy_physical_model": None,
     "transport_capability_labels": [
         "one_phase_interface_transport_nonlocal_conservation",
         "one_phase_locally_conservative_p1_indicator_transport",
@@ -45,7 +49,7 @@ EXPECTED_CURRENT_BOUNDARY = {
     "liquid_pressure_field_count": 1,
     "material_density_state_count": 1,
     "material_viscosity_state_count": 1,
-    "exterior_state": "prescribed_scalar_pressure_traction",
+    "exterior_state": "prescribed_scalar_traction_reference",
     "exterior_momentum_solved": False,
     "exterior_pressure_field_solved": False,
     "incompressible_two_fluid_implemented": False,
@@ -54,12 +58,16 @@ EXPECTED_CURRENT_BOUNDARY = {
     "q7_closure_claimed": False,
 }
 EXPECTED_SOURCE_CHECKS = {
-    "single_liquid_option_state": {
+    "explicit_one_phase_option_state": {
         "path": (
             "Code/Source/solver/Physics/Formulations/NavierStokes/"
             "IncompressibleNavierStokesVMSModule.h"
         ),
         "required_fragments": [
+            "enum class FreeSurfacePhysicalModel",
+            "OnePhaseLiquidPrescribedExteriorPressure",
+            "current_configuration_schema_version{2}",
+            "FreeSurfacePhysicalModel free_surface_physical_model{",
             'std::string velocity_field_name{"u"};',
             'std::string pressure_field_name{"p"};',
             "FE::Real density{1.0};",
@@ -75,20 +83,61 @@ EXPECTED_SOURCE_CHECKS = {
             "pressure_space_enrichment",
         ],
     },
-    "one_phase_momentum_artifact": {
+    "explicit_one_phase_momentum_artifact": {
         "path": (
             "Code/Source/solver/Physics/Formulations/NavierStokes/"
             "IncompressibleNavierStokesVMSModule.cpp"
         ),
         "required_fragments": [
+            'out << "{\\"artifact_schema_version\\":2"',
+            '",\\"physical_model\\":"',
+            '"one_phase_liquid_prescribed_exterior_pressure"',
+            "prescribed_scalar_traction_reference",
+            '",\\"exterior_momentum_solved\\":false"',
+            '",\\"exterior_pressure_field_solved\\":false"',
+            'out << "null";',
             '"one_phase_liquid_sharp_interface"',
             "const auto p_ext = bc::toScalarExpr(",
             "bc.external_pressure",
+            '"unsupported_free_surface_physical_model"',
+            "effective_configuration_artifact_.reset();",
         ],
         "forbidden_fragments": [
             '"incompressible_two_fluid"',
             '"compressible_gas_free_surface"',
         ],
+    },
+    "production_input_scope_containment": {
+        "path": (
+            "Code/Source/solver/Physics/Formulations/NavierStokes/"
+            "NavierStokesRegister.cpp"
+        ),
+        "required_fragments": [
+            '"unsupported_two_phase_or_jump_free_surface_scope"',
+            '"unsupported_free_surface_physical_model"',
+            '"misplaced_free_surface_physical_model"',
+            '"ambiguous_free_surface_physical_model"',
+            '"Free_surface_physical_model"',
+            '"FreeSurfacePhysicalModel"',
+            "validate_and_resolve_free_surface_physical_model(",
+            "create_navier_stokes_from_input(",
+            "preRegisterPrimaryVelocityField(",
+        ],
+        "forbidden_fragments": [],
+    },
+    "xml_input_scope_containment": {
+        "path": "Code/Source/solver/Parameters.cpp",
+        "required_fragments": [
+            "is_free_surface_physical_model_parameter(",
+            '"Free_surface_physical_model"',
+            '"FreeSurfacePhysicalModel"',
+            "onephaseliquidprescribedexteriorpressure",
+            '"unsupported_two_phase_or_jump_free_surface_scope"',
+            '"unsupported_free_surface_physical_model"',
+            '"misplaced_free_surface_physical_model"',
+            '"ambiguous_free_surface_physical_model"',
+        ],
+        "forbidden_fragments": [],
     },
     "one_phase_transport_artifacts": {
         "path": (
@@ -111,6 +160,8 @@ EXPECTED_SOURCE_CHECKS = {
             '"gasdensity"',
             '"gasviscosity"',
             '"unsupported_two_phase_or_jump_free_surface_scope"',
+            '"freesurfacephysicalmodel"',
+            '"physicalmodel"',
             "def validate_xml_config(",
             "def validate_json_config(",
             "def validate_config_mapping(",
@@ -121,24 +172,50 @@ EXPECTED_SOURCE_CHECKS = {
     },
 }
 EXPECTED_SCOPE_GUARD_CONTRACT_SHA256 = (
-    "6caf114d8751e67191e36f4fbb7905aadb0414d63b65c624326a29f96c4d8b4f"
+    "8d20484cff330f269de2f44f4a2b396e9d62b6c8e110a336478a7fba8c4fbc5b"
 )
 EXPECTED_GROUPS = {
-    "momentum_capability_artifact_serial": {
+    "momentum_physical_model_boundary_serial": {
         "binary_argument": "physics_binary",
         "tests": [
             (
                 "MovingDomainPhysics."
                 "NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults"
-            )
+            ),
+            (
+                "MovingDomainPhysics."
+                "NavierStokesLegacySchemaIsExplicitAndLosesCurrentCapabilityLabel"
+            ),
+            (
+                "MovingDomainPhysics."
+                "NavierStokesRejectsUnsupportedPhysicalModelBeforeSystemMutation"
+            ),
+            (
+                "NavierStokesLegacyBCs."
+                "FreeSurfacePhysicalModelDirectInputIsExplicitAndFailClosed"
+            ),
         ],
+        "execution": {
+            "wall_time_seconds": 300,
+            "memory_mib": 2048,
+            "output_mib": 64,
+        },
     },
-    "transport_capability_artifacts_serial": {
+    "application_physical_model_boundary_serial": {
         "binary_argument": "application_binary",
         "tests": [
             "LevelSetEquationTranslator.TranslatesFieldsAndBoundaries",
             "LevelSetEquationTranslator.TranslatesConservativePhaseControls",
+            (
+                "EquationTranslatorFreeSurface."
+                "XmlPhysicalModelIsExplicitAndUnsupportedScopeFailsClosed"
+            ),
         ],
+        "execution": {
+            "wall_time_seconds": 300,
+            "memory_mib": 2048,
+            "output_mib": 64,
+        },
     },
 }
 EXPECTED_UNIMPLEMENTED = {
@@ -193,10 +270,31 @@ EXPECTED_POLICY = {
         "gas_sensitive_qualification",
     ],
     "diagnostic": (
-        "This matrix verifies only the explicit one-phase model boundary. "
-        "The two-fluid and gas formulations and every physical WP-10/Q7 exit "
-        "are absent."
+        "This matrix verifies only the explicit new-OOP Navier-Stokes "
+        "one-phase model boundary. Legacy-solver input, the two-fluid and gas "
+        "formulations, and every physical WP-10/Q7 exit are outside this "
+        "evidence."
     ),
+}
+EXPECTED_MATRIX_KEYS = {
+    "schema_version",
+    "matrix_id",
+    "status",
+    "work_package",
+    "finding",
+    "qualification_campaign",
+    "architecture_record",
+    "model_envelope",
+    "current_capability_boundary",
+    "source_checks",
+    "scope_guard_contract",
+    "groups",
+    "unimplemented_wp10_requirements",
+    "blocked_wp10_qualification_exits",
+    "blocked_q7_progression",
+    "excluded_current_claims",
+    "closure_request_policy",
+    "qualification_scope",
 }
 
 
@@ -210,6 +308,15 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
 
 
 def write_text_exclusive(path: Path, value: str) -> None:
@@ -252,8 +359,13 @@ def validate_status_entries(
 def validate_matrix(path: Path) -> dict[str, Any]:
     if path.resolve() != DEFAULT_MATRIX.resolve():
         raise ValueError("WP-10 requires the canonical frozen matrix")
-    matrix = json.loads(path.read_text(encoding="utf-8"))
-    if matrix.get("schema_version") != 1:
+    matrix = json.loads(
+        path.read_text(encoding="utf-8"),
+        object_pairs_hook=reject_duplicate_keys,
+    )
+    if not isinstance(matrix, dict) or set(matrix) != EXPECTED_MATRIX_KEYS:
+        raise ValueError("WP-10 matrix top-level contract changed")
+    if matrix.get("schema_version") != 2:
         raise ValueError("unsupported WP-10 matrix schema")
     if matrix.get("matrix_id") != EXPECTED_MATRIX_ID:
         raise ValueError("unexpected WP-10 matrix id")
@@ -342,7 +454,9 @@ def validate_matrix(path: Path) -> dict[str, Any]:
             or not isinstance(execution, dict)
             or set(execution) != {"wall_time_seconds", "memory_mib", "output_mib"}
             or any(
-                not isinstance(execution[key], int) or execution[key] <= 0
+                not isinstance(execution[key], int)
+                or isinstance(execution[key], bool)
+                or execution[key] <= 0
                 for key in execution
             )
         ):
@@ -358,6 +472,7 @@ def validate_matrix(path: Path) -> dict[str, Any]:
         actual_groups[identifier] = {
             "binary_argument": group["binary_argument"],
             "tests": tests,
+            "execution": execution,
         }
     if actual_groups != EXPECTED_GROUPS:
         raise ValueError("test groups changed after freeze")

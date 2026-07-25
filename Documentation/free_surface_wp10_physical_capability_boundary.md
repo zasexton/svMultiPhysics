@@ -6,8 +6,10 @@ open.
 
 Scope: AD-6, the free-surface momentum and transport model, and the
 qualification progression required before any two-fluid or gas-sensitive
-claim. The evidence is evaluated against the source revision recorded by the
-runner rather than against an informal working-tree snapshot.
+claim. The runner binds each declared source to exact bytes and records the
+current Git revision, whether the worktree is clean, and a hash of the raw
+porcelain status. A dirty execution remains explicitly dirty; it is not
+misrepresented as evidence from the recorded revision alone.
 
 ## Decision
 
@@ -26,26 +28,73 @@ therefore have no qualifying simulation matrix.
 
 ## Current source contract
 
-`IncompressibleNavierStokesVMSOptions` owns one velocity field, one pressure
-field, one density, and one viscosity value or constitutive viscosity model.
-A free surface owns a scalar `external_pressure`. The boundary operator uses
-that value as the prescribed exterior traction reference. It does not solve
-an exterior momentum equation or an exterior pressure field.
+`IncompressibleNavierStokesVMSOptions` defaults the
+`FreeSurfacePhysicalModel` enum to
+`OnePhaseLiquidPrescribedExteriorPressure`. It owns one velocity field, one
+pressure field, one density, and one viscosity value or constitutive
+viscosity model. A free surface owns a scalar `external_pressure`. The
+boundary operator uses that value as the prescribed exterior traction
+reference. It does not solve an exterior momentum equation or an exterior
+pressure field.
 
-The effective Navier--Stokes artifact labels the supported current model
-`one_phase_liquid_sharp_interface`. Level-set transport independently labels
-its nonlocally conservative and locally conservative indicator variants as
-one-phase transport. The locally conservative indicator is a liquid-geometry
-transport variable; it is not a second-fluid momentum or pressure field.
+Effective-artifact schema 2 retains the momentum capability label
+`one_phase_liquid_sharp_interface` and adds a `physical_model` record named
+`one_phase_liquid_prescribed_exterior_pressure`. That record states that
+there is one liquid phase, one liquid velocity field, one liquid pressure
+field, one material density state, and one material viscosity state. Its
+exterior-pressure mode is `prescribed_scalar_traction_reference`; exterior
+momentum and pressure fields are not solved. Explicit schema-1 legacy
+artifacts carry `physical_model: null` and cannot inherit this current model
+record.
+
+Level-set transport independently labels its nonlocally conservative and
+locally conservative indicator variants as one-phase transport. The locally
+conservative indicator is a liquid-geometry transport variable; it is not a
+second-fluid momentum or pressure field.
+
+The two canonical equation-level selectors are
+`Free_surface_physical_model` and `FreeSurfacePhysicalModel`. Their only
+supported normalized value is
+`OnePhaseLiquidPrescribedExteriorPressure`; absence selects that same default.
+The XML parameter parser enforces this value for both solver modes, rejects
+the aliases outside fluid or stokes equation scope, and rejects duplicate
+aliases before overwrite. Schema and explicit-legacy aliases are parsed once
+by a shared strict contract: current schema with legacy behavior disabled, or
+schema 1 with explicit legacy behavior enabled. An explicit physical-model
+selector is legal only in the current contract.
+
+The new-OOP Navier--Stokes factory and primary-velocity pre-registration path
+run the same production guard before creating fields, forms, or operators.
+It scans equation parameters, default and explicit domains, boundary
+conditions, and inline module options. Keys are always checked; values are
+checked only when assigned to normalized model/scope selectors. The exact
+unsupported marker vocabulary is `twophase`, `twofluid`, `multiphase`,
+`pressureenrichment`, `jump`, `gas`, `gasdensity`, and `gasviscosity`.
+Module-options file paths, mesh names, and other nonselector values are not
+interpreted as physics declarations. Boundary `Type` and implementation
+aliases are accepted only in their existing Navier--Stokes contexts and with
+existing fitted or unfitted tokens. Unsupported marked scope uses
+`unsupported_two_phase_or_jump_free_surface_scope`; unknown physical models,
+misplaced selectors, and ambiguous aliases have distinct stable diagnostics.
+
+This semantic direct-map and generic-selector guard belongs to the new-OOP
+Navier--Stokes input boundary. The legacy solver does not call it, so this
+record does not claim whole-program containment of generic legacy
+`Model` controls. The canonical physical-model XML aliases are nevertheless
+value-checked by the common parser.
 
 The committed qualification scope guard parses representative XML, JSON, and
 already-decoded mapping inputs. It rejects keys, tags, model values, and
 name/key/option/parameter wrappers when they carry the frozen normalized
 `two_phase`, `two_fluid`, `multiphase`, `jump`, `gas`, or
 `pressure_enrichment` markers. Rejection uses the stable diagnostic
-`unsupported_two_phase_or_jump_free_surface_scope`. This is executable
-control-layer containment evidence. It is not a production formulation,
-production-schema qualification, or the missing physical implementation.
+`unsupported_two_phase_or_jump_free_surface_scope`. The normalized scope
+selector set includes `freesurfacephysicalmodel` and `physicalmodel`. This
+standalone guard is supplemental executable control-layer containment
+evidence; the production parser, factory, and pre-registration checks above
+are authoritative for the new canonical prerequisite. Neither guard is a
+two-fluid formulation, a physical qualification result, or the missing
+implementation.
 
 The authoritative geometry snapshot retains negative- and positive-side
 quadrature on cut cells. References there to a two-sided volume family are
@@ -100,8 +149,13 @@ wrapper
 `tests/cases/fluid/run_free_surface_wp10_capability_boundary_qualification.py`
 freeze only the following evidence:
 
-- the momentum artifact emits its one-phase capability label and prescribed
-  exterior-pressure state;
+- the option enum and default make the supported physical model explicit;
+- artifact schema 2 emits the canonical physical-model record and prescribed
+  exterior-pressure state, while explicit legacy output carries a null model;
+- canonical XML aliases, direct maps, domains, boundary conditions, and
+  inline module options fail closed before Navier--Stokes system mutation;
+- both the normal factory and primary-velocity pre-registration path execute
+  the same early production validation;
 - the two level-set transport modes emit one-phase labels;
 - the production option record still contains a single liquid
   velocity/pressure/density/viscosity state; and
@@ -111,6 +165,11 @@ freeze only the following evidence:
   structured nested-value and XML tail forms. JSON configuration roots must
   be mappings; a non-mapping root is structural invalidity rather than an
   unsupported-physics diagnostic.
+
+The two frozen groups contain seven tests: four Physics tests for the current
+artifact, legacy artifact, invalid enum, direct-map, and pre-registration
+boundaries, and three Application tests for both transport labels and XML
+containment.
 
 The wrapper accepts only the claim `one_phase_capability_boundary`. It rejects
 requests for FSR-08 closure, WP-10 closure, Q7 closure, incompressible
@@ -159,12 +218,20 @@ matrix, so Q7 and WP-10 must remain unchecked.
 
 - One liquid field pair and material state:
   `Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h`
-- Prescribed exterior pressure and the momentum capability artifact:
+- Schema-2 physical-model artifact, invalid-enum stop, and prescribed exterior
+  pressure:
   `Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp`
+- Direct-map, domain, boundary, module-option, factory, and pre-registration
+  containment:
+  `Code/Source/solver/Physics/Formulations/NavierStokes/NavierStokesRegister.cpp`
+- Canonical XML alias placement, duplication, and value containment:
+  `Code/Source/solver/Parameters.cpp`
 - One-phase transport capability artifacts:
   `Code/Source/solver/Application/Translators/LevelSetEquationTranslator.cpp`
-- Unsupported two-fluid/jump input containment:
+- Supplemental representative XML/JSON/mapping containment:
   `tests/cases/fluid/free_surface_one_phase_scope_guard.py`
-- Artifact-label unit evidence:
+- Artifact, direct-input, pre-registration, and XML unit evidence:
   `Code/Source/solver/Physics/Tests/Unit/test_MovingDomainPhysics.cpp` and
+  `Code/Source/solver/Physics/Tests/Unit/test_NavierStokesLegacyBCs.cpp`,
+  `Code/Source/solver/Application/Tests/Unit/test_EquationTranslator.cpp`, and
   `Code/Source/solver/Application/Tests/Unit/test_LevelSetEquationTranslator.cpp`

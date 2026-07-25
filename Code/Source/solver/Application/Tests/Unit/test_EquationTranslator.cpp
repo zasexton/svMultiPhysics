@@ -15,6 +15,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -833,6 +834,168 @@ TEST(EquationTranslatorFreeSurface, BuildInputRejectsContactLineFacesAndMarkersT
   EXPECT_THROW((void)application::translators::EquationTranslator::buildInput(
                    *params, singleMeshMap(mesh)),
                std::runtime_error);
+}
+
+TEST(EquationTranslatorFreeSurface,
+     XmlPhysicalModelIsExplicitAndUnsupportedScopeFailsClosed)
+{
+  svmp::Physics::formulations::navier_stokes::
+      forceLink_NavierStokesRegister();
+  auto mesh = buildTranslatorMesh();
+  const auto meshes = singleMeshMap(mesh);
+
+  for (const std::string alias : {
+           "Free_surface_physical_model",
+           "FreeSurfacePhysicalModel",
+       }) {
+    SCOPED_TRACE(alias);
+    const std::string xml =
+        std::string(R"xml(
+<Add_equation type="fluid">
+  <)xml") +
+        alias +
+        R"xml(>OnePhaseLiquidPrescribedExteriorPressure</)xml" +
+        alias + R"xml(>
+  <Density>1.0</Density>
+  <Viscosity model="Constant">
+    <Value>0.01</Value>
+  </Viscosity>
+</Add_equation>
+)xml";
+    auto params = parseEquationXml(xml.c_str());
+    const auto input =
+        application::translators::EquationTranslator::buildInput(
+            *params, meshes);
+    ASSERT_TRUE(input.equation_params.at(alias).defined);
+    EXPECT_EQ(
+        input.equation_params.at(alias).value,
+        "OnePhaseLiquidPrescribedExteriorPressure");
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto module =
+        application::translators::EquationTranslator::createModule(
+            *params, system, meshes);
+    ASSERT_TRUE(module);
+    const auto artifact = module->effectiveConfigurationArtifact();
+    ASSERT_TRUE(artifact.has_value());
+    EXPECT_NE(
+        artifact->json.find(
+            "\"artifact_schema_version\":2"),
+        std::string::npos);
+    EXPECT_NE(
+        artifact->json.find(
+            "\"name\":"
+            "\"one_phase_liquid_prescribed_exterior_pressure\""),
+        std::string::npos);
+  }
+
+  const auto expect_factory_rejected =
+      [&](const char* xml, std::string_view diagnostic) {
+        auto params = parseEquationXml(xml);
+        svmp::FE::systems::FESystem system(mesh);
+        try {
+          (void)application::translators::EquationTranslator::createModule(
+              *params, system, meshes);
+          FAIL() << "unsupported XML physical input must fail closed";
+        } catch (const std::runtime_error& error) {
+          EXPECT_NE(
+              std::string(error.what()).find(diagnostic),
+              std::string::npos);
+        }
+        EXPECT_EQ(system.fieldMap().numFields(), 0u);
+        EXPECT_TRUE(system.formulationRecords().empty());
+        EXPECT_EQ(
+            system.findFieldByName("Velocity"),
+            svmp::FE::INVALID_FIELD_ID);
+        EXPECT_EQ(
+            system.findFieldByName("Pressure"),
+            svmp::FE::INVALID_FIELD_ID);
+      };
+
+  expect_factory_rejected(
+      R"xml(
+<Add_equation type="fluid">
+  <Model>two_fluid</Model>
+  <Density>1.0</Density>
+  <Viscosity model="Constant"><Value>0.01</Value></Viscosity>
+</Add_equation>
+)xml",
+      "unsupported_two_phase_or_jump_free_surface_scope");
+
+  const auto expect_parser_rejected =
+      [](const char* xml, std::string_view diagnostic) {
+        try {
+          (void)parseEquationXml(xml);
+          FAIL() << "invalid XML physical input must fail closed";
+        } catch (const std::runtime_error& error) {
+          EXPECT_NE(
+              std::string(error.what()).find(diagnostic),
+              std::string::npos);
+        }
+      };
+
+  expect_parser_rejected(
+      R"xml(
+<Add_equation type="fluid">
+  <Free_surface_physical_model>two_fluid</Free_surface_physical_model>
+</Add_equation>
+)xml",
+      "unsupported_two_phase_or_jump_free_surface_scope");
+  expect_parser_rejected(
+      R"xml(
+<Add_equation type="fluid">
+  <FreeSurfacePhysicalModel>one_phase_liquid_sharp_interface</FreeSurfacePhysicalModel>
+</Add_equation>
+)xml",
+      "unsupported_free_surface_physical_model");
+  expect_parser_rejected(
+      R"xml(
+<Add_equation type="fluid">
+  <Free_surface_physical_model>OnePhaseLiquidPrescribedExteriorPressure</Free_surface_physical_model>
+  <Free_surface_physical_model>OnePhaseLiquidPrescribedExteriorPressure</Free_surface_physical_model>
+</Add_equation>
+)xml",
+      "ambiguous_free_surface_physical_model");
+  expect_parser_rejected(
+      R"xml(
+<Add_equation type="fluid">
+  <Free_surface_physical_model>OnePhaseLiquidPrescribedExteriorPressure</Free_surface_physical_model>
+  <FreeSurfacePhysicalModel>OnePhaseLiquidPrescribedExteriorPressure</FreeSurfacePhysicalModel>
+</Add_equation>
+)xml",
+      "ambiguous_free_surface_physical_model");
+  expect_parser_rejected(
+      R"xml(
+<Add_equation type="level_set">
+  <Free_surface_physical_model>OnePhaseLiquidPrescribedExteriorPressure</Free_surface_physical_model>
+</Add_equation>
+)xml",
+      "misplaced_free_surface_physical_model");
+  expect_parser_rejected(
+      R"xml(
+<Add_equation type="fluid">
+  <Domain id="liquid">
+    <FreeSurfacePhysicalModel>OnePhaseLiquidPrescribedExteriorPressure</FreeSurfacePhysicalModel>
+  </Domain>
+</Add_equation>
+)xml",
+      "misplaced_free_surface_physical_model");
+  expect_parser_rejected(
+      R"xml(
+<Add_equation type="fluid">
+  <Add_BC name="free_surface">
+    <Free_surface_physical_model>OnePhaseLiquidPrescribedExteriorPressure</Free_surface_physical_model>
+  </Add_BC>
+</Add_equation>
+)xml",
+      "misplaced_free_surface_physical_model");
+  expect_parser_rejected(
+      R"xml(
+<Add_equation type="fluid">
+  <Gas_density>1.2</Gas_density>
+</Add_equation>
+)xml",
+      "Unknown Add_equation XML element");
 }
 
 TEST(EquationTranslatorNodePressureConstraints, BuildInputRejectsUnsupportedIdType)

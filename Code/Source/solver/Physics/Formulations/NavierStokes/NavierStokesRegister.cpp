@@ -56,6 +56,411 @@ std::string lower_copy(std::string s)
   return s;
 }
 
+std::string normalized_scope_token(std::string_view raw)
+{
+  std::string token;
+  token.reserve(raw.size());
+  for (char ch : raw) {
+    if (ch >= 'A' && ch <= 'Z') {
+      token.push_back(static_cast<char>(ch - 'A' + 'a'));
+    } else if ((ch >= 'a' && ch <= 'z') ||
+               (ch >= '0' && ch <= '9')) {
+      token.push_back(ch);
+    }
+  }
+  return token;
+}
+
+[[noreturn]] void reject_unsupported_free_surface_scope()
+{
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] "
+      "unsupported_two_phase_or_jump_free_surface_scope");
+}
+
+[[nodiscard]] bool contains_unsupported_free_surface_scope_marker(
+    std::string_view value)
+{
+  static constexpr std::array<std::string_view, 8> markers = {
+      "twophase",
+      "twofluid",
+      "multiphase",
+      "pressureenrichment",
+      "jump",
+      "gas",
+      "gasdensity",
+      "gasviscosity",
+  };
+  const auto token = normalized_scope_token(value);
+  return std::any_of(
+      markers.begin(), markers.end(), [&](std::string_view marker) {
+        return token.find(marker) != std::string::npos;
+      });
+}
+
+[[nodiscard]] bool is_free_surface_scope_selector(std::string_view token)
+{
+  static constexpr std::array<std::string_view, 18> selectors = {
+      "capability",
+      "capabilityscope",
+      "fluidmodel",
+      "formulation",
+      "freesurfacemodel",
+      "freesurfacephysicalmodel",
+      "implementation",
+      "interfacephysics",
+      "interfacemodel",
+      "materialmodel",
+      "model",
+      "modelscope",
+      "phasemodel",
+      "physicalmodel",
+      "physics",
+      "physicsscope",
+      "scope",
+      "type",
+  };
+  return std::find(selectors.begin(), selectors.end(), token) !=
+         selectors.end();
+}
+
+void validate_free_surface_scope_entry(std::string_view key,
+                                       std::string_view value,
+                                       bool scan_value)
+{
+  const auto normalized_key = normalized_scope_token(key);
+  if (contains_unsupported_free_surface_scope_marker(normalized_key) ||
+      (scan_value && is_free_surface_scope_selector(normalized_key) &&
+       contains_unsupported_free_surface_scope_marker(value))) {
+    reject_unsupported_free_surface_scope();
+  }
+}
+
+[[nodiscard]] bool is_canonical_free_surface_physical_model_key(
+    std::string_view key)
+{
+  return key == "Free_surface_physical_model" ||
+         key == "FreeSurfacePhysicalModel";
+}
+
+enum class FreeSurfaceScopeLocation {
+  Equation,
+  Domain,
+  Boundary,
+};
+
+[[nodiscard]] bool is_free_surface_implementation_selector(
+    std::string_view normalized_key)
+{
+  return normalized_key == "implementation" ||
+         normalized_key == "freesurfaceimplementation";
+}
+
+[[nodiscard]] bool is_canonical_free_surface_implementation_key(
+    std::string_view key)
+{
+  return key == "Implementation" ||
+         key == "Free_surface_implementation" ||
+         key == "FreeSurfaceImplementation";
+}
+
+void validate_free_surface_scope_map(
+    const svmp::Physics::ParameterMap& params,
+    FreeSurfaceScopeLocation location)
+{
+  for (const auto& [key, parameter] : params) {
+    validate_free_surface_scope_entry(
+        key, parameter.value, parameter.defined);
+    const auto normalized_key = normalized_scope_token(key);
+    if (parameter.defined &&
+        is_free_surface_implementation_selector(normalized_key)) {
+      validate_free_surface_scope_entry(
+          "Implementation", parameter.value, true);
+    }
+    if (!parameter.defined) {
+      continue;
+    }
+    if (normalized_key == "freesurfacephysicalmodel") {
+      if (location != FreeSurfaceScopeLocation::Equation) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] "
+            "misplaced_free_surface_physical_model");
+      }
+      if (!is_canonical_free_surface_physical_model_key(key)) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] "
+            "unsupported_free_surface_physical_model");
+      }
+      continue;
+    }
+    const bool boundary_control =
+        location == FreeSurfaceScopeLocation::Boundary &&
+        (key == "Type" ||
+         (is_free_surface_implementation_selector(normalized_key) &&
+          is_canonical_free_surface_implementation_key(key)));
+    if ((is_free_surface_scope_selector(normalized_key) ||
+         is_free_surface_implementation_selector(normalized_key)) &&
+        !boundary_control) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "unsupported_free_surface_physical_model");
+    }
+  }
+}
+
+void validate_free_surface_boundary_scope(
+    const svmp::Physics::ParameterMap& params)
+{
+  validate_free_surface_scope_map(
+      params, FreeSurfaceScopeLocation::Boundary);
+
+  const auto type_it = params.find("Type");
+  if (type_it == params.end() || !type_it->second.defined) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] "
+        "unsupported_free_surface_physical_model");
+  }
+  const auto type = normalized_scope_token(type_it->second.value);
+  static constexpr std::array<std::string_view, 9> supported_types = {
+      "dir",
+      "dirichlet",
+      "neu",
+      "neumann",
+      "trac",
+      "traction",
+      "rbn",
+      "robin",
+      "freesurface",
+  };
+  if (std::find(supported_types.begin(), supported_types.end(), type) ==
+      supported_types.end()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] "
+        "unsupported_free_surface_physical_model");
+  }
+
+  std::size_t implementation_count = 0;
+  for (const auto key : {
+           "Implementation",
+           "Free_surface_implementation",
+           "FreeSurfaceImplementation",
+       }) {
+    const auto it = params.find(key);
+    if (it == params.end() || !it->second.defined) {
+      continue;
+    }
+    ++implementation_count;
+    const auto implementation =
+        normalized_scope_token(it->second.value);
+    const bool supported =
+        implementation == "fitted" ||
+        implementation == "fittedale" ||
+        implementation == "ale" ||
+        implementation == "unfitted" ||
+        implementation == "unfittedlevelset" ||
+        implementation == "levelset" ||
+        implementation == "embeddedlevelset";
+    if (type != "freesurface" || !supported) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "unsupported_free_surface_physical_model");
+    }
+  }
+  if (implementation_count > 1) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] "
+        "unsupported_free_surface_physical_model");
+  }
+}
+
+void validate_free_surface_module_options(std::string_view module_options)
+{
+  std::string normalized(module_options);
+  for (char& ch : normalized) {
+    if (ch == ';' || ch == '\n' || ch == '\t') {
+      ch = ',';
+    }
+  }
+
+  std::size_t start = 0;
+  while (start < normalized.size()) {
+    const auto end = normalized.find(',', start);
+    const auto token = trim_copy(normalized.substr(start, end - start));
+    if (!token.empty()) {
+      const auto separator = token.find_first_of("=:");
+      const auto key = trim_copy(token.substr(0, separator));
+      const auto value =
+          separator == std::string::npos
+              ? std::string{}
+              : trim_copy(token.substr(separator + 1));
+      validate_free_surface_scope_entry(key, value, true);
+      if (normalized_scope_token(key) == "freesurfacephysicalmodel") {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] "
+            "misplaced_free_surface_physical_model");
+      }
+      if (is_free_surface_scope_selector(
+              normalized_scope_token(key)) ||
+          is_free_surface_implementation_selector(
+              normalized_scope_token(key))) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] "
+            "unsupported_free_surface_physical_model");
+      }
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    start = end + 1;
+  }
+}
+
+struct FreeSurfaceSchemaContract {
+  int version{
+      svmp::Physics::formulations::navier_stokes::
+          IncompressibleNavierStokesVMSOptions::
+              current_configuration_schema_version};
+  bool explicit_legacy{false};
+};
+
+FreeSurfaceSchemaContract resolve_free_surface_schema_contract(
+    const svmp::Physics::ParameterMap& params)
+{
+  FreeSurfaceSchemaContract contract;
+  bool schema_seen = false;
+  for (const auto key : {
+           "Free_surface_configuration_schema_version",
+           "FreeSurfaceConfigurationSchemaVersion",
+           "Free_surface_schema_version",
+       }) {
+    const auto it = params.find(key);
+    if (it == params.end() || !it->second.defined) {
+      continue;
+    }
+    if (schema_seen) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "unsupported_free_surface_physical_model");
+    }
+    schema_seen = true;
+    const auto value = trim_copy(it->second.value);
+    std::size_t parsed = 0;
+    try {
+      contract.version = std::stoi(value, &parsed);
+    } catch (...) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "unsupported_free_surface_physical_model");
+    }
+    if (parsed != value.size()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "unsupported_free_surface_physical_model");
+    }
+  }
+
+  bool legacy_seen = false;
+  for (const auto key : {
+           "Enable_explicit_legacy_free_surface_configuration",
+           "EnableExplicitLegacyFreeSurfaceConfiguration",
+           "Free_surface_legacy_behavior",
+       }) {
+    const auto it = params.find(key);
+    if (it == params.end() || !it->second.defined) {
+      continue;
+    }
+    if (legacy_seen) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "unsupported_free_surface_physical_model");
+    }
+    legacy_seen = true;
+    const auto value = lower_copy(trim_copy(it->second.value));
+    if (value == "true" || value == "1" ||
+        value == "yes" || value == "on") {
+      contract.explicit_legacy = true;
+    } else if (
+        value == "false" || value == "0" ||
+        value == "no" || value == "off") {
+      contract.explicit_legacy = false;
+    } else {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "unsupported_free_surface_physical_model");
+    }
+  }
+
+  const auto current =
+      svmp::Physics::formulations::navier_stokes::
+          IncompressibleNavierStokesVMSOptions::
+              current_configuration_schema_version;
+  const bool current_contract =
+      contract.version == current && !contract.explicit_legacy;
+  const bool explicit_legacy_contract =
+      contract.version == 1 && contract.explicit_legacy;
+  if (!current_contract && !explicit_legacy_contract) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] "
+        "unsupported_free_surface_physical_model");
+  }
+  return contract;
+}
+
+svmp::Physics::formulations::navier_stokes::FreeSurfacePhysicalModel
+validate_and_resolve_free_surface_physical_model(
+    const svmp::Physics::EquationModuleInput& input)
+{
+  using PhysicalModel = svmp::Physics::formulations::navier_stokes::
+      FreeSurfacePhysicalModel;
+  validate_free_surface_scope_map(
+      input.equation_params, FreeSurfaceScopeLocation::Equation);
+  validate_free_surface_scope_map(
+      input.default_domain.params, FreeSurfaceScopeLocation::Domain);
+  for (const auto& domain : input.domains) {
+    validate_free_surface_scope_map(
+        domain.params, FreeSurfaceScopeLocation::Domain);
+  }
+  for (const auto& boundary : input.boundary_conditions) {
+    validate_free_surface_boundary_scope(boundary.params);
+  }
+  validate_free_surface_module_options(input.module_options);
+
+  const svmp::Physics::ParameterValue* selected = nullptr;
+  for (const auto key : {
+           "Free_surface_physical_model",
+           "FreeSurfacePhysicalModel",
+       }) {
+    const auto it = input.equation_params.find(key);
+    if (it == input.equation_params.end() || !it->second.defined) {
+      continue;
+    }
+    if (selected != nullptr) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] "
+          "ambiguous_free_surface_physical_model");
+    }
+    selected = &it->second;
+  }
+
+  const auto schema_contract =
+      resolve_free_surface_schema_contract(input.equation_params);
+  if (selected == nullptr) {
+    return PhysicalModel::OnePhaseLiquidPrescribedExteriorPressure;
+  }
+  if (schema_contract.explicit_legacy) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] "
+        "unsupported_free_surface_physical_model");
+  }
+  if (normalized_scope_token(selected->value) !=
+      "onephaseliquidprescribedexteriorpressure") {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] "
+        "unsupported_free_surface_physical_model");
+  }
+  return PhysicalModel::OnePhaseLiquidPrescribedExteriorPressure;
+}
+
 bool parse_bool_relaxed(std::string_view raw)
 {
   const auto v = lower_copy(trim_copy(std::string(raw)));
@@ -1323,43 +1728,9 @@ void apply_free_surface_schema_options(
     svmp::Physics::formulations::navier_stokes::
         IncompressibleNavierStokesVMSOptions& options)
 {
-  constexpr std::array<std::string_view, 3> version_keys = {
-      "Free_surface_configuration_schema_version",
-      "FreeSurfaceConfigurationSchemaVersion",
-      "Free_surface_schema_version",
-  };
-  std::optional<int> version;
-  for (const auto key : version_keys) {
-    if (const auto value = get_defined_int(params, key)) {
-      if (version.has_value()) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Physics] Free-surface configuration schema version was provided through more than one alias.");
-      }
-      version = *value;
-    }
-  }
-  if (version.has_value()) {
-    options.input_configuration_schema_version = *version;
-  }
-
-  constexpr std::array<std::string_view, 3> legacy_keys = {
-      "Enable_explicit_legacy_free_surface_configuration",
-      "EnableExplicitLegacyFreeSurfaceConfiguration",
-      "Free_surface_legacy_behavior",
-  };
-  std::optional<bool> legacy;
-  for (const auto key : legacy_keys) {
-    if (const auto value = get_defined_bool(params, key)) {
-      if (legacy.has_value()) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Physics] Explicit legacy free-surface behavior was provided through more than one alias.");
-      }
-      legacy = *value;
-    }
-  }
-  if (legacy.has_value()) {
-    options.explicit_legacy_configuration = *legacy;
-  }
+  const auto contract = resolve_free_surface_schema_contract(params);
+  options.input_configuration_schema_version = contract.version;
+  options.explicit_legacy_configuration = contract.explicit_legacy;
 }
 
 std::vector<int> parse_int_list(std::string_view raw)
@@ -4063,6 +4434,8 @@ std::unique_ptr<svmp::Physics::PhysicsModule>
 create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
                                 svmp::FE::systems::FESystem& system)
 {
+  const auto free_surface_physical_model =
+      validate_and_resolve_free_surface_physical_model(input);
   if (!input.mesh) {
     throw std::runtime_error("[svMultiPhysics::Physics] Navier-Stokes module factory received null mesh.");
   }
@@ -4092,7 +4465,8 @@ create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
   svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions options{};
   options.velocity_field_name = "Velocity";
   options.pressure_field_name = "Pressure";
-  if (const auto operator_tag = get_defined_string(
+  options.free_surface_physical_model = free_surface_physical_model;
+  if (const auto operator_tag = first_defined_string(
           input.equation_params, {"Operator_tag", "OperatorTag"})) {
     options.operator_tag = *operator_tag;
   }
@@ -4125,6 +4499,7 @@ FE::FieldId preRegisterPrimaryVelocityField(
     const svmp::Physics::EquationModuleInput& input,
     FE::systems::FESystem& system)
 {
+  (void)validate_and_resolve_free_surface_physical_model(input);
   if (input.equation_type != "fluid" && input.equation_type != "stokes") {
     throw std::invalid_argument(
         "preRegisterPrimaryVelocityField requires a fluid or stokes equation input");

@@ -9,6 +9,7 @@
 
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/EquationModuleRegistry.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
 
 #include "Assembly/GlobalSystemView.h"
 #include "FE/Forms/FormExpr.h"
@@ -27,6 +28,7 @@
 #include <cmath>
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <string>
@@ -36,10 +38,6 @@
 #  include "Mesh/Mesh.h"
 #  include "Mesh/Topology/CellShape.h"
 #endif
-
-namespace svmp::Physics::formulations::navier_stokes {
-void forceLink_NavierStokesRegister();
-}
 
 namespace svmp::Physics::test {
 
@@ -497,6 +495,396 @@ std::size_t interiorFaceKernelCountForBlock(
 }
 
 } // namespace
+
+TEST(NavierStokesLegacyBCs,
+     FreeSurfacePhysicalModelDirectInputIsExplicitAndFailClosed)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::
+        forceLink_NavierStokesRegister();
+
+    constexpr int marker = 76;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    const auto make_input = [&]() {
+        svmp::Physics::EquationModuleInput input{};
+        input.equation_type = "fluid";
+        input.mesh_name = "single_tetra";
+        input.mesh = mesh->local_mesh_ptr();
+        input.default_domain.params["Density"] = defined("1.0");
+        input.default_domain.params["Viscosity.model"] =
+            defined("Constant");
+        input.default_domain.params["Viscosity.Value"] = defined("0.01");
+        return input;
+    };
+
+    const auto expect_supported = [&](std::string model_key) {
+        auto input = make_input();
+        input.mesh_name = "gas_two_phase_mesh";
+        input.equation_params["Operator_tag"] =
+            defined("gas_diagnostic");
+        if (!model_key.empty()) {
+            input.equation_params[model_key] =
+                defined("OnePhaseLiquidPrescribedExteriorPressure");
+        }
+        input.module_options_file_path =
+            "ignored_gas_two_phase_physical_options.txt";
+        svmp::FE::systems::FESystem system(mesh);
+        auto module =
+            svmp::Physics::EquationModuleRegistry::instance().create(
+                "fluid", input, system);
+        ASSERT_TRUE(module) << model_key;
+        const auto artifact = module->effectiveConfigurationArtifact();
+        ASSERT_TRUE(artifact.has_value()) << model_key;
+        EXPECT_NE(
+            artifact->json.find(
+                "\"operator\":\"gas_diagnostic\""),
+            std::string::npos)
+            << model_key;
+        EXPECT_NE(
+            artifact->json.find(
+                "\"name\":"
+                "\"one_phase_liquid_prescribed_exterior_pressure\""),
+            std::string::npos)
+            << model_key;
+        EXPECT_NE(
+            artifact->json.find(
+                "\"exterior_pressure_mode\":"
+                "\"prescribed_scalar_traction_reference\""),
+            std::string::npos)
+            << model_key;
+        EXPECT_NE(
+            artifact->json.find(
+                "\"exterior_momentum_solved\":false"),
+            std::string::npos)
+            << model_key;
+        EXPECT_NE(
+            artifact->json.find(
+                "\"exterior_pressure_field_solved\":false"),
+            std::string::npos)
+            << model_key;
+    };
+
+    expect_supported("");
+    expect_supported("Free_surface_physical_model");
+    expect_supported("FreeSurfacePhysicalModel");
+
+    struct Rejection {
+        const char* label;
+        std::function<void(svmp::Physics::EquationModuleInput&)> mutate;
+        const char* diagnostic;
+    };
+    const std::vector<Rejection> rejections = {
+        {
+            "undefined gas key",
+            [](auto& input) {
+                input.equation_params["Gas_density"] =
+                    svmp::Physics::ParameterValue{false, ""};
+            },
+            "unsupported_two_phase_or_jump_free_surface_scope",
+        },
+        {
+            "generic selector value",
+            [](auto& input) {
+                input.equation_params["Model"] =
+                    defined("two_fluid");
+            },
+            "unsupported_two_phase_or_jump_free_surface_scope",
+        },
+        {
+            "unmarked generic selector value",
+            [](auto& input) {
+                input.equation_params["Model"] =
+                    defined("AirLiquid");
+            },
+            "unsupported_free_surface_physical_model",
+        },
+        {
+            "default-domain key",
+            [](auto& input) {
+                input.default_domain.params["Pressure_enrichment"] =
+                    defined("xfem");
+            },
+            "unsupported_two_phase_or_jump_free_surface_scope",
+        },
+        {
+            "default-domain unmarked selector",
+            [](auto& input) {
+                input.default_domain.params["Model"] =
+                    defined("AirLiquid");
+            },
+            "unsupported_free_surface_physical_model",
+        },
+        {
+            "explicit domain key",
+            [](auto& input) {
+                svmp::Physics::DomainInput domain{};
+                domain.id = "liquid";
+                domain.params["Gas_viscosity"] = defined("1.8e-5");
+                input.domains.push_back(std::move(domain));
+            },
+            "unsupported_two_phase_or_jump_free_surface_scope",
+        },
+        {
+            "boundary selector value",
+            [](auto& input) {
+                svmp::Physics::BoundaryConditionInput boundary{};
+                boundary.name = "free_surface";
+                boundary.params["Interface_model"] =
+                    defined("pressure_jump");
+                input.boundary_conditions.push_back(std::move(boundary));
+            },
+            "unsupported_two_phase_or_jump_free_surface_scope",
+        },
+        {
+            "implementation on non-free-surface boundary",
+            [](auto& input) {
+                svmp::Physics::BoundaryConditionInput boundary{};
+                boundary.name = "wall";
+                boundary.params["Type"] = defined("Dir");
+                boundary.params["FreeSurfaceImplementation"] =
+                    defined("Hysing");
+                input.boundary_conditions.push_back(
+                    std::move(boundary));
+            },
+            "unsupported_free_surface_physical_model",
+        },
+        {
+            "noncanonical free-surface implementation key",
+            [](auto& input) {
+                svmp::Physics::BoundaryConditionInput boundary{};
+                boundary.name = "free_surface";
+                boundary.params["Type"] = defined("Free_surface");
+                boundary.params["implementation"] =
+                    defined("Hysing");
+                input.boundary_conditions.push_back(
+                    std::move(boundary));
+            },
+            "unsupported_free_surface_physical_model",
+        },
+        {
+            "module-options selector value",
+            [](auto& input) {
+                input.module_options = "model = two_phase";
+            },
+            "unsupported_two_phase_or_jump_free_surface_scope",
+        },
+        {
+            "module-options physical selector",
+            [](auto& input) {
+                input.module_options =
+                    "FreeSurfacePhysicalModel:"
+                    "OnePhaseLiquidPrescribedExteriorPressure";
+            },
+            "misplaced_free_surface_physical_model",
+        },
+        {
+            "misplaced physical selector",
+            [](auto& input) {
+                input.default_domain
+                    .params["Free_surface_physical_model"] =
+                    defined(
+                        "OnePhaseLiquidPrescribedExteriorPressure");
+            },
+            "misplaced_free_surface_physical_model",
+        },
+        {
+            "noncanonical physical selector spelling",
+            [](auto& input) {
+                input.equation_params[
+                    "Free-surface physical model"] =
+                    defined(
+                        "OnePhaseLiquidPrescribedExteriorPressure");
+            },
+            "unsupported_free_surface_physical_model",
+        },
+        {
+            "unknown physical model",
+            [](auto& input) {
+                input.equation_params[
+                    "Free_surface_physical_model"] =
+                    defined("one_phase_liquid_sharp_interface");
+            },
+            "unsupported_free_surface_physical_model",
+        },
+        {
+            "duplicate physical model aliases",
+            [](auto& input) {
+                input.equation_params[
+                    "Free_surface_physical_model"] =
+                    defined(
+                        "OnePhaseLiquidPrescribedExteriorPressure");
+                input.equation_params[
+                    "FreeSurfacePhysicalModel"] =
+                    defined(
+                        "OnePhaseLiquidPrescribedExteriorPressure");
+            },
+            "ambiguous_free_surface_physical_model",
+        },
+        {
+            "legacy schema selector",
+            [](auto& input) {
+                input.equation_params[
+                    "Free_surface_physical_model"] =
+                    defined(
+                        "OnePhaseLiquidPrescribedExteriorPressure");
+                input.equation_params[
+                    "Free_surface_configuration_schema_version"] =
+                    defined("1");
+                input.equation_params[
+                    "Enable_explicit_legacy_free_surface_configuration"] =
+                    defined("true");
+            },
+            "unsupported_free_surface_physical_model",
+        },
+        {
+            "non-current schema with explicit selector",
+            [](auto& input) {
+                input.equation_params[
+                    "Free_surface_physical_model"] =
+                    defined(
+                        "OnePhaseLiquidPrescribedExteriorPressure");
+                input.equation_params[
+                    "Free_surface_configuration_schema_version"] =
+                    defined("99");
+            },
+            "unsupported_free_surface_physical_model",
+        },
+    };
+
+    for (const auto& rejection : rejections) {
+        SCOPED_TRACE(rejection.label);
+        auto input = make_input();
+        rejection.mutate(input);
+        svmp::FE::systems::FESystem system(mesh);
+        try {
+            (void)svmp::Physics::EquationModuleRegistry::instance().create(
+                "fluid", input, system);
+            FAIL() << "unsupported physical input must fail closed";
+        } catch (const std::runtime_error& error) {
+            EXPECT_NE(
+                std::string(error.what()).find(rejection.diagnostic),
+                std::string::npos);
+        }
+        EXPECT_EQ(system.findFieldByName("Velocity"),
+                  svmp::FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.findFieldByName("Pressure"),
+                  svmp::FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.fieldMap().numFields(), 0u);
+        EXPECT_TRUE(system.formulationRecords().empty());
+        EXPECT_FALSE(system.hasOperator("equations"));
+    }
+
+    {
+        auto input = make_input();
+        svmp::Physics::BoundaryConditionInput boundary{};
+        boundary.name = "free_surface";
+        boundary.params["Type"] = defined("Free_surface");
+        boundary.params["Implementation"] =
+            defined("UnfittedLevelSet");
+        input.boundary_conditions.push_back(std::move(boundary));
+        svmp::FE::systems::FESystem system(mesh);
+        EXPECT_NE(
+            svmp::Physics::formulations::navier_stokes::
+                preRegisterPrimaryVelocityField(input, system),
+            svmp::FE::INVALID_FIELD_ID);
+        EXPECT_NE(system.findFieldByName("Velocity"),
+                  svmp::FE::INVALID_FIELD_ID);
+    }
+
+    const std::vector<Rejection> preregistration_rejections = {
+        {
+            "pre-registration scope marker",
+            [](auto& input) {
+                input.equation_params["Formulation"] =
+                    defined("incompressible_two_fluid");
+            },
+            "unsupported_two_phase_or_jump_free_surface_scope",
+        },
+        {
+            "pre-registration unsupported schema",
+            [](auto& input) {
+                input.equation_params[
+                    "Free_surface_configuration_schema_version"] =
+                    defined("99");
+            },
+            "unsupported_free_surface_physical_model",
+        },
+        {
+            "pre-registration legacy schema without opt-in",
+            [](auto& input) {
+                input.equation_params[
+                    "Free_surface_configuration_schema_version"] =
+                    defined("1");
+                input.equation_params[
+                    "Enable_explicit_legacy_free_surface_configuration"] =
+                    defined("false");
+            },
+            "unsupported_free_surface_physical_model",
+        },
+        {
+            "pre-registration current schema with legacy opt-in",
+            [](auto& input) {
+                input.equation_params[
+                    "Free_surface_configuration_schema_version"] =
+                    defined("2");
+                input.equation_params[
+                    "Enable_explicit_legacy_free_surface_configuration"] =
+                    defined("true");
+            },
+            "unsupported_free_surface_physical_model",
+        },
+        {
+            "pre-registration duplicate schema aliases",
+            [](auto& input) {
+                input.equation_params[
+                    "Free_surface_configuration_schema_version"] =
+                    defined("2");
+                input.equation_params[
+                    "FreeSurfaceConfigurationSchemaVersion"] =
+                    defined("2");
+            },
+            "unsupported_free_surface_physical_model",
+        },
+        {
+            "pre-registration boundary context",
+            [](auto& input) {
+                svmp::Physics::BoundaryConditionInput boundary{};
+                boundary.name = "wall";
+                boundary.params["Type"] = defined("Dir");
+                boundary.params["Free_surface_implementation"] =
+                    defined("Hysing");
+                input.boundary_conditions.push_back(
+                    std::move(boundary));
+            },
+            "unsupported_free_surface_physical_model",
+        },
+    };
+    for (const auto& rejection : preregistration_rejections) {
+        SCOPED_TRACE(rejection.label);
+        auto input = make_input();
+        rejection.mutate(input);
+        svmp::FE::systems::FESystem system(mesh);
+        try {
+            (void)svmp::Physics::formulations::navier_stokes::
+                preRegisterPrimaryVelocityField(input, system);
+            FAIL()
+                << "pre-registration must reject unsupported physical input";
+        } catch (const std::runtime_error& error) {
+            EXPECT_NE(
+                std::string(error.what()).find(rejection.diagnostic),
+                std::string::npos);
+        }
+        EXPECT_EQ(system.findFieldByName("Velocity"),
+                  svmp::FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.fieldMap().numFields(), 0u);
+        EXPECT_TRUE(system.formulationRecords().empty());
+    }
+#endif
+}
 
 TEST(NavierStokesLegacyBCs, ParabolicFluxInflow_ResistanceOutflow_SetupSucceeds)
 {

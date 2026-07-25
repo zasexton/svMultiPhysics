@@ -6386,6 +6386,17 @@ void installFittedFreeSurfaceMeshKinematics(
                : "UnfittedLevelSet";
 }
 
+[[nodiscard]] const char* freeSurfacePhysicalModelName(
+    FreeSurfacePhysicalModel model) noexcept
+{
+    switch (model) {
+    case FreeSurfacePhysicalModel::
+        OnePhaseLiquidPrescribedExteriorPressure:
+        return "one_phase_liquid_prescribed_exterior_pressure";
+    }
+    return nullptr;
+}
+
 [[nodiscard]] const char* normalKinematicPolicyName(
     FreeSurfaceNormalKinematicPolicy policy) noexcept
 {
@@ -6604,7 +6615,7 @@ tangentialPolicyProvenance(
 
     std::ostringstream out;
     out.imbue(std::locale::classic());
-    out << "{\"artifact_schema_version\":1"
+    out << "{\"artifact_schema_version\":2"
         << ",\"component\":\"incompressible_navier_stokes_free_surface\""
         << ",\"configuration_schema\":{\"input_version\":"
         << options.input_configuration_schema_version
@@ -6620,6 +6631,26 @@ tangentialPolicyProvenance(
         << jsonString(options.explicit_legacy_configuration
                           ? "legacy_diagnostic"
                           : "one_phase_liquid_sharp_interface")
+        << ",\"physical_model\":";
+    if (options.explicit_legacy_configuration) {
+        out << "null";
+    } else {
+        out << "{\"name\":"
+            << jsonString(freeSurfacePhysicalModelName(
+                   options.free_surface_physical_model))
+            << ",\"liquid_phase_count\":1"
+            << ",\"liquid_velocity_field_count\":1"
+            << ",\"liquid_pressure_field_count\":1"
+            << ",\"material_density_state_count\":1"
+            << ",\"material_viscosity_state_count\":1"
+            << ",\"exterior_pressure_mode\":"
+               "\"prescribed_scalar_traction_reference\""
+            << ",\"exterior_momentum_solved\":false"
+            << ",\"exterior_pressure_field_solved\":false"
+            << ",\"incompressible_two_fluid_implemented\":false"
+            << ",\"gas_dynamics_implemented\":false}";
+    }
+    out
         << ",\"units\":{\"system\":\"consistent_solver_units\",\"angle\":\"radian\",\"length\":\"solver_length\",\"pressure\":\"solver_pressure\",\"surface_tension\":\"force_per_length\"}"
         << ",\"fields\":{\"velocity\":"
         << jsonString(options.velocity_field_name)
@@ -6838,6 +6869,12 @@ tangentialPolicyProvenance(
 
 void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& system) const
 {
+    if (freeSurfacePhysicalModelName(options_.free_surface_physical_model) ==
+        nullptr) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule::registerOn: "
+            "unsupported_free_surface_physical_model");
+    }
     effective_configuration_artifact_.reset();
     const auto current_schema =
         IncompressibleNavierStokesVMSOptions::

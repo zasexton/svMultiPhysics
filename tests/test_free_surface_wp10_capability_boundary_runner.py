@@ -40,8 +40,12 @@ def validate_mutated_matrix(runner, tmp_path, mutation):
     mutation(document)
     path = tmp_path / "matrix.json"
     path.write_text(json.dumps(document), encoding="utf-8")
-    runner.DEFAULT_MATRIX = path
-    return runner.validate_matrix(path)
+    canonical = runner.DEFAULT_MATRIX
+    try:
+        runner.DEFAULT_MATRIX = path
+        return runner.validate_matrix(path)
+    finally:
+        runner.DEFAULT_MATRIX = canonical
 
 
 def test_canonical_boundary_is_strict_and_explicitly_open(tmp_path):
@@ -72,6 +76,50 @@ def test_canonical_boundary_is_strict_and_explicitly_open(tmp_path):
             tmp_path,
             lambda document: document["scope_guard_contract"].__setitem__(
                 "diagnostic", "weakened_scope_diagnostic"
+            ),
+        )
+    with pytest.raises(ValueError, match="top-level contract changed"):
+        validate_mutated_matrix(
+            runner,
+            tmp_path,
+            lambda document: document.__setitem__("wp10_closed", True),
+        )
+
+    duplicate_path = tmp_path / "duplicate.json"
+    duplicate_path.write_text(
+        MATRIX_PATH.read_text(encoding="utf-8").replace(
+            '  "qualification_scope": ',
+            '  "qualification_scope": "premature",\n'
+            '  "qualification_scope": ',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    canonical = runner.DEFAULT_MATRIX
+    try:
+        runner.DEFAULT_MATRIX = duplicate_path
+        with pytest.raises(
+            ValueError,
+            match="duplicate JSON key: qualification_scope",
+        ):
+            runner.validate_matrix(duplicate_path)
+    finally:
+        runner.DEFAULT_MATRIX = canonical
+
+    with pytest.raises(ValueError, match="test groups changed after freeze"):
+        validate_mutated_matrix(
+            runner,
+            tmp_path,
+            lambda document: document["groups"][0]["execution"].__setitem__(
+                "wall_time_seconds", 301
+            ),
+        )
+    with pytest.raises(ValueError, match="invalid test-group contract"):
+        validate_mutated_matrix(
+            runner,
+            tmp_path,
+            lambda document: document["groups"][0]["execution"].__setitem__(
+                "wall_time_seconds", True
             ),
         )
 

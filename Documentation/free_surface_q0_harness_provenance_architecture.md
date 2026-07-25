@@ -32,7 +32,11 @@ The frozen prerequisite harness checks:
 - all 16 exact committed source definitions and required semantics for the
   audit criteria,
   WP-0, WP-1, WP-2, and WP-10 matrices and runners, and the central campaign
-  registry and validator, plus the executable WP-10 one-phase scope guard;
+  registry and validator, plus the executable WP-10 one-phase scope guard.
+  The WP-10 definition transitively pins its schema-2 physical-model artifact,
+  canonical XML parser boundary, and direct-map production boundary. It
+  freezes seven dedicated C++ test names and records the binaries when its
+  groups execute; Q0 does not reclassify those tests as Q0 campaign execution;
 - all 24 WP-0 configuration-containment test names, including negative cases,
   in an executable Physics test binary;
 - all 44 committed Python control tests covering exact result inventories,
@@ -44,7 +48,7 @@ The frozen prerequisite harness checks:
 - the machine-readable unresolved Q0 state.
 
 The exact matrix SHA-256 is
-`44204326a345760a98e92db3cfd8a53a231a74e6e5c0b710694f29146df734e5`.
+`27abb180aa7c18e72b794148a30899e0ddb3420c86038907f50352f4c99e1c14`.
 The runner accepts only the canonical, non-symbolic-link matrix path and
 rejects any byte mutation before discovery or execution. Every path component
 of every frozen source definition is checked for symbolic links before path

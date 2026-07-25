@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "matrix_id": "free_surface_wp10_capability_boundary_v1",
+  "schema_version": 2,
+  "matrix_id": "free_surface_wp10_capability_boundary_v2",
   "status": "FROZEN_CAPABILITY_BOUNDARY",
   "work_package": "WP-10",
   "finding": "FSR-08",
@@ -8,7 +8,10 @@
   "architecture_record": "Documentation/free_surface_wp10_physical_capability_boundary.md",
   "model_envelope": "one_phase_incompressible_liquid_with_prescribed_exterior_pressure",
   "current_capability_boundary": {
+    "artifact_schema_version": 2,
     "momentum_capability_label": "one_phase_liquid_sharp_interface",
+    "physical_model_name": "one_phase_liquid_prescribed_exterior_pressure",
+    "legacy_physical_model": null,
     "transport_capability_labels": [
       "one_phase_interface_transport_nonlocal_conservation",
       "one_phase_locally_conservative_p1_indicator_transport"
@@ -17,7 +20,7 @@
     "liquid_pressure_field_count": 1,
     "material_density_state_count": 1,
     "material_viscosity_state_count": 1,
-    "exterior_state": "prescribed_scalar_pressure_traction",
+    "exterior_state": "prescribed_scalar_traction_reference",
     "exterior_momentum_solved": false,
     "exterior_pressure_field_solved": false,
     "incompressible_two_fluid_implemented": false,
@@ -27,9 +30,13 @@
   },
   "source_checks": [
     {
-      "id": "single_liquid_option_state",
+      "id": "explicit_one_phase_option_state",
       "path": "Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h",
       "required_fragments": [
+        "enum class FreeSurfacePhysicalModel",
+        "OnePhaseLiquidPrescribedExteriorPressure",
+        "current_configuration_schema_version{2}",
+        "FreeSurfacePhysicalModel free_surface_physical_model{",
         "std::string velocity_field_name{\"u\"};",
         "std::string pressure_field_name{\"p\"};",
         "FE::Real density{1.0};",
@@ -46,17 +53,57 @@
       ]
     },
     {
-      "id": "one_phase_momentum_artifact",
+      "id": "explicit_one_phase_momentum_artifact",
       "path": "Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp",
       "required_fragments": [
+        "out << \"{\\\"artifact_schema_version\\\":2\"",
+        "\",\\\"physical_model\\\":\"",
+        "\"one_phase_liquid_prescribed_exterior_pressure\"",
+        "prescribed_scalar_traction_reference",
+        "\",\\\"exterior_momentum_solved\\\":false\"",
+        "\",\\\"exterior_pressure_field_solved\\\":false\"",
+        "out << \"null\";",
         "\"one_phase_liquid_sharp_interface\"",
         "const auto p_ext = bc::toScalarExpr(",
-        "bc.external_pressure"
+        "bc.external_pressure",
+        "\"unsupported_free_surface_physical_model\"",
+        "effective_configuration_artifact_.reset();"
       ],
       "forbidden_fragments": [
         "\"incompressible_two_fluid\"",
         "\"compressible_gas_free_surface\""
       ]
+    },
+    {
+      "id": "production_input_scope_containment",
+      "path": "Code/Source/solver/Physics/Formulations/NavierStokes/NavierStokesRegister.cpp",
+      "required_fragments": [
+        "\"unsupported_two_phase_or_jump_free_surface_scope\"",
+        "\"unsupported_free_surface_physical_model\"",
+        "\"misplaced_free_surface_physical_model\"",
+        "\"ambiguous_free_surface_physical_model\"",
+        "\"Free_surface_physical_model\"",
+        "\"FreeSurfacePhysicalModel\"",
+        "validate_and_resolve_free_surface_physical_model(",
+        "create_navier_stokes_from_input(",
+        "preRegisterPrimaryVelocityField("
+      ],
+      "forbidden_fragments": []
+    },
+    {
+      "id": "xml_input_scope_containment",
+      "path": "Code/Source/solver/Parameters.cpp",
+      "required_fragments": [
+        "is_free_surface_physical_model_parameter(",
+        "\"Free_surface_physical_model\"",
+        "\"FreeSurfacePhysicalModel\"",
+        "onephaseliquidprescribedexteriorpressure",
+        "\"unsupported_two_phase_or_jump_free_surface_scope\"",
+        "\"unsupported_free_surface_physical_model\"",
+        "\"misplaced_free_surface_physical_model\"",
+        "\"ambiguous_free_surface_physical_model\""
+      ],
+      "forbidden_fragments": []
     },
     {
       "id": "one_phase_transport_artifacts",
@@ -79,6 +126,8 @@
         "\"gasdensity\"",
         "\"gasviscosity\"",
         "\"unsupported_two_phase_or_jump_free_surface_scope\"",
+        "\"freesurfacephysicalmodel\"",
+        "\"physicalmodel\"",
         "def validate_xml_config(",
         "def validate_json_config(",
         "def validate_config_mapping(",
@@ -95,7 +144,7 @@
       {
         "id": "xml_declared_one_phase",
         "format": "xml",
-        "payload": "<FreeSurface><FluidModel>one_phase_liquid_sharp_interface</FluidModel><Option name=\"external_pressure\">101325</Option></FreeSurface>"
+        "payload": "<FreeSurface><Free_surface_physical_model>OnePhaseLiquidPrescribedExteriorPressure</Free_surface_physical_model><Option name=\"external_pressure\">101325</Option></FreeSurface>"
       },
       {
         "id": "json_declared_one_phase",
@@ -236,10 +285,10 @@
         "payload": "<FreeSurface><Entry><Name value=\"interface_model\"/><Value value=\"pressure_jump\"/></Entry></FreeSurface>"
       },
       {
-        "id": "mapping_two_fluid_scope_value",
+        "id": "mapping_physical_model_two_fluid",
         "format": "mapping",
         "payload": {
-          "phase_model": "incompressible_two_fluid"
+          "Free_surface_physical_model": "incompressible_two_fluid"
         }
       },
       {
@@ -267,10 +316,13 @@
   },
   "groups": [
     {
-      "id": "momentum_capability_artifact_serial",
+      "id": "momentum_physical_model_boundary_serial",
       "binary_argument": "physics_binary",
       "tests": [
-        "MovingDomainPhysics.NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults"
+        "MovingDomainPhysics.NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults",
+        "MovingDomainPhysics.NavierStokesLegacySchemaIsExplicitAndLosesCurrentCapabilityLabel",
+        "MovingDomainPhysics.NavierStokesRejectsUnsupportedPhysicalModelBeforeSystemMutation",
+        "NavierStokesLegacyBCs.FreeSurfacePhysicalModelDirectInputIsExplicitAndFailClosed"
       ],
       "execution": {
         "wall_time_seconds": 300,
@@ -279,11 +331,12 @@
       }
     },
     {
-      "id": "transport_capability_artifacts_serial",
+      "id": "application_physical_model_boundary_serial",
       "binary_argument": "application_binary",
       "tests": [
         "LevelSetEquationTranslator.TranslatesFieldsAndBoundaries",
-        "LevelSetEquationTranslator.TranslatesConservativePhaseControls"
+        "LevelSetEquationTranslator.TranslatesConservativePhaseControls",
+        "EquationTranslatorFreeSurface.XmlPhysicalModelIsExplicitAndUnsupportedScopeFailsClosed"
       ],
       "execution": {
         "wall_time_seconds": 300,
@@ -418,7 +471,7 @@
       "incompressible_two_fluid_qualification",
       "gas_sensitive_qualification"
     ],
-    "diagnostic": "This matrix verifies only the explicit one-phase model boundary. The two-fluid and gas formulations and every physical WP-10/Q7 exit are absent."
+    "diagnostic": "This matrix verifies only the explicit new-OOP Navier-Stokes one-phase model boundary. Legacy-solver input, the two-fluid and gas formulations, and every physical WP-10/Q7 exit are outside this evidence."
   },
-  "qualification_scope": "Explicit one-phase capability labeling and unsupported-scope containment only; this matrix does not close FSR-08, WP-10, or Q7 and does not qualify any two-fluid or gas-sensitive phenomenon."
+  "qualification_scope": "New-OOP Navier-Stokes explicit one-phase capability labeling and unsupported-scope containment only; legacy-solver input is outside this evidence. This matrix does not close FSR-08, WP-10, or Q7 and does not qualify any two-fluid or gas-sensitive phenomenon."
 }

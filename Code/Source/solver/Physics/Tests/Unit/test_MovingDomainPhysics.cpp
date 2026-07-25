@@ -8584,6 +8584,35 @@ TEST(MovingDomainPhysics,
 }
 
 TEST(MovingDomainPhysics,
+     NavierStokesRejectsUnsupportedPhysicalModelBeforeSystemMutation)
+{
+    const auto mesh = makeMesh();
+    auto opts = baseNavierStokesOptions();
+    opts.free_surface_physical_model =
+        static_cast<ns::FreeSurfacePhysicalModel>(255);
+    const auto velocity_name = opts.velocity_field_name;
+    const auto pressure_name = opts.pressure_field_name;
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(
+        makeVelocitySpace(mesh), makePressureSpace(mesh), std::move(opts));
+    try {
+        module.registerOn(system);
+        FAIL() << "unsupported physical model must fail closed";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "unsupported_free_surface_physical_model"),
+            std::string::npos);
+    }
+    EXPECT_EQ(system.findFieldByName(velocity_name), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName(pressure_name), FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(system.formulationRecords().empty());
+    EXPECT_FALSE(system.hasOperator("equations"));
+    EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
+}
+
+TEST(MovingDomainPhysics,
      NavierStokesLegacySchemaIsExplicitAndLosesCurrentCapabilityLabel)
 {
     constexpr int interface_marker = 171;
@@ -8625,8 +8654,14 @@ TEST(MovingDomainPhysics,
               std::string::npos);
     EXPECT_NE(artifact->json.find("\"capability_label\":\"legacy_diagnostic\""),
               std::string::npos);
+    EXPECT_NE(artifact->json.find("\"physical_model\":null"),
+              std::string::npos);
     EXPECT_EQ(artifact->json.find("one_phase_liquid_sharp_interface"),
               std::string::npos);
+    EXPECT_EQ(
+        artifact->json.find(
+            "one_phase_liquid_prescribed_exterior_pressure"),
+        std::string::npos);
     EXPECT_NE(artifact->json.find("\"active_domain_method\":\"SmoothedIndicator\""),
               std::string::npos);
 }
@@ -8676,6 +8711,35 @@ TEST(MovingDomainPhysics,
     constexpr std::string_view expected =
         R"json({"artifact_schema_version":1,"component":"incompressible_navier_stokes_free_surface","configuration_schema":{"input_version":2,"effective_version":2,"migration_mode":"current"},"capability_label":"one_phase_liquid_sharp_interface","units":{"system":"consistent_solver_units","angle":"radian","length":"solver_length","pressure":"solver_pressure","surface_tension":"force_per_length"},"fields":{"velocity":"u","pressure":"p","operator":"equations","dimension":3},"ale":{"enabled":true,"mesh_velocity_source":"CoupledDisplacement","mesh_velocity_field":"mesh_velocity","mesh_displacement_field":"mesh_displacement","geometry_tangent_path":"SymbolicRequired"},"generic_velocity_nitsche":{"gamma":23,"symmetric":false,"scale_with_polynomial_order":false},"stabilization":{"vms_enabled":false,"ct_m":1,"ct_c":36,"epsilon":9.9999999999999998e-13},"maintenance_policy":{"owner_component":"level_set_transport","coupling":"one_way_velocity_to_extension_to_level_set"},"extension_guards":{"physical_momentum_dry_extension_allowed":false,"auxiliary_extension_owner":"level_set_transport","external_owner_required":true},"free_surfaces":[{"implementation":"FittedALE","boundary_marker":172,"interface_marker":-1,"level_set_field":"level_set","generated_interface_domain":"free_surface","generated_interface_geometry":"LinearCorner","geometry_tangent_policy":"RefreshedFrozenQuadrature","level_set_isovalue":0,"active_domain":"None","active_phase_sign":"full_domain","active_domain_method":"CutVolume","active_domain_smoothing_width":0,"smoothing_width_unit":"length","allow_full_domain_unfitted_free_surface":false,"external_pressure":2.25,"surface_tension":0.5,"surface_tension_form_requested":"Automatic","surface_tension_form_effective":"CurvatureTraction","curvature_policy":"supplied_scalar","curvature_tangent_policy":"supplied_scalar_frozen","kinematic":{"normal_policy":"MatchFluidNormalVelocity","tangential_mesh_policy":"Prescribed","prescribed_tangential_mesh_velocity":[0,0,0],"enforcement":"Nitsche","penalty":0,"nitsche":{"gamma":17,"symmetric":false,"scale_with_polynomial_order":false}},"stabilization":{"enabled":false,"small_cut_aggregation":true,"pressure_policy":"Enabled","pressure_gradient_penalty":1,"use_cut_metadata_scale":false,"cut_metadata_scale_cap":null},"pruning":{"decision_owner":"authoritative_geometry_snapshot","fallback_to_whole_face":false},"legacy_dry_velocity_diffusion":{"enabled":false,"diffusivity":1,"production_allowed":false},"contact_lines":[{"model":"None"}]}]})json";
     std::string expected_with_aggregation_guards(expected);
+    constexpr std::string_view artifact_schema_fragment =
+        "\"artifact_schema_version\":1";
+    const auto artifact_schema =
+        expected_with_aggregation_guards.find(artifact_schema_fragment);
+    ASSERT_NE(artifact_schema, std::string::npos);
+    expected_with_aggregation_guards.replace(
+        artifact_schema,
+        artifact_schema_fragment.size(),
+        "\"artifact_schema_version\":2");
+    constexpr std::string_view capability_fragment =
+        "\"capability_label\":\"one_phase_liquid_sharp_interface\"";
+    const auto physical_model =
+        expected_with_aggregation_guards.find(capability_fragment);
+    ASSERT_NE(physical_model, std::string::npos);
+    expected_with_aggregation_guards.insert(
+        physical_model + capability_fragment.size(),
+        ",\"physical_model\":{"
+        "\"name\":\"one_phase_liquid_prescribed_exterior_pressure\","
+        "\"liquid_phase_count\":1,"
+        "\"liquid_velocity_field_count\":1,"
+        "\"liquid_pressure_field_count\":1,"
+        "\"material_density_state_count\":1,"
+        "\"material_viscosity_state_count\":1,"
+        "\"exterior_pressure_mode\":"
+        "\"prescribed_scalar_traction_reference\","
+        "\"exterior_momentum_solved\":false,"
+        "\"exterior_pressure_field_solved\":false,"
+        "\"incompressible_two_fluid_implemented\":false,"
+        "\"gas_dynamics_implemented\":false}");
     constexpr std::string_view cut_scale_fragment =
         "\"cut_metadata_scale_cap\":null";
     const auto insertion = expected_with_aggregation_guards.find(

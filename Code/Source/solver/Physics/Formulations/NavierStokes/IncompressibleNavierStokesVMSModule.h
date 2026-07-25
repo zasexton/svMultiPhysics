@@ -64,6 +64,10 @@ enum class FreeSurfaceImplementation : std::uint8_t {
     UnfittedLevelSet
 };
 
+enum class FreeSurfacePhysicalModel : std::uint8_t {
+    OnePhaseLiquidPrescribedExteriorPressure
+};
+
 enum class FreeSurfaceActiveDomain : std::uint8_t {
     None,
     LevelSetNegative,
@@ -151,6 +155,8 @@ struct IncompressibleNavierStokesVMSOptions {
     int input_configuration_schema_version{
         current_configuration_schema_version};
     bool explicit_legacy_configuration{false};
+    FreeSurfacePhysicalModel free_surface_physical_model{
+        FreeSurfacePhysicalModel::OnePhaseLiquidPrescribedExteriorPressure};
 
     struct VelocityDirichletBC {
         int boundary_marker{-1};

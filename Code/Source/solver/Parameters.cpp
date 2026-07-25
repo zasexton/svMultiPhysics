@@ -67,10 +67,12 @@
 #include "LinearAlgebra.h"
 #include "ustruct.h"
 
+#include <array>
 #include <iostream>
 #include <regex>
 #include <set>
 #include <sstream>
+#include <string_view>
 #include <limits>
 #include <math.h>
 
@@ -105,6 +107,54 @@ void xml_util_set_parameters( std::function<void(const std::string&, const std::
 
 namespace {
 
+bool is_free_surface_physical_model_parameter(const std::string& name)
+{
+  return name == "Free_surface_physical_model" ||
+         name == "FreeSurfacePhysicalModel";
+}
+
+std::string normalized_free_surface_physical_model_token(
+    std::string_view raw)
+{
+  std::string token;
+  token.reserve(raw.size());
+  for (const char ch : raw) {
+    if (ch >= 'A' && ch <= 'Z') {
+      token.push_back(static_cast<char>(ch - 'A' + 'a'));
+    } else if ((ch >= 'a' && ch <= 'z') ||
+               (ch >= '0' && ch <= '9')) {
+      token.push_back(ch);
+    }
+  }
+  return token;
+}
+
+void validate_free_surface_physical_model_value(std::string_view raw)
+{
+  const auto token =
+      normalized_free_surface_physical_model_token(raw);
+  static constexpr std::array<std::string_view, 8> unsupported_markers = {
+      "twophase",
+      "twofluid",
+      "multiphase",
+      "pressureenrichment",
+      "jump",
+      "gas",
+      "gasdensity",
+      "gasviscosity",
+  };
+  for (const auto marker : unsupported_markers) {
+    if (token.find(marker) != std::string::npos) {
+      throw std::runtime_error(
+          "unsupported_two_phase_or_jump_free_surface_scope");
+    }
+  }
+  if (token != "onephaseliquidprescribedexteriorpressure") {
+    throw std::runtime_error(
+        "unsupported_free_surface_physical_model");
+  }
+}
+
 bool is_oop_equation_extension_parameter(const std::string& name)
 {
   static const std::set<std::string> names = {
@@ -133,6 +183,8 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "Moving_mesh_tangent_path",
     "Moving_mesh_geometry_tangent_path",
     "ALE_moving_mesh_tangent_path",
+    "Free_surface_physical_model",
+    "FreeSurfacePhysicalModel",
     "Level_set_field_name",
     "LevelSetFieldName",
     "Level_set_field",
@@ -1280,7 +1332,10 @@ void BoundaryConditionParameters::set_values(tinyxml2::XMLElement* xml_elem)
    
     else if (item->GetText() != nullptr) {
       auto value = item->GetText();
-      if (params_map.count(name) != 0) {
+      if (is_free_surface_physical_model_parameter(name)) {
+        throw std::runtime_error(
+            "misplaced_free_surface_physical_model");
+      } else if (params_map.count(name) != 0) {
         set_parameter_value(name, value);
       } else if (is_oop_boundary_extension_parameter(name)) {
         set_extra_parameter_value(name, value);
@@ -2540,6 +2595,10 @@ void DomainParameters::set_values(tinyxml2::XMLElement* domain_elem)
   
     } else if (item->GetText() != nullptr) {
       auto value = item->GetText();
+      if (is_free_surface_physical_model_parameter(name)) {
+        throw std::runtime_error(
+            "misplaced_free_surface_physical_model");
+      }
       if (params_map.count(name) != 0) {
         set_parameter_value(name, value);
       } else if (is_oop_equation_extension_parameter(name)) {
@@ -3003,6 +3062,20 @@ void EquationParameters::set_values(tinyxml2::XMLElement* eq_elem)
 
     } else if (item->GetText() != nullptr) {
       auto value = item->GetText();
+
+      if (is_free_surface_physical_model_parameter(name)) {
+        const auto equation_type = type.value();
+        if (equation_type != "fluid" && equation_type != "stokes") {
+          throw std::runtime_error(
+              "misplaced_free_surface_physical_model");
+        }
+        if (extra_string_params.count("Free_surface_physical_model") != 0 ||
+            extra_string_params.count("FreeSurfacePhysicalModel") != 0) {
+          throw std::runtime_error(
+              "ambiguous_free_surface_physical_model");
+        }
+        validate_free_surface_physical_model_value(value);
+      }
 
       // A parameter can be an EqutionParameter or DomainParameter.
       //
