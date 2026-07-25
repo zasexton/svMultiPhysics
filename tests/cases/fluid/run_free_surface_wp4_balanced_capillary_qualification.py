@@ -26,7 +26,7 @@ DEFAULT_REGISTRY = SCRIPT_PATH.with_name(
     "free_surface_wp4_balanced_capillary_prerequisite_matrix.json"
 )
 EXPECTED_REGISTRY_SHA256 = (
-    "32abde84e3c087ca80e527bd68c576b5c91c31c7465cbc01791cc1e6e79f565d"
+    "3f52f970c76488d1ffc540b13a6d3510521efa339bee1bb7e8bc2e8b1c9f19b1"
 )
 SHARED_RUNNER_PATH = Path(strict_runner.__file__).resolve()
 SHARED_RUNNER_SHA256 = strict_runner.sha256_file(SHARED_RUNNER_PATH)
@@ -71,6 +71,12 @@ EXPECTED_DISPOSITION = {
 EXPECTED_GROUPS = {
     "static_pressure_gate_serial": ("systems", 1, 1, 13),
     "surface_wall_balance_serial": ("physics", 1, 1, 8),
+    "surface_wall_volume_functional_variation_serial": (
+        "geometry",
+        1,
+        1,
+        2,
+    ),
     "wall_angle_geometry_serial": ("level_set", 1, 1, 2),
     "static_pressure_configuration_mpi": ("assembly_mpi", 2, 2, 1),
 }

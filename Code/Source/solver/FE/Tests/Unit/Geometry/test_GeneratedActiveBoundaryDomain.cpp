@@ -20,6 +20,7 @@
 #include <memory>
 #include <numbers>
 #include <numeric>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -294,6 +295,87 @@ public:
 private:
     int marker_{17};
     std::vector<std::array<FE::Real, 3>> coordinates_{};
+};
+
+class SingleTetraBoundaryMesh final : public FE::assembly::IMeshAccess {
+public:
+    explicit SingleTetraBoundaryMesh(int marker = 17)
+        : marker_(marker)
+    {
+    }
+
+    [[nodiscard]] FE::GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] FE::GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override { return 1; }
+    [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+    [[nodiscard]] bool isOwnedCell(FE::GlobalIndex cell) const override {
+        return cell == 0;
+    }
+    [[nodiscard]] FE::ElementType getCellType(
+        FE::GlobalIndex) const override {
+        return FE::ElementType::Tetra4;
+    }
+    void getCellNodes(FE::GlobalIndex,
+                      std::vector<FE::GlobalIndex>& nodes) const override {
+        nodes = {0, 1, 2, 3};
+    }
+    [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
+        FE::GlobalIndex node) const override {
+        const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(
+            FE::ElementType::Tetra4,
+            static_cast<std::size_t>(node));
+        return {{xi[0], xi[1], xi[2]}};
+    }
+    void getCellCoordinates(
+        FE::GlobalIndex,
+        std::vector<std::array<FE::Real, 3>>& coordinates) const override {
+        coordinates.resize(4u);
+        for (std::size_t node = 0u; node < coordinates.size(); ++node) {
+            const auto xi =
+                FE::basis::ReferenceNodeLayout::get_node_coords(
+                    FE::ElementType::Tetra4, node);
+            coordinates[node] = {{xi[0], xi[1], xi[2]}};
+        }
+    }
+    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
+        FE::GlobalIndex face,
+        FE::GlobalIndex cell) const override {
+        return face == 0 && cell == 0 ? FE::LocalIndex{0}
+                                     : FE::INVALID_LOCAL_INDEX;
+    }
+    [[nodiscard]] int getBoundaryFaceMarker(
+        FE::GlobalIndex face) const override {
+        return face == 0 ? marker_ : -1;
+    }
+    [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
+    getInteriorFaceCells(FE::GlobalIndex) const override {
+        return {-1, -1};
+    }
+    void forEachCell(
+        std::function<void(FE::GlobalIndex)> callback) const override {
+        callback(0);
+    }
+    void forEachOwnedCell(
+        std::function<void(FE::GlobalIndex)> callback) const override {
+        callback(0);
+    }
+    void forEachBoundaryFace(
+        int marker,
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex)> callback)
+        const override {
+        if (marker < 0 || marker == marker_) {
+            callback(0, 0);
+        }
+    }
+    void forEachInteriorFace(
+        std::function<void(FE::GlobalIndex,
+                           FE::GlobalIndex,
+                           FE::GlobalIndex)>) const override {
+    }
+
+private:
+    int marker_{17};
 };
 
 interfaces::CutInterfaceDomainRequest interfaceRequest(int marker)
@@ -3175,6 +3257,295 @@ TEST(FreeSurfaceGeometrySnapshot,
                    ::testing::PrintToString(maximum_volume_potential_error));
     RecordProperty("functional_total_fd_max_relative_error",
                    ::testing::PrintToString(maximum_total_error));
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
+     DiscreteFunctionalFirstVariationMatchesThreeDimensionalCentralDifference)
+{
+    constexpr int interface_marker = 125;
+    constexpr int wall_marker = 22;
+    constexpr FE::Real interface_intercept = 0.35;
+    constexpr FE::Real interface_y_slope = -0.30;
+    constexpr FE::Real interface_z_slope = -0.20;
+    // V = (0.14 * (1 - x - y - z), 0, 0) is wall tangential and has
+    // zero normal flux on every non-wall tetrahedral face reached by the cut.
+    constexpr FE::Real translation = 0.14;
+    constexpr FE::Real deformation_x_gradient = -0.14;
+    constexpr FE::Real deformation_y_gradient = -0.14;
+    constexpr FE::Real deformation_z_gradient = -0.14;
+    constexpr FE::Real epsilon = 2.0e-6;
+    const SingleTetraBoundaryMesh mesh(wall_marker);
+
+    const auto moved_interface_x = [](FE::Real y,
+                                      FE::Real z,
+                                      FE::Real perturbation) {
+        return (FE::Real{1.0} +
+                perturbation * deformation_x_gradient) *
+                   (interface_intercept + interface_y_slope * y +
+                    interface_z_slope * z) +
+               perturbation *
+                   (translation + deformation_y_gradient * y +
+                    deformation_z_gradient * z);
+    };
+    const auto nodal_values = [&](FE::Real perturbation) {
+        std::array<FE::Real, 4> values{};
+        for (std::size_t node = 0u; node < values.size(); ++node) {
+            const auto xi =
+                FE::basis::ReferenceNodeLayout::get_node_coords(
+                    FE::ElementType::Tetra4, node);
+            values[node] =
+                xi[0] - moved_interface_x(xi[1], xi[2], perturbation);
+        }
+        return values;
+    };
+    const auto scalar_evaluator = [&](FE::Real perturbation) {
+        interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+        scalar.value =
+            [perturbation, moved_interface_x](
+                FE::GlobalIndex,
+                const std::array<FE::Real, 3>& point,
+                const FE::geometry::CutQuadratureProvenance&) {
+                return point[0] -
+                       moved_interface_x(
+                           point[1], point[2], perturbation);
+            };
+        scalar.reference_gradient =
+            [perturbation](
+                FE::GlobalIndex,
+                const std::array<FE::Real, 3>&,
+                const FE::geometry::CutQuadratureProvenance&) {
+                const FE::Real scale =
+                    FE::Real{1.0} +
+                    perturbation * deformation_x_gradient;
+                return std::array<FE::Real, 3>{{
+                    FE::Real{1.0},
+                    -(scale * interface_y_slope +
+                      perturbation * deformation_y_gradient),
+                    -(scale * interface_z_slope +
+                      perturbation * deformation_z_gradient),
+                }};
+            };
+        return scalar;
+    };
+    const auto build_snapshot = [&](FE::Real perturbation,
+                                    std::string domain_id) {
+        const auto values = nodal_values(perturbation);
+        auto request = interfaceRequest(interface_marker);
+        request.interface_quadrature_order = 1;
+        interfaces::LevelSetCellCutInput input;
+        input.parent_cell = 0;
+        input.element_type = FE::ElementType::Tetra4;
+        input.node_coordinates.reserve(values.size());
+        for (std::size_t node = 0u; node < values.size(); ++node) {
+            const auto xi =
+                FE::basis::ReferenceNodeLayout::get_node_coords(
+                    FE::ElementType::Tetra4, node);
+            input.node_coordinates.push_back({{xi[0], xi[1], xi[2]}});
+        }
+        input.level_set_values.assign(values.begin(), values.end());
+        auto cut = interfaces::cutLinearLevelSetCell3D(request, input);
+        if (!cut.supported || cut.fragments.empty() ||
+            cut.volume_regions.empty()) {
+            throw std::runtime_error(
+                "three-dimensional functional regression requires a supported tetrahedral cut");
+        }
+        interfaces::LevelSetInterfaceDomain interface_domain(request);
+        for (auto& fragment : cut.fragments) {
+            interface_domain.addFragment(std::move(fragment));
+        }
+        for (auto& region : cut.volume_regions) {
+            interface_domain.addVolumeRegion(std::move(region));
+        }
+
+        auto contact_domain =
+            interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+                contactRequest(interface_marker, wall_marker),
+                interface_domain,
+                mesh);
+        interfaces::GeneratedActiveBoundaryScalarField nodal_field;
+        nodal_field.value_at_node = [values](FE::GlobalIndex node) {
+            return values.at(static_cast<std::size_t>(node));
+        };
+        auto negative = interfaces::buildGeneratedActiveBoundaryDomain(
+            activeRequest(interface_marker,
+                          wall_marker,
+                          FE::geometry::CutIntegrationSide::Negative),
+            interface_domain,
+            contact_domain,
+            mesh,
+            nodal_field);
+        auto positive = interfaces::buildGeneratedActiveBoundaryDomain(
+            activeRequest(interface_marker,
+                          wall_marker,
+                          FE::geometry::CutIntegrationSide::Positive),
+            interface_domain,
+            contact_domain,
+            mesh,
+            nodal_field);
+        return interfaces::buildFreeSurfaceGeometrySnapshot(
+            std::move(interface_domain),
+            {std::move(contact_domain)},
+            {std::move(negative), std::move(positive)},
+            mesh,
+            {},
+            scalar_evaluator(perturbation),
+            std::move(domain_id));
+    };
+
+    const auto base_snapshot =
+        build_snapshot(0.0, "functional_fd_3d_base");
+    const auto plus_snapshot =
+        build_snapshot(epsilon, "functional_fd_3d_plus");
+    const auto minus_snapshot =
+        build_snapshot(-epsilon, "functional_fd_3d_minus");
+
+    interfaces::FreeSurfaceDiscreteFunctionalDeformationEvaluator
+        deformation;
+    deformation.value =
+        [](FE::GlobalIndex,
+           const std::array<FE::Real, 3>& xi,
+           const FE::geometry::CutQuadratureProvenance&) {
+            return std::array<FE::Real, 3>{{
+                translation + deformation_x_gradient * xi[0] +
+                    deformation_y_gradient * xi[1] +
+                    deformation_z_gradient * xi[2],
+                0.0,
+                0.0,
+            }};
+        };
+    deformation.physical_gradient =
+        [](FE::GlobalIndex,
+           const std::array<FE::Real, 3>&,
+           const FE::geometry::CutQuadratureProvenance&) {
+            return interfaces::FreeSurfaceDiscreteFunctionalPhysicalGradient{{
+                {{deformation_x_gradient,
+                  deformation_y_gradient,
+                  deformation_z_gradient}},
+                {{0.0, 0.0, 0.0}},
+                {{0.0, 0.0, 0.0}},
+            }};
+        };
+
+    const auto central_difference = [](FE::Real plus, FE::Real minus) {
+        return (plus - minus) / (FE::Real{2.0} * epsilon);
+    };
+    const auto relative_error = [](FE::Real actual, FE::Real expected) {
+        return std::abs(actual - expected) /
+               std::max({FE::Real{1.0e-12},
+                         std::abs(actual),
+                         std::abs(expected)});
+    };
+    FE::Real maximum_relative_error{0.0};
+    std::size_t case_count{0u};
+
+    for (const auto liquid_side : {
+             FE::geometry::CutIntegrationSide::Negative,
+             FE::geometry::CutIntegrationSide::Positive}) {
+        SCOPED_TRACE(static_cast<int>(liquid_side));
+        interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+        parameters.liquid_side = liquid_side;
+        parameters.surface_tension = FE::Real{1.6};
+        parameters.young_wall_coefficients.push_back(
+            {wall_marker, std::numbers::pi_v<FE::Real> / FE::Real{4.0}});
+        parameters.volume_multiplier = FE::Real{-0.7};
+
+        const auto base =
+            interfaces::evaluateFreeSurfaceDiscreteFunctional(
+                *base_snapshot, parameters);
+        const auto plus =
+            interfaces::evaluateFreeSurfaceDiscreteFunctional(
+                *plus_snapshot, parameters);
+        const auto minus =
+            interfaces::evaluateFreeSurfaceDiscreteFunctional(
+                *minus_snapshot, parameters);
+        const auto variation =
+            interfaces::evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
+                *base_snapshot, parameters, deformation);
+
+        EXPECT_EQ(variation.snapshot_revision_key,
+                  base.snapshot_revision_key);
+        EXPECT_EQ(variation.liquid_side, liquid_side);
+        ASSERT_EQ(base.walls.size(), 1u);
+        ASSERT_EQ(plus.walls.size(), 1u);
+        ASSERT_EQ(minus.walls.size(), 1u);
+        ASSERT_EQ(variation.walls.size(), 1u);
+        EXPECT_EQ(variation.walls.front().boundary_marker, wall_marker);
+
+        const auto check_central_difference =
+            [&](FE::Real actual,
+                FE::Real plus_value,
+                FE::Real minus_value,
+                const char* quantity) {
+                const FE::Real expected =
+                    central_difference(plus_value, minus_value);
+                const FE::Real error = relative_error(actual, expected);
+                EXPECT_LT(error, 5.0e-7)
+                    << quantity << ": actual=" << actual
+                    << ", central_difference=" << expected;
+                maximum_relative_error =
+                    std::max(maximum_relative_error, error);
+            };
+        check_central_difference(
+            variation.owned_liquid_gas_area_variation,
+            plus.owned_liquid_gas_area,
+            minus.owned_liquid_gas_area,
+            "liquid-gas area");
+        check_central_difference(
+            variation.liquid_gas_surface_energy_variation,
+            plus.liquid_gas_surface_energy,
+            minus.liquid_gas_surface_energy,
+            "liquid-gas surface energy");
+        check_central_difference(
+            variation.owned_wetted_wall_area_variation,
+            plus.owned_wetted_wall_area,
+            minus.owned_wetted_wall_area,
+            "wetted-wall area");
+        check_central_difference(
+            variation.young_wall_energy_variation,
+            plus.young_wall_energy,
+            minus.young_wall_energy,
+            "Young wall energy");
+        check_central_difference(
+            variation.owned_liquid_volume_variation,
+            plus.owned_liquid_volume,
+            minus.owned_liquid_volume,
+            "liquid volume");
+        check_central_difference(
+            variation.volume_constraint_potential_variation,
+            plus.volume_constraint_potential,
+            minus.volume_constraint_potential,
+            "volume constraint potential");
+        check_central_difference(
+            variation.total_potential_variation,
+            plus.total_potential,
+            minus.total_potential,
+            "total potential");
+
+        EXPECT_DOUBLE_EQ(
+            variation.walls.front().owned_wetted_wall_area_variation,
+            variation.owned_wetted_wall_area_variation);
+        EXPECT_DOUBLE_EQ(
+            variation.walls.front().young_wall_energy_variation,
+            variation.young_wall_energy_variation);
+        EXPECT_NE(variation.owned_liquid_volume_variation, 0.0);
+        EXPECT_NE(variation.owned_liquid_gas_area_variation, 0.0);
+        EXPECT_NE(variation.owned_wetted_wall_area_variation, 0.0);
+        EXPECT_NE(variation.total_potential_variation, 0.0);
+        EXPECT_NEAR(
+            variation.total_potential_variation,
+            variation.liquid_gas_surface_energy_variation +
+                variation.young_wall_energy_variation +
+                variation.volume_constraint_potential_variation,
+            1.0e-14);
+        ++case_count;
+    }
+
+    RecordProperty("functional_first_variation_3d_spatial_dimension", 3);
+    RecordProperty("functional_first_variation_3d_fd_case_count",
+                   case_count);
+    RecordProperty(
+        "functional_first_variation_3d_fd_max_relative_error",
+        ::testing::PrintToString(maximum_relative_error));
 }
 
 TEST(FreeSurfaceGeometrySnapshot,

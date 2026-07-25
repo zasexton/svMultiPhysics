@@ -45,6 +45,15 @@ def test_wp4_matrix_is_frozen_but_explicitly_incomplete():
     )
     assert matrix["method_boundary"]["selected_ad2_method"] == "UNSELECTED"
     assert matrix["method_boundary"]["balanced_force_evidence_claimed"] is False
+    groups = {group["id"]: group for group in matrix["groups"]}
+    assert groups["surface_wall_volume_functional_variation_serial"][
+        "tests"
+    ] == [
+        "FreeSurfaceGeometrySnapshot."
+        "DiscreteFunctionalFirstVariationMatchesCentralDifference",
+        "FreeSurfaceGeometrySnapshot."
+        "DiscreteFunctionalFirstVariationMatchesThreeDimensionalCentralDifference",
+    ]
     assert all(
         value is False
         for value in matrix["qualification_disposition"].values()
@@ -155,10 +164,10 @@ def test_wp4_validate_only_reports_prerequisite_without_closure():
 
     assert summary["outcome"] == "PASS"
     assert summary["requested_claim"] == "low_level_prerequisite"
-    assert summary["group_count"] == 4
-    assert summary["test_count"] == 24
+    assert summary["group_count"] == 5
+    assert summary["test_count"] == 26
     assert summary["prospective_test_count"] == 0
-    assert summary["serial_quantitative_gate_count"] == 29
+    assert summary["serial_quantitative_gate_count"] == 40
     assert summary["unqualified_campaign_count"] == 10
     assert summary["fsr03_closed"] is False
     assert summary["fsr04_closed"] is False

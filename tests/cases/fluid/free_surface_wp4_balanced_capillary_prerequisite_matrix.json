@@ -38,6 +38,7 @@
     "representability_acceptance": "The exactly representable synthetic load must have relative distance at or below 1e-10 and the incompatible synthetic load must be rejected before mutation.",
     "transactional_lifecycle": "Rollback and retry checks are exact state and lifecycle assertions; they do not establish a capillary equilibrium error tolerance.",
     "affine_balance": "The manufactured affine P1 Young-Laplace and wall-energy fixture requires exact zero residual and zero repeated-assembly difference in its representable algebraic state.",
+    "functional_first_variation": "The snapshot-owned surface, wetted-wall, and volume functional first variations must match fixed-topology central differences for both liquid-side conventions within 2e-7 in the two-dimensional fixture and 5e-7 in the three-dimensional tetrahedral fixture. These affine unit fixtures are method-neutral prerequisites, not a complete static-cap directional-derivative campaign.",
     "wall_orientation": "The two tracked redistancing tests preserve an oblique two-dimensional and a three-dimensional wall contact angle within their existing fixed unit-test tolerances.",
     "distributed_scope": "The distributed fixture checks only collective configuration failure on two ranks; no distributed static-cap balance result is claimed."
   },
@@ -148,6 +149,21 @@
       "execution": {
         "wall_time_seconds": 1800,
         "memory_mib": 8192,
+        "output_mib": 256
+      }
+    },
+    {
+      "id": "surface_wall_volume_functional_variation_serial",
+      "binary": "geometry",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+        "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesThreeDimensionalCentralDifference"
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 6144,
         "output_mib": 256
       }
     },
@@ -345,6 +361,83 @@
       "threshold": 1
     },
     {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_first_variation_fd_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 2
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_surface_area_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_surface_energy_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_wetted_wall_area_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_young_wall_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_volume_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_volume_potential_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+      "property": "functional_total_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-7
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesThreeDimensionalCentralDifference",
+      "property": "functional_first_variation_3d_spatial_dimension",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 3
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesThreeDimensionalCentralDifference",
+      "property": "functional_first_variation_3d_fd_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 2
+    },
+    {
+      "test": "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesThreeDimensionalCentralDifference",
+      "property": "functional_first_variation_3d_fd_max_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 5e-7
+    },
+    {
       "test": "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
       "property": "wp7_balance_interface_fragment_count",
       "type": "integer",
@@ -388,9 +481,9 @@
     }
   ],
   "gates": {
-    "expected_group_count": 4,
-    "expected_distinct_test_count": 24,
-    "expected_quantitative_evidence_count": 29,
+    "expected_group_count": 5,
+    "expected_distinct_test_count": 26,
+    "expected_quantitative_evidence_count": 40,
     "expected_failures": 0,
     "expected_errors": 0,
     "expected_disabled": 0,
@@ -428,6 +521,13 @@
         "MovingDomainPhysics.NavierStokesSurfaceStressDeclaresSnapshotFunctionalForBothLiquidSides",
         "MovingDomainPhysics.NavierStokesSurfaceStressConservativeBalanceDiagnosticSplitsTermsAndExcludesDissipation",
         "MovingDomainPhysics.NavierStokesSurfaceStressPressureRepresentabilityPairIsTransposeWithZeroDiagonalBlocks"
+      ]
+    },
+    {
+      "claim": "the_snapshot_owned_surface_wetted_wall_and_volume_functional_first_variations_match_fixed_topology_central_differences_on_registered_affine_two_and_three_dimensional_fixtures_for_both_liquid_sides",
+      "evidence": [
+        "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference",
+        "FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesThreeDimensionalCentralDifference"
       ]
     },
     {
