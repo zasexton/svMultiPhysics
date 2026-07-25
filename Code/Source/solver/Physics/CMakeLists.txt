@@ -349,7 +349,26 @@ if(PHYSICS_BUILD_TESTS)
     if(_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS)
         target_compile_options(test_physics PRIVATE ${_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS})
     endif()
-    add_test(NAME Physics_Tests COMMAND test_physics)
+    set(_SVMP_WP7_SERIAL_MATRIX_TEST
+        "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations")
+
+    add_test(
+        NAME Physics_Tests
+        COMMAND test_physics
+                "--gtest_filter=-${_SVMP_WP7_SERIAL_MATRIX_TEST}"
+    )
+
+    add_test(
+        NAME Physics_FreeSurfaceCutStability_Serial_Matrix
+        COMMAND test_physics
+                "--gtest_filter=${_SVMP_WP7_SERIAL_MATRIX_TEST}"
+    )
+    set_tests_properties(
+        Physics_FreeSurfaceCutStability_Serial_Matrix PROPERTIES
+        TIMEOUT 14400
+        PROCESSORS 1
+        LABELS "physics;free-surface;qualification"
+    )
 
     # Optional MPI-launched tests (requires mpiexec and building with MPI-enabled deps).
     find_program(MPIEXEC_EXECUTABLE NAMES mpiexec mpirun)
