@@ -737,6 +737,9 @@ public:
         if (indices.empty()) {
             generated_interface_markers_.push_back(marker);
         }
+        if (rules.empty()) {
+            markModified();
+        }
         for (auto& rule : rules) {
             indices.push_back(interface_rules_.size());
             interface_rules_.push_back(std::move(rule));

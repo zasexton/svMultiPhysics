@@ -1280,6 +1280,12 @@ TEST(GeneratedActiveBoundaryDomain, CompletelyDrySideHasExactlyZeroRules)
     ASSERT_EQ(positive.fragments().size(), 1u);
     EXPECT_TRUE(positive.fragments().front().full_face_equivalent);
     EXPECT_NEAR(positive.summary().measure, 2.0, 1.0e-14);
+    FE::assembly::CutIntegrationContext context;
+    const auto revision_before_dry_import = context.contentRevision();
+    context.addGeneratedActiveBoundaryDomain(negative);
+    EXPECT_GT(context.contentRevision(), revision_before_dry_import);
+    EXPECT_TRUE(context.hasGeneratedInterfaceMarker(negative.marker()));
+    EXPECT_TRUE(context.interfaceRulesForMarker(negative.marker()).empty());
     EXPECT_NO_THROW(interfaces::validateGeneratedActiveBoundaryPartition(
         negative, positive, interface_domain, contact_domain, mesh));
     RecordProperty("active_boundary_dry_rule_count",
