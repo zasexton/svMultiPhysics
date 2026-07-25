@@ -567,6 +567,215 @@ TEST(EquationTranslatorFreeSurface,
   EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
 }
 
+TEST(EquationTranslatorFreeSurface,
+     XmlFittedDynamicContactFailsClosedBeforeSystemMutation)
+{
+  svmp::Physics::formulations::navier_stokes::
+      forceLink_NavierStokesRegister();
+  auto mesh = buildTranslatorMesh();
+  mesh->base().register_label("free_surface", 83);
+  const auto meshes = singleMeshMap(mesh);
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="fluid">
+  <Enable_ALE>true</Enable_ALE>
+  <Mesh_velocity_source>coupled_displacement</Mesh_velocity_source>
+  <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>
+  <Density>1.0</Density>
+  <Viscosity model="Constant">
+    <Value>0.01</Value>
+  </Viscosity>
+  <Add_BC name="free_surface">
+    <Type>Free_surface</Type>
+    <Implementation>FittedALE</Implementation>
+    <Surface_tension>0.8</Surface_tension>
+    <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
+    <Kinematic_enforcement>Penalty</Kinematic_enforcement>
+    <Kinematic_penalty>8.0</Kinematic_penalty>
+    <Tangential_mesh_policy>Prescribed</Tangential_mesh_policy>
+    <Tangential_mesh_penalty>6.0</Tangential_mesh_penalty>
+    <Contact_line_model>DynamicContactAngle</Contact_line_model>
+    <Contact_angle_degrees>60.0</Contact_angle_degrees>
+    <Contact_line_wall_marker>84</Contact_line_wall_marker>
+    <Contact_line_wall_normal>1.0 0.0 0.0</Contact_line_wall_normal>
+    <Contact_line_mobility>0.5</Contact_line_mobility>
+    <Wall_slip_model>Navier</Wall_slip_model>
+    <Wall_slip_length>0.2</Wall_slip_length>
+  </Add_BC>
+</Add_equation>
+)xml");
+
+  svmp::FE::systems::FESystem system(mesh);
+  const auto layout_revision_before = system.feLayoutRevisionState();
+  const auto constraint_revision_before =
+      system.constraintRevisionSnapshot();
+  const auto constraint_revision_key = [](const auto& revision) {
+    return std::array{
+        revision.geometry,
+        revision.reference_rebase,
+        revision.topology,
+        revision.ownership,
+        revision.numbering,
+        revision.mesh_field_layout,
+        revision.mesh_field_values,
+        revision.labels,
+        revision.active_configuration,
+        revision.fe_space,
+        revision.fe_dof_layout,
+        revision.fe_constraint_layout,
+        revision.fe_block_layout,
+        revision.time_epoch,
+    };
+  };
+  const auto constraint_revision_key_before =
+      constraint_revision_key(constraint_revision_before);
+  const auto operator_revision_before =
+      system.operatorRevisionSnapshot();
+  const auto system_layout_revision_before =
+      system.systemLayoutRevision();
+  const auto sparsity_revision_before =
+      system.sparsityPatternRevision();
+  const auto definition_plan_before =
+      system.computeSetupStoragePlan();
+  const auto definition_plan_key = [](const auto& plan) {
+    const auto& requirements = plan.requirements;
+    return std::array{
+        requirements.vertex_topology,
+        requirements.cell_topology,
+        requirements.edge_topology,
+        requirements.boundary_face_topology,
+        requirements.interior_face_topology,
+        requirements.interface_face_topology,
+        requirements.vertex_gids,
+        requirements.cell_gids,
+        requirements.face_gids,
+        requirements.edge_gids,
+        requirements.global_vertex_lookup,
+        requirements.global_cell_lookup,
+        requirements.global_face_lookup,
+        requirements.global_edge_lookup,
+        requirements.entity_dof_map,
+        plan.can_alias_single_field_dof_map,
+        plan.uses_single_field_alias,
+    };
+  };
+  const auto definition_plan_key_before =
+      definition_plan_key(definition_plan_before);
+  const auto constraint_stale_before =
+      system.constraintStateStaleForCurrentRevisions();
+  try {
+    (void)application::translators::EquationTranslator::createModule(
+        *params, system, meshes);
+    FAIL() << "fitted DynamicContactAngle must fail closed";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_NE(
+        std::string(error.what()).find(
+            "DynamicContactAngle is currently supported only for sharp "
+            "unfitted level-set free surfaces"),
+        std::string::npos);
+  }
+
+  const auto layout_revision_after = system.feLayoutRevisionState();
+  EXPECT_EQ(layout_revision_after.space, layout_revision_before.space);
+  EXPECT_EQ(
+      layout_revision_after.dof_layout,
+      layout_revision_before.dof_layout);
+  EXPECT_EQ(
+      layout_revision_after.constraint_layout,
+      layout_revision_before.constraint_layout);
+  EXPECT_EQ(
+      layout_revision_after.block_layout,
+      layout_revision_before.block_layout);
+  EXPECT_EQ(
+      system.systemLayoutRevision(),
+      system_layout_revision_before);
+  EXPECT_EQ(
+      system.sparsityPatternRevision(),
+      sparsity_revision_before);
+  const auto operator_invalidation =
+      system.operatorInvalidationDecision(operator_revision_before);
+  EXPECT_FALSE(operator_invalidation.any_change())
+      << operator_invalidation.reason;
+  const auto constraint_revision_after =
+      system.constraintRevisionSnapshot();
+  EXPECT_EQ(
+      constraint_revision_after.valid,
+      constraint_revision_before.valid);
+  EXPECT_EQ(
+      constraint_revision_key(constraint_revision_after),
+      constraint_revision_key_before);
+  EXPECT_EQ(
+      system.constraintStateStaleForCurrentRevisions(),
+      constraint_stale_before);
+
+  EXPECT_EQ(system.fieldMap().numFields(), 0u);
+  EXPECT_EQ(system.blockMap(), nullptr);
+  EXPECT_FALSE(system.isSetup());
+  EXPECT_TRUE(system.formulationRecords().empty());
+  EXPECT_TRUE(system.boundaryConditionDescriptors().empty());
+  EXPECT_TRUE(system.variableDescriptors().empty());
+  EXPECT_TRUE(system.contributionDescriptors().empty());
+  EXPECT_TRUE(system.constraints().empty());
+  EXPECT_EQ(system.constraints().numConstraints(), 0u);
+  const auto constraint_dependencies =
+      system.constraintDependencyDeclaration();
+  EXPECT_FALSE(constraint_dependencies.any());
+  EXPECT_EQ(
+      constraint_dependencies.tangent_policy,
+      svmp::FE::constraints::ConstraintTangentPolicy::None);
+  EXPECT_TRUE(constraint_dependencies.tangent_hook_name.empty());
+
+  constexpr std::array mesh_motion_roles{
+      svmp::FE::systems::MeshMotionFieldRole::Displacement,
+      svmp::FE::systems::MeshMotionFieldRole::Velocity,
+      svmp::FE::systems::MeshMotionFieldRole::Acceleration,
+      svmp::FE::systems::MeshMotionFieldRole::PreviousCoordinates,
+      svmp::FE::systems::MeshMotionFieldRole::PreviousDisplacement,
+      svmp::FE::systems::MeshMotionFieldRole::PreviousVelocity,
+      svmp::FE::systems::MeshMotionFieldRole::PredictedVelocity,
+  };
+  for (const auto role : mesh_motion_roles) {
+    EXPECT_FALSE(system.meshMotionField(role).has_value());
+  }
+  EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
+  EXPECT_TRUE(system.meshTangentialBoundaryPolicyHistory().empty());
+  EXPECT_TRUE(
+      system.freeSurfaceDiscreteFunctionalDeclarations().empty());
+  EXPECT_TRUE(system.freeSurfaceDiscreteFunctionalHistory().empty());
+
+  EXPECT_FALSE(system.hasGaugeRegistry());
+  EXPECT_EQ(system.gaugeRegistryIfPresent(), nullptr);
+  EXPECT_EQ(system.auxiliaryStateManagerIfPresent(), nullptr);
+  EXPECT_EQ(system.auxiliaryOperatorRegistryIfPresent(), nullptr);
+  EXPECT_EQ(system.auxiliaryInputRegistryIfPresent(), nullptr);
+  EXPECT_EQ(system.feQuantityRegistryIfPresent(), nullptr);
+  EXPECT_TRUE(system.parameterRegistry().specs().empty());
+
+  EXPECT_TRUE(system.formInstallCellDomainRestrictions().empty());
+  EXPECT_EQ(system.cutIntegrationContext(), nullptr);
+  EXPECT_FALSE(system.cutIntegrationContextTransactionActive());
+  EXPECT_FALSE(
+      system.isGeneratedEmbeddedInterfaceMarkerRegistered(83));
+  EXPECT_FALSE(
+      system.isGeneratedEmbeddedInterfaceMarkerRegistered(84));
+  EXPECT_EQ(system.latestAnalysisSummaries(), nullptr);
+  EXPECT_EQ(system.constraintSummary(), nullptr);
+  EXPECT_EQ(system.topologyContext(), nullptr);
+  EXPECT_EQ(system.interfaceTopologyContext(), nullptr);
+  EXPECT_FALSE(system.geometricNonlinearityEnabled());
+
+  const auto definition_plan_after =
+      system.computeSetupStoragePlan();
+  EXPECT_EQ(
+      definition_plan_key(definition_plan_after),
+      definition_plan_key_before);
+  EXPECT_EQ(
+      definition_plan_after.reasons,
+      definition_plan_before.reasons);
+  EXPECT_EQ(
+      definition_plan_after.summary(),
+      definition_plan_before.summary());
+}
+
 TEST(EquationTranslatorFreeSurface, BuildInputResolvesUnfittedContactLineWallFaces)
 {
   auto mesh = buildTranslatorMesh();

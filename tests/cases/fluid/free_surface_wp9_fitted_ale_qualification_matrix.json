@@ -37,7 +37,8 @@
         "normal_policy_None",
         "normal_enforcement_None",
         "tangential_policy_Free",
-        "tangential_policy_SmoothingOnly"
+        "tangential_policy_SmoothingOnly",
+        "fitted_DynamicRenE_contact_model"
       ],
       "kinematic_penalty_auto_promotes_none": false
     },
@@ -138,7 +139,8 @@
       "MovingDomainPhysics.FittedPrescribedContactAngleFailsClosedWithoutContactLineIntegration",
       "MovingDomainPhysics.FittedPrescribedContactAngleFailsClosedWithoutALEToo",
       "MovingDomainPhysics.NavierStokesFittedSurfaceStressFailsClosed",
-      "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedAngleTranslationFailsClosed"
+      "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedAngleTranslationFailsClosed",
+      "EquationTranslatorFreeSurface.XmlFittedDynamicContactFailsClosedBeforeSystemMutation"
     ],
     "schema_1_unqualified_legacy_operator_regressions": [
       "MovingDomainPhysics.FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy",
@@ -177,6 +179,7 @@
     "MovingDomainPhysics.FittedPrescribedContactAngleFailsClosedWithoutALEToo",
     "MovingDomainPhysics.NavierStokesFittedSurfaceStressFailsClosed",
     "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedAngleTranslationFailsClosed",
+    "EquationTranslatorFreeSurface.XmlFittedDynamicContactFailsClosedBeforeSystemMutation",
     "MovingDomainPhysics.FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy",
     "MovingDomainPhysics.NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeometry",
     "MovingDomainPhysics.NavierStokesFittedFreeSurfaceCanUseCurrentGeometryCurvature",
@@ -190,7 +193,7 @@
     "MovingDomainPhysics.FittedPinnedContactLineRequiresALE"
   ],
   "gates": {
-    "expected_test_count": 29,
+    "expected_test_count": 30,
     "expected_failures": 0,
     "expected_errors": 0,
     "expected_disabled": 0,
@@ -235,7 +238,8 @@
         "MovingDomainPhysics.FittedFreeSurfaceRejectsMeshMotionTangentialOwnerInEitherOrder",
         "MovingDomainPhysics.FittedPinnedContactLineRejectsPrescribedALEBeforeSystemMutation",
         "MovingDomainPhysics.FittedPrescribedContactAngleFailsClosedWithoutContactLineIntegration",
-        "MovingDomainPhysics.NavierStokesFittedSurfaceStressFailsClosed"
+        "MovingDomainPhysics.NavierStokesFittedSurfaceStressFailsClosed",
+        "EquationTranslatorFreeSurface.XmlFittedDynamicContactFailsClosedBeforeSystemMutation"
       ]
     }
   ],
@@ -274,7 +278,7 @@
     {
       "id": "explicit_fitted_dynamic_contact_rejection_and_capability_provenance",
       "status": "REQUIRED_NOT_CLAIMED",
-      "contract": "A dedicated regression rejects fitted dynamic contact before mutation and the exclusion is present in effective capability provenance."
+      "contract": "The dedicated regression rejects fitted dynamic contact before mutation, but complete effective capability provenance for the exclusion remains required."
     },
     {
       "id": "normal_mesh_constraint_and_fluid_kinematic_compatibility_matrix",

@@ -31,7 +31,7 @@ DEFAULT_MATRIX = SCRIPT_PATH.with_name(
     "free_surface_wp9_fitted_ale_qualification_matrix.json"
 )
 EXPECTED_MATRIX_SHA256 = (
-    "64c67f09b3f21a856efa213eb8f0e9ffe0680aa20dde0274594f493807344965"
+    "bf3d0a2d9f8fc9d9530ae916460a07460181de63deffc6f735bedb4f57c76123"
 )
 SHARED_RUNNER_PATH = Path(base_runner.__file__).resolve()
 SHARED_RUNNER_SHA256 = base_runner.sha256_file(SHARED_RUNNER_PATH)
@@ -70,6 +70,7 @@ EXPECTED_CONFIGURATION_CONTRACT = {
             "normal_enforcement_None",
             "tangential_policy_Free",
             "tangential_policy_SmoothingOnly",
+            "fitted_DynamicRenE_contact_model",
         ],
         "kinematic_penalty_auto_promotes_none": False,
     },
@@ -199,6 +200,10 @@ EXPECTED_TEST_GROUPS = {
         (
             "NavierStokesLegacyBCs."
             "FittedFreeSurfacePrescribedAngleTranslationFailsClosed"
+        ),
+        (
+            "EquationTranslatorFreeSurface."
+            "XmlFittedDynamicContactFailsClosedBeforeSystemMutation"
         ),
     ],
     "schema_1_unqualified_legacy_operator_regressions": [

@@ -48,6 +48,7 @@ exits remain open, and none of the required physical ALE campaigns has run.
 | schema 2 | `SmoothingOnly` | rejected before system mutation | unsupported |
 | schema 2, prescribed mesh-velocity data | any fitted policy | rejected before system mutation | unsupported |
 | schema 2, normal policy or enforcement `None` | any fitted policy | rejected before system mutation | unsupported |
+| schema 2, fitted dynamic contact angle | `Prescribed` | rejected before system mutation | unsupported |
 | schema 1 with explicit legacy opt-in | `Free`, `SmoothingOnly`, or `Prescribed` | retained only according to the legacy path actually present | `unqualified_explicit_legacy` |
 
 The XML translator does not infer normal enforcement from a penalty value in
@@ -129,7 +130,10 @@ the downstream modules:
 Application-level regressions parse complete `Add_equation` XML, build the
 module, and inspect the central declarations or effective free-surface
 artifact. They also prove that explicit `None` plus a kinematic penalty fails
-without mutating the system.
+without mutating the system. A complete fitted `DynamicContactAngle` input is
+translated to the typed `DynamicRenE` model and rejected by module preflight
+before fields, forms, boundary descriptors, mesh policies, or operators are
+installed.
 
 ## Boundary-local enforcement and conflicts
 
@@ -155,16 +159,17 @@ The supported fitted slice continues to exclude:
 - schema-2 normal policy or enforcement `None`; and
 - unfitted active-domain and cut-stabilization controls on a fitted surface.
 
-Pinned fitted contact lines remain contained to coupled ALE. A dedicated
-pre-mutation fitted dynamic-contact regression and complete capability
-provenance remain open method work.
+Pinned fitted contact lines remain contained to coupled ALE. The dedicated
+fitted dynamic-contact regression now freezes its pre-mutation rejection.
+Complete effective capability provenance for the exclusion remains open
+method work.
 
 ## Frozen prerequisite evidence
 
 The matrix
 `tests/cases/fluid/free_surface_wp9_fitted_ale_qualification_matrix.json`
 is byte-frozen at SHA-256
-`64c67f09b3f21a856efa213eb8f0e9ffe0680aa20dde0274594f493807344965`.
+`bf3d0a2d9f8fc9d9530ae916460a07460181de63deffc6f735bedb4f57c76123`.
 
 The wrapper
 `tests/cases/fluid/run_free_surface_wp9_fitted_ale_qualification.py`
@@ -179,6 +184,7 @@ The frozen evidence includes these source-contract regressions:
 - `EquationTranslatorMeshMotion.XmlAliasesReachTangentialPolicyModuleRegistration`;
 - `EquationTranslatorFreeSurface.XmlTangentialPenaltyAliasesReachTruthfulFittedModule`;
 - `EquationTranslatorFreeSurface.XmlExplicitNoneCannotBePromotedByKinematicPenalty`;
+- `EquationTranslatorFreeSurface.XmlFittedDynamicContactFailsClosedBeforeSystemMutation`;
 - `MovingDomainPhysics.FittedFreeSurfaceQualifiedContractRejectsBeforeMutation`;
 - `MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership`;
 - `MovingDomainPhysics.FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy`;
@@ -206,8 +212,8 @@ The matrix keeps the following method work open:
 5. Serialize those histories and prove restart continuity.
 6. Establish rotation, numbering, and representative MPI partition
    equivalence.
-7. Add an explicit fitted dynamic-contact pre-mutation rejection and complete
-   capability provenance.
+7. Keep the fitted dynamic-contact pre-mutation rejection frozen and add
+   complete effective capability provenance for the exclusion.
 8. Freeze compatibility outcomes for mesh-motion normal constraints combined
    with fluid kinematic policies.
 9. Freeze geometric-conservation, phase-volume, surface-work, and mesh-quality

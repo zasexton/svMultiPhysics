@@ -71,6 +71,10 @@ def test_wp9_schema2_claims_only_prescribed_as_consumed_supported_path():
         "tangential_policy_SmoothingOnly"
         in (schema_2["rejected_before_system_mutation"])
     )
+    assert (
+        "fitted_DynamicRenE_contact_model"
+        in schema_2["rejected_before_system_mutation"]
+    )
     assert schema_2["kinematic_penalty_auto_promotes_none"] is False
 
 
@@ -110,6 +114,10 @@ def test_wp9_matrix_contains_exact_xml_and_provenance_regressions():
             "EquationTranslatorFreeSurface."
             "XmlExplicitNoneCannotBePromotedByKinematicPenalty"
         ),
+        (
+            "EquationTranslatorFreeSurface."
+            "XmlFittedDynamicContactFailsClosedBeforeSystemMutation"
+        ),
         ("MovingDomainPhysics.FittedFreeSurfaceQualifiedContractRejectsBeforeMutation"),
         (
             "MovingDomainPhysics."
@@ -124,8 +132,18 @@ def test_wp9_matrix_contains_exact_xml_and_provenance_regressions():
             "NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults"
         ),
     } <= tests
-    assert len(runner._tests_for_binary(matrix, "application")) == 3
+    assert len(runner._tests_for_binary(matrix, "application")) == 4
     assert len(runner._tests_for_binary(matrix, "physics")) == 26
+    dynamic_contact_exit = next(
+        entry
+        for entry in matrix["unqualified_required_method_exits"]
+        if entry["id"]
+        == "explicit_fitted_dynamic_contact_rejection_and_capability_provenance"
+    )
+    assert dynamic_contact_exit["status"] == "REQUIRED_NOT_CLAIMED"
+    assert "complete effective capability provenance" in (
+        dynamic_contact_exit["contract"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -249,8 +267,8 @@ def test_wp9_validate_only_reports_prerequisite_nonclosure():
 
     assert summary["outcome"] == "PASS_PREREQUISITE_NONCLOSURE"
     assert summary["requested_claim"] == "low_level_prerequisite"
-    assert summary["test_count"] == 29
-    assert summary["application_test_count"] == 3
+    assert summary["test_count"] == 30
+    assert summary["application_test_count"] == 4
     assert summary["physics_test_count"] == 26
     assert summary["unqualified_method_exit_count"] == 9
     assert summary["unqualified_simulation_exit_count"] == 3
