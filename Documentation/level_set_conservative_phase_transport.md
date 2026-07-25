@@ -114,12 +114,26 @@ constant preservation, and a fault injected on only one owned cell. Replacing
 the replicated sparse merge with owner-to-owner exchange is a scalability
 optimization that must preserve these public graph and ledger invariants. A
 separate rank-local invalid-option test guards the collective failure path.
+The replicated-stage test also changes the previous indicator, lower and upper
+bounds, velocity, time step, tolerance, and stage options on one rank at a
+time, and requires every rank to reject before entering an asymmetric stage.
 
 ## Accepted-step maintenance transaction
 
 The conservative liquid indicator is held at the previous accepted endpoint
-during the nonlinear solve. After a candidate step converges, production
-performs the following sequence inside one geometry transaction:
+during the nonlinear solve. Before initialization and again before each
+covered candidate or accepted-step request loop, production compares an exact
+canonical representation of the ordered maintenance requests. The comparison
+includes cadence and action bits, all numerical configuration and mutable
+accounting state, and the replicated shape, invariant, and FE-layout contract
+of any conservative-phase graph. The graph's geometry, topology, ownership,
+and numbering revisions remain rank-local cache stamps and are deliberately
+excluded. It is a direct length-and-word comparison, not a hash. A count,
+order, cadence, or velocity-source difference therefore fails collectively
+before a per-request stage callback can run.
+
+After a candidate step converges, production performs the following sequence
+inside a rollback-capable geometry transaction:
 
 1. advance and limit `q` with the conservative algebraic-edge operator;
 2. rebuild the raw transported signed-distance geometry;
@@ -127,27 +141,78 @@ performs the following sequence inside one geometry transaction:
 4. reconcile geometry locally against the transported nodal liquid moments;
 5. validate global measure, every nodal moment, cut-context provenance, and
    all transport invariants; and
-6. commit the field state, generated geometry, lifecycle revisions, and
-   refresh cache together.
+6. compare the complete trial ledger, current and all-history content
+   revisions, geometry-transaction presence, the final live FE layout state,
+   canonical authoritative snapshot revision identities (including their
+   communicator-replicated geometry/topology/ownership/numbering mesh
+   revisions), and the post-stage request state before selecting the same
+   commit or reject decision on every rank. Raw operator mesh event counters,
+   including geometry, topology, ownership, numbering, label,
+   reference-configuration, field-layout, and active-configuration epochs,
+   are deliberately excluded because they can advance a different number of
+   times on equally valid partitions.
+
+The distributed graph builder applies the same distinction. It requires an
+identical global field size, FE layout revision, dimension, and graph options,
+but retains each rank's local mesh event counters for its own staleness check.
+The production currentness helper reduces whether any rank has a stale local
+stamp before deciding whether to rebuild. If one partition is stale, every
+rank enters the collective graph builder and refreshes its own local stamps.
+The selected two-rank disjoint-wall fixture proves that a real conservative
+graph builds and passes the production request preflight while those local
+cache stamps differ. It then advances the geometry stamp on one rank only and
+requires the production helper to rebuild successfully on both ranks.
 
 A failed stage, nonconverged repair, displacement/topology guard, stale graph,
-or failed geometry invariant rejects the candidate and restores the field,
-cut-context, lifecycle, and cache checkpoints. No global level-set shift is
+failed geometry invariant, or consensus mismatch rejects the covered
+prepublication candidate. Geometry, lifecycle, mesh-field, refresh-cache,
+request, current-state, and every history checkpoint are restored
+component-by-component, and diagnostics do not report restoration while any
+component is unresolved. Specifically, a geometry rollback interrupted by a
+one-shot cut-context callback failure remains active and succeeds on retry.
+Publication enters an explicit `Publishing` state before the first
+irreversible geometry or ledger action. Committed diagnostics and transaction
+reset occur only after both actions succeed. If publication or its logging
+fails after that boundary, candidate discard is fail-stop: it does not restore
+the algebraic state against published geometry, reject the ledger, or claim a
+successful rollback. The enclosing time-loop attempt guard makes the same
+distinction: a successful discard restores provisional rate/workspace state,
+while a discard callback that refuses recovery disarms that guard before
+rethrow so the candidate rates and one-shot workspace state are retained.
+History-scatter and the other cross-resource fault-injection cases remain part
+of the unqualified full-transaction campaign. No global level-set shift is
 part of this sequence. The retained maintenance ledger distinguishes raw
-post-transport, post-limit, post-reinitialization, post-correction, and retained
-assembly measures, together with nodal mismatch and interface/contact
-displacement measures.
+post-transport, post-limit, post-reinitialization, post-correction, and
+retained assembly measures, together with nodal mismatch and
+interface/contact displacement measures.
 
 Application tests exercise the production sequence as distinct transport-only,
 local-reconciliation-only, and reinitialization-plus-reconciliation modes. A
-separate negative case verifies full rollback after a nonconverged repair. The
-transport velocity extension is swept over 1, 2, 4, and 16 graph layers on a
-regular curved interface while checking row, partition-of-unity, and
+separate negative case verifies rollback after a nonconverged repair, and a
+one-shot cut-context callback failure verifies that rollback remains active and
+succeeds on retry. Exact two- and four-rank consensus fixtures cover identical
+commit, last-rank invariant rejection, missing active transactions, differing
+row counts, functional content, algebraic/current/history content, snapshot,
+mesh, cut, extension-map, geometry-presence, and final geometry-revision
+content drift. A selected two-rank partition fixture also compares the real
+production live-geometry serialization, builds a distributed conservative
+graph with unequal rank-local mesh cache stamps, passes the production request
+preflight, injects snapshot-revision drift, and finally invalidates one rank's
+local graph stamp to verify an all-rank rebuild through the production helper.
+Paired time-loop regressions inject a commit-ready failure and verify that
+successful discard restores the provisional rate state while a fail-stop
+discard refusal makes unwind retain the candidate rate state. These are
+low-level collective prerequisite gates. They do not prove atomicity across
+the later `TimeLoop` acceptance operations or across multiple due artifacts;
+that cross-resource fault-injection campaign remains explicitly unqualified.
+They also do not replace the required independent release-scale space/time,
+maintenance, extension, or four-or-more-rank partition sweeps.
+
+The transport velocity extension is swept over 1, 2, 4, and 16 graph layers
+on a regular curved interface while checking row, partition-of-unity, and
 wet-to-dry amplification bounds. A deliberately skewed triangle makes the
 tangential regression extrapolative and verifies that its rejected row is
-replaced by the positive bounded fallback. These are CI-level isolation gates;
-they do not replace the required independent release-scale space/time,
-maintenance, and extension matrices.
+replaced by the positive bounded fallback.
 
 The CI transport benchmark now keeps the spatial and temporal studies
 independent. Its fixed-step spatial sequence uses `N=16,32,64`; its fixed
@@ -263,14 +328,18 @@ the output rank writes
 under the configured results directory. All ranks complete preflight before
 publication. The writer closes a temporary sibling and atomically publishes a
 no-replacement final link; an existing final or temporary path is a hard
-failure rather than an overwrite.
+failure rather than an overwrite. This is per-file publication atomicity only:
+several due artifacts are still published sequentially, so the low-level
+qualification does not claim a single atomic multi-artifact transaction.
 
-Artifact schema version 2 contains accepted step/time and graph revisions; all
-stage and limiter invariant flags and residuals; every nodal control-volume state,
-Courant number, source, transfer, factor, and balance; every canonical edge and
-pair-cancellation residual; every resolved and subthreshold component ledger;
-and the complete reinitialization, reconciliation, mismatch, phase-measure,
-geometry-measure, and displacement history for that accepted transaction.
+Artifact schema version 2 contains accepted step/time, the output rank's local
+graph mesh cache stamps, and the communicator-replicated graph FE-layout
+revision; all stage and limiter invariant flags and residuals; every nodal
+control-volume state, Courant number, source, transfer, factor, and balance;
+every canonical edge and pair-cancellation residual; every resolved and
+subthreshold component ledger; and the complete reinitialization,
+reconciliation, mismatch, phase-measure, geometry-measure, and displacement
+history for that accepted transaction.
 Serial tests cover schema content, stale-file refusal, malformed-ledger
 rejection, and cadence ordering. The two-rank application test requires a
 rank-local preflight fault to fail collectively before publication and a valid

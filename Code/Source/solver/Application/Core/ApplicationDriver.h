@@ -128,6 +128,8 @@ public:
   void rejectTransaction();
 
   [[nodiscard]] bool transactionActive() const noexcept;
+  [[nodiscard]] const LevelSetMaintenanceWorkTransaction*
+  activeTransaction() const noexcept;
   [[nodiscard]] const std::vector<LevelSetMaintenanceWorkRow>&
   trialRows() const noexcept;
   [[nodiscard]] const std::vector<LevelSetMaintenanceWorkRow>&

@@ -4,6 +4,7 @@
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/LevelSetCurvatureSamples.h"
 #include "Application/Core/LevelSetMaintenanceHistory.h"
+#include "Application/Core/LevelSetMaintenanceTransactionConsensus.h"
 #include "Application/Core/LevelSetVelocityExtensionMap.h"
 #include "Application/Core/NearestPointIndex.h"
 #include "Application/Core/OopMpiLog.h"
@@ -51,6 +52,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -401,6 +403,14 @@ void LevelSetMaintenanceWorkLedger::rejectTransaction()
 bool LevelSetMaintenanceWorkLedger::transactionActive() const noexcept
 {
   return active_transaction_.has_value();
+}
+
+const LevelSetMaintenanceWorkTransaction*
+LevelSetMaintenanceWorkLedger::activeTransaction() const noexcept
+{
+  return active_transaction_.has_value()
+      ? &*active_transaction_
+      : nullptr;
 }
 
 const std::vector<LevelSetMaintenanceWorkRow>&
@@ -1536,6 +1546,785 @@ struct LevelSetMaintenanceRequest {
       svmp::FE::level_set::LevelSetP1PhaseTransportGraph>
       conservative_phase_graph{};
 };
+
+enum class LevelSetMaintenanceScheduleStage : std::uint64_t {
+  SteadyInitialization = 1u,
+  TransientInitialization = 2u,
+  ProspectiveAcceptedEndpoint = 3u,
+  AcceptedEndpointPostStep = 4u,
+};
+
+struct CanonicalLevelSetMaintenanceSchedule {
+  std::vector<std::uint64_t> words{};
+  bool supported{true};
+};
+
+struct CanonicalLevelSetMaintenanceGeometryState {
+  std::vector<std::uint64_t> words{};
+  bool supported{true};
+};
+
+void appendMaintenanceScheduleWord(
+    std::vector<std::uint64_t>& words,
+    std::uint64_t value)
+{
+  words.push_back(value);
+}
+
+void appendMaintenanceScheduleBool(
+    std::vector<std::uint64_t>& words,
+    bool value)
+{
+  appendMaintenanceScheduleWord(words, value ? 1u : 0u);
+}
+
+void appendMaintenanceScheduleSigned(
+    std::vector<std::uint64_t>& words,
+    std::int64_t value)
+{
+  appendMaintenanceScheduleWord(
+      words, static_cast<std::uint64_t>(value));
+}
+
+template <typename Enum>
+void appendMaintenanceScheduleEnum(
+    std::vector<std::uint64_t>& words,
+    Enum value)
+{
+  static_assert(std::is_enum_v<Enum>);
+  using Underlying = std::underlying_type_t<Enum>;
+  if constexpr (std::is_signed_v<Underlying>) {
+    appendMaintenanceScheduleSigned(
+        words, static_cast<std::int64_t>(value));
+  } else {
+    appendMaintenanceScheduleWord(
+        words, static_cast<std::uint64_t>(value));
+  }
+}
+
+void appendMaintenanceScheduleReal(
+    std::vector<std::uint64_t>& words,
+    double value)
+{
+  appendMaintenanceScheduleWord(
+      words, std::bit_cast<std::uint64_t>(value));
+}
+
+void appendMaintenanceScheduleString(
+    std::vector<std::uint64_t>& words,
+    std::string_view value)
+{
+  appendMaintenanceScheduleWord(
+      words, static_cast<std::uint64_t>(value.size()));
+  for (const unsigned char byte : value) {
+    appendMaintenanceScheduleWord(
+        words, static_cast<std::uint64_t>(byte));
+  }
+}
+
+void appendMaintenanceScheduleOptionalInt(
+    std::vector<std::uint64_t>& words,
+    const std::optional<int>& value)
+{
+  appendMaintenanceScheduleBool(words, value.has_value());
+  appendMaintenanceScheduleSigned(
+      words, static_cast<std::int64_t>(value.value_or(0)));
+}
+
+void appendMaintenanceScheduleOptionalReal(
+    std::vector<std::uint64_t>& words,
+    const std::optional<svmp::FE::Real>& value)
+{
+  appendMaintenanceScheduleBool(words, value.has_value());
+  appendMaintenanceScheduleReal(
+      words, static_cast<double>(value.value_or(0.0)));
+}
+
+void appendMaintenanceScheduleActiveCutRequest(
+    std::vector<std::uint64_t>& words,
+    const std::optional<ActiveCutVolumeRequest>& request)
+{
+  appendMaintenanceScheduleBool(words, request.has_value());
+  if (!request.has_value()) {
+    return;
+  }
+  appendMaintenanceScheduleString(
+      words, request->level_set_field_name);
+  appendMaintenanceScheduleString(words, request->domain_id);
+  appendMaintenanceScheduleString(words, request->equation_type);
+  appendMaintenanceScheduleEnum(words, request->origin);
+  appendMaintenanceScheduleSigned(
+      words, request->requested_interface_marker);
+  appendMaintenanceScheduleReal(words, request->isovalue);
+  appendMaintenanceScheduleOptionalInt(
+      words, request->quadrature_order);
+  appendMaintenanceScheduleOptionalInt(
+      words, request->interface_quadrature_order);
+  appendMaintenanceScheduleOptionalInt(
+      words, request->volume_quadrature_order);
+  appendMaintenanceScheduleEnum(words, request->geometry_mode);
+  appendMaintenanceScheduleEnum(
+      words, request->implicit_cut_backend);
+  appendMaintenanceScheduleEnum(
+      words, request->implicit_cut_fallback_policy);
+  appendMaintenanceScheduleEnum(
+      words, request->geometry_tangent_policy);
+  appendMaintenanceScheduleBool(
+      words, request->geometry_tangent_policy_explicit);
+  appendMaintenanceScheduleReal(
+      words, request->implicit_cut_root_tolerance);
+  appendMaintenanceScheduleReal(
+      words, request->implicit_cut_root_coordinate_tolerance);
+  appendMaintenanceScheduleSigned(
+      words, request->implicit_cut_root_max_iterations);
+  appendMaintenanceScheduleSigned(
+      words, request->implicit_cut_max_subdivision_depth);
+  appendMaintenanceScheduleSigned(
+      words, request->affected_cell_neighborhood_layers);
+  appendMaintenanceScheduleEnum(words, request->active_side);
+  appendMaintenanceScheduleEnum(words, request->volume_retention);
+  appendMaintenanceScheduleBool(
+      words, request->allow_corner_linearized_geometry);
+  appendMaintenanceScheduleBool(
+      words,
+      request->require_production_qualified_implicit_cut_backend);
+}
+
+void appendMaintenanceScheduleGraphMetadata(
+    std::vector<std::uint64_t>& words,
+    const std::optional<
+        svmp::FE::level_set::LevelSetP1PhaseTransportGraph>& graph)
+{
+  appendMaintenanceScheduleBool(words, graph.has_value());
+  if (!graph.has_value()) {
+    return;
+  }
+  appendMaintenanceScheduleBool(
+      words, static_cast<bool>(graph->collective_state));
+  appendMaintenanceScheduleBool(words, graph->success);
+  appendMaintenanceScheduleBool(
+      words, graph->partition_of_unity_satisfied);
+  appendMaintenanceScheduleBool(
+      words, graph->gradient_partition_satisfied);
+  appendMaintenanceScheduleBool(
+      words, graph->positive_control_volumes_satisfied);
+  appendMaintenanceScheduleBool(
+      words, graph->gradient_row_sum_satisfied);
+  appendMaintenanceScheduleBool(
+      words, graph->measure_closure_satisfied);
+  appendMaintenanceScheduleBool(
+      words, graph->edge_ownership_satisfied);
+  appendMaintenanceScheduleBool(words, graph->distributed);
+  appendMaintenanceScheduleBool(
+      words, graph->replicated_sparse_graph);
+  appendMaintenanceScheduleSigned(words, graph->dimension);
+  appendMaintenanceScheduleSigned(words, graph->parallel_size);
+  appendMaintenanceScheduleSigned(
+      words, graph->maximum_quadrature_order);
+  appendMaintenanceScheduleWord(
+      words, static_cast<std::uint64_t>(graph->cells));
+  appendMaintenanceScheduleWord(
+      words, static_cast<std::uint64_t>(graph->nodes));
+  appendMaintenanceScheduleWord(
+      words,
+      static_cast<std::uint64_t>(
+          graph->lumped_control_volume.size()));
+  appendMaintenanceScheduleWord(
+      words,
+      static_cast<std::uint64_t>(
+          graph->diagonal_gradient.size()));
+  appendMaintenanceScheduleWord(
+      words,
+      static_cast<std::uint64_t>(
+          graph->boundary_column_sum.size()));
+  appendMaintenanceScheduleWord(
+      words, static_cast<std::uint64_t>(graph->edges.size()));
+  // The graph caches rank-local mesh event counters so each partition can
+  // decide when its own graph is stale.  Equally valid partitions can advance
+  // those counters a different number of times, so they are not replicated
+  // request semantics and must not participate in exact schedule consensus.
+  // The graph's replicated shape, invariant flags, and FE DOF-layout identity
+  // above/below remain part of the collective preflight.
+  appendMaintenanceScheduleWord(words, graph->dof_layout_revision);
+}
+
+std::uint64_t levelSetMaintenanceRequestActionBits(
+    const LevelSetMaintenanceRequest& request,
+    int completed_step)
+{
+  const bool conservative_reinitialization_due =
+      request.conservative_phase.enabled &&
+      svmp::FE::level_set::shouldReinitializeLevelSet(
+          request.reinitialization, completed_step);
+  const bool accepted_reinitialization_due =
+      !request.conservative_phase.enabled &&
+      svmp::FE::level_set::shouldReinitializeLevelSet(
+          request.reinitialization, completed_step);
+  const bool accepted_volume_due =
+      !request.conservative_phase.enabled &&
+      svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
+          request.volume_correction, completed_step);
+  const bool all_request_volume_due =
+      svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
+          request.volume_correction, completed_step);
+  const bool artifact_due =
+      request.conservative_phase.enabled &&
+      request.conservative_phase.write_flux_artifacts &&
+      request.conservative_phase.flux_artifact_cadence_steps > 0 &&
+      completed_step >= 0 &&
+      static_cast<std::uint64_t>(completed_step) %
+              static_cast<std::uint64_t>(
+                  request.conservative_phase
+                      .flux_artifact_cadence_steps) ==
+          0u;
+  const bool functional_due =
+      request.conservative_phase.enabled ||
+      request.bound_preserving.enabled ||
+      accepted_reinitialization_due ||
+      all_request_volume_due;
+  std::uint64_t bits = 0u;
+  bits |= request.conservative_phase.enabled ? (1ull << 0u) : 0u;
+  bits |= request.bound_preserving.enabled ? (1ull << 1u) : 0u;
+  bits |= conservative_reinitialization_due ? (1ull << 2u) : 0u;
+  bits |=
+      request.velocity.source ==
+              svmp::FE::level_set::LevelSetVelocitySource::
+                  ConstantVector
+          ? (1ull << 3u)
+          : (1ull << 4u);
+  bits |= accepted_reinitialization_due ? (1ull << 5u) : 0u;
+  bits |= accepted_volume_due ? (1ull << 6u) : 0u;
+  bits |= all_request_volume_due ? (1ull << 7u) : 0u;
+  bits |= functional_due ? (1ull << 8u) : 0u;
+  bits |= artifact_due ? (1ull << 9u) : 0u;
+  bits |= request.conservative_phase.reconcile_geometry
+              ? (1ull << 10u)
+              : 0u;
+  return bits;
+}
+
+CanonicalLevelSetMaintenanceSchedule
+canonicalLevelSetMaintenanceRequestSchedule(
+    const std::vector<LevelSetMaintenanceRequest>& requests,
+    LevelSetMaintenanceScheduleStage stage,
+    int completed_step)
+{
+  CanonicalLevelSetMaintenanceSchedule schedule;
+  auto& words = schedule.words;
+  words.reserve(32u + 192u * requests.size());
+  appendMaintenanceScheduleWord(words, 1u);
+  appendMaintenanceScheduleEnum(words, stage);
+  appendMaintenanceScheduleSigned(words, completed_step);
+  appendMaintenanceScheduleWord(
+      words, static_cast<std::uint64_t>(requests.size()));
+  std::uint64_t aggregate_action_bits = 0u;
+  for (const auto& request : requests) {
+    aggregate_action_bits |=
+        levelSetMaintenanceRequestActionBits(
+            request, completed_step);
+  }
+  appendMaintenanceScheduleWord(words, aggregate_action_bits);
+
+  for (const auto& request : requests) {
+    appendMaintenanceScheduleWord(
+        words,
+        levelSetMaintenanceRequestActionBits(
+            request, completed_step));
+    appendMaintenanceScheduleString(
+        words, request.level_set_field_name);
+    appendMaintenanceScheduleReal(words, request.isovalue);
+    appendMaintenanceScheduleEnum(words, request.transport_form);
+
+    appendMaintenanceScheduleString(
+        words, request.velocity.field_name);
+    appendMaintenanceScheduleEnum(words, request.velocity.source);
+    appendMaintenanceScheduleBool(
+        words, request.velocity.auto_register_field);
+    appendMaintenanceScheduleBool(
+        words, static_cast<bool>(request.velocity.space));
+    schedule.supported =
+        !request.velocity.space && schedule.supported;
+    for (const auto value : request.velocity.constant_value) {
+      appendMaintenanceScheduleReal(
+          words, static_cast<double>(value));
+    }
+    appendMaintenanceScheduleString(
+        words,
+        request.velocity
+            .algebraic_extension_source_field_name);
+
+    appendMaintenanceScheduleBool(
+        words, request.bound_preserving.enabled);
+    appendMaintenanceScheduleReal(
+        words, request.bound_preserving.bound_tolerance);
+    appendMaintenanceScheduleReal(
+        words, request.bound_preserving.sign_tolerance);
+    appendMaintenanceScheduleReal(
+        words, request.bound_preserving.maximum_courant);
+    appendMaintenanceScheduleReal(
+        words, request.bound_preserving.courant_tolerance);
+    appendMaintenanceScheduleBool(
+        words,
+        request.bound_preserving.enforce_courant_limit);
+    appendMaintenanceScheduleBool(
+        words,
+        request.bound_preserving
+            .enforce_impermeable_boundaries);
+    appendMaintenanceScheduleReal(
+        words,
+        request.bound_preserving
+            .impermeable_normal_velocity_tolerance);
+
+    appendMaintenanceScheduleBool(
+        words, request.conservative_phase.enabled);
+    appendMaintenanceScheduleString(
+        words,
+        request.conservative_phase.liquid_indicator.field_name);
+    appendMaintenanceScheduleEnum(
+        words,
+        request.conservative_phase.liquid_indicator.source);
+    appendMaintenanceScheduleBool(
+        words,
+        request.conservative_phase.liquid_indicator
+            .auto_register_field);
+    appendMaintenanceScheduleEnum(
+        words, request.conservative_phase.liquid_side);
+    appendMaintenanceScheduleReal(
+        words, request.conservative_phase.invariant_tolerance);
+    appendMaintenanceScheduleReal(
+        words,
+        request.conservative_phase.component_activity_tolerance);
+    appendMaintenanceScheduleReal(
+        words, request.conservative_phase.maximum_courant);
+    appendMaintenanceScheduleBool(
+        words,
+        request.conservative_phase.enforce_courant_limit);
+    appendMaintenanceScheduleBool(
+        words,
+        request.conservative_phase.require_constant_preservation);
+    appendMaintenanceScheduleBool(
+        words, request.conservative_phase.write_flux_artifacts);
+    appendMaintenanceScheduleSigned(
+        words,
+        request.conservative_phase
+            .flux_artifact_cadence_steps);
+    appendMaintenanceScheduleBool(
+        words,
+        request.conservative_phase
+            .classify_nonprimary_components_as_satellites);
+    appendMaintenanceScheduleWord(
+        words,
+        static_cast<std::uint64_t>(
+            request.conservative_phase.fixed_flux_regions.size()));
+    for (const auto& region :
+         request.conservative_phase.fixed_flux_regions) {
+      appendMaintenanceScheduleString(words, region.name);
+      appendMaintenanceScheduleEnum(words, region.kind);
+      for (const auto value : region.minimum) {
+        appendMaintenanceScheduleReal(words, value);
+      }
+      for (const auto value : region.maximum) {
+        appendMaintenanceScheduleReal(words, value);
+      }
+    }
+    appendMaintenanceScheduleReal(
+        words,
+        request.conservative_phase
+            .impermeable_normal_velocity_tolerance);
+    appendMaintenanceScheduleBool(
+        words, request.conservative_phase.reconcile_geometry);
+    appendMaintenanceScheduleReal(
+        words,
+        request.conservative_phase.geometry_measure_tolerance);
+    appendMaintenanceScheduleSigned(
+        words,
+        request.conservative_phase
+            .geometry_correction_max_iterations);
+    appendMaintenanceScheduleReal(
+        words,
+        request.conservative_phase
+            .maximum_geometry_displacement_fraction);
+
+    appendMaintenanceScheduleWord(
+        words,
+        static_cast<std::uint64_t>(
+            request.open_boundaries.size()));
+    for (const auto& boundary : request.open_boundaries) {
+      appendMaintenanceScheduleString(
+          words, boundary.face_name);
+      appendMaintenanceScheduleBool(words, boundary.inflow);
+      appendMaintenanceScheduleOptionalReal(
+          words, boundary.literal_inflow_value);
+    }
+
+    appendMaintenanceScheduleBool(
+        words, request.reinitialization.enabled);
+    appendMaintenanceScheduleEnum(
+        words, request.reinitialization.method);
+    appendMaintenanceScheduleSigned(
+        words, request.reinitialization.cadence_steps);
+    appendMaintenanceScheduleSigned(
+        words, request.reinitialization.max_iterations);
+    appendMaintenanceScheduleReal(
+        words,
+        request.reinitialization.pseudo_time_step_scale);
+    appendMaintenanceScheduleReal(
+        words, request.reinitialization.interface_band_width);
+    appendMaintenanceScheduleReal(
+        words,
+        request.reinitialization.signed_distance_tolerance);
+    appendMaintenanceScheduleReal(
+        words, request.reinitialization.preserve_band_width);
+    appendMaintenanceScheduleReal(
+        words,
+        request.reinitialization.max_zero_set_displacement);
+
+    appendMaintenanceScheduleBool(
+        words, request.volume_correction.enabled);
+    appendMaintenanceScheduleSigned(
+        words, request.volume_correction.cadence_steps);
+    appendMaintenanceScheduleBool(
+        words,
+        request.volume_correction
+            .use_initial_negative_volume_as_target);
+    appendMaintenanceScheduleReal(
+        words,
+        request.volume_correction.target_negative_volume);
+    appendMaintenanceScheduleReal(
+        words, request.volume_correction.volume_tolerance);
+    appendMaintenanceScheduleSigned(
+        words, request.volume_correction.max_iterations);
+    appendMaintenanceScheduleReal(
+        words,
+        request.volume_correction.minimum_relative_volume_error);
+    appendMaintenanceScheduleReal(
+        words,
+        request.volume_correction
+            .maximum_interface_displacement_fraction);
+    appendMaintenanceScheduleReal(
+        words,
+        request.volume_correction
+            .maximum_cumulative_interface_displacement_fraction);
+    appendMaintenanceScheduleActiveCutRequest(
+        words, request.volume_cut_request);
+
+    appendMaintenanceScheduleBool(
+        words, request.curvature_projection_enabled);
+    appendMaintenanceScheduleString(
+        words, request.curvature_field_name);
+    appendMaintenanceScheduleSigned(
+        words, request.curvature_projection_cadence_steps);
+    appendMaintenanceScheduleReal(
+        words, request.curvature_projection.isovalue);
+    appendMaintenanceScheduleReal(
+        words,
+        request.curvature_projection.gradient_tolerance);
+    appendMaintenanceScheduleReal(
+        words,
+        request.curvature_projection.normal_equation_tolerance);
+    appendMaintenanceScheduleReal(
+        words,
+        request.curvature_projection
+            .max_normalized_fit_residual);
+    appendMaintenanceScheduleSigned(
+        words,
+        request.curvature_projection.max_neighbor_rings);
+    appendMaintenanceScheduleSigned(
+        words,
+        request.curvature_projection
+            .max_neighbor_fallback_vertices);
+    appendMaintenanceScheduleSigned(
+        words,
+        request.curvature_projection
+            .max_zero_fallback_vertices);
+    appendMaintenanceScheduleReal(
+        words,
+        request.curvature_projection
+            .supplemental_sample_weight);
+    appendMaintenanceScheduleReal(
+        words,
+        request.curvature_projection.narrow_band_width);
+    appendMaintenanceScheduleSigned(
+        words,
+        request.curvature_projection.smoothing_iterations);
+    appendMaintenanceScheduleReal(
+        words,
+        request.curvature_projection.smoothing_relaxation);
+    appendMaintenanceScheduleEnum(
+        words, request.curvature_projection.smoothing_mode);
+
+    appendMaintenanceScheduleBool(
+        words, request.volume_target_initialized);
+    appendMaintenanceScheduleReal(words, request.volume_target);
+    appendMaintenanceScheduleReal(
+        words,
+        request.volume_correction_reference_minimum_edge_length);
+    appendMaintenanceScheduleReal(
+        words,
+        request
+            .cumulative_volume_correction_interface_displacement);
+    appendMaintenanceScheduleReal(
+        words,
+        request
+            .cumulative_volume_correction_contact_line_displacement);
+    appendMaintenanceScheduleBool(
+        words, request.conservative_phase_initialized);
+    appendMaintenanceScheduleGraphMetadata(
+        words, request.conservative_phase_graph);
+  }
+  return schedule;
+}
+
+void appendCanonicalLevelSetMaintenanceScheduleSection(
+    std::vector<std::uint64_t>& words,
+    const CanonicalLevelSetMaintenanceSchedule& schedule)
+{
+  // A distinct section tag and length make the enclosing commit-state
+  // serialization unambiguous even when the request schema grows.
+  appendMaintenanceScheduleWord(
+      words, 0x4c534d5343484544ull);
+  appendMaintenanceScheduleBool(words, schedule.supported);
+  appendMaintenanceScheduleWord(
+      words,
+      static_cast<std::uint64_t>(schedule.words.size()));
+  words.insert(
+      words.end(),
+      schedule.words.begin(),
+      schedule.words.end());
+}
+
+void appendCanonicalFreeSurfaceGeometryRevision(
+    std::vector<std::uint64_t>& words,
+    const svmp::FE::interfaces::FreeSurfaceGeometryRevision& revision)
+{
+  appendMaintenanceScheduleString(words, revision.source_id);
+  appendMaintenanceScheduleString(words, revision.domain_id);
+  appendMaintenanceScheduleSigned(words, revision.interface_marker);
+  appendMaintenanceScheduleReal(words, revision.isovalue);
+  appendMaintenanceScheduleWord(
+      words, revision.source_layout_revision);
+  appendMaintenanceScheduleWord(
+      words, revision.source_value_revision);
+  appendMaintenanceScheduleWord(
+      words, revision.mesh_geometry_revision);
+  appendMaintenanceScheduleWord(
+      words, revision.mesh_topology_revision);
+  appendMaintenanceScheduleWord(
+      words, revision.ownership_revision);
+  appendMaintenanceScheduleWord(
+      words, revision.numbering_revision);
+  appendMaintenanceScheduleWord(
+      words, revision.quadrature_policy_key);
+  appendMaintenanceScheduleWord(
+      words, revision.snapshot_revision_key);
+}
+
+CanonicalLevelSetMaintenanceGeometryState
+canonicalLevelSetMaintenanceGeometryState(
+    const application::core::SimulationComponents& sim,
+    const std::vector<LevelSetMaintenanceRequest>& requests)
+{
+  CanonicalLevelSetMaintenanceGeometryState state;
+  auto& words = state.words;
+  appendMaintenanceScheduleWord(words, 1u);
+  appendMaintenanceScheduleBool(
+      words, static_cast<bool>(sim.fe_system));
+  if (!sim.fe_system) {
+    state.supported = false;
+    return state;
+  }
+
+  const auto operator_revision =
+      sim.fe_system->operatorRevisionSnapshot();
+  appendMaintenanceScheduleBool(words, operator_revision.valid);
+  // Raw operator mesh event counters are partition-local: equally valid
+  // partitions can process different numbers of local geometry, topology,
+  // ownership, or numbering events.  The full authoritative snapshot
+  // revisions serialized below carry the communicator-replicated mesh
+  // geometry/topology/ownership/numbering identities instead.
+  appendMaintenanceScheduleWord(
+      words, operator_revision.fe_layout.space);
+  appendMaintenanceScheduleWord(
+      words, operator_revision.fe_layout.dof_layout);
+  appendMaintenanceScheduleWord(
+      words, operator_revision.fe_layout.constraint_layout);
+  appendMaintenanceScheduleWord(
+      words, operator_revision.fe_layout.block_layout);
+  appendMaintenanceScheduleWord(
+      words, operator_revision.system_layout_key);
+  appendMaintenanceScheduleEnum(
+      words, operator_revision.geometry_state);
+  appendMaintenanceScheduleEnum(
+      words, operator_revision.geometry_use);
+
+  const auto* context =
+      sim.fe_system->cutIntegrationContext();
+  appendMaintenanceScheduleBool(words, context != nullptr);
+  appendMaintenanceScheduleWord(
+      words, static_cast<std::uint64_t>(requests.size()));
+  for (const auto& request : requests) {
+    appendMaintenanceScheduleBool(
+        words, request.volume_cut_request.has_value());
+    if (!request.volume_cut_request.has_value()) {
+      continue;
+    }
+
+    const auto marker =
+        resolvedActiveCutVolumeInterfaceMarker(
+            *sim.fe_system, *request.volume_cut_request);
+    appendMaintenanceScheduleBool(words, marker.has_value());
+    appendMaintenanceScheduleSigned(
+        words, marker.value_or(-1));
+    if (!marker.has_value() || context == nullptr) {
+      state.supported = false;
+      appendMaintenanceScheduleBool(words, false);
+      appendMaintenanceScheduleBool(words, false);
+      appendMaintenanceScheduleBool(words, false);
+      continue;
+    }
+
+    const bool has_snapshot_binding =
+        context->hasFreeSurfaceGeometrySnapshotForMarker(*marker);
+    appendMaintenanceScheduleBool(
+        words, has_snapshot_binding);
+    const auto bound_snapshot_revision =
+        has_snapshot_binding
+            ? context->freeSurfaceGeometrySnapshotRevisionForMarker(
+                  *marker)
+            : 0u;
+    appendMaintenanceScheduleWord(
+        words, bound_snapshot_revision);
+
+    const bool has_expected_source_revision =
+        context->hasExpectedGeneratedSourceValueRevision(*marker);
+    appendMaintenanceScheduleBool(
+        words, has_expected_source_revision);
+    appendMaintenanceScheduleWord(
+        words,
+        has_expected_source_revision
+            ? context->expectedGeneratedSourceValueRevision(*marker)
+            : 0u);
+
+    const auto& snapshots =
+        context->freeSurfaceGeometrySnapshots();
+    const auto found = std::find_if(
+        snapshots.begin(), snapshots.end(),
+        [&](const auto& snapshot) {
+          return snapshot &&
+                 snapshot->revision().interface_marker == *marker &&
+                 snapshot->revision().snapshot_revision_key ==
+                     bound_snapshot_revision;
+        });
+    const bool has_bound_snapshot =
+        has_snapshot_binding && found != snapshots.end();
+    appendMaintenanceScheduleBool(
+        words, has_bound_snapshot);
+    if (has_bound_snapshot) {
+      appendCanonicalFreeSurfaceGeometryRevision(
+          words, (*found)->revision());
+    } else {
+      state.supported = false;
+    }
+  }
+
+  using GeometrySnapshot =
+      svmp::FE::interfaces::FreeSurfaceGeometrySnapshot;
+  std::vector<const GeometrySnapshot*> ordered_snapshots;
+  if (context != nullptr) {
+    const auto& snapshots =
+        context->freeSurfaceGeometrySnapshots();
+    ordered_snapshots.reserve(snapshots.size());
+    for (const auto& snapshot : snapshots) {
+      ordered_snapshots.push_back(snapshot.get());
+    }
+    std::sort(
+        ordered_snapshots.begin(), ordered_snapshots.end(),
+        [](const GeometrySnapshot* left,
+           const GeometrySnapshot* right) {
+          if (left == nullptr || right == nullptr) {
+            return left == nullptr && right != nullptr;
+          }
+          const auto& lhs = left->revision();
+          const auto& rhs = right->revision();
+          return std::tuple{
+                     lhs.interface_marker,
+                     lhs.source_id,
+                     lhs.domain_id,
+                     std::bit_cast<std::uint64_t>(
+                         static_cast<double>(lhs.isovalue)),
+                     lhs.source_layout_revision,
+                     lhs.source_value_revision,
+                     lhs.snapshot_revision_key} <
+                 std::tuple{
+                     rhs.interface_marker,
+                     rhs.source_id,
+                     rhs.domain_id,
+                     std::bit_cast<std::uint64_t>(
+                         static_cast<double>(rhs.isovalue)),
+                     rhs.source_layout_revision,
+                     rhs.source_value_revision,
+                     rhs.snapshot_revision_key};
+        });
+  }
+  appendMaintenanceScheduleWord(
+      words,
+      static_cast<std::uint64_t>(
+          ordered_snapshots.size()));
+  for (const auto* snapshot : ordered_snapshots) {
+    appendMaintenanceScheduleBool(
+        words, snapshot != nullptr);
+    if (snapshot == nullptr) {
+      state.supported = false;
+      continue;
+    }
+    appendCanonicalFreeSurfaceGeometryRevision(
+        words, snapshot->revision());
+  }
+  return state;
+}
+
+void appendCanonicalLevelSetMaintenanceGeometrySection(
+    std::vector<std::uint64_t>& words,
+    const CanonicalLevelSetMaintenanceGeometryState& geometry)
+{
+  appendMaintenanceScheduleWord(
+      words, 0x4c534d47454f4d31ull);
+  appendMaintenanceScheduleBool(words, geometry.supported);
+  appendMaintenanceScheduleWord(
+      words,
+      static_cast<std::uint64_t>(geometry.words.size()));
+  words.insert(
+      words.end(),
+      geometry.words.begin(),
+      geometry.words.end());
+}
+
+void requireCollectiveLevelSetMaintenanceRequestSchedule(
+    const std::vector<LevelSetMaintenanceRequest>& requests,
+    LevelSetMaintenanceScheduleStage stage,
+    int completed_step,
+    const svmp::MeshComm& comm)
+{
+  const auto schedule =
+      canonicalLevelSetMaintenanceRequestSchedule(
+          requests, stage, completed_step);
+  const bool identical =
+      application::core::
+          collectiveLevelSetMaintenanceCanonicalWordsAgree(
+              schedule.words, comm);
+  if (!identical) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Ordered level-set maintenance "
+        "request schedule differs across the FE communicator.");
+  }
+  if (!schedule.supported) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Maintenance request schedule "
+        "preflight does not support an embedded velocity FunctionSpace; "
+        "production requests must resolve velocity fields through the FE "
+        "system.");
+  }
+}
 
 struct CurvatureProjectionCacheEntry {
   bool valid{false};
@@ -7430,7 +8219,8 @@ bool applyLevelSetMaintenance(
     std::vector<LevelSetVolumeCorrectionMaintenanceEvent>*
         applied_volume_corrections = nullptr,
     const LevelSetMaintenanceCandidateValidator& validate_candidate = {},
-    const LevelSetMaintenanceStageObserver& observe_stage = {})
+    const LevelSetMaintenanceStageObserver& observe_stage = {},
+    std::vector<std::string>* deferred_commit_logs = nullptr)
 {
   if (applied_volume_corrections != nullptr) {
     applied_volume_corrections->clear();
@@ -7869,8 +8659,12 @@ bool applyLevelSetMaintenance(
     history.updateGhosts();
   }
   requests = std::move(staged_requests);
-  for (const auto& log : staged_commit_logs) {
-    application::core::oopCout() << log << std::endl;
+  if (deferred_commit_logs != nullptr) {
+    *deferred_commit_logs = std::move(staged_commit_logs);
+  } else {
+    for (const auto& log : staged_commit_logs) {
+      application::core::oopCout() << log << std::endl;
+    }
   }
   if (applied_volume_corrections != nullptr) {
     *applied_volume_corrections = std::move(staged_volume_corrections);
@@ -12661,6 +13455,16 @@ public:
         "staged_fe_solution");
   }
 
+  [[nodiscard]] bool active() const noexcept
+  {
+    return active_;
+  }
+
+  [[nodiscard]] bool publicationStarted() const noexcept
+  {
+    return publication_started_;
+  }
+
   void commit()
   {
     if (!active_ || !system_transaction_active_ ||
@@ -12668,6 +13472,7 @@ public:
       throw std::logic_error(
           "level-set maintenance geometry transaction is not active");
     }
+    publication_started_ = true;
     sim_.fe_system->commitCutIntegrationContextTransaction();
     system_transaction_active_ = false;
     lifecycle_.commitTransaction();
@@ -12677,10 +13482,17 @@ public:
 
   void rollback()
   {
+    if (publication_started_) {
+      throw std::logic_error(
+          "level-set maintenance geometry transaction cannot claim "
+          "rollback after geometry publication has started");
+    }
     if (!active_) {
       return;
     }
     std::exception_ptr first_failure;
+    bool mesh_fields_restored = false;
+    bool refresh_cache_restored = false;
     const auto attempt = [&](auto&& action) {
       try {
         action();
@@ -12690,9 +13502,6 @@ public:
         }
       }
     };
-    attempt([&] {
-      restoreActiveLevelSetMeshFields(sim_, mesh_field_checkpoint_);
-    });
     if (system_transaction_active_) {
       attempt([&] {
         sim_.fe_system->rollbackCutIntegrationContextTransaction();
@@ -12705,8 +13514,23 @@ public:
         lifecycle_transaction_active_ = false;
       });
     }
-    attempt([&] { refresh_cache_ = refresh_cache_backup_; });
-    active_ = false;
+    // Transactional context callbacks can update the mesh fields and refresh
+    // cache while restoring their own state.  Restore those dependent
+    // checkpoints last on every attempt, including a retry after one of the
+    // upstream rollback operations failed.
+    attempt([&] {
+      restoreActiveLevelSetMeshFields(sim_, mesh_field_checkpoint_);
+      mesh_fields_restored = true;
+    });
+    attempt([&] {
+      refresh_cache_ = refresh_cache_backup_;
+      refresh_cache_restored = true;
+    });
+    active_ =
+        system_transaction_active_ ||
+        lifecycle_transaction_active_ ||
+        !mesh_fields_restored ||
+        !refresh_cache_restored;
     if (first_failure) {
       std::rethrow_exception(first_failure);
     }
@@ -12720,8 +13544,32 @@ private:
   ActiveLevelSetMeshFieldCheckpoint mesh_field_checkpoint_{};
   bool lifecycle_transaction_active_{false};
   bool system_transaction_active_{false};
+  bool publication_started_{false};
   bool active_{false};
 };
+
+enum class LevelSetMaintenancePublicationState : std::uint8_t {
+  Staged,
+  Publishing,
+  Published,
+  PublicationFailed,
+};
+
+const char* levelSetMaintenancePublicationStateName(
+    LevelSetMaintenancePublicationState state) noexcept
+{
+  switch (state) {
+    case LevelSetMaintenancePublicationState::Staged:
+      return "staged";
+    case LevelSetMaintenancePublicationState::Publishing:
+      return "publishing";
+    case LevelSetMaintenancePublicationState::Published:
+      return "published";
+    case LevelSetMaintenancePublicationState::PublicationFailed:
+      return "publication_failed";
+  }
+  return "unknown";
+}
 
 svmp::FE::geometry::CutIntegrationSide conservativePhaseSide(
     const svmp::FE::level_set::LevelSetConservativePhaseOptions& options)
@@ -12786,7 +13634,11 @@ requireCurrentConservativePhaseGraph(
            graph.dof_layout_revision == dofs.dofLayoutRevision() &&
            graph.nodes == static_cast<std::size_t>(dofs.getNumDofs());
   };
-  if (!graph_is_current()) {
+  const bool local_graph_is_current = graph_is_current();
+  const auto comm = activeFESystemCommunicator(system);
+  const bool graph_rebuild_required =
+      globalAnyBool(!local_graph_is_current, comm);
+  if (graph_rebuild_required) {
     svmp::FE::level_set::LevelSetP1PhaseGraphOptions graph_options;
     graph_options.invariant_tolerance =
         request.conservative_phase.invariant_tolerance;
@@ -14908,15 +15760,34 @@ void rollbackConservativePhaseCandidate(
     svmp::FE::timestepping::TimeHistory& history,
     ConservativePhaseCandidateResult& result)
 {
+  std::exception_ptr first_failure;
   if (result.geometry_transaction) {
-    result.geometry_transaction->rollback();
-    result.geometry_transaction.reset();
+    try {
+      result.geometry_transaction->rollback();
+      if (!result.geometry_transaction->active()) {
+        result.geometry_transaction.reset();
+      }
+    } catch (...) {
+      first_failure = std::current_exception();
+    }
   }
   if (result.changed && !result.original_solution.empty()) {
-    scatterFeOrderedSolution(history.u(), result.original_solution);
-    history.updateGhosts();
+    try {
+      scatterFeOrderedSolution(
+          history.u(), result.original_solution);
+      history.updateGhosts();
+      result.changed = false;
+    } catch (...) {
+      if (!first_failure) {
+        first_failure = std::current_exception();
+      }
+    }
+  } else {
+    result.changed = false;
   }
-  result.changed = false;
+  if (first_failure) {
+    std::rethrow_exception(first_failure);
+  }
 }
 
 class ZeroTimeDerivativeIntegrator final : public svmp::FE::systems::TimeIntegrator {
@@ -15218,6 +16089,11 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   auto cut_refresh_cache =
       std::make_shared<ActiveCutContextRefreshCache>();
   auto level_set_maintenance = levelSetMaintenanceRequests(params);
+  requireCollectiveLevelSetMaintenanceRequestSchedule(
+      level_set_maintenance,
+      LevelSetMaintenanceScheduleStage::SteadyInitialization,
+      sim.time_history->stepIndex(),
+      activeFESystemCommunicator(*sim.fe_system));
   const auto steady_level_set_advection_velocity =
       levelSetAdvectionVelocityRequests(params);
   applyCoupledLevelSetFieldResidualCriteria(
@@ -15614,6 +16490,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   auto bdf1 = std::make_shared<const svmp::FE::systems::BDFIntegrator>(1);
   svmp::FE::systems::TransientSystem transient(*sim.fe_system, std::move(bdf1));
   auto level_set_maintenance = levelSetMaintenanceRequests(params);
+  requireCollectiveLevelSetMaintenanceRequestSchedule(
+      level_set_maintenance,
+      LevelSetMaintenanceScheduleStage::TransientInitialization,
+      sim.time_history->stepIndex(),
+      activeFESystemCommunicator(*sim.fe_system));
   applyCoupledLevelSetFieldResidualCriteria(
       *sim.fe_system, params, opts.newton);
   const bool has_frozen_algebraic_level_set_extension =
@@ -15927,6 +16808,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   std::uint64_t pending_pre_maintenance_endpoint_state_revision{0u};
   ConservativePhaseCandidateResult pending_phase_candidate;
   ConservativePhaseCandidateResult accepted_phase_candidate;
+  LevelSetMaintenancePublicationState
+      pending_phase_publication_state{
+          LevelSetMaintenancePublicationState::Staged};
+  bool pending_phase_geometry_commit_required{false};
+  bool pending_phase_geometry_commit_returned{false};
+  bool pending_phase_ledger_transaction_inactive{false};
   std::size_t pending_phase_accepted_row_begin{0u};
   std::size_t pending_phase_rejected_row_begin{0u};
   std::size_t pending_phase_accepted_attempt_begin{0u};
@@ -15972,12 +16859,119 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                             LevelSetMaintenanceWorkRow>(rows)
             .subspan(pending_phase_accepted_row_begin));
   };
+  const auto rollback_and_reject_pending_phase =
+      [&](svmp::FE::timestepping::TimeHistory& h,
+          std::string_view reason) {
+        const bool publication_began =
+            pending_phase_publication_state !=
+            LevelSetMaintenancePublicationState::Staged;
+        if (publication_began) {
+          oopCout()
+              << "[svMultiPhysics::Application] Conservative phase candidate"
+              << " diagnostic=level_set_maintenance_transaction"
+              << " step=" << h.stepIndex() + 1
+              << " reason='" << reason << "'"
+              << " outcome=publication_failed"
+              << " publication_state="
+              << levelSetMaintenancePublicationStateName(
+                     pending_phase_publication_state)
+              << " rollback_claimed=false"
+              << " candidate_geometry_and_state_restored=false"
+              << " ledger_transaction_inactive="
+              << (!level_set_maintenance_work.transactionActive()
+                      ? "true"
+                      : "false")
+              << std::endl;
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Conservative phase "
+              "publication had already begun; candidate discard is "
+              "fail-stop and cannot roll back geometry, algebraic state, "
+              "or the maintenance ledger.");
+        }
+        std::string recovery_failure;
+        const auto record_failure =
+            [&](std::string_view resource,
+                std::string_view diagnostic) {
+              if (!recovery_failure.empty()) {
+                recovery_failure += "; ";
+              }
+              recovery_failure += std::string(resource);
+              recovery_failure += ": ";
+              recovery_failure += std::string(diagnostic);
+            };
+        try {
+          rollbackConservativePhaseCandidate(
+              h, pending_phase_candidate);
+        } catch (const std::exception& error) {
+          record_failure("candidate_geometry_or_state", error.what());
+        } catch (...) {
+          record_failure(
+              "candidate_geometry_or_state", "unknown failure");
+        }
+        try {
+          reject_pending_phase_work();
+        } catch (const std::exception& error) {
+          record_failure("maintenance_ledger", error.what());
+        } catch (...) {
+          record_failure("maintenance_ledger", "unknown failure");
+        }
+        const bool candidate_restored =
+            !pending_phase_candidate.geometry_transaction &&
+            !pending_phase_candidate.changed;
+        const bool ledger_rejected =
+            !level_set_maintenance_work.transactionActive();
+        const bool restored =
+            recovery_failure.empty() &&
+            candidate_restored &&
+            ledger_rejected;
+        oopCout()
+            << "[svMultiPhysics::Application] Conservative phase candidate"
+            << " diagnostic=level_set_maintenance_transaction"
+            << " step=" << h.stepIndex() + 1
+            << " reason='" << reason << "'"
+            << " outcome="
+            << (restored ? "rolled_back"
+                         : "rollback_failed")
+            << " publication_state="
+            << levelSetMaintenancePublicationStateName(
+                   pending_phase_publication_state)
+            << " rollback_claimed="
+            << (restored ? "true" : "false")
+            << " candidate_geometry_and_state_restored="
+            << (candidate_restored ? "true" : "false")
+            << " ledger_rejected="
+            << (ledger_rejected ? "true" : "false")
+            << std::endl;
+        if (!restored) {
+          if (recovery_failure.empty()) {
+            recovery_failure =
+                "covered rollback resources remain unresolved";
+          }
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Conservative phase "
+              "candidate rollback/rejection failed: " +
+              recovery_failure);
+        }
+      };
   callbacks.on_before_step_accept =
       [&](svmp::FE::timestepping::TimeHistory& h,
           const svmp::FE::timestepping::NewtonReport& nr) {
+        requireCollectiveLevelSetMaintenanceRequestSchedule(
+            level_set_maintenance,
+            LevelSetMaintenanceScheduleStage::
+                ProspectiveAcceptedEndpoint,
+            h.stepIndex() + 1,
+            velocity_extension_artifact_comm);
         (void)nr;
         ++step_acceptance_attempt;
         clear_pending_contact_provenance();
+        if (pending_phase_publication_state !=
+            LevelSetMaintenancePublicationState::Staged) {
+          throw std::logic_error(
+              "[svMultiPhysics::Application] A conservative phase "
+              "publication remained non-staged at the start of a new "
+              "acceptance attempt.");
+        }
         if (pending_phase_candidate.geometry_transaction) {
           throw std::logic_error(
               "[svMultiPhysics::Application] A conservative phase candidate remained active at the start of a new acceptance attempt.");
@@ -16105,9 +17099,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   : LevelSetMaintenanceStageObserver{});
           if (!pending_phase_candidate.accept_step) {
             clear_pending_contact_provenance();
-            rollbackConservativePhaseCandidate(
-                h, pending_phase_candidate);
-            reject_pending_phase_work();
+            rollback_and_reject_pending_phase(
+                h, "candidate_contract_rejection");
             return false;
           }
           if (activePressureUpdateRejectOnTriggerEnabled() &&
@@ -16130,9 +17123,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 /*honor_fail_on_trigger=*/false);
             if (triggered) {
               clear_pending_contact_provenance();
-              rollbackConservativePhaseCandidate(
-                  h, pending_phase_candidate);
-              reject_pending_phase_work();
+              rollback_and_reject_pending_phase(
+                  h, "pressure_update_rejection");
               return false;
             }
           }
@@ -16178,9 +17170,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               });
           if (!bound_result.accept_step) {
             clear_pending_contact_provenance();
-            rollbackConservativePhaseCandidate(
-                h, pending_phase_candidate);
-            reject_pending_phase_work();
+            rollback_and_reject_pending_phase(
+                h, "bound_preserving_rejection");
             return false;
           }
           return true;
@@ -16188,23 +17179,23 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           const auto failure = std::current_exception();
           clear_pending_contact_provenance();
           try {
-            rollbackConservativePhaseCandidate(
-                h, pending_phase_candidate);
-          } catch (const std::exception& rollback_error) {
+            rollback_and_reject_pending_phase(
+                h, "candidate_exception");
+          } catch (const std::exception& recovery_error) {
             throw std::runtime_error(
-                "[svMultiPhysics::Application] Conservative phase candidate rollback failed: " +
-                std::string(rollback_error.what()));
+                "[svMultiPhysics::Application] Conservative phase "
+                "candidate recovery failed after an exception: " +
+                std::string(recovery_error.what()));
           }
-          reject_pending_phase_work();
           std::rethrow_exception(failure);
         }
       };
   callbacks.on_step_candidate_discarded =
       [&](svmp::FE::timestepping::TimeHistory& h) {
         clear_pending_contact_provenance();
-        rollbackConservativePhaseCandidate(h, pending_phase_candidate);
+        rollback_and_reject_pending_phase(
+            h, "time_loop_candidate_discarded");
         pending_phase_candidate = ConservativePhaseCandidateResult{};
-        reject_pending_phase_work();
       };
   callbacks.on_step_commit_ready =
       [&](svmp::FE::timestepping::TimeHistory& h) {
@@ -16259,24 +17250,165 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           }
         }
         const bool changed = pending_phase_candidate.changed;
-        if (pending_phase_candidate.geometry_transaction) {
-          pending_phase_candidate.geometry_transaction->commit();
-          pending_phase_candidate.geometry_transaction.reset();
-          oopCout()
-              << "[svMultiPhysics::Application] Conservative phase candidate"
-              << " step=" << h.stepIndex() + 1
-              << " outcome=committed"
-              << " geometry_validated_before_commit=true"
-              << " accepted_state_change="
-              << (changed ? "true" : "false")
-              << std::endl;
+        if (has_precommit_maintenance) {
+          std::vector<std::uint64_t> commit_state_words;
+          commit_state_words.reserve(
+              16u + 3u * static_cast<std::size_t>(
+                              std::max(0, h.historyDepth())));
+          appendMaintenanceScheduleWord(commit_state_words, 1u);
+          appendMaintenanceScheduleBool(
+              commit_state_words,
+              static_cast<bool>(
+                  pending_phase_candidate.geometry_transaction));
+          appendMaintenanceScheduleBool(
+              commit_state_words,
+              pending_phase_candidate.geometry_transaction &&
+                  pending_phase_candidate.geometry_transaction
+                      ->active());
+          appendMaintenanceScheduleBool(
+              commit_state_words,
+              pending_phase_candidate.accept_step);
+          appendMaintenanceScheduleBool(
+              commit_state_words,
+              pending_phase_candidate.changed);
+          const auto endpoint_solution =
+              gatherFeOrderedSolution(h.u());
+          appendMaintenanceScheduleWord(
+              commit_state_words,
+              levelSetMaintenanceAlgebraicRevision(
+                  endpoint_solution));
+          appendMaintenanceScheduleWord(
+              commit_state_words, h.u().valueRevision());
+          appendMaintenanceScheduleWord(
+              commit_state_words,
+              static_cast<std::uint64_t>(
+                  endpoint_solution.size()));
+          appendMaintenanceScheduleSigned(
+              commit_state_words, h.historyDepth());
+          for (int level = 1; level <= h.historyDepth(); ++level) {
+            const auto history_solution =
+                gatherFeOrderedSolution(h.uPrevK(level));
+            appendMaintenanceScheduleWord(
+                commit_state_words,
+                levelSetMaintenanceAlgebraicRevision(
+                    history_solution));
+            appendMaintenanceScheduleWord(
+                commit_state_words,
+                h.uPrevK(level).valueRevision());
+            appendMaintenanceScheduleWord(
+                commit_state_words,
+                static_cast<std::uint64_t>(
+                    history_solution.size()));
+          }
+          const auto request_schedule =
+              canonicalLevelSetMaintenanceRequestSchedule(
+                  level_set_maintenance,
+                  LevelSetMaintenanceScheduleStage::
+                      ProspectiveAcceptedEndpoint,
+                  h.stepIndex() + 1);
+          appendCanonicalLevelSetMaintenanceScheduleSection(
+              commit_state_words, request_schedule);
+          const auto geometry_state =
+              canonicalLevelSetMaintenanceGeometryState(
+                  sim, level_set_maintenance);
+          appendCanonicalLevelSetMaintenanceGeometrySection(
+              commit_state_words, geometry_state);
+          const bool local_commit_invariants_satisfied =
+              pending_phase_candidate.accept_step &&
+              request_schedule.supported &&
+              geometry_state.supported &&
+              (!pending_phase_candidate.changed ||
+               (pending_phase_candidate.geometry_transaction &&
+                pending_phase_candidate.geometry_transaction
+                    ->active())) &&
+              (!pending_phase_candidate.geometry_transaction ||
+               pending_phase_candidate.geometry_transaction
+                   ->active());
+          const auto decision =
+              application::core::
+                  collectiveLevelSetMaintenanceTransactionDecision(
+                      level_set_maintenance_work,
+                      local_commit_invariants_satisfied,
+                      velocity_extension_artifact_comm,
+                      commit_state_words);
+          if (decision ==
+              application::core::
+                  LevelSetMaintenanceTransactionDecision::Reject) {
+            clear_pending_contact_provenance();
+            rollback_and_reject_pending_phase(
+                h, "collective_consensus_rejection");
+            pending_phase_candidate =
+                ConservativePhaseCandidateResult{};
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Conservative phase maintenance transaction was rejected by collective commit consensus.");
+          }
         }
-        commit_pending_phase_work();
+        if (has_precommit_maintenance) {
+          pending_phase_geometry_commit_required =
+              static_cast<bool>(
+                  pending_phase_candidate.geometry_transaction);
+          pending_phase_geometry_commit_returned =
+              !pending_phase_geometry_commit_required;
+          pending_phase_ledger_transaction_inactive =
+              !level_set_maintenance_work.transactionActive();
+          pending_phase_publication_state =
+              LevelSetMaintenancePublicationState::Publishing;
+          try {
+            if (pending_phase_candidate.geometry_transaction) {
+              pending_phase_candidate.geometry_transaction->commit();
+              pending_phase_geometry_commit_returned = true;
+            }
+            commit_pending_phase_work();
+            pending_phase_ledger_transaction_inactive =
+                !level_set_maintenance_work.transactionActive();
+            oopCout()
+                << "[svMultiPhysics::Application] Conservative phase candidate"
+                << " step=" << h.stepIndex() + 1
+                << " outcome=committed"
+                << " geometry_validated_before_commit=true"
+                << " accepted_state_change="
+                << (changed ? "true" : "false")
+                << std::endl;
+            pending_phase_publication_state =
+                LevelSetMaintenancePublicationState::Published;
+          } catch (...) {
+            pending_phase_publication_state =
+                LevelSetMaintenancePublicationState::PublicationFailed;
+            pending_phase_ledger_transaction_inactive =
+                !level_set_maintenance_work.transactionActive();
+            oopCout()
+                << "[svMultiPhysics::Application] Conservative phase candidate"
+                << " diagnostic=level_set_maintenance_transaction"
+                << " step=" << h.stepIndex() + 1
+                << " outcome=publication_failed"
+                << " geometry_commit_required="
+                << (pending_phase_geometry_commit_required
+                        ? "true"
+                        : "false")
+                << " geometry_commit_returned="
+                << (pending_phase_geometry_commit_returned
+                        ? "true"
+                        : "false")
+                << " ledger_transaction_inactive="
+                << (pending_phase_ledger_transaction_inactive
+                        ? "true"
+                        : "false")
+                << " rollback_claimed=false"
+                << std::endl;
+            throw;
+          }
+        }
         accepted_phase_candidate = std::move(pending_phase_candidate);
         pending_phase_candidate = ConservativePhaseCandidateResult{};
       };
   double vtk_total_time = 0.0;
   callbacks.on_step_accepted = [&](svmp::FE::timestepping::TimeHistory& h) {
+    requireCollectiveLevelSetMaintenanceRequestSchedule(
+        level_set_maintenance,
+        LevelSetMaintenanceScheduleStage::
+            AcceptedEndpointPostStep,
+        h.stepIndex(),
+        velocity_extension_artifact_comm);
     if (has_free_surface_functional) {
       const auto endpoint_solution =
           gatherFeOrderedSolution(h.u());
@@ -16308,6 +17440,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         h.u().valueRevision(),
         svmp::MeshComm::world());
     accepted_phase_candidate = ConservativePhaseCandidateResult{};
+    pending_phase_publication_state =
+        LevelSetMaintenancePublicationState::Staged;
+    pending_phase_geometry_commit_required = false;
+    pending_phase_geometry_commit_returned = false;
+    pending_phase_ledger_transaction_inactive = false;
     if (acceptedPressureUpdateDiagnosticEnabled() &&
         !accepted_pressure_update_previous_solution.empty()) {
       const auto current_solution = gatherFeOrderedSolution(h.u());
@@ -16354,6 +17491,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     std::vector<LevelSetVolumeCorrectionMaintenanceEvent>
         applied_volume_corrections;
     std::vector<std::string> volume_correction_work_logs;
+    std::vector<std::string> maintenance_commit_logs;
     ActiveCutContextRefreshReport cut_report{};
     std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
         maintenance_geometry_transaction;
@@ -16370,7 +17508,31 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         levelSetMaintenanceFunctionalValues(
             sim,
             pre_maintenance_functionals);
+    std::vector<LevelSetMaintenanceRequest>
+        maintenance_requests_before_transaction;
+    std::vector<svmp::FE::Real>
+        maintenance_current_before_transaction;
+    std::vector<std::vector<svmp::FE::Real>>
+        maintenance_history_before_transaction;
+    bool maintenance_checkpoint_restored = false;
+    bool maintenance_requests_checkpoint_restored = false;
+    bool maintenance_current_checkpoint_restored = false;
+    std::vector<std::uint8_t>
+        maintenance_history_checkpoint_levels_restored;
+    bool maintenance_checkpoint_ghosts_restored = false;
     if (maintenance_work_due) {
+      maintenance_requests_before_transaction =
+          level_set_maintenance;
+      maintenance_current_before_transaction =
+          gatherFeOrderedSolution(h.u());
+      maintenance_history_before_transaction.reserve(
+          static_cast<std::size_t>(h.historyDepth()));
+      maintenance_history_checkpoint_levels_restored.assign(
+          static_cast<std::size_t>(h.historyDepth()), 0u);
+      for (int level = 1; level <= h.historyDepth(); ++level) {
+        maintenance_history_before_transaction.push_back(
+            gatherFeOrderedSolution(h.uPrevK(level)));
+      }
       level_set_maintenance_work.beginTransaction(
           application::core::LevelSetMaintenanceWorkTransaction{
               .transaction_id =
@@ -16391,6 +17553,216 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                       accepted_velocity_extension_maps),
           });
     }
+    const auto restore_maintenance_checkpoint = [&] {
+      if (!maintenance_work_due ||
+          maintenance_checkpoint_restored) {
+        return;
+      }
+      std::exception_ptr first_failure;
+      const auto attempt = [&](auto&& action) {
+        try {
+          action();
+        } catch (...) {
+          if (!first_failure) {
+            first_failure = std::current_exception();
+          }
+        }
+      };
+      if (!maintenance_requests_checkpoint_restored) {
+        attempt([&] {
+          level_set_maintenance =
+              maintenance_requests_before_transaction;
+          maintenance_requests_checkpoint_restored = true;
+        });
+      }
+      if (!maintenance_current_checkpoint_restored) {
+        attempt([&] {
+          scatterFeOrderedSolution(
+              h.u(), maintenance_current_before_transaction);
+          maintenance_current_checkpoint_restored = true;
+        });
+      }
+
+      const bool history_depth_matches =
+          maintenance_history_before_transaction.size() ==
+              static_cast<std::size_t>(h.historyDepth()) &&
+          maintenance_history_checkpoint_levels_restored.size() ==
+              maintenance_history_before_transaction.size();
+      if (!history_depth_matches) {
+        attempt([&] {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Level-set maintenance "
+              "rollback history depth changed during the transaction.");
+        });
+      } else {
+        for (int level = 1; level <= h.historyDepth(); ++level) {
+          const auto index =
+              static_cast<std::size_t>(level - 1);
+          if (maintenance_history_checkpoint_levels_restored[index] !=
+              0u) {
+            continue;
+          }
+          attempt([&, level, index] {
+            scatterFeOrderedSolution(
+                h.uPrevK(level),
+                maintenance_history_before_transaction[index]);
+            maintenance_history_checkpoint_levels_restored[index] =
+                1u;
+          });
+        }
+      }
+      const bool all_history_levels_restored =
+          history_depth_matches &&
+          std::all_of(
+              maintenance_history_checkpoint_levels_restored.begin(),
+              maintenance_history_checkpoint_levels_restored.end(),
+              [](std::uint8_t value) { return value != 0u; });
+      if (!maintenance_checkpoint_ghosts_restored &&
+          maintenance_requests_checkpoint_restored &&
+          maintenance_current_checkpoint_restored &&
+          all_history_levels_restored) {
+        attempt([&] {
+          h.updateGhosts();
+          maintenance_checkpoint_ghosts_restored = true;
+        });
+      }
+      maintenance_checkpoint_restored =
+          maintenance_requests_checkpoint_restored &&
+          maintenance_current_checkpoint_restored &&
+          all_history_levels_restored &&
+          maintenance_checkpoint_ghosts_restored;
+      if (first_failure) {
+        std::rethrow_exception(first_failure);
+      }
+      if (!maintenance_checkpoint_restored) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set maintenance "
+            "rollback checkpoint remains incomplete.");
+      }
+    };
+    bool maintenance_transaction_published = false;
+    bool maintenance_transaction_rejected = false;
+    bool maintenance_publication_started = false;
+    bool maintenance_geometry_commit_required = false;
+    bool maintenance_geometry_commit_returned = false;
+    bool maintenance_ledger_commit_completed = false;
+    bool maintenance_rejection_records_logged = false;
+    const auto rollback_and_reject_maintenance =
+        [&](std::string_view reason) {
+          std::string recovery_failure;
+          const auto record_failure =
+              [&](std::string_view resource,
+                  std::string_view diagnostic) {
+                if (!recovery_failure.empty()) {
+                  recovery_failure += "; ";
+                }
+                recovery_failure += std::string(resource);
+                recovery_failure += ": ";
+                recovery_failure += std::string(diagnostic);
+              };
+
+          if (maintenance_geometry_transaction) {
+            try {
+              maintenance_geometry_transaction->rollback();
+              if (!maintenance_geometry_transaction->active()) {
+                maintenance_geometry_transaction.reset();
+              }
+            } catch (const std::exception& error) {
+              record_failure("geometry", error.what());
+            } catch (...) {
+              record_failure("geometry", "unknown failure");
+            }
+          }
+          try {
+            restore_maintenance_checkpoint();
+          } catch (const std::exception& error) {
+            record_failure("request_and_history", error.what());
+          } catch (...) {
+            record_failure(
+                "request_and_history", "unknown failure");
+          }
+          try {
+            if (level_set_maintenance_work.transactionActive()) {
+              level_set_maintenance_work.rejectTransaction();
+            }
+          } catch (const std::exception& error) {
+            record_failure("maintenance_ledger", error.what());
+          } catch (...) {
+            record_failure("maintenance_ledger", "unknown failure");
+          }
+
+          if (!maintenance_rejection_records_logged &&
+              !level_set_maintenance_work.transactionActive()) {
+            const auto& rejected_attempts =
+                level_set_maintenance_work.rejectedAttempts();
+            if (rejected_attempts.size() > rejected_attempt_begin) {
+              logLevelSetMaintenanceWorkAttempts(
+                  std::span<const application::core::
+                                      LevelSetMaintenanceWorkAttempt>(
+                      rejected_attempts)
+                      .subspan(rejected_attempt_begin));
+            }
+            const auto& rejected_rows =
+                level_set_maintenance_work.rejectedRows();
+            if (rejected_rows.size() > rejected_row_begin) {
+              logLevelSetMaintenanceWorkRows(
+                  std::span<const application::core::
+                                      LevelSetMaintenanceWorkRow>(
+                      rejected_rows)
+                      .subspan(rejected_row_begin));
+            }
+            maintenance_rejection_records_logged = true;
+          }
+
+          const bool geometry_restored =
+              !maintenance_geometry_transaction;
+          const bool request_and_history_restored =
+              !maintenance_work_due ||
+              maintenance_checkpoint_restored;
+          const bool ledger_rejected =
+              !level_set_maintenance_work.transactionActive();
+          const bool restored =
+              recovery_failure.empty() &&
+              geometry_restored &&
+              request_and_history_restored &&
+              ledger_rejected;
+          const bool collective_rejection =
+              reason == "collective_consensus_rejection";
+          maintenance_transaction_rejected = restored;
+          level_set_maintenance_changed = false;
+          applied_volume_corrections.clear();
+          volume_correction_work_logs.clear();
+          maintenance_commit_logs.clear();
+          oopCout()
+              << "[svMultiPhysics::Application] Level-set maintenance transaction"
+              << " diagnostic=level_set_maintenance_transaction"
+              << " step=" << h.stepIndex()
+              << " reason='" << reason << "'"
+              << " outcome="
+              << (restored
+                      ? (collective_rejection
+                             ? "collectively_rejected"
+                             : "rolled_back")
+                      : "rollback_failed")
+              << " accepted_state_change=false"
+              << " geometry_state_restored="
+              << (geometry_restored ? "true" : "false")
+              << " request_and_history_state_restored="
+              << (request_and_history_restored ? "true" : "false")
+              << " ledger_rejected="
+              << (ledger_rejected ? "true" : "false")
+              << std::endl;
+          if (!restored) {
+            if (recovery_failure.empty()) {
+              recovery_failure =
+                  "covered rollback resources remain unresolved";
+            }
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Accepted-step "
+                "maintenance rollback/rejection failed: " +
+                recovery_failure);
+          }
+        };
     try {
       const auto ensure_maintenance_geometry_transaction = [&] {
         if (!maintenance_geometry_transaction) {
@@ -16460,9 +17832,140 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           pending_contact_stage_solution,
           &applied_volume_corrections,
           validate_candidate,
-          observe_stage);
-      if (maintenance_geometry_transaction) {
-        maintenance_geometry_transaction->commit();
+          observe_stage,
+          &maintenance_commit_logs);
+      if (maintenance_work_due) {
+        std::vector<std::uint64_t> commit_state_words;
+        commit_state_words.reserve(
+            8u + 3u * static_cast<std::size_t>(
+                            std::max(0, h.historyDepth())));
+        appendMaintenanceScheduleWord(commit_state_words, 1u);
+        appendMaintenanceScheduleBool(
+            commit_state_words,
+            static_cast<bool>(maintenance_geometry_transaction));
+        appendMaintenanceScheduleBool(
+            commit_state_words,
+            maintenance_geometry_transaction &&
+                maintenance_geometry_transaction->active());
+        appendMaintenanceScheduleBool(
+            commit_state_words, level_set_maintenance_changed);
+        const auto current_after_maintenance =
+            gatherFeOrderedSolution(h.u());
+        appendMaintenanceScheduleWord(
+            commit_state_words,
+            levelSetMaintenanceAlgebraicRevision(
+                current_after_maintenance));
+        appendMaintenanceScheduleWord(
+            commit_state_words, h.u().valueRevision());
+        appendMaintenanceScheduleSigned(
+            commit_state_words, h.historyDepth());
+        bool local_transaction_invariants_satisfied =
+            maintenance_history_before_transaction.size() ==
+                static_cast<std::size_t>(h.historyDepth()) &&
+            current_after_maintenance.size() ==
+                maintenance_current_before_transaction.size() &&
+            (!level_set_maintenance_changed ||
+             (maintenance_geometry_transaction &&
+              maintenance_geometry_transaction->active())) &&
+            (!maintenance_geometry_transaction ||
+             maintenance_geometry_transaction->active());
+        for (int level = 1; level <= h.historyDepth(); ++level) {
+          const auto history_after_maintenance =
+              gatherFeOrderedSolution(h.uPrevK(level));
+          appendMaintenanceScheduleWord(
+              commit_state_words,
+              levelSetMaintenanceAlgebraicRevision(
+                  history_after_maintenance));
+          appendMaintenanceScheduleWord(
+              commit_state_words,
+              h.uPrevK(level).valueRevision());
+          appendMaintenanceScheduleWord(
+              commit_state_words,
+              static_cast<std::uint64_t>(
+                  history_after_maintenance.size()));
+          const auto index =
+              static_cast<std::size_t>(level - 1);
+          local_transaction_invariants_satisfied =
+              index <
+                  maintenance_history_before_transaction.size() &&
+              history_after_maintenance.size() ==
+                  maintenance_history_before_transaction[index].size() &&
+              local_transaction_invariants_satisfied;
+        }
+        const auto request_schedule =
+            canonicalLevelSetMaintenanceRequestSchedule(
+                level_set_maintenance,
+                LevelSetMaintenanceScheduleStage::
+                    AcceptedEndpointPostStep,
+                h.stepIndex());
+        appendCanonicalLevelSetMaintenanceScheduleSection(
+            commit_state_words, request_schedule);
+        const auto geometry_state =
+            canonicalLevelSetMaintenanceGeometryState(
+                sim, level_set_maintenance);
+        appendCanonicalLevelSetMaintenanceGeometrySection(
+            commit_state_words, geometry_state);
+        local_transaction_invariants_satisfied =
+            request_schedule.supported &&
+            geometry_state.supported &&
+            local_transaction_invariants_satisfied;
+        const auto decision =
+            application::core::
+                collectiveLevelSetMaintenanceTransactionDecision(
+                    level_set_maintenance_work,
+                    local_transaction_invariants_satisfied,
+                    velocity_extension_artifact_comm,
+                    commit_state_words);
+        if (decision ==
+            application::core::
+                LevelSetMaintenanceTransactionDecision::Reject) {
+          rollback_and_reject_maintenance(
+              "collective_consensus_rejection");
+        }
+      }
+      if (!maintenance_transaction_rejected) {
+        maintenance_publication_started = true;
+        maintenance_geometry_commit_required =
+            static_cast<bool>(maintenance_geometry_transaction);
+        maintenance_geometry_commit_returned =
+            !maintenance_geometry_commit_required;
+        try {
+          if (maintenance_geometry_transaction) {
+            maintenance_geometry_transaction->commit();
+          }
+          maintenance_geometry_commit_returned = true;
+          if (level_set_maintenance_work.transactionActive()) {
+            level_set_maintenance_work.commitTransaction();
+          }
+          maintenance_ledger_commit_completed = true;
+          maintenance_transaction_published = true;
+        } catch (...) {
+          maintenance_ledger_commit_completed =
+              !level_set_maintenance_work.transactionActive();
+          oopCout()
+              << "[svMultiPhysics::Application] Level-set maintenance transaction"
+              << " diagnostic=level_set_maintenance_transaction"
+              << " step=" << h.stepIndex()
+              << " outcome=publication_failed"
+              << " geometry_commit_required="
+              << (maintenance_geometry_commit_required
+                      ? "true"
+                      : "false")
+              << " geometry_commit_returned="
+              << (maintenance_geometry_commit_returned
+                      ? "true"
+                      : "false")
+              << " ledger_transaction_inactive="
+              << (maintenance_ledger_commit_completed
+                      ? "true"
+                      : "false")
+              << " rollback_claimed=false"
+              << std::endl;
+          throw;
+        }
+      }
+      if (maintenance_transaction_published &&
+          maintenance_geometry_transaction) {
         oopCout()
             << "[svMultiPhysics::Application] Level-set maintenance transaction"
             << " diagnostic=level_set_maintenance_transaction"
@@ -16474,8 +17977,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             << " volume_corrections="
             << applied_volume_corrections.size() << std::endl;
       }
-      if (level_set_maintenance_work.transactionActive()) {
-        level_set_maintenance_work.commitTransaction();
+      if (maintenance_transaction_published &&
+          !level_set_maintenance_work.acceptedAttempts().empty() &&
+          level_set_maintenance_work.acceptedAttempts().size() >
+              accepted_attempt_begin) {
         const auto& accepted_attempts =
             level_set_maintenance_work.acceptedAttempts();
         logLevelSetMaintenanceWorkAttempts(
@@ -16491,47 +17996,39 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       }
     } catch (...) {
       const auto failure = std::current_exception();
-      std::string rollback_failure;
-      if (maintenance_geometry_transaction) {
-        try {
-          maintenance_geometry_transaction->rollback();
-        } catch (const std::exception& error) {
-          rollback_failure = error.what();
-        } catch (...) {
-          rollback_failure = "unknown rollback failure";
-        }
+      if (maintenance_transaction_published ||
+          maintenance_transaction_rejected) {
+        std::rethrow_exception(failure);
       }
-      oopCout()
-          << "[svMultiPhysics::Application] Level-set maintenance transaction"
-          << " diagnostic=level_set_maintenance_transaction"
-          << " step=" << h.stepIndex()
-          << " outcome="
-          << (rollback_failure.empty() ? "rolled_back"
-                                       : "rollback_failed")
-          << " accepted_state_change=false"
-          << " geometry_state_restored="
-          << (rollback_failure.empty() ? "true" : "false")
-          << std::endl;
-      if (rollback_failure.empty() &&
-          level_set_maintenance_work.transactionActive()) {
-        level_set_maintenance_work.rejectTransaction();
-        const auto& rejected_attempts =
-            level_set_maintenance_work.rejectedAttempts();
-        logLevelSetMaintenanceWorkAttempts(
-            std::span<const application::core::
-                                LevelSetMaintenanceWorkAttempt>(
-                rejected_attempts).subspan(rejected_attempt_begin));
-        const auto& rejected_rows =
-            level_set_maintenance_work.rejectedRows();
-        logLevelSetMaintenanceWorkRows(
-            std::span<const
-                application::core::LevelSetMaintenanceWorkRow>(
-                rejected_rows).subspan(rejected_row_begin));
+      if (maintenance_publication_started) {
+        oopCout()
+            << "[svMultiPhysics::Application] Level-set maintenance transaction"
+            << " diagnostic=level_set_maintenance_transaction"
+            << " step=" << h.stepIndex()
+            << " outcome=publication_failed"
+            << " geometry_commit_required="
+            << (maintenance_geometry_commit_required
+                    ? "true"
+                    : "false")
+            << " geometry_commit_returned="
+            << (maintenance_geometry_commit_returned
+                    ? "true"
+                    : "false")
+            << " ledger_transaction_inactive="
+            << (maintenance_ledger_commit_completed
+                    ? "true"
+                    : "false")
+            << " rollback_claimed=false"
+            << std::endl;
+        std::rethrow_exception(failure);
       }
-      if (!rollback_failure.empty()) {
+      try {
+        rollback_and_reject_maintenance("candidate_exception");
+      } catch (const std::exception& recovery_error) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set maintenance rollback failed after candidate failure: " +
-            rollback_failure);
+            "[svMultiPhysics::Application] Level-set maintenance "
+            "recovery failed after candidate failure: " +
+            std::string(recovery_error.what()));
       }
       std::rethrow_exception(failure);
     }
@@ -16539,6 +18036,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       cut_report = refreshActiveCutIntegrationContextCached(
           sim, params, h.u(), *cut_lifecycle, *cut_refresh_cache,
           "accepted_step");
+    }
+    for (const auto& log : maintenance_commit_logs) {
+      oopCout() << log << std::endl;
     }
     for (const auto& log : volume_correction_work_logs) {
       oopCout() << log << std::endl;

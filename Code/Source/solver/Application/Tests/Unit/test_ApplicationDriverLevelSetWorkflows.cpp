@@ -5544,6 +5544,10 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   EXPECT_EQ(fieldSlice(gatherFeOrderedSolution(history().uPrev()), phase_),
             previous_phase);
   ASSERT_NO_THROW(result.geometry_transaction->commit());
+  EXPECT_TRUE(result.geometry_transaction->publicationStarted());
+  EXPECT_FALSE(result.geometry_transaction->active());
+  EXPECT_THROW(
+      result.geometry_transaction->rollback(), std::logic_error);
   result.geometry_transaction.reset();
   EXPECT_FALSE(sim_.fe_system->cutIntegrationContextTransactionActive());
   EXPECT_FALSE(lifecycle_.transactionActive());
@@ -5562,6 +5566,139 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   EXPECT_NEAR(projection.retained_liquid_measure,
               accepted_measure,
               1.0e-10);
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       RollbackRemainsActiveAndRetriesAfterCutContextCallbackFailure)
+{
+  const auto* context_before =
+      sim_.fe_system->cutIntegrationContext();
+  ASSERT_NE(context_before, nullptr);
+  const auto lifecycle_revision_before = lifecycle_.valueRevision();
+  const auto constraint_revision_before =
+      sim_.fe_system->constraintLayoutRevision();
+  const auto sparsity_revision_before =
+      sim_.fe_system->sparsityPatternRevision();
+  const auto constraint_count_before =
+      sim_.fe_system->constraints().numConstraints();
+  const auto refresh_cache_before = refresh_cache_;
+  const auto mesh_revisions_before =
+      mesh_->event_bus().revision_state();
+  const auto phi_handle = mesh_->field_handle(
+      svmp::EntityKind::Vertex, "phi");
+  const auto phi_value_count =
+      mesh_->field_components(phi_handle) *
+      mesh_->field_entity_count(phi_handle);
+  const auto* phi_before_data =
+      static_cast<const double*>(mesh_->field_data(phi_handle));
+  ASSERT_NE(phi_before_data, nullptr);
+  const std::vector<double> phi_before(
+      phi_before_data, phi_before_data + phi_value_count);
+
+  auto candidate = gatherFeOrderedSolution(history().u());
+  candidate[fieldOffset(phi_)] += svmp::FE::Real{0.2};
+  LevelSetMaintenanceGeometryTransaction transaction(
+      sim_, lifecycle_, refresh_cache_, active_requests_);
+  ASSERT_NO_THROW(
+      (void)transaction.refresh(*params_, candidate));
+  ASSERT_TRUE(transaction.active());
+  ASSERT_TRUE(
+      sim_.fe_system->cutIntegrationContextTransactionActive());
+  ASSERT_TRUE(lifecycle_.transactionActive());
+
+  auto throw_once = std::make_shared<bool>(true);
+  auto callback_calls = std::make_shared<int>(0);
+  sim_.fe_system->addCutIntegrationContextUpdateCallback(
+      svmp::FE::systems::CutIntegrationContextUpdateCallback{
+          .name = "application-driver-rollback-retry-test",
+          .callback =
+              [throw_once, callback_calls](
+                  const svmp::FE::assembly::CutIntegrationContext*) {
+                ++*callback_calls;
+                if (*throw_once) {
+                  *throw_once = false;
+                  throw std::runtime_error(
+                      "injected one-shot cut-context rollback failure");
+                }
+              },
+      });
+
+  EXPECT_THROW(transaction.rollback(), std::runtime_error);
+  EXPECT_TRUE(transaction.active());
+  EXPECT_TRUE(
+      sim_.fe_system->cutIntegrationContextTransactionActive());
+  EXPECT_FALSE(lifecycle_.transactionActive());
+
+  ASSERT_NO_THROW(transaction.rollback());
+  EXPECT_FALSE(transaction.active());
+  EXPECT_FALSE(
+      sim_.fe_system->cutIntegrationContextTransactionActive());
+  EXPECT_FALSE(lifecycle_.transactionActive());
+  EXPECT_GE(*callback_calls, 2);
+  EXPECT_EQ(sim_.fe_system->cutIntegrationContext(), context_before);
+  EXPECT_EQ(lifecycle_.valueRevision(), lifecycle_revision_before);
+  EXPECT_EQ(
+      sim_.fe_system->constraintLayoutRevision(),
+      constraint_revision_before);
+  EXPECT_EQ(
+      sim_.fe_system->sparsityPatternRevision(),
+      sparsity_revision_before);
+  EXPECT_EQ(
+      sim_.fe_system->constraints().numConstraints(),
+      constraint_count_before);
+  EXPECT_EQ(
+      mesh_->event_bus().revision_state().reference_geometry,
+      mesh_revisions_before.reference_geometry);
+  EXPECT_EQ(
+      mesh_->event_bus().revision_state().current_geometry,
+      mesh_revisions_before.current_geometry);
+  EXPECT_EQ(
+      mesh_->event_bus().revision_state().reference_rebase,
+      mesh_revisions_before.reference_rebase);
+  EXPECT_EQ(
+      mesh_->event_bus().revision_state().geometry,
+      mesh_revisions_before.geometry);
+  EXPECT_EQ(
+      mesh_->event_bus().revision_state().topology,
+      mesh_revisions_before.topology);
+  EXPECT_EQ(
+      mesh_->event_bus().revision_state().ownership,
+      mesh_revisions_before.ownership);
+  EXPECT_EQ(
+      mesh_->event_bus().revision_state().numbering,
+      mesh_revisions_before.numbering);
+  EXPECT_EQ(
+      mesh_->event_bus().revision_state().field_layout,
+      mesh_revisions_before.field_layout);
+  EXPECT_EQ(
+      mesh_->event_bus().revision_state().labels,
+      mesh_revisions_before.labels);
+  EXPECT_EQ(
+      mesh_->event_bus().revision_state().active_configuration,
+      mesh_revisions_before.active_configuration);
+  const auto* phi_after_data =
+      static_cast<const double*>(mesh_->field_data(phi_handle));
+  ASSERT_NE(phi_after_data, nullptr);
+  EXPECT_EQ(
+      std::vector<double>(
+          phi_after_data, phi_after_data + phi_value_count),
+      phi_before);
+  EXPECT_EQ(
+      refresh_cache_.last_signature.has_value(),
+      refresh_cache_before.last_signature.has_value());
+  if (refresh_cache_.last_signature.has_value()) {
+    EXPECT_EQ(
+        *refresh_cache_.last_signature,
+        *refresh_cache_before.last_signature);
+  }
+  EXPECT_EQ(
+      refresh_cache_.last_vector_signature.has_value(),
+      refresh_cache_before.last_vector_signature.has_value());
+  if (refresh_cache_.last_vector_signature.has_value()) {
+    EXPECT_EQ(
+        *refresh_cache_.last_vector_signature,
+        *refresh_cache_before.last_vector_signature);
+  }
 }
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,

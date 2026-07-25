@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "matrix_id": "free_surface_wp6_conservative_phase_prerequisite_v1",
+  "matrix_id": "free_surface_wp6_conservative_phase_prerequisite_v2",
   "status": "FROZEN_BEFORE_EXECUTION",
   "work_package": "WP-6",
   "findings": [
@@ -27,15 +27,26 @@
     "component_contract": "deterministic connected supports and subthreshold support retain raw, limited, boundary, divergence, and balance entries",
     "geometry_contract": "the level set is provisional geometry while q is the phase-measure authority for local geometry reconciliation"
   },
-  "maintenance_transaction_contract": [
-    "stage conservative transport without mutating accepted history",
-    "retain raw transport and every maintenance-stage ledger",
-    "reinitialize only when requested",
-    "perform local geometry reconciliation against the transported phase measure",
-    "validate Courant, bounds, component balance, displacement, contact protection, and geometry revisions",
-    "commit state, history, geometry, revisions, and artifacts together",
-    "restore raw candidate, accepted history, geometry, and revisions on any rejection"
-  ],
+  "maintenance_transaction_contract": {
+    "target_full_contract_not_qualified_here": [
+      "atomically commit accepted system state, every history level, geometry and lifecycle revisions, maintenance ledger, and every due artifact across one fault boundary",
+      "recover or fail-stop truthfully under injected commit, rollback, history-scatter, artifact-publication, and logging failures"
+    ],
+    "qualified_collective_prerequisite": [
+      "stage conservative transport without mutating accepted history",
+      "retain raw transport and every maintenance-stage ledger",
+      "reinitialize only when requested",
+      "perform local geometry reconciliation against the transported phase measure",
+      "validate Courant, bounds, component balance, displacement, contact protection, and geometry revisions",
+      "require an exact ordered request schedule before any covered per-request collective, including replicated conservative-graph shape, invariant, and FE-layout metadata while excluding rank-local graph mesh cache stamps",
+      "reduce rank-local conservative-graph staleness before rebuild so every rank enters the collective graph builder when any partition requires refresh",
+      "require identical active transaction metadata, every staged ledger row, current and history content revisions, geometry-transaction presence, final live FE layout state, canonical authoritative snapshot revision identities including their communicator-replicated geometry, topology, ownership, and numbering mesh revisions, mutable request accounting state, and an all-rank invariant vote before the covered commit sites; raw operator mesh event counters and conservative-graph mesh cache stamps are excluded as partition-local",
+      "gate covered candidate-geometry and maintenance-ledger publication on exact all-rank consensus at the existing commit sites",
+      "exercise covered prepublication checkpoint restoration and a retryable injected geometry rollback failure",
+      "restore provisional rate and one-shot workspace state after successful commit-ready discard while preserving those candidate rate and one-shot workspace values when discard refuses recovery"
+    ],
+    "qualification_boundary": "This prerequisite does not establish atomicity across the later TimeLoop acceptance boundary or across multiple artifact publications."
+  },
   "global_shift_contract": {
     "classification": "reported emergency fallback",
     "may_establish_transport_conservation": false,
@@ -54,7 +65,7 @@
     "modest_grid_measure": "Raw measure thresholds are 1e-8 for translation and reversible deformation, 1e-4 for the 3D and Zalesak smokes, 1e-7 for the wall film, and 1e-6 for separated drops.",
     "separated_refinement": "The existing independent 2D studies require spatial orders above 0.35 and temporal orders above 0.5; these low-level values do not replace the frozen 18-point release gates.",
     "emergency_correction": "The correction isolation test requires nonzero injected raw drift, pointwise geometry agreement, greater-than-first-order target-volume convergence, and post-correction drift at or below 1e-10.",
-    "distributed_scope": "The tracked distributed operator and artifact tests require exactly two ranks; no four-rank result is claimed."
+    "distributed_scope": "The phase operator, replicated stage-input, unequal-partition graph-cache-stamp, one-rank graph-invalidation rebuild, and artifact fixtures remain two-rank evidence. Maintenance-transaction consensus is exercised separately at two and four ranks; no four-or-more-rank operator or partition sweep is claimed."
   },
   "build_targets": {
     "geometry": "test_fe_geometry",
@@ -63,6 +74,7 @@
     "assembly": "test_fe_assembly",
     "physics": "test_physics",
     "application": "test_application",
+    "timestepping": "test_fe_timestepping",
     "assembly_mpi": "test_fe_levelset_mpi",
     "application_mpi": "test_application_mpi"
   },
@@ -73,6 +85,7 @@
     "assembly": "Code/Source/solver/FE",
     "physics": "Code/Source/solver/Physics",
     "application": "Code",
+    "timestepping": "Code/Source/solver/FE",
     "assembly_mpi": "Code/Source/solver/FE",
     "application_mpi": "Code"
   },
@@ -159,6 +172,7 @@
       "tests": [
         "ApplicationDriverConservativePhaseCandidatesTest.InitializesEveryHistoryLevelAndOnlyItsRateSlices",
         "ApplicationDriverConservativePhaseCandidatesTest.StagesAndCommitsTheTransportedPhaseAgainstAuthoritativeGeometry",
+        "ApplicationDriverConservativePhaseCandidatesTest.RollbackRemainsActiveAndRetriesAfterCutContextCallbackFailure",
         "ApplicationDriverConservativePhaseCandidatesTest.TransportOnlyKeepsAnAlreadyConsistentGeometryUnchanged",
         "ApplicationDriverConservativePhaseCandidatesTest.ReconciliationOnlyRepairsTransportedGeometryLocally",
         "ApplicationDriverConservativePhaseCandidatesTest.ReinitializesBeforeLocalReconciliationAndRetainsEveryStage",
@@ -177,14 +191,30 @@
       }
     },
     {
-      "id": "phase_operator_partition_mpi",
+      "id": "phase_timeloop_publication_fail_stop_serial",
+      "binary": "timestepping",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "TimeLoopCallbacks.CommitReadyFailureWithSuccessfulDiscardRestoresRateState",
+        "TimeLoopCallbacks.CommitReadyFailureWithFailStopDiscardRetainsCandidateRateState"
+      ],
+      "execution": {
+        "wall_time_seconds": 900,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    },
+    {
+      "id": "phase_operator_partition_mpi_2",
       "binary": "assembly_mpi",
       "mpi_ranks": 2,
       "gtest_output_copies": 2,
       "tests": [
         "LevelSetConservativePhaseOperatorMPI.MergesOwnedCellFragmentsAndTransportsAcrossThePartition",
         "LevelSetConservativePhaseOperatorMPI.ReportsTheSameOwnedCellAssemblyFailureOnEveryRank",
-        "LevelSetConservativePhaseOperatorMPI.ReportsRankLocalPreflightFailureWithoutStrandingPeers"
+        "LevelSetConservativePhaseOperatorMPI.ReportsRankLocalPreflightFailureWithoutStrandingPeers",
+        "LevelSetConservativePhaseOperatorMPI.RejectsEveryReplicatedStageInputMismatchCollectively"
       ],
       "execution": {
         "wall_time_seconds": 1200,
@@ -193,12 +223,29 @@
       }
     },
     {
-      "id": "phase_artifact_collective_mpi",
+      "id": "phase_application_collectives_mpi_2",
       "binary": "application_mpi",
       "mpi_ranks": 2,
       "gtest_output_copies": 2,
       "tests": [
-        "ApplicationDriverLevelSetWorkflowsMPI.ConservativePhaseArtifactPublishesOnceAfterCollectivePreflight"
+        "ApplicationDriverLevelSetWorkflowsMPI.ActiveCutRefreshUsesCommunicatorWideSortedBoundaryMarkerUnion",
+        "ApplicationDriverLevelSetWorkflowsMPI.ConservativePhaseArtifactPublishesOnceAfterCollectivePreflight",
+        "ApplicationDriverLevelSetWorkflowsMPI.MaintenanceRequestScheduleRejectsRankSpecificDriftBeforeStageCallbacks",
+        "LevelSetMaintenanceTransactionConsensusMPI.TwoRankCommitRejectAndContentRevisionAgreement"
+      ],
+      "execution": {
+        "wall_time_seconds": 1200,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    },
+    {
+      "id": "phase_maintenance_consensus_mpi_4",
+      "binary": "application_mpi",
+      "mpi_ranks": 4,
+      "gtest_output_copies": 4,
+      "tests": [
+        "LevelSetMaintenanceTransactionConsensusMPI.FourRankCommitRejectAndContentRevisionAgreement"
       ],
       "execution": {
         "wall_time_seconds": 1200,
@@ -490,8 +537,8 @@
     }
   ],
   "gates": {
-    "expected_group_count": 6,
-    "expected_distinct_test_count": 51,
+    "expected_group_count": 8,
+    "expected_distinct_test_count": 59,
     "expected_quantitative_evidence_count": 40,
     "expected_failures": 0,
     "expected_errors": 0,
@@ -530,9 +577,10 @@
       ]
     },
     {
-      "claim": "candidate_maintenance_commit_and_rollback_contract",
+      "claim": "covered_candidate_maintenance_staging_and_prepublication_rollback_contract",
       "evidence": [
         "ApplicationDriverConservativePhaseCandidatesTest.StagesAndCommitsTheTransportedPhaseAgainstAuthoritativeGeometry",
+        "ApplicationDriverConservativePhaseCandidatesTest.RollbackRemainsActiveAndRetriesAfterCutContextCallbackFailure",
         "ApplicationDriverConservativePhaseCandidatesTest.ReinitializesBeforeLocalReconciliationAndRetainsEveryStage",
         "ApplicationDriverConservativePhaseCandidatesTest.NonconvergedReinitializationRejectsAndRestoresGeometry",
         "ApplicationDriverConservativePhaseCandidatesTest.LaterRejectionRestoresTheRawCandidateAndEveryGeometryRevision",
@@ -541,12 +589,24 @@
       ]
     },
     {
-      "claim": "two_rank_phase_flux_and_artifact_collective_contract",
+      "claim": "timeloop_commit_ready_discard_and_fail_stop_state_contract",
+      "evidence": [
+        "TimeLoopCallbacks.CommitReadyFailureWithSuccessfulDiscardRestoresRateState",
+        "TimeLoopCallbacks.CommitReadyFailureWithFailStopDiscardRetainsCandidateRateState"
+      ]
+    },
+    {
+      "claim": "tracked_phase_flux_artifact_fixture_and_low_level_transaction_consensus_contract",
       "evidence": [
         "LevelSetConservativePhaseOperatorMPI.MergesOwnedCellFragmentsAndTransportsAcrossThePartition",
         "LevelSetConservativePhaseOperatorMPI.ReportsTheSameOwnedCellAssemblyFailureOnEveryRank",
         "LevelSetConservativePhaseOperatorMPI.ReportsRankLocalPreflightFailureWithoutStrandingPeers",
-        "ApplicationDriverLevelSetWorkflowsMPI.ConservativePhaseArtifactPublishesOnceAfterCollectivePreflight"
+        "LevelSetConservativePhaseOperatorMPI.RejectsEveryReplicatedStageInputMismatchCollectively",
+        "ApplicationDriverLevelSetWorkflowsMPI.ActiveCutRefreshUsesCommunicatorWideSortedBoundaryMarkerUnion",
+        "ApplicationDriverLevelSetWorkflowsMPI.ConservativePhaseArtifactPublishesOnceAfterCollectivePreflight",
+        "ApplicationDriverLevelSetWorkflowsMPI.MaintenanceRequestScheduleRejectsRankSpecificDriftBeforeStageCallbacks",
+        "LevelSetMaintenanceTransactionConsensusMPI.TwoRankCommitRejectAndContentRevisionAgreement",
+        "LevelSetMaintenanceTransactionConsensusMPI.FourRankCommitRejectAndContentRevisionAgreement"
       ]
     },
     {
@@ -571,6 +631,10 @@
     },
     {
       "id": "maintenance_off_reinitialization_only_correction_only_and_production_transaction_comparison",
+      "status": "REQUIRED_NOT_CLAIMED"
+    },
+    {
+      "id": "whole_time_loop_and_multi_artifact_cross_resource_atomicity_with_commit_rollback_and_logging_fault_injection",
       "status": "REQUIRED_NOT_CLAIMED"
     },
     {
@@ -599,9 +663,18 @@
     }
   ],
   "known_partition_limit": {
-    "tracked_operator_fixture_ranks": 2,
-    "tracked_artifact_fixture_ranks": 2,
-    "four_rank_disposition": "REQUIRED_NOT_CLAIMED"
+    "tracked_operator_fixture_ranks": [
+      2
+    ],
+    "tracked_artifact_fixture_ranks": [
+      2
+    ],
+    "tracked_transaction_consensus_fixture_ranks": [
+      2,
+      4
+    ],
+    "four_rank_disposition": "LOW_LEVEL_TRANSACTION_CONSENSUS_ONLY",
+    "four_or_more_rank_partition_sweeps": "REQUIRED_NOT_CLAIMED"
   },
   "release_matrix_dependency": {
     "matrix": "level_set_phase_transport_release_matrix.json",

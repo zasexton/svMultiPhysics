@@ -75,10 +75,13 @@ struct LevelSetP1PhaseTransportGraph {
     std::size_t local_owned_cells{0u};
     std::size_t nodes{0u};
     std::size_t locally_owned_edges{0u};
+    /// Rank-local mesh cache stamps used only to decide when this rank's
+    /// graph is stale. Valid partitions need not have equal values.
     std::uint64_t geometry_revision{0u};
     std::uint64_t topology_revision{0u};
     std::uint64_t ownership_revision{0u};
     std::uint64_t numbering_revision{0u};
+    /// Communicator-replicated FE field-layout identity.
     std::uint64_t dof_layout_revision{0u};
     Real physical_measure{0.0};
     Real total_lumped_control_volume{0.0};

@@ -58,10 +58,13 @@ struct LevelSetConservativePhaseArtifactContext {
     Real accepted_time{0.0};
     Real time_step{0.0};
     std::uint64_t state_revision{0u};
+    /// Output-rank mesh cache stamps. These four values are diagnostic local
+    /// provenance, not communicator-wide graph identities.
     std::uint64_t graph_geometry_revision{0u};
     std::uint64_t graph_topology_revision{0u};
     std::uint64_t graph_ownership_revision{0u};
     std::uint64_t graph_numbering_revision{0u};
+    /// Communicator-replicated FE field-layout identity.
     std::uint64_t graph_dof_layout_revision{0u};
     bool geometry_validated_before_commit{false};
     bool reinitialization_due{false};

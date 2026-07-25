@@ -2141,6 +2141,7 @@ def main() -> int:
     parser.add_argument("--application-binary", type=Path, required=True)
     parser.add_argument("--assembly-mpi-binary", type=Path, required=True)
     parser.add_argument("--application-mpi-binary", type=Path, required=True)
+    parser.add_argument("--timestepping-binary", type=Path)
     parser.add_argument("--mpiexec", type=Path, default=Path("/usr/bin/mpiexec"))
     parser.add_argument("--cmake", type=Path, default=Path("/usr/bin/cmake"))
     parser.add_argument("--build-parallel", type=int, default=2)
@@ -2164,6 +2165,17 @@ def main() -> int:
         "assembly_mpi": arguments.assembly_mpi_binary.resolve(),
         "application_mpi": arguments.application_mpi_binary.resolve(),
     }
+    if arguments.timestepping_binary is not None:
+        binaries["timestepping"] = (
+            arguments.timestepping_binary.resolve()
+        )
+    if set(binaries) != QUALIFICATION_BINARY_KEYS:
+        missing = sorted(QUALIFICATION_BINARY_KEYS - set(binaries))
+        unexpected = sorted(set(binaries) - QUALIFICATION_BINARY_KEYS)
+        parser.error(
+            "qualification binary arguments do not match the declared "
+            f"binary keys; missing={missing}, unexpected={unexpected}"
+        )
     registry_sha256 = sha256_file(registry_path)
     runner_sha256 = sha256_file(SCRIPT_PATH)
     registry = load_registry(registry_path)

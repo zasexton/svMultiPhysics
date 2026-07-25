@@ -24,6 +24,7 @@ add_executable(test_application
   ../Core/LevelSetCutConfiguration.cpp
   ../Core/LevelSetCurvatureSamples.cpp
   ../Core/LevelSetMaintenanceHistory.cpp
+  ../Core/LevelSetMaintenanceTransactionConsensus.cpp
   ../Core/LevelSetVelocityExtensionMap.cpp
   ../Core/MeshCollection.cpp
   ../Core/SimulationBuilder.cpp
@@ -64,11 +65,13 @@ add_test(NAME Application_Tests COMMAND test_application)
 if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
   add_executable(test_application_mpi
     Unit/test_ApplicationDriverLevelSetWorkflowsMPI.cpp
+    Unit/test_LevelSetMaintenanceTransactionConsensusMPI.cpp
     Unit/test_LegacyParameterStubs.cpp
     ../Core/ActiveDomainOutput.cpp
     ../Core/LevelSetCutConfiguration.cpp
     ../Core/LevelSetCurvatureSamples.cpp
     ../Core/LevelSetMaintenanceHistory.cpp
+    ../Core/LevelSetMaintenanceTransactionConsensus.cpp
     ../Core/LevelSetVelocityExtensionMap.cpp
     ../Core/MeshCollection.cpp
     ../Core/SimulationBuilder.cpp
@@ -123,5 +126,37 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     PROCESSORS 2
     ENVIRONMENT
       "OMPI_ALLOW_RUN_AS_ROOT=1;OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1"
+  )
+
+  add_test(
+    NAME Application_LevelSetMaintenanceConsensus_MPI_2
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+            ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_application_mpi>
+            --gtest_filter=LevelSetMaintenanceTransactionConsensusMPI.TwoRankCommitRejectAndContentRevisionAgreement
+            ${MPIEXEC_POSTFLAGS}
+  )
+  set_tests_properties(
+    Application_LevelSetMaintenanceConsensus_MPI_2
+    PROPERTIES
+      PROCESSORS 2
+      TIMEOUT 1200
+      ENVIRONMENT
+        "OMPI_ALLOW_RUN_AS_ROOT=1;OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1"
+  )
+
+  add_test(
+    NAME Application_LevelSetMaintenanceConsensus_MPI_4
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4
+            ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_application_mpi>
+            --gtest_filter=LevelSetMaintenanceTransactionConsensusMPI.FourRankCommitRejectAndContentRevisionAgreement
+            ${MPIEXEC_POSTFLAGS}
+  )
+  set_tests_properties(
+    Application_LevelSetMaintenanceConsensus_MPI_4
+    PROPERTIES
+      PROCESSORS 4
+      TIMEOUT 1200
+      ENVIRONMENT
+        "OMPI_ALLOW_RUN_AS_ROOT=1;OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1"
   )
 endif()

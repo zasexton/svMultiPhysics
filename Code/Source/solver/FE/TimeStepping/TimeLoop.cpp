@@ -3555,14 +3555,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 }
                 const auto accepted_time_step_state =
                     makeAcceptedTimeStepStateView(history, solve_time);
-                // acceptGeometricNonlinearityState() is the first
-                // irreversible acceptance operation: moving-mesh state
-                // may be committed, its rollback backup is released, and
-                // transaction callbacks may run.  All retry decisions are
-                // complete at this point.  From this boundary onward a
-                // fatal exception must retain the candidate rate state,
-                // rather than rolling rates back independently of an
-                // accepted or partially accepted system state.
+                // A commit-ready callback may itself cross an external
+                // publication boundary.  It signals that recovery is no
+                // longer safe by refusing candidate discard in the catch
+                // below, which retains the candidate rate/workspace state.
                 if (candidate_rollback_guard.armed()) {
                     try {
                         if (callbacks.on_step_commit_ready) {
@@ -3571,10 +3567,24 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         candidate_rollback_guard.release();
                     } catch (...) {
                         const auto commit_failure = std::current_exception();
+                        try {
+                            candidate_rollback_guard.discard();
+                        } catch (...) {
+                            // A discard callback that refuses recovery marks an
+                            // irreversible or unresolved publication boundary.
+                            // Preserve the candidate rate/workspace state rather
+                            // than independently rolling it back during unwind.
+                            attempt_state.commit();
+                            throw;
+                        }
                         restoreAcceptedGeneratedState();
                         std::rethrow_exception(commit_failure);
                     }
                 }
+                // All retry decisions are complete.  From this boundary
+                // onward a fatal exception must retain candidate rates rather
+                // than rolling them back independently of an accepted or
+                // partially accepted system state.
                 attempt_state.commit();
                 transient.system().acceptGeometricNonlinearityState(
                     accepted_time_step_state,

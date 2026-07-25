@@ -1779,6 +1779,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
   const auto phi = system->addField(svmp::FE::systems::FieldSpec{
       .name = "phi", .space = scalar_space, .components = 1});
+  const auto phase = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "phase", .space = scalar_space, .components = 1});
   const auto velocity = system->addField(svmp::FE::systems::FieldSpec{
       .name = "velocity", .space = velocity_space, .components = 2});
   svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
@@ -1950,6 +1952,104 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
 
   const auto active_cut_requests = activeCutVolumeRequests(*params);
   ASSERT_EQ(active_cut_requests.size(), 1u);
+  LevelSetMaintenanceRequest geometry_request;
+  geometry_request.level_set_field_name = "phi";
+  geometry_request.volume_cut_request =
+      active_cut_requests.front();
+  geometry_request.conservative_phase.enabled = true;
+  geometry_request.conservative_phase.liquid_indicator.field_name =
+      "phase";
+  geometry_request.conservative_phase_initialized = true;
+  geometry_request.conservative_phase_graph =
+      svmp::FE::level_set::buildLevelSetP1PhaseTransportGraph(
+          *sim.fe_system, phase);
+  ASSERT_TRUE(geometry_request.conservative_phase_graph->success)
+      << geometry_request.conservative_phase_graph->diagnostic;
+  ASSERT_TRUE(
+      geometry_request.conservative_phase_graph->distributed);
+  ASSERT_TRUE(
+      geometry_request.conservative_phase_graph
+          ->replicated_sparse_graph);
+  const auto& distributed_graph =
+      *geometry_request.conservative_phase_graph;
+  EXPECT_EQ(
+      distributed_graph.geometry_revision,
+      sim.fe_system->meshAccess().geometryRevision());
+  EXPECT_EQ(
+      distributed_graph.topology_revision,
+      sim.fe_system->meshAccess().topologyRevision());
+  EXPECT_EQ(
+      distributed_graph.ownership_revision,
+      sim.fe_system->meshAccess().ownershipRevision());
+  EXPECT_EQ(
+      distributed_graph.numbering_revision,
+      sim.fe_system->meshAccess().numberingRevision());
+  const auto [minimum_graph_geometry, maximum_graph_geometry] =
+      globalMinMaxUint64(
+          distributed_graph.geometry_revision,
+          svmp::MeshComm(MPI_COMM_WORLD));
+  const auto [minimum_graph_topology, maximum_graph_topology] =
+      globalMinMaxUint64(
+          distributed_graph.topology_revision,
+          svmp::MeshComm(MPI_COMM_WORLD));
+  const auto [minimum_graph_ownership, maximum_graph_ownership] =
+      globalMinMaxUint64(
+          distributed_graph.ownership_revision,
+          svmp::MeshComm(MPI_COMM_WORLD));
+  const auto [minimum_graph_numbering, maximum_graph_numbering] =
+      globalMinMaxUint64(
+          distributed_graph.numbering_revision,
+          svmp::MeshComm(MPI_COMM_WORLD));
+  EXPECT_TRUE(
+      minimum_graph_geometry != maximum_graph_geometry ||
+      minimum_graph_topology != maximum_graph_topology ||
+      minimum_graph_ownership != maximum_graph_ownership ||
+      minimum_graph_numbering != maximum_graph_numbering)
+      << "The fixture must retain unequal partition-local graph cache "
+         "stamps to exercise the production request preflight.";
+  const std::vector<LevelSetMaintenanceRequest>
+      geometry_requests{geometry_request};
+  int stage_callback_sentinel = 0;
+  ASSERT_NO_THROW({
+    requireCollectiveLevelSetMaintenanceRequestSchedule(
+        geometry_requests,
+        LevelSetMaintenanceScheduleStage::
+            ProspectiveAcceptedEndpoint,
+        /*completed_step=*/3,
+        svmp::MeshComm(MPI_COMM_WORLD));
+    ++stage_callback_sentinel;
+  });
+  int every_rank_reached_stage_callback = 0;
+  MPI_Allreduce(
+      &stage_callback_sentinel,
+      &every_rank_reached_stage_callback,
+      1,
+      MPI_INT,
+      MPI_MIN,
+      MPI_COMM_WORLD);
+  EXPECT_EQ(every_rank_reached_stage_callback, 1);
+  const auto geometry_state =
+      canonicalLevelSetMaintenanceGeometryState(
+          sim, geometry_requests);
+  ASSERT_TRUE(geometry_state.supported);
+  ASSERT_FALSE(geometry_state.words.empty());
+  EXPECT_TRUE(
+      application::core::
+          collectiveLevelSetMaintenanceCanonicalWordsAgree(
+              geometry_state.words,
+              svmp::MeshComm(MPI_COMM_WORLD)));
+  auto drifted_geometry_words = geometry_state.words;
+  if (rank + 1 == size) {
+    // The canonical stream ends in the final authoritative snapshot
+    // revision key.  Alter it on one rank to model live-geometry revision
+    // drift without mutating the shared production fixture.
+    ++drifted_geometry_words.back();
+  }
+  EXPECT_FALSE(
+      application::core::
+          collectiveLevelSetMaintenanceCanonicalWordsAgree(
+              drifted_geometry_words,
+              svmp::MeshComm(MPI_COMM_WORLD)));
   const auto* original_context = sim.fe_system->cutIntegrationContext();
   ASSERT_NE(original_context, nullptr);
   const auto lifecycle_revision_before_transaction =
@@ -2081,7 +2181,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
 
   ASSERT_TRUE(sim.fe_system->dofPermutation());
   svmp::FE::backends::FsilsFactory maintenance_factory(
-      /*dofs_per_node=*/3,
+      /*dofs_per_node=*/4,
       sim.fe_system->dofPermutation(),
       MPI_COMM_WORLD);
   auto time_history = svmp::FE::timestepping::TimeHistory::allocate(
@@ -2395,6 +2495,88 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   EXPECT_EQ(global_left_rules, 1);
   EXPECT_EQ(global_extra_rules, 0);
   EXPECT_EQ(global_right_rules, 1);
+
+  auto& graph_before_rank_local_invalidation =
+      requireCurrentConservativePhaseGraph(
+          *sim.fe_system, geometry_request);
+  ASSERT_EQ(graph_before_rank_local_invalidation.diagnostic, "ok");
+  const auto collective_state_before_rank_local_invalidation =
+      graph_before_rank_local_invalidation.collective_state;
+  ASSERT_TRUE(collective_state_before_rank_local_invalidation);
+  if (rank == 0) {
+    mesh->event_bus().notify(svmp::MeshEvent::GeometryChanged);
+  } else {
+    graph_before_rank_local_invalidation.diagnostic =
+        "cached graph sentinel";
+  }
+  const bool local_graph_is_stale =
+      graph_before_rank_local_invalidation.geometry_revision !=
+      sim.fe_system->meshAccess().geometryRevision();
+  int local_stale_count = local_graph_is_stale ? 1 : 0;
+  int global_stale_count = 0;
+  MPI_Allreduce(&local_stale_count,
+                &global_stale_count,
+                1,
+                MPI_INT,
+                MPI_SUM,
+                MPI_COMM_WORLD);
+  ASSERT_EQ(global_stale_count, 1)
+      << "Exactly one rank must invalidate its local graph cache stamp.";
+
+  auto& graph_after_collective_rebuild =
+      requireCurrentConservativePhaseGraph(
+          *sim.fe_system, geometry_request);
+  EXPECT_NE(
+      graph_after_collective_rebuild.collective_state,
+      collective_state_before_rank_local_invalidation);
+  EXPECT_EQ(graph_after_collective_rebuild.diagnostic, "ok");
+  EXPECT_EQ(
+      graph_after_collective_rebuild.geometry_revision,
+      sim.fe_system->meshAccess().geometryRevision());
+  EXPECT_EQ(
+      graph_after_collective_rebuild.topology_revision,
+      sim.fe_system->meshAccess().topologyRevision());
+  EXPECT_EQ(
+      graph_after_collective_rebuild.ownership_revision,
+      sim.fe_system->meshAccess().ownershipRevision());
+  EXPECT_EQ(
+      graph_after_collective_rebuild.numbering_revision,
+      sim.fe_system->meshAccess().numberingRevision());
+  EXPECT_EQ(
+      graph_after_collective_rebuild.dof_layout_revision,
+      sim.fe_system->fieldDofHandler(phase).dofLayoutRevision());
+  EXPECT_EQ(
+      graph_after_collective_rebuild.nodes,
+      static_cast<std::size_t>(
+          sim.fe_system->fieldDofHandler(phase).getNumDofs()));
+  const bool local_rebuild_completed =
+      graph_after_collective_rebuild.success &&
+      graph_after_collective_rebuild.diagnostic == "ok" &&
+      graph_after_collective_rebuild.collective_state !=
+          collective_state_before_rank_local_invalidation &&
+      graph_after_collective_rebuild.geometry_revision ==
+          sim.fe_system->meshAccess().geometryRevision() &&
+      graph_after_collective_rebuild.topology_revision ==
+          sim.fe_system->meshAccess().topologyRevision() &&
+      graph_after_collective_rebuild.ownership_revision ==
+          sim.fe_system->meshAccess().ownershipRevision() &&
+      graph_after_collective_rebuild.numbering_revision ==
+          sim.fe_system->meshAccess().numberingRevision() &&
+      graph_after_collective_rebuild.dof_layout_revision ==
+          sim.fe_system->fieldDofHandler(phase).dofLayoutRevision() &&
+      graph_after_collective_rebuild.nodes ==
+          static_cast<std::size_t>(
+              sim.fe_system->fieldDofHandler(phase).getNumDofs());
+  const int local_rebuild_completed_value =
+      local_rebuild_completed ? 1 : 0;
+  int every_rank_rebuilt = 0;
+  MPI_Allreduce(&local_rebuild_completed_value,
+                &every_rank_rebuilt,
+                1,
+                MPI_INT,
+                MPI_MIN,
+                MPI_COMM_WORLD);
+  EXPECT_EQ(every_rank_rebuilt, 1);
 }
 
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
@@ -3116,6 +3298,98 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       (void)collectiveLevelSetMaintenanceAlgebraicRevision(
           rank_local_slice, svmp::MeshComm(MPI_COMM_WORLD)),
       std::runtime_error);
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     MaintenanceRequestScheduleRejectsRankSpecificDriftBeforeStageCallbacks)
+{
+  int rank = 0;
+  int size = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  if (size != 2) {
+    GTEST_SKIP() << "This request-schedule fixture requires two ranks.";
+  }
+
+  LevelSetMaintenanceRequest first;
+  first.level_set_field_name = "phi_first";
+  first.velocity.source =
+      svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
+  first.reinitialization.enabled = true;
+  first.reinitialization.cadence_steps = 2;
+  first.bound_preserving.enabled = true;
+
+  LevelSetMaintenanceRequest second;
+  second.level_set_field_name = "phi_second";
+  second.velocity.source =
+      svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
+  second.reinitialization.enabled = true;
+  second.reinitialization.cadence_steps = 3;
+  second.volume_correction.enabled = true;
+  second.volume_correction.cadence_steps = 4;
+  const std::vector<LevelSetMaintenanceRequest> baseline{
+      first, second};
+
+  using Mutation =
+      std::function<void(std::vector<LevelSetMaintenanceRequest>&)>;
+  const std::array<std::pair<const char*, Mutation>, 4> cases{{
+      {"request_count",
+       [](auto& requests) { requests.pop_back(); }},
+      {"request_order",
+       [](auto& requests) {
+         std::swap(requests[0], requests[1]);
+       }},
+      {"reinitialization_cadence",
+       [](auto& requests) {
+         ++requests[0].reinitialization.cadence_steps;
+       }},
+      {"velocity_source",
+       [](auto& requests) {
+         requests[0].velocity.source =
+             svmp::FE::level_set::LevelSetVelocitySource::
+                 CoupledField;
+       }},
+  }};
+
+  for (const auto& [name, mutate] : cases) {
+    auto requests = baseline;
+    if (rank + 1 == size) {
+      mutate(requests);
+    }
+    bool rejected = false;
+    int stage_callback_sentinel = 0;
+    try {
+      requireCollectiveLevelSetMaintenanceRequestSchedule(
+          requests,
+          LevelSetMaintenanceScheduleStage::
+              ProspectiveAcceptedEndpoint,
+          /*completed_step=*/6,
+          svmp::MeshComm(MPI_COMM_WORLD));
+      ++stage_callback_sentinel;
+    } catch (const std::runtime_error&) {
+      rejected = true;
+    }
+
+    const int local_rejected = rejected ? 1 : 0;
+    int every_rank_rejected = 0;
+    int maximum_stage_callback_sentinel = 0;
+    MPI_Allreduce(
+        &local_rejected,
+        &every_rank_rejected,
+        1,
+        MPI_INT,
+        MPI_MIN,
+        MPI_COMM_WORLD);
+    MPI_Allreduce(
+        &stage_callback_sentinel,
+        &maximum_stage_callback_sentinel,
+        1,
+        MPI_INT,
+        MPI_MAX,
+        MPI_COMM_WORLD);
+    EXPECT_EQ(every_rank_rejected, 1) << name;
+    EXPECT_EQ(maximum_stage_callback_sentinel, 0) << name;
+  }
 }
 
 int main(int argc, char** argv)

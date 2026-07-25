@@ -914,39 +914,20 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
         result.dimension = minimum_dimension;
         result.nodes = static_cast<std::size_t>(minimum_node_count);
 
-        const auto geometry_revision_min = allReduceUnsigned64Min(
-            collective, result.geometry_revision);
-        const auto geometry_revision_max = allReduceUnsigned64Max(
-            collective, result.geometry_revision);
-        const auto topology_revision_min = allReduceUnsigned64Min(
-            collective, result.topology_revision);
-        const auto topology_revision_max = allReduceUnsigned64Max(
-            collective, result.topology_revision);
-        const auto ownership_revision_min = allReduceUnsigned64Min(
-            collective, result.ownership_revision);
-        const auto ownership_revision_max = allReduceUnsigned64Max(
-            collective, result.ownership_revision);
-        const auto numbering_revision_min = allReduceUnsigned64Min(
-            collective, result.numbering_revision);
-        const auto numbering_revision_max = allReduceUnsigned64Max(
-            collective, result.numbering_revision);
+        // Mesh revisions are local cache stamps, not communicator-wide
+        // topology identities.  Valid partitions can observe different
+        // numbers of local geometry, topology, ownership, and numbering
+        // events.  Retain each rank's stamps so the graph staleness check
+        // remains local, while requiring the replicated FE layout below.
         const auto dof_revision_min = allReduceUnsigned64Min(
             collective, result.dof_layout_revision);
         const auto dof_revision_max = allReduceUnsigned64Max(
             collective, result.dof_layout_revision);
-        if (geometry_revision_min != geometry_revision_max ||
-            topology_revision_min != topology_revision_max ||
-            ownership_revision_min != ownership_revision_max ||
-            numbering_revision_min != numbering_revision_max ||
-            dof_revision_min != dof_revision_max) {
+        if (dof_revision_min != dof_revision_max) {
             result.diagnostic =
-                "P1 conservative phase graph requires synchronized mesh and field revisions on every rank";
+                "P1 conservative phase graph requires a synchronized field layout revision on every rank";
             return result;
         }
-        result.geometry_revision = geometry_revision_min;
-        result.topology_revision = topology_revision_min;
-        result.ownership_revision = ownership_revision_min;
-        result.numbering_revision = numbering_revision_min;
         result.dof_layout_revision = dof_revision_min;
 
         result.lumped_control_volume.assign(result.nodes, Real{0.0});

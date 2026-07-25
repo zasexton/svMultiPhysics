@@ -2291,6 +2291,157 @@ TEST(TimeLoopCallbacks, AcceptedCallbackExceptionDoesNotRollbackCommittedRateSta
     EXPECT_TRUE(inspected_after_unwind);
 }
 
+TEST(TimeLoopCallbacks,
+     CommitReadyFailureWithSuccessfulDiscardRestoresRateState)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    const std::vector<Real> initial_u_dot = {0.25, -0.5, 0.75, -1.0};
+    auto rate_factory = ts_test::createTestFactory();
+    ASSERT_NE(rate_factory.get(), nullptr);
+
+    std::vector<Real> candidate_u_dot;
+    int commit_ready_calls = 0;
+    int discard_calls = 0;
+    bool inspected_after_unwind = false;
+    const auto result = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        /*dt=*/0.1,
+        /*t_end=*/0.1,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1.0e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory& history) {
+            history.ensureSecondOrderState(*rate_factory);
+            setVectorByDof(history.uDot(), initial_u_dot);
+            history.uDDot().zero();
+            callbacks.on_before_step_accept =
+                [](svmp::FE::timestepping::TimeHistory&,
+                   const svmp::FE::timestepping::NewtonReport&) {
+                    return true;
+                };
+            callbacks.on_step_commit_ready =
+                [&](svmp::FE::timestepping::TimeHistory& h) {
+                    ++commit_ready_calls;
+                    candidate_u_dot = getVectorByDof(h.uDot());
+                    EXPECT_NE(candidate_u_dot, initial_u_dot);
+                    FE_THROW(svmp::FE::FEException,
+                             "expected commit-ready failure");
+                };
+            callbacks.on_step_candidate_discarded =
+                [&](svmp::FE::timestepping::TimeHistory& h) {
+                    ++discard_calls;
+                    EXPECT_EQ(getVectorByDof(h.uDot()), candidate_u_dot);
+                };
+        },
+        [&](const svmp::FE::timestepping::TimeHistory& history,
+            const svmp::FE::FEException& exception) {
+            inspected_after_unwind = true;
+            EXPECT_NE(std::string(exception.what()).find(
+                          "expected commit-ready failure"),
+                      std::string::npos);
+            EXPECT_EQ(getVectorByDof(const_cast<
+                          svmp::FE::backends::GenericVector&>(history.uDot())),
+                      initial_u_dot);
+        });
+
+    EXPECT_TRUE(result.empty());
+    EXPECT_TRUE(inspected_after_unwind);
+    EXPECT_EQ(commit_ready_calls, 1);
+    EXPECT_EQ(discard_calls, 1);
+}
+
+TEST(TimeLoopCallbacks,
+     CommitReadyFailureWithFailStopDiscardRetainsCandidateRateState)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    const std::vector<Real> initial_u_dot = {0.25, -0.5, 0.75, -1.0};
+    auto rate_factory = ts_test::createTestFactory();
+    ASSERT_NE(rate_factory.get(), nullptr);
+
+    std::vector<Real> candidate_u_dot;
+    int commit_ready_calls = 0;
+    int discard_calls = 0;
+    bool inspected_after_unwind = false;
+    const auto result = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        /*dt=*/0.1,
+        /*t_end=*/0.1,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1.0e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory& history) {
+            history.ensureSecondOrderState(*rate_factory);
+            setVectorByDof(history.uDot(), initial_u_dot);
+            history.uDDot().zero();
+            callbacks.on_before_step_accept =
+                [](svmp::FE::timestepping::TimeHistory&,
+                   const svmp::FE::timestepping::NewtonReport&) {
+                    return true;
+                };
+            callbacks.on_step_commit_ready =
+                [&](svmp::FE::timestepping::TimeHistory& h) {
+                    ++commit_ready_calls;
+                    candidate_u_dot = getVectorByDof(h.uDot());
+                    EXPECT_NE(candidate_u_dot, initial_u_dot);
+                    FE_THROW(svmp::FE::FEException,
+                             "expected commit-ready publication failure");
+                };
+            callbacks.on_step_candidate_discarded =
+                [&](svmp::FE::timestepping::TimeHistory& h) {
+                    ++discard_calls;
+                    EXPECT_EQ(getVectorByDof(h.uDot()), candidate_u_dot);
+                    FE_THROW(svmp::FE::FEException,
+                             "expected fail-stop discard failure");
+                };
+        },
+        [&](const svmp::FE::timestepping::TimeHistory& history,
+            const svmp::FE::FEException& exception) {
+            inspected_after_unwind = true;
+            EXPECT_NE(std::string(exception.what()).find(
+                          "expected fail-stop discard failure"),
+                      std::string::npos);
+            EXPECT_EQ(getVectorByDof(const_cast<
+                          svmp::FE::backends::GenericVector&>(history.uDot())),
+                      candidate_u_dot);
+            EXPECT_NE(candidate_u_dot, initial_u_dot);
+        });
+
+    EXPECT_TRUE(result.empty());
+    EXPECT_TRUE(inspected_after_unwind);
+    EXPECT_EQ(commit_ready_calls, 1);
+    EXPECT_EQ(discard_calls, 1);
+}
+
 TEST(TimeLoopConvergence, Bdf2_IsSecondOrder_ForReactionEquation)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
