@@ -347,6 +347,130 @@ private:
     std::vector<std::array<GlobalIndex, 4>> cells_{};
 };
 
+class SixQuadEqualRootMeshAccess final : public assembly::IMeshAccess {
+public:
+    SixQuadEqualRootMeshAccess(int rank, bool reverse_ownership)
+        : rank_(rank), reverse_ownership_(reverse_ownership)
+    {
+        for (int x = 0; x <= 6; ++x) {
+            nodes_.push_back(
+                {static_cast<Real>(x), Real{0}, Real{0}});
+            nodes_.push_back(
+                {static_cast<Real>(x), Real{1}, Real{0}});
+        }
+        for (GlobalIndex cell = 0; cell < 6; ++cell) {
+            const auto left = 2 * cell;
+            cells_.push_back({left, left + 2, left + 3, left + 1});
+        }
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override
+    {
+        return static_cast<GlobalIndex>(cells_.size());
+    }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 3; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 5; }
+    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool globalEntityIdsAvailable() const override
+    {
+        return true;
+    }
+    [[nodiscard]] GlobalIndex getCellGlobalId(
+        GlobalIndex cell) const override
+    {
+        constexpr std::array<GlobalIndex, 6> physical_cell_gids{
+            82, 101, 102, 103, 104, 41};
+        return physical_cell_gids.at(static_cast<std::size_t>(cell));
+    }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex cell) const override
+    {
+        return ownerRank(cell) == rank_;
+    }
+    [[nodiscard]] ElementType getCellType(GlobalIndex) const override
+    {
+        return ElementType::Quad4;
+    }
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex,
+                                               GlobalIndex) const override
+    {
+        return INVALID_LOCAL_INDEX;
+    }
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex) const override
+    {
+        return -1;
+    }
+    void getCellNodes(GlobalIndex cell,
+                      std::vector<GlobalIndex>& nodes) const override
+    {
+        const auto& connectivity = cells_.at(static_cast<std::size_t>(cell));
+        nodes.assign(connectivity.begin(), connectivity.end());
+    }
+    [[nodiscard]] std::array<Real, 3>
+    getNodeCoordinates(GlobalIndex node) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node));
+    }
+    void getCellCoordinates(
+        GlobalIndex cell,
+        std::vector<std::array<Real, 3>>& coordinates) const override
+    {
+        const auto& connectivity = cells_.at(static_cast<std::size_t>(cell));
+        coordinates.resize(connectivity.size());
+        for (std::size_t i = 0; i < connectivity.size(); ++i) {
+            coordinates[i] =
+                nodes_.at(static_cast<std::size_t>(connectivity[i]));
+        }
+    }
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex>
+    getInteriorFaceCells(GlobalIndex face) const override
+    {
+        return {face, face + 1};
+    }
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        // Only the owner exposes geometry to proposal construction. This
+        // makes each equal-distance root's provider rank observable while
+        // the global owner-face ledger still reconstructs the full strip.
+        forEachOwnedCell(std::move(callback));
+    }
+    void forEachOwnedCell(
+        std::function<void(GlobalIndex)> callback) const override
+    {
+        for (GlobalIndex cell = 0; cell < numCells(); ++cell) {
+            if (isOwnedCell(cell)) {
+                callback(cell);
+            }
+        }
+    }
+    void forEachBoundaryFace(
+        int,
+        std::function<void(GlobalIndex, GlobalIndex)>) const override
+    {
+    }
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> callback)
+        const override
+    {
+        for (GlobalIndex face = 0; face < numInteriorFaces(); ++face) {
+            callback(face, face, face + 1);
+        }
+    }
+
+private:
+    [[nodiscard]] int ownerRank(GlobalIndex cell) const
+    {
+        const int base_owner = cell < 3 ? 0 : 1;
+        return reverse_ownership_ ? 1 - base_owner : base_owner;
+    }
+
+    int rank_{0};
+    bool reverse_ownership_{false};
+    std::vector<std::array<Real, 3>> nodes_{};
+    std::vector<std::array<GlobalIndex, 4>> cells_{};
+};
+
 dofs::MeshTopologyInfo fullTopology()
 {
     dofs::MeshTopologyInfo topology;
@@ -434,6 +558,40 @@ dofs::MeshTopologyInfo fiveQuadTopology(int rank)
     return topology;
 }
 
+dofs::MeshTopologyInfo sixQuadEqualRootTopology(bool reverse_ownership,
+                                                int rank)
+{
+    dofs::MeshTopologyInfo topology;
+    topology.dim = 2;
+    topology.n_cells = 6;
+    topology.n_vertices = 14;
+    topology.cell2vertex_offsets.reserve(7);
+    topology.cell2vertex_offsets.push_back(0);
+    for (int cell = 0; cell < 6; ++cell) {
+        const int left = 2 * cell;
+        topology.cell2vertex_data.insert(
+            topology.cell2vertex_data.end(),
+            {left, left + 2, left + 3, left + 1});
+        topology.cell2vertex_offsets.push_back(
+            static_cast<GlobalIndex>(topology.cell2vertex_data.size()));
+    }
+    for (GlobalIndex vertex = 0; vertex < 14; ++vertex) {
+        topology.vertex_gids.push_back(vertex);
+        topology.vertex_coords.push_back(
+            static_cast<Real>(vertex / 2));
+        topology.vertex_coords.push_back(
+            static_cast<Real>(vertex % 2));
+    }
+    topology.cell_gids = {82, 101, 102, 103, 104, 41};
+    for (GlobalIndex cell = 0; cell < 6; ++cell) {
+        const int base_owner = cell < 3 ? 0 : 1;
+        topology.cell_owner_ranks.push_back(
+            reverse_ownership ? 1 - base_owner : base_owner);
+    }
+    topology.neighbor_ranks = {rank == 0 ? 1 : 0};
+    return topology;
+}
+
 systems::SetupOptions setupOptions(int rank,
                                   int world_size,
                                   MPI_Comm comm = MPI_COMM_WORLD)
@@ -474,6 +632,38 @@ std::shared_ptr<assembly::CutIntegrationContext> cutContext(
         rule.parent_measure = Real{1};
         rule.volume_fraction = cell_rule.fraction;
         rule.full_cell_equivalent = cell_rule.full;
+        context->addGeneratedVolumeRule(kInterfaceMarker, metadata, rule);
+    }
+    return context;
+}
+
+std::shared_ptr<assembly::CutIntegrationContext>
+sixQuadEqualRootCutContext(int rank, bool reverse_ownership)
+{
+    auto context = std::make_shared<assembly::CutIntegrationContext>();
+    for (GlobalIndex cell = 0; cell < 6; ++cell) {
+        const int base_owner = cell < 3 ? 0 : 1;
+        const int owner =
+            reverse_ownership ? 1 - base_owner : base_owner;
+        if (owner != rank) {
+            continue;
+        }
+        const bool full = cell == 0 || cell == 5;
+        const Real fraction = full ? Real{1} : Real{0.25};
+
+        assembly::CutCellAssemblyMetadata metadata{};
+        metadata.cell = cell;
+        metadata.parent_entity = cell;
+        metadata.side = geometry::CutIntegrationSide::Negative;
+        metadata.volume_fraction = fraction;
+
+        geometry::CutQuadratureRule rule{};
+        rule.kind = geometry::CutQuadratureKind::Volume;
+        rule.side = geometry::CutIntegrationSide::Negative;
+        rule.measure = fraction;
+        rule.parent_measure = Real{1};
+        rule.volume_fraction = fraction;
+        rule.full_cell_equivalent = full;
         context->addGeneratedVolumeRule(kInterfaceMarker, metadata, rule);
     }
     return context;
@@ -591,6 +781,34 @@ std::vector<std::pair<GlobalIndex, double>> lineEntries(
     }
     for (const auto& entry : line->entries) {
         entries.emplace_back(entry.master_dof, entry.weight);
+    }
+    std::sort(entries.begin(), entries.end());
+    return entries;
+}
+
+std::vector<std::pair<GlobalIndex, double>> lineEntriesByVertex(
+    const systems::FESystem& system,
+    FieldId field,
+    GlobalIndex slave,
+    GlobalIndex vertex_count)
+{
+    std::vector<GlobalIndex> vertex_dofs;
+    vertex_dofs.reserve(static_cast<std::size_t>(vertex_count));
+    for (GlobalIndex vertex = 0; vertex < vertex_count; ++vertex) {
+        vertex_dofs.push_back(vertexDof(system, field, vertex));
+    }
+
+    std::vector<std::pair<GlobalIndex, double>> entries;
+    for (const auto& [master, weight] : lineEntries(system, slave)) {
+        const auto found =
+            std::find(vertex_dofs.begin(), vertex_dofs.end(), master);
+        EXPECT_NE(found, vertex_dofs.end());
+        if (found != vertex_dofs.end()) {
+            entries.emplace_back(
+                static_cast<GlobalIndex>(
+                    std::distance(vertex_dofs.begin(), found)),
+                weight);
+        }
     }
     std::sort(entries.begin(), entries.end());
     return entries;
@@ -1119,6 +1337,132 @@ TEST(SmallCutAggregationConstraintMPI,
     // but its all-ghost DOF view is relevant to the canonical slave/master
     // lines and must receive the same valid constraints.
     expectEveryMasterLineFiniteAndPartitionOfUnity(system);
+#endif
+}
+
+TEST(SmallCutAggregationConstraintMPI,
+     EqualDistanceRootUsesPhysicalCellGidAcrossReversedOwnership)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    int rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size != 2) {
+        GTEST_SKIP() << "Run with exactly two MPI ranks";
+    }
+
+    struct LayoutResult {
+        std::vector<std::pair<GlobalIndex, double>> raw_bottom_line{};
+        std::vector<std::pair<GlobalIndex, double>> raw_top_line{};
+        std::vector<std::pair<GlobalIndex, double>> physical_bottom_line{};
+        std::vector<std::pair<GlobalIndex, double>> physical_top_line{};
+        std::vector<GlobalIndex> selected_root_masters{};
+        std::vector<GlobalIndex> competing_root_masters{};
+    };
+    std::array<LayoutResult, 2> results;
+
+    for (std::size_t layout = 0; layout < results.size(); ++layout) {
+        const bool reverse_ownership = layout == 1;
+        auto mesh = std::make_shared<SixQuadEqualRootMeshAccess>(
+            rank, reverse_ownership);
+        auto space =
+            std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+        systems::FESystem system(mesh);
+        const auto pressure = system.addField(
+            systems::FieldSpec{
+                .name = "p", .space = space, .components = 1});
+        system.addOperator("pressure");
+        system.addSystemConstraint(
+            std::make_unique<SmallCutAggregationConstraint>(
+                pressure,
+                geometry::CutIntegrationSide::Negative,
+                kInterfaceMarker));
+
+        systems::SetupInputs inputs;
+        inputs.topology_override =
+            sixQuadEqualRootTopology(reverse_ownership, rank);
+        const auto setup_outcome = invokeCollectively(
+            MPI_COMM_WORLD, [&] {
+                system.setup(setupOptions(rank, world_size), inputs);
+            });
+        ASSERT_TRUE(setup_outcome.allSucceeded())
+            << setup_outcome.local_message;
+
+        system.setCutIntegrationContext(
+            sixQuadEqualRootCutContext(rank, reverse_ownership));
+        const auto rebuild_outcome = invokeCollectively(
+            MPI_COMM_WORLD, [&] { system.rebuildConstraintState(); });
+        ASSERT_TRUE(rebuild_outcome.allSucceeded())
+            << rebuild_outcome.local_message;
+
+        // The x=3 vertices are two face steps from both full roots. Cell 5
+        // has the lower physical GID (41 versus 82), so its x=5 and x=6
+        // vertices must supply both installed extension lines.
+        EXPECT_EQ(mesh->getCellGlobalId(5), 41);
+        EXPECT_EQ(mesh->getCellGlobalId(0), 82);
+        const auto bottom_slave = vertexDof(system, pressure, 6);
+        const auto top_slave = vertexDof(system, pressure, 7);
+
+        auto& result = results[layout];
+        result.raw_bottom_line = lineEntries(system, bottom_slave);
+        result.raw_top_line = lineEntries(system, top_slave);
+        result.physical_bottom_line = lineEntriesByVertex(
+            system, pressure, bottom_slave, 14);
+        result.physical_top_line = lineEntriesByVertex(
+            system, pressure, top_slave, 14);
+        for (const auto vertex : {10, 11, 12, 13}) {
+            result.selected_root_masters.push_back(
+                vertexDof(system, pressure, vertex));
+        }
+        for (const auto vertex : {0, 1, 2, 3}) {
+            result.competing_root_masters.push_back(
+                vertexDof(system, pressure, vertex));
+        }
+        std::sort(result.selected_root_masters.begin(),
+                  result.selected_root_masters.end());
+        std::sort(result.competing_root_masters.begin(),
+                  result.competing_root_masters.end());
+
+        auto expected_bottom =
+            std::vector<std::pair<GlobalIndex, double>>{
+                {vertexDof(system, pressure, 10), 3.0},
+                {vertexDof(system, pressure, 12), -2.0}};
+        auto expected_top =
+            std::vector<std::pair<GlobalIndex, double>>{
+                {vertexDof(system, pressure, 11), 3.0},
+                {vertexDof(system, pressure, 13), -2.0}};
+        std::sort(expected_bottom.begin(), expected_bottom.end());
+        std::sort(expected_top.begin(), expected_top.end());
+        EXPECT_EQ(result.raw_bottom_line, expected_bottom);
+        EXPECT_EQ(result.raw_top_line, expected_top);
+        EXPECT_EQ(
+            result.physical_bottom_line,
+            (std::vector<std::pair<GlobalIndex, double>>{
+                {10, 3.0}, {12, -2.0}}));
+        EXPECT_EQ(
+            result.physical_top_line,
+            (std::vector<std::pair<GlobalIndex, double>>{
+                {11, 3.0}, {13, -2.0}}));
+        expectEveryMasterLineFiniteAndPartitionOfUnity(system);
+    }
+
+    // Owner-contiguous numbering ranks the selected root after its competitor
+    // in the first layout and before it in the reversed layout. The raw
+    // algebraic rows therefore change, while their physical vertex/weight
+    // representation remains identical.
+    EXPECT_GT(results[0].selected_root_masters.front(),
+              results[0].competing_root_masters.back());
+    EXPECT_LT(results[1].selected_root_masters.back(),
+              results[1].competing_root_masters.front());
+    EXPECT_NE(results[0].raw_bottom_line, results[1].raw_bottom_line);
+    EXPECT_NE(results[0].raw_top_line, results[1].raw_top_line);
+    EXPECT_EQ(results[0].physical_bottom_line,
+              results[1].physical_bottom_line);
+    EXPECT_EQ(results[0].physical_top_line,
+              results[1].physical_top_line);
 #endif
 }
 
