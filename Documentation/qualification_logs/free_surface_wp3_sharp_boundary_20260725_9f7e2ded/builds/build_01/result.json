@@ -1,0 +1,135 @@
+{
+  "binaries_before_clean": {
+    "application": {
+      "exists": true,
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application/bin/test_application",
+      "sha256": "be177c4dddf329f7dff1ef148e4dd719f15fda74681e9a77c8f8401a00d4046e"
+    },
+    "application_mpi": {
+      "exists": true,
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application/bin/test_application_mpi",
+      "sha256": "e6fbec7361b7c3ac3f1b29ebe4e6ee8ffea19715767dd5922c146f8c7faca95b"
+    }
+  },
+  "binary_keys": [
+    "application",
+    "application_mpi"
+  ],
+  "build": {
+    "all_supplied_binaries_recreated": true,
+    "binaries_after_build": {
+      "application": {
+        "executable": true,
+        "exists": true,
+        "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application/bin/test_application",
+        "sha256": "be177c4dddf329f7dff1ef148e4dd719f15fda74681e9a77c8f8401a00d4046e"
+      },
+      "application_mpi": {
+        "executable": true,
+        "exists": true,
+        "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application/bin/test_application_mpi",
+        "sha256": "e6fbec7361b7c3ac3f1b29ebe4e6ee8ffea19715767dd5922c146f8c7faca95b"
+      }
+    },
+    "command": [
+      "/usr/bin/cmake",
+      "--build",
+      "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application",
+      "--parallel",
+      "2",
+      "--target",
+      "test_application",
+      "test_application_mpi"
+    ],
+    "elapsed_seconds": 1248.235063257045,
+    "outcome": "PASS",
+    "return_code": 0,
+    "stderr": "builds/build_01/build_stderr.txt",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout": "builds/build_01/build_stdout.txt",
+    "stdout_sha256": "575cbc9e981f5ff940d109d91b0c47f007a54d2e0886497cc9132cf9e3734783",
+    "termination": null,
+    "timed_out": false
+  },
+  "build_directory": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application",
+  "cache_is_symlink_after_build": false,
+  "cache_path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application/CMakeCache.txt",
+  "cache_present_after_build": true,
+  "cache_sha256": "f4f2dcaa69054295f3bbc57e209682d29dc5727d43d7d6099bb9bef683e89e96",
+  "clean": {
+    "all_supplied_binaries_absent": true,
+    "binaries_after_clean": {
+      "application": {
+        "exists": false,
+        "is_file": false,
+        "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application/bin/test_application"
+      },
+      "application_mpi": {
+        "exists": false,
+        "is_file": false,
+        "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application/bin/test_application_mpi"
+      }
+    },
+    "cache_is_symlink_after_clean": false,
+    "cache_path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application/CMakeCache.txt",
+    "cache_present_after_clean": true,
+    "cmake_home_directory_after_clean": "/tmp/svmp-wp3-worktree-qGVgK2pT/Code",
+    "cmake_home_matches_after_clean": true,
+    "command": [
+      "/usr/bin/cmake",
+      "--build",
+      "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application",
+      "--target",
+      "clean"
+    ],
+    "elapsed_seconds": 0.2143521289108321,
+    "outcome": "PASS",
+    "return_code": 0,
+    "single_configuration_after_clean": true,
+    "stderr": "builds/build_01/clean_stderr.txt",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout": "builds/build_01/clean_stdout.txt",
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "termination": null,
+    "timed_out": false
+  },
+  "cmake_home_directory": "/tmp/svmp-wp3-worktree-qGVgK2pT/Code",
+  "cmake_home_matches": true,
+  "configure": {
+    "cache_is_symlink_after_configure": false,
+    "cache_path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application/CMakeCache.txt",
+    "cache_present_after_configure": true,
+    "cmake_home_directory_after_configure": "/tmp/svmp-wp3-worktree-qGVgK2pT/Code",
+    "cmake_home_matches_after_configure": true,
+    "command": [
+      "/usr/bin/cmake",
+      "-S",
+      "/tmp/svmp-wp3-worktree-qGVgK2pT/Code",
+      "-B",
+      "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application"
+    ],
+    "elapsed_seconds": 3.120421989937313,
+    "expected_cmake_home": "/tmp/svmp-wp3-worktree-qGVgK2pT/Code",
+    "outcome": "PASS",
+    "return_code": 0,
+    "single_configuration_after_configure": true,
+    "stderr": "builds/build_01/configure_stderr.txt",
+    "stderr_sha256": "8c97253e588a9c802713f1be39196cd95e1f944ee37e4b73ae6c9dc5bd5e5446",
+    "stdout": "builds/build_01/configure_stdout.txt",
+    "stdout_sha256": "edd0b0aec43cf05bc8d2dc191a9af6a64b00c41effe517a008cf56268270ac36",
+    "termination": null,
+    "timed_out": false
+  },
+  "diagnostic": null,
+  "expected_cmake_homes": [
+    "/tmp/svmp-wp3-worktree-qGVgK2pT/Code"
+  ],
+  "outcome": "PASS",
+  "single_configuration_after_build": true,
+  "targets": [
+    "test_application",
+    "test_application_mpi"
+  ]
+}

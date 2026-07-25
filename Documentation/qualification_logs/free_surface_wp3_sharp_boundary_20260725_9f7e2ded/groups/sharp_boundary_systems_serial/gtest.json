@@ -1,0 +1,30 @@
+{
+  "tests": 1,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-25T02:22:18Z",
+  "time": "0.007s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "BoundaryIntegralInput",
+      "tests": 1,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-25T02:22:18Z",
+      "time": "0.007s",
+      "testsuite": [
+        {
+          "name": "GeneratedActiveBoundaryValueGradientDryValidationAndHandleIdentity",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:18Z",
+          "time": "0.007s",
+          "classname": "BoundaryIntegralInput"
+        }
+      ]
+    }
+  ]
+}

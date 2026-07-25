@@ -1,0 +1,25 @@
+The following are some of the valid targets for this Makefile:
+... all (the default if no target is provided)
+... clean
+... depend
+... edit_cache
+... install
+... install/local
+... install/strip
+... list_install_components
+... rebuild_cache
+... doc
+... _simvascular_linear_solver
+... _simvascular_thirdparty_gklib_internal
+... _simvascular_thirdparty_metis_internal
+... _simvascular_thirdparty_parmetis_internal
+... _simvascular_thirdparty_tetgen
+... _simvascular_thirdparty_tinyxml
+... svapplication
+... svfe
+... svfe_dofs
+... svmesh
+... svmultiphysics
+... svphysics
+... test_application
+... test_application_mpi

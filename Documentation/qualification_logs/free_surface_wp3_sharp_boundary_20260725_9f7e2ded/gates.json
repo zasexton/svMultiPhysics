@@ -1,0 +1,582 @@
+{
+  "closure_contract": [
+    {
+      "claim": "wet_face_constants_and_polynomials_match_analytic_half_quarter_oblique_and_fraction_sweep_moments",
+      "evidence": [
+        "GeneratedActiveBoundaryDomain.PlanarHalfAndQuarterFacesIntegratePolynomialsForBothSides",
+        "GeneratedActiveBoundaryDomain.ObliqueHexFaceIntegratesQuadraticMomentsForBothSides",
+        "GeneratedActiveBoundaryDomain.WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases",
+        "GeneratedActiveBoundaryDomain.CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping"
+      ]
+    },
+    {
+      "claim": "completely_dry_faces_have_no_rules_measure_residual_or_wet_row_work",
+      "evidence": [
+        "GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules",
+        "StandardAssemblerCutInterfaces.SharpActiveBoundaryHalfWetMeasureAndFullyDryResidualAreExact",
+        "FreeSurfaceSharpBoundaryOperators.CompletelyDryBoundaryProducesExactlyZeroWetRows"
+      ]
+    },
+    {
+      "claim": "supported_natural_weak_and_slip_operators_use_only_the_generated_active_trace",
+      "evidence": [
+        "MovingDomainPhysics.NavierStokesUnfittedNaturalAndWeakBoundaryOperatorsUseSharpActiveTrace",
+        "NavierStokesLegacyBCs.UnfittedDynamicContactAngleTranslationRoutesLineAndSharpWallGeometry",
+        "FreeSurfaceSharpBoundaryOperators.WetFractionSweepMatchesAnalyticOperatorWork",
+        "FreeSurfaceSharpBoundaryOperators.PspgBoundaryPressureFluxUsesGeneratedWetWallMeasure"
+      ]
+    },
+    {
+      "claim": "ambiguous_active_owners_fail_closed",
+      "evidence": [
+        "MovingDomainPhysics.NavierStokesUnfittedBoundaryOperatorsRejectMultipleActiveOwners"
+      ]
+    },
+    {
+      "claim": "coupled_rcr_and_rcrcr_outflows_use_generated_active_flow_and_trace_with_partition_invariant_gradient_and_traction",
+      "evidence": [
+        "BoundaryIntegralInput.GeneratedActiveBoundaryValueGradientDryValidationAndHandleIdentity",
+        "NavierStokesOutletFactory.GeneratedActiveBoundaryRoutesEveryCoupledBranch",
+        "MovingDomainPhysics.NavierStokesUnfittedCoupledOutflowVariantsUseSharpActiveTrace",
+        "MovingDomainPhysicsMPI.GeneratedActiveCoupledOutflowReductionGradientAndTractionArePartitionIndependent"
+      ]
+    },
+    {
+      "claim": "missing_generated_active_domains_and_unqualified_higher_order_exterior_forms_fail_closed",
+      "evidence": [
+        "FreeSurfaceSharpBoundaryOperators.MissingGeneratedActiveDomainFailsClosed",
+        "FreeSurfaceSharpBoundaryOperators.HigherOrderSpacesAndImplicitGeometryFailClosed",
+        "MovingDomainPhysics.NavierStokesUnfittedCoupledOutflowFamiliesRejectUnsupportedSharpEnvelope"
+      ]
+    },
+    {
+      "claim": "the_production_application_refresh_pipeline_builds_and_validates_complete_active_boundary_partitions",
+      "evidence": [
+        "ApplicationDriverLevelSetWorkflows.RefreshesMultipleGeneratedCutDomainsIntoOneContext"
+      ]
+    },
+    {
+      "claim": "active_side_reversal_selects_the_complementary_sharp_subset_without_whole_face_fallback",
+      "evidence": [
+        "GeneratedActiveBoundaryDomain.HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly",
+        "FreeSurfaceSharpBoundaryOperators.ActiveSideReversalUsesComplementarySharpSubset"
+      ]
+    },
+    {
+      "claim": "connected_structured_channel_force_flux_and_penalty_work_track_analytic_wet_measure_on_distinct_inlet_outlet_and_sidewall_markers",
+      "evidence": [
+        "FreeSurfaceSharpBoundaryOperators.StructuredManufacturedChannelTracksDistinctExteriorRoles"
+      ]
+    },
+    {
+      "claim": "global_boundary_work_jump_across_a_fixed_domain_mesh_vertex_decreases_under_structured_refinement",
+      "evidence": [
+        "FreeSurfaceSharpBoundaryOperators.StructuredVertexCrossingGlobalWorkJumpConvergesUnderRefinement"
+      ]
+    },
+    {
+      "claim": "sampled_nitsche_trace_scales_and_parent_entity_measures_are_finite_positive_and_consistent_without_claiming_a_uniform_coercivity_bound",
+      "evidence": [
+        "FreeSurfaceSharpBoundaryOperators.NitscheTraceScalingProducesFiniteSampledMargins"
+      ]
+    },
+    {
+      "claim": "wet_face_rules_and_operator_work_are_partition_independent_with_unique_distributed_ownership",
+      "evidence": [
+        "GeneratedActiveBoundaryDomainMPI.WetFractionSweepIsOwnershipUniqueAndPartitionIndependent",
+        "FreeSurfaceSharpBoundaryOperatorsMPI.OperatorWorkIsPartitionIndependent",
+        "FreeSurfaceSharpBoundaryOperatorsMPI.StructuredChannelWorkIsInvariantUnderActualRepartition",
+        "MovingDomainPhysicsMPI.GeneratedActiveCoupledOutflowReductionGradientAndTractionArePartitionIndependent"
+      ]
+    }
+  ],
+  "gates": {
+    "expected_disabled": 0,
+    "expected_distinct_test_count": 29,
+    "expected_errors": 0,
+    "expected_failures": 0,
+    "expected_group_count": 9,
+    "expected_quantitative_evidence_count": 68,
+    "expected_skipped": 0
+  },
+  "matrix_status_at_execution": "FROZEN_BEFORE_EXECUTION",
+  "qualification_scope": "Low-level WP-3 prerequisite evidence only; coupled RCR/RCRCR sharp routing is included, but this matrix does not close FSR-16, WP-3, joint WP-7, or Q1.",
+  "quantitative_evidence": [
+    {
+      "property": "active_boundary_planar_fraction_case_count",
+      "relation": "equal",
+      "test": "GeneratedActiveBoundaryDomain.PlanarHalfAndQuarterFacesIntegratePolynomialsForBothSides",
+      "threshold": 2,
+      "type": "integer"
+    },
+    {
+      "property": "active_boundary_planar_fraction_side_count",
+      "relation": "equal",
+      "test": "GeneratedActiveBoundaryDomain.PlanarHalfAndQuarterFacesIntegratePolynomialsForBothSides",
+      "threshold": 4,
+      "type": "integer"
+    },
+    {
+      "property": "active_boundary_planar_max_constant_moment_error",
+      "relation": "less_than_or_equal",
+      "test": "GeneratedActiveBoundaryDomain.PlanarHalfAndQuarterFacesIntegratePolynomialsForBothSides",
+      "threshold": 1e-13,
+      "type": "real"
+    },
+    {
+      "property": "active_boundary_planar_max_polynomial_moment_error",
+      "relation": "less_than_or_equal",
+      "test": "GeneratedActiveBoundaryDomain.PlanarHalfAndQuarterFacesIntegratePolynomialsForBothSides",
+      "threshold": 1e-13,
+      "type": "real"
+    },
+    {
+      "property": "active_boundary_planar_max_partition_error",
+      "relation": "less_than_or_equal",
+      "test": "GeneratedActiveBoundaryDomain.PlanarHalfAndQuarterFacesIntegratePolynomialsForBothSides",
+      "threshold": 1e-13,
+      "type": "real"
+    },
+    {
+      "property": "active_boundary_oblique_face_spatial_dimension",
+      "relation": "equal",
+      "test": "GeneratedActiveBoundaryDomain.ObliqueHexFaceIntegratesQuadraticMomentsForBothSides",
+      "threshold": 3,
+      "type": "integer"
+    },
+    {
+      "property": "active_boundary_oblique_face_side_count",
+      "relation": "equal",
+      "test": "GeneratedActiveBoundaryDomain.ObliqueHexFaceIntegratesQuadraticMomentsForBothSides",
+      "threshold": 2,
+      "type": "integer"
+    },
+    {
+      "property": "active_boundary_oblique_face_max_constant_moment_error",
+      "relation": "less_than_or_equal",
+      "test": "GeneratedActiveBoundaryDomain.ObliqueHexFaceIntegratesQuadraticMomentsForBothSides",
+      "threshold": 1e-13,
+      "type": "real"
+    },
+    {
+      "property": "active_boundary_oblique_face_max_polynomial_moment_error",
+      "relation": "less_than_or_equal",
+      "test": "GeneratedActiveBoundaryDomain.ObliqueHexFaceIntegratesQuadraticMomentsForBothSides",
+      "threshold": 1e-13,
+      "type": "real"
+    },
+    {
+      "property": "active_boundary_oblique_face_max_partition_error",
+      "relation": "less_than_or_equal",
+      "test": "GeneratedActiveBoundaryDomain.ObliqueHexFaceIntegratesQuadraticMomentsForBothSides",
+      "threshold": 1e-13,
+      "type": "real"
+    },
+    {
+      "property": "active_boundary_dry_rule_count",
+      "relation": "equal",
+      "test": "GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules",
+      "threshold": 0,
+      "type": "integer"
+    },
+    {
+      "property": "active_boundary_dry_measure",
+      "relation": "equal",
+      "test": "GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules",
+      "threshold": 0.0,
+      "type": "real"
+    },
+    {
+      "property": "active_boundary_full_measure",
+      "relation": "equal",
+      "test": "GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules",
+      "threshold": 2.0,
+      "type": "real"
+    },
+    {
+      "property": "sharp_natural_operator_variant_count",
+      "relation": "equal",
+      "test": "MovingDomainPhysics.NavierStokesUnfittedNaturalAndWeakBoundaryOperatorsUseSharpActiveTrace",
+      "threshold": 3,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_weak_operator_variant_count",
+      "relation": "equal",
+      "test": "MovingDomainPhysics.NavierStokesUnfittedNaturalAndWeakBoundaryOperatorsUseSharpActiveTrace",
+      "threshold": 4,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_operator_generated_trace_count",
+      "relation": "equal",
+      "test": "MovingDomainPhysics.NavierStokesUnfittedNaturalAndWeakBoundaryOperatorsUseSharpActiveTrace",
+      "threshold": 7,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_operator_whole_face_fallback_count",
+      "relation": "equal",
+      "test": "MovingDomainPhysics.NavierStokesUnfittedNaturalAndWeakBoundaryOperatorsUseSharpActiveTrace",
+      "threshold": 0,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_ambiguous_active_domain_rejection_count",
+      "relation": "equal",
+      "test": "MovingDomainPhysics.NavierStokesUnfittedBoundaryOperatorsRejectMultipleActiveOwners",
+      "threshold": 1,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_operator_fraction_case_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.WetFractionSweepMatchesAnalyticOperatorWork",
+      "threshold": 8,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_operator_family_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.WetFractionSweepMatchesAnalyticOperatorWork",
+      "threshold": 7,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_operator_active_side_case_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.WetFractionSweepMatchesAnalyticOperatorWork",
+      "threshold": 2,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_operator_maximum_scaled_force_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.WetFractionSweepMatchesAnalyticOperatorWork",
+      "threshold": 1e-10,
+      "type": "real"
+    },
+    {
+      "property": "sharp_operator_maximum_scaled_flux_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.WetFractionSweepMatchesAnalyticOperatorWork",
+      "threshold": 1e-10,
+      "type": "real"
+    },
+    {
+      "property": "sharp_operator_maximum_scaled_robin_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.WetFractionSweepMatchesAnalyticOperatorWork",
+      "threshold": 1e-10,
+      "type": "real"
+    },
+    {
+      "property": "sharp_operator_maximum_scaled_penalty_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.WetFractionSweepMatchesAnalyticOperatorWork",
+      "threshold": 1e-10,
+      "type": "real"
+    },
+    {
+      "property": "sharp_pspg_pressure_flux_fraction_case_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.PspgBoundaryPressureFluxUsesGeneratedWetWallMeasure",
+      "threshold": 8,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_pspg_pressure_flux_maximum_scaled_work_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.PspgBoundaryPressureFluxUsesGeneratedWetWallMeasure",
+      "threshold": 1e-10,
+      "type": "real"
+    },
+    {
+      "property": "sharp_pspg_pressure_flux_maximum_wet_measure_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.PspgBoundaryPressureFluxUsesGeneratedWetWallMeasure",
+      "threshold": 2e-12,
+      "type": "real"
+    },
+    {
+      "property": "sharp_active_side_case_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.ActiveSideReversalUsesComplementarySharpSubset",
+      "threshold": 2,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_active_side_maximum_complement_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.ActiveSideReversalUsesComplementarySharpSubset",
+      "threshold": 1e-12,
+      "type": "real"
+    },
+    {
+      "property": "sharp_active_side_marker_mismatch_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.ActiveSideReversalUsesComplementarySharpSubset",
+      "threshold": 0,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_dry_operator_family_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.CompletelyDryBoundaryProducesExactlyZeroWetRows",
+      "threshold": 7,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_dry_generated_rule_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.CompletelyDryBoundaryProducesExactlyZeroWetRows",
+      "threshold": 0,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_dry_repeatability_maximum_error",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.CompletelyDryBoundaryProducesExactlyZeroWetRows",
+      "threshold": 0.0,
+      "type": "real"
+    },
+    {
+      "property": "sharp_dry_whole_face_contribution_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.CompletelyDryBoundaryProducesExactlyZeroWetRows",
+      "threshold": 0,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_missing_domain_rejection_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.MissingGeneratedActiveDomainFailsClosed",
+      "threshold": 7,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_high_order_envelope_rejection_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.HigherOrderSpacesAndImplicitGeometryFailClosed",
+      "threshold": 3,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_channel_boundary_role_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.StructuredManufacturedChannelTracksDistinctExteriorRoles",
+      "threshold": 3,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_channel_structured_cell_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.StructuredManufacturedChannelTracksDistinctExteriorRoles",
+      "threshold": 96,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_channel_crossing_state_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.StructuredManufacturedChannelTracksDistinctExteriorRoles",
+      "threshold": 9,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_channel_maximum_wet_measure_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.StructuredManufacturedChannelTracksDistinctExteriorRoles",
+      "threshold": 2e-11,
+      "type": "real"
+    },
+    {
+      "property": "sharp_channel_maximum_scaled_force_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.StructuredManufacturedChannelTracksDistinctExteriorRoles",
+      "threshold": 1e-09,
+      "type": "real"
+    },
+    {
+      "property": "sharp_channel_maximum_scaled_flux_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.StructuredManufacturedChannelTracksDistinctExteriorRoles",
+      "threshold": 1e-09,
+      "type": "real"
+    },
+    {
+      "property": "sharp_channel_maximum_scaled_penalty_work_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.StructuredManufacturedChannelTracksDistinctExteriorRoles",
+      "threshold": 1e-09,
+      "type": "real"
+    },
+    {
+      "property": "sharp_vertex_crossing_refinement_level_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.StructuredVertexCrossingGlobalWorkJumpConvergesUnderRefinement",
+      "threshold": 4,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_vertex_crossing_strict_decrease_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.StructuredVertexCrossingGlobalWorkJumpConvergesUnderRefinement",
+      "threshold": 3,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_vertex_crossing_finest_structured_cell_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.StructuredVertexCrossingGlobalWorkJumpConvergesUnderRefinement",
+      "threshold": 6144,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_vertex_crossing_fine_to_coarse_jump_ratio",
+      "relation": "less_than",
+      "test": "FreeSurfaceSharpBoundaryOperators.StructuredVertexCrossingGlobalWorkJumpConvergesUnderRefinement",
+      "threshold": 1.0,
+      "type": "real"
+    },
+    {
+      "property": "sharp_nitsche_fraction_case_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.NitscheTraceScalingProducesFiniteSampledMargins",
+      "threshold": 8,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_nitsche_policy_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.NitscheTraceScalingProducesFiniteSampledMargins",
+      "threshold": 2,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_nitsche_finite_positive_sample_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.NitscheTraceScalingProducesFiniteSampledMargins",
+      "threshold": 16,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_nitsche_nonpositive_sample_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.NitscheTraceScalingProducesFiniteSampledMargins",
+      "threshold": 0,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_nitsche_maximum_scaled_consistency_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.NitscheTraceScalingProducesFiniteSampledMargins",
+      "threshold": 1e-10,
+      "type": "real"
+    },
+    {
+      "property": "sharp_nitsche_active_side_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.NitscheTraceScalingProducesFiniteSampledMargins",
+      "threshold": 2,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_nitsche_zero_area_rejection_count",
+      "relation": "equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.NitscheTraceScalingProducesFiniteSampledMargins",
+      "threshold": 16,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_nitsche_minimum_sampled_margin",
+      "relation": "greater_than",
+      "test": "FreeSurfaceSharpBoundaryOperators.NitscheTraceScalingProducesFiniteSampledMargins",
+      "threshold": 0.0,
+      "type": "real"
+    },
+    {
+      "property": "sharp_nitsche_maximum_cell_diameter_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.NitscheTraceScalingProducesFiniteSampledMargins",
+      "threshold": 1e-12,
+      "type": "real"
+    },
+    {
+      "property": "sharp_nitsche_maximum_cell_measure_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.NitscheTraceScalingProducesFiniteSampledMargins",
+      "threshold": 1e-12,
+      "type": "real"
+    },
+    {
+      "property": "sharp_nitsche_maximum_parent_facet_measure_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.NitscheTraceScalingProducesFiniteSampledMargins",
+      "threshold": 1e-12,
+      "type": "real"
+    },
+    {
+      "property": "sharp_nitsche_maximum_h_normal_error",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceSharpBoundaryOperators.NitscheTraceScalingProducesFiniteSampledMargins",
+      "threshold": 1e-12,
+      "type": "real"
+    },
+    {
+      "property": "coupled_outflow_generated_trace_variant_count",
+      "relation": "equal",
+      "test": "NavierStokesOutletFactory.GeneratedActiveBoundaryRoutesEveryCoupledBranch",
+      "threshold": 3,
+      "type": "integer"
+    },
+    {
+      "property": "coupled_outflow_physical_trace_variant_count",
+      "relation": "equal",
+      "test": "NavierStokesOutletFactory.GeneratedActiveBoundaryRoutesEveryCoupledBranch",
+      "threshold": 0,
+      "type": "integer"
+    },
+    {
+      "property": "coupled_outflow_physical_deployment_variant_count",
+      "relation": "equal",
+      "test": "NavierStokesOutletFactory.GeneratedActiveBoundaryRoutesEveryCoupledBranch",
+      "threshold": 3,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_coupled_outflow_variant_count",
+      "relation": "equal",
+      "test": "MovingDomainPhysics.NavierStokesUnfittedCoupledOutflowVariantsUseSharpActiveTrace",
+      "threshold": 3,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_coupled_outflow_generated_trace_count",
+      "relation": "equal",
+      "test": "MovingDomainPhysics.NavierStokesUnfittedCoupledOutflowVariantsUseSharpActiveTrace",
+      "threshold": 3,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_coupled_outflow_whole_face_fallback_count",
+      "relation": "equal",
+      "test": "MovingDomainPhysics.NavierStokesUnfittedCoupledOutflowVariantsUseSharpActiveTrace",
+      "threshold": 0,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_coupled_outflow_generated_flow_count",
+      "relation": "equal",
+      "test": "MovingDomainPhysics.NavierStokesUnfittedCoupledOutflowVariantsUseSharpActiveTrace",
+      "threshold": 3,
+      "type": "integer"
+    },
+    {
+      "property": "sharp_coupled_outflow_envelope_rejection_count",
+      "relation": "equal",
+      "test": "MovingDomainPhysics.NavierStokesUnfittedCoupledOutflowFamiliesRejectUnsupportedSharpEnvelope",
+      "threshold": 2,
+      "type": "integer"
+    }
+  ]
+}

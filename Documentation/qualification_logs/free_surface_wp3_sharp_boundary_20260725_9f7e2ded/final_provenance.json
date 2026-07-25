@@ -1,0 +1,398 @@
+{
+  "artifact_schema_version": 1,
+  "binaries_after_execution": {
+    "application": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "be177c4dddf329f7dff1ef148e4dd719f15fda74681e9a77c8f8401a00d4046e",
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application/bin/test_application",
+      "sha256": "be177c4dddf329f7dff1ef148e4dd719f15fda74681e9a77c8f8401a00d4046e"
+    },
+    "application_mpi": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "e6fbec7361b7c3ac3f1b29ebe4e6ee8ffea19715767dd5922c146f8c7faca95b",
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-application/bin/test_application_mpi",
+      "sha256": "e6fbec7361b7c3ac3f1b29ebe4e6ee8ffea19715767dd5922c146f8c7faca95b"
+    },
+    "assembly": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "b157706be848193202d4529c9a2fb8864466e3cca362ba222b915589acf509f4",
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_assembly",
+      "sha256": "b157706be848193202d4529c9a2fb8864466e3cca362ba222b915589acf509f4"
+    },
+    "assembly_mpi": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "b4bb6e05213912dd6911e65f31ec9e71b6a1a07f3cf8b38cf72afae2eb63bbd2",
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_assembly_mpi",
+      "sha256": "b4bb6e05213912dd6911e65f31ec9e71b6a1a07f3cf8b38cf72afae2eb63bbd2"
+    },
+    "geometry": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "54719a4b4cd5edf72b88978b583d969ec334375e9f5cf5aa76c86a2bc0101e1e",
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_geometry",
+      "sha256": "54719a4b4cd5edf72b88978b583d969ec334375e9f5cf5aa76c86a2bc0101e1e"
+    },
+    "level_set": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "fcd6973e9a06f0a81c0374015d043156a4f9d917b7209858cab28dbc8a11b158",
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_levelset",
+      "sha256": "fcd6973e9a06f0a81c0374015d043156a4f9d917b7209858cab28dbc8a11b158"
+    },
+    "physics": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "275d1e6b2ec9ce2c71ce3804a264fe51f23eebf0e21dc8b274450ab827be7928",
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-physics-gcc/test_physics",
+      "sha256": "275d1e6b2ec9ce2c71ce3804a264fe51f23eebf0e21dc8b274450ab827be7928"
+    },
+    "systems": {
+      "executable": true,
+      "exists": true,
+      "expected_sha256": "acdf1b9582553e50d55901d03c0da9030adf509e45bcce7f72c881cdd51f02ee",
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_systems",
+      "sha256": "acdf1b9582553e50d55901d03c0da9030adf509e45bcce7f72c881cdd51f02ee"
+    }
+  },
+  "canonical_registry": "/tmp/svmp-wp3-worktree-qGVgK2pT/tests/cases/fluid/free_surface_wp3_sharp_boundary_qualification_matrix_v2.json",
+  "checks": [
+    {
+      "actual": "9f7e2deda9eb897edf3634cc90210b8f437e9ded",
+      "expected": "9f7e2deda9eb897edf3634cc90210b8f437e9ded",
+      "metric": "source_commit",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "6a0b13715f27b9dc8928221e82de916ed29623c4",
+      "expected": "6a0b13715f27b9dc8928221e82de916ed29623c4",
+      "metric": "source_tree",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "",
+      "expected": "",
+      "metric": "tracked_status",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "unexpected_untracked_path_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "72cffdc330f07b386fdb89681bcd3da83b7f884c5bd1d09f49eef3f6ae79d883",
+      "expected": "72cffdc330f07b386fdb89681bcd3da83b7f884c5bd1d09f49eef3f6ae79d883",
+      "metric": "registry_sha256",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "634a003c8cde429756787771bd4c870ee453a372b95d704fb98e2e10b99876e0",
+      "expected": "634a003c8cde429756787771bd4c870ee453a372b95d704fb98e2e10b99876e0",
+      "metric": "runner_sha256",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:application",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:application",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "be177c4dddf329f7dff1ef148e4dd719f15fda74681e9a77c8f8401a00d4046e",
+      "expected": "be177c4dddf329f7dff1ef148e4dd719f15fda74681e9a77c8f8401a00d4046e",
+      "metric": "binary_sha256:application",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:application_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:application_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "e6fbec7361b7c3ac3f1b29ebe4e6ee8ffea19715767dd5922c146f8c7faca95b",
+      "expected": "e6fbec7361b7c3ac3f1b29ebe4e6ee8ffea19715767dd5922c146f8c7faca95b",
+      "metric": "binary_sha256:application_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:assembly",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:assembly",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "b157706be848193202d4529c9a2fb8864466e3cca362ba222b915589acf509f4",
+      "expected": "b157706be848193202d4529c9a2fb8864466e3cca362ba222b915589acf509f4",
+      "metric": "binary_sha256:assembly",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:assembly_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:assembly_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "b4bb6e05213912dd6911e65f31ec9e71b6a1a07f3cf8b38cf72afae2eb63bbd2",
+      "expected": "b4bb6e05213912dd6911e65f31ec9e71b6a1a07f3cf8b38cf72afae2eb63bbd2",
+      "metric": "binary_sha256:assembly_mpi",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:geometry",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:geometry",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "54719a4b4cd5edf72b88978b583d969ec334375e9f5cf5aa76c86a2bc0101e1e",
+      "expected": "54719a4b4cd5edf72b88978b583d969ec334375e9f5cf5aa76c86a2bc0101e1e",
+      "metric": "binary_sha256:geometry",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:level_set",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:level_set",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "fcd6973e9a06f0a81c0374015d043156a4f9d917b7209858cab28dbc8a11b158",
+      "expected": "fcd6973e9a06f0a81c0374015d043156a4f9d917b7209858cab28dbc8a11b158",
+      "metric": "binary_sha256:level_set",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:physics",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:physics",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "275d1e6b2ec9ce2c71ce3804a264fe51f23eebf0e21dc8b274450ab827be7928",
+      "expected": "275d1e6b2ec9ce2c71ce3804a264fe51f23eebf0e21dc8b274450ab827be7928",
+      "metric": "binary_sha256:physics",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_exists:systems",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "binary_executable:systems",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "acdf1b9582553e50d55901d03c0da9030adf509e45bcce7f72c881cdd51f02ee",
+      "expected": "acdf1b9582553e50d55901d03c0da9030adf509e45bcce7f72c881cdd51f02ee",
+      "metric": "binary_sha256:systems",
+      "passed": true,
+      "relation": "equal"
+    }
+  ],
+  "diagnostics": [],
+  "open_outcomes": {
+    "fsr16": "OPEN",
+    "joint_wp7": "OPEN",
+    "q1": "OPEN",
+    "wp3": "OPEN"
+  },
+  "outcome": "PASS",
+  "qualification_scope": "Low-level WP-3 prerequisite evidence only; coupled RCR/RCRCR sharp routing is included, but this matrix does not close FSR-16, WP-3, joint WP-7, or Q1.",
+  "registry_sha256_after_execution": "72cffdc330f07b386fdb89681bcd3da83b7f884c5bd1d09f49eef3f6ae79d883",
+  "registry_sha256_before_execution": "72cffdc330f07b386fdb89681bcd3da83b7f884c5bd1d09f49eef3f6ae79d883",
+  "requested_claim": "low_level_prerequisite",
+  "runner_sha256_after_execution": "634a003c8cde429756787771bd4c870ee453a372b95d704fb98e2e10b99876e0",
+  "runner_sha256_before_execution": "634a003c8cde429756787771bd4c870ee453a372b95d704fb98e2e10b99876e0",
+  "shared_runner_dependency": {
+    "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/tests/cases/fluid/run_free_surface_wp2_geometry_qualification.py",
+    "sha256": "5aea557b1bd3123116bbf034f39c0dd5f914f66286df65dd2250ec9bd906561f"
+  },
+  "source_commit_after_execution": "9f7e2deda9eb897edf3634cc90210b8f437e9ded",
+  "source_commit_before_execution": "9f7e2deda9eb897edf3634cc90210b8f437e9ded",
+  "source_tree_after_execution": "6a0b13715f27b9dc8928221e82de916ed29623c4",
+  "source_tree_before_execution": "6a0b13715f27b9dc8928221e82de916ed29623c4",
+  "tracked_status_after_execution": "",
+  "untracked_sources_after_execution": {
+    "allowed_output_path_count": 73,
+    "allowed_output_path_list_sha256": "538f7d26d5a06cd05734c2ae38022d00cbfd584687353370a6a474feb9a165fd",
+    "allowed_output_paths": [
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/build.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/build_preflight.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_01/build_stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_01/build_stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_01/clean_stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_01/clean_stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_01/configure_stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_01/configure_stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_01/result.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_02/build_stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_02/build_stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_02/clean_stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_02/clean_stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_02/configure_stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_02/configure_stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_02/result.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_03/build_stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_03/build_stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_03/clean_stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_03/clean_stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_03/configure_stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_03/configure_stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/build_03/result.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/target_inventory_01_stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/target_inventory_01_stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/target_inventory_02_stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/target_inventory_02_stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/target_inventory_03_stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/builds/target_inventory_03_stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/gates.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/group_recorded_properties.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_application_serial/gtest.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_application_serial/result.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_application_serial/stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_application_serial/stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_assembly_mpi/gtest_rank_0.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_assembly_mpi/gtest_rank_1.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_assembly_mpi/result.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_assembly_mpi/stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_assembly_mpi/stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_assembly_serial/gtest.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_assembly_serial/result.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_assembly_serial/stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_assembly_serial/stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_coupled_outflow_mpi/gtest_rank_0.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_coupled_outflow_mpi/gtest_rank_1.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_coupled_outflow_mpi/result.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_coupled_outflow_mpi/stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_coupled_outflow_mpi/stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_geometry_serial/gtest.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_geometry_serial/result.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_geometry_serial/stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_geometry_serial/stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_operators_mpi/gtest_rank_0.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_operators_mpi/gtest_rank_1.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_operators_mpi/result.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_operators_mpi/stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_operators_mpi/stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_operators_serial/gtest.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_operators_serial/result.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_operators_serial/stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_operators_serial/stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_structured_mpi/gtest_rank_0.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_structured_mpi/gtest_rank_1.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_structured_mpi/result.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_structured_mpi/stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_structured_mpi/stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_systems_serial/gtest.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_systems_serial/result.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_systems_serial/stderr.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_systems_serial/stdout.txt",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/manifest.json",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/quantitative_evidence.json"
+    ],
+    "allowed_output_root": "/tmp/svmp-wp3-worktree-qGVgK2pT/Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded",
+    "ignored_scan_roots": [
+      "Code",
+      "Code/Source/solver/FE",
+      "Code/Source/solver/Physics",
+      "Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded"
+    ],
+    "ignored_source_path_count": 27,
+    "ordinary_path_count": 46,
+    "path_count": 73,
+    "path_list_sha256": "538f7d26d5a06cd05734c2ae38022d00cbfd584687353370a6a474feb9a165fd",
+    "unexpected_path_count": 0,
+    "unexpected_path_list_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "unexpected_paths": []
+  }
+}

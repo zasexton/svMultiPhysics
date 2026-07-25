@@ -1,0 +1,48 @@
+{
+  "tests": 1,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-25T02:22:42Z",
+  "time": "2.829s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "FreeSurfaceSharpBoundaryOperatorsMPI",
+      "tests": 1,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-25T02:22:42Z",
+      "time": "2.829s",
+      "testsuite": [
+        {
+          "name": "OperatorWorkIsPartitionIndependent",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:42Z",
+          "time": "2.829s",
+          "classname": "FreeSurfaceSharpBoundaryOperatorsMPI",
+          "sharp_operator_mpi_rank_count": "2",
+          "sharp_operator_mpi_fraction_case_count": "8",
+          "sharp_operator_mpi_active_side_case_count": "2",
+          "sharp_operator_mpi_family_count": "7",
+          "sharp_operator_mpi_partition_case_count": "112",
+          "sharp_operator_mpi_minimum_owner_multiplicity": "1",
+          "sharp_operator_mpi_maximum_owner_multiplicity": "1",
+          "sharp_operator_mpi_minimum_full_residual_norm": "7.58287544405155181e-03",
+          "sharp_operator_mpi_maximum_residual_error": "0.00000000000000000e+00",
+          "sharp_operator_mpi_maximum_jacobian_error": "0.00000000000000000e+00",
+          "sharp_operator_mpi_maximum_work_error": "0.00000000000000000e+00",
+          "sharp_operator_mpi_maximum_residual_scaling_error": "3.46944695195361419e-18",
+          "sharp_operator_mpi_maximum_jacobian_scaling_error": "6.93889390390722838e-18",
+          "sharp_operator_mpi_trace_sample_count": "32",
+          "sharp_operator_mpi_positive_trace_sample_count": "32",
+          "sharp_operator_mpi_minimum_trace_margin": "6.86249997447615916e-11",
+          "sharp_operator_mpi_maximum_trace_partition_error": "0.00000000000000000e+00",
+          "sharp_operator_mpi_maximum_trace_consistency_error": "1.26391510089384856e-15"
+        }
+      ]
+    }
+  ]
+}

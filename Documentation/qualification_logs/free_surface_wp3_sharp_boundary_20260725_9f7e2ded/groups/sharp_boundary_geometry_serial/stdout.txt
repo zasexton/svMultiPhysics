@@ -1,0 +1,23 @@
+Note: Google Test filter = GeneratedActiveBoundaryDomain.HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly:GeneratedActiveBoundaryDomain.PlanarHalfAndQuarterFacesIntegratePolynomialsForBothSides:GeneratedActiveBoundaryDomain.ObliqueHexFaceIntegratesQuadraticMomentsForBothSides:GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules:GeneratedActiveBoundaryDomain.WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases:GeneratedActiveBoundaryDomain.CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping:GeneratedActiveBoundaryDomain.RejectsScalarRootThatDoesNotMatchAuthoritativeContactTrace
+[==========] Running 7 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 7 tests from GeneratedActiveBoundaryDomain
+[ RUN      ] GeneratedActiveBoundaryDomain.HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly
+[       OK ] GeneratedActiveBoundaryDomain.HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.PlanarHalfAndQuarterFacesIntegratePolynomialsForBothSides
+[       OK ] GeneratedActiveBoundaryDomain.PlanarHalfAndQuarterFacesIntegratePolynomialsForBothSides (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.ObliqueHexFaceIntegratesQuadraticMomentsForBothSides
+[       OK ] GeneratedActiveBoundaryDomain.ObliqueHexFaceIntegratesQuadraticMomentsForBothSides (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules
+[       OK ] GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.RejectsScalarRootThatDoesNotMatchAuthoritativeContactTrace
+[       OK ] GeneratedActiveBoundaryDomain.RejectsScalarRootThatDoesNotMatchAuthoritativeContactTrace (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases
+[       OK ] GeneratedActiveBoundaryDomain.WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases (0 ms)
+[ RUN      ] GeneratedActiveBoundaryDomain.CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping
+[       OK ] GeneratedActiveBoundaryDomain.CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping (0 ms)
+[----------] 7 tests from GeneratedActiveBoundaryDomain (1 ms total)
+
+[----------] Global test environment tear-down
+[==========] 7 tests from 1 test suite ran. (1 ms total)
+[  PASSED  ] 7 tests.

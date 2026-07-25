@@ -1,0 +1,764 @@
+[02:22:41.893] [R1] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:41.893] [R0] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:41.894] [R0] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=231 level_set_field='phi_sharp_partition_work' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:41.894] [R1] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=231 level_set_field='phi_sharp_partition_work' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:41.899] [R0] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:41.899] [R1] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:41.899] [R0] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=231 level_set_field='phi_sharp_partition_work' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:41.899] [R1] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=231 level_set_field='phi_sharp_partition_work' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[GaugeRegistry] MPI run: using global gauge scoping; per-region gauge scoping requires globally consistent connected-component labels.
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000897 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000897 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000039 s  (  4.3%)
+      Cut volumes:       0.000856 s  ( 95.5%)
+      Global terms:      0.000001 s  (  0.2%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000943 s
+    Cell terms:          0.000001 s  (  0.1%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000943 s  ( 99.9%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000043 s  (  4.6%)
+      Cut volumes:       0.000898 s  ( 95.2%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223928 process_rss_kb=31536
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000884 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000884 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000170 s  ( 19.2%)
+      Cut volumes:       0.000713 s  ( 80.6%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000905 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000905 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000170 s  ( 18.8%)
+      Cut volumes:       0.000733 s  ( 81.0%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223928 process_rss_kb=31536
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000789 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000789 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000015 s  (  1.9%)
+      Cut volumes:       0.000768 s  ( 97.2%)
+      Global terms:      0.000006 s  (  0.8%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000789 /  0.000790 /  0.000790 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000789 /  0.000789 /  0.000789 s
+    Rank min/mean/max cut-vol:   0.000049 /  0.000408 /  0.000768 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000889 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000889 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000164 s  ( 18.5%)
+      Cut volumes:       0.000723 s  ( 81.3%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000880 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000879 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000167 s  ( 18.9%)
+      Cut volumes:       0.000711 s  ( 80.9%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223928 process_rss_kb=31536
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000914 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000913 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000177 s  ( 19.4%)
+      Cut volumes:       0.000730 s  ( 79.9%)
+      Global terms:      0.000006 s  (  0.6%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000914 /  0.000914 /  0.000914 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000913 /  0.000914 /  0.000914 s
+    Rank min/mean/max cut-vol:   0.000046 /  0.000388 /  0.000730 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000895 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000895 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000164 s  ( 18.3%)
+      Cut volumes:       0.000730 s  ( 81.5%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000877 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000877 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000166 s  ( 18.9%)
+      Cut volumes:       0.000710 s  ( 80.9%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223928 process_rss_kb=31536
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000914 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000913 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000174 s  ( 19.1%)
+      Cut volumes:       0.000733 s  ( 80.2%)
+      Global terms:      0.000006 s  (  0.7%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000913 /  0.000913 /  0.000914 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000913 /  0.000913 /  0.000913 s
+    Rank min/mean/max cut-vol:   0.000042 /  0.000387 /  0.000733 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000880 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000880 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000163 s  ( 18.5%)
+      Cut volumes:       0.000715 s  ( 81.3%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000877 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000876 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000165 s  ( 18.8%)
+      Cut volumes:       0.000710 s  ( 81.0%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223928 process_rss_kb=31536
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000936 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000935 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000174 s  ( 18.5%)
+      Cut volumes:       0.000755 s  ( 80.7%)
+      Global terms:      0.000007 s  (  0.7%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000936 /  0.000936 /  0.000936 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000935 /  0.000935 /  0.000935 s
+    Rank min/mean/max cut-vol:   0.000042 /  0.000398 /  0.000755 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000902 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000901 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000183 s  ( 20.3%)
+      Cut volumes:       0.000717 s  ( 79.5%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000912 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000911 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000180 s  ( 19.7%)
+      Cut volumes:       0.000731 s  ( 80.1%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223928 process_rss_kb=31536
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000914 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000914 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000187 s  ( 20.5%)
+      Cut volumes:       0.000721 s  ( 78.9%)
+      Global terms:      0.000005 s  (  0.6%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000914 /  0.000915 /  0.000915 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000914 /  0.000914 /  0.000915 s
+    Rank min/mean/max cut-vol:   0.000051 /  0.000386 /  0.000721 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000870 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000870 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000165 s  ( 19.0%)
+      Cut volumes:       0.000703 s  ( 80.8%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000877 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000877 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000163 s  ( 18.6%)
+      Cut volumes:       0.000713 s  ( 81.3%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223928 process_rss_kb=31536
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000813 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000813 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000175 s  ( 21.5%)
+      Cut volumes:       0.000634 s  ( 77.9%)
+      Global terms:      0.000004 s  (  0.5%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000813 /  0.000813 /  0.000813 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000813 /  0.000813 /  0.000813 s
+    Rank min/mean/max cut-vol:   0.000046 /  0.000340 /  0.000634 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000735 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000734 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000140 s  ( 19.0%)
+      Cut volumes:       0.000594 s  ( 80.8%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000738 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000738 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000138 s  ( 18.7%)
+      Cut volumes:       0.000599 s  ( 81.1%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223928 process_rss_kb=31536
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000766 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000765 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000153 s  ( 19.9%)
+      Cut volumes:       0.000608 s  ( 79.4%)
+      Global terms:      0.000005 s  (  0.6%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000766 /  0.000766 /  0.000766 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000765 /  0.000766 /  0.000766 s
+    Rank min/mean/max cut-vol:   0.000034 /  0.000321 /  0.000608 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000740 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000740 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000139 s  ( 18.8%)
+      Cut volumes:       0.000600 s  ( 81.0%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000753 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000753 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000137 s  ( 18.2%)
+      Cut volumes:       0.000615 s  ( 81.6%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223928 process_rss_kb=31536
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000766 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000766 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000147 s  ( 19.1%)
+      Cut volumes:       0.000614 s  ( 80.1%)
+      Global terms:      0.000005 s  (  0.7%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000766 /  0.000766 /  0.000766 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000766 /  0.000766 /  0.000766 s
+    Rank min/mean/max cut-vol:   0.000038 /  0.000326 /  0.000614 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000739 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000739 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000139 s  ( 18.8%)
+      Cut volumes:       0.000599 s  ( 81.0%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000754 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000754 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000138 s  ( 18.3%)
+      Cut volumes:       0.000614 s  ( 81.5%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223928 process_rss_kb=31536
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000663 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000662 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000128 s  ( 19.3%)
+      Cut volumes:       0.000531 s  ( 80.1%)
+      Global terms:      0.000004 s  (  0.6%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000663 /  0.000663 /  0.000663 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000662 /  0.000662 /  0.000662 s
+    Rank min/mean/max cut-vol:   0.000029 /  0.000280 /  0.000531 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=223924 process_rss_kb=31892
+[02:22:41.922] [R1] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:41.922] [R1] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=231 level_set_field='phi_sharp_partition_work' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:41.922] [R0] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:41.922] [R0] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=231 level_set_field='phi_sharp_partition_work' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:41.925] [R0] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:41.925] [R0] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=231 level_set_field='phi_sharp_partition_work' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:41.925] [R1] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:41.925] [R1] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=231 level_set_field='phi_sharp_partition_work' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[GaugeRegistry] MPI run: using global gauge scoping; per-region gauge scoping requires globally consistent connected-component labels.
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000557 s
+    Cell terms:          0.000001 s  (  0.1%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000557 s  ( 99.9%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000012 s  (  2.2%)
+      Cut volumes:       0.000543 s  ( 97.5%)
+      Global terms:      0.000001 s  (  0.2%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000543 s
+    Cell terms:          0.000001 s  (  0.1%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000542 s  ( 99.9%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000012 s  (  2.2%)
+      Cut volumes:       0.000529 s  ( 97.5%)
+      Global terms:      0.000001 s  (  0.2%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224068 process_rss_kb=31684
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=31996
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000588 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000588 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000126 s  ( 21.4%)
+      Cut volumes:       0.000461 s  ( 78.5%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000593 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000593 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000121 s  ( 20.4%)
+      Cut volumes:       0.000471 s  ( 79.4%)
+      Global terms:      0.000001 s  (  0.2%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224068 process_rss_kb=31684
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=31996
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000523 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000522 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000010 s  (  1.9%)
+      Cut volumes:       0.000029 s  (  5.5%)
+      Global terms:      0.000484 s  ( 92.5%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000522 /  0.000523 /  0.000523 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000522 /  0.000522 /  0.000522 s
+    Rank min/mean/max cut-vol:   0.000029 /  0.000266 /  0.000503 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000567 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000567 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000107 s  ( 18.9%)
+      Cut volumes:       0.000458 s  ( 80.9%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000578 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000578 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000113 s  ( 19.6%)
+      Cut volumes:       0.000463 s  ( 80.2%)
+      Global terms:      0.000001 s  (  0.2%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224068 process_rss_kb=31692
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000570 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000570 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000009 s  (  1.6%)
+      Cut volumes:       0.000029 s  (  5.1%)
+      Global terms:      0.000531 s  ( 93.2%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000570 /  0.000570 /  0.000570 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000570 /  0.000570 /  0.000570 s
+    Rank min/mean/max cut-vol:   0.000029 /  0.000238 /  0.000446 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000511 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000511 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000092 s  ( 18.0%)
+      Cut volumes:       0.000418 s  ( 81.8%)
+      Global terms:      0.000001 s  (  0.2%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000515 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000515 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000097 s  ( 18.8%)
+      Cut volumes:       0.000417 s  ( 81.0%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224068 process_rss_kb=31692
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000522 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000521 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000007 s  (  1.4%)
+      Cut volumes:       0.000026 s  (  4.9%)
+      Global terms:      0.000488 s  ( 93.6%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000522 /  0.000522 /  0.000522 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000521 /  0.000521 /  0.000521 s
+    Rank min/mean/max cut-vol:   0.000026 /  0.000219 /  0.000412 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000509 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000509 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000092 s  ( 18.0%)
+      Cut volumes:       0.000417 s  ( 81.9%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000520 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000520 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000102 s  ( 19.6%)
+      Cut volumes:       0.000418 s  ( 80.2%)
+      Global terms:      0.000001 s  (  0.2%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224068 process_rss_kb=31692
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000520 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000520 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000007 s  (  1.4%)
+      Cut volumes:       0.000025 s  (  4.8%)
+      Global terms:      0.000488 s  ( 93.7%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000520 /  0.000520 /  0.000520 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000520 /  0.000520 /  0.000520 s
+    Rank min/mean/max cut-vol:   0.000025 /  0.000221 /  0.000417 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000500 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000500 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000092 s  ( 18.5%)
+      Cut volumes:       0.000407 s  ( 81.4%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000512 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000512 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000096 s  ( 18.7%)
+      Cut volumes:       0.000415 s  ( 81.1%)
+      Global terms:      0.000001 s  (  0.2%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224068 process_rss_kb=31692
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000526 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000526 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000007 s  (  1.4%)
+      Cut volumes:       0.000025 s  (  4.8%)
+      Global terms:      0.000494 s  ( 93.8%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000526 /  0.000527 /  0.000527 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000526 /  0.000526 /  0.000527 s
+    Rank min/mean/max cut-vol:   0.000025 /  0.000221 /  0.000417 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000501 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000501 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000092 s  ( 18.4%)
+      Cut volumes:       0.000408 s  ( 81.5%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000513 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000513 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000095 s  ( 18.6%)
+      Cut volumes:       0.000417 s  ( 81.2%)
+      Global terms:      0.000001 s  (  0.2%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224068 process_rss_kb=31692
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000517 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000517 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000008 s  (  1.5%)
+      Cut volumes:       0.000031 s  (  6.0%)
+      Global terms:      0.000478 s  ( 92.5%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000517 /  0.000517 /  0.000517 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000517 /  0.000517 /  0.000517 s
+    Rank min/mean/max cut-vol:   0.000031 /  0.000218 /  0.000405 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000470 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000470 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000085 s  ( 18.1%)
+      Cut volumes:       0.000384 s  ( 81.7%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000480 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000479 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000090 s  ( 18.7%)
+      Cut volumes:       0.000389 s  ( 81.1%)
+      Global terms:      0.000001 s  (  0.2%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224068 process_rss_kb=31692
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000481 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000481 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000007 s  (  1.4%)
+      Cut volumes:       0.000023 s  (  4.8%)
+      Global terms:      0.000451 s  ( 93.7%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000481 /  0.000482 /  0.000482 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000481 /  0.000481 /  0.000482 s
+    Rank min/mean/max cut-vol:   0.000023 /  0.000202 /  0.000381 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000482 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000481 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000089 s  ( 18.4%)
+      Cut volumes:       0.000392 s  ( 81.4%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000509 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000509 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000086 s  ( 16.9%)
+      Cut volumes:       0.000422 s  ( 82.9%)
+      Global terms:      0.000001 s  (  0.2%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224068 process_rss_kb=31692
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000477 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000476 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000007 s  (  1.5%)
+      Cut volumes:       0.000023 s  (  4.9%)
+      Global terms:      0.000446 s  ( 93.6%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000477 /  0.000477 /  0.000477 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000476 /  0.000477 /  0.000477 s
+    Rank min/mean/max cut-vol:   0.000023 /  0.000202 /  0.000380 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000469 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000468 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000085 s  ( 18.1%)
+      Cut volumes:       0.000383 s  ( 81.7%)
+      Global terms:      0.000001 s  (  0.1%)
+  ================================================
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000483 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000483 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000089 s  ( 18.3%)
+      Cut volumes:       0.000393 s  ( 81.4%)
+      Global terms:      0.000001 s  (  0.2%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224068 process_rss_kb=31692
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.000482 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.000482 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.000007 s  (  1.4%)
+      Cut volumes:       0.000023 s  (  4.9%)
+      Global terms:      0.000452 s  ( 93.7%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000482 /  0.000483 /  0.000483 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000482 /  0.000482 /  0.000483 s
+    Rank min/mean/max cut-vol:   0.000023 /  0.000203 /  0.000382 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=224056 process_rss_kb=32000

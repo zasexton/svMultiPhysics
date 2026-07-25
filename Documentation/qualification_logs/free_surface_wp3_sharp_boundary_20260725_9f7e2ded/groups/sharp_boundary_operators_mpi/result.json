@@ -1,0 +1,397 @@
+{
+  "checks": [
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "process_return_code",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": null,
+      "expected": null,
+      "metric": "termination_reason",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "failure_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "error_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "disabled_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "skipped_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "failure_marker_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "stderr_failure_marker_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_run_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_completed_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 1,
+      "expected": 1,
+      "metric": "run_multiplicity:FreeSurfaceSharpBoundaryOperatorsMPI.OperatorWorkIsPartitionIndependent",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 1,
+      "expected": 1,
+      "metric": "pass_multiplicity:FreeSurfaceSharpBoundaryOperatorsMPI.OperatorWorkIsPartitionIndependent",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [
+        "gtest_rank_0.json",
+        "gtest_rank_1.json"
+      ],
+      "expected": [
+        "gtest_rank_0.json",
+        "gtest_rank_1.json"
+      ],
+      "metric": "mpi_gtest_result_files",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "mpi_gtest_result_present:0",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "mpi_gtest_result_valid:0",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "mpi_gtest_rank_0:process_return_code",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": null,
+      "expected": null,
+      "metric": "mpi_gtest_rank_0:termination_reason",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 1,
+      "expected": 1,
+      "metric": "mpi_gtest_rank_0:test_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "mpi_gtest_rank_0:failure_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "mpi_gtest_rank_0:error_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "mpi_gtest_rank_0:disabled_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "mpi_gtest_rank_0:skipped_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "mpi_gtest_rank_0:skipped_result_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "mpi_gtest_rank_0:skipped_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "mpi_gtest_rank_0:missing_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "mpi_gtest_rank_0:unexpected_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "mpi_gtest_rank_0:incomplete_or_skipped_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "mpi_gtest_rank_0:tests_with_failure_records",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "mpi_gtest_result_present:1",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": true,
+      "expected": true,
+      "metric": "mpi_gtest_result_valid:1",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "mpi_gtest_rank_1:process_return_code",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": null,
+      "expected": null,
+      "metric": "mpi_gtest_rank_1:termination_reason",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 1,
+      "expected": 1,
+      "metric": "mpi_gtest_rank_1:test_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "mpi_gtest_rank_1:failure_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "mpi_gtest_rank_1:error_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "mpi_gtest_rank_1:disabled_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "mpi_gtest_rank_1:skipped_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "mpi_gtest_rank_1:skipped_result_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "mpi_gtest_rank_1:skipped_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "mpi_gtest_rank_1:missing_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "mpi_gtest_rank_1:unexpected_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "mpi_gtest_rank_1:incomplete_or_skipped_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "mpi_gtest_rank_1:tests_with_failure_records",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "PASS",
+      "expected": "PASS",
+      "metric": "resource_monitoring_outcome",
+      "passed": true,
+      "relation": "equal"
+    }
+  ],
+  "command": [
+    "/usr/bin/orterun",
+    "--oversubscribe",
+    "-n",
+    "2",
+    "/bin/sh",
+    "-c",
+    "rank_value=\"${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-${PMIX_RANK:-${MV2_COMM_WORLD_RANK:-${SLURM_PROCID:-}}}}}\"; case \"$rank_value\" in \"\"|*[!0-9]*) echo \"invalid or missing MPI rank\" >&2; exit 97;; esac; exec \"$1\" \"$2\" \"$3\" \"--gtest_output=json:${4}/gtest_rank_${rank_value}.json\"",
+    "qualification-rank",
+    "/tmp/svmp-wp3-worktree-qGVgK2pT/build-physics-gcc/test_physics",
+    "--gtest_filter=FreeSurfaceSharpBoundaryOperatorsMPI.OperatorWorkIsPartitionIndependent",
+    "--gtest_color=no",
+    "/tmp/svmp-wp3-worktree-qGVgK2pT/Documentation/qualification_logs/free_surface_wp3_sharp_boundary_20260725_9f7e2ded/groups/sharp_boundary_operators_mpi"
+  ],
+  "diagnostic": null,
+  "execution": {
+    "memory_mib": 8192,
+    "output_mib": 256,
+    "wall_time_seconds": 1800
+  },
+  "expected_tests": [
+    "FreeSurfaceSharpBoundaryOperatorsMPI.OperatorWorkIsPartitionIndependent"
+  ],
+  "group_id": "sharp_boundary_operators_mpi",
+  "gtest_output_copies": 1,
+  "gtest_result_error": null,
+  "mpi_gtest_results": [
+    {
+      "error": null,
+      "gtest_result": "groups/sharp_boundary_operators_mpi/gtest_rank_0.json",
+      "present": true,
+      "rank": 0,
+      "sha256": "4c45afcee7ba3f7387ea937dfd99376e9473a5e853408ee748f4d738e8ea245b",
+      "valid": true
+    },
+    {
+      "error": null,
+      "gtest_result": "groups/sharp_boundary_operators_mpi/gtest_rank_1.json",
+      "present": true,
+      "rank": 1,
+      "sha256": "4c45afcee7ba3f7387ea937dfd99376e9473a5e853408ee748f4d738e8ea245b",
+      "valid": true
+    }
+  ],
+  "mpi_ranks": 2,
+  "outcome": "PASS",
+  "resources": {
+    "aggregate_memory_measurement": "sampled_peak",
+    "complete_session_process_coverage": true,
+    "final_output_bytes": 1051803,
+    "launch_mode": "mpi",
+    "memory_enforcement_method": "per_process_address_space_limit_and_sampled_session_resident_memory",
+    "memory_enforcement_scope": "spawned_process_session",
+    "monitor_sample_count": 46,
+    "peak_aggregate_resident_kib_sampled": 108756,
+    "peak_process_count_sampled": 3,
+    "peak_process_group_count_sampled": 3,
+    "peak_resident_kib_sampled": 27452,
+    "peak_resident_sample_count": 3,
+    "process_session_id": 1511867,
+    "reaped_launcher_fallback_allowed": false,
+    "reaped_launcher_fallback_requires_session_enumeration": true,
+    "reaped_launcher_fallback_scope": "direct_serial_launcher_process",
+    "reaped_launcher_fallback_source": "wait4_ru_maxrss",
+    "reaped_launcher_fallback_used": false,
+    "reaped_launcher_max_resident_kib": 40624,
+    "reaped_launcher_rusage_available": true,
+    "required_simultaneous_process_samples": 3,
+    "resident_read_failure_count": 1,
+    "resource_monitoring_method": "sampled_process_session",
+    "resource_monitoring_outcome": "PASS",
+    "return_code": 0,
+    "session_enumeration_failure_count": 0,
+    "stat_read_failure_count": 0,
+    "successful_session_sample_count": 45,
+    "termination": null,
+    "termination_reason": null,
+    "wall_time_seconds": 3.213390465010889
+  }
+}

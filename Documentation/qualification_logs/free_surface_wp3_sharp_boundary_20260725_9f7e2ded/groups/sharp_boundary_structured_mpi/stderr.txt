@@ -1,0 +1,136 @@
+[02:22:45.539] [R1] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:45.539] [R0] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:45.539] [R0] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=239 level_set_field='phi_structured_channel' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:45.539] [R1] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=239 level_set_field='phi_structured_channel' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:45.557] [R1] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:45.557] [R0] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:45.557] [R1] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=239 level_set_field='phi_structured_channel' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:45.557] [R0] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=239 level_set_field='phi_structured_channel' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:45.568] [R0] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:45.568] [R1] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:45.568] [R1] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=239 level_set_field='phi_structured_channel' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:45.568] [R0] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=239 level_set_field='phi_structured_channel' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:45.577] [R1] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:45.577] [R1] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=239 level_set_field='phi_structured_channel' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:45.577] [R0] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:45.577] [R0] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=239 level_set_field='phi_structured_channel' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:45.585] [R1] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:45.585] [R1] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=239 level_set_field='phi_structured_channel' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:45.585] [R0] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:45.585] [R0] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=239 level_set_field='phi_structured_channel' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:45.592] [R0] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:45.592] [R0] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=239 level_set_field='phi_structured_channel' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+[02:22:45.592] [R1] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem
+[02:22:45.592] [R1] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=239 level_set_field='phi_structured_channel' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.046318 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.046317 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.004078 s  (  8.8%)
+      Cut volumes:       0.042231 s  ( 91.2%)
+      Global terms:      0.000008 s  (  0.0%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=231480 process_rss_kb=39112
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.046729 s
+    Cell terms:          0.000001 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.046729 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.004149 s  (  8.9%)
+      Cut volumes:       0.042572 s  ( 91.1%)
+      Global terms:      0.000008 s  (  0.0%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=231532 process_rss_kb=39356
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.048923 s
+    Cell terms:          0.000001 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.048922 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.004615 s  (  9.4%)
+      Cut volumes:       0.044301 s  ( 90.6%)
+      Global terms:      0.000006 s  (  0.0%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=231780 process_rss_kb=39284
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.048948 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.048948 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.004542 s  (  9.3%)
+      Cut volumes:       0.044400 s  ( 90.7%)
+      Global terms:      0.000006 s  (  0.0%)
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=231992 process_rss_kb=39548
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.025469 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.025469 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.002220 s  (  8.7%)
+      Cut volumes:       0.022374 s  ( 87.8%)
+      Global terms:      0.000874 s  (  3.4%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.025468 /  0.025469 /  0.025469 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.025468 /  0.025468 /  0.025469 s
+    Rank min/mean/max cut-vol:   0.022374 /  0.022636 /  0.022898 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=232352 process_rss_kb=39484
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.025751 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.025751 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.002304 s  (  8.9%)
+      Cut volumes:       0.022870 s  ( 88.8%)
+      Global terms:      0.000577 s  (  2.2%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.025751 /  0.025755 /  0.025758 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000001 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.025751 /  0.025754 /  0.025757 s
+    Rank min/mean/max cut-vol:   0.022870 /  0.022977 /  0.023085 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=232812 process_rss_kb=39696
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.026223 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.026223 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.003590 s  ( 13.7%)
+      Cut volumes:       0.022624 s  ( 86.3%)
+      Global terms:      0.000009 s  (  0.0%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.026223 /  0.026224 /  0.026225 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000001 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.026223 /  0.026224 /  0.026225 s
+    Rank min/mean/max cut-vol:   0.022624 /  0.022760 /  0.022896 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=233112 process_rss_kb=39832
+  === assembleOperator TIMING (rank 0, op='equations') ===
+    Total:               0.026534 s
+    Cell terms:          0.000000 s  (  0.0%)
+    Boundary terms:      0.000000 s  (  0.0%)
+    Other (DG+global):   0.026534 s  (100.0%)
+      Interior faces:    0.000000 s  (  0.0%)
+      Interface faces:   0.003577 s  ( 13.5%)
+      Cut volumes:       0.022940 s  ( 86.5%)
+      Global terms:      0.000017 s  (  0.1%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.026534 /  0.026534 /  0.026534 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.026533 /  0.026534 /  0.026534 s
+    Rank min/mean/max cut-vol:   0.022940 /  0.023064 /  0.023188 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='equations' process_vm_kb=233716 process_rss_kb=40228

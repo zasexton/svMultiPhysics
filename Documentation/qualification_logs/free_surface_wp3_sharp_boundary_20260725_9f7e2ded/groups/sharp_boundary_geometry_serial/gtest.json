@@ -1,0 +1,91 @@
+{
+  "tests": 7,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-25T02:22:17Z",
+  "time": "0.001s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "GeneratedActiveBoundaryDomain",
+      "tests": 7,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-25T02:22:17Z",
+      "time": "0.001s",
+      "testsuite": [
+        {
+          "name": "HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:17Z",
+          "time": "0s",
+          "classname": "GeneratedActiveBoundaryDomain"
+        },
+        {
+          "name": "PlanarHalfAndQuarterFacesIntegratePolynomialsForBothSides",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:17Z",
+          "time": "0s",
+          "classname": "GeneratedActiveBoundaryDomain",
+          "active_boundary_planar_fraction_case_count": "2",
+          "active_boundary_planar_fraction_side_count": "4",
+          "active_boundary_planar_max_constant_moment_error": "0",
+          "active_boundary_planar_max_polynomial_moment_error": "5.55112e-17",
+          "active_boundary_planar_max_partition_error": "0"
+        },
+        {
+          "name": "ObliqueHexFaceIntegratesQuadraticMomentsForBothSides",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:17Z",
+          "time": "0s",
+          "classname": "GeneratedActiveBoundaryDomain",
+          "active_boundary_oblique_face_spatial_dimension": "3",
+          "active_boundary_oblique_face_side_count": "2",
+          "active_boundary_oblique_face_max_constant_moment_error": "0",
+          "active_boundary_oblique_face_max_polynomial_moment_error": "2.77556e-17",
+          "active_boundary_oblique_face_max_partition_error": "0"
+        },
+        {
+          "name": "CompletelyDrySideHasExactlyZeroRules",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:17Z",
+          "time": "0s",
+          "classname": "GeneratedActiveBoundaryDomain",
+          "active_boundary_dry_rule_count": "0",
+          "active_boundary_dry_measure": "0",
+          "active_boundary_full_measure": "2"
+        },
+        {
+          "name": "RejectsScalarRootThatDoesNotMatchAuthoritativeContactTrace",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:17Z",
+          "time": "0s",
+          "classname": "GeneratedActiveBoundaryDomain"
+        },
+        {
+          "name": "WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:17Z",
+          "time": "0s",
+          "classname": "GeneratedActiveBoundaryDomain"
+        },
+        {
+          "name": "CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:17Z",
+          "time": "0s",
+          "classname": "GeneratedActiveBoundaryDomain"
+        }
+      ]
+    }
+  ]
+}

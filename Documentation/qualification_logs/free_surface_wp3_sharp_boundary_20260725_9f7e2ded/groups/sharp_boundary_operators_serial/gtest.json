@@ -1,0 +1,232 @@
+{
+  "tests": 15,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-25T02:22:18Z",
+  "time": "21.47s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "NavierStokesLegacyBCs",
+      "tests": 1,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-25T02:22:18Z",
+      "time": "0.003s",
+      "testsuite": [
+        {
+          "name": "UnfittedDynamicContactAngleTranslationRoutesLineAndSharpWallGeometry",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:18Z",
+          "time": "0.003s",
+          "classname": "NavierStokesLegacyBCs"
+        }
+      ]
+    },
+    {
+      "name": "NavierStokesOutletFactory",
+      "tests": 1,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-25T02:22:18Z",
+      "time": "0s",
+      "testsuite": [
+        {
+          "name": "GeneratedActiveBoundaryRoutesEveryCoupledBranch",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:18Z",
+          "time": "0s",
+          "classname": "NavierStokesOutletFactory",
+          "coupled_outflow_generated_trace_variant_count": "3",
+          "coupled_outflow_physical_trace_variant_count": "0",
+          "coupled_outflow_physical_deployment_variant_count": "3"
+        }
+      ]
+    },
+    {
+      "name": "MovingDomainPhysics",
+      "tests": 4,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-25T02:22:18Z",
+      "time": "0.011s",
+      "testsuite": [
+        {
+          "name": "NavierStokesUnfittedNaturalAndWeakBoundaryOperatorsUseSharpActiveTrace",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:18Z",
+          "time": "0.003s",
+          "classname": "MovingDomainPhysics",
+          "sharp_natural_operator_variant_count": "3",
+          "sharp_weak_operator_variant_count": "4",
+          "sharp_operator_generated_trace_count": "7",
+          "sharp_operator_whole_face_fallback_count": "0"
+        },
+        {
+          "name": "NavierStokesUnfittedBoundaryOperatorsRejectMultipleActiveOwners",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:18Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics",
+          "sharp_ambiguous_active_domain_rejection_count": "1"
+        },
+        {
+          "name": "NavierStokesUnfittedCoupledOutflowVariantsUseSharpActiveTrace",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:18Z",
+          "time": "0.006s",
+          "classname": "MovingDomainPhysics",
+          "sharp_coupled_outflow_variant_count": "3",
+          "sharp_coupled_outflow_generated_trace_count": "3",
+          "sharp_coupled_outflow_whole_face_fallback_count": "0",
+          "sharp_coupled_outflow_generated_flow_count": "3"
+        },
+        {
+          "name": "NavierStokesUnfittedCoupledOutflowFamiliesRejectUnsupportedSharpEnvelope",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:18Z",
+          "time": "0s",
+          "classname": "MovingDomainPhysics",
+          "sharp_coupled_outflow_envelope_rejection_count": "2"
+        }
+      ]
+    },
+    {
+      "name": "FreeSurfaceSharpBoundaryOperators",
+      "tests": 9,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-25T02:22:18Z",
+      "time": "21.454s",
+      "testsuite": [
+        {
+          "name": "WetFractionSweepMatchesAnalyticOperatorWork",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:18Z",
+          "time": "1.049s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_operator_fraction_case_count": "8",
+          "sharp_operator_family_count": "7",
+          "sharp_operator_active_side_case_count": "2",
+          "sharp_operator_maximum_scaled_force_error": "0.00000000000000000e+00",
+          "sharp_operator_maximum_scaled_flux_error": "6.93889390390722838e-18",
+          "sharp_operator_maximum_scaled_robin_error": "6.93889390390722838e-18",
+          "sharp_operator_maximum_scaled_penalty_error": "6.93889390390722838e-18"
+        },
+        {
+          "name": "PspgBoundaryPressureFluxUsesGeneratedWetWallMeasure",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:19Z",
+          "time": "8.439s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_pspg_pressure_flux_fraction_case_count": "8",
+          "sharp_pspg_pressure_flux_maximum_scaled_work_error": "1.36269896170660598e-16",
+          "sharp_pspg_pressure_flux_maximum_wet_measure_error": "6.81349472925123072e-17"
+        },
+        {
+          "name": "ActiveSideReversalUsesComplementarySharpSubset",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:27Z",
+          "time": "0.175s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_active_side_case_count": "2",
+          "sharp_active_side_maximum_complement_error": "5.55111512312578270e-17",
+          "sharp_active_side_marker_mismatch_count": "0"
+        },
+        {
+          "name": "CompletelyDryBoundaryProducesExactlyZeroWetRows",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:27Z",
+          "time": "0.568s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_dry_operator_family_count": "7",
+          "sharp_dry_generated_rule_count": "0",
+          "sharp_dry_repeatability_maximum_error": "0.00000000000000000e+00",
+          "sharp_dry_maximum_entry_magnitude": "0.00000000000000000e+00",
+          "sharp_dry_explicit_empty_marker_registration_count": "7",
+          "sharp_dry_whole_face_contribution_count": "0"
+        },
+        {
+          "name": "MissingGeneratedActiveDomainFailsClosed",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:28Z",
+          "time": "0.044s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_missing_domain_rejection_count": "7"
+        },
+        {
+          "name": "HigherOrderSpacesAndImplicitGeometryFailClosed",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:28Z",
+          "time": "0s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_high_order_envelope_rejection_count": "3"
+        },
+        {
+          "name": "StructuredManufacturedChannelTracksDistinctExteriorRoles",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:28Z",
+          "time": "2.05s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_channel_boundary_role_count": "3",
+          "sharp_channel_structured_cell_count": "96",
+          "sharp_channel_crossing_state_count": "9",
+          "sharp_channel_maximum_wet_measure_error": "4.44089209850062616e-16",
+          "sharp_channel_maximum_scaled_force_error": "3.88274718994590253e-16",
+          "sharp_channel_maximum_scaled_flux_error": "1.76225876924628086e-16",
+          "sharp_channel_maximum_scaled_penalty_work_error": "4.67265582754694989e-16"
+        },
+        {
+          "name": "StructuredVertexCrossingGlobalWorkJumpConvergesUnderRefinement",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:30Z",
+          "time": "8.135s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_vertex_crossing_refinement_level_count": "4",
+          "sharp_vertex_crossing_strict_decrease_count": "3",
+          "sharp_vertex_crossing_finest_structured_cell_count": "6144",
+          "sharp_vertex_crossing_fine_to_coarse_jump_ratio": "2.49999999999999223e-01"
+        },
+        {
+          "name": "NitscheTraceScalingProducesFiniteSampledMargins",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:38Z",
+          "time": "0.991s",
+          "classname": "FreeSurfaceSharpBoundaryOperators",
+          "sharp_nitsche_fraction_case_count": "8",
+          "sharp_nitsche_policy_count": "2",
+          "sharp_nitsche_finite_positive_sample_count": "16",
+          "sharp_nitsche_nonpositive_sample_count": "0",
+          "sharp_nitsche_maximum_scaled_consistency_error": "1.64308963116200307e-15",
+          "sharp_nitsche_active_side_count": "2",
+          "sharp_nitsche_zero_area_rejection_count": "16",
+          "sharp_nitsche_minimum_sampled_margin": "6.86250009351522092e-11",
+          "sharp_nitsche_maximum_cell_diameter_error": "2.22044604925031308e-16",
+          "sharp_nitsche_maximum_cell_measure_error": "1.38777878078144568e-16",
+          "sharp_nitsche_maximum_parent_facet_measure_error": "3.33066907387546962e-16",
+          "sharp_nitsche_maximum_h_normal_error": "8.88178419700125232e-16"
+        }
+      ]
+    }
+  ]
+}

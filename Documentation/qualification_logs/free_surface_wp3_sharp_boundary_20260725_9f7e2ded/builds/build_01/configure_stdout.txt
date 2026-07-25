@@ -1,0 +1,39 @@
+-- SimVascular Version: simvascular 2026-07-25
+-- PKG MPI found!
+--     ThreeDSolver Components
+--         liner_solver
+--         solver
+-- svMultiPhysics: Clang <16 detected; using libstdc++-11 headers to avoid <chrono> build failure with newer libstdc++
+-- svmesh: Detected Conda environment at: /home/zack/miniconda3
+-- MPI found - enabling distributed mesh support
+-- VTK support disabled
+-- EnableEIGEN: Ignoring Conda prefix for Eigen lookup: /home/zack/miniconda3
+-- System Eigen found (version 3.4.0) - enabling Eigen linear algebra support
+-- Eigen include directory: /usr/include/eigen3
+-- Building svmesh as static library
+-- 
+-- svMultiPhysics Mesh Configuration Summary:
+--   Build type: Release
+--   C++ standard: 17
+--   MPI support: ON
+--   VTK support: OFF
+--   Eigen support: ON
+--   Adaptivity: OFF
+--   Build tests: OFF
+--   Build shared: OFF
+--   Standalone build: OFF
+-- 
+-- FE: Building as part of svMultiPhysics
+-- FE: Clang <16 detected; using libstdc++-11 headers to avoid <chrono> build failure with newer libstdc++
+-- FE: Configuring MPI support for distributed operations
+-- FE: Using manual MPI configuration via wrapper interrogation (bypassing FindMPI).
+-- FE: Configuring MPI via wrapper interrogation: /usr/bin/mpicxx
+-- FE: Found MPI executor: /usr/bin/mpiexec
+-- FE: MPI configuration complete
+-- FE: LLVM OrcJIT support disabled (FE_ENABLE_LLVM_JIT=OFF)
+-- FE: OpenMP not found (no libomp), threading disabled
+-- Physics: Building as part of svMultiPhysics
+-- Physics: Clang <16 detected; using libstdc++-11 headers to avoid <chrono> build failure with newer libstdc++
+-- Configuring done (2.8s)
+-- Generating done (0.3s)
+-- Build files have been written to: /tmp/svmp-wp3-worktree-qGVgK2pT/build-application

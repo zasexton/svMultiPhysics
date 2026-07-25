@@ -1,0 +1,37 @@
+{
+  "tests": 1,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-25T02:22:45Z",
+  "time": "0.27s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "FreeSurfaceSharpBoundaryOperatorsMPI",
+      "tests": 1,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-25T02:22:45Z",
+      "time": "0.27s",
+      "testsuite": [
+        {
+          "name": "StructuredChannelWorkIsInvariantUnderActualRepartition",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-25T02:22:45Z",
+          "time": "0.27s",
+          "classname": "FreeSurfaceSharpBoundaryOperatorsMPI",
+          "sharp_structured_mpi_rank_count": "2",
+          "sharp_structured_mpi_cell_count": "96",
+          "sharp_structured_mpi_partition_count": "2",
+          "sharp_structured_mpi_boundary_role_count": "3",
+          "sharp_structured_mpi_rule_count_mismatch": "0",
+          "sharp_structured_mpi_maximum_measure_error": "0.00000000000000000e+00",
+          "sharp_structured_mpi_maximum_work_error": "5.55111512312578270e-17"
+        }
+      ]
+    }
+  ]
+}

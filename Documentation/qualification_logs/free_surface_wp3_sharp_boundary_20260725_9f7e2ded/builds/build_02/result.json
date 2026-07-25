@@ -1,0 +1,195 @@
+{
+  "binaries_before_clean": {
+    "assembly": {
+      "exists": true,
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_assembly",
+      "sha256": "b157706be848193202d4529c9a2fb8864466e3cca362ba222b915589acf509f4"
+    },
+    "assembly_mpi": {
+      "exists": true,
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_assembly_mpi",
+      "sha256": "b4bb6e05213912dd6911e65f31ec9e71b6a1a07f3cf8b38cf72afae2eb63bbd2"
+    },
+    "geometry": {
+      "exists": true,
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_geometry",
+      "sha256": "54719a4b4cd5edf72b88978b583d969ec334375e9f5cf5aa76c86a2bc0101e1e"
+    },
+    "level_set": {
+      "exists": true,
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_levelset",
+      "sha256": "fcd6973e9a06f0a81c0374015d043156a4f9d917b7209858cab28dbc8a11b158"
+    },
+    "systems": {
+      "exists": true,
+      "is_file": true,
+      "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_systems",
+      "sha256": "acdf1b9582553e50d55901d03c0da9030adf509e45bcce7f72c881cdd51f02ee"
+    }
+  },
+  "binary_keys": [
+    "assembly",
+    "assembly_mpi",
+    "geometry",
+    "level_set",
+    "systems"
+  ],
+  "build": {
+    "all_supplied_binaries_recreated": true,
+    "binaries_after_build": {
+      "assembly": {
+        "executable": true,
+        "exists": true,
+        "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_assembly",
+        "sha256": "b157706be848193202d4529c9a2fb8864466e3cca362ba222b915589acf509f4"
+      },
+      "assembly_mpi": {
+        "executable": true,
+        "exists": true,
+        "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_assembly_mpi",
+        "sha256": "b4bb6e05213912dd6911e65f31ec9e71b6a1a07f3cf8b38cf72afae2eb63bbd2"
+      },
+      "geometry": {
+        "executable": true,
+        "exists": true,
+        "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_geometry",
+        "sha256": "54719a4b4cd5edf72b88978b583d969ec334375e9f5cf5aa76c86a2bc0101e1e"
+      },
+      "level_set": {
+        "executable": true,
+        "exists": true,
+        "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_levelset",
+        "sha256": "fcd6973e9a06f0a81c0374015d043156a4f9d917b7209858cab28dbc8a11b158"
+      },
+      "systems": {
+        "executable": true,
+        "exists": true,
+        "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_systems",
+        "sha256": "acdf1b9582553e50d55901d03c0da9030adf509e45bcce7f72c881cdd51f02ee"
+      }
+    },
+    "command": [
+      "/usr/bin/cmake",
+      "--build",
+      "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc",
+      "--parallel",
+      "2",
+      "--target",
+      "test_fe_assembly",
+      "test_fe_assembly_mpi",
+      "test_fe_geometry",
+      "test_fe_levelset",
+      "test_fe_systems"
+    ],
+    "elapsed_seconds": 1450.4138297600439,
+    "outcome": "PASS",
+    "return_code": 0,
+    "stderr": "builds/build_02/build_stderr.txt",
+    "stderr_sha256": "dfe4ace7fb9bbb47d56470b53304629fd35d4e90ee8873444c537c07e99c17b1",
+    "stdout": "builds/build_02/build_stdout.txt",
+    "stdout_sha256": "051e9e284d9db1392084c8f099c17438981583a31f1d1f8b2bcb256a42fe9f7e",
+    "termination": null,
+    "timed_out": false
+  },
+  "build_directory": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc",
+  "cache_is_symlink_after_build": false,
+  "cache_path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/CMakeCache.txt",
+  "cache_present_after_build": true,
+  "cache_sha256": "de7748888361d59cff8af4a0e3a6fb746bdd9b8238d06e7b8447ff19811d08c0",
+  "clean": {
+    "all_supplied_binaries_absent": true,
+    "binaries_after_clean": {
+      "assembly": {
+        "exists": false,
+        "is_file": false,
+        "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_assembly"
+      },
+      "assembly_mpi": {
+        "exists": false,
+        "is_file": false,
+        "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_assembly_mpi"
+      },
+      "geometry": {
+        "exists": false,
+        "is_file": false,
+        "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_geometry"
+      },
+      "level_set": {
+        "exists": false,
+        "is_file": false,
+        "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_levelset"
+      },
+      "systems": {
+        "exists": false,
+        "is_file": false,
+        "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/test_fe_systems"
+      }
+    },
+    "cache_is_symlink_after_clean": false,
+    "cache_path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/CMakeCache.txt",
+    "cache_present_after_clean": true,
+    "cmake_home_directory_after_clean": "/tmp/svmp-wp3-worktree-qGVgK2pT/Code/Source/solver/FE",
+    "cmake_home_matches_after_clean": true,
+    "command": [
+      "/usr/bin/cmake",
+      "--build",
+      "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc",
+      "--target",
+      "clean"
+    ],
+    "elapsed_seconds": 0.6649516419274732,
+    "outcome": "PASS",
+    "return_code": 0,
+    "single_configuration_after_clean": true,
+    "stderr": "builds/build_02/clean_stderr.txt",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout": "builds/build_02/clean_stdout.txt",
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "termination": null,
+    "timed_out": false
+  },
+  "cmake_home_directory": "/tmp/svmp-wp3-worktree-qGVgK2pT/Code/Source/solver/FE",
+  "cmake_home_matches": true,
+  "configure": {
+    "cache_is_symlink_after_configure": false,
+    "cache_path": "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc/CMakeCache.txt",
+    "cache_present_after_configure": true,
+    "cmake_home_directory_after_configure": "/tmp/svmp-wp3-worktree-qGVgK2pT/Code/Source/solver/FE",
+    "cmake_home_matches_after_configure": true,
+    "command": [
+      "/usr/bin/cmake",
+      "-S",
+      "/tmp/svmp-wp3-worktree-qGVgK2pT/Code/Source/solver/FE",
+      "-B",
+      "/tmp/svmp-wp3-worktree-qGVgK2pT/build-fe-gcc"
+    ],
+    "elapsed_seconds": 2.3693303109612316,
+    "expected_cmake_home": "/tmp/svmp-wp3-worktree-qGVgK2pT/Code/Source/solver/FE",
+    "outcome": "PASS",
+    "return_code": 0,
+    "single_configuration_after_configure": true,
+    "stderr": "builds/build_02/configure_stderr.txt",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout": "builds/build_02/configure_stdout.txt",
+    "stdout_sha256": "10d437c59c63f4fb94f0b5f363967cd566365645ef4e99e16ce7b8ab9ea3fffb",
+    "termination": null,
+    "timed_out": false
+  },
+  "diagnostic": null,
+  "expected_cmake_homes": [
+    "/tmp/svmp-wp3-worktree-qGVgK2pT/Code/Source/solver/FE"
+  ],
+  "outcome": "PASS",
+  "single_configuration_after_build": true,
+  "targets": [
+    "test_fe_assembly",
+    "test_fe_assembly_mpi",
+    "test_fe_geometry",
+    "test_fe_levelset",
+    "test_fe_systems"
+  ]
+}

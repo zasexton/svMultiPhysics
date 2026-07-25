@@ -1,0 +1,35 @@
+{
+  "distinct_test_count": 29,
+  "final_provenance_diagnostics": [],
+  "final_provenance_outcome": "PASS",
+  "group_outcomes": {
+    "sharp_boundary_application_serial": "PASS",
+    "sharp_boundary_assembly_mpi": "PASS",
+    "sharp_boundary_assembly_serial": "PASS",
+    "sharp_boundary_coupled_outflow_mpi": "PASS",
+    "sharp_boundary_geometry_serial": "PASS",
+    "sharp_boundary_operators_mpi": "PASS",
+    "sharp_boundary_operators_serial": "PASS",
+    "sharp_boundary_structured_mpi": "PASS",
+    "sharp_boundary_systems_serial": "PASS"
+  },
+  "group_recorded_properties_check_count": 44,
+  "group_recorded_properties_outcome": "PASS",
+  "matrix_id": "free_surface_wp3_sharp_boundary_v2",
+  "open_outcomes": {
+    "fsr16": "OPEN",
+    "joint_wp7": "OPEN",
+    "q1": "OPEN",
+    "wp3": "OPEN"
+  },
+  "overall_outcome": "PASS",
+  "qualification_scope": "Low-level WP-3 prerequisite evidence only; coupled RCR/RCRCR sharp routing is included, but this matrix does not close FSR-16, WP-3, joint WP-7, or Q1.",
+  "quantitative_evidence_check_count": 68,
+  "quantitative_evidence_outcome": "PASS",
+  "requested_claim": "low_level_prerequisite",
+  "shared_runner_dependency": {
+    "path": "/tmp/svmp-wp3-worktree-qGVgK2pT/tests/cases/fluid/run_free_surface_wp2_geometry_qualification.py",
+    "sha256": "5aea557b1bd3123116bbf034f39c0dd5f914f66286df65dd2250ec9bd906561f"
+  },
+  "source_commit": "9f7e2deda9eb897edf3634cc90210b8f437e9ded"
+}

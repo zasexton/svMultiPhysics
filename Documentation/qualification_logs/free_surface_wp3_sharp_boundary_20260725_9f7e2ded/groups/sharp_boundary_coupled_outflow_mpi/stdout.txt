@@ -1,0 +1,17 @@
+Note: Google Test filter = MovingDomainPhysicsMPI.GeneratedActiveCoupledOutflowReductionGradientAndTractionArePartitionIndependent
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from MovingDomainPhysicsMPI
+[ RUN      ] MovingDomainPhysicsMPI.GeneratedActiveCoupledOutflowReductionGradientAndTractionArePartitionIndependent
+[02:22:46.171] [R1] [INFO] FESystem: sparsity setup diagnostic=constraint_sparsity_setup operator='generated_active_coupled_outflow' master_bearing_lines=0 serial_base_nnz=702 serial_active_nnz=702 distributed_indexing=none distributed_base_diag_nnz=0 distributed_base_offdiag_nnz=0 distributed_active_diag_nnz=0 distributed_active_offdiag_nnz=0
+[02:22:46.171] [R0] [INFO] FESystem: sparsity setup diagnostic=constraint_sparsity_setup operator='generated_active_coupled_outflow' master_bearing_lines=0 serial_base_nnz=702 serial_active_nnz=702 distributed_indexing=none distributed_base_diag_nnz=0 distributed_base_offdiag_nnz=0 distributed_active_diag_nnz=0 distributed_active_offdiag_nnz=0
+[02:22:46.175] [R1] [INFO] FESystem: sparsity setup diagnostic=constraint_sparsity_setup operator='generated_active_coupled_outflow' master_bearing_lines=0 serial_base_nnz=426 serial_active_nnz=426 distributed_indexing=Natural distributed_base_diag_nnz=126 distributed_base_offdiag_nnz=81 distributed_active_diag_nnz=126 distributed_active_offdiag_nnz=81
+[02:22:46.175] [R0] [INFO] FESystem: sparsity setup diagnostic=constraint_sparsity_setup operator='generated_active_coupled_outflow' master_bearing_lines=0 serial_base_nnz=426 serial_active_nnz=426 distributed_indexing=Natural distributed_base_diag_nnz=414 distributed_base_offdiag_nnz=81 distributed_active_diag_nnz=414 distributed_active_offdiag_nnz=81
+[02:22:46.180] [R1] [INFO] FESystem: sparsity setup diagnostic=constraint_sparsity_setup operator='generated_active_coupled_outflow' master_bearing_lines=0 serial_base_nnz=552 serial_active_nnz=552 distributed_indexing=Natural distributed_base_diag_nnz=9 distributed_base_offdiag_nnz=36 distributed_active_diag_nnz=9 distributed_active_offdiag_nnz=36
+[02:22:46.180] [R0] [INFO] FESystem: sparsity setup diagnostic=constraint_sparsity_setup operator='generated_active_coupled_outflow' master_bearing_lines=0 serial_base_nnz=588 serial_active_nnz=588 distributed_indexing=Natural distributed_base_diag_nnz=621 distributed_base_offdiag_nnz=36 distributed_active_diag_nnz=621 distributed_active_offdiag_nnz=36
+[       OK ] MovingDomainPhysicsMPI.GeneratedActiveCoupledOutflowReductionGradientAndTractionArePartitionIndependent (35 ms)
+[----------] 1 test from MovingDomainPhysicsMPI (35 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (35 ms total)
+[  PASSED  ] 1 test.
