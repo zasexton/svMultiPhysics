@@ -233,8 +233,11 @@ struct FreeSurfaceDiscreteFunctionalDeclaration {
 struct FreeSurfaceAcceptedContactStageState {
     Real stage_time{0.0};
     Real stage_alpha_f{1.0};
+    // Communicator-consistent fingerprints of FE-ordered algebraic content.
     std::uint64_t previous_state_revision{0};
     std::uint64_t endpoint_state_revision{0};
+    // Composite fingerprint over the previous/endpoint content, accepted
+    // snapshot, stage time/alpha, and stage solution.
     std::uint64_t stage_state_revision{0};
     interfaces::FreeSurfaceGeometryRevision geometry_revision{};
     interfaces::FreeSurfaceDynamicContactState state{};
@@ -251,6 +254,8 @@ struct FreeSurfaceDiscreteFunctionalHistoryRecord {
     std::uint64_t accepted_step{0};
     Real accepted_time{0.0};
     Real dt{0.0};
+    // Communicator-consistent fingerprints before and after maintenance.
+    std::uint64_t pre_maintenance_endpoint_state_revision{0};
     std::uint64_t state_revision{0};
     FreeSurfaceDiscreteFunctionalDeclaration declaration{};
     interfaces::FreeSurfaceGeometryRevision geometry_revision{};
@@ -443,6 +448,7 @@ public:
         std::uint64_t accepted_step,
         Real accepted_time,
         Real dt,
+        std::uint64_t pre_maintenance_endpoint_state_revision,
         std::uint64_t state_revision,
         std::span<const AcceptedFreeSurfaceDiscreteFunctionalState> states);
     [[nodiscard]] std::span<

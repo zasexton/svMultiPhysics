@@ -30,7 +30,7 @@ DEFAULT_REGISTRY = SCRIPT_PATH.with_name(
     "free_surface_wp5_contact_line_qualification_matrix.json"
 )
 EXPECTED_REGISTRY_SHA256 = (
-    "65bbfad62c9022e48fc97879eabbd9385859898cc26eb3edab2ce77e29e8b7b2"
+    "80b9c62256566ae39193a091171fff67ab37dc169398f288a96f8e280de9ab18"
 )
 SHARED_RUNNER_PATH = Path(strict_runner.__file__).resolve()
 SHARED_RUNNER_SHA256 = strict_runner.sha256_file(SHARED_RUNNER_PATH)
@@ -81,7 +81,9 @@ EXPECTED_STAGE_FIELDS = [
     "generalized_alpha_stage_fraction",
     "previous_state_revision",
     "endpoint_state_revision",
+    "pre_maintenance_endpoint_state_revision",
     "stage_state_revision",
+    "state_revision",
     "geometry_snapshot_revision",
     "wall_normal",
     "contact_line_tangent",
@@ -109,7 +111,7 @@ EXPECTED_GROUPS = {
     "wall_aware_reinitialization_serial": ("level_set", 1, 1, 7),
     "accepted_contact_maintenance_serial": ("application", 1, 1, 7),
     "wall_aware_reinitialization_mpi": ("assembly_mpi", 2, 2, 2),
-    "accepted_contact_frame_mpi": ("application_mpi", 2, 2, 1),
+    "accepted_contact_frame_mpi": ("application_mpi", 2, 2, 2),
 }
 EXPECTED_QUANTITATIVE_EVIDENCE = {
     (

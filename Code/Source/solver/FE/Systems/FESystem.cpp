@@ -7067,6 +7067,7 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
     std::uint64_t accepted_step,
     Real accepted_time,
     Real dt,
+    std::uint64_t pre_maintenance_endpoint_state_revision,
     std::uint64_t state_revision,
     std::span<const AcceptedFreeSurfaceDiscreteFunctionalState> states)
 {
@@ -7079,17 +7080,20 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
         return;
     }
     FE_THROW_IF(
+        !std::isfinite(accepted_time) || !std::isfinite(dt) ||
+            dt < Real{0.0} ||
+            pre_maintenance_endpoint_state_revision == 0u ||
+            state_revision == 0u,
+        InvalidArgumentException,
+        "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: accepted "
+        "time and dt must be finite, dt must be nonnegative, and the "
+        "pre-maintenance endpoint and accepted-state revisions must be "
+        "nonzero");
+    FE_THROW_IF(
         !isSetup(),
         InvalidArgumentException,
         "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: system "
         "setup must be complete");
-    FE_THROW_IF(
-        !std::isfinite(accepted_time) || !std::isfinite(dt) ||
-            dt < Real{0.0} || state_revision == 0u,
-        InvalidArgumentException,
-        "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: accepted "
-        "time and dt must be finite, dt must be nonnegative, and the state "
-        "revision must be nonzero");
     FE_THROW_IF(
         states.size() !=
             free_surface_discrete_functional_declarations_.size(),
@@ -7270,6 +7274,13 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 InvalidArgumentException,
                 "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
                 "contact-stage provenance is incomplete");
+            FE_THROW_IF(
+                contact_stage.endpoint_state_revision !=
+                    pre_maintenance_endpoint_state_revision,
+                InvalidArgumentException,
+                "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                "contact-stage endpoint revision does not match the "
+                "pre-maintenance endpoint revision");
             require_near(
                 contact_stage.stage_time,
                 accepted_time -
@@ -7683,6 +7694,8 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
         if (accepted_step == latest.accepted_step) {
             FE_THROW_IF(
                 accepted_time != latest.accepted_time || dt != latest.dt ||
+                    pre_maintenance_endpoint_state_revision !=
+                        latest.pre_maintenance_endpoint_state_revision ||
                     state_revision != latest.state_revision,
                 InvalidArgumentException,
                 "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
@@ -7743,6 +7756,8 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 .accepted_step = accepted_step,
                 .accepted_time = accepted_time,
                 .dt = dt,
+                .pre_maintenance_endpoint_state_revision =
+                    pre_maintenance_endpoint_state_revision,
                 .state_revision = state_revision,
                 .declaration = declaration,
                 .geometry_revision = accepted.geometry_revision,
@@ -7758,6 +7773,8 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 << " accepted_step=" << accepted_step
                 << " accepted_time=" << accepted_time
                 << " dt=" << dt
+                << " pre_maintenance_endpoint_state_revision="
+                << pre_maintenance_endpoint_state_revision
                 << " state_revision=" << state_revision
                 << " interface_marker=" << declaration.interface_marker
                 << " level_set_field=" << declaration.level_set_field

@@ -34,7 +34,7 @@ EXPECTED_BINARY_TEST_COUNTS = {
     "physics": 24,
     "application": 7,
     "assembly_mpi": 2,
-    "application_mpi": 1,
+    "application_mpi": 2,
 }
 
 
@@ -190,7 +190,7 @@ def test_wp5_validate_only_reports_exact_nonclosure_counts():
     )
     assert summary["prospective_test_count"] == 0
     assert summary["group_count"] == 6
-    assert summary["test_count"] == 42
+    assert summary["test_count"] == 43
     assert summary["serial_quantitative_gate_count"] == 8
     assert summary["unqualified_campaign_count"] == 7
     assert summary["fsr04_closed"] is False

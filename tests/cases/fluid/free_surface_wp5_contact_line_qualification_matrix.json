@@ -54,7 +54,9 @@
     "generalized_alpha_stage_fraction",
     "previous_state_revision",
     "endpoint_state_revision",
+    "pre_maintenance_endpoint_state_revision",
     "stage_state_revision",
+    "state_revision",
     "geometry_snapshot_revision",
     "wall_normal",
     "contact_line_tangent",
@@ -218,7 +220,8 @@
       "mpi_ranks": 2,
       "gtest_output_copies": 2,
       "tests": [
-        "ApplicationDriverLevelSetWorkflowsMPI.AcceptedSnapshotPrescribedFrameIsPartitionInvariantAndConflictsFailClosed"
+        "ApplicationDriverLevelSetWorkflowsMPI.AcceptedSnapshotPrescribedFrameIsPartitionInvariantAndConflictsFailClosed",
+        "ApplicationDriverLevelSetWorkflowsMPI.ContactStageBindingUsesCollectiveContentAndConsensusCoverage"
       ],
       "recorded_properties": [
         {
@@ -296,7 +299,7 @@
   ],
   "gates": {
     "expected_group_count": 6,
-    "expected_distinct_test_count": 42,
+    "expected_distinct_test_count": 43,
     "expected_quantitative_evidence_count": 8,
     "expected_failures": 0,
     "expected_errors": 0,
@@ -305,7 +308,7 @@
   },
   "closure_contract": [
     {
-      "claim": "dynamic_contact_records_bind_law_frame_dissipation_state_and_geometry_to_one_accepted_stage",
+      "claim": "dynamic_contact_records_bind_law_frame_dissipation_state_and_geometry_to_one_accepted_stage_with_the_stage_endpoint_revision_equal_to_the_pre_maintenance_endpoint_revision_and_the_post_maintenance_state_revision_recorded_separately",
       "evidence": [
         "MovingDomainPhysics.FreeSurfaceDynamicContactStageHistoryPreservesLawAndFrameProvenance",
         "ApplicationDriverLevelSetWorkflows.ConsumedContactMarkerAcceptsCurvedHighOrderFragments",

@@ -1330,18 +1330,26 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .geometry_revision.mesh_topology_revision);
   EXPECT_NE(
       maintenance_functionals.front().cut_topology_revision, 0u);
+  const auto accepted_state_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          solution,
+          activeFESystemCommunicator(*sim.fe_system));
   ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
       sim,
       /*accepted_step=*/3u,
       svmp::FE::Real{0.15},
       svmp::FE::Real{0.05},
-      /*state_revision=*/23u));
+      accepted_state_revision,
+      accepted_state_revision));
 
   const auto history = sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
   ASSERT_EQ(history.size(), 1u);
   const auto& record = history.front();
   EXPECT_EQ(record.accepted_step, 3u);
-  EXPECT_EQ(record.state_revision, 23u);
+  EXPECT_EQ(
+      record.pre_maintenance_endpoint_state_revision,
+      accepted_state_revision);
+  EXPECT_EQ(record.state_revision, accepted_state_revision);
   EXPECT_TRUE(record.geometry_revision.complete());
   EXPECT_EQ(record.geometry_revision.interface_marker, interface_marker);
   EXPECT_EQ(record.geometry_revision.domain_id, "functional_interface");
@@ -1358,7 +1366,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
       /*accepted_step=*/3u,
       svmp::FE::Real{0.15},
       svmp::FE::Real{0.05},
-      /*state_revision=*/23u));
+      accepted_state_revision,
+      accepted_state_revision));
   EXPECT_EQ(sim.fe_system->freeSurfaceDiscreteFunctionalHistory().size(), 1u);
 #endif
 }
@@ -1572,15 +1581,56 @@ TEST(ApplicationDriverLevelSetWorkflows,
   scatterFeOrderedSolution(time_history.uPrev(), previous_solution);
   scatterFeOrderedSolution(time_history.uPrev2(), previous_solution);
 
+  // Emulate the four TimeLoop acceptance transitions without requiring a
+  // second nonlinear solve fixture: finalized generalized-alpha endpoint,
+  // commit-ready stage rebuild, TimeHistory::acceptStep(), then the first
+  // accepted-callback provenance capture/bind.
+  auto acceptance_order_history =
+      svmp::FE::timestepping::TimeHistory::allocate(
+          *factory,
+          sim.fe_system->dofHandler().getNumDofs(),
+          /*history_depth=*/2,
+          /*allocate_second_order_state=*/false);
+  acceptance_order_history.setTime(0.05);
+  acceptance_order_history.setDt(0.05);
+  acceptance_order_history.setPrevDt(0.05);
+  acceptance_order_history.setStepIndex(1);
+  scatterFeOrderedSolution(
+      acceptance_order_history.u(), previous_solution);
+  scatterFeOrderedSolution(
+      acceptance_order_history.uPrev(), previous_solution);
+  scatterFeOrderedSolution(
+      acceptance_order_history.uPrev2(), previous_solution);
+  // The solve/finalization transition publishes the authoritative endpoint
+  // that on_step_commit_ready must consume.
+  scatterFeOrderedSolution(
+      acceptance_order_history.u(), endpoint_solution);
+  const auto finalized_endpoint_solution =
+      gatherFeOrderedSolution(acceptance_order_history.u());
+  const auto commit_ready_previous_solution =
+      gatherFeOrderedSolution(acceptance_order_history.uPrev());
+  EXPECT_EQ(finalized_endpoint_solution, endpoint_solution);
+  EXPECT_EQ(commit_ready_previous_solution, previous_solution);
+
   ASSERT_NO_THROW((void)refreshActiveCutIntegrationContextFromSolution(
       sim,
       *params,
-      endpoint_solution,
+      finalized_endpoint_solution,
       lifecycle,
       "application-driver-contact-endpoint-before-stage-test"));
   ActiveCutContextRefreshCache contact_stage_refresh_cache;
   const auto active_cut_requests = activeCutVolumeRequests(*params);
-  const auto contact_stage_candidate =
+  const auto previous_state_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          commit_ready_previous_solution,
+          activeFESystemCommunicator(*sim.fe_system));
+  const auto endpoint_state_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          finalized_endpoint_solution,
+          activeFESystemCommunicator(*sim.fe_system));
+  // This is the production on_step_commit_ready rebuild, after endpoint
+  // finalization rather than from an earlier conservative-phase candidate.
+  auto contact_stage_candidate =
       buildAcceptedFreeSurfaceContactStageCandidate(
           sim,
           *params,
@@ -1589,12 +1639,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
           active_cut_requests,
           svmp::FE::Real{0.075},
           svmp::FE::Real{0.5},
-          time_history.uPrev().valueRevision(),
-          time_history.u().valueRevision(),
-          previous_solution,
-          endpoint_solution,
+          previous_state_revision,
+          endpoint_state_revision,
+          commit_ready_previous_solution,
+          finalized_endpoint_solution,
           nullptr);
-  const auto& contact_stages = contact_stage_candidate.stages;
+  auto& contact_stages = contact_stage_candidate.stages;
   const auto& contact_stage_constraints =
       contact_stage_candidate.constraints;
   ASSERT_EQ(contact_stages.size(), 1u);
@@ -1614,8 +1664,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(
       contact_stages.front().stage_state_revision,
       acceptedContactStageRevision(
-          time_history.uPrev().valueRevision(),
-          time_history.u().valueRevision(),
+          previous_state_revision,
+          endpoint_state_revision,
           contact_stages.front().geometry_revision.snapshot_revision_key,
           svmp::FE::Real{0.075},
           svmp::FE::Real{0.5},
@@ -1626,22 +1676,76 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_NE(
       contact_stages.front().stage_state_revision,
       acceptedContactStageRevision(
-          time_history.uPrev().valueRevision(),
-          time_history.u().valueRevision(),
+          previous_state_revision,
+          endpoint_state_revision,
           contact_stages.front().geometry_revision.snapshot_revision_key,
           svmp::FE::Real{0.075},
           svmp::FE::Real{0.5},
           changed_stage_solution));
-  time_history.updateGhosts();
-  EXPECT_NE(contact_stages.front().endpoint_state_revision,
-            time_history.u().valueRevision());
+  const auto raw_endpoint_revision_before_accept =
+      acceptance_order_history.u().valueRevision();
+  acceptance_order_history.acceptStep(0.05);
+  EXPECT_EQ(acceptance_order_history.stepIndex(), 2);
+  EXPECT_DOUBLE_EQ(acceptance_order_history.time(), 0.10);
+  EXPECT_NE(acceptance_order_history.u().valueRevision(),
+            raw_endpoint_revision_before_accept);
+  const auto accepted_callback_endpoint =
+      gatherFeOrderedSolution(acceptance_order_history.u());
+  EXPECT_EQ(accepted_callback_endpoint, finalized_endpoint_solution);
+  const auto pre_maintenance_endpoint_state_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          accepted_callback_endpoint,
+          activeFESystemCommunicator(*sim.fe_system));
+  EXPECT_EQ(contact_stages.front().endpoint_state_revision,
+            pre_maintenance_endpoint_state_revision);
+  // These are the first accepted-callback operations: reject content drift,
+  // then bind the preserved endpoint content and recompute the composite
+  // stage hash after acceptStep has changed backend mutation counters.
+  ASSERT_NO_THROW(
+      assertAcceptedFreeSurfaceContactStageEndpointUnchanged(
+          endpoint_state_revision,
+          accepted_callback_endpoint,
+          activeFESystemCommunicator(*sim.fe_system)));
+  ASSERT_NO_THROW(
+      bindAcceptedFreeSurfaceContactStagesToEndpointRevision(
+          contact_stages,
+          pre_maintenance_endpoint_state_revision,
+          contact_stage_candidate.stage_solution,
+          activeFESystemCommunicator(*sim.fe_system)));
+  EXPECT_EQ(
+      contact_stages.front().endpoint_state_revision,
+      pre_maintenance_endpoint_state_revision);
+  EXPECT_EQ(
+      contact_stages.front().stage_state_revision,
+      acceptedContactStageRevision(
+          contact_stages.front().previous_state_revision,
+          pre_maintenance_endpoint_state_revision,
+          contact_stages.front()
+              .geometry_revision.snapshot_revision_key,
+          contact_stages.front().stage_time,
+          contact_stages.front().stage_alpha_f,
+          contact_stage_candidate.stage_solution));
+  ASSERT_NO_THROW(
+      assertAcceptedFreeSurfaceContactStageEndpointUnchanged(
+          pre_maintenance_endpoint_state_revision,
+          accepted_callback_endpoint,
+          activeFESystemCommunicator(*sim.fe_system)));
+  auto stale_endpoint_solution = endpoint_solution;
+  ASSERT_FALSE(stale_endpoint_solution.empty());
+  stale_endpoint_solution.back() += svmp::FE::Real{0.125};
+  EXPECT_THROW(
+      assertAcceptedFreeSurfaceContactStageEndpointUnchanged(
+          pre_maintenance_endpoint_state_revision,
+          stale_endpoint_solution,
+          activeFESystemCommunicator(*sim.fe_system)),
+      std::runtime_error);
   const auto endpoint_contact_stages =
       evaluateAcceptedFreeSurfaceContactStages(
           sim,
           svmp::FE::Real{0.10},
           svmp::FE::Real{1.0},
-          time_history.uPrev().valueRevision(),
-          time_history.u().valueRevision(),
+          previous_state_revision,
+          pre_maintenance_endpoint_state_revision,
           endpoint_solution);
   ASSERT_EQ(endpoint_contact_stages.size(), 1u);
   ASSERT_EQ(endpoint_contact_stages.front().state.walls.size(), 1u);
@@ -1750,17 +1854,31 @@ TEST(ApplicationDriverLevelSetWorkflows,
             snapshot->revision().snapshot_revision_key);
   EXPECT_NE(maintained_snapshot_revision, endpoint_snapshot_revision);
 
+  const auto accepted_state_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          endpoint_after,
+          activeFESystemCommunicator(*sim.fe_system));
   ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
       sim,
       /*accepted_step=*/2u,
       svmp::FE::Real{0.10},
       svmp::FE::Real{0.05},
-      time_history.u().valueRevision(),
+      pre_maintenance_endpoint_state_revision,
+      accepted_state_revision,
       contact_stages));
   const auto history =
       sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
   ASSERT_EQ(history.size(), 1u);
+  EXPECT_EQ(
+      history.front().pre_maintenance_endpoint_state_revision,
+      pre_maintenance_endpoint_state_revision);
+  EXPECT_NE(history.front().pre_maintenance_endpoint_state_revision,
+            history.front().state_revision);
+  EXPECT_EQ(history.front().state_revision, accepted_state_revision);
   ASSERT_TRUE(history.front().contact_stage.has_value());
+  EXPECT_EQ(
+      history.front().contact_stage->endpoint_state_revision,
+      history.front().pre_maintenance_endpoint_state_revision);
   EXPECT_DOUBLE_EQ(history.front().contact_stage->stage_time,
                    svmp::FE::Real{0.075});
   EXPECT_DOUBLE_EQ(history.front().contact_stage->stage_alpha_f,

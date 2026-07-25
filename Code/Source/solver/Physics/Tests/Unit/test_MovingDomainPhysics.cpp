@@ -4866,11 +4866,18 @@ TEST(MovingDomainPhysics,
             }};
 
     ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
-        7u, FE::Real{0.35}, FE::Real{0.05}, 13u, accepted_states));
+        7u,
+        FE::Real{0.35},
+        FE::Real{0.05},
+        13u,
+        13u,
+        accepted_states));
     auto history = system.freeSurfaceDiscreteFunctionalHistory();
     ASSERT_EQ(history.size(), 1u);
     EXPECT_EQ(history.front().accepted_step, 7u);
     EXPECT_DOUBLE_EQ(history.front().accepted_time, FE::Real{0.35});
+    EXPECT_EQ(
+        history.front().pre_maintenance_endpoint_state_revision, 13u);
     EXPECT_EQ(history.front().state_revision, 13u);
     EXPECT_EQ(history.front().geometry_revision.snapshot_revision_key, 101u);
     EXPECT_EQ(history.front().state.snapshot_revision_key,
@@ -4878,7 +4885,12 @@ TEST(MovingDomainPhysics,
     EXPECT_DOUBLE_EQ(history.front().state.total_potential, total_potential);
 
     ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
-        7u, FE::Real{0.35}, FE::Real{0.05}, 13u, accepted_states));
+        7u,
+        FE::Real{0.35},
+        FE::Real{0.05},
+        13u,
+        13u,
+        accepted_states));
     EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
     auto mismatched_snapshot_states = accepted_states;
     mismatched_snapshot_states.front().state.snapshot_revision_key = 102u;
@@ -4887,6 +4899,7 @@ TEST(MovingDomainPhysics,
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
+            13u,
             13u,
             mismatched_snapshot_states),
         FE::InvalidArgumentException);
@@ -4900,16 +4913,23 @@ TEST(MovingDomainPhysics,
             FE::Real{0.35},
             FE::Real{0.05},
             13u,
+            13u,
             conflicting_states),
         FE::InvalidArgumentException);
     ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
-        8u, FE::Real{0.40}, FE::Real{0.05}, 14u, accepted_states));
+        8u,
+        FE::Real{0.40},
+        FE::Real{0.05},
+        14u,
+        14u,
+        accepted_states));
     EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 2u);
     EXPECT_THROW(
         system.recordAcceptedFreeSurfaceDiscreteFunctionals(
             6u,
             FE::Real{0.30},
             FE::Real{0.05},
+            12u,
             12u,
             accepted_states),
         FE::InvalidArgumentException);
@@ -5111,9 +5131,17 @@ TEST(MovingDomainPhysics,
                     },
             }};
     ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
-        7u, FE::Real{0.35}, FE::Real{0.05}, 13u, accepted_states));
+        7u,
+        FE::Real{0.35},
+        FE::Real{0.05},
+        13u,
+        13u,
+        accepted_states));
     const auto history = system.freeSurfaceDiscreteFunctionalHistory();
     ASSERT_EQ(history.size(), 1u);
+    EXPECT_EQ(
+        history.front().pre_maintenance_endpoint_state_revision, 13u);
+    EXPECT_EQ(history.front().state_revision, 13u);
     ASSERT_TRUE(history.front().contact_stage.has_value());
     const auto& stage = *history.front().contact_stage;
     EXPECT_EQ(stage.state.snapshot_revision_key,
@@ -5147,7 +5175,50 @@ TEST(MovingDomainPhysics,
         FE::Real{-1.0},
         1.0e-14);
     ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
-        7u, FE::Real{0.35}, FE::Real{0.05}, 13u, accepted_states));
+        7u,
+        FE::Real{0.35},
+        FE::Real{0.05},
+        13u,
+        13u,
+        accepted_states));
+
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            7u,
+            FE::Real{0.35},
+            FE::Real{0.05},
+            0u,
+            13u,
+            accepted_states),
+        FE::InvalidArgumentException);
+    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+
+    auto endpoint_mismatch = accepted_states;
+    endpoint_mismatch.front().contact_stage->endpoint_state_revision = 14u;
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            7u,
+            FE::Real{0.35},
+            FE::Real{0.05},
+            13u,
+            13u,
+            endpoint_mismatch),
+        FE::InvalidArgumentException);
+    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+
+    auto conflicting_replay = accepted_states;
+    conflicting_replay.front().contact_stage->endpoint_state_revision =
+        14u;
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            7u,
+            FE::Real{0.35},
+            FE::Real{0.05},
+            14u,
+            13u,
+            conflicting_replay),
+        FE::InvalidArgumentException);
+    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
 
     auto invalid = accepted_states;
     invalid.front().contact_stage->state.snapshot_revision_key = 103u;
@@ -5156,6 +5227,7 @@ TEST(MovingDomainPhysics,
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
+            13u,
             13u,
             invalid),
         FE::InvalidArgumentException);
@@ -5169,6 +5241,7 @@ TEST(MovingDomainPhysics,
             FE::Real{0.35},
             FE::Real{0.05},
             13u,
+            13u,
             invalid),
         FE::InvalidArgumentException);
     invalid = accepted_states;
@@ -5181,6 +5254,7 @@ TEST(MovingDomainPhysics,
             FE::Real{0.35},
             FE::Real{0.05},
             13u,
+            13u,
             invalid),
         FE::InvalidArgumentException);
     invalid = accepted_states;
@@ -5192,6 +5266,7 @@ TEST(MovingDomainPhysics,
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
+            13u,
             13u,
             invalid),
         FE::InvalidArgumentException);
@@ -5206,6 +5281,7 @@ TEST(MovingDomainPhysics,
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
+            13u,
             13u,
             invalid),
         FE::InvalidArgumentException);
@@ -5222,6 +5298,7 @@ TEST(MovingDomainPhysics,
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
+            13u,
             13u,
             invalid),
         FE::InvalidArgumentException);

@@ -5514,11 +5514,50 @@ void logLevelSetMaintenanceWorkAttempts(
   }
 }
 
+struct FreeSurfaceAcceptanceCoverage {
+  bool has_functional{false};
+  bool has_dynamic_contact{false};
+};
+
+FreeSurfaceAcceptanceCoverage
+requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
+    std::span<
+        const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration>
+        declarations,
+    const svmp::MeshComm& comm)
+{
+  const auto local_declaration_count =
+      static_cast<double>(declarations.size());
+  if (globalMinDouble(local_declaration_count, comm) !=
+      globalMaxDouble(local_declaration_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Free-surface functional declaration coverage differs across the FE communicator.");
+  }
+  const auto local_dynamic_contact_count =
+      static_cast<double>(std::count_if(
+          declarations.begin(),
+          declarations.end(),
+          [](const auto& declaration) {
+            return !declaration.parameters.dynamic_contact_coefficients
+                        .empty();
+          }));
+  if (globalMinDouble(local_dynamic_contact_count, comm) !=
+      globalMaxDouble(local_dynamic_contact_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Dynamic contact-stage declaration coverage differs across the FE communicator.");
+  }
+  return FreeSurfaceAcceptanceCoverage{
+      .has_functional = !declarations.empty(),
+      .has_dynamic_contact = local_dynamic_contact_count > 0.0,
+  };
+}
+
 void recordAcceptedFreeSurfaceDiscreteFunctionals(
     application::core::SimulationComponents& sim,
     std::uint64_t accepted_step,
     svmp::FE::Real accepted_time,
     svmp::FE::Real dt,
+    std::uint64_t pre_maintenance_endpoint_state_revision,
     std::uint64_t state_revision,
     std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
         contact_stages = {})
@@ -5526,19 +5565,32 @@ void recordAcceptedFreeSurfaceDiscreteFunctionals(
   const auto declarations =
       sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
-  const auto local_declaration_count =
-      static_cast<double>(declarations.size());
-  if (globalMinDouble(local_declaration_count, comm) !=
-      globalMaxDouble(local_declaration_count, comm)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Accepted free-surface functional declarations differ across the FE communicator.");
-  }
-  if (declarations.empty()) {
+  const auto coverage =
+      requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
+          declarations, comm);
+  if (!coverage.has_functional) {
     if (!contact_stages.empty()) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Contact-stage states were supplied without free-surface functional declarations.");
     }
     return;
+  }
+  const auto [minimum_pre_maintenance_revision,
+              maximum_pre_maintenance_revision] =
+      globalMinMaxUint64(
+          pre_maintenance_endpoint_state_revision, comm);
+  if (pre_maintenance_endpoint_state_revision == 0u ||
+      minimum_pre_maintenance_revision !=
+          maximum_pre_maintenance_revision) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] The pre-maintenance endpoint state revision must be nonzero and identical across the FE communicator.");
+  }
+  const auto [minimum_state_revision, maximum_state_revision] =
+      globalMinMaxUint64(state_revision, comm);
+  if (state_revision == 0u ||
+      minimum_state_revision != maximum_state_revision) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] The accepted state revision must be nonzero and identical across the FE communicator.");
   }
   const double local_contact_stage_count =
       static_cast<double>(contact_stages.size());
@@ -5561,12 +5613,14 @@ void recordAcceptedFreeSurfaceDiscreteFunctionals(
     }
     local_contact_stages_valid =
         marker >= 0 &&
+        stage.endpoint_state_revision ==
+            pre_maintenance_endpoint_state_revision &&
         contact_stage_by_marker.emplace(marker, &stage).second &&
         local_contact_stages_valid;
   }
   if (globalMinDouble(local_contact_stages_valid ? 1.0 : 0.0, comm) != 1.0) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] Accepted contact-stage states must have communicator-consistent unique nonnegative interface markers.");
+        "[svMultiPhysics::Application] Accepted contact-stage states must have communicator-consistent unique nonnegative interface markers and must bind to the pre-maintenance endpoint revision.");
   }
   auto accepted_states = evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
   if (accepted_states.size() != declarations.size()) {
@@ -5609,6 +5663,7 @@ void recordAcceptedFreeSurfaceDiscreteFunctionals(
       accepted_step,
       accepted_time,
       dt,
+      pre_maintenance_endpoint_state_revision,
       state_revision,
       accepted_states);
 }
@@ -13270,6 +13325,70 @@ buildAcceptedFreeSurfaceContactStageCandidate(
   return contact_stage;
 }
 
+void bindAcceptedFreeSurfaceContactStagesToEndpointRevision(
+    std::span<
+        svmp::FE::systems::FreeSurfaceAcceptedContactStageState> stages,
+    std::uint64_t endpoint_state_revision,
+    std::span<const svmp::FE::Real> stage_solution,
+    const svmp::MeshComm& comm)
+{
+  const auto [minimum_revision, maximum_revision] =
+      globalMinMaxUint64(endpoint_state_revision, comm);
+  if (endpoint_state_revision == 0u ||
+      minimum_revision != maximum_revision) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] The pre-maintenance endpoint state revision must be nonzero and identical across the FE communicator.");
+  }
+  const auto local_stage_count =
+      static_cast<std::uint64_t>(stages.size());
+  const auto [minimum_stage_count, maximum_stage_count] =
+      globalMinMaxUint64(local_stage_count, comm);
+  if (minimum_stage_count != maximum_stage_count) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact-stage binding coverage differs across the FE communicator.");
+  }
+
+  std::vector<std::uint64_t> bound_stage_revisions(stages.size(), 0u);
+  for (std::size_t index = 0u; index < stages.size(); ++index) {
+    const auto& stage = stages[index];
+    const auto bound_stage_revision = acceptedContactStageRevision(
+        stage.previous_state_revision,
+        endpoint_state_revision,
+        stage.geometry_revision.snapshot_revision_key,
+        stage.stage_time,
+        stage.stage_alpha_f,
+        stage_solution);
+    const auto [minimum_stage_revision, maximum_stage_revision] =
+        globalMinMaxUint64(bound_stage_revision, comm);
+    if (minimum_stage_revision != maximum_stage_revision) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage composite revision differs across the FE communicator.");
+    }
+    bound_stage_revisions[index] = bound_stage_revision;
+  }
+
+  for (std::size_t index = 0u; index < stages.size(); ++index) {
+    stages[index].endpoint_state_revision = endpoint_state_revision;
+    stages[index].stage_state_revision = bound_stage_revisions[index];
+  }
+}
+
+void assertAcceptedFreeSurfaceContactStageEndpointUnchanged(
+    std::uint64_t expected_endpoint_algebraic_revision,
+    std::span<const svmp::FE::Real> endpoint_solution,
+    const svmp::MeshComm& comm)
+{
+  const auto endpoint_algebraic_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          endpoint_solution, comm);
+  if (expected_endpoint_algebraic_revision == 0u ||
+      endpoint_algebraic_revision !=
+          expected_endpoint_algebraic_revision) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] The finalized endpoint state differs from the endpoint used to reconstruct accepted contact-stage provenance.");
+  }
+}
+
 struct ConservativePhaseMomentMismatch {
   svmp::FE::Real maximum_nodal_residual{0.0};
   svmp::FE::Real residual_norm{0.0};
@@ -15279,24 +15398,35 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       sim.time_history->u().valueRevision(),
       activeFESystemCommunicator(*sim.fe_system),
       steady_accepted_extension_maps);
-  const auto steady_solution =
-      gatherFeOrderedSolution(sim.time_history->u());
-  const auto steady_contact_stages =
-      evaluateAcceptedFreeSurfaceContactStages(
-          sim,
-          static_cast<svmp::FE::Real>(solve_time),
-          svmp::FE::Real{1.0},
-          sim.time_history->u().valueRevision(),
-          sim.time_history->u().valueRevision(),
-          std::span<const svmp::FE::Real>(steady_solution.data(),
-                                          steady_solution.size()));
-  recordAcceptedFreeSurfaceDiscreteFunctionals(
-      sim,
-      /*accepted_step=*/1u,
-      solve_time,
-      sim.time_history->dt(),
-      sim.time_history->u().valueRevision(),
-      steady_contact_stages);
+  const auto steady_free_surface_coverage =
+      requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
+          sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations(),
+          activeFESystemCommunicator(*sim.fe_system));
+  if (steady_free_surface_coverage.has_functional) {
+    const auto steady_solution =
+        gatherFeOrderedSolution(sim.time_history->u());
+    const auto steady_state_revision =
+        collectiveLevelSetMaintenanceAlgebraicRevision(
+            steady_solution,
+            activeFESystemCommunicator(*sim.fe_system));
+    const auto steady_contact_stages =
+        evaluateAcceptedFreeSurfaceContactStages(
+            sim,
+            static_cast<svmp::FE::Real>(solve_time),
+            svmp::FE::Real{1.0},
+            steady_state_revision,
+            steady_state_revision,
+            std::span<const svmp::FE::Real>(
+                steady_solution.data(), steady_solution.size()));
+    recordAcceptedFreeSurfaceDiscreteFunctionals(
+        sim,
+        /*accepted_step=*/1u,
+        solve_time,
+        sim.time_history->dt(),
+        steady_state_revision,
+        steady_state_revision,
+        steady_contact_stages);
+  }
   sim.fe_system->recordAcceptedMeshTangentialBoundaryPolicies(
       /*accepted_step=*/1u,
       solve_time,
@@ -15769,12 +15899,16 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       });
   const bool has_precommit_maintenance =
       has_conservative_phase || has_bound_preserving_maintenance;
-  const bool has_dynamic_contact_stage = std::any_of(
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations().begin(),
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations().end(),
-      [](const auto& declaration) {
-        return !declaration.parameters.dynamic_contact_coefficients.empty();
-      });
+  const auto free_surface_declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+  const auto free_surface_acceptance_coverage =
+      requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
+          free_surface_declarations,
+          velocity_extension_artifact_comm);
+  const bool has_free_surface_functional =
+      free_surface_acceptance_coverage.has_functional;
+  const bool has_dynamic_contact_stage =
+      free_surface_acceptance_coverage.has_dynamic_contact;
   if (has_dynamic_contact_stage &&
       opts.scheme != svmp::FE::timestepping::SchemeKind::BackwardEuler &&
       opts.scheme != svmp::FE::timestepping::SchemeKind::BDF2 &&
@@ -15788,12 +15922,22 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
       pending_contact_stage_constraints;
   std::vector<svmp::FE::Real> pending_contact_stage_solution;
+  std::uint64_t
+      pending_contact_stage_endpoint_algebraic_revision{0u};
+  std::uint64_t pending_pre_maintenance_endpoint_state_revision{0u};
   ConservativePhaseCandidateResult pending_phase_candidate;
   ConservativePhaseCandidateResult accepted_phase_candidate;
   std::size_t pending_phase_accepted_row_begin{0u};
   std::size_t pending_phase_rejected_row_begin{0u};
   std::size_t pending_phase_accepted_attempt_begin{0u};
   std::size_t pending_phase_rejected_attempt_begin{0u};
+  const auto clear_pending_contact_provenance = [&] {
+    pending_contact_stages.clear();
+    pending_contact_stage_constraints.clear();
+    pending_contact_stage_solution.clear();
+    pending_contact_stage_endpoint_algebraic_revision = 0u;
+    pending_pre_maintenance_endpoint_state_revision = 0u;
+  };
   const auto reject_pending_phase_work = [&] {
     if (!level_set_maintenance_work.transactionActive()) {
       return;
@@ -15833,9 +15977,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           const svmp::FE::timestepping::NewtonReport& nr) {
         (void)nr;
         ++step_acceptance_attempt;
-        pending_contact_stages.clear();
-        pending_contact_stage_constraints.clear();
-        pending_contact_stage_solution.clear();
+        clear_pending_contact_provenance();
         if (pending_phase_candidate.geometry_transaction) {
           throw std::logic_error(
               "[svMultiPhysics::Application] A conservative phase candidate remained active at the start of a new acceptance attempt.");
@@ -15897,6 +16039,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                     : svmp::FE::Real{1.0};
                 const auto previous_solution =
                     gatherFeOrderedSolution(h.uPrev());
+                const auto previous_state_revision =
+                    collectiveLevelSetMaintenanceAlgebraicRevision(
+                        previous_solution,
+                        velocity_extension_artifact_comm);
+                const auto endpoint_state_revision =
+                    collectiveLevelSetMaintenanceAlgebraicRevision(
+                        endpoint_solution,
+                        velocity_extension_artifact_comm);
                 return buildAcceptedFreeSurfaceContactStageCandidate(
                     sim,
                     params,
@@ -15906,8 +16056,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                     static_cast<svmp::FE::Real>(h.time()) +
                         alpha_f * static_cast<svmp::FE::Real>(h.dt()),
                     alpha_f,
-                    h.uPrev().valueRevision(),
-                    h.u().valueRevision(),
+                    previous_state_revision,
+                    endpoint_state_revision,
                     previous_solution,
                     endpoint_solution,
                     active_transaction);
@@ -15954,6 +16104,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   ? observe_phase_stage
                   : LevelSetMaintenanceStageObserver{});
           if (!pending_phase_candidate.accept_step) {
+            clear_pending_contact_provenance();
             rollbackConservativePhaseCandidate(
                 h, pending_phase_candidate);
             reject_pending_phase_work();
@@ -15978,26 +16129,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 "pre_commit",
                 /*honor_fail_on_trigger=*/false);
             if (triggered) {
+              clear_pending_contact_provenance();
               rollbackConservativePhaseCandidate(
                   h, pending_phase_candidate);
               reject_pending_phase_work();
               return false;
             }
-          }
-          if (has_dynamic_contact_stage) {
-            auto contact_stage =
-                std::move(pending_phase_candidate.contact_stage);
-            if (contact_stage.stages.empty()) {
-              const auto endpoint_solution =
-                  gatherFeOrderedSolution(h.u());
-              contact_stage = build_contact_stage_candidate(
-                  endpoint_solution, nullptr);
-            }
-            pending_contact_stages = std::move(contact_stage.stages);
-            pending_contact_stage_constraints =
-                std::move(contact_stage.constraints);
-            pending_contact_stage_solution =
-                std::move(contact_stage.stage_solution);
           }
           const auto bound_result = applyLevelSetBoundPreservingCandidates(
               sim,
@@ -16040,9 +16177,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 staged_phase_functionals = after_functionals;
               });
           if (!bound_result.accept_step) {
-            pending_contact_stages.clear();
-            pending_contact_stage_constraints.clear();
-            pending_contact_stage_solution.clear();
+            clear_pending_contact_provenance();
             rollbackConservativePhaseCandidate(
                 h, pending_phase_candidate);
             reject_pending_phase_work();
@@ -16051,6 +16186,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           return true;
         } catch (...) {
           const auto failure = std::current_exception();
+          clear_pending_contact_provenance();
           try {
             rollbackConservativePhaseCandidate(
                 h, pending_phase_candidate);
@@ -16065,15 +16201,63 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       };
   callbacks.on_step_candidate_discarded =
       [&](svmp::FE::timestepping::TimeHistory& h) {
-        pending_contact_stages.clear();
-        pending_contact_stage_constraints.clear();
-        pending_contact_stage_solution.clear();
+        clear_pending_contact_provenance();
         rollbackConservativePhaseCandidate(h, pending_phase_candidate);
         pending_phase_candidate = ConservativePhaseCandidateResult{};
         reject_pending_phase_work();
       };
   callbacks.on_step_commit_ready =
       [&](svmp::FE::timestepping::TimeHistory& h) {
+        if (has_dynamic_contact_stage) {
+          const auto endpoint_solution =
+              gatherFeOrderedSolution(h.u());
+          const auto previous_solution =
+              gatherFeOrderedSolution(h.uPrev());
+          const auto previous_state_revision =
+              collectiveLevelSetMaintenanceAlgebraicRevision(
+                  previous_solution,
+                  velocity_extension_artifact_comm);
+          const auto endpoint_state_revision =
+              collectiveLevelSetMaintenanceAlgebraicRevision(
+                  endpoint_solution,
+                  velocity_extension_artifact_comm);
+          const svmp::FE::Real alpha_f =
+              opts.scheme ==
+                      svmp::FE::timestepping::SchemeKind::
+                          GeneralizedAlpha
+                  ? static_cast<svmp::FE::Real>(
+                        generalized_alpha_first_order.alpha_f)
+                  : svmp::FE::Real{1.0};
+          try {
+            auto contact_stage =
+                buildAcceptedFreeSurfaceContactStageCandidate(
+                    sim,
+                    params,
+                    *cut_lifecycle,
+                    *cut_refresh_cache,
+                    transient_active_cut_requests,
+                    static_cast<svmp::FE::Real>(h.time()) +
+                        alpha_f *
+                            static_cast<svmp::FE::Real>(h.dt()),
+                    alpha_f,
+                    previous_state_revision,
+                    endpoint_state_revision,
+                    previous_solution,
+                    endpoint_solution,
+                    pending_phase_candidate.geometry_transaction.get());
+            pending_contact_stages =
+                std::move(contact_stage.stages);
+            pending_contact_stage_constraints =
+                std::move(contact_stage.constraints);
+            pending_contact_stage_solution =
+                std::move(contact_stage.stage_solution);
+            pending_contact_stage_endpoint_algebraic_revision =
+                endpoint_state_revision;
+          } catch (...) {
+            clear_pending_contact_provenance();
+            throw;
+          }
+        }
         const bool changed = pending_phase_candidate.changed;
         if (pending_phase_candidate.geometry_transaction) {
           pending_phase_candidate.geometry_transaction->commit();
@@ -16093,6 +16277,25 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       };
   double vtk_total_time = 0.0;
   callbacks.on_step_accepted = [&](svmp::FE::timestepping::TimeHistory& h) {
+    if (has_free_surface_functional) {
+      const auto endpoint_solution =
+          gatherFeOrderedSolution(h.u());
+      pending_pre_maintenance_endpoint_state_revision =
+          collectiveLevelSetMaintenanceAlgebraicRevision(
+              endpoint_solution,
+              velocity_extension_artifact_comm);
+      if (has_dynamic_contact_stage) {
+        assertAcceptedFreeSurfaceContactStageEndpointUnchanged(
+            pending_contact_stage_endpoint_algebraic_revision,
+            endpoint_solution,
+            velocity_extension_artifact_comm);
+        bindAcceptedFreeSurfaceContactStagesToEndpointRevision(
+            pending_contact_stages,
+            pending_pre_maintenance_endpoint_state_revision,
+            pending_contact_stage_solution,
+            velocity_extension_artifact_comm);
+      }
+    }
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_accepted step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
     writeAcceptedConservativePhaseArtifacts(
@@ -16369,16 +16572,23 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         h.u().valueRevision(),
         velocity_extension_artifact_comm,
         accepted_velocity_extension_maps);
-    recordAcceptedFreeSurfaceDiscreteFunctionals(
-        sim,
-        static_cast<std::uint64_t>(h.stepIndex()),
-        h.time(),
-        h.dt(),
-        h.u().valueRevision(),
-        pending_contact_stages);
-    pending_contact_stages.clear();
-    pending_contact_stage_constraints.clear();
-    pending_contact_stage_solution.clear();
+    if (has_free_surface_functional) {
+      const auto accepted_state_solution =
+          gatherFeOrderedSolution(h.u());
+      const auto accepted_state_revision =
+          collectiveLevelSetMaintenanceAlgebraicRevision(
+              accepted_state_solution,
+              velocity_extension_artifact_comm);
+      recordAcceptedFreeSurfaceDiscreteFunctionals(
+          sim,
+          static_cast<std::uint64_t>(h.stepIndex()),
+          h.time(),
+          h.dt(),
+          pending_pre_maintenance_endpoint_state_revision,
+          accepted_state_revision,
+          pending_contact_stages);
+    }
+    clear_pending_contact_provenance();
     sim.fe_system->recordAcceptedMeshTangentialBoundaryPolicies(
         static_cast<std::uint64_t>(h.stepIndex()),
         h.time(),

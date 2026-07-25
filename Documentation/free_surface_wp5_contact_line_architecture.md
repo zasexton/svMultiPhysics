@@ -127,7 +127,13 @@ Every accepted dynamic-contact record binds the following to one
 generalized-alpha stage:
 
 - accepted step, accepted time, stage time, and stage fraction;
-- previous, endpoint, and stage algebraic revisions;
+- communicator-consistent content fingerprints for the previous and endpoint
+  algebraic states;
+- a composite stage fingerprint over those content identities, the accepted
+  snapshot, stage time and fraction, and reconstructed stage solution;
+- the pre-maintenance endpoint revision, which exactly matches every contact
+  stage endpoint content fingerprint, and the separately retained
+  post-maintenance accepted-state content fingerprint in `state_revision`;
 - complete geometry snapshot and source-value revisions;
 - wall normal, footprint direction, oriented contact-line tangent, and
   contact position;
@@ -135,10 +141,32 @@ generalized-alpha stage:
 - wall-slip speed and constitutive residual; and
 - line-friction and wall-slip dissipation.
 
-The stage solution is reconstructed before endpoint acceptance, its
-authoritative geometry is refreshed transactionally, and the endpoint
-geometry is restored afterward. Missing, stale, rank-inconsistent, or
-declaration-inconsistent stage geometry is rejected rather than recorded.
+The stage solution is reconstructed at commit readiness from the finalized
+endpoint, its authoritative geometry is refreshed transactionally, and the
+endpoint geometry is restored afterward. At the start of the accepted-step
+callback, after the time history accepts that endpoint but before any
+accepted-step maintenance, its algebraic revision is captured and bound into
+every contact-stage record. Maintenance may advance the accepted state
+revision without rewriting that captured identity. Missing, stale,
+rank-inconsistent, endpoint-inconsistent, or declaration-inconsistent stage
+geometry or algebraic provenance is rejected rather than recorded.
+Binding first verifies communicator-consistent stage coverage and every
+recomputed composite stage fingerprint. Endpoint and composite revisions are
+updated only after the complete collective preflight succeeds, so asymmetric
+stage solutions or metadata leave all stage records unchanged.
+
+The frozen serial application test explicitly emulates the four relevant
+transitions in order: generalized-alpha endpoint finalization, commit-ready
+stage reconstruction, `TimeHistory::acceptStep()` (including its backend
+counter bump), and accepted-callback content capture/bind. It intentionally
+does not claim a full nonlinear `TimeLoop` integration run: such a fixture
+would require a second coupled solve/mesh campaign, while this frozen matrix
+is limited to low-level prerequisite evidence.
+
+These WP-5 history revisions fingerprint gathered FE-ordered algebraic
+content; they are not rank-local backend mutation counters. This prerequisite
+does not provide Q0's still-open nine-field atomic accepted-state identity or
+artifact contract.
 
 ## Wall-aware reinitialization
 
@@ -186,8 +214,8 @@ The matrix
 `tests/cases/fluid/free_surface_wp5_contact_line_qualification_matrix.json`
 and wrapper
 `tests/cases/fluid/run_free_surface_wp5_contact_line_qualification.py`
-freeze 42 low-level tests. The matrix is byte-frozen at SHA-256
-`65bbfad62c9022e48fc97879eabbd9385859898cc26eb3edab2ce77e29e8b7b2`.
+freeze 43 low-level tests. The matrix is byte-frozen at SHA-256
+`80b9c62256566ae39193a091171fff67ab37dc169398f288a96f8e280de9ab18`.
 The wrapper accepts only
 `low_level_prerequisite`, rejects FSR-05, WP-5, and Q4 closure requests
 before execution, verifies the canonical matrix bytes and architecture

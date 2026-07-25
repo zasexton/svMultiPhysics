@@ -8,6 +8,7 @@
 #include "Application/Translators/MeshTranslator.h"
 #include "FE/Backends/FSILS/FsilsFactory.h"
 #include "FE/Backends/FSILS/FsilsMatrix.h"
+#include "FE/Backends/FSILS/FsilsVector.h"
 #include "FE/Backends/Utils/BackendOptions.h"
 #include "FE/Forms/Forms.h"
 #include "FE/Forms/Vocabulary.h"
@@ -2096,12 +2097,26 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   scatterFeOrderedSolution(time_history.uPrev(), solution);
   scatterFeOrderedSolution(time_history.uPrev2(), solution);
 
-  const auto contact_stages = evaluateAcceptedFreeSurfaceContactStages(
+  const auto accepted_endpoint =
+      gatherFeOrderedSolution(time_history.u());
+  EXPECT_EQ(accepted_endpoint, solution);
+  const auto previous_state_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          std::span<const svmp::FE::Real>(
+              solution.data(), solution.size()),
+          activeFESystemCommunicator(*sim.fe_system));
+  const auto endpoint_state_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          std::span<const svmp::FE::Real>(
+              accepted_endpoint.data(),
+              accepted_endpoint.size()),
+          activeFESystemCommunicator(*sim.fe_system));
+  auto contact_stages = evaluateAcceptedFreeSurfaceContactStages(
       sim,
       svmp::FE::Real{0.075},
       svmp::FE::Real{0.5},
-      time_history.uPrev().valueRevision(),
-      time_history.u().valueRevision(),
+      previous_state_revision,
+      endpoint_state_revision,
       std::span<const svmp::FE::Real>(solution.data(), solution.size()));
   ASSERT_EQ(contact_stages.size(), 1u);
   const auto contact_stage_constraints =
@@ -2140,8 +2155,42 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                 MPI_COMM_WORLD);
   EXPECT_EQ(minimum_protected_count, maximum_protected_count);
   time_history.updateGhosts();
-  EXPECT_NE(contact_stages.front().endpoint_state_revision,
-            time_history.u().valueRevision());
+  const auto pre_maintenance_endpoint_state_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          std::span<const svmp::FE::Real>(
+              solution.data(), solution.size()),
+          activeFESystemCommunicator(*sim.fe_system));
+  EXPECT_EQ(contact_stages.front().endpoint_state_revision,
+            pre_maintenance_endpoint_state_revision);
+  const auto local_pre_maintenance_revision =
+      static_cast<unsigned long long>(
+          pre_maintenance_endpoint_state_revision);
+  unsigned long long minimum_pre_maintenance_revision = 0u;
+  unsigned long long maximum_pre_maintenance_revision = 0u;
+  MPI_Allreduce(&local_pre_maintenance_revision,
+                &minimum_pre_maintenance_revision,
+                1,
+                MPI_UNSIGNED_LONG_LONG,
+                MPI_MIN,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(&local_pre_maintenance_revision,
+                &maximum_pre_maintenance_revision,
+                1,
+                MPI_UNSIGNED_LONG_LONG,
+                MPI_MAX,
+                MPI_COMM_WORLD);
+  EXPECT_EQ(minimum_pre_maintenance_revision,
+            maximum_pre_maintenance_revision);
+  ASSERT_NO_THROW(
+      bindAcceptedFreeSurfaceContactStagesToEndpointRevision(
+          contact_stages,
+          pre_maintenance_endpoint_state_revision,
+          std::span<const svmp::FE::Real>(
+              solution.data(), solution.size()),
+          activeFESystemCommunicator(*sim.fe_system)));
+  EXPECT_EQ(
+      contact_stages.front().endpoint_state_revision,
+      pre_maintenance_endpoint_state_revision);
   ActiveCutContextRefreshReport endpoint_report{};
   ASSERT_NO_THROW(
       endpoint_report = refreshActiveCutIntegrationContextFromSolution(
@@ -2200,20 +2249,31 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       sim.fe_system->cutIntegrationContext()
           ->freeSurfaceGeometrySnapshotRevisionForMarker(721),
       endpoint_snapshot_revision);
+  const auto accepted_state_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          maintained_solution,
+          activeFESystemCommunicator(*sim.fe_system));
   ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
       sim,
       /*accepted_step=*/2u,
       svmp::FE::Real{0.10},
       svmp::FE::Real{0.05},
-      time_history.u().valueRevision(),
+      pre_maintenance_endpoint_state_revision,
+      accepted_state_revision,
       contact_stages));
   const auto functional_history =
       sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
   ASSERT_EQ(functional_history.size(), 1u);
   const auto& functional_record = functional_history.front();
   EXPECT_EQ(functional_record.accepted_step, 2u);
+  EXPECT_EQ(
+      functional_record.pre_maintenance_endpoint_state_revision,
+      pre_maintenance_endpoint_state_revision);
+  EXPECT_NE(
+      functional_record.pre_maintenance_endpoint_state_revision,
+      functional_record.state_revision);
   EXPECT_EQ(functional_record.state_revision,
-            time_history.u().valueRevision());
+            accepted_state_revision);
   EXPECT_NEAR(functional_record.state.owned_liquid_volume, 4.0, 1.0e-12);
   EXPECT_NEAR(functional_record.state.owned_liquid_gas_area, 8.0, 1.0e-12);
   EXPECT_NEAR(functional_record.state.liquid_gas_surface_energy,
@@ -2231,6 +2291,9 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   }
   ASSERT_TRUE(functional_record.contact_stage.has_value());
   const auto& contact_stage = *functional_record.contact_stage;
+  EXPECT_EQ(
+      contact_stage.endpoint_state_revision,
+      functional_record.pre_maintenance_endpoint_state_revision);
   EXPECT_DOUBLE_EQ(contact_stage.stage_time, svmp::FE::Real{0.075});
   EXPECT_DOUBLE_EQ(contact_stage.stage_alpha_f, svmp::FE::Real{0.5});
   EXPECT_NEAR(contact_stage.state.owned_contact_measure, 2.0, 1.0e-12);
@@ -2855,6 +2918,175 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
         MPI_COMM_WORLD);
     EXPECT_EQ(minimum_values, maximum_values);
   }
+}
+
+TEST(ApplicationDriverLevelSetWorkflowsMPI,
+     ContactStageBindingUsesCollectiveContentAndConsensusCoverage)
+{
+  int rank = 0;
+  int size = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  if (size != 2) {
+    GTEST_SKIP() << "This collective provenance fixture requires two ranks.";
+  }
+
+  svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration
+      inconsistent_declaration;
+  if (rank == 0) {
+    inconsistent_declaration.parameters.dynamic_contact_coefficients
+        .push_back(
+            svmp::FE::interfaces::
+                FreeSurfaceDynamicContactCoefficient{});
+  }
+  const std::array<
+      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration,
+      1u>
+      inconsistent_declarations{{inconsistent_declaration}};
+  bool local_declaration_mismatch_rejected = false;
+  try {
+    (void)requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
+        inconsistent_declarations, svmp::MeshComm::world());
+  } catch (const std::runtime_error&) {
+    local_declaration_mismatch_rejected = true;
+  }
+  const int local_declaration_rejection =
+      local_declaration_mismatch_rejected ? 1 : 0;
+  int communicator_declaration_rejection = 0;
+  MPI_Allreduce(&local_declaration_rejection,
+                &communicator_declaration_rejection,
+                1,
+                MPI_INT,
+                MPI_MIN,
+                MPI_COMM_WORLD);
+  EXPECT_EQ(communicator_declaration_rejection, 1);
+
+  svmp::FE::backends::FsilsVector local_full_state(4);
+  {
+    const std::array<svmp::FE::Real, 4> values{
+        1.0, -2.0, 3.5, 4.25};
+    auto state = local_full_state.localSpan();
+    std::copy(values.begin(), values.end(), state.begin());
+  }
+  const auto raw_revision_before_rank_local_access =
+      local_full_state.valueRevision();
+  if (rank == 0) {
+    (void)local_full_state.localSpan();
+    EXPECT_NE(local_full_state.valueRevision(),
+              raw_revision_before_rank_local_access);
+  } else {
+    EXPECT_EQ(local_full_state.valueRevision(),
+              raw_revision_before_rank_local_access);
+  }
+  const auto [minimum_raw_revision, maximum_raw_revision] =
+      globalMinMaxUint64(
+          local_full_state.valueRevision(), svmp::MeshComm::world());
+  EXPECT_NE(minimum_raw_revision, maximum_raw_revision);
+
+  const auto& const_local_full_state = local_full_state;
+  const auto full_ordered_state = const_local_full_state.localSpan();
+  const auto content_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          full_ordered_state, svmp::MeshComm::world());
+  const auto [minimum_content_revision, maximum_content_revision] =
+      globalMinMaxUint64(content_revision, svmp::MeshComm::world());
+  EXPECT_EQ(minimum_content_revision, maximum_content_revision);
+
+  auto rank_inconsistent_state = std::vector<svmp::FE::Real>(
+      full_ordered_state.begin(), full_ordered_state.end());
+  if (rank == 0) {
+    rank_inconsistent_state.back() += svmp::FE::Real{0.125};
+  }
+  bool local_content_mismatch_rejected = false;
+  try {
+    (void)collectiveLevelSetMaintenanceAlgebraicRevision(
+        rank_inconsistent_state, svmp::MeshComm::world());
+  } catch (const std::runtime_error&) {
+    local_content_mismatch_rejected = true;
+  }
+  const int local_content_rejection =
+      local_content_mismatch_rejected ? 1 : 0;
+  int communicator_content_rejection = 0;
+  MPI_Allreduce(&local_content_rejection,
+                &communicator_content_rejection,
+                1,
+                MPI_INT,
+                MPI_MIN,
+                MPI_COMM_WORLD);
+  EXPECT_EQ(communicator_content_rejection, 1);
+
+  svmp::FE::systems::FreeSurfaceAcceptedContactStageState stage;
+  stage.stage_time = svmp::FE::Real{0.075};
+  stage.stage_alpha_f = svmp::FE::Real{0.5};
+  stage.previous_state_revision = content_revision;
+  stage.endpoint_state_revision = 17u;
+  stage.stage_state_revision = 19u;
+  stage.geometry_revision.snapshot_revision_key = 23u;
+  std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+      stages{stage};
+  const auto endpoint_revision_before_rejected_bind =
+      stages.front().endpoint_state_revision;
+  const auto stage_revision_before_rejected_bind =
+      stages.front().stage_state_revision;
+
+  auto rank_inconsistent_stage_solution =
+      std::vector<svmp::FE::Real>(
+          full_ordered_state.begin(), full_ordered_state.end());
+  if (rank == 0) {
+    rank_inconsistent_stage_solution.front() +=
+        svmp::FE::Real{0.25};
+  }
+  bool local_stage_bind_rejected = false;
+  try {
+    bindAcceptedFreeSurfaceContactStagesToEndpointRevision(
+        stages,
+        content_revision,
+        rank_inconsistent_stage_solution,
+        svmp::MeshComm::world());
+  } catch (const std::runtime_error&) {
+    local_stage_bind_rejected = true;
+  }
+  const int local_stage_bind_rejection =
+      local_stage_bind_rejected ? 1 : 0;
+  int communicator_stage_bind_rejection = 0;
+  MPI_Allreduce(&local_stage_bind_rejection,
+                &communicator_stage_bind_rejection,
+                1,
+                MPI_INT,
+                MPI_MIN,
+                MPI_COMM_WORLD);
+  EXPECT_EQ(communicator_stage_bind_rejection, 1);
+  EXPECT_EQ(stages.front().endpoint_state_revision,
+            endpoint_revision_before_rejected_bind);
+  EXPECT_EQ(stages.front().stage_state_revision,
+            stage_revision_before_rejected_bind);
+
+  const auto consistent_stage_solution =
+      std::vector<svmp::FE::Real>(
+          full_ordered_state.begin(), full_ordered_state.end());
+  ASSERT_NO_THROW(
+      bindAcceptedFreeSurfaceContactStagesToEndpointRevision(
+          stages,
+          content_revision,
+          consistent_stage_solution,
+          svmp::MeshComm::world()));
+  EXPECT_EQ(stages.front().endpoint_state_revision, content_revision);
+  EXPECT_EQ(
+      stages.front().stage_state_revision,
+      acceptedContactStageRevision(
+          stages.front().previous_state_revision,
+          content_revision,
+          stages.front().geometry_revision.snapshot_revision_key,
+          stages.front().stage_time,
+          stages.front().stage_alpha_f,
+          consistent_stage_solution));
+  const auto [minimum_bound_stage_revision,
+              maximum_bound_stage_revision] =
+      globalMinMaxUint64(
+          stages.front().stage_state_revision,
+          svmp::MeshComm::world());
+  EXPECT_EQ(minimum_bound_stage_revision,
+            maximum_bound_stage_revision);
 }
 
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
