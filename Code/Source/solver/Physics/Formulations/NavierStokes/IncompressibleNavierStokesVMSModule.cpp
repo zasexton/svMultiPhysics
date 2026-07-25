@@ -4085,6 +4085,8 @@ void validateNavierStokesBoundaryConfiguration(
     inspect_boundary_markers(options.traction_neumann);
     inspect_boundary_markers(options.traction_robin);
     inspect_boundary_markers(options.pressure_outflow);
+    inspect_boundary_markers(options.coupled_outflow_rcr);
+    inspect_boundary_markers(options.coupled_outflow_rcrcr);
     inspect_boundary_markers(options.velocity_dirichlet_weak);
     for (const auto& free_surface : free_surfaces) {
         if (!isUnfittedLevelSet(free_surface) ||
@@ -4189,10 +4191,6 @@ void validateNavierStokesBoundaryConfiguration(
         }
         validateNonnegativeConstantScalar(
             bc.backflow_beta, "RCR backflow coefficient");
-        if (generated_active_boundary_for(marker).has_value()) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: coupled RCR outflow on an unfitted active-domain boundary is unsupported until its flow functional consumes the sharp generated boundary");
-        }
         velocity_conditions.add(
             std::make_unique<FE::forms::bc::ReservedBC>(marker));
     }
@@ -4221,10 +4219,6 @@ void validateNavierStokesBoundaryConfiguration(
         }
         validateNonnegativeConstantScalar(
             bc.backflow_beta, "RCRCR backflow coefficient");
-        if (generated_active_boundary_for(marker).has_value()) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: coupled RCRCR outflow on an unfitted active-domain boundary is unsupported until its flow functional consumes the sharp generated boundary");
-        }
         velocity_conditions.add(
             std::make_unique<FE::forms::bc::ReservedBC>(marker));
     }
@@ -8156,18 +8150,20 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             bc, u, rho, generated_active_boundary_for(bc.boundary_marker));
     });
     bc_manager.install(options_.coupled_outflow_rcr, [&](const auto& bc) {
-        if (generated_active_boundary_for(bc.boundary_marker).has_value()) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: coupled RCR outflow on an unfitted active-domain boundary is unsupported until its flow functional consumes the sharp generated boundary");
-        }
-        return Factories::toCoupledOutflowBC(bc, system, u, rho);
+        return Factories::toCoupledOutflowBC(
+            bc,
+            system,
+            u,
+            rho,
+            generated_active_boundary_for(bc.boundary_marker));
     });
     bc_manager.install(options_.coupled_outflow_rcrcr, [&](const auto& bc) {
-        if (generated_active_boundary_for(bc.boundary_marker).has_value()) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: coupled RCRCR outflow on an unfitted active-domain boundary is unsupported until its flow functional consumes the sharp generated boundary");
-        }
-        return Factories::toCoupledOutflowBC(bc, system, u, rho);
+        return Factories::toCoupledOutflowBC(
+            bc,
+            system,
+            u,
+            rho,
+            generated_active_boundary_for(bc.boundary_marker));
     });
     bc_manager.install(options_.velocity_dirichlet,
                        [&](const auto& bc) {

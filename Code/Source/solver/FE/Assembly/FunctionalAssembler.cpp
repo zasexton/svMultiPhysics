@@ -6,7 +6,9 @@
  */
 
 #include "FunctionalAssembler.h"
+#include "CutIntegrationContext.h"
 #include "GlobalSystemView.h"
+#include "StandardAssembler.h"
 #include "Dofs/DofMap.h"
 #include "Spaces/FunctionSpace.h"
 #include "Elements/Element.h"
@@ -1612,6 +1614,180 @@ Real FunctionalAssembler::assembleBoundaryScalar(
     Real value = assembleBoundaryCore(kernel, boundary_marker, result);
     last_result_ = result;
     return kernel.postProcess(value);
+}
+
+Real FunctionalAssembler::assembleCutInterfaceScalar(
+    FunctionalKernel& kernel,
+    const CutIntegrationContext& cut_context,
+    int generated_interface_marker)
+{
+    FE_THROW_IF(
+        generated_interface_marker < 0 ||
+            !cut_context.hasGeneratedActiveBoundaryMarker(
+                generated_interface_marker),
+        InvalidArgumentException,
+        "FunctionalAssembler::assembleCutInterfaceScalar: marker " +
+            std::to_string(generated_interface_marker) +
+            " is not a generated active-boundary marker");
+
+    FunctionalResult result;
+    if (!isConfigured()) {
+        result.success = false;
+        result.error_message = "FunctionalAssembler not configured";
+        last_result_ = result;
+        return Real{0.0};
+    }
+    if (!kernel.hasBoundaryFace()) {
+        result.success = false;
+        result.error_message =
+            "Kernel does not support boundary face integration";
+        last_result_ = result;
+        return Real{0.0};
+    }
+
+    class CutFunctionalAdapter final : public AssemblyKernel {
+    public:
+        explicit CutFunctionalAdapter(FunctionalKernel& kernel) : kernel_(kernel) {}
+
+        [[nodiscard]] RequiredData getRequiredData() const noexcept override
+        {
+            return kernel_.getRequiredData();
+        }
+
+        [[nodiscard]] std::vector<FieldRequirement>
+        fieldRequirements() const override
+        {
+            return kernel_.fieldRequirements();
+        }
+
+        [[nodiscard]] bool hasCell() const noexcept override { return false; }
+        [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+        [[nodiscard]] bool hasSingleSidedInterfaceFace() const noexcept override
+        {
+            return true;
+        }
+
+        void computeCell(const AssemblyContext&,
+                         KernelOutput& output) override
+        {
+            output.reserve(0, 0, false, false);
+        }
+
+        void computeBoundaryFace(const AssemblyContext& context,
+                                 int marker,
+                                 KernelOutput& output) override
+        {
+            const Real contribution =
+                kernel_.evaluateBoundaryFaceTotal(context, marker);
+            const Real adjusted = contribution - compensation_;
+            const Real next = sum_ + adjusted;
+            compensation_ = (next - sum_) - adjusted;
+            sum_ = next;
+            output.reserve(context.numTestDofs(),
+                           context.numTrialDofs(),
+                           false,
+                           false);
+        }
+
+        [[nodiscard]] Real value() const noexcept { return sum_; }
+
+    private:
+        FunctionalKernel& kernel_;
+        Real sum_{0.0};
+        Real compensation_{0.0};
+    };
+
+    AssemblyOptions bridge_options;
+    bridge_options.deterministic = options_.deterministic;
+    bridge_options.use_constraints = false;
+    bridge_options.allow_unowned_row_accumulation = true;
+    bridge_options.use_batching = false;
+
+    StandardAssembler bridge(bridge_options);
+
+    const dofs::DofMap* primary_map = dof_map_;
+    GlobalIndex primary_offset = primary_field_dof_offset_;
+    if (const auto* binding = findFieldBinding(primary_field_);
+        binding != nullptr && binding->dof_map != nullptr) {
+        primary_map = binding->dof_map;
+        primary_offset = binding->dof_offset;
+    }
+    FE_CHECK_NOT_NULL(primary_map,
+                      "FunctionalAssembler::assembleCutInterfaceScalar: primary dof map");
+    FE_CHECK_NOT_NULL(space_,
+                      "FunctionalAssembler::assembleCutInterfaceScalar: primary space");
+    bridge.setRowDofMap(*primary_map, primary_offset);
+    bridge.setColDofMap(*primary_map, primary_offset);
+
+    std::vector<FieldSolutionAccess> field_access;
+    field_access.reserve(field_bindings_.size());
+    for (const auto& binding : field_bindings_) {
+        FieldSolutionAccess access;
+        access.field = binding.field;
+        access.space = binding.space;
+        access.dof_map = binding.dof_map;
+        access.dof_offset = binding.dof_offset;
+        access.coefficient_source =
+            FieldSolutionAccess::CoefficientSource::GlobalSolution;
+        field_access.push_back(access);
+    }
+    bridge.setFieldSolutionAccess(field_access);
+
+    bridge.setCurrentSolution(solution_);
+    if (solution_view_ != nullptr) {
+        bridge.setCurrentSolutionView(solution_view_);
+    }
+    for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
+        const auto& previous = previous_solutions_[k];
+        const auto* previous_view =
+            k < previous_solution_views_.size()
+                ? previous_solution_views_[k]
+                : nullptr;
+        if (!previous.empty()) {
+            bridge.setPreviousSolutionK(static_cast<int>(k + 1u), previous);
+        }
+        if (previous_view != nullptr) {
+            bridge.setPreviousSolutionViewK(static_cast<int>(k + 1u),
+                                            previous_view);
+        }
+    }
+
+    bridge.setTimeIntegrationContext(time_integration_);
+    bridge.setHistoryWeights(history_weights_);
+    bridge.setTime(time_);
+    bridge.setTimeStep(dt_);
+    bridge.setRealParameterGetter(get_real_param_);
+    bridge.setParameterGetter(get_param_);
+    bridge.setUserData(user_data_);
+    bridge.setJITConstants(jit_constants_);
+    bridge.setCutIntegrationContext(&cut_context);
+    bridge.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+    bridge.setAuxiliaryValues(auxiliary_inputs_,
+                              auxiliary_state_,
+                              auxiliary_outputs_);
+    bridge.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
+
+    CutFunctionalAdapter adapter(kernel);
+    const auto assembly_result = bridge.assembleCutInterfaces(
+        *mesh_,
+        cut_context,
+        generated_interface_marker,
+        *space_,
+        *space_,
+        adapter,
+        nullptr,
+        nullptr,
+        false,
+        false);
+
+    const Real value = kernel.postProcess(adapter.value());
+    result.value = value;
+    result.success = assembly_result.success;
+    result.error_message = assembly_result.error_message;
+    result.faces_processed = assembly_result.interface_faces_assembled;
+    result.elapsed_seconds = assembly_result.elapsed_time_seconds;
+    last_result_ = result;
+    return value;
 }
 
 // ============================================================================

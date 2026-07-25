@@ -180,7 +180,18 @@ public:
      * @param state System state (needed for assembler configuration).
      * @return The global boundary measure.
      */
-    [[nodiscard]] Real boundaryMeasure(int boundary_marker, const SystemStateView& state);
+    [[nodiscard]] Real boundaryMeasure(int boundary_marker,
+                                       const SystemStateView& state);
+
+    /**
+     * @brief Compute the measure for a physical or generated active boundary.
+     *
+     * Generated measures are intentionally not cached because the cut context
+     * can be replaced while retaining the same marker.
+     */
+    [[nodiscard]] Real boundaryMeasure(
+        const forms::BoundaryFunctional& functional,
+        const SystemStateView& state);
 
     // -----------------------------------------------------------------
     //  Sensitivity (for monolithic coupling)

@@ -208,6 +208,7 @@ public:
 	    void setPreviousSolution2View(const GlobalSystemView* solution_view) override;
 	    void setPreviousSolutionK(int k, std::span<const Real> solution) override;
 	    void setPreviousSolutionViewK(int k, const GlobalSystemView* solution_view) override;
+	    void setHistoryWeights(std::span<const Real> weights) noexcept;
 	    void setTimeIntegrationContext(const TimeIntegrationContext* ctx) override;
     void setTime(Real time) override;
     void setTimeStep(Real dt) override;
@@ -999,6 +1000,7 @@ private:
 	    const GlobalSystemView* current_solution_view_{nullptr};
 	    std::vector<std::span<const Real>> previous_solutions_{};
 	    std::vector<const GlobalSystemView*> previous_solution_views_{};
+	    std::span<const Real> history_weights_{};
 	    std::vector<Real> local_solution_coeffs_{};
 	    std::vector<std::vector<Real>> local_prev_solution_coeffs_{};
 	    std::vector<GlobalIndex> field_dof_scratch_{};

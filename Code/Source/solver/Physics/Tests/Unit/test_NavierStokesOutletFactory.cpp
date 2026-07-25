@@ -18,10 +18,12 @@
 #include "Assembly/GlobalSystemView.h"
 
 #include "FE/Backends/FSILS/FsilsFactory.h"
+#include "FE/Analysis/FormExprScanner.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/BoundaryReductionService.h"
 #include "FE/Auxiliary/AuxiliaryInputRegistry.h"
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/FormsInstaller.h"
@@ -721,6 +723,127 @@ void expectAdaptiveNear(const std::vector<Real>& actual,
 // ===========================================================================
 //  Modern overload (with FESystem&): deployed auxiliary model path.
 // ===========================================================================
+
+TEST(NavierStokesOutletFactory,
+     GeneratedActiveBoundaryRoutesEveryCoupledBranch)
+{
+    constexpr int physical_marker = 39;
+    constexpr int generated_marker = 139;
+    constexpr std::size_t expected_variant_count = 3u;
+
+    std::size_t generated_trace_count = 0u;
+    std::size_t physical_trace_count = 0u;
+    std::size_t physical_deployment_count = 0u;
+    const auto verify = [&](std::string_view variant,
+                            const auto& build_boundary_condition) {
+        SCOPED_TRACE(std::string(variant));
+        auto mesh = std::make_shared<
+            svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(
+            physical_marker);
+        auto u_space = svmp::FE::spaces::VectorSpace(
+            svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
+        auto p_space = svmp::FE::spaces::Space(
+            svmp::FE::spaces::SpaceType::H1, mesh, 1);
+
+        FESystem sys(mesh);
+        const auto u_field = sys.addField(
+            FieldSpec{.name = "u", .space = u_space, .components = 3});
+        sys.addField(
+            FieldSpec{.name = "p", .space = p_space, .components = 1});
+        const auto u = FormExpr::stateField(u_field, *u_space, "u");
+        const auto rho = FormExpr::constant(1.0);
+        auto boundary_condition =
+            build_boundary_condition(sys, u, rho);
+        ASSERT_NE(boundary_condition, nullptr);
+
+        const auto* registry = sys.auxiliaryInputRegistryIfPresent();
+        ASSERT_NE(registry, nullptr);
+        const auto input_name = autoBoundaryIntegralName(physical_marker);
+        ASSERT_TRUE(registry->hasInput(input_name));
+        EXPECT_EQ(registry->specOf(input_name).boundary_marker,
+                  physical_marker);
+        physical_deployment_count += static_cast<std::size_t>(
+            registry->specOf(input_name).boundary_marker ==
+            physical_marker);
+
+        const auto* reductions =
+            sys.boundaryReductionServiceIfPresent(u_field);
+        ASSERT_NE(reductions, nullptr);
+        EXPECT_TRUE(reductions->hasFunctional(input_name));
+        EXPECT_EQ(reductions->functionalCount(), 1u);
+        EXPECT_EQ(
+            reductions->functionalDef(input_name).boundary_marker,
+            physical_marker);
+        EXPECT_EQ(
+            reductions->functionalDef(input_name)
+                .generated_active_boundary_marker,
+            std::optional<int>{generated_marker});
+
+        BoundaryConditionManager manager;
+        manager.add(std::move(boundary_condition));
+        const auto v = FormExpr::testFunction(*u_space, "v");
+        auto momentum = inner(grad(u), grad(v)).dx();
+        manager.applyAll(sys, momentum, u, v, u_field);
+        ASSERT_NE(momentum.node(), nullptr);
+        const auto scan =
+            svmp::FE::analysis::scanFormExpr(*momentum.node());
+        const bool generated_trace =
+            std::find(scan.interface_markers.begin(),
+                      scan.interface_markers.end(),
+                      generated_marker) != scan.interface_markers.end();
+        const bool physical_trace =
+            std::find(scan.boundary_markers.begin(),
+                      scan.boundary_markers.end(),
+                      physical_marker) != scan.boundary_markers.end();
+        EXPECT_TRUE(generated_trace);
+        EXPECT_FALSE(physical_trace);
+        generated_trace_count +=
+            static_cast<std::size_t>(generated_trace);
+        physical_trace_count +=
+            static_cast<std::size_t>(physical_trace);
+    };
+
+    verify("rcr_resistive", [=](auto& system,
+                                 const auto& u,
+                                 const auto& rho) {
+        return Factories::toCoupledOutflowBC(
+            makeRCROpts(physical_marker, /*C=*/0.0),
+            system,
+            u,
+            rho,
+            generated_marker);
+    });
+    verify("rcr_compliant", [=](auto& system,
+                                 const auto& u,
+                                 const auto& rho) {
+        return Factories::toCoupledOutflowBC(
+            makeRCROpts(physical_marker, /*C=*/0.001),
+            system,
+            u,
+            rho,
+            generated_marker);
+    });
+    verify("rcrcr", [=](auto& system,
+                        const auto& u,
+                        const auto& rho) {
+        return Factories::toCoupledOutflowBC(
+            makeRCRCROpts(physical_marker),
+            system,
+            u,
+            rho,
+            generated_marker);
+    });
+
+    EXPECT_EQ(generated_trace_count, expected_variant_count);
+    EXPECT_EQ(physical_trace_count, 0u);
+    EXPECT_EQ(physical_deployment_count, expected_variant_count);
+    RecordProperty("coupled_outflow_generated_trace_variant_count",
+                   generated_trace_count);
+    RecordProperty("coupled_outflow_physical_trace_variant_count",
+                   physical_trace_count);
+    RecordProperty("coupled_outflow_physical_deployment_variant_count",
+                   physical_deployment_count);
+}
 
 TEST(NavierStokesOutletFactory, NewOverload_RCR_EndToEnd)
 {

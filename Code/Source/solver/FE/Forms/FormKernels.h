@@ -657,6 +657,7 @@ public:
 
     [[nodiscard]] bool hasCell() const noexcept override { return false; }
     [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+    [[nodiscard]] bool hasSingleSidedInterfaceFace() const noexcept override { return true; }
     [[nodiscard]] bool hasInteriorFace() const noexcept override { return false; }
     [[nodiscard]] bool hasInterfaceFace() const noexcept override { return false; }
 

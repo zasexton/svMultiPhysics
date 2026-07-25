@@ -94,6 +94,7 @@ namespace spaces {
 namespace assembly {
 
 struct TimeIntegrationContext;
+class CutIntegrationContext;
 
 /**
  * @brief Binding descriptor for a secondary field in multi-field functional evaluation
@@ -798,6 +799,17 @@ public:
     [[nodiscard]] Real assembleBoundaryScalar(
         FunctionalKernel& kernel,
         int boundary_marker);
+
+    /**
+     * @brief Assemble a scalar functional over a generated active boundary.
+     *
+     * The marker must identify a generated active-boundary domain in the
+     * supplied cut context. The caller owns any inter-rank reduction.
+     */
+    [[nodiscard]] Real assembleCutInterfaceScalar(
+        FunctionalKernel& kernel,
+        const CutIntegrationContext& cut_context,
+        int generated_interface_marker);
 
     // =========================================================================
     // Multiple Functionals

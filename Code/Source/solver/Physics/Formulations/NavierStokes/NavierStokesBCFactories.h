@@ -238,7 +238,8 @@ namespace detail {
     const IncompressibleNavierStokesVMSOptions::CoupledRCROutflowBC& bc,
     FE::systems::FESystem& system,
     const FE::forms::FormExpr& u,
-    const FE::forms::FormExpr& rho)
+    const FE::forms::FormExpr& rho,
+    std::optional<int> generated_active_boundary_marker = std::nullopt)
 {
     using namespace FE::forms;
     using namespace FE::systems;
@@ -266,6 +267,8 @@ namespace detail {
         FE::forms::BoundaryFunctional flow_rate;
         flow_rate.integrand = inner(u, n);
         flow_rate.boundary_marker = marker;
+        flow_rate.generated_active_boundary_marker =
+            generated_active_boundary_marker;
         flow_rate.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
         flow_rate.name = bc.functional_name;
         auto Q = system.boundaryIntegral(
@@ -282,12 +285,15 @@ namespace detail {
         );
         const auto p_out = resistive.output("P_out");
         const auto flux = -p_out * n - beta * rho * max_backflow * u;
-        return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
+        return std::make_unique<FE::forms::bc::NaturalBC>(
+            marker, flux, generated_active_boundary_marker);
     } else {
         // Step 1: Register boundary-integral input for Q via handle-returning API.
         FE::forms::BoundaryFunctional flow_rate;
         flow_rate.integrand = inner(u, n);
         flow_rate.boundary_marker = marker;
+        flow_rate.generated_active_boundary_marker =
+            generated_active_boundary_marker;
         flow_rate.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
         flow_rate.name = bc.functional_name;
         auto Q = system.boundaryIntegral(
@@ -307,7 +313,8 @@ namespace detail {
         // Step 3: Return a standard NaturalBC.
         const auto p_out = rcr.output("P_out");
         const auto flux = -p_out * n - beta * rho * max_backflow * u;
-        return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
+        return std::make_unique<FE::forms::bc::NaturalBC>(
+            marker, flux, generated_active_boundary_marker);
     }
 }
 
@@ -315,7 +322,8 @@ namespace detail {
     const IncompressibleNavierStokesVMSOptions::CoupledRCRCROutflowBC& bc,
     FE::systems::FESystem& system,
     const FE::forms::FormExpr& u,
-    const FE::forms::FormExpr& rho)
+    const FE::forms::FormExpr& rho,
+    std::optional<int> generated_active_boundary_marker = std::nullopt)
 {
     using namespace FE::forms;
     using namespace FE::systems;
@@ -340,6 +348,8 @@ namespace detail {
     FE::forms::BoundaryFunctional flow_rate;
     flow_rate.integrand = inner(u, n);
     flow_rate.boundary_marker = marker;
+    flow_rate.generated_active_boundary_marker =
+        generated_active_boundary_marker;
     flow_rate.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
     flow_rate.name = bc.functional_name;
     auto Q = system.boundaryIntegral(
@@ -364,7 +374,8 @@ namespace detail {
 
     const auto p_out = rcrcr.output("P_out");
     const auto flux = -p_out * n - beta * rho * max_backflow * u;
-    return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
+    return std::make_unique<FE::forms::bc::NaturalBC>(
+        marker, flux, generated_active_boundary_marker);
 }
 
 inline void applyVelocityNitscheBCs(

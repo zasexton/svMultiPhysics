@@ -48,7 +48,8 @@ struct BoundaryFunctional {
     };
 
     FormExpr integrand{};
-    int boundary_marker{-1};
+    int boundary_marker{-1};  ///< Physical boundary/deployment marker.
+    std::optional<int> generated_active_boundary_marker{};  ///< Optional cut-domain marker.
     std::string name{};
     Reduction reduction{Reduction::Sum};
     bool is_domain_functional{false};  ///< If true, integrate over cells instead of boundary faces.

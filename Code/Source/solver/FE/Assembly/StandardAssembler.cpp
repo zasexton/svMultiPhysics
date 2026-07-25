@@ -4631,6 +4631,11 @@ void StandardAssembler::setPreviousSolutionViewK(int k, const GlobalSystemView* 
     }
 }
 
+void StandardAssembler::setHistoryWeights(std::span<const Real> weights) noexcept
+{
+    history_weights_ = weights;
+}
+
 void StandardAssembler::setTimeIntegrationContext(const TimeIntegrationContext* ctx)
 {
     time_integration_ = ctx;
@@ -12031,6 +12036,7 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
                 ctx.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
                 ctx.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
                 ctx.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
+                ctx.setHistoryWeights(history_weights_);
                 ctx.clearAllPreviousSolutionData();
             };
             bind_cut_interface_common_context(context_);

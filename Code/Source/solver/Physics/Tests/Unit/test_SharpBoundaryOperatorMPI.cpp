@@ -11,10 +11,16 @@
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
 #include "FE/Assembly/CutIntegrationContext.h"
+#include "FE/Auxiliary/AuxiliaryBindings.h"
+#include "FE/Auxiliary/AuxiliaryInputRegistry.h"
 #include "FE/Dofs/EntityDofMap.h"
+#include "FE/Forms/BoundaryFunctional.h"
 #include "FE/Forms/FormExpr.h"
+#include "FE/Forms/StandardBCs.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Spaces/SpaceFactory.h"
+#include "FE/Systems/BoundaryConditionManager.h"
+#include "FE/Systems/BoundaryReductionService.h"
 #include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/TimeIntegrator.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
@@ -1372,6 +1378,369 @@ private:
     FE::FieldId pressure_{FE::INVALID_FIELD_ID};
     std::vector<FE::Real> solution_{};
     std::vector<FE::Real> previous_solution_{};
+};
+
+struct StructuredGeneratedCoupledOutflowSample {
+    FE::Real flow_rate{0.0};
+    std::array<FE::Real, 4> local_gradient_actions{};
+    FE::Real local_traction_work{0.0};
+    FE::Real local_active_measure{0.0};
+    int local_owned_rule_count{0};
+    int local_owner_mismatch_count{0};
+    int local_outlet_contributor_count{0};
+};
+
+class StructuredGeneratedCoupledOutflowHarness {
+public:
+    StructuredGeneratedCoupledOutflowHarness(
+        int rank,
+        int size,
+        ChannelPartition partition,
+        bool serial_communicator)
+        : rank_(serial_communicator ? 0 : rank)
+        , size_(serial_communicator ? 1 : size)
+        , mesh_(std::make_shared<StructuredChannelBoundaryMesh>(
+              1,
+              rank_,
+              size_,
+              serial_communicator ? ChannelPartition::Serial
+                                  : partition))
+        , system_(std::make_unique<FE::systems::FESystem>(mesh_))
+    {
+        const auto velocity_space = makeVelocitySpace(mesh_);
+        const auto level_set_space = makePressureSpace(mesh_);
+        velocity_ = system_->addField(FE::systems::FieldSpec{
+            .name = "u_generated_coupled_outflow",
+            .space = velocity_space,
+            .components = 3,
+        });
+        level_set_ = system_->addField(FE::systems::FieldSpec{
+            .name = "phi_generated_coupled_outflow",
+            .space = level_set_space,
+            .components = 1,
+            .source_kind =
+                FE::systems::FieldSourceKind::PrescribedData,
+        });
+        system_->addOperator(operator_tag_);
+        mesh_->enforcePartitionOwnership();
+
+        geometry_ = makeStructuredChannelGeometry(
+            *mesh_,
+            level_set_,
+            interface_marker_,
+            interface_height_,
+            FE::geometry::CutIntegrationSide::Negative);
+        active_marker_ = geometry_.active_markers[1];
+        system_->setCutIntegrationContext(geometry_.context);
+        system_->registerGeneratedEmbeddedInterfaceMarker(active_marker_);
+
+        FE::forms::BoundaryFunctional flow;
+        flow.integrand = FE::forms::inner(
+            FE::forms::FormExpr::discreteField(
+                velocity_, *velocity_space, "u_generated_coupled_outflow"),
+            FE::forms::FormExpr::normal());
+        flow.boundary_marker = kChannelOutletMarker;
+        flow.generated_active_boundary_marker = active_marker_;
+        flow.reduction =
+            FE::forms::BoundaryFunctional::Reduction::Sum;
+        flow_rate_ = system_->boundaryIntegral(
+            std::move(flow),
+            FE::systems::AuxiliaryInputUpdateSchedule::
+                EachNonlinearIteration);
+
+        const auto u = FE::forms::FormExpr::stateField(
+            velocity_, *velocity_space, "u_generated_coupled_outflow");
+        const auto v = FE::forms::FormExpr::testFunction(
+            *velocity_space, "v_generated_coupled_outflow");
+        const auto pressure =
+            FE::forms::FormExpr::constant(resistance_) *
+            flow_rate_.expr();
+        const auto flux =
+            -(pressure * FE::forms::FormExpr::normal());
+        FE::systems::BoundaryConditionManager boundary_conditions;
+        boundary_conditions.add(
+            std::make_unique<FE::forms::bc::NaturalBC>(
+                kChannelOutletMarker,
+                flux,
+                active_marker_));
+        auto residual =
+            (FE::forms::FormExpr::constant(0.0) *
+             FE::forms::inner(u, v))
+                .dx();
+        boundary_conditions.applyAll(
+            *system_, residual, u, v, velocity_);
+        (void)FE::systems::installFormulation(
+            *system_, operator_tag_, {velocity_}, residual);
+
+        FE::systems::SetupOptions setup_options;
+#if FE_HAS_MPI || defined(MESH_HAS_MPI)
+        setup_options.dof_options.my_rank = rank_;
+        setup_options.dof_options.world_size = size_;
+        setup_options.dof_options.mpi_comm =
+            serial_communicator ? MPI_COMM_SELF : MPI_COMM_WORLD;
+#else
+        (void)serial_communicator;
+#endif
+        system_->setup(
+            setup_options,
+            makeStructuredChannelSetupInputs(
+                *mesh_, rank_, size_));
+
+        solution_.assign(
+            static_cast<std::size_t>(
+                system_->dofHandler().getNumDofs()),
+            FE::Real{0.0});
+        for (FE::GlobalIndex vertex = 0;
+             vertex < mesh_->numVertices();
+             ++vertex) {
+            setFieldComponentValue(
+                solution_,
+                *system_,
+                velocity_,
+                vertex,
+                0,
+                velocity_magnitude_);
+        }
+        setLevelSetCoefficients();
+    }
+
+    [[nodiscard]] StructuredGeneratedCoupledOutflowSample sample()
+    {
+        FE::systems::SystemStateView state;
+        state.dt = FE::Real{1.0};
+        state.u = std::span<const FE::Real>(solution_);
+        system_->prepareAuxiliaryForAssembly(
+            state, /*is_nonlinear_iteration=*/true);
+
+        const auto* registry =
+            system_->auxiliaryInputRegistryIfPresent();
+        if (registry == nullptr ||
+            !registry->hasInput(flow_rate_.registryName())) {
+            throw std::runtime_error(
+                "generated coupled-outflow flow input is unavailable");
+        }
+
+        StructuredGeneratedCoupledOutflowSample result;
+        result.flow_rate =
+            registry->get(flow_rate_.registryName());
+
+        auto* reductions =
+            system_->boundaryReductionServiceIfPresent(velocity_);
+        if (reductions == nullptr ||
+            !reductions->hasFunctional(flow_rate_.registryName())) {
+            throw std::runtime_error(
+                "generated coupled-outflow reduction service is unavailable");
+        }
+        const auto gradient =
+            reductions->evaluateFunctionalGradient(
+                flow_rate_.registryName(),
+                velocity_,
+                state,
+                /*apply_constraints=*/false);
+        const auto probes = velocityProbes();
+        for (const auto& entry : gradient) {
+            if (entry.dof < 0 ||
+                static_cast<std::size_t>(entry.dof) >=
+                    solution_.size()) {
+                throw std::runtime_error(
+                    "generated coupled-outflow gradient DOF is out of range");
+            }
+            const auto index =
+                static_cast<std::size_t>(entry.dof);
+            for (std::size_t probe_index = 0;
+                 probe_index < probes.size();
+                 ++probe_index) {
+                result.local_gradient_actions[probe_index] +=
+                    entry.value * probes[probe_index][index];
+            }
+        }
+
+        const auto dof_count =
+            system_->dofHandler().getNumDofs();
+        FE::assembly::DenseVectorView residual(dof_count);
+        residual.zero();
+        FE::systems::AssemblyRequest request;
+        request.op = operator_tag_;
+        request.want_matrix = false;
+        request.want_vector = true;
+        request.is_nonlinear_iteration = true;
+        const auto assembly =
+            system_->assemble(
+                request, state, nullptr, &residual);
+        if (!assembly.success) {
+            throw std::runtime_error(
+                "generated coupled-outflow assembly failed: " +
+                assembly.error_message);
+        }
+        std::vector<FE::Real> residual_values(
+            static_cast<std::size_t>(dof_count),
+            FE::Real{0.0});
+        for (FE::GlobalIndex row = 0;
+             row < dof_count;
+             ++row) {
+            residual_values[static_cast<std::size_t>(row)] =
+                residual[row];
+        }
+        for (std::size_t dof = 0;
+             dof < residual_values.size();
+             ++dof) {
+            result.local_traction_work +=
+                residual_values[dof] * probes[0][dof];
+        }
+        result.local_active_measure =
+            geometry_.active_measures[1];
+        result.local_outlet_contributor_count =
+            result.local_active_measure >
+                    FE::Real{1.0e-14}
+                ? 1
+                : 0;
+
+        for (const auto* rule :
+             geometry_.context->interfaceRulesForMarker(
+                 active_marker_)) {
+            if (rule == nullptr) {
+                ++result.local_owner_mismatch_count;
+                continue;
+            }
+            const auto parent_cell =
+                static_cast<FE::GlobalIndex>(
+                    rule->provenance.parent_entity);
+            if (parent_cell < 0 ||
+                parent_cell >= mesh_->numCells()) {
+                ++result.local_owner_mismatch_count;
+                continue;
+            }
+            const int expected_owner =
+                mesh_->getCellOwnerRank(parent_cell);
+            if (rule->provenance.owner_rank != expected_owner ||
+                expected_owner != rank_ ||
+                !mesh_->isOwnedCell(parent_cell)) {
+                ++result.local_owner_mismatch_count;
+                continue;
+            }
+            ++result.local_owned_rule_count;
+        }
+        return result;
+    }
+
+    [[nodiscard]] bool hasDualMarkerContract() const
+    {
+        const auto* definition = flow_rate_.definition();
+        const auto* registry =
+            system_->auxiliaryInputRegistryIfPresent();
+        const auto* reductions =
+            system_->boundaryReductionServiceIfPresent(velocity_);
+        if (definition == nullptr ||
+            registry == nullptr ||
+            reductions == nullptr ||
+            !registry->hasInput(flow_rate_.registryName()) ||
+            !reductions->hasFunctional(flow_rate_.registryName())) {
+            return false;
+        }
+        const auto& functional =
+            reductions->functionalDef(flow_rate_.registryName());
+        return definition->boundary_marker ==
+                   kChannelOutletMarker &&
+               definition->generated_active_boundary_marker ==
+                   active_marker_ &&
+               registry->specOf(flow_rate_.registryName())
+                       .boundary_marker ==
+                   kChannelOutletMarker &&
+               functional.boundary_marker ==
+                   kChannelOutletMarker &&
+               functional.generated_active_boundary_marker ==
+                   active_marker_;
+    }
+
+    [[nodiscard]] FE::GlobalIndex cellCount() const noexcept
+    {
+        return mesh_->numCells();
+    }
+
+private:
+    [[nodiscard]] std::array<std::vector<FE::Real>, 4>
+    velocityProbes() const
+    {
+        std::array<std::vector<FE::Real>, 4> probes;
+        for (auto& probe : probes) {
+            probe.assign(solution_.size(), FE::Real{0.0});
+        }
+        for (FE::GlobalIndex vertex = 0;
+             vertex < mesh_->numVertices();
+             ++vertex) {
+            const auto point =
+                mesh_->getNodeCoordinates(vertex);
+            setFieldComponentValue(
+                probes[0],
+                *system_,
+                velocity_,
+                vertex,
+                0,
+                FE::Real{1.0});
+            setFieldComponentValue(
+                probes[1],
+                *system_,
+                velocity_,
+                vertex,
+                0,
+                point[1]);
+            setFieldComponentValue(
+                probes[2],
+                *system_,
+                velocity_,
+                vertex,
+                0,
+                point[2]);
+            setFieldComponentValue(
+                probes[3],
+                *system_,
+                velocity_,
+                vertex,
+                1,
+                FE::Real{1.0});
+        }
+        return probes;
+    }
+
+    void setLevelSetCoefficients()
+    {
+        const auto& handler =
+            system_->fieldDofHandler(level_set_);
+        std::vector<FE::Real> coefficients(
+            static_cast<std::size_t>(
+                handler.getNumDofs()),
+            FE::Real{0.0});
+        for (FE::GlobalIndex vertex = 0;
+             vertex < mesh_->numVertices();
+             ++vertex) {
+            setPrescribedVertexValue(
+                coefficients,
+                *system_,
+                level_set_,
+                vertex,
+                mesh_->getNodeCoordinates(vertex)[1] -
+                    interface_height_);
+        }
+        system_->setPrescribedFieldCoefficients(
+            level_set_, std::move(coefficients));
+    }
+
+    static constexpr const char* operator_tag_ =
+        "generated_active_coupled_outflow";
+    static constexpr int interface_marker_{238};
+    static constexpr FE::Real interface_height_{0.37};
+    static constexpr FE::Real velocity_magnitude_{0.4};
+    static constexpr FE::Real resistance_{2.0};
+    int rank_{0};
+    int size_{1};
+    std::shared_ptr<StructuredChannelBoundaryMesh> mesh_{};
+    std::unique_ptr<FE::systems::FESystem> system_{};
+    FE::FieldId velocity_{FE::INVALID_FIELD_ID};
+    FE::FieldId level_set_{FE::INVALID_FIELD_ID};
+    int active_marker_{-1};
+    StructuredChannelGeometry geometry_{};
+    FE::systems::AuxiliaryInputHandle flow_rate_{};
+    std::vector<FE::Real> solution_{};
 };
 
 std::shared_ptr<FE::assembly::CutIntegrationContext>
@@ -3408,6 +3777,303 @@ bool mpiWorld(int& rank, int& size)
 }
 
 #endif
+
+TEST(MovingDomainPhysicsMPI,
+     GeneratedActiveCoupledOutflowReductionGradientAndTractionArePartitionIndependent)
+{
+#if FE_HAS_MPI || defined(MESH_HAS_MPI)
+    int rank = 0;
+    int size = 1;
+    if (!mpiWorld(rank, size) || size < 2) {
+        GTEST_SKIP() << "requires an MPI launch with at least two ranks";
+    }
+
+    constexpr FE::Real interface_height = FE::Real{0.37};
+    constexpr FE::Real velocity_magnitude = FE::Real{0.4};
+    constexpr FE::Real resistance = FE::Real{2.0};
+    constexpr FE::Real expected_flow_rate =
+        velocity_magnitude * interface_height;
+    constexpr FE::Real expected_traction_work =
+        resistance * velocity_magnitude *
+        interface_height * interface_height;
+    constexpr std::array<FE::Real, 4>
+        expected_gradient_actions{{
+            interface_height,
+            interface_height * interface_height / FE::Real{2.0},
+            interface_height / FE::Real{2.0},
+            FE::Real{0.0},
+        }};
+
+    StructuredGeneratedCoupledOutflowHarness serial(
+        rank,
+        size,
+        ChannelPartition::Serial,
+        true);
+    StructuredGeneratedCoupledOutflowHarness slab(
+        rank,
+        size,
+        ChannelPartition::XSlab,
+        false);
+    StructuredGeneratedCoupledOutflowHarness round_robin(
+        rank,
+        size,
+        ChannelPartition::RoundRobin,
+        false);
+
+    const bool serial_dual_marker =
+        serial.hasDualMarkerContract();
+    const bool slab_dual_marker =
+        slab.hasDualMarkerContract();
+    const bool round_robin_dual_marker =
+        round_robin.hasDualMarkerContract();
+    EXPECT_TRUE(serial_dual_marker);
+    EXPECT_TRUE(slab_dual_marker);
+    EXPECT_TRUE(round_robin_dual_marker);
+    const int dual_marker_contract_count =
+        static_cast<int>(serial_dual_marker) +
+        static_cast<int>(slab_dual_marker) +
+        static_cast<int>(round_robin_dual_marker);
+
+    const auto serial_sample = serial.sample();
+    const auto slab_sample = slab.sample();
+    const auto round_robin_sample =
+        round_robin.sample();
+
+    std::array<FE::Real, 4> slab_gradient_actions{};
+    std::array<FE::Real, 4>
+        round_robin_gradient_actions{};
+    for (std::size_t probe_index = 0;
+         probe_index < expected_gradient_actions.size();
+         ++probe_index) {
+        slab_gradient_actions[probe_index] = globalSum(
+            slab_sample.local_gradient_actions[probe_index]);
+        round_robin_gradient_actions[probe_index] = globalSum(
+            round_robin_sample.local_gradient_actions[probe_index]);
+    }
+
+    const FE::Real slab_traction_work =
+        globalSum(slab_sample.local_traction_work);
+    const FE::Real round_robin_traction_work =
+        globalSum(round_robin_sample.local_traction_work);
+    const FE::Real slab_active_measure =
+        globalSum(slab_sample.local_active_measure);
+    const FE::Real round_robin_active_measure =
+        globalSum(round_robin_sample.local_active_measure);
+    const int slab_rule_count =
+        globalSum(slab_sample.local_owned_rule_count);
+    const int round_robin_rule_count =
+        globalSum(
+            round_robin_sample.local_owned_rule_count);
+    const int owner_mismatch_count =
+        serial_sample.local_owner_mismatch_count +
+        globalSum(
+            slab_sample.local_owner_mismatch_count) +
+        globalSum(
+            round_robin_sample.local_owner_mismatch_count);
+    const int slab_outlet_contributor_count =
+        globalSum(
+            slab_sample.local_outlet_contributor_count);
+    const int round_robin_outlet_contributor_count =
+        globalSum(
+            round_robin_sample
+                .local_outlet_contributor_count);
+    const int expected_rule_count =
+        serial_sample.local_owned_rule_count;
+    const int rule_count_mismatch =
+        std::abs(slab_rule_count - expected_rule_count) +
+        std::abs(
+            round_robin_rule_count -
+            expected_rule_count);
+
+    FE::Real maximum_gradient_action_error{0.0};
+    for (std::size_t probe_index = 0;
+         probe_index < expected_gradient_actions.size();
+         ++probe_index) {
+        EXPECT_NEAR(
+            serial_sample.local_gradient_actions[probe_index],
+            expected_gradient_actions[probe_index],
+            kPartitionTolerance);
+        EXPECT_NEAR(
+            slab_gradient_actions[probe_index],
+            expected_gradient_actions[probe_index],
+            kPartitionTolerance);
+        EXPECT_NEAR(
+            round_robin_gradient_actions[probe_index],
+            expected_gradient_actions[probe_index],
+            kPartitionTolerance);
+        maximum_gradient_action_error = std::max({
+            maximum_gradient_action_error,
+            std::abs(
+                serial_sample.local_gradient_actions[probe_index] -
+                expected_gradient_actions[probe_index]),
+            std::abs(
+                slab_gradient_actions[probe_index] -
+                expected_gradient_actions[probe_index]),
+            std::abs(
+                round_robin_gradient_actions[probe_index] -
+                expected_gradient_actions[probe_index]),
+        });
+    }
+    maximum_gradient_action_error =
+        globalMaximum(maximum_gradient_action_error);
+
+    EXPECT_NEAR(
+        serial_sample.flow_rate,
+        expected_flow_rate,
+        kPartitionTolerance);
+    EXPECT_NEAR(
+        slab_sample.flow_rate,
+        expected_flow_rate,
+        kPartitionTolerance);
+    EXPECT_NEAR(
+        round_robin_sample.flow_rate,
+        expected_flow_rate,
+        kPartitionTolerance);
+    EXPECT_NEAR(
+        serial_sample.local_traction_work,
+        expected_traction_work,
+        kPartitionTolerance);
+    EXPECT_NEAR(
+        slab_traction_work,
+        expected_traction_work,
+        kPartitionTolerance);
+    EXPECT_NEAR(
+        round_robin_traction_work,
+        expected_traction_work,
+        kPartitionTolerance);
+    EXPECT_NEAR(
+        serial_sample.local_active_measure,
+        interface_height,
+        kPartitionTolerance);
+    EXPECT_NEAR(
+        slab_active_measure,
+        interface_height,
+        kPartitionTolerance);
+    EXPECT_NEAR(
+        round_robin_active_measure,
+        interface_height,
+        kPartitionTolerance);
+
+    ASSERT_GT(expected_rule_count, 0);
+    EXPECT_EQ(slab_rule_count, expected_rule_count);
+    EXPECT_EQ(
+        round_robin_rule_count,
+        expected_rule_count);
+    EXPECT_EQ(rule_count_mismatch, 0);
+    EXPECT_EQ(owner_mismatch_count, 0);
+    EXPECT_EQ(slab_outlet_contributor_count, 1);
+    EXPECT_EQ(round_robin_outlet_contributor_count, 2);
+    EXPECT_EQ(serial.cellCount(), 12);
+
+    const int whole_face_fallback_count =
+        static_cast<int>(
+            std::abs(
+                serial_sample.flow_rate -
+                velocity_magnitude) <=
+            kPartitionTolerance) +
+        static_cast<int>(
+            std::abs(
+                slab_sample.flow_rate -
+                velocity_magnitude) <=
+            kPartitionTolerance) +
+        static_cast<int>(
+            std::abs(
+                round_robin_sample.flow_rate -
+                velocity_magnitude) <=
+            kPartitionTolerance);
+    EXPECT_EQ(whole_face_fallback_count, 0);
+
+    const FE::Real maximum_measure_error =
+        globalMaximum(std::max({
+            std::abs(
+                serial_sample.local_active_measure -
+                interface_height),
+            std::abs(
+                slab_active_measure - interface_height),
+            std::abs(
+                round_robin_active_measure -
+                interface_height),
+        }));
+    const FE::Real maximum_flow_error =
+        globalMaximum(std::max({
+            std::abs(
+                serial_sample.flow_rate -
+                expected_flow_rate),
+            std::abs(
+                slab_sample.flow_rate -
+                expected_flow_rate),
+            std::abs(
+                round_robin_sample.flow_rate -
+                expected_flow_rate),
+        }));
+    const FE::Real maximum_traction_work_error =
+        globalMaximum(std::max({
+            std::abs(
+                serial_sample.local_traction_work -
+                expected_traction_work),
+            std::abs(
+                slab_traction_work -
+                expected_traction_work),
+            std::abs(
+                round_robin_traction_work -
+                expected_traction_work),
+        }));
+    EXPECT_LE(maximum_measure_error, kPartitionTolerance);
+    EXPECT_LE(maximum_flow_error, kPartitionTolerance);
+    EXPECT_LE(
+        maximum_gradient_action_error,
+        kPartitionTolerance);
+    EXPECT_LE(
+        maximum_traction_work_error,
+        kPartitionTolerance);
+
+    ::testing::Test::RecordProperty(
+        "sharp_coupled_outflow_mpi_rank_count",
+        size);
+    ::testing::Test::RecordProperty(
+        "sharp_coupled_outflow_mpi_cell_count",
+        static_cast<int>(serial.cellCount()));
+    ::testing::Test::RecordProperty(
+        "sharp_coupled_outflow_mpi_partition_count",
+        2);
+    ::testing::Test::RecordProperty(
+        "sharp_coupled_outflow_mpi_gradient_probe_count",
+        static_cast<int>(
+            expected_gradient_actions.size()));
+    ::testing::Test::RecordProperty(
+        "sharp_coupled_outflow_mpi_dual_marker_contract_count",
+        dual_marker_contract_count);
+    ::testing::Test::RecordProperty(
+        "sharp_coupled_outflow_mpi_rule_count_mismatch",
+        rule_count_mismatch);
+    ::testing::Test::RecordProperty(
+        "sharp_coupled_outflow_mpi_owner_mismatch_count",
+        owner_mismatch_count);
+    ::testing::Test::RecordProperty(
+        "sharp_coupled_outflow_mpi_whole_face_fallback_count",
+        whole_face_fallback_count);
+    ::testing::Test::RecordProperty(
+        "sharp_coupled_outflow_mpi_slab_outlet_contributor_count",
+        slab_outlet_contributor_count);
+    ::testing::Test::RecordProperty(
+        "sharp_coupled_outflow_mpi_round_robin_outlet_contributor_count",
+        round_robin_outlet_contributor_count);
+    recordRealProperty(
+        "sharp_coupled_outflow_mpi_maximum_measure_error",
+        maximum_measure_error);
+    recordRealProperty(
+        "sharp_coupled_outflow_mpi_maximum_flow_error",
+        maximum_flow_error);
+    recordRealProperty(
+        "sharp_coupled_outflow_mpi_maximum_gradient_action_error",
+        maximum_gradient_action_error);
+    recordRealProperty(
+        "sharp_coupled_outflow_mpi_maximum_traction_work_error",
+        maximum_traction_work_error);
+#else
+    GTEST_SKIP() << "requires an MPI-enabled build";
+#endif
+}
 
 TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
      StructuredChannelWorkIsInvariantUnderActualRepartition)

@@ -25,6 +25,7 @@
 #include "Forms/FormExpr.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -137,8 +138,11 @@ struct FEQuantityDefinition {
     /// The integrand/expression (for integral/expression kinds).
     forms::FormExpr expression{};
 
-    /// Boundary marker (for BoundaryIntegral, BoundaryAverage, BoundaryNodalSum).
+    /// Physical boundary/deployment marker.
     int boundary_marker{-1};
+
+    /// Generated active-boundary marker used for cut-boundary integration.
+    std::optional<int> generated_active_boundary_marker{};
 
     /// Region descriptor (for RegionIntegral, RegionAverage).
     /// Uses the same region kind/identity scheme as AuxiliaryDeploymentRegion.

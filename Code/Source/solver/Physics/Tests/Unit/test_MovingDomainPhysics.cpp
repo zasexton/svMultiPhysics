@@ -37,6 +37,7 @@
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Spaces/SpaceFactory.h"
+#include "FE/Systems/BoundaryReductionService.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/TimeIntegrator.h"
@@ -5930,20 +5931,23 @@ TEST(MovingDomainPhysics,
 }
 
 TEST(MovingDomainPhysics,
-     NavierStokesUnfittedBoundaryOperatorsRejectCoupledOutflowFamilies)
+     NavierStokesUnfittedCoupledOutflowVariantsUseSharpActiveTrace)
 {
     constexpr int physical_marker = 219;
     constexpr int interface_marker = 220;
-    constexpr std::size_t coupled_family_count = 2u;
+    constexpr FE::Real generated_boundary_measure = FE::Real{0.125};
+    constexpr std::size_t coupled_variant_count = 3u;
     const auto mesh =
         std::make_shared<SingleTetraBoundaryMeshAccess>(physical_marker);
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
 
-    std::size_t rejection_count = 0u;
-    const auto verify_rejection = [&](std::string_view family,
-                                      const auto& configure_outflow) {
-        SCOPED_TRACE(family);
+    std::size_t generated_trace_count = 0u;
+    std::size_t whole_face_fallback_count = 0u;
+    std::size_t generated_flow_count = 0u;
+    const auto verify_routing = [&](std::string_view variant,
+                                    const auto& configure_outflow) {
+        SCOPED_TRACE(variant);
         auto opts = baseNavierStokesOptions();
         opts.enable_convection = false;
         opts.jit_policy.enable = false;
@@ -5954,16 +5958,17 @@ TEST(MovingDomainPhysics,
                 .interface_marker = interface_marker,
                 .level_set_field_name = "phi_coupled_outflow",
                 .generated_interface_domain_id =
-                    "coupled_outflow_rejection",
+                    "free_surface",
                 .active_domain =
                     ns::FreeSurfaceActiveDomain::LevelSetNegative,
                 .active_domain_method =
                     ns::FreeSurfaceActiveDomainMethod::CutVolume,
+                .small_cut_aggregation = false,
             });
         configure_outflow(opts);
 
         FE::systems::FESystem system(mesh);
-        system.addField(FE::systems::FieldSpec{
+        const auto phi = system.addField(FE::systems::FieldSpec{
             .name = "phi_coupled_outflow",
             .space = p_space,
             .components = 1,
@@ -5971,29 +5976,89 @@ TEST(MovingDomainPhysics,
         });
         ns::IncompressibleNavierStokesVMSModule module(
             u_space, p_space, std::move(opts));
-        try {
-            module.registerOn(system);
-            FAIL() << "coupled outflow on a sharp active boundary must fail closed";
-        } catch (const std::invalid_argument& error) {
-            const auto message = std::string(error.what());
-            EXPECT_NE(message.find(std::string(family)), std::string::npos);
-            EXPECT_NE(message.find("unsupported"), std::string::npos);
-            ++rejection_count;
+        ASSERT_NO_THROW(module.registerOn(system));
+
+        FE::interfaces::GeneratedActiveBoundaryMarkerKey key;
+        key.source = FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+        key.domain_id = "free_surface";
+        key.interface_marker = interface_marker;
+        key.boundary_marker = physical_marker;
+        key.side = FE::geometry::CutIntegrationSide::Negative;
+        const int sharp_marker =
+            FE::interfaces::stableGeneratedActiveBoundaryMarker(key);
+
+        const bool uses_generated_trace =
+            formulationRecordsContainInterfaceMarker(system, sharp_marker);
+        const bool uses_whole_face =
+            formulationRecordsContainBoundaryMarker(system, physical_marker);
+        EXPECT_TRUE(uses_generated_trace);
+        EXPECT_FALSE(uses_whole_face);
+        generated_trace_count +=
+            static_cast<std::size_t>(uses_generated_trace);
+        whole_face_fallback_count +=
+            static_cast<std::size_t>(uses_whole_face);
+
+        const int contact_marker =
+            stableContactLineMarker(phi, interface_marker, physical_marker);
+        system.setCutIntegrationContext(
+            makeSingleTetraContactLineCutContext(
+                interface_marker,
+                physical_marker,
+                contact_marker,
+                phi,
+                {0.0, 0.0, 1.0},
+                {0.0, 1.0, 0.0},
+                {0.10, 0.20, 0.0},
+                {1.0, 0.0, 0.0},
+                FE::geometry::CutIntegrationSide::Negative,
+                generated_boundary_measure));
+        ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+        const auto velocity = system.findFieldByName("u");
+        ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(
+                system.dofHandler().getNumDofs()),
+            FE::Real{0.0});
+        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            setFieldComponentValue(
+                solution, system, velocity, vertex, 2, FE::Real{1.0});
         }
-        EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
-        EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+        FE::systems::SystemStateView state;
+        state.u = solution;
+        auto* reductions =
+            system.boundaryReductionServiceIfPresent(velocity);
+        ASSERT_NE(reductions, nullptr);
+        ASSERT_TRUE(reductions->hasFunctional("sharp_coupled_flow"));
+        const auto flow =
+            reductions->evaluateFunctional("sharp_coupled_flow", state);
+        EXPECT_NEAR(flow, generated_boundary_measure, FE::Real{1.0e-12});
+        generated_flow_count += static_cast<std::size_t>(
+            std::abs(flow - generated_boundary_measure) <=
+            FE::Real{1.0e-12});
     };
 
-    verify_rejection("coupled RCR outflow", [](auto& opts) {
+    verify_routing("rcr_resistive", [](auto& opts) {
+        opts.coupled_outflow_rcr.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::CoupledRCROutflowBC{
+                .boundary_marker = physical_marker,
+                .Rp = 1.0,
+                .C = 0.0,
+                .Rd = 1.0,
+                .functional_name = "sharp_coupled_flow",
+            });
+    });
+    verify_routing("rcr_compliant", [](auto& opts) {
         opts.coupled_outflow_rcr.push_back(
             ns::IncompressibleNavierStokesVMSOptions::CoupledRCROutflowBC{
                 .boundary_marker = physical_marker,
                 .Rp = 1.0,
                 .C = 1.0,
                 .Rd = 1.0,
+                .functional_name = "sharp_coupled_flow",
             });
     });
-    verify_rejection("coupled RCRCR outflow", [](auto& opts) {
+    verify_routing("rcrcr", [](auto& opts) {
         opts.coupled_outflow_rcrcr.push_back(
             ns::IncompressibleNavierStokesVMSOptions::CoupledRCRCROutflowBC{
                 .boundary_marker = physical_marker,
@@ -6002,14 +6067,135 @@ TEST(MovingDomainPhysics,
                 .Rm = 1.0,
                 .C2 = 1.0,
                 .Rd = 1.0,
+                .functional_name = "sharp_coupled_flow",
             });
     });
 
-    EXPECT_EQ(rejection_count, coupled_family_count);
-    RecordProperty("sharp_unsupported_coupled_outflow_rejection_count",
+    EXPECT_EQ(generated_trace_count, coupled_variant_count);
+    EXPECT_EQ(whole_face_fallback_count, 0u);
+    EXPECT_EQ(generated_flow_count, coupled_variant_count);
+    RecordProperty("sharp_coupled_outflow_variant_count",
+                   coupled_variant_count);
+    RecordProperty("sharp_coupled_outflow_generated_trace_count",
+                   generated_trace_count);
+    RecordProperty("sharp_coupled_outflow_whole_face_fallback_count",
+                   whole_face_fallback_count);
+    RecordProperty("sharp_coupled_outflow_generated_flow_count",
+                   generated_flow_count);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesUnfittedCoupledOutflowFamiliesRejectUnsupportedSharpEnvelope)
+{
+    constexpr int physical_marker = 221;
+    constexpr int interface_marker = 222;
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(physical_marker);
+
+    std::size_t rejection_count = 0u;
+    const auto expect_rejection =
+        [&](std::string_view variant,
+            int velocity_order,
+            int pressure_order,
+            std::string generated_geometry,
+            std::string_view expected_diagnostic,
+            const auto& configure_outflow) {
+            SCOPED_TRACE(variant);
+            auto u_space = FE::spaces::VectorSpace(
+                FE::spaces::SpaceType::H1,
+                mesh,
+                velocity_order,
+                /*components=*/3);
+            auto p_space = FE::spaces::Space(
+                FE::spaces::SpaceType::H1,
+                mesh,
+                pressure_order,
+                /*components=*/1);
+            auto opts = baseNavierStokesOptions();
+            opts.enable_convection = false;
+            opts.jit_policy.enable = false;
+            opts.free_surface.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+                    .implementation =
+                        ns::FreeSurfaceImplementation::UnfittedLevelSet,
+                    .interface_marker = interface_marker,
+                    .level_set_field_name =
+                        "phi_coupled_outflow_envelope",
+                    .generated_interface_domain_id =
+                        "coupled_outflow_envelope",
+                    .generated_interface_geometry =
+                        std::move(generated_geometry),
+                    .active_domain =
+                        ns::FreeSurfaceActiveDomain::LevelSetNegative,
+                    .active_domain_method =
+                        ns::FreeSurfaceActiveDomainMethod::CutVolume,
+                });
+            configure_outflow(opts);
+
+            FE::systems::FESystem system(mesh);
+            system.addField(FE::systems::FieldSpec{
+                .name = "phi_coupled_outflow_envelope",
+                .space = p_space,
+                .components = 1,
+                .source_kind =
+                    FE::systems::FieldSourceKind::PrescribedData,
+            });
+            ns::IncompressibleNavierStokesVMSModule module(
+                u_space, p_space, std::move(opts));
+            try {
+                module.registerOn(system);
+                FAIL() << "unsupported sharp coupled-outflow envelope "
+                          "must fail closed";
+            } catch (const std::invalid_argument& error) {
+                EXPECT_NE(std::string(error.what()).find(
+                              expected_diagnostic),
+                          std::string::npos);
+                ++rejection_count;
+            }
+            EXPECT_EQ(system.findFieldByName("u"),
+                      FE::INVALID_FIELD_ID);
+            EXPECT_EQ(system.findFieldByName("p"),
+                      FE::INVALID_FIELD_ID);
+        };
+
+    expect_rejection(
+        "rcr_polynomial_order",
+        /*velocity_order=*/2,
+        /*pressure_order=*/1,
+        "LinearCorner",
+        "order-1 velocity and pressure",
+        [](auto& opts) {
+            opts.coupled_outflow_rcr.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::
+                    CoupledRCROutflowBC{
+                        .boundary_marker = physical_marker,
+                        .Rp = 1.0,
+                        .C = 0.0,
+                        .Rd = 1.0,
+                    });
+        });
+    expect_rejection(
+        "rcrcr_generated_geometry",
+        /*velocity_order=*/1,
+        /*pressure_order=*/1,
+        "HighOrderImplicit",
+        "Generated_interface_geometry=LinearCorner",
+        [](auto& opts) {
+            opts.coupled_outflow_rcrcr.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::
+                    CoupledRCRCROutflowBC{
+                        .boundary_marker = physical_marker,
+                        .Rp = 1.0,
+                        .C1 = 1.0,
+                        .Rm = 1.0,
+                        .C2 = 1.0,
+                        .Rd = 1.0,
+                    });
+        });
+
+    EXPECT_EQ(rejection_count, 2u);
+    RecordProperty("sharp_coupled_outflow_envelope_rejection_count",
                    rejection_count);
-    RecordProperty("sharp_supported_coupled_outflow_on_active_boundary_count",
-                   coupled_family_count - rejection_count);
 }
 
 TEST(FreeSurfaceSharpBoundaryOperators,

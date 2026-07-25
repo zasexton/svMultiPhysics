@@ -8,6 +8,7 @@
 #include "Systems/BoundaryReductionService.h"
 
 #include "Assembly/FunctionalAssembler.h"
+#include "Assembly/CutIntegrationContext.h"
 #if defined(FE_HAS_FSILS)
 #include "Backends/FSILS/FsilsVector.h"
 #endif
@@ -59,6 +60,13 @@ Real allreduceSum(Real local, MPI_Comm comm)
 {
     Real global = local;
     MPI_Allreduce(&local, &global, 1, mpiRealType(), MPI_SUM, comm);
+    return global;
+}
+
+int allreduceSum(int local, MPI_Comm comm)
+{
+    int global = local;
+    MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_SUM, comm);
     return global;
 }
 
@@ -324,6 +332,49 @@ void BoundaryReductionService::addBoundaryFunctional(forms::BoundaryFunctional f
                 "BoundaryReductionService::addBoundaryFunctional: empty name");
     FE_THROW_IF(!functional.integrand.isValid(), InvalidArgumentException,
                 "BoundaryReductionService::addBoundaryFunctional: invalid integrand");
+    FE_THROW_IF(functional.generated_active_boundary_marker.has_value() &&
+                    *functional.generated_active_boundary_marker < 0,
+                InvalidArgumentException,
+                "BoundaryReductionService::addBoundaryFunctional: "
+                "generated_active_boundary_marker must be >= 0");
+    FE_THROW_IF(functional.is_domain_functional &&
+                    functional.generated_active_boundary_marker.has_value(),
+                InvalidArgumentException,
+                "BoundaryReductionService::addBoundaryFunctional: domain "
+                "functionals cannot use generated_active_boundary_marker");
+    if (functional.generated_active_boundary_marker.has_value()) {
+        const auto validate_generated_expression =
+            [&](const auto& self,
+                const forms::FormExprNode& node) -> void {
+                if (const auto field = node.fieldId(); field.has_value()) {
+                    FE_THROW_IF(
+                        system_.fieldRecord(*field).source_kind !=
+                            FieldSourceKind::Unknown,
+                        NotImplementedException,
+                        "BoundaryReductionService::addBoundaryFunctional: "
+                        "generated active-boundary functionals currently "
+                        "require unknown-vector field sources");
+                }
+                FE_THROW_IF(
+                    node.type() == forms::FormExprType::PreviousSolutionRef ||
+                        node.type() == forms::FormExprType::TimeDerivative ||
+                        node.type() ==
+                            forms::FormExprType::HistoryWeightedSum ||
+                        node.type() ==
+                            forms::FormExprType::HistoryConvolution,
+                    NotImplementedException,
+                    "BoundaryReductionService::addBoundaryFunctional: "
+                    "generated active-boundary functionals with "
+                    "solution-history operators are unsupported");
+                for (const auto* child : node.children()) {
+                    if (child != nullptr) {
+                        self(self, *child);
+                    }
+                }
+            };
+        validate_generated_expression(
+            validate_generated_expression, *functional.integrand.node());
+    }
 
     auto it = name_to_functional_.find(functional.name);
     if (it != name_to_functional_.end()) {
@@ -332,9 +383,27 @@ void BoundaryReductionService::addBoundaryFunctional(forms::BoundaryFunctional f
         FE_THROW_IF(existing.boundary_marker != functional.boundary_marker, InvalidArgumentException,
                     "BoundaryReductionService::addBoundaryFunctional: name '" + functional.name +
                     "' already registered with different boundary_marker");
+        FE_THROW_IF(existing.generated_active_boundary_marker !=
+                        functional.generated_active_boundary_marker,
+                    InvalidArgumentException,
+                    "BoundaryReductionService::addBoundaryFunctional: name '" +
+                        functional.name +
+                        "' already registered with different "
+                        "generated_active_boundary_marker");
         FE_THROW_IF(existing.reduction != functional.reduction, InvalidArgumentException,
                     "BoundaryReductionService::addBoundaryFunctional: name '" + functional.name +
                     "' already registered with different reduction");
+        FE_THROW_IF(existing.is_domain_functional !=
+                        functional.is_domain_functional,
+                    InvalidArgumentException,
+                    "BoundaryReductionService::addBoundaryFunctional: name '" +
+                        functional.name +
+                        "' already registered with different functional domain");
+        FE_THROW_IF(existing.region_marker != functional.region_marker,
+                    InvalidArgumentException,
+                    "BoundaryReductionService::addBoundaryFunctional: name '" +
+                        functional.name +
+                        "' already registered with different region_marker");
         FE_THROW_IF(existing.integrand.toString() != functional.integrand.toString(), InvalidArgumentException,
                     "BoundaryReductionService::addBoundaryFunctional: name '" + functional.name +
                     "' already registered with different integrand");
@@ -645,15 +714,44 @@ Real BoundaryReductionService::evaluateFunctionalEntry(CompiledFunctional& entry
         } else {
             raw = assembler.assembleScalar(*entry.kernel);
         }
+    } else if (entry.def.generated_active_boundary_marker.has_value()) {
+        const auto* cut_context = system_.cutIntegrationContext();
+        FE_THROW_IF(cut_context == nullptr, InvalidStateException,
+                    "BoundaryReductionService: generated active-boundary "
+                    "functional requires a cut integration context");
+        const int marker = *entry.def.generated_active_boundary_marker;
+        FE_THROW_IF(!cut_context->hasGeneratedActiveBoundaryMarker(marker),
+                    InvalidArgumentException,
+                    "BoundaryReductionService: marker " +
+                        std::to_string(marker) +
+                        " is not a generated active-boundary marker");
+        raw = assembler.assembleCutInterfaceScalar(
+            *entry.kernel, *cut_context, marker);
     } else {
         raw = assembler.assembleBoundaryScalar(*entry.kernel, entry.def.boundary_marker);
     }
 
     const auto local_result = assembler.getLastResult();
 
+    int assembly_failure_count = local_result.success ? 0 : 1;
 #if FE_HAS_MPI
     int mpi_initialized = 0;
     MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        const auto comm = system_.dofHandler().mpiComm();
+        assembly_failure_count =
+            allreduceSum(assembly_failure_count, comm);
+    }
+#endif
+    FE_THROW_IF(
+        assembly_failure_count != 0,
+        InvalidStateException,
+        "BoundaryReductionService: functional '" + entry.def.name +
+            "' assembly failed" +
+            (local_result.error_message.empty()
+                 ? std::string(" on at least one rank")
+                 : std::string(": ") + local_result.error_message));
+#if FE_HAS_MPI
     if (mpi_initialized) {
         raw = allreduceSum(raw, system_.dofHandler().mpiComm());
     }
@@ -672,7 +770,7 @@ Real BoundaryReductionService::evaluateFunctionalEntry(CompiledFunctional& entry
             return raw;
         case forms::BoundaryFunctional::Reduction::Average: {
             const Real area = const_cast<BoundaryReductionService*>(this)->boundaryMeasure(
-                entry.def.boundary_marker, state);
+                entry.def, state);
             FE_THROW_IF(std::abs(area) < 1e-14, InvalidArgumentException,
                         "BoundaryReductionService: boundary measure is near zero for Average reduction");
             return raw / area;
@@ -779,28 +877,75 @@ std::vector<Real> BoundaryReductionService::evaluateAll(const SystemStateView& s
     return results;
 }
 
-Real BoundaryReductionService::boundaryMeasure(int boundary_marker, const SystemStateView& state)
+Real BoundaryReductionService::boundaryMeasure(
+    int boundary_marker,
+    const SystemStateView& state)
 {
-    auto it = boundary_measure_cache_.find(boundary_marker);
-    if (it != boundary_measure_cache_.end()) {
-        return it->second;
+    forms::BoundaryFunctional functional;
+    functional.boundary_marker = boundary_marker;
+    return boundaryMeasure(functional, state);
+}
+
+Real BoundaryReductionService::boundaryMeasure(
+    const forms::BoundaryFunctional& functional,
+    const SystemStateView& state)
+{
+    if (!functional.generated_active_boundary_marker.has_value()) {
+        auto it = boundary_measure_cache_.find(functional.boundary_marker);
+        if (it != boundary_measure_cache_.end()) {
+            return it->second;
+        }
     }
 
     assembly::FunctionalAssembler assembler;
     configureAssembler(assembler, state, /*bind_solution=*/false);
 
     BoundaryMeasureKernel measure_kernel;
-    Real area = assembler.assembleBoundaryScalar(measure_kernel, boundary_marker);
+    Real area = Real{0.0};
+    if (functional.generated_active_boundary_marker.has_value()) {
+        const auto* cut_context = system_.cutIntegrationContext();
+        FE_THROW_IF(cut_context == nullptr, InvalidStateException,
+                    "BoundaryReductionService::boundaryMeasure: generated "
+                    "active boundary requires a cut integration context");
+        const int marker = *functional.generated_active_boundary_marker;
+        FE_THROW_IF(!cut_context->hasGeneratedActiveBoundaryMarker(marker),
+                    InvalidArgumentException,
+                    "BoundaryReductionService::boundaryMeasure: marker " +
+                        std::to_string(marker) +
+                        " is not a generated active-boundary marker");
+        area = assembler.assembleCutInterfaceScalar(
+            measure_kernel, *cut_context, marker);
+    } else {
+        area = assembler.assembleBoundaryScalar(
+            measure_kernel, functional.boundary_marker);
+    }
 
+    const auto local_result = assembler.getLastResult();
+    int assembly_failure_count = local_result.success ? 0 : 1;
 #if FE_HAS_MPI
     int mpi_initialized = 0;
     MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        assembly_failure_count = allreduceSum(
+            assembly_failure_count, system_.dofHandler().mpiComm());
+    }
+#endif
+    FE_THROW_IF(
+        assembly_failure_count != 0,
+        InvalidStateException,
+        "BoundaryReductionService::boundaryMeasure: assembly failed" +
+            (local_result.error_message.empty()
+                 ? std::string(" on at least one rank")
+                 : std::string(": ") + local_result.error_message));
+#if FE_HAS_MPI
     if (mpi_initialized) {
         area = allreduceSum(area, system_.dofHandler().mpiComm());
     }
 #endif
 
-    boundary_measure_cache_.emplace(boundary_marker, area);
+    if (!functional.generated_active_boundary_marker.has_value()) {
+        boundary_measure_cache_.emplace(functional.boundary_marker, area);
+    }
     return area;
 }
 
@@ -868,14 +1013,17 @@ BoundaryReductionService::evaluateFunctionalGradient(std::string_view name,
         entry.def.boundary_marker,
         state,
         apply_constraints,
-        region_marker);
+        region_marker,
+        {},
+        entry.def.generated_active_boundary_marker);
 
     // Apply reduction: for Average, divide by boundary measure.
     if (entry.def.reduction == forms::BoundaryFunctional::Reduction::Average) {
-        const Real measure = boundaryMeasure(entry.def.boundary_marker, state);
-        if (measure > 0.0) {
-            for (auto& se : grad_entries) se.value /= measure;
-        }
+        const Real measure = boundaryMeasure(entry.def, state);
+        FE_THROW_IF(std::abs(measure) < 1e-14, InvalidArgumentException,
+                    "BoundaryReductionService: boundary measure is near zero "
+                    "for Average reduction gradient");
+        for (auto& se : grad_entries) se.value /= measure;
     }
 
     return grad_entries;

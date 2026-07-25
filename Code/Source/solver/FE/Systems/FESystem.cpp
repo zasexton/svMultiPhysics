@@ -12451,6 +12451,8 @@ AuxiliaryInputHandle FESystem::registerBoundaryIntegralHandle_(
     def->referenced_fields = refs;
     def->expression = functional.integrand;
     def->boundary_marker = functional.boundary_marker;
+    def->generated_active_boundary_marker =
+        functional.generated_active_boundary_marker;
     def->capabilities.explicit_evaluation = true;
     def->capabilities.monolithic_linearization = !refs.empty();
 
@@ -14136,6 +14138,16 @@ void FESystem::registerBoundaryIntegralInput(
                 "registerBoundaryIntegralInput: invalid integrand");
     FE_THROW_IF(functional.boundary_marker < 0, InvalidArgumentException,
                 "registerBoundaryIntegralInput: boundary_marker must be >= 0");
+    FE_THROW_IF(functional.generated_active_boundary_marker.has_value() &&
+                    *functional.generated_active_boundary_marker < 0,
+                InvalidArgumentException,
+                "registerBoundaryIntegralInput: "
+                "generated_active_boundary_marker must be >= 0");
+    FE_THROW_IF(functional.is_domain_functional &&
+                    functional.generated_active_boundary_marker.has_value(),
+                InvalidArgumentException,
+                "registerBoundaryIntegralInput: domain functionals cannot use "
+                "generated_active_boundary_marker");
 
     // The functional's name defaults to the input_name if not set.
     if (functional.name.empty()) {
@@ -19308,7 +19320,9 @@ FESystem::assembleBoundaryGradient(FieldId field,
                                     const SystemStateView& state,
                                     bool apply_constraints,
                                     int region_marker,
-                                    std::span<const GlobalIndex> cell_filter)
+                                    std::span<const GlobalIndex> cell_filter,
+                                    std::optional<int>
+                                        generated_active_boundary_marker)
 {
     const auto& rec = fieldRecord(field);
     FE_CHECK_NOT_NULL(rec.space.get(),
@@ -19320,8 +19334,21 @@ FESystem::assembleBoundaryGradient(FieldId field,
     const auto field_off = fieldDofOffset(field);
 
     // Create the gradient kernel (forward-mode AD for exact ∂(integrand)/∂(trial_dof_j)).
+    FE_THROW_IF(generated_active_boundary_marker.has_value() &&
+                    *generated_active_boundary_marker < 0,
+                InvalidArgumentException,
+                "FESystem::assembleBoundaryGradient: "
+                "generated_active_boundary_marker must be >= 0");
+    FE_THROW_IF(generated_active_boundary_marker.has_value() &&
+                    (region_marker >= 0 || !cell_filter.empty()),
+                InvalidArgumentException,
+                "FESystem::assembleBoundaryGradient: generated active-boundary "
+                "and domain-subset integration are mutually exclusive");
+
+    const int integration_marker =
+        generated_active_boundary_marker.value_or(boundary_marker);
     forms::BoundaryFunctionalGradientKernel grad_kernel(
-        integrand_trial, boundary_marker);
+        integrand_trial, integration_marker);
 
     // Assemble using the StandardAssembler's boundary face pipeline with a
     // lightweight sparse vector accumulator (same pattern as SystemAssembly.cpp).
@@ -19511,7 +19538,41 @@ FESystem::assembleBoundaryGradient(FieldId field,
     ScopedAssemblerOptions sensitivity_option_guard(
         assembler_.get(), sensitivity_options);
 
-    if (boundary_marker >= 0) {
+    if (generated_active_boundary_marker.has_value()) {
+        const auto* cut_context = cutIntegrationContext();
+        FE_THROW_IF(cut_context == nullptr, InvalidStateException,
+                    "FESystem::assembleBoundaryGradient: generated "
+                    "active-boundary integration requires a cut integration "
+                    "context");
+        const int marker = *generated_active_boundary_marker;
+        FE_THROW_IF(!cut_context->hasGeneratedActiveBoundaryMarker(marker),
+                    InvalidArgumentException,
+                    "FESystem::assembleBoundaryGradient: marker " +
+                        std::to_string(marker) +
+                        " is not a generated active-boundary marker");
+        const auto assembly_result = assembler_->assembleCutInterfaces(
+            meshAccess(),
+            *cut_context,
+            marker,
+            *rec.space,
+            *rec.space,
+            grad_kernel,
+            nullptr,
+            &accum,
+            false,
+            true);
+        const int assembly_failure_count = mpiAllreduceSumIfActive(
+            assembly_result.success ? 0 : 1,
+            activeAnalysisCommunicator(*this));
+        FE_THROW_IF(
+            assembly_failure_count != 0,
+            InvalidStateException,
+            "FESystem::assembleBoundaryGradient: generated active-boundary "
+            "assembly failed" +
+                (assembly_result.error_message.empty()
+                     ? std::string(" on at least one rank")
+                     : std::string(": ") + assembly_result.error_message));
+    } else if (boundary_marker >= 0) {
         // Boundary face gradient assembly.
         assembler_->assembleBoundaryFaces(
             meshAccess(), boundary_marker,

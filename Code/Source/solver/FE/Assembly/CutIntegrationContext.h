@@ -1295,6 +1295,10 @@ public:
                generated_interface_rule_indices_by_marker_.end();
     }
 
+    [[nodiscard]] bool hasGeneratedActiveBoundaryMarker(int marker) const noexcept {
+        return generated_active_boundary_marker_keys_.contains(marker);
+    }
+
     [[nodiscard]] const std::vector<int>& generatedInterfaceMarkers() const noexcept {
         return generated_interface_markers_;
     }

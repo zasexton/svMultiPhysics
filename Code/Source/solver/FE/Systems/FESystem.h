@@ -2083,7 +2083,9 @@ public:
                               const SystemStateView& state,
                               bool apply_constraints = true,
                               int region_marker = -1,
-                              std::span<const GlobalIndex> cell_filter = {});
+                              std::span<const GlobalIndex> cell_filter = {},
+                              std::optional<int> generated_active_boundary_marker =
+                                  std::nullopt);
 
 private:
 
