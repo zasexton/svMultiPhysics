@@ -53,12 +53,14 @@ public:
                                  bool full_view,
                                  bool expose_left_wall,
                                  bool rank_one_empty = false,
-                                 bool all_cells_owned_by_rank_zero = false)
+                                 bool all_cells_owned_by_rank_zero = false,
+                                 bool global_entity_ids_available = true)
         : rank_(rank),
           full_view_(full_view),
           expose_left_wall_(expose_left_wall),
           rank_one_empty_(rank_one_empty),
-          all_cells_owned_by_rank_zero_(all_cells_owned_by_rank_zero)
+          all_cells_owned_by_rank_zero_(all_cells_owned_by_rank_zero),
+          global_entity_ids_available_(global_entity_ids_available)
     {
         if (rank_one_empty_ && rank_ == 1) {
             return;
@@ -105,6 +107,15 @@ public:
         return full_view_ ? 1 : 0;
     }
     [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool globalEntityIdsAvailable() const override
+    {
+        return global_entity_ids_available_;
+    }
+    [[nodiscard]] GlobalIndex getCellGlobalId(
+        GlobalIndex cell) const override
+    {
+        return cell;
+    }
 
     [[nodiscard]] bool isOwnedCell(GlobalIndex cell) const override
     {
@@ -198,6 +209,7 @@ private:
     bool expose_left_wall_{false};
     bool rank_one_empty_{false};
     bool all_cells_owned_by_rank_zero_{false};
+    bool global_entity_ids_available_{true};
     std::vector<std::array<Real, 3>> nodes_{};
     std::vector<std::array<GlobalIndex, 4>> cells_{};
 };
@@ -235,6 +247,15 @@ public:
         return static_cast<GlobalIndex>(cells_.size() - 1u);
     }
     [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool globalEntityIdsAvailable() const override
+    {
+        return true;
+    }
+    [[nodiscard]] GlobalIndex getCellGlobalId(
+        GlobalIndex cell) const override
+    {
+        return cell + (rank_ == 0 ? 0 : 1);
+    }
 
     [[nodiscard]] bool isOwnedCell(GlobalIndex cell) const override
     {
@@ -606,6 +627,56 @@ void expectEveryMasterLineFiniteAndPartitionOfUnity(
 }
 
 } // namespace
+
+TEST(SmallCutAggregationConstraintMPI,
+     MissingGlobalCellIdsFailsCollectivelyBeforeRootSelection)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    int rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size != 2) {
+        GTEST_SKIP() << "Run with exactly two MPI ranks";
+    }
+
+    auto mesh = std::make_shared<TwoQuadAggregationMeshAccess>(
+        rank,
+        /*full_view=*/true,
+        /*expose_left_wall=*/false,
+        /*rank_one_empty=*/false,
+        /*all_cells_owned_by_rank_zero=*/false,
+        /*global_entity_ids_available=*/rank == 0);
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+        pressure, geometry::CutIntegrationSide::Negative, kInterfaceMarker));
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = fullTopology();
+    const auto setup_outcome = invokeCollectively(MPI_COMM_WORLD, [&] {
+        system.setup(setupOptions(rank, world_size), inputs);
+    });
+    ASSERT_TRUE(setup_outcome.allSucceeded())
+        << setup_outcome.local_message;
+
+    system.setCutIntegrationContext(
+        cutContext({{0, Real{0.25}, false}, {1, Real{1}, true}}));
+    const auto rebuild_outcome = invokeCollectively(
+        MPI_COMM_WORLD, [&] { system.rebuildConstraintState(); });
+    EXPECT_TRUE(rebuild_outcome.allThrew());
+    EXPECT_TRUE(anyMessageContains(
+        MPI_COMM_WORLD,
+        rebuild_outcome,
+        "missing_distributed_global_cell_ids"));
+    EXPECT_EQ(system.constraints().numConstraints(), 0u);
+#endif
+}
 
 TEST(SmallCutAggregationConstraintMPI,
      FullOverlapOwnerNonCandidateImportsCanonicalGhostRoot)

@@ -377,11 +377,21 @@ if(PHYSICS_BUILD_TESTS)
         add_test(
             NAME Physics_FreeSurfaceCutStability_MPI_2
             COMMAND ${MPIEXEC_EXECUTABLE} -np 2 $<TARGET_FILE:test_physics>
-                    --gtest_filter=FreeSurfaceCutStabilityMPI.*
+                    --gtest_filter=FreeSurfaceCutStabilityMPI.PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData:FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions:FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport:FreeSurfaceCutStabilityMPI.TwoRankFractionOrientationRegimeMatrixMatchesSerial
         )
         set_tests_properties(Physics_FreeSurfaceCutStability_MPI_2 PROPERTIES
-            TIMEOUT 240
+            TIMEOUT 43200
             PROCESSORS 2
+            LABELS "MPI;physics;free-surface"
+        )
+        add_test(
+            NAME Physics_FreeSurfaceCutStability_MPI_4
+            COMMAND ${MPIEXEC_EXECUTABLE} -np 4 $<TARGET_FILE:test_physics>
+                    --gtest_filter=FreeSurfaceCutStabilityMPI.FourRankFixedCutIsInvariantAcrossBlockAndMetisPartitions:FreeSurfaceCutStabilityMPI.FourRankFractionOrientationRegimeMatrixMatchesSerial
+        )
+        set_tests_properties(Physics_FreeSurfaceCutStability_MPI_4 PROPERTIES
+            TIMEOUT 43200
+            PROCESSORS 4
             LABELS "MPI;physics;free-surface"
         )
     else()

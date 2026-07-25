@@ -74,14 +74,17 @@
  * rebuild/refresh requires the generated context and fails closed if it is
  * absent. The configured interface marker must also occur in the generated
  * volume context on at least one communicator rank. Assembly must follow that
- * generated-context rebuild. Ranks that can see a candidate propose roots, and a
- * communicator-wide choice uses (BFS distance, sorted global root-master
- * DOFs) as its deterministic key. Equivalent providers must agree on the
+ * generated-context rebuild. Ranks that can see a candidate propose roots,
+ * and a communicator-wide choice uses (BFS distance, globally unique physical
+ * root-cell ID) as its deterministic key. Algebraic master DOF numbers are
+ * excluded because owner-contiguous numbering changes under repartitioning.
+ * Equivalent providers of the selected physical root must agree on the
  * extension weights. The canonical line is installed on every rank where its
  * slave is relevant only after proving that the slave has exactly one owner
- * and every nonzero master is relevant there. Missing master availability or
+ * and every nonzero master is relevant there. Distributed mesh adapters must
+ * expose globally unique cell IDs; missing IDs, master availability, or
  * inconsistent component/weight data fails closed before the generic
- * owner-wins parallel merge. Increase mesh/DOF overlap in that case.
+ * owner-wins parallel merge. Increase mesh/DOF overlap in the latter case.
  * SVMP_AGGREGATION_ALLOW_UNAGGREGATED=1 restores the
  * legacy open handling of local island/machinery failures for debugging, but
  * does not bypass this communicator-consistency safety check; the
@@ -103,12 +106,52 @@
 #include "Geometry/CutQuadrature.h"
 
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <vector>
 
 namespace svmp {
 namespace FE {
 namespace constraints {
+
+namespace detail {
+
+/**
+ * Partition-invariant identity used to choose among aggregation roots.
+ *
+ * Global algebraic DOF numbers are intentionally allowed to change with an
+ * owner-contiguous partition.  They therefore cannot participate in the root
+ * ordering.  A distributed caller must supply a globally unique physical cell
+ * identifier.
+ */
+struct SmallCutAggregationPhysicalRootKey {
+    std::size_t distance{std::numeric_limits<std::size_t>::max()};
+    GlobalIndex cell_gid{INVALID_GLOBAL_INDEX};
+};
+
+[[nodiscard]] constexpr bool smallCutAggregationPhysicalRootLess(
+    const SmallCutAggregationPhysicalRootKey& lhs,
+    int lhs_provider_rank,
+    const SmallCutAggregationPhysicalRootKey& rhs,
+    int rhs_provider_rank) noexcept
+{
+    if (lhs.distance != rhs.distance) {
+        return lhs.distance < rhs.distance;
+    }
+    if (lhs.cell_gid != rhs.cell_gid) {
+        return lhs.cell_gid < rhs.cell_gid;
+    }
+    return lhs_provider_rank < rhs_provider_rank;
+}
+
+[[nodiscard]] constexpr bool smallCutAggregationSamePhysicalRoot(
+    const SmallCutAggregationPhysicalRootKey& lhs,
+    const SmallCutAggregationPhysicalRootKey& rhs) noexcept
+{
+    return lhs.distance == rhs.distance && lhs.cell_gid == rhs.cell_gid;
+}
+
+} // namespace detail
 
 struct SmallCutAggregationGuardOptions {
     std::size_t maximum_root_path_length{8u};

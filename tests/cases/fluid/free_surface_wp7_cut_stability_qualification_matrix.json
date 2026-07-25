@@ -1,0 +1,715 @@
+{
+  "schema_version": 1,
+  "matrix_id": "free_surface_wp7_cut_stability_v2",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "work_package": "WP-7",
+  "findings": [
+    "FSR-07"
+  ],
+  "qualification_scope": "WP-7 matrix-definition and currently executable prerequisite evidence only; seven frozen prospective tests remain absent, so this matrix does not close FSR-07, WP-7, or Q1.",
+  "closure_request_policy": {
+    "accepted_claim": "low_level_prerequisite",
+    "rejected_claims": [
+      "fsr07_closure",
+      "wp7_closure",
+      "q1_closure"
+    ],
+    "diagnostic": "Seven frozen manufactured-error, topology-policy, node-crossing, and simulation-exit tests are prospective, and production preconditioner and Krylov-spread evidence is unresolved."
+  },
+  "qualification_disposition": {
+    "fsr07_closed": false,
+    "wp7_closed": false,
+    "q1_closed": false
+  },
+  "closure_state": "BLOCKED_BY_FROZEN_PROSPECTIVE_EVIDENCE",
+  "model_envelope": "one_phase_unfitted_p1_equal_order_transient_vms_pspg_with_combined_aggregation_and_pressure_jump_stabilization",
+  "matching_derivation": "Documentation/free_surface_wp7_combined_p1_method.md",
+  "selected_method": {
+    "name": "combined_p1_aggregate_space_vms_pspg_pressure_jump",
+    "velocity_space": "continuous_p1_aggregate_constrained",
+    "pressure_space": "continuous_p1_aggregate_constrained",
+    "bulk_stabilization": "transient_equal_order_vms_pspg",
+    "cut_stabilization": "cut_metadata_scaled_pressure_first_derivative_jump",
+    "velocity_ghost_penalty": "disabled",
+    "aggregate_root_policy": "breadth_first_full_active_root_with_common_velocity_pressure_topology",
+    "aggregate_constant_reproduction": "partition_of_unity_gated",
+    "aggregate_coefficient_bound": "row_l1_and_slave_master_distance_over_h_gated",
+    "pressure_datum": "physical_natural_traction_anchor_without_algebraic_gauge",
+    "rootless_feature_policy": "homogeneous_support_removal_reported_as_feature_deletion",
+    "supported_polynomial_orders": [
+      1
+    ]
+  },
+  "method_limitations": [
+    "This finite matrix does not establish a general inf-sup, coercivity, or condition-number theorem.",
+    "The selected implementation has no velocity ghost penalty and therefore does not inherit results for formulations that require both velocity and pressure ghost stabilization.",
+    "The production rootless-feature policy removes unsupported subresolution degrees of freedom; it is a reported model event and is not liquid conservation.",
+    "Only the production P1 aggregate space is in scope. Higher polynomial orders remain unsupported by this selected method.",
+    "The deterministic Jacobi-preconditioned BiCGSTAB diagnostic is not the production preconditioner and does not freeze a production Krylov-spread threshold.",
+    "The full finite operator cross-product is executable but remains unqualified until an immutable run passes; its finite results cannot establish a general theorem."
+  ],
+  "case_axes": {
+    "volume_fractions": [
+      1e-08,
+      1e-06,
+      0.0001,
+      0.01,
+      0.1,
+      0.25,
+      0.49
+    ],
+    "orientations": [
+      {
+        "id": "axis",
+        "normal": [
+          1.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "id": "oblique",
+        "normal": [
+          1.0,
+          0.73,
+          0.41
+        ]
+      }
+    ],
+    "h_levels": [
+      {
+        "cells_per_axis": 2,
+        "h_over_domain_length": 0.5
+      },
+      {
+        "cells_per_axis": 3,
+        "h_over_domain_length": 0.3333333333333333
+      },
+      {
+        "cells_per_axis": 4,
+        "h_over_domain_length": 0.25
+      }
+    ],
+    "regimes": [
+      {
+        "id": "viscous",
+        "density": 1.0,
+        "viscosity": 1.0,
+        "dt": 0.1,
+        "convection": false,
+        "advective_speed": 0.0
+      },
+      {
+        "id": "transient",
+        "density": 1.0,
+        "viscosity": 0.01,
+        "dt": 0.001,
+        "convection": false,
+        "advective_speed": 0.0
+      },
+      {
+        "id": "advection",
+        "density": 1.0,
+        "viscosity": 0.001,
+        "dt": 0.1,
+        "convection": true,
+        "advective_speed": 1.0
+      }
+    ],
+    "mpi_ranks": [
+      1,
+      2,
+      4
+    ],
+    "polynomial_orders": [
+      1
+    ],
+    "topologies": [
+      "connected",
+      "disconnected_resolved",
+      "rootless_subresolution",
+      "continuous_node_crossing"
+    ]
+  },
+  "full_cross_product_case_count": 378,
+  "required_metrics": [
+    "velocity_l2_error",
+    "velocity_h1_error",
+    "pressure_l2_error_after_physical_nullspace_removal",
+    "divergence_l2_norm",
+    "stabilized_pressure_control_surrogate",
+    "equilibrated_smallest_singular_value",
+    "canonically_scaled_condition_number",
+    "preconditioned_krylov_iterations",
+    "preconditioned_spectrum_when_available",
+    "aggregate_row_l1_norm",
+    "aggregate_slave_master_distance_over_h",
+    "rootless_feature_count_and_removed_volume",
+    "solver_fallback_and_retry_count",
+    "operator_and_solution_jump_at_node_crossing"
+  ],
+  "numeric_threshold_basis": {
+    "exact_fraction_geometry": "Affine single-tetra reference-volume fractions are invariant across three physically scaled h fixtures up to generated-quadrature roundoff; the frozen relative bound is 2e-11.",
+    "finite_conditioning": "The 400 and 1000 condition bounds apply only to the named finite serial and distributed fixtures after deterministic row-column equilibration.",
+    "pressure_control": "The 0.45 lower bound is an observed finite-fixture stabilized Schur surrogate and is not an h-uniform inf-sup constant.",
+    "aggregate_amplification": "The row-l1 and reach bounds apply to the production P1 aggregate constraints exercised by the named fixtures.",
+    "krylov_and_manufactured_errors": "The diagnostic BiCGSTAB path gates a 2e-9 manufactured linear-system residual and records iterations without assigning a cut-independent spread. Production-preconditioner spread and expected manufactured field convergence remain prospective."
+  },
+  "simulation_exits": [
+    {
+      "case": "static_caps",
+      "status": "REQUIRED_PROSPECTIVE",
+      "contract": "No nonconvergent force or solution jump caused solely by mesh-relative cut-topology change."
+    },
+    {
+      "case": "translating_drops",
+      "status": "REQUIRED_PROSPECTIVE",
+      "contract": "Expected velocity, pressure, divergence, and conservation convergence across cut offsets."
+    },
+    {
+      "case": "filaments",
+      "status": "REQUIRED_PROSPECTIVE",
+      "contract": "Resolved connected filaments remain stable while rootless deletion is separately reported."
+    },
+    {
+      "case": "d18_d38",
+      "status": "REQUIRED_PROSPECTIVE",
+      "contract": "No unreported solver fallback, feature deletion, or mesh-relative numerical jump at the accepted horizon."
+    }
+  ],
+  "unresolved_required_evidence": [
+    "production_preconditioner_and_krylov_iteration_spread",
+    "manufactured_stokes_and_navier_stokes_error_rates",
+    "static_drop_filament_and_d18_d38_topology_transition_exits"
+  ],
+  "build_targets": {
+    "geometry": "test_fe_geometry",
+    "level_set": "test_fe_levelset",
+    "systems": "test_fe_systems",
+    "assembly": "test_fe_assembly",
+    "physics": "test_physics",
+    "application": "test_application",
+    "assembly_mpi": "test_fe_assembly_mpi",
+    "application_mpi": "test_application_mpi"
+  },
+  "build_cmake_homes": {
+    "geometry": "Code/Source/solver/FE",
+    "level_set": "Code/Source/solver/FE",
+    "systems": "Code/Source/solver/FE",
+    "assembly": "Code/Source/solver/FE",
+    "physics": "Code/Source/solver/Physics",
+    "application": "Code",
+    "assembly_mpi": "Code/Source/solver/FE",
+    "application_mpi": "Code"
+  },
+  "groups": [
+    {
+      "id": "wp7_finite_foundation_serial",
+      "binary": "physics",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "FreeSurfaceCutStability.SelectedCombinedAggregateAndPressureStabilizationContractIsExplicit",
+        "FreeSurfaceCutStability.ExactTargetFractionGeometryCoversAxisObliqueAndThreeHLevels",
+        "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+        "FreeSurfaceCutStability.FixedTetraMeshGenericAndNearFeatureSweepHasNoFreePressureNullRows",
+        "FreeSurfaceCutStability.FixedPhysicalCutThreeLevelRefinementBoundsPressureControlAndAggregation",
+        "FreeSurfaceCutStability.PersistentMovingCutRefreshesAggregationAndRetainsMixedRankWithoutPressurePin",
+        "FreeSurfaceCutStability.ProductionSmallCutAggregationPreservesPartialWallDirichletPerComponent",
+        "FreeSurfaceCutStability.DisconnectedLiquidIslandsHaveZeroPhysicalCrossCouplingThroughDryStrip"
+      ],
+      "execution": {
+        "wall_time_seconds": 3600,
+        "memory_mib": 8192,
+        "output_mib": 512
+      }
+    },
+    {
+      "id": "wp7_required_regimes_serial",
+      "binary": "physics",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations",
+        "FreeSurfaceCutStability.ManufacturedStokesAndNavierStokesErrorsConvergeAcrossCuts",
+        "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+        "FreeSurfaceCutStability.ContinuousNodeCrossingHasNoUnreportedOperatorOrSolutionJump"
+      ],
+      "execution": {
+        "wall_time_seconds": 14400,
+        "memory_mib": 12288,
+        "output_mib": 1024
+      }
+    },
+    {
+      "id": "wp7_partition_mpi_2",
+      "binary": "physics",
+      "mpi_ranks": 2,
+      "gtest_output_copies": 1,
+      "tests": [
+        "FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions",
+        "FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport",
+        "FreeSurfaceCutStabilityMPI.TwoRankFractionOrientationRegimeMatrixMatchesSerial"
+      ],
+      "execution": {
+        "wall_time_seconds": 43200,
+        "memory_mib": 12288,
+        "output_mib": 1024
+      }
+    },
+    {
+      "id": "wp7_partition_mpi_4",
+      "binary": "physics",
+      "mpi_ranks": 4,
+      "gtest_output_copies": 1,
+      "tests": [
+        "FreeSurfaceCutStabilityMPI.FourRankFixedCutIsInvariantAcrossBlockAndMetisPartitions",
+        "FreeSurfaceCutStabilityMPI.FourRankFractionOrientationRegimeMatrixMatchesSerial"
+      ],
+      "execution": {
+        "wall_time_seconds": 43200,
+        "memory_mib": 14336,
+        "output_mib": 1024
+      }
+    },
+    {
+      "id": "wp7_simulation_exits_serial",
+      "binary": "physics",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "FreeSurfaceCutStabilitySimulation.StaticCapsHaveNoMeshRelativeNumericalJump",
+        "FreeSurfaceCutStabilitySimulation.TranslatingDropsConvergeAcrossCutOffsets",
+        "FreeSurfaceCutStabilitySimulation.ResolvedFilamentsSeparatePhysicalAndRootlessEvents",
+        "FreeSurfaceCutStabilitySimulation.D18D38ReportEveryFallbackAndFeatureDeletion"
+      ],
+      "execution": {
+        "wall_time_seconds": 86400,
+        "memory_mib": 14336,
+        "output_mib": 4096
+      }
+    }
+  ],
+  "executable_tests": [
+    "FreeSurfaceCutStability.SelectedCombinedAggregateAndPressureStabilizationContractIsExplicit",
+    "FreeSurfaceCutStability.ExactTargetFractionGeometryCoversAxisObliqueAndThreeHLevels",
+    "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+    "FreeSurfaceCutStability.FixedTetraMeshGenericAndNearFeatureSweepHasNoFreePressureNullRows",
+    "FreeSurfaceCutStability.FixedPhysicalCutThreeLevelRefinementBoundsPressureControlAndAggregation",
+    "FreeSurfaceCutStability.PersistentMovingCutRefreshesAggregationAndRetainsMixedRankWithoutPressurePin",
+    "FreeSurfaceCutStability.ProductionSmallCutAggregationPreservesPartialWallDirichletPerComponent",
+    "FreeSurfaceCutStability.DisconnectedLiquidIslandsHaveZeroPhysicalCrossCouplingThroughDryStrip",
+    "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations",
+    "FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions",
+    "FreeSurfaceCutStabilityMPI.LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport",
+    "FreeSurfaceCutStabilityMPI.TwoRankFractionOrientationRegimeMatrixMatchesSerial",
+    "FreeSurfaceCutStabilityMPI.FourRankFixedCutIsInvariantAcrossBlockAndMetisPartitions",
+    "FreeSurfaceCutStabilityMPI.FourRankFractionOrientationRegimeMatrixMatchesSerial"
+  ],
+  "prospective_tests": [
+    "FreeSurfaceCutStability.ManufacturedStokesAndNavierStokesErrorsConvergeAcrossCuts",
+    "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+    "FreeSurfaceCutStability.ContinuousNodeCrossingHasNoUnreportedOperatorOrSolutionJump",
+    "FreeSurfaceCutStabilitySimulation.StaticCapsHaveNoMeshRelativeNumericalJump",
+    "FreeSurfaceCutStabilitySimulation.TranslatingDropsConvergeAcrossCutOffsets",
+    "FreeSurfaceCutStabilitySimulation.ResolvedFilamentsSeparatePhysicalAndRootlessEvents",
+    "FreeSurfaceCutStabilitySimulation.D18D38ReportEveryFallbackAndFeatureDeletion"
+  ],
+  "closure_contract": [
+    {
+      "claim": "selected_combined_method_is_bound_to_the_production_fixture",
+      "evidence": [
+        "FreeSurfaceCutStability.SelectedCombinedAggregateAndPressureStabilizationContractIsExplicit",
+        "FreeSurfaceCutStability.ProductionSmallCutAggregationPreservesPartialWallDirichletPerComponent"
+      ]
+    },
+    {
+      "claim": "exact_fraction_orientation_and_h_geometry_is_finite_and_fallback_free",
+      "evidence": [
+        "FreeSurfaceCutStability.ExactTargetFractionGeometryCoversAxisObliqueAndThreeHLevels"
+      ]
+    },
+    {
+      "claim": "existing_finite_conditioning_and_partition_foundation_remains_gated",
+      "evidence": [
+        "FreeSurfaceCutStability.FixedTetraMeshGenericAndNearFeatureSweepHasNoFreePressureNullRows",
+        "FreeSurfaceCutStability.FixedPhysicalCutThreeLevelRefinementBoundsPressureControlAndAggregation",
+        "FreeSurfaceCutStability.PersistentMovingCutRefreshesAggregationAndRetainsMixedRankWithoutPressurePin",
+        "FreeSurfaceCutStabilityMPI.DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions",
+        "FreeSurfaceCutStabilityMPI.FourRankFixedCutIsInvariantAcrossBlockAndMetisPartitions"
+      ]
+    },
+    {
+      "claim": "full_wp7_operator_and_krylov_cross_product_is_release_blocking",
+      "evidence": [
+        "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations",
+        "FreeSurfaceCutStabilityMPI.TwoRankFractionOrientationRegimeMatrixMatchesSerial",
+        "FreeSurfaceCutStabilityMPI.FourRankFractionOrientationRegimeMatrixMatchesSerial"
+      ]
+    },
+    {
+      "claim": "manufactured_error_and_simulation_exits_are_release_blocking",
+      "evidence": [
+        "FreeSurfaceCutStability.ManufacturedStokesAndNavierStokesErrorsConvergeAcrossCuts",
+        "FreeSurfaceCutStabilitySimulation.StaticCapsHaveNoMeshRelativeNumericalJump",
+        "FreeSurfaceCutStabilitySimulation.TranslatingDropsConvergeAcrossCutOffsets",
+        "FreeSurfaceCutStabilitySimulation.ResolvedFilamentsSeparatePhysicalAndRootlessEvents",
+        "FreeSurfaceCutStabilitySimulation.D18D38ReportEveryFallbackAndFeatureDeletion"
+      ]
+    }
+  ],
+  "quantitative_evidence": [
+    {
+      "test": "FreeSurfaceCutStability.SelectedCombinedAggregateAndPressureStabilizationContractIsExplicit",
+      "property": "wp7_selected_supported_polynomial_order_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceCutStability.SelectedCombinedAggregateAndPressureStabilizationContractIsExplicit",
+      "property": "wp7_selected_equal_order_velocity_pressure",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceCutStability.SelectedCombinedAggregateAndPressureStabilizationContractIsExplicit",
+      "property": "wp7_selected_vms_pspg_enabled",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceCutStability.SelectedCombinedAggregateAndPressureStabilizationContractIsExplicit",
+      "property": "wp7_selected_pressure_ghost_enabled",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceCutStability.SelectedCombinedAggregateAndPressureStabilizationContractIsExplicit",
+      "property": "wp7_selected_small_cut_aggregation_enabled",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceCutStability.SelectedCombinedAggregateAndPressureStabilizationContractIsExplicit",
+      "property": "wp7_selected_velocity_ghost_enabled",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceCutStability.SelectedCombinedAggregateAndPressureStabilizationContractIsExplicit",
+      "property": "wp7_selected_pressure_gradient_penalty",
+      "type": "real",
+      "relation": "equal",
+      "threshold": 1.0
+    },
+    {
+      "test": "FreeSurfaceCutStability.SelectedCombinedAggregateAndPressureStabilizationContractIsExplicit",
+      "property": "wp7_selected_cut_metadata_scale_cap",
+      "type": "real",
+      "relation": "equal",
+      "threshold": 100.0
+    },
+    {
+      "test": "FreeSurfaceCutStability.ExactTargetFractionGeometryCoversAxisObliqueAndThreeHLevels",
+      "property": "wp7_exact_fraction_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 42
+    },
+    {
+      "test": "FreeSurfaceCutStability.ExactTargetFractionGeometryCoversAxisObliqueAndThreeHLevels",
+      "property": "wp7_exact_fraction_orientation_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 2
+    },
+    {
+      "test": "FreeSurfaceCutStability.ExactTargetFractionGeometryCoversAxisObliqueAndThreeHLevels",
+      "property": "wp7_exact_fraction_h_level_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 3
+    },
+    {
+      "test": "FreeSurfaceCutStability.ExactTargetFractionGeometryCoversAxisObliqueAndThreeHLevels",
+      "property": "wp7_exact_fraction_backend_fallback_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceCutStability.ExactTargetFractionGeometryCoversAxisObliqueAndThreeHLevels",
+      "property": "wp7_exact_fraction_maximum_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-11
+    },
+    {
+      "test": "FreeSurfaceCutStability.ExactTargetFractionGeometryCoversAxisObliqueAndThreeHLevels",
+      "property": "wp7_exact_fraction_maximum_volume_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-11
+    },
+    {
+      "test": "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+      "property": "wp7_balance_interface_fragment_count",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+      "property": "wp7_balance_contact_fragment_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+      "property": "wp7_balance_maximum_interface_normal_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-12
+    },
+    {
+      "test": "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+      "property": "wp7_balance_maximum_contact_cosine_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-12
+    },
+    {
+      "test": "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+      "property": "wp7_balance_unconstrained_residual_norm",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 5e-11
+    },
+    {
+      "test": "FreeSurfaceCutStability.ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+      "property": "wp7_balance_repeated_residual_difference_norm",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-15
+    },
+    {
+      "test": "FreeSurfaceCutStability.FixedTetraMeshGenericAndNearFeatureSweepHasNoFreePressureNullRows",
+      "property": "wp7_finite_cut_position_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 10
+    },
+    {
+      "test": "FreeSurfaceCutStability.FixedTetraMeshGenericAndNearFeatureSweepHasNoFreePressureNullRows",
+      "property": "wp7_finite_cut_maximum_condition",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 400.0
+    },
+    {
+      "test": "FreeSurfaceCutStability.FixedTetraMeshGenericAndNearFeatureSweepHasNoFreePressureNullRows",
+      "property": "wp7_finite_cut_condition_spread",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 4.0
+    },
+    {
+      "test": "FreeSurfaceCutStability.FixedTetraMeshGenericAndNearFeatureSweepHasNoFreePressureNullRows",
+      "property": "wp7_finite_cut_minimum_pressure_control",
+      "type": "real",
+      "relation": "greater_than_or_equal",
+      "threshold": 0.45
+    },
+    {
+      "test": "FreeSurfaceCutStability.FixedTetraMeshGenericAndNearFeatureSweepHasNoFreePressureNullRows",
+      "property": "wp7_finite_cut_pressure_control_spread",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1.05
+    },
+    {
+      "test": "FreeSurfaceCutStability.FixedTetraMeshGenericAndNearFeatureSweepHasNoFreePressureNullRows",
+      "property": "wp7_finite_cut_maximum_aggregate_weight_l1",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 3.000000000001
+    },
+    {
+      "test": "FreeSurfaceCutStability.FixedTetraMeshGenericAndNearFeatureSweepHasNoFreePressureNullRows",
+      "property": "wp7_finite_cut_maximum_aggregate_reach_over_h",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 3.5
+    },
+    {
+      "test": "FreeSurfaceCutStability.FixedPhysicalCutThreeLevelRefinementBoundsPressureControlAndAggregation",
+      "property": "wp7_refinement_h_level_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 3
+    },
+    {
+      "test": "FreeSurfaceCutStability.FixedPhysicalCutThreeLevelRefinementBoundsPressureControlAndAggregation",
+      "property": "wp7_refinement_minimum_pressure_control",
+      "type": "real",
+      "relation": "greater_than_or_equal",
+      "threshold": 0.45
+    },
+    {
+      "test": "FreeSurfaceCutStability.FixedPhysicalCutThreeLevelRefinementBoundsPressureControlAndAggregation",
+      "property": "wp7_refinement_pressure_control_spread",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1.75
+    },
+    {
+      "test": "FreeSurfaceCutStability.FixedPhysicalCutThreeLevelRefinementBoundsPressureControlAndAggregation",
+      "property": "wp7_refinement_minimum_equilibrated_sigma",
+      "type": "real",
+      "relation": "greater_than_or_equal",
+      "threshold": 0.08
+    },
+    {
+      "test": "FreeSurfaceCutStability.FixedPhysicalCutThreeLevelRefinementBoundsPressureControlAndAggregation",
+      "property": "wp7_refinement_maximum_aggregate_weight_l1",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 5.000000000001
+    },
+    {
+      "test": "FreeSurfaceCutStability.FixedPhysicalCutThreeLevelRefinementBoundsPressureControlAndAggregation",
+      "property": "wp7_refinement_maximum_aggregate_reach_over_h",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 3.75
+    },
+    {
+      "test": "FreeSurfaceCutStability.PersistentMovingCutRefreshesAggregationAndRetainsMixedRankWithoutPressurePin",
+      "property": "wp7_moving_cut_position_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 4
+    },
+    {
+      "test": "FreeSurfaceCutStability.PersistentMovingCutRefreshesAggregationAndRetainsMixedRankWithoutPressurePin",
+      "property": "wp7_moving_cut_distinct_cell_topology_count",
+      "type": "integer",
+      "relation": "greater_than_or_equal",
+      "threshold": 2
+    },
+    {
+      "test": "FreeSurfaceCutStability.PersistentMovingCutRefreshesAggregationAndRetainsMixedRankWithoutPressurePin",
+      "property": "wp7_moving_cut_distinct_facet_topology_count",
+      "type": "integer",
+      "relation": "greater_than_or_equal",
+      "threshold": 2
+    },
+    {
+      "test": "FreeSurfaceCutStability.PersistentMovingCutRefreshesAggregationAndRetainsMixedRankWithoutPressurePin",
+      "property": "wp7_moving_cut_distinct_aggregate_topology_count",
+      "type": "integer",
+      "relation": "greater_than_or_equal",
+      "threshold": 2
+    },
+    {
+      "test": "FreeSurfaceCutStability.PersistentMovingCutRefreshesAggregationAndRetainsMixedRankWithoutPressurePin",
+      "property": "wp7_moving_cut_condition_spread",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 3.0
+    },
+    {
+      "test": "FreeSurfaceCutStability.PersistentMovingCutRefreshesAggregationAndRetainsMixedRankWithoutPressurePin",
+      "property": "wp7_moving_cut_pressure_control_spread",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1.05
+    },
+    {
+      "test": "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations",
+      "property": "wp7_full_serial_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 126
+    },
+    {
+      "test": "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations",
+      "property": "wp7_full_serial_fraction_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 7
+    },
+    {
+      "test": "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations",
+      "property": "wp7_full_serial_orientation_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 2
+    },
+    {
+      "test": "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations",
+      "property": "wp7_full_serial_h_level_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 3
+    },
+    {
+      "test": "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations",
+      "property": "wp7_full_serial_regime_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 3
+    },
+    {
+      "test": "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations",
+      "property": "wp7_full_serial_krylov_nonconvergence_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations",
+      "property": "wp7_full_serial_krylov_breakdown_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations",
+      "property": "wp7_full_serial_maximum_fraction_relative_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 5e-08
+    },
+    {
+      "test": "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations",
+      "property": "wp7_full_serial_maximum_krylov_relative_residual",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-09
+    },
+    {
+      "test": "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations",
+      "property": "wp7_full_serial_aggregation_case_count",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    }
+  ],
+  "gates": {
+    "expected_group_count": 5,
+    "expected_distinct_test_count": 21,
+    "expected_quantitative_evidence_count": 49,
+    "expected_failures": 0,
+    "expected_errors": 0,
+    "expected_disabled": 0,
+    "expected_skipped": 0
+  }
+}

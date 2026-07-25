@@ -67,10 +67,20 @@ enum class AggregationDeclarationState : std::int64_t {
 struct AggregationDeclaration {
     AggregationDeclarationState state{AggregationDeclarationState::NonCandidate};
     std::size_t root_distance{std::numeric_limits<std::size_t>::max()};
+    GlobalIndex root_cell_gid{INVALID_GLOBAL_INDEX};
     std::vector<GlobalIndex> component_dofs{};
     std::vector<GlobalIndex> root_master_dofs{};
     std::vector<ConstraintLine> lines{};
 };
+
+[[nodiscard]] detail::SmallCutAggregationPhysicalRootKey physicalRootKey(
+    const AggregationDeclaration& declaration) noexcept
+{
+    return detail::SmallCutAggregationPhysicalRootKey{
+        declaration.root_distance,
+        declaration.root_cell_gid,
+    };
+}
 
 using LocalAggregationDeclarationMap =
     std::unordered_map<GlobalIndex, std::vector<AggregationDeclaration>>;
@@ -750,7 +760,8 @@ resolveDistributedAggregationDeclarations(
             bool valid = true;
             if (normalized.state == AggregationDeclarationState::Rooted) {
                 std::set<GlobalIndex> line_slaves;
-                valid = !normalized.component_dofs.empty() &&
+                valid = normalized.root_cell_gid >= 0 &&
+                        !normalized.component_dofs.empty() &&
                         !normalized.root_master_dofs.empty() &&
                         normalized.lines.size() ==
                             normalized.component_dofs.size();
@@ -778,19 +789,18 @@ resolveDistributedAggregationDeclarations(
     }
     std::sort(ordered.begin(), ordered.end(),
               [](const auto& a, const auto& b) {
-                  const auto a_key = std::tie(
-                      a.first,
-                      a.second->root_distance,
-                      a.second->root_master_dofs);
-                  const auto b_key = std::tie(
-                      b.first,
-                      b.second->root_distance,
-                      b.second->root_master_dofs);
-                  return a_key < b_key;
+                  if (a.first != b.first) {
+                      return a.first < b.first;
+                  }
+                  return detail::smallCutAggregationPhysicalRootLess(
+                      physicalRootKey(*a.second),
+                      /*lhs_provider_rank=*/0,
+                      physicalRootKey(*b.second),
+                      /*rhs_provider_rank=*/0);
               });
 
     // Proposal payload:
-    // [base, state, distance, n_components, n_roots, n_lines,
+    // [base, state, distance, root_cell_gid, n_components, n_roots, n_lines,
     //  components..., roots..., {slave,n_entries,{master,weight_bits}...}...]
     for (const auto& [dof, declaration] : ordered) {
         local_candidate_words.push_back(static_cast<std::int64_t>(dof));
@@ -801,6 +811,8 @@ resolveDistributedAggregationDeclarations(
                     std::numeric_limits<std::size_t>::max()
                 ? std::int64_t{-1}
                 : static_cast<std::int64_t>(declaration->root_distance));
+        local_candidate_words.push_back(
+            static_cast<std::int64_t>(declaration->root_cell_gid));
         local_candidate_words.push_back(static_cast<std::int64_t>(
             declaration->component_dofs.size()));
         local_candidate_words.push_back(static_cast<std::int64_t>(
@@ -890,7 +902,7 @@ resolveDistributedAggregationDeclarations(
         const auto end = position + static_cast<std::size_t>(
             gathered_candidates.counts[static_cast<std::size_t>(rank)]);
         while (position < end) {
-            if (end - position < 6u) {
+            if (end - position < 7u) {
                 throw std::runtime_error(
                     "SmallCutAggregationConstraint: malformed distributed "
                     "aggregation candidate declaration");
@@ -899,6 +911,8 @@ resolveDistributedAggregationDeclarations(
                 gathered_candidates.words[position++]);
             const auto raw_state = gathered_candidates.words[position++];
             const auto raw_distance = gathered_candidates.words[position++];
+            const auto raw_root_cell_gid =
+                gathered_candidates.words[position++];
             const auto component_count = gathered_candidates.words[position++];
             const auto master_count = gathered_candidates.words[position++];
             const auto line_count = gathered_candidates.words[position++];
@@ -907,7 +921,10 @@ resolveDistributedAggregationDeclarations(
                 raw_state > static_cast<std::int64_t>(
                                 AggregationDeclarationState::SupportedWithoutForeignRoot) ||
                 raw_distance < -1 || component_count <= 0 ||
-                master_count < 0 || line_count < 0) {
+                master_count < 0 || line_count < 0 ||
+                (raw_state == static_cast<std::int64_t>(
+                                  AggregationDeclarationState::Rooted) &&
+                 raw_root_cell_gid < 0)) {
                 throw std::runtime_error(
                     "SmallCutAggregationConstraint: malformed distributed "
                     "aggregation candidate payload");
@@ -935,6 +952,8 @@ resolveDistributedAggregationDeclarations(
                 raw_distance < 0
                     ? std::numeric_limits<std::size_t>::max()
                     : static_cast<std::size_t>(raw_distance);
+            ranked.declaration.root_cell_gid =
+                static_cast<GlobalIndex>(raw_root_cell_gid);
             ranked.declaration.component_dofs.reserve(
                 static_cast<std::size_t>(component_count));
             for (std::int64_t i = 0; i < component_count; ++i) {
@@ -992,6 +1011,7 @@ resolveDistributedAggregationDeclarations(
             if (ranked.declaration.state ==
                     AggregationDeclarationState::Rooted) {
                 ranked_valid = ranked_valid &&
+                    ranked.declaration.root_cell_gid >= 0 &&
                     !ranked.declaration.root_master_dofs.empty() &&
                     ranked.declaration.lines.size() ==
                         ranked.declaration.component_dofs.size() &&
@@ -1016,7 +1036,10 @@ resolveDistributedAggregationDeclarations(
     // second rank may have proposed a slightly more distant root whose basis
     // is visible on all slave-relevant ranks.  Gather relevance for every DOF
     // mentioned by any proposal so unavailable roots can be removed before
-    // applying the deterministic (distance, master DOFs, rank) ordering.
+    // applying the deterministic (distance, physical root cell GID, rank)
+    // ordering. Algebraic master DOFs are deliberately excluded because
+    // owner-contiguous numbering changes when the physical mesh is
+    // repartitioned.
     const auto& partition = system.dofHandler().getPartition();
     std::set<GlobalIndex> proposal_dofs;
     std::vector<std::int64_t> local_proposal_visibility_words;
@@ -1307,21 +1330,18 @@ resolveDistributedAggregationDeclarations(
 
         std::sort(available_rooted.begin(), available_rooted.end(),
                   [](const auto* a, const auto* b) {
-            const auto a_key = std::tie(a->declaration.root_distance,
-                                        a->declaration.root_master_dofs,
-                                        a->rank);
-            const auto b_key = std::tie(b->declaration.root_distance,
-                                        b->declaration.root_master_dofs,
-                                        b->rank);
-            return a_key < b_key;
+            return detail::smallCutAggregationPhysicalRootLess(
+                physicalRootKey(a->declaration),
+                a->rank,
+                physicalRootKey(b->declaration),
+                b->rank);
         });
         const auto& chosen = available_rooted.front()->declaration;
         std::vector<const RankedDeclaration*> providers;
         for (const auto* declaration : available_rooted) {
-            if (declaration->declaration.root_distance ==
-                    chosen.root_distance &&
-                declaration->declaration.root_master_dofs ==
-                    chosen.root_master_dofs) {
+            if (detail::smallCutAggregationSamePhysicalRoot(
+                    physicalRootKey(declaration->declaration),
+                    physicalRootKey(chosen))) {
                 providers.push_back(declaration);
             }
         }
@@ -1647,6 +1667,7 @@ resolveDistributedAggregationDeclarations(
                 std::set<GlobalIndex> line_slaves;
                 bool valid = normalized.component_dofs ==
                                  support.component_dofs &&
+                             normalized.root_cell_gid >= 0 &&
                              !normalized.root_master_dofs.empty() &&
                              normalized.lines.size() ==
                                  support.component_dofs.size();
@@ -1669,8 +1690,11 @@ resolveDistributedAggregationDeclarations(
         }
         std::sort(valid_declarations.begin(), valid_declarations.end(),
                   [](const auto& a, const auto& b) {
-                      return std::tie(a.root_distance, a.root_master_dofs) <
-                             std::tie(b.root_distance, b.root_master_dofs);
+                      return detail::smallCutAggregationPhysicalRootLess(
+                          physicalRootKey(a),
+                          /*lhs_provider_rank=*/0,
+                          physicalRootKey(b),
+                          /*rhs_provider_rank=*/0);
                   });
         if (!valid_declarations.empty()) {
             for (const auto& line : valid_declarations.front().lines) {
@@ -2030,6 +2054,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                           AffineConstraints& constraints)
 {
     const auto* cut_context = system.cutIntegrationContext();
+    bool distributed_aggregation = false;
 #if FE_HAS_MPI
     // A rank-local early return would let another rank enter the declaration
     // collectives below alone.  More importantly, a cut context installed on
@@ -2042,6 +2067,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         int world_size = 1;
         MPI_Comm_size(comm, &world_size);
         if (world_size > 1) {
+            distributed_aggregation = true;
             const int local_has_context = cut_context != nullptr ? 1 : 0;
             int minimum_has_context = 0;
             int maximum_has_context = 0;
@@ -2080,6 +2106,31 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             "missing_cut_integration_context aggregation requires a generated "
             "cut context before post-setup constraint rebuild");
     }
+
+#if FE_HAS_MPI
+    if (distributed_aggregation) {
+        const auto comm = system.dofHandler().mpiComm();
+        const int local_has_global_entity_ids =
+            system.meshAccess().globalEntityIdsAvailable() ? 1 : 0;
+        int all_have_global_entity_ids = 0;
+        MPI_Allreduce(&local_has_global_entity_ids,
+                      &all_have_global_entity_ids,
+                      1,
+                      MPI_INT,
+                      MPI_MIN,
+                      comm);
+        if (all_have_global_entity_ids == 0) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: diagnostic="
+                "missing_distributed_global_cell_ids physical root selection "
+                "requires globally unique cell IDs on every field-communicator "
+                "rank");
+        }
+    }
+#else
+    static_cast<void>(distributed_aggregation);
+#endif
+
     cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
         system.meshAccess());
 
@@ -3376,6 +3427,9 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             AggregationDeclaration declaration{
                 .state = AggregationDeclarationState::Rooted,
                 .root_distance = root_candidate.distance,
+                .root_cell_gid = mesh.globalEntityIdsAvailable()
+                                     ? mesh.getCellGlobalId(root)
+                                     : root,
                 .component_dofs = candidate.component_dofs,
                 .root_master_dofs = std::move(declared_root_masters)};
             bool proposal_valid = true;

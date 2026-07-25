@@ -16,8 +16,9 @@
  * the active-support and AgFEM constraints, and assembles the actual transient
  * Navier--Stokes VMS/PSPG Jacobian with pressure ghost stabilization enabled.
  * The embedded natural-traction boundary anchors absolute pressure without a
- * gauge constraint.  The test removes only active-support/aggregation
- * constrained rows and columns, checks every remaining pressure row, and
+ * pressure gauge constraint.  The test reduces by every registered constraint
+ * line, including the componentwise velocity gauges and
+ * active-support/aggregation lines, checks every remaining pressure row, and
  * evaluates the exact infinity-norm condition of the equilibrated matrix.  A
  * complementary sequence refreshes moving cuts on one persistent FESystem and
  * revisits an earlier position to detect stale quadrature/facet/constraint
@@ -65,6 +66,7 @@
 #include <numeric>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -76,6 +78,15 @@ namespace svmp::Physics::test {
 namespace {
 
 namespace ns = formulations::navier_stokes;
+
+[[nodiscard]] std::string realPropertyValue(FE::Real value)
+{
+    std::ostringstream output;
+    output << std::setprecision(
+                  std::numeric_limits<FE::Real>::max_digits10)
+           << value;
+    return output.str();
+}
 
 class ScopedEnvVar {
 public:
@@ -147,9 +158,32 @@ struct PressureControlMetrics {
     FE::Real pressure_gradient_adjoint_relative_defect{0.0};
 };
 
+struct StabilityRegime {
+    std::string_view id{"baseline"};
+    FE::Real density{1.0};
+    FE::Real viscosity{0.01};
+    FE::Real dt{0.1};
+    bool convection{false};
+    FE::Real advective_speed{0.0};
+};
+
+struct KrylovTelemetry {
+    std::size_t iterations{0u};
+    std::size_t iteration_limit{0u};
+    std::size_t diagonal_fallback_count{0u};
+    bool converged{false};
+    bool breakdown{false};
+    FE::Real relative_residual{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real relative_solution_error{
+        std::numeric_limits<FE::Real>::infinity()};
+};
+
 struct StabilitySample {
     std::string label;
     FE::Real minimum_active_cut_fraction{1.0};
+    FE::Real designated_cut_fraction{
+        std::numeric_limits<FE::Real>::quiet_NaN()};
     FE::Real reference_active_volume{0.0};
     FE::Real physical_active_volume{0.0};
     std::size_t cut_cells{0u};
@@ -182,6 +216,7 @@ struct StabilitySample {
     FE::Real equilibrated_largest_singular_value{0.0};
     FE::Real equilibrated_condition_inf{
         std::numeric_limits<FE::Real>::infinity()};
+    KrylovTelemetry krylov{};
 };
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -325,7 +360,11 @@ public:
                         static_cast<FE::Real>(x[2])}}));
     }
 
+#if defined(MESH_HAS_MPI)
+    return create_mesh(std::move(base), MeshComm(MPI_COMM_SELF));
+#else
     return create_mesh(std::move(base));
+#endif
 }
 
 [[nodiscard]] std::shared_ptr<Mesh> makeManufacturedOpenTankQuadMesh(
@@ -688,6 +727,84 @@ struct TetraStripArrays {
     return arrays;
 }
 
+[[nodiscard]] TetraStripArrays makeStructuredTetraArrays(
+    int cells_per_axis)
+{
+    if (cells_per_axis < 2) {
+        throw std::invalid_argument(
+            "distributed structured stability mesh requires at least two cells per axis");
+    }
+    TetraStripArrays arrays;
+    const int nodes_per_axis = cells_per_axis + 1;
+    const auto node_count =
+        static_cast<std::size_t>(nodes_per_axis) *
+        static_cast<std::size_t>(nodes_per_axis) *
+        static_cast<std::size_t>(nodes_per_axis);
+    const auto cube_count =
+        static_cast<std::size_t>(cells_per_axis) *
+        static_cast<std::size_t>(cells_per_axis) *
+        static_cast<std::size_t>(cells_per_axis);
+    const auto h =
+        FE::Real{2.0} / static_cast<FE::Real>(cells_per_axis);
+    arrays.coordinates.reserve(3u * node_count);
+    for (int k = 0; k < nodes_per_axis; ++k) {
+        for (int j = 0; j < nodes_per_axis; ++j) {
+            for (int i = 0; i < nodes_per_axis; ++i) {
+                arrays.coordinates.push_back(
+                    static_cast<real_t>(h * static_cast<FE::Real>(i)));
+                arrays.coordinates.push_back(
+                    static_cast<real_t>(h * static_cast<FE::Real>(j)));
+                arrays.coordinates.push_back(
+                    static_cast<real_t>(h * static_cast<FE::Real>(k)));
+            }
+        }
+    }
+    const auto vertex = [&](int i, int j, int k) {
+        return static_cast<FE::GlobalIndex>(
+            i + nodes_per_axis * (j + nodes_per_axis * k));
+    };
+    constexpr std::array<std::array<std::size_t, 4>, 6> tetrahedra = {{
+        {{0, 1, 2, 6}},
+        {{0, 2, 3, 6}},
+        {{0, 3, 7, 6}},
+        {{0, 7, 4, 6}},
+        {{0, 4, 5, 6}},
+        {{0, 5, 1, 6}},
+    }};
+    arrays.cell_offsets = {0};
+    arrays.cell_offsets.reserve(6u * cube_count + 1u);
+    arrays.cell_vertices.reserve(24u * cube_count);
+    for (int k = 0; k < cells_per_axis; ++k) {
+        for (int j = 0; j < cells_per_axis; ++j) {
+            for (int i = 0; i < cells_per_axis; ++i) {
+                const std::array<FE::GlobalIndex, 8> nodes = {
+                    vertex(i, j, k),
+                    vertex(i + 1, j, k),
+                    vertex(i + 1, j + 1, k),
+                    vertex(i, j + 1, k),
+                    vertex(i, j, k + 1),
+                    vertex(i + 1, j, k + 1),
+                    vertex(i + 1, j + 1, k + 1),
+                    vertex(i, j + 1, k + 1),
+                };
+                for (const auto& tetra : tetrahedra) {
+                    for (const auto local : tetra) {
+                        arrays.cell_vertices.push_back(
+                            static_cast<index_t>(nodes[local]));
+                    }
+                    arrays.cell_offsets.push_back(
+                        static_cast<offset_t>(
+                            arrays.cell_vertices.size()));
+                }
+            }
+        }
+    }
+    arrays.cell_shapes.assign(
+        6u * cube_count,
+        CellShape{CellFamily::Tetra, 4, 1});
+    return arrays;
+}
+
 [[nodiscard]] std::shared_ptr<Mesh> makeDistributedTetraStripMesh(
     const PlaneCutPosition& cut,
     MPI_Comm comm,
@@ -730,6 +847,51 @@ struct TetraStripArrays {
             cut.value({{static_cast<FE::Real>(x[0]),
                         static_cast<FE::Real>(x[1]),
                         static_cast<FE::Real>(x[2])}}));
+    }
+    return mesh;
+}
+
+[[nodiscard]] std::shared_ptr<Mesh> makeDistributedStructuredTetraMesh(
+    const PlaneCutPosition& cut,
+    MPI_Comm comm,
+    std::string_view partition_method,
+    int cells_per_axis)
+{
+    const auto arrays = makeStructuredTetraArrays(cells_per_axis);
+    auto mesh = std::make_shared<Mesh>(MeshComm(comm));
+    mesh->build_from_arrays_global_and_partition(
+        /*spatial_dim=*/3,
+        arrays.coordinates,
+        arrays.cell_offsets,
+        arrays.cell_vertices,
+        arrays.cell_shapes,
+        PartitionHint::Cells,
+        static_cast<int>(arrays.cell_shapes.size()),
+        {{"partition_method", std::string(partition_method)}});
+
+    auto& local_mesh = mesh->base();
+    const auto phi_handle = MeshFields::attach_field(
+        local_mesh,
+        EntityKind::Vertex,
+        "phi",
+        FieldScalarType::Float64,
+        1);
+    auto* phi = MeshFields::field_data_as<real_t>(
+        local_mesh, phi_handle);
+    if (phi == nullptr) {
+        throw std::runtime_error(
+            "failed to allocate distributed structured level-set field");
+    }
+    for (index_t vertex = 0;
+         vertex < static_cast<index_t>(local_mesh.n_vertices());
+         ++vertex) {
+        const auto x = local_mesh.get_vertex_coords(vertex);
+        phi[static_cast<std::size_t>(vertex)] =
+            static_cast<real_t>(cut.value({{
+                static_cast<FE::Real>(x[0]),
+                static_cast<FE::Real>(x[1]),
+                static_cast<FE::Real>(x[2]),
+            }}));
     }
     return mesh;
 }
@@ -938,6 +1100,339 @@ void setMeshVertexField(Mesh& mesh, const PlaneCutPosition& cut)
     }
 }
 
+struct TargetFractionGeometrySample {
+    FE::Real target_fraction{0.0};
+    FE::Real generated_fraction{0.0};
+    FE::Real expected_retained_volume{0.0};
+    FE::Real generated_retained_volume{0.0};
+    std::size_t cut_cells{0u};
+    std::size_t backend_fallback_cells{0u};
+};
+
+[[nodiscard]] std::array<FE::Real, 3> crossProduct(
+    const std::array<FE::Real, 3>& lhs,
+    const std::array<FE::Real, 3>& rhs)
+{
+    return {{
+        lhs[1] * rhs[2] - lhs[2] * rhs[1],
+        lhs[2] * rhs[0] - lhs[0] * rhs[2],
+        lhs[0] * rhs[1] - lhs[1] * rhs[0],
+    }};
+}
+
+[[nodiscard]] FE::Real vectorNorm(
+    const std::array<FE::Real, 3>& value)
+{
+    return std::sqrt(
+        value[0] * value[0] +
+        value[1] * value[1] +
+        value[2] * value[2]);
+}
+
+[[nodiscard]] std::array<FE::Real, 3> normalizedVector(
+    const std::array<FE::Real, 3>& value)
+{
+    const auto norm = vectorNorm(value);
+    if (!(norm > FE::Real{0.0}) || !std::isfinite(norm)) {
+        throw std::invalid_argument(
+            "target-fraction orientation must have finite positive length");
+    }
+    return {{
+        value[0] / norm,
+        value[1] / norm,
+        value[2] / norm,
+    }};
+}
+
+[[nodiscard]] TargetFractionGeometrySample runTargetFractionGeometrySample(
+    FE::Real target_fraction,
+    const std::array<FE::Real, 3>& requested_normal,
+    FE::Real h)
+{
+    if (!(target_fraction > FE::Real{0.0}) ||
+        !(target_fraction < FE::Real{1.0}) ||
+        !(h > FE::Real{0.0}) ||
+        !std::isfinite(target_fraction) ||
+        !std::isfinite(h)) {
+        throw std::invalid_argument(
+            "target-fraction geometry requires finite interior fraction and h");
+    }
+
+    const auto normal = normalizedVector(requested_normal);
+    const std::array<FE::Real, 3> seed =
+        std::abs(normal[2]) < FE::Real{0.9}
+            ? std::array<FE::Real, 3>{{0.0, 0.0, 1.0}}
+            : std::array<FE::Real, 3>{{0.0, 1.0, 0.0}};
+    const auto first_tangent =
+        normalizedVector(crossProduct(normal, seed));
+    const auto second_tangent =
+        normalizedVector(crossProduct(normal, first_tangent));
+    const auto scaled_sum =
+        [&](const std::array<FE::Real, 3>& first,
+            const std::array<FE::Real, 3>& second) {
+            return std::array<FE::Real, 3>{{
+                h * (first[0] + second[0]),
+                h * (first[1] + second[1]),
+                h * (first[2] + second[2]),
+            }};
+        };
+
+    const std::array<std::array<FE::Real, 3>, 4> vertices = {{
+        {{0.0, 0.0, 0.0}},
+        {{h * normal[0], h * normal[1], h * normal[2]}},
+        scaled_sum(normal, first_tangent),
+        scaled_sum(normal, second_tangent),
+    }};
+    std::vector<real_t> coordinates;
+    coordinates.reserve(12u);
+    for (const auto& vertex : vertices) {
+        coordinates.push_back(static_cast<real_t>(vertex[0]));
+        coordinates.push_back(static_cast<real_t>(vertex[1]));
+        coordinates.push_back(static_cast<real_t>(vertex[2]));
+    }
+
+    auto base = std::make_shared<MeshBase>();
+    base->build_from_arrays(
+        /*spatial_dim=*/3,
+        coordinates,
+        std::vector<offset_t>{0, 4},
+        std::vector<index_t>{0, 1, 2, 3},
+        std::vector<CellShape>{
+            CellShape{CellFamily::Tetra, 4, 1}});
+    base->finalize();
+    auto mesh = create_mesh(std::move(base));
+    auto scalar_space = FE::spaces::SpaceFactory::create_h1(
+        FE::ElementType::Tetra4, /*order=*/1);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::Unknown,
+    });
+    system.setup({});
+
+    const auto edge_fraction = std::cbrt(target_fraction);
+    const PlaneCutPosition cut{
+        "target_fraction",
+        normal,
+        edge_fraction * h,
+    };
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+        FE::Real{0.0});
+    setScalarVertexField(solution, system, phi, cut);
+
+    FE::level_set::LevelSetGeneratedInterfaceOptions options;
+    options.level_set_field_name = "phi";
+    options.domain_id = "wp7_exact_target_fraction";
+    options.requested_interface_marker = 27017;
+    options.tolerance = FE::Real{1.0e-14};
+    options.quadrature_order = 2;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+    FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto generated = lifecycle.build(system, options, solution);
+    if (!generated.success) {
+        throw std::runtime_error(generated.diagnostic);
+    }
+
+    // LevelSetInterfaceDomain summary measures are stored in parent reference
+    // coordinates.  Physical assembly applies the cell mapping later, so the
+    // single reference tetra has measure 1/6 at every physical h.
+    constexpr FE::Real full_volume =
+        FE::Real{1.0} / FE::Real{6.0};
+    TargetFractionGeometrySample sample;
+    sample.target_fraction = target_fraction;
+    sample.generated_retained_volume =
+        generated.summary.negative_volume_measure;
+    sample.expected_retained_volume = target_fraction * full_volume;
+    sample.generated_fraction =
+        sample.generated_retained_volume / full_volume;
+    sample.cut_cells = generated.domain.cutCells().size();
+    sample.backend_fallback_cells =
+        generated.implicit_cut_fallback_cell_count;
+    return sample;
+}
+
+[[nodiscard]] FE::Real tetrahedronVolume(
+    const std::array<FE::Real, 3>& first,
+    const std::array<FE::Real, 3>& second,
+    const std::array<FE::Real, 3>& third,
+    const std::array<FE::Real, 3>& fourth)
+{
+    const std::array<FE::Real, 3> a = {{
+        second[0] - first[0],
+        second[1] - first[1],
+        second[2] - first[2],
+    }};
+    const std::array<FE::Real, 3> b = {{
+        third[0] - first[0],
+        third[1] - first[1],
+        third[2] - first[2],
+    }};
+    const std::array<FE::Real, 3> c = {{
+        fourth[0] - first[0],
+        fourth[1] - first[1],
+        fourth[2] - first[2],
+    }};
+    return std::abs(
+               a[0] * (b[1] * c[2] - b[2] * c[1]) -
+               a[1] * (b[0] * c[2] - b[2] * c[0]) +
+               a[2] * (b[0] * c[1] - b[1] * c[0])) /
+           FE::Real{6.0};
+}
+
+[[nodiscard]] FE::Real negativeReferenceTetraFraction(
+    const std::array<FE::Real, 4>& values)
+{
+    constexpr std::array<std::array<FE::Real, 3>, 4> vertices = {{
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 0.0, 0.0}},
+        {{0.0, 1.0, 0.0}},
+        {{0.0, 0.0, 1.0}},
+    }};
+    std::array<std::size_t, 4> negative{};
+    std::array<std::size_t, 4> positive{};
+    std::size_t negative_count = 0u;
+    std::size_t positive_count = 0u;
+    for (std::size_t vertex = 0u; vertex < values.size(); ++vertex) {
+        if (values[vertex] < FE::Real{0.0}) {
+            negative[negative_count++] = vertex;
+        } else {
+            positive[positive_count++] = vertex;
+        }
+    }
+    if (negative_count == 0u) {
+        return FE::Real{0.0};
+    }
+    if (negative_count == 4u) {
+        return FE::Real{1.0};
+    }
+
+    const auto intersection =
+        [&](std::size_t first, std::size_t second) {
+            const auto denominator = values[second] - values[first];
+            if (!(std::abs(denominator) > FE::Real{0.0})) {
+                throw std::runtime_error(
+                    "target-cut edge has no signed-value separation");
+            }
+            const auto t = -values[first] / denominator;
+            return std::array<FE::Real, 3>{{
+                vertices[first][0] +
+                    t * (vertices[second][0] - vertices[first][0]),
+                vertices[first][1] +
+                    t * (vertices[second][1] - vertices[first][1]),
+                vertices[first][2] +
+                    t * (vertices[second][2] - vertices[first][2]),
+            }};
+        };
+    constexpr FE::Real full_volume = FE::Real{1.0} / FE::Real{6.0};
+    if (negative_count == 1u) {
+        const auto n = negative[0];
+        const auto first = intersection(n, positive[0]);
+        const auto second = intersection(n, positive[1]);
+        const auto third = intersection(n, positive[2]);
+        return tetrahedronVolume(
+                   vertices[n], first, second, third) /
+               full_volume;
+    }
+    if (negative_count == 3u) {
+        const auto p = positive[0];
+        const auto first = intersection(p, negative[0]);
+        const auto second = intersection(p, negative[1]);
+        const auto third = intersection(p, negative[2]);
+        return FE::Real{1.0} -
+               tetrahedronVolume(
+                   vertices[p], first, second, third) /
+                   full_volume;
+    }
+
+    const auto n0 = negative[0];
+    const auto n1 = negative[1];
+    const auto p0 = positive[0];
+    const auto p1 = positive[1];
+    const auto n0p0 = intersection(n0, p0);
+    const auto n0p1 = intersection(n0, p1);
+    const auto n1p0 = intersection(n1, p0);
+    const auto n1p1 = intersection(n1, p1);
+    const auto volume =
+        tetrahedronVolume(
+            vertices[n0], vertices[n1], n0p0, n0p1) +
+        tetrahedronVolume(
+            vertices[n1], n0p0, n0p1, n1p1) +
+        tetrahedronVolume(
+            vertices[n1], n0p0, n1p0, n1p1);
+    return volume / full_volume;
+}
+
+struct TargetStructuredCut {
+    PlaneCutPosition cut{};
+    FE::MeshIndex designated_parent_cell{-1};
+};
+
+[[nodiscard]] TargetStructuredCut makeTargetStructuredCut(
+    FE::Real target_fraction,
+    const std::array<FE::Real, 3>& normal,
+    int cells_per_axis,
+    std::string label)
+{
+    if (!(target_fraction > FE::Real{0.0}) ||
+        !(target_fraction < FE::Real{1.0}) ||
+        cells_per_axis < 2) {
+        throw std::invalid_argument(
+            "structured target cut requires interior fraction and at least two cells per axis");
+    }
+    const auto h =
+        FE::Real{2.0} / static_cast<FE::Real>(cells_per_axis);
+    const auto base =
+        h * static_cast<FE::Real>(cells_per_axis - 1);
+    const std::array<std::array<FE::Real, 3>, 4> vertices = {{
+        {{base, base, base}},
+        {{base + h, base, base}},
+        {{base + h, base + h, base}},
+        {{base + h, base + h, base + h}},
+    }};
+    std::array<FE::Real, 4> projections{};
+    for (std::size_t vertex = 0u; vertex < vertices.size(); ++vertex) {
+        projections[vertex] =
+            normal[0] * vertices[vertex][0] +
+            normal[1] * vertices[vertex][1] +
+            normal[2] * vertices[vertex][2];
+    }
+    auto lower =
+        *std::min_element(projections.begin(), projections.end());
+    auto upper =
+        *std::max_element(projections.begin(), projections.end());
+    for (int iteration = 0; iteration < 100; ++iteration) {
+        const auto offset = FE::Real{0.5} * (lower + upper);
+        std::array<FE::Real, 4> values{};
+        for (std::size_t vertex = 0u;
+             vertex < projections.size();
+             ++vertex) {
+            values[vertex] = projections[vertex] - offset;
+        }
+        if (negativeReferenceTetraFraction(values) < target_fraction) {
+            lower = offset;
+        } else {
+            upper = offset;
+        }
+    }
+    const auto cube_count =
+        static_cast<std::size_t>(cells_per_axis) *
+        static_cast<std::size_t>(cells_per_axis) *
+        static_cast<std::size_t>(cells_per_axis);
+    return TargetStructuredCut{
+        .cut = PlaneCutPosition{
+            std::move(label),
+            normal,
+            FE::Real{0.5} * (lower + upper),
+        },
+        .designated_parent_cell =
+            static_cast<FE::MeshIndex>(6u * (cube_count - 1u)),
+    };
+}
+
 [[nodiscard]] FieldConstraintCounts countFieldConstraints(
     const FE::systems::FESystem& system,
     FE::FieldId field)
@@ -1067,6 +1562,92 @@ void setMeshVertexField(Mesh& mesh, const PlaneCutPosition& cut)
         const auto global = offset + local;
         if (!constraints.isConstrained(global)) {
             dofs.push_back(global);
+        }
+    }
+    return dofs;
+}
+
+struct CanonicalP1Dof {
+    gid_t vertex_gid{0};
+    std::size_t component{0u};
+    FE::GlobalIndex global_dof{FE::INVALID_GLOBAL_INDEX};
+};
+
+/** Return all P1 DOFs in physical vertex-GID/component order. */
+[[nodiscard]] std::vector<CanonicalP1Dof> canonicalP1Dofs(
+    const Mesh& mesh,
+    const FE::systems::FESystem& system,
+    FE::FieldId field,
+    std::size_t components)
+{
+    const auto* entity_map =
+        system.fieldDofHandler(field).getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::runtime_error(
+            "stability P1 field has no entity DOF map");
+    }
+
+    const auto& base = mesh.base();
+    const auto& vertex_gids = base.vertex_gids();
+    if (vertex_gids.size() != base.n_vertices()) {
+        throw std::runtime_error(
+            "stability mesh has incomplete vertex GIDs");
+    }
+
+    const auto offset = system.fieldDofOffset(field);
+    std::vector<CanonicalP1Dof> canonical;
+    canonical.reserve(vertex_gids.size() * components);
+    for (index_t vertex = 0;
+         vertex < static_cast<index_t>(base.n_vertices());
+         ++vertex) {
+        const auto vertex_dofs = entity_map->getVertexDofs(
+            static_cast<FE::GlobalIndex>(vertex));
+        if (vertex_dofs.size() != components) {
+            throw std::runtime_error(
+                "stability field is not the expected P1 layout");
+        }
+        for (std::size_t component = 0u;
+             component < components;
+             ++component) {
+            canonical.push_back(CanonicalP1Dof{
+                vertex_gids[static_cast<std::size_t>(vertex)],
+                component,
+                offset + vertex_dofs[component]});
+        }
+    }
+
+    std::sort(
+        canonical.begin(),
+        canonical.end(),
+        [](const CanonicalP1Dof& lhs, const CanonicalP1Dof& rhs) {
+            if (lhs.vertex_gid != rhs.vertex_gid) {
+                return lhs.vertex_gid < rhs.vertex_gid;
+            }
+            return lhs.component < rhs.component;
+        });
+    for (std::size_t index = 1u; index < canonical.size(); ++index) {
+        if (canonical[index - 1u].vertex_gid == canonical[index].vertex_gid &&
+            canonical[index - 1u].component == canonical[index].component) {
+            throw std::runtime_error(
+                "stability canonical P1 DOF is duplicated");
+        }
+    }
+    return canonical;
+}
+
+[[nodiscard]] std::vector<FE::GlobalIndex> canonicalFreeP1Dofs(
+    const Mesh& mesh,
+    const FE::systems::FESystem& system,
+    FE::FieldId field,
+    std::size_t components)
+{
+    const auto canonical =
+        canonicalP1Dofs(mesh, system, field, components);
+    std::vector<FE::GlobalIndex> dofs;
+    dofs.reserve(canonical.size());
+    for (const auto& entry : canonical) {
+        if (!system.constraints().isConstrained(entry.global_dof)) {
+            dofs.push_back(entry.global_dof);
         }
     }
     return dofs;
@@ -1296,14 +1877,37 @@ struct PressureAnchorState {
             "raw field matrix does not match the field dimension");
     }
     const auto offset = system.fieldDofOffset(field);
+    constexpr auto invalid_reduced_index =
+        std::numeric_limits<std::size_t>::max();
+    std::vector<std::size_t> free_index(
+        field_size, invalid_reduced_index);
+    for (std::size_t reduced = 0u;
+         reduced < free_dofs.size();
+         ++reduced) {
+        const auto global = free_dofs[reduced];
+        if (global < offset || global >= offset + field_dofs) {
+            throw std::runtime_error(
+                "free field DOF lies outside the field");
+        }
+        auto& index =
+            free_index[static_cast<std::size_t>(global - offset)];
+        if (index != invalid_reduced_index) {
+            throw std::runtime_error("free field DOF is duplicated");
+        }
+        index = reduced;
+    }
     const auto find_free = [&](FE::GlobalIndex global) -> std::size_t {
-        const auto found = std::lower_bound(
-            free_dofs.begin(), free_dofs.end(), global);
-        if (found == free_dofs.end() || *found != global) {
+        if (global < offset || global >= offset + field_dofs) {
+            throw std::runtime_error(
+                "field constraint master lies outside the field");
+        }
+        const auto index =
+            free_index[static_cast<std::size_t>(global - offset)];
+        if (index == invalid_reduced_index) {
             throw std::runtime_error(
                 "closed field constraint retains a constrained master");
         }
-        return static_cast<std::size_t>(found - free_dofs.begin());
+        return index;
     };
 
     using ExpansionEntry = std::pair<std::size_t, FE::Real>;
@@ -1700,16 +2304,231 @@ void equilibrate(std::vector<FE::Real>& matrix, std::size_t n)
     return matrix_norm * inverse_norm;
 }
 
+[[nodiscard]] KrylovTelemetry runEquilibratedJacobiBicgstab(
+    std::span<const FE::Real> matrix,
+    std::size_t n)
+{
+    if (n == 0u || matrix.size() != n * n) {
+        throw std::invalid_argument(
+            "Krylov telemetry requires a nonempty square dense matrix");
+    }
+    const auto dot = [](std::span<const FE::Real> lhs,
+                        std::span<const FE::Real> rhs) {
+        if (lhs.size() != rhs.size()) {
+            throw std::invalid_argument(
+                "Krylov dot product requires equal vector sizes");
+        }
+        long double value = 0.0L;
+        for (std::size_t i = 0u; i < lhs.size(); ++i) {
+            value += static_cast<long double>(lhs[i]) *
+                     static_cast<long double>(rhs[i]);
+        }
+        return static_cast<FE::Real>(value);
+    };
+    const auto norm = [&](std::span<const FE::Real> value) {
+        return std::sqrt(std::max(FE::Real{0.0}, dot(value, value)));
+    };
+    const auto multiply = [&](std::span<const FE::Real> input,
+                              std::span<FE::Real> output) {
+        if (input.size() != n || output.size() != n) {
+            throw std::invalid_argument(
+                "Krylov matrix-vector dimensions do not match");
+        }
+        for (std::size_t row = 0u; row < n; ++row) {
+            long double value = 0.0L;
+            for (std::size_t column = 0u; column < n; ++column) {
+                value += static_cast<long double>(
+                             matrix[row * n + column]) *
+                         static_cast<long double>(input[column]);
+            }
+            output[row] = static_cast<FE::Real>(value);
+        }
+    };
+
+    std::vector<FE::Real> exact(n, FE::Real{0.0});
+    for (std::size_t i = 0u; i < n; ++i) {
+        const auto index = static_cast<FE::Real>(i + 1u);
+        exact[i] =
+            std::sin(FE::Real{0.37} * index) +
+            FE::Real{0.25} * std::cos(FE::Real{0.11} * index);
+    }
+    std::vector<FE::Real> rhs(n, FE::Real{0.0});
+    multiply(exact, rhs);
+    const auto rhs_norm = norm(rhs);
+    if (!(rhs_norm > FE::Real{0.0}) || !std::isfinite(rhs_norm)) {
+        throw std::runtime_error(
+            "Krylov telemetry manufactured right-hand side is invalid");
+    }
+
+    KrylovTelemetry telemetry;
+    telemetry.iteration_limit = std::max(std::size_t{32u}, 8u * n);
+    std::vector<FE::Real> inverse_diagonal(n, FE::Real{1.0});
+    for (std::size_t row = 0u; row < n; ++row) {
+        FE::Real row_norm = 0.0;
+        for (std::size_t column = 0u; column < n; ++column) {
+            row_norm += std::abs(matrix[row * n + column]);
+        }
+        const auto diagonal = matrix[row * n + row];
+        const auto tolerance =
+            FE::Real{128.0} *
+            std::numeric_limits<FE::Real>::epsilon() *
+            std::max(FE::Real{1.0}, row_norm);
+        if (std::abs(diagonal) > tolerance) {
+            inverse_diagonal[row] = FE::Real{1.0} / diagonal;
+        } else {
+            inverse_diagonal[row] =
+                FE::Real{1.0} / std::max(FE::Real{1.0}, row_norm);
+            ++telemetry.diagonal_fallback_count;
+        }
+    }
+    const auto apply_preconditioner =
+        [&](std::span<const FE::Real> input,
+            std::span<FE::Real> output) {
+            for (std::size_t i = 0u; i < n; ++i) {
+                output[i] = inverse_diagonal[i] * input[i];
+            }
+        };
+
+    std::vector<FE::Real> solution(n, FE::Real{0.0});
+    std::vector<FE::Real> residual = rhs;
+    std::vector<FE::Real> shadow = residual;
+    std::vector<FE::Real> direction(n, FE::Real{0.0});
+    std::vector<FE::Real> operator_direction(n, FE::Real{0.0});
+    std::vector<FE::Real> preconditioned_direction(n, FE::Real{0.0});
+    std::vector<FE::Real> intermediate(n, FE::Real{0.0});
+    std::vector<FE::Real> preconditioned_intermediate(n, FE::Real{0.0});
+    std::vector<FE::Real> operator_intermediate(n, FE::Real{0.0});
+    FE::Real rho_previous = FE::Real{1.0};
+    FE::Real alpha = FE::Real{1.0};
+    FE::Real omega = FE::Real{1.0};
+    constexpr FE::Real relative_tolerance = FE::Real{1.0e-9};
+    const auto breakdown_tolerance =
+        FE::Real{1024.0} * std::numeric_limits<FE::Real>::epsilon();
+
+    for (std::size_t iteration = 1u;
+         iteration <= telemetry.iteration_limit;
+         ++iteration) {
+        const auto rho = dot(shadow, residual);
+        const auto rho_scale = norm(shadow) * norm(residual);
+        if (!std::isfinite(rho) ||
+            !(rho_scale > FE::Real{0.0}) ||
+            std::abs(rho) <= breakdown_tolerance * rho_scale) {
+            telemetry.breakdown = true;
+            break;
+        }
+        if (iteration == 1u) {
+            direction = residual;
+        } else {
+            if (!std::isfinite(omega) ||
+                std::abs(omega) <= breakdown_tolerance) {
+                telemetry.breakdown = true;
+                break;
+            }
+            const auto beta =
+                (rho / rho_previous) * (alpha / omega);
+            for (std::size_t i = 0u; i < n; ++i) {
+                direction[i] =
+                    residual[i] +
+                    beta *
+                        (direction[i] - omega * operator_direction[i]);
+            }
+        }
+
+        apply_preconditioner(direction, preconditioned_direction);
+        multiply(preconditioned_direction, operator_direction);
+        const auto shadow_operator = dot(shadow, operator_direction);
+        const auto shadow_operator_scale =
+            norm(shadow) * norm(operator_direction);
+        if (!std::isfinite(shadow_operator) ||
+            !(shadow_operator_scale > FE::Real{0.0}) ||
+            std::abs(shadow_operator) <=
+                breakdown_tolerance * shadow_operator_scale) {
+            telemetry.breakdown = true;
+            break;
+        }
+        alpha = rho / shadow_operator;
+        for (std::size_t i = 0u; i < n; ++i) {
+            intermediate[i] =
+                residual[i] - alpha * operator_direction[i];
+        }
+        if (norm(intermediate) / rhs_norm <= relative_tolerance) {
+            for (std::size_t i = 0u; i < n; ++i) {
+                solution[i] += alpha * preconditioned_direction[i];
+            }
+            telemetry.iterations = iteration;
+            telemetry.converged = true;
+            residual = intermediate;
+            break;
+        }
+
+        apply_preconditioner(
+            intermediate, preconditioned_intermediate);
+        multiply(preconditioned_intermediate, operator_intermediate);
+        const auto operator_norm_squared =
+            dot(operator_intermediate, operator_intermediate);
+        const auto intermediate_norm = norm(intermediate);
+        const auto operator_breakdown_scale =
+            breakdown_tolerance * intermediate_norm;
+        if (!std::isfinite(operator_norm_squared) ||
+            operator_norm_squared <=
+                operator_breakdown_scale * operator_breakdown_scale) {
+            telemetry.breakdown = true;
+            break;
+        }
+        omega =
+            dot(operator_intermediate, intermediate) /
+            operator_norm_squared;
+        if (!std::isfinite(omega)) {
+            telemetry.breakdown = true;
+            break;
+        }
+        for (std::size_t i = 0u; i < n; ++i) {
+            solution[i] +=
+                alpha * preconditioned_direction[i] +
+                omega * preconditioned_intermediate[i];
+            residual[i] =
+                intermediate[i] - omega * operator_intermediate[i];
+        }
+        telemetry.iterations = iteration;
+        telemetry.relative_residual = norm(residual) / rhs_norm;
+        if (telemetry.relative_residual <= relative_tolerance) {
+            telemetry.converged = true;
+            break;
+        }
+        rho_previous = rho;
+    }
+
+    std::vector<FE::Real> recomputed(n, FE::Real{0.0});
+    multiply(solution, recomputed);
+    for (std::size_t i = 0u; i < n; ++i) {
+        recomputed[i] = rhs[i] - recomputed[i];
+    }
+    telemetry.relative_residual = norm(recomputed) / rhs_norm;
+    std::vector<FE::Real> solution_error(n, FE::Real{0.0});
+    for (std::size_t i = 0u; i < n; ++i) {
+        solution_error[i] = solution[i] - exact[i];
+    }
+    telemetry.relative_solution_error =
+        norm(solution_error) /
+        std::max(FE::Real{1.0}, norm(exact));
+    telemetry.converged =
+        telemetry.converged &&
+        std::isfinite(telemetry.relative_residual) &&
+        telemetry.relative_residual <= FE::Real{2.0e-9};
+    return telemetry;
+}
+
 [[nodiscard]] ns::IncompressibleNavierStokesVMSOptions stabilityOptions(
     int interface_marker,
-    std::string domain_id)
+    std::string domain_id,
+    const StabilityRegime& regime = {})
 {
     ns::IncompressibleNavierStokesVMSOptions options;
     options.velocity_field_name = "u";
     options.pressure_field_name = "p";
-    options.density = 1.0;
-    options.viscosity = 0.01;
-    options.enable_convection = false;
+    options.density = regime.density;
+    options.viscosity = regime.viscosity;
+    options.enable_convection = regime.convection;
     options.enable_vms = true;
     options.free_surface.push_back(
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -2570,7 +3389,8 @@ runManufacturedAffineQ1Balance(FE::Real geometry_angle,
 class PersistentStabilityProblem {
 public:
     explicit PersistentStabilityProblem(const PlaneCutPosition& initial_cut,
-                                        int cells_per_axis = 2)
+                                        int cells_per_axis = 2,
+                                        StabilityRegime regime = {})
         : mesh_(makeFixedTetraMesh(initial_cut, cells_per_axis)),
           velocity_space_(FE::spaces::SpaceFactory::create_vector_h1(
               FE::ElementType::Tetra4, /*order=*/1, /*components=*/3)),
@@ -2579,7 +3399,8 @@ public:
           system_(mesh_),
           cells_per_axis_(cells_per_axis),
           mesh_spacing_(FE::Real{2.0} /
-                        static_cast<FE::Real>(cells_per_axis))
+                        static_cast<FE::Real>(cells_per_axis)),
+          regime_(regime)
     {
         // Keep phi as an unknown only so the production lifecycle receives its
         // normal coefficient span.  It owns no residual, and is intentionally
@@ -2592,12 +3413,18 @@ public:
         });
 
         auto options = stabilityOptions(
-            interface_marker, std::string(domain_id));
+            interface_marker, std::string(domain_id), regime_);
 
         ns::IncompressibleNavierStokesVMSModule module(
             velocity_space_, pressure_space_, options);
         module.registerOn(system_);
-        system_.setup({});
+        FE::systems::SetupOptions setup;
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+        setup.dof_options.my_rank = 0;
+        setup.dof_options.world_size = 1;
+        setup.dof_options.mpi_comm = MPI_COMM_SELF;
+#endif
+        system_.setup(setup);
 
         velocity_ = system_.findFieldByName("u");
         pressure_ = system_.findFieldByName("p");
@@ -2610,10 +3437,31 @@ public:
 
         solution_.assign(
             static_cast<std::size_t>(system_.dofHandler().getNumDofs()), 0.0);
+        const auto* velocity_map =
+            system_.fieldDofHandler(velocity_).getEntityDofMap();
+        if (velocity_map == nullptr) {
+            throw std::runtime_error(
+                "fixed-sweep velocity field has no entity map");
+        }
+        const auto velocity_offset = system_.fieldDofOffset(velocity_);
+        for (FE::GlobalIndex vertex = 0;
+             vertex < system_.meshAccess().numVertices();
+             ++vertex) {
+            const auto dofs = velocity_map->getVertexDofs(vertex);
+            if (dofs.size() != 3u) {
+                throw std::runtime_error(
+                    "fixed-sweep velocity field is not vector P1");
+            }
+            solution_.at(static_cast<std::size_t>(
+                velocity_offset + dofs[0])) = regime_.advective_speed;
+        }
         previous_ = solution_;
     }
 
-    [[nodiscard]] StabilitySample evaluate(const PlaneCutPosition& cut)
+    [[nodiscard]] StabilitySample evaluate(
+        const PlaneCutPosition& cut,
+        std::optional<FE::MeshIndex> designated_parent_cell =
+            std::nullopt)
     {
         setScalarVertexField(solution_, system_, phi_, cut);
         // Post-setup active-side and aggregation constraint rebuilds consume
@@ -2647,7 +3495,7 @@ public:
         const auto pressure_anchor = pressureAnchorState(system_, pressure_);
 
         FE::systems::SystemStateView state;
-        state.dt = 0.1;
+        state.dt = regime_.dt;
         state.u = std::span<const FE::Real>(solution_);
         state.u_prev = std::span<const FE::Real>(previous_);
         const FE::systems::BackwardDifferenceIntegrator integrator;
@@ -2667,8 +3515,10 @@ public:
             system_, state,
             "equations_diagnostic_ns_galerkin_continuity");
 
-        auto free_velocity = freeFieldDofs(system_, velocity_);
-        auto free_pressure = freeFieldDofs(system_, pressure_);
+        auto free_velocity =
+            canonicalFreeP1Dofs(*mesh_, system_, velocity_, 3u);
+        auto free_pressure =
+            canonicalFreeP1Dofs(*mesh_, system_, pressure_, 1u);
         std::vector<FE::GlobalIndex> free_mixed = free_velocity;
         free_mixed.insert(
             free_mixed.end(), free_pressure.begin(), free_pressure.end());
@@ -2693,6 +3543,11 @@ public:
             free_pressure);
 
         auto reduced = extractReducedMatrix(jacobian, free_mixed);
+        const auto canonical_mixed_operator = reduced;
+        const auto canonical_pressure_ghost_operator =
+            extractReducedMatrix(ghost, free_pressure);
+        const auto canonical_pressure_pspg_operator =
+            extractReducedMatrix(pspg, free_pressure);
         const auto reduced_max = FE::math::dense_matrix_max_abs(reduced);
         const auto zero_row_tolerance =
             std::max(FE::Real{1.0}, reduced_max) * FE::Real{1.0e-12};
@@ -2743,6 +3598,10 @@ public:
             }
             sample.minimum_active_cut_fraction = std::min(
                 sample.minimum_active_cut_fraction, region.volume_fraction);
+            if (designated_parent_cell.has_value() &&
+                region.parent_cell == designated_parent_cell.value()) {
+                sample.designated_cut_fraction = region.volume_fraction;
+            }
         }
         sample.velocity_constraints = countFieldConstraints(system_, velocity_);
         sample.pressure_constraints = countFieldConstraints(system_, pressure_);
@@ -2758,6 +3617,11 @@ public:
             selectedFrobeniusNorm(ghost, free_pressure, free_pressure);
         sample.pspg_pressure_gradient_norm =
             selectedFrobeniusNorm(pspg, free_pressure, free_pressure);
+        sample.canonical_mixed_operator = canonical_mixed_operator;
+        sample.canonical_pressure_ghost_operator =
+            canonical_pressure_ghost_operator;
+        sample.canonical_pressure_pspg_operator =
+            canonical_pressure_pspg_operator;
         sample.equilibrated_rank = diagnostics.rank;
         sample.equilibrated_size = free_mixed.size();
         sample.equilibrated_smallest_singular_value =
@@ -2766,6 +3630,8 @@ public:
             diagnostics.largest_singular_value;
         sample.equilibrated_condition_inf =
             infinityNormCondition(reduced, free_mixed.size());
+        sample.krylov = runEquilibratedJacobiBicgstab(
+            reduced, free_mixed.size());
 
         previous_ = solution_;
         has_previous_sample_ = true;
@@ -2790,6 +3656,7 @@ private:
     bool has_previous_sample_{false};
     int cells_per_axis_{2};
     FE::Real mesh_spacing_{1.0};
+    StabilityRegime regime_{};
 };
 
 #if defined(FE_HAS_MPI) && defined(MESH_HAS_MPI)
@@ -2943,12 +3810,6 @@ private:
     return dofs;
 }
 
-struct CanonicalP1Dof {
-    gid_t vertex_gid{0};
-    std::size_t component{0u};
-    FE::GlobalIndex global_dof{FE::INVALID_GLOBAL_INDEX};
-};
-
 /** Return unconstrained P1 DOFs in physical vertex-GID/component order.
  *
  * Owner-contiguous global numbering deliberately changes when the cell
@@ -2963,71 +3824,21 @@ struct CanonicalP1Dof {
     std::size_t components,
     std::span<const int> constrained)
 {
-    const auto* entity_map =
-        system.fieldDofHandler(field).getEntityDofMap();
-    if (entity_map == nullptr) {
-        throw std::runtime_error(
-            "distributed stability P1 field has no entity DOF map");
-    }
-
-    const auto& base = mesh.base();
-    const auto& vertex_gids = base.vertex_gids();
-    if (vertex_gids.size() != base.n_vertices()) {
-        throw std::runtime_error(
-            "distributed stability mesh has incomplete vertex GIDs");
-    }
-
-    const auto offset = system.fieldDofOffset(field);
-    std::vector<CanonicalP1Dof> canonical;
-    canonical.reserve(vertex_gids.size() * components);
-    for (index_t vertex = 0;
-         vertex < static_cast<index_t>(base.n_vertices());
-         ++vertex) {
-        const auto vertex_dofs = entity_map->getVertexDofs(
-            static_cast<FE::GlobalIndex>(vertex));
-        if (vertex_dofs.size() != components) {
-            throw std::runtime_error(
-                "distributed stability field is not the expected P1 layout");
-        }
-        for (std::size_t component = 0u;
-             component < components;
-             ++component) {
-            const auto global = offset + vertex_dofs[component];
-            if (global < 0 ||
-                static_cast<std::size_t>(global) >= constrained.size()) {
-                throw std::runtime_error(
-                    "distributed stability vertex DOF is out of range");
-            }
-            if (constrained[static_cast<std::size_t>(global)] == 0) {
-                canonical.push_back(CanonicalP1Dof{
-                    vertex_gids[static_cast<std::size_t>(vertex)],
-                    component,
-                    global});
-            }
-        }
-    }
-
-    std::sort(
-        canonical.begin(),
-        canonical.end(),
-        [](const CanonicalP1Dof& lhs, const CanonicalP1Dof& rhs) {
-            if (lhs.vertex_gid != rhs.vertex_gid) {
-                return lhs.vertex_gid < rhs.vertex_gid;
-            }
-            return lhs.component < rhs.component;
-        });
-    for (std::size_t index = 1u; index < canonical.size(); ++index) {
-        if (canonical[index - 1u].vertex_gid == canonical[index].vertex_gid &&
-            canonical[index - 1u].component == canonical[index].component) {
-            throw std::runtime_error(
-                "distributed stability canonical P1 DOF is duplicated");
-        }
-    }
+    const auto canonical =
+        canonicalP1Dofs(mesh, system, field, components);
 
     std::vector<FE::GlobalIndex> dofs;
     dofs.reserve(canonical.size());
     for (const auto& entry : canonical) {
-        dofs.push_back(entry.global_dof);
+        if (entry.global_dof < 0 ||
+            static_cast<std::size_t>(entry.global_dof) >=
+                constrained.size()) {
+            throw std::runtime_error(
+                "distributed stability vertex DOF is out of range");
+        }
+        if (constrained[static_cast<std::size_t>(entry.global_dof)] == 0) {
+            dofs.push_back(entry.global_dof);
+        }
     }
     return dofs;
 }
@@ -3420,11 +4231,15 @@ struct DenseOperatorDifference {
     const Mesh& mesh,
     MPI_Comm comm)
 {
-    constexpr std::size_t global_cells = 18u;
-    std::array<int, global_cells> local_owner{};
-    std::array<int, global_cells> global_owner{};
-    local_owner.fill(-1);
-    global_owner.fill(-1);
+    const auto global_cells = mesh.global_n_cells();
+    if (global_cells == 0u ||
+        global_cells >
+            static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            "distributed stability partition has an invalid global cell count");
+    }
+    std::vector<int> local_owner(global_cells, -1);
+    std::vector<int> global_owner(global_cells, -1);
     const auto& base = mesh.base();
     const auto& gids = base.cell_gids();
     for (index_t cell = 0;
@@ -3469,25 +4284,46 @@ public:
         const PlaneCutPosition& initial_cut,
         MPI_Comm comm,
         std::string partition_method,
-        int ghost_layers = 18)
+        int ghost_layers = 18,
+        int cells_per_axis = 0,
+        StabilityRegime regime = {})
         : comm_(comm),
-          mesh_(makeDistributedTetraStripMesh(
-              initial_cut, comm, partition_method, ghost_layers)),
+          mesh_(
+              cells_per_axis > 0
+                  ? makeDistributedStructuredTetraMesh(
+                        initial_cut,
+                        comm,
+                        partition_method,
+                        cells_per_axis)
+                  : makeDistributedTetraStripMesh(
+                        initial_cut,
+                        comm,
+                        partition_method,
+                        ghost_layers)),
           velocity_space_(FE::spaces::SpaceFactory::create_vector_h1(
               FE::ElementType::Tetra4, /*order=*/1, /*components=*/3)),
           pressure_space_(FE::spaces::SpaceFactory::create_h1(
               FE::ElementType::Tetra4, /*order=*/1)),
-          system_(mesh_)
+          system_(mesh_),
+          cells_per_axis_(cells_per_axis),
+          regime_(regime)
     {
         int rank = 0;
         int size = 1;
         MPI_Comm_rank(comm_, &rank);
         MPI_Comm_size(comm_, &size);
-        if (size != 2) {
+        if (size != 2 && size != 4) {
             throw std::runtime_error(
-                "distributed stability problem requires exactly two ranks");
+                "distributed stability problem requires two or four ranks");
         }
-        if (mesh_->global_n_cells() != 18u ||
+        const auto expected_cells =
+            cells_per_axis_ > 0
+                ? 6u *
+                      static_cast<std::size_t>(cells_per_axis_) *
+                      static_cast<std::size_t>(cells_per_axis_) *
+                      static_cast<std::size_t>(cells_per_axis_)
+                : std::size_t{18u};
+        if (mesh_->global_n_cells() != expected_cells ||
             mesh_->n_owned_cells() == 0u ||
             mesh_->n_owned_cells() >= mesh_->global_n_cells()) {
             throw std::runtime_error(
@@ -3501,7 +4337,7 @@ public:
             .source_kind = FE::systems::FieldSourceKind::Unknown,
         });
         auto options = stabilityOptions(
-            interface_marker, std::string(domain_id));
+            interface_marker, std::string(domain_id), regime_);
         ns::IncompressibleNavierStokesVMSModule module(
             velocity_space_, pressure_space_, options);
         module.registerOn(system_);
@@ -3536,6 +4372,24 @@ public:
         }
         solution_.assign(
             static_cast<std::size_t>(system_.dofHandler().getNumDofs()), 0.0);
+        const auto* velocity_map =
+            system_.fieldDofHandler(velocity_).getEntityDofMap();
+        if (velocity_map == nullptr) {
+            throw std::runtime_error(
+                "distributed stability velocity field has no entity map");
+        }
+        const auto velocity_offset = system_.fieldDofOffset(velocity_);
+        for (FE::GlobalIndex vertex = 0;
+             vertex < system_.meshAccess().numVertices();
+             ++vertex) {
+            const auto dofs = velocity_map->getVertexDofs(vertex);
+            if (dofs.size() != 3u) {
+                throw std::runtime_error(
+                    "distributed stability velocity field is not vector P1");
+            }
+            solution_.at(static_cast<std::size_t>(
+                velocity_offset + dofs[0])) = regime_.advective_speed;
+        }
         previous_ = solution_;
         partition_hash_ = distributedCellOwnerHash(*mesh_, comm_);
     }
@@ -3545,7 +4399,10 @@ public:
         return partition_hash_;
     }
 
-    [[nodiscard]] StabilitySample evaluate(const PlaneCutPosition& cut)
+    [[nodiscard]] StabilitySample evaluate(
+        const PlaneCutPosition& cut,
+        std::optional<FE::MeshIndex> designated_parent_cell =
+            std::nullopt)
     {
         setScalarVertexField(solution_, system_, phi_, cut);
         setMeshVertexField(*mesh_, cut);
@@ -3622,7 +4479,7 @@ public:
         const auto pressure_anchor = pressureAnchorState(system_, pressure_);
 
         FE::systems::SystemStateView state;
-        state.dt = 0.1;
+        state.dt = regime_.dt;
         state.u = std::span<const FE::Real>(solution_);
         state.u_prev = std::span<const FE::Real>(previous_);
         const FE::systems::BackwardDifferenceIntegrator integrator;
@@ -3709,9 +4566,9 @@ public:
         sample.physical_active_volume = sample.reference_active_volume;
         sample.cut_cells = static_cast<std::size_t>(
             allreduceSumUnsigned(local_cut_cells, comm_));
-        // This finite fixture intentionally retains its complete 18-cell mesh
-        // in overlap.  Canonical face GIDs above prove that both ranks see the
-        // same physical facet set; counting "first-cell owned" is invalid
+        // This finite fixture intentionally retains its complete physical mesh
+        // in overlap.  Canonical face GIDs above prove that every rank sees
+        // the same physical facet set; counting "first-cell owned" is invalid
         // because the local minus/plus orientation is partition dependent.
         sample.cut_adjacent_facets = facet_gids.size();
         sample.cut_adjacent_facet_gid_hash =
@@ -3724,6 +4581,26 @@ public:
             pressure_anchor.natural_traction_anchor;
         sample.pressure_anchor_has_no_gauge_enforcement =
             pressure_anchor.no_gauge_enforcement;
+        for (const auto& region : generated.domain.volumeRegions()) {
+            if (!region.active() ||
+                region.side !=
+                    FE::geometry::CutIntegrationSide::Negative ||
+                region.full_cell_equivalent ||
+                !(region.volume_fraction > FE::Real{0.0}) ||
+                !(region.volume_fraction < FE::Real{1.0})) {
+                continue;
+            }
+            sample.minimum_active_cut_fraction = std::min(
+                sample.minimum_active_cut_fraction,
+                region.volume_fraction);
+            if (designated_parent_cell.has_value() &&
+                region.parent_cell_global_id ==
+                    static_cast<FE::GlobalIndex>(
+                        designated_parent_cell.value())) {
+                sample.designated_cut_fraction =
+                    region.volume_fraction;
+            }
+        }
         sample.velocity_constraints = globalFieldConstraintCounts(
             system_, velocity_, comm_);
         sample.pressure_constraints = globalFieldConstraintCounts(
@@ -3744,6 +4621,8 @@ public:
         sample.equilibrated_size = free_mixed.size();
         sample.equilibrated_condition_inf =
             infinityNormCondition(reduced, free_mixed.size());
+        sample.krylov = runEquilibratedJacobiBicgstab(
+            reduced, free_mixed.size());
 
         previous_ = solution_;
         has_previous_sample_ = true;
@@ -3768,7 +4647,336 @@ private:
     FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle_{};
     std::uint64_t partition_hash_{0u};
     bool has_previous_sample_{false};
+    int cells_per_axis_{0};
+    StabilityRegime regime_{};
 };
+
+void runDistributedFrozenMatrix(int expected_ranks)
+{
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    ASSERT_NE(initialized, 0) << "Run this test under mpiexec.";
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+    ASSERT_EQ(size, expected_ranks);
+
+    const ScopedEnvVar pressure_diagnostics(
+        "SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC", "1");
+    constexpr std::array<FE::Real, 7> fractions = {{
+        FE::Real{1.0e-8},
+        FE::Real{1.0e-6},
+        FE::Real{1.0e-4},
+        FE::Real{1.0e-2},
+        FE::Real{0.1},
+        FE::Real{0.25},
+        FE::Real{0.49},
+    }};
+    constexpr std::array<std::array<FE::Real, 3>, 2> orientations = {{
+        {{1.0, 0.0, 0.0}},
+        {{1.0, 0.73, 0.41}},
+    }};
+    constexpr std::array<int, 3> resolutions = {{2, 3, 4}};
+    constexpr std::array<StabilityRegime, 3> regimes = {{
+        StabilityRegime{
+            .id = "viscous",
+            .density = FE::Real{1.0},
+            .viscosity = FE::Real{1.0},
+            .dt = FE::Real{0.1},
+            .convection = false,
+            .advective_speed = FE::Real{0.0},
+        },
+        StabilityRegime{
+            .id = "transient",
+            .density = FE::Real{1.0},
+            .viscosity = FE::Real{0.01},
+            .dt = FE::Real{0.001},
+            .convection = false,
+            .advective_speed = FE::Real{0.0},
+        },
+        StabilityRegime{
+            .id = "advection",
+            .density = FE::Real{1.0},
+            .viscosity = FE::Real{0.001},
+            .dt = FE::Real{0.1},
+            .convection = true,
+            .advective_speed = FE::Real{1.0},
+        },
+    }};
+
+    std::size_t case_count = 0u;
+    std::size_t distinct_partition_count = 0u;
+    std::size_t krylov_nonconvergence_count = 0u;
+    FE::Real maximum_fraction_relative_error = 0.0;
+    FE::Real maximum_serial_block_operator_difference = 0.0;
+    FE::Real maximum_serial_metis_operator_difference = 0.0;
+    FE::Real maximum_block_metis_operator_difference = 0.0;
+    FE::Real maximum_partition_condition_relative_difference = 0.0;
+    FE::Real maximum_rank_condition_relative_difference = 0.0;
+
+    const auto compare_operator =
+        [&](std::span<const FE::Real> first,
+            std::span<const FE::Real> second,
+            std::string_view comparison) {
+            EXPECT_EQ(second.size(), first.size()) << comparison;
+            if (second.size() != first.size()) {
+                return std::numeric_limits<FE::Real>::infinity();
+            }
+            const auto difference =
+                compareDenseOperators(first, second);
+            const auto tolerance =
+                FE::Real{8192.0} *
+                std::numeric_limits<FE::Real>::epsilon() *
+                std::max(FE::Real{1.0},
+                         difference.maximum_absolute_entry);
+            EXPECT_LE(
+                difference.maximum_absolute_difference, tolerance)
+                << "comparison=" << comparison
+                << " flat_index="
+                << difference.maximum_difference_index
+                << " scale=" << difference.maximum_absolute_entry;
+            return difference.maximum_absolute_difference;
+        };
+    const auto relative_difference =
+        [](FE::Real first, FE::Real second) {
+            return std::abs(first - second) /
+                   std::max(
+                       FE::Real{1.0e-30},
+                       std::max(std::abs(first), std::abs(second)));
+        };
+
+    for (const auto resolution : resolutions) {
+        const auto structured_cell_count =
+            6 * resolution * resolution * resolution;
+        for (std::size_t orientation = 0u;
+             orientation < orientations.size();
+             ++orientation) {
+            std::array<TargetStructuredCut, fractions.size()> cuts;
+            for (std::size_t fraction = 0u;
+                 fraction < fractions.size();
+                 ++fraction) {
+                cuts[fraction] = makeTargetStructuredCut(
+                    fractions[fraction],
+                    orientations[orientation],
+                    resolution,
+                    std::string("distributed_matrix_fraction_") +
+                        std::to_string(fraction));
+            }
+            for (const auto& regime : regimes) {
+                SCOPED_TRACE(
+                    std::string("ranks=") +
+                    std::to_string(expected_ranks) +
+                    " resolution=" + std::to_string(resolution) +
+                    " orientation=" + std::to_string(orientation) +
+                    " regime=" + std::string(regime.id));
+                PersistentStabilityProblem serial(
+                    cuts.front().cut, resolution, regime);
+                DistributedStabilityProblem block(
+                    cuts.front().cut,
+                    comm,
+                    "block",
+                    structured_cell_count,
+                    resolution,
+                    regime);
+                DistributedStabilityProblem metis(
+                    cuts.front().cut,
+                    comm,
+                    "metis",
+                    structured_cell_count,
+                    resolution,
+                    regime);
+                if (block.partitionHash() != metis.partitionHash()) {
+                    ++distinct_partition_count;
+                }
+
+                for (std::size_t fraction = 0u;
+                     fraction < fractions.size();
+                     ++fraction) {
+                    SCOPED_TRACE(
+                        std::string("fraction=") +
+                        std::to_string(fractions[fraction]));
+                    const auto serial_sample = serial.evaluate(
+                        cuts[fraction].cut,
+                        cuts[fraction].designated_parent_cell);
+                    const auto block_sample = block.evaluate(
+                        cuts[fraction].cut,
+                        cuts[fraction].designated_parent_cell);
+                    const auto metis_sample = metis.evaluate(
+                        cuts[fraction].cut,
+                        cuts[fraction].designated_parent_cell);
+                    for (const auto* sample :
+                         {&serial_sample, &block_sample, &metis_sample}) {
+                        ASSERT_TRUE(std::isfinite(
+                            sample->designated_cut_fraction));
+                        const auto fraction_error =
+                            std::abs(
+                                sample->designated_cut_fraction -
+                                fractions[fraction]) /
+                            fractions[fraction];
+                        maximum_fraction_relative_error = std::max(
+                            maximum_fraction_relative_error,
+                            fraction_error);
+                        EXPECT_LE(
+                            fraction_error, FE::Real{5.0e-8});
+                        EXPECT_GT(sample->cut_cells, 0u);
+                        EXPECT_GT(sample->cut_adjacent_facets, 0u);
+                        EXPECT_EQ(
+                            sample->backend_fallback_cells, 0u);
+                        EXPECT_EQ(
+                            sample->zero_free_pressure_rows, 0u);
+                        EXPECT_EQ(
+                            sample->equilibrated_rank,
+                            sample->equilibrated_size);
+                        EXPECT_TRUE(std::isfinite(
+                            sample->equilibrated_condition_inf));
+                        if (!sample->krylov.converged) {
+                            ++krylov_nonconvergence_count;
+                        }
+                        EXPECT_TRUE(sample->krylov.converged);
+                        EXPECT_FALSE(sample->krylov.breakdown);
+                    }
+
+                    EXPECT_EQ(
+                        block_sample.cut_cells,
+                        serial_sample.cut_cells);
+                    EXPECT_EQ(
+                        metis_sample.cut_cells,
+                        serial_sample.cut_cells);
+                    EXPECT_EQ(
+                        block_sample.cut_adjacent_facets,
+                        serial_sample.cut_adjacent_facets);
+                    EXPECT_EQ(
+                        metis_sample.cut_adjacent_facets,
+                        serial_sample.cut_adjacent_facets);
+                    EXPECT_EQ(
+                        block_sample.free_velocity_dofs,
+                        serial_sample.free_velocity_dofs);
+                    EXPECT_EQ(
+                        metis_sample.free_velocity_dofs,
+                        serial_sample.free_velocity_dofs);
+                    EXPECT_EQ(
+                        block_sample.free_pressure_dofs,
+                        serial_sample.free_pressure_dofs);
+                    EXPECT_EQ(
+                        metis_sample.free_pressure_dofs,
+                        serial_sample.free_pressure_dofs);
+                    EXPECT_EQ(
+                        block_sample.pressure_constraints.master_bearing,
+                        serial_sample.pressure_constraints.master_bearing);
+                    EXPECT_EQ(
+                        metis_sample.pressure_constraints.master_bearing,
+                        serial_sample.pressure_constraints.master_bearing);
+                    EXPECT_EQ(
+                        block_sample.pressure_constraints.homogeneous_pins,
+                        serial_sample.pressure_constraints.homogeneous_pins);
+                    EXPECT_EQ(
+                        metis_sample.pressure_constraints.homogeneous_pins,
+                        serial_sample.pressure_constraints.homogeneous_pins);
+
+                    maximum_serial_block_operator_difference = std::max(
+                        maximum_serial_block_operator_difference,
+                        compare_operator(
+                            serial_sample.canonical_mixed_operator,
+                            block_sample.canonical_mixed_operator,
+                            "serial-block mixed Jacobian"));
+                    maximum_serial_metis_operator_difference = std::max(
+                        maximum_serial_metis_operator_difference,
+                        compare_operator(
+                            serial_sample.canonical_mixed_operator,
+                            metis_sample.canonical_mixed_operator,
+                            "serial-METIS mixed Jacobian"));
+                    maximum_block_metis_operator_difference = std::max(
+                        maximum_block_metis_operator_difference,
+                        compare_operator(
+                            block_sample.canonical_mixed_operator,
+                            metis_sample.canonical_mixed_operator,
+                            "block-METIS mixed Jacobian"));
+                    compare_operator(
+                        serial_sample.canonical_pressure_ghost_operator,
+                        block_sample.canonical_pressure_ghost_operator,
+                        "serial-block pressure ghost");
+                    compare_operator(
+                        serial_sample.canonical_pressure_ghost_operator,
+                        metis_sample.canonical_pressure_ghost_operator,
+                        "serial-METIS pressure ghost");
+                    compare_operator(
+                        serial_sample.canonical_pressure_pspg_operator,
+                        block_sample.canonical_pressure_pspg_operator,
+                        "serial-block pressure PSPG");
+                    compare_operator(
+                        serial_sample.canonical_pressure_pspg_operator,
+                        metis_sample.canonical_pressure_pspg_operator,
+                        "serial-METIS pressure PSPG");
+
+                    const auto partition_condition_difference =
+                        relative_difference(
+                            block_sample.equilibrated_condition_inf,
+                            metis_sample.equilibrated_condition_inf);
+                    const auto block_rank_condition_difference =
+                        relative_difference(
+                            serial_sample.equilibrated_condition_inf,
+                            block_sample.equilibrated_condition_inf);
+                    const auto metis_rank_condition_difference =
+                        relative_difference(
+                            serial_sample.equilibrated_condition_inf,
+                            metis_sample.equilibrated_condition_inf);
+                    maximum_partition_condition_relative_difference =
+                        std::max(
+                            maximum_partition_condition_relative_difference,
+                            partition_condition_difference);
+                    maximum_rank_condition_relative_difference = std::max(
+                        maximum_rank_condition_relative_difference,
+                        std::max(
+                            block_rank_condition_difference,
+                            metis_rank_condition_difference));
+                    EXPECT_LE(
+                        partition_condition_difference,
+                        FE::Real{1.0e-9});
+                    EXPECT_LE(
+                        block_rank_condition_difference,
+                        FE::Real{1.0e-9});
+                    EXPECT_LE(
+                        metis_rank_condition_difference,
+                        FE::Real{1.0e-9});
+                    ++case_count;
+                }
+            }
+        }
+    }
+
+    const auto expected_case_count =
+        fractions.size() * orientations.size() *
+        resolutions.size() * regimes.size();
+    EXPECT_EQ(case_count, expected_case_count);
+    EXPECT_GT(distinct_partition_count, 0u);
+    EXPECT_EQ(krylov_nonconvergence_count, 0u);
+    if (rank == 0) {
+        std::cout << std::setprecision(17)
+                  << "WP7_distributed_full_matrix"
+                  << " ranks=" << size
+                  << " cases=" << case_count
+                  << " distinct_partition_configurations="
+                  << distinct_partition_count
+                  << " maximum_fraction_relative_error="
+                  << maximum_fraction_relative_error
+                  << " maximum_serial_block_operator_difference="
+                  << maximum_serial_block_operator_difference
+                  << " maximum_serial_metis_operator_difference="
+                  << maximum_serial_metis_operator_difference
+                  << " maximum_block_metis_operator_difference="
+                  << maximum_block_metis_operator_difference
+                  << " maximum_partition_condition_relative_difference="
+                  << maximum_partition_condition_relative_difference
+                  << " maximum_rank_condition_relative_difference="
+                  << maximum_rank_condition_relative_difference
+                  << " krylov_nonconvergence_count="
+                  << krylov_nonconvergence_count
+                  << " scope=finite_p1_rank_equivalence_not_uniform_theorem"
+                  << '\n';
+    }
+}
 
 #endif
 
@@ -4126,6 +5334,460 @@ TEST(FreeSurfaceCutStability,
 }
 
 TEST(FreeSurfaceCutStability,
+     SelectedCombinedAggregateAndPressureStabilizationContractIsExplicit)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Cut-stability method contract requires native mesh support.";
+#else
+    const auto velocity_space =
+        FE::spaces::SpaceFactory::create_vector_h1(
+            FE::ElementType::Tetra4, /*order=*/1, /*components=*/3);
+    const auto pressure_space =
+        FE::spaces::SpaceFactory::create_h1(
+            FE::ElementType::Tetra4, /*order=*/1);
+    constexpr std::array<int, 1> supported_polynomial_orders = {{1}};
+    const auto velocity_order = velocity_space->polynomial_order();
+    const auto pressure_order = pressure_space->polynomial_order();
+    const auto is_supported_order = [&](int order) {
+        return std::find(
+                   supported_polynomial_orders.begin(),
+                   supported_polynomial_orders.end(),
+                   order) != supported_polynomial_orders.end();
+    };
+    EXPECT_TRUE(is_supported_order(velocity_order));
+    EXPECT_TRUE(is_supported_order(pressure_order));
+    EXPECT_EQ(velocity_order, pressure_order);
+
+    const auto options =
+        stabilityOptions(27017, "wp7_selected_combined_method");
+    ASSERT_EQ(options.free_surface.size(), 1u);
+    const auto& free_surface = options.free_surface.front();
+
+    EXPECT_EQ(free_surface.implementation,
+              ns::FreeSurfaceImplementation::UnfittedLevelSet);
+    EXPECT_EQ(free_surface.active_domain,
+              ns::FreeSurfaceActiveDomain::LevelSetNegative);
+    EXPECT_EQ(free_surface.active_domain_method,
+              ns::FreeSurfaceActiveDomainMethod::CutVolume);
+    EXPECT_TRUE(options.enable_vms);
+    EXPECT_FALSE(options.enable_convection);
+    EXPECT_TRUE(free_surface.small_cut_aggregation);
+    EXPECT_TRUE(free_surface.cut_cell_stabilization.enabled);
+    EXPECT_EQ(
+        free_surface.cut_cell_stabilization.pressure_policy,
+        ns::FreeSurfacePressureStabilizationPolicy::Enabled);
+    ASSERT_TRUE(std::holds_alternative<FE::Real>(
+        free_surface.cut_cell_stabilization
+            .pressure_gradient_penalty));
+    const auto pressure_gradient_penalty = std::get<FE::Real>(
+        free_surface.cut_cell_stabilization
+            .pressure_gradient_penalty);
+    EXPECT_DOUBLE_EQ(
+        pressure_gradient_penalty,
+        FE::Real{1.0});
+    EXPECT_TRUE(
+        free_surface.cut_cell_stabilization.use_cut_metadata_scale);
+    ASSERT_TRUE(
+        free_surface.cut_cell_stabilization
+            .cut_metadata_scale_cap.has_value());
+    const auto cut_metadata_scale_cap =
+        free_surface.cut_cell_stabilization
+            .cut_metadata_scale_cap.value();
+    EXPECT_DOUBLE_EQ(
+        cut_metadata_scale_cap,
+        FE::Real{100.0});
+
+    const auto equal_order =
+        velocity_order == pressure_order ? 1 : 0;
+    const auto vms_pspg_enabled = options.enable_vms ? 1 : 0;
+    const auto pressure_ghost_enabled =
+        free_surface.cut_cell_stabilization.enabled &&
+                free_surface.cut_cell_stabilization.pressure_policy ==
+                    ns::FreeSurfacePressureStabilizationPolicy::Enabled
+            ? 1
+            : 0;
+    const auto small_cut_aggregation_enabled =
+        free_surface.small_cut_aggregation ? 1 : 0;
+    RecordProperty(
+        "wp7_selected_supported_polynomial_order_count",
+        supported_polynomial_orders.size());
+    RecordProperty(
+        "wp7_selected_equal_order_velocity_pressure", equal_order);
+    RecordProperty("wp7_selected_vms_pspg_enabled", vms_pspg_enabled);
+    RecordProperty(
+        "wp7_selected_pressure_ghost_enabled", pressure_ghost_enabled);
+    RecordProperty(
+        "wp7_selected_small_cut_aggregation_enabled",
+        small_cut_aggregation_enabled);
+    RecordProperty("wp7_selected_velocity_ghost_enabled", 0);
+    RecordProperty(
+        "wp7_selected_pressure_gradient_penalty",
+        realPropertyValue(pressure_gradient_penalty));
+    RecordProperty(
+        "wp7_selected_cut_metadata_scale_cap",
+        realPropertyValue(cut_metadata_scale_cap));
+#endif
+}
+
+TEST(FreeSurfaceCutStability,
+     ExactTargetFractionGeometryCoversAxisObliqueAndThreeHLevels)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Exact target-fraction sweep requires native mesh support.";
+#else
+    constexpr std::array<FE::Real, 7> fractions = {{
+        FE::Real{1.0e-8},
+        FE::Real{1.0e-6},
+        FE::Real{1.0e-4},
+        FE::Real{1.0e-2},
+        FE::Real{0.1},
+        FE::Real{0.25},
+        FE::Real{0.49},
+    }};
+    constexpr std::array<std::array<FE::Real, 3>, 2> orientations = {{
+        {{1.0, 0.0, 0.0}},
+        {{1.0, 0.73, 0.41}},
+    }};
+    constexpr std::array<FE::Real, 3> h_levels = {{
+        FE::Real{1.0},
+        FE::Real{0.5},
+        FE::Real{0.25},
+    }};
+
+    FE::Real maximum_fraction_relative_error = 0.0;
+    FE::Real maximum_volume_relative_error = 0.0;
+    std::size_t case_count = 0u;
+    std::size_t fallback_count = 0u;
+    for (std::size_t orientation = 0u;
+         orientation < orientations.size();
+         ++orientation) {
+        for (const auto h : h_levels) {
+            for (const auto fraction : fractions) {
+                SCOPED_TRACE(
+                    std::string("orientation=") +
+                    std::to_string(orientation) +
+                    " h=" + std::to_string(h) +
+                    " fraction=" + std::to_string(fraction));
+                const auto sample = runTargetFractionGeometrySample(
+                    fraction, orientations[orientation], h);
+                EXPECT_EQ(sample.cut_cells, 1u);
+                EXPECT_EQ(sample.backend_fallback_cells, 0u);
+                EXPECT_GT(sample.generated_retained_volume, FE::Real{0.0});
+                EXPECT_NEAR(
+                    sample.generated_fraction,
+                    sample.target_fraction,
+                    FE::Real{2.0e-11} *
+                        std::max(FE::Real{1.0e-8},
+                                 sample.target_fraction));
+                EXPECT_NEAR(
+                    sample.generated_retained_volume,
+                    sample.expected_retained_volume,
+                    FE::Real{2.0e-11} *
+                        std::max(FE::Real{1.0e-12},
+                                 sample.expected_retained_volume));
+
+                maximum_fraction_relative_error = std::max(
+                    maximum_fraction_relative_error,
+                    std::abs(
+                        sample.generated_fraction -
+                        sample.target_fraction) /
+                        sample.target_fraction);
+                maximum_volume_relative_error = std::max(
+                    maximum_volume_relative_error,
+                    std::abs(
+                        sample.generated_retained_volume -
+                        sample.expected_retained_volume) /
+                        sample.expected_retained_volume);
+                fallback_count += sample.backend_fallback_cells;
+                ++case_count;
+            }
+        }
+    }
+
+    EXPECT_EQ(case_count,
+              fractions.size() * orientations.size() * h_levels.size());
+    EXPECT_EQ(fallback_count, 0u);
+    EXPECT_LE(maximum_fraction_relative_error, FE::Real{2.0e-11});
+    EXPECT_LE(maximum_volume_relative_error, FE::Real{2.0e-11});
+    RecordProperty("wp7_exact_fraction_case_count", case_count);
+    RecordProperty(
+        "wp7_exact_fraction_orientation_count", orientations.size());
+    RecordProperty("wp7_exact_fraction_h_level_count", h_levels.size());
+    RecordProperty("wp7_exact_fraction_backend_fallback_count",
+                   fallback_count);
+    RecordProperty(
+        "wp7_exact_fraction_maximum_relative_error",
+        realPropertyValue(maximum_fraction_relative_error));
+    RecordProperty(
+        "wp7_exact_fraction_maximum_volume_relative_error",
+        realPropertyValue(maximum_volume_relative_error));
+#endif
+}
+
+TEST(FreeSurfaceCutStability,
+     FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Full serial cut-stability matrix requires native mesh support.";
+#else
+    const ScopedEnvVar pressure_diagnostics(
+        "SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC", "1");
+    constexpr std::array<FE::Real, 7> fractions = {{
+        FE::Real{1.0e-8},
+        FE::Real{1.0e-6},
+        FE::Real{1.0e-4},
+        FE::Real{1.0e-2},
+        FE::Real{0.1},
+        FE::Real{0.25},
+        FE::Real{0.49},
+    }};
+    constexpr std::array<std::array<FE::Real, 3>, 2> orientations = {{
+        {{1.0, 0.0, 0.0}},
+        {{1.0, 0.73, 0.41}},
+    }};
+    constexpr std::array<int, 3> resolutions = {{2, 3, 4}};
+    constexpr std::array<StabilityRegime, 3> regimes = {{
+        StabilityRegime{
+            .id = "viscous",
+            .density = FE::Real{1.0},
+            .viscosity = FE::Real{1.0},
+            .dt = FE::Real{0.1},
+            .convection = false,
+            .advective_speed = FE::Real{0.0},
+        },
+        StabilityRegime{
+            .id = "transient",
+            .density = FE::Real{1.0},
+            .viscosity = FE::Real{0.01},
+            .dt = FE::Real{0.001},
+            .convection = false,
+            .advective_speed = FE::Real{0.0},
+        },
+        StabilityRegime{
+            .id = "advection",
+            .density = FE::Real{1.0},
+            .viscosity = FE::Real{0.001},
+            .dt = FE::Real{0.1},
+            .convection = true,
+            .advective_speed = FE::Real{1.0},
+        },
+    }};
+
+    std::size_t case_count = 0u;
+    std::size_t aggregation_case_count = 0u;
+    std::size_t rootless_case_count = 0u;
+    std::size_t krylov_nonconvergence_count = 0u;
+    std::size_t krylov_breakdown_count = 0u;
+    std::size_t maximum_krylov_iterations = 0u;
+    std::size_t maximum_krylov_diagonal_fallbacks = 0u;
+    FE::Real maximum_fraction_relative_error = 0.0;
+    FE::Real minimum_condition =
+        std::numeric_limits<FE::Real>::infinity();
+    FE::Real maximum_condition = 0.0;
+    FE::Real maximum_krylov_relative_residual = 0.0;
+    FE::Real maximum_krylov_relative_solution_error = 0.0;
+    FE::Real minimum_pressure_control =
+        std::numeric_limits<FE::Real>::infinity();
+
+    for (const auto resolution : resolutions) {
+        for (std::size_t orientation = 0u;
+             orientation < orientations.size();
+             ++orientation) {
+            std::array<TargetStructuredCut, fractions.size()> cuts;
+            for (std::size_t fraction = 0u;
+                 fraction < fractions.size();
+                 ++fraction) {
+                cuts[fraction] = makeTargetStructuredCut(
+                    fractions[fraction],
+                    orientations[orientation],
+                    resolution,
+                    std::string("matrix_fraction_") +
+                        std::to_string(fraction));
+            }
+            for (const auto& regime : regimes) {
+                SCOPED_TRACE(
+                    std::string("resolution=") +
+                    std::to_string(resolution) +
+                    " orientation=" +
+                    std::to_string(orientation) +
+                    " regime=" + std::string(regime.id));
+                PersistentStabilityProblem problem(
+                    cuts.front().cut, resolution, regime);
+                for (std::size_t fraction = 0u;
+                     fraction < fractions.size();
+                     ++fraction) {
+                    SCOPED_TRACE(
+                        std::string("fraction=") +
+                        std::to_string(fractions[fraction]));
+                    const auto sample = problem.evaluate(
+                        cuts[fraction].cut,
+                        cuts[fraction].designated_parent_cell);
+                    ASSERT_TRUE(std::isfinite(
+                        sample.designated_cut_fraction));
+                    const auto fraction_relative_error =
+                        std::abs(
+                            sample.designated_cut_fraction -
+                            fractions[fraction]) /
+                        fractions[fraction];
+                    maximum_fraction_relative_error = std::max(
+                        maximum_fraction_relative_error,
+                        fraction_relative_error);
+                    EXPECT_LE(fraction_relative_error, FE::Real{5.0e-8});
+                    EXPECT_GT(sample.cut_cells, 0u);
+                    EXPECT_GT(sample.cut_adjacent_facets, 0u);
+                    EXPECT_GT(
+                        sample.backend_volume_quadrature_points, 0u);
+                    EXPECT_EQ(sample.backend_fallback_cells, 0u);
+                    EXPECT_TRUE(sample.pressure_natural_traction_anchor);
+                    EXPECT_TRUE(
+                        sample.pressure_anchor_has_no_gauge_enforcement);
+                    EXPECT_EQ(sample.zero_free_pressure_rows, 0u);
+                    EXPECT_GT(sample.pressure_ghost_norm, FE::Real{0.0});
+                    EXPECT_GT(
+                        sample.pspg_pressure_gradient_norm, FE::Real{0.0});
+                    EXPECT_EQ(
+                        sample.equilibrated_rank,
+                        sample.equilibrated_size);
+                    EXPECT_TRUE(std::isfinite(
+                        sample.equilibrated_condition_inf));
+                    EXPECT_GT(
+                        sample.equilibrated_condition_inf, FE::Real{0.0});
+                    EXPECT_GT(
+                        sample.pressure_control
+                            .stabilized_pressure_control,
+                        FE::Real{0.0});
+                    if (sample.pressure_constraints.master_bearing > 0u) {
+                        ++aggregation_case_count;
+                    }
+                    if (sample.pressure_constraints.homogeneous_pins > 0u) {
+                        ++rootless_case_count;
+                    }
+
+                    if (!sample.krylov.converged) {
+                        ++krylov_nonconvergence_count;
+                    }
+                    if (sample.krylov.breakdown) {
+                        ++krylov_breakdown_count;
+                    }
+                    EXPECT_TRUE(sample.krylov.converged)
+                        << "iterations=" << sample.krylov.iterations
+                        << " limit=" << sample.krylov.iteration_limit
+                        << " residual="
+                        << sample.krylov.relative_residual;
+                    EXPECT_FALSE(sample.krylov.breakdown);
+                    EXPECT_LE(
+                        sample.krylov.relative_residual,
+                        FE::Real{2.0e-9});
+                    EXPECT_TRUE(std::isfinite(
+                        sample.krylov.relative_solution_error));
+                    maximum_krylov_iterations = std::max(
+                        maximum_krylov_iterations,
+                        sample.krylov.iterations);
+                    maximum_krylov_diagonal_fallbacks = std::max(
+                        maximum_krylov_diagonal_fallbacks,
+                        sample.krylov.diagonal_fallback_count);
+                    maximum_krylov_relative_residual = std::max(
+                        maximum_krylov_relative_residual,
+                        sample.krylov.relative_residual);
+                    maximum_krylov_relative_solution_error = std::max(
+                        maximum_krylov_relative_solution_error,
+                        sample.krylov.relative_solution_error);
+                    minimum_condition = std::min(
+                        minimum_condition,
+                        sample.equilibrated_condition_inf);
+                    maximum_condition = std::max(
+                        maximum_condition,
+                        sample.equilibrated_condition_inf);
+                    minimum_pressure_control = std::min(
+                        minimum_pressure_control,
+                        sample.pressure_control
+                            .stabilized_pressure_control);
+                    ++case_count;
+                }
+            }
+        }
+    }
+
+    const auto expected_case_count =
+        fractions.size() * orientations.size() *
+        resolutions.size() * regimes.size();
+    ASSERT_EQ(case_count, expected_case_count);
+    EXPECT_GT(aggregation_case_count, 0u);
+    EXPECT_EQ(krylov_nonconvergence_count, 0u);
+    EXPECT_EQ(krylov_breakdown_count, 0u);
+    EXPECT_TRUE(std::isfinite(minimum_condition));
+    EXPECT_TRUE(std::isfinite(maximum_condition));
+    EXPECT_GE(maximum_condition, minimum_condition);
+    EXPECT_GT(minimum_pressure_control, FE::Real{0.0});
+    RecordProperty("wp7_full_serial_case_count", case_count);
+    RecordProperty("wp7_full_serial_fraction_count", fractions.size());
+    RecordProperty(
+        "wp7_full_serial_orientation_count", orientations.size());
+    RecordProperty("wp7_full_serial_h_level_count", resolutions.size());
+    RecordProperty("wp7_full_serial_regime_count", regimes.size());
+    RecordProperty(
+        "wp7_full_serial_aggregation_case_count",
+        aggregation_case_count);
+    RecordProperty(
+        "wp7_full_serial_rootless_case_count", rootless_case_count);
+    RecordProperty(
+        "wp7_full_serial_krylov_nonconvergence_count",
+        krylov_nonconvergence_count);
+    RecordProperty(
+        "wp7_full_serial_krylov_breakdown_count",
+        krylov_breakdown_count);
+    RecordProperty(
+        "wp7_full_serial_maximum_krylov_iterations",
+        maximum_krylov_iterations);
+    RecordProperty(
+        "wp7_full_serial_maximum_krylov_diagonal_fallbacks",
+        maximum_krylov_diagonal_fallbacks);
+    RecordProperty(
+        "wp7_full_serial_maximum_fraction_relative_error",
+        realPropertyValue(maximum_fraction_relative_error));
+    RecordProperty(
+        "wp7_full_serial_minimum_condition",
+        realPropertyValue(minimum_condition));
+    RecordProperty(
+        "wp7_full_serial_maximum_condition",
+        realPropertyValue(maximum_condition));
+    RecordProperty(
+        "wp7_full_serial_condition_spread",
+        realPropertyValue(maximum_condition / minimum_condition));
+    RecordProperty(
+        "wp7_full_serial_minimum_pressure_control",
+        realPropertyValue(minimum_pressure_control));
+    RecordProperty(
+        "wp7_full_serial_maximum_krylov_relative_residual",
+        realPropertyValue(maximum_krylov_relative_residual));
+    RecordProperty(
+        "wp7_full_serial_maximum_krylov_relative_solution_error",
+        realPropertyValue(maximum_krylov_relative_solution_error));
+    std::cout << std::setprecision(17)
+              << "WP7_full_serial_matrix"
+              << " cases=" << case_count
+              << " aggregation_cases=" << aggregation_case_count
+              << " rootless_cases=" << rootless_case_count
+              << " minimum_condition=" << minimum_condition
+              << " maximum_condition=" << maximum_condition
+              << " condition_spread="
+              << maximum_condition / minimum_condition
+              << " minimum_pressure_control="
+              << minimum_pressure_control
+              << " maximum_krylov_iterations="
+              << maximum_krylov_iterations
+              << " maximum_krylov_diagonal_fallbacks="
+              << maximum_krylov_diagonal_fallbacks
+              << " maximum_krylov_relative_residual="
+              << maximum_krylov_relative_residual
+              << " maximum_krylov_relative_solution_error="
+              << maximum_krylov_relative_solution_error
+              << " scope=finite_p1_matrix_not_uniform_theorem"
+              << '\n';
+#endif
+}
+
+TEST(FreeSurfaceCutStability,
      ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -4155,6 +5817,23 @@ TEST(FreeSurfaceCutStability,
            "and the dynamic contact law do not balance";
     EXPECT_LT(balanced.repeated_residual_difference_norm, FE::Real{1.0e-15})
         << "the stationary current/previous state is not one-step invariant";
+    RecordProperty("wp7_balance_interface_fragment_count",
+                   balanced.interface_fragments);
+    RecordProperty("wp7_balance_contact_fragment_count",
+                   balanced.contact_fragments);
+    RecordProperty(
+        "wp7_balance_maximum_interface_normal_error",
+        realPropertyValue(balanced.maximum_interface_normal_error));
+    RecordProperty(
+        "wp7_balance_maximum_contact_cosine_error",
+        realPropertyValue(balanced.maximum_contact_cosine_error));
+    RecordProperty(
+        "wp7_balance_unconstrained_residual_norm",
+        realPropertyValue(balanced.unconstrained_residual_norm));
+    RecordProperty(
+        "wp7_balance_repeated_residual_difference_norm",
+        realPropertyValue(
+            balanced.repeated_residual_difference_norm));
 
     // Both controls retain the same production cut-volume/interface/contact
     // assembly.  They ensure the near-zero result is a resolved balance rather
@@ -4406,6 +6085,25 @@ TEST(FreeSurfaceCutStability,
                                   /*near_edge_last=*/6u);
     expect_no_near_feature_growth(/*near_face_first=*/7u,
                                   /*near_face_last=*/9u);
+    RecordProperty("wp7_finite_cut_position_count", samples.size());
+    RecordProperty(
+        "wp7_finite_cut_maximum_condition",
+        realPropertyValue(max_condition));
+    RecordProperty(
+        "wp7_finite_cut_condition_spread",
+        realPropertyValue(condition_spread));
+    RecordProperty(
+        "wp7_finite_cut_minimum_pressure_control",
+        realPropertyValue(min_stabilized_control));
+    RecordProperty(
+        "wp7_finite_cut_pressure_control_spread",
+        realPropertyValue(stabilized_control_spread));
+    RecordProperty(
+        "wp7_finite_cut_maximum_aggregate_weight_l1",
+        realPropertyValue(max_aggregate_weight_l1));
+    RecordProperty(
+        "wp7_finite_cut_maximum_aggregate_reach_over_h",
+        realPropertyValue(max_aggregate_reach_over_h));
     std::cout << std::setprecision(12)
               << "FS14_cut_sweep_summary"
               << " positions=" << samples.size()
@@ -4592,6 +6290,22 @@ TEST(FreeSurfaceCutStability,
               maximum_accepted_aggregate_weight_l1);
     EXPECT_LE(maximum_extension_reach,
               maximum_accepted_aggregate_reach_over_h);
+    RecordProperty("wp7_refinement_h_level_count", samples.size());
+    RecordProperty(
+        "wp7_refinement_minimum_pressure_control",
+        realPropertyValue(minimum_stabilized_control));
+    RecordProperty(
+        "wp7_refinement_pressure_control_spread",
+        realPropertyValue(stabilized_control_spread));
+    RecordProperty(
+        "wp7_refinement_minimum_equilibrated_sigma",
+        realPropertyValue(minimum_equilibrated_sigma));
+    RecordProperty(
+        "wp7_refinement_maximum_aggregate_weight_l1",
+        realPropertyValue(maximum_weight_l1));
+    RecordProperty(
+        "wp7_refinement_maximum_aggregate_reach_over_h",
+        realPropertyValue(maximum_extension_reach));
     std::cout << std::setprecision(12)
               << "FS14_refinement_summary"
               << " levels=" << samples.size()
@@ -4801,6 +6515,22 @@ TEST(FreeSurfaceCutStability,
     EXPECT_LE(condition_spread, maximum_accepted_sequence_spread);
     EXPECT_LE(stabilized_control_spread,
               maximum_accepted_stabilized_control_spread);
+    RecordProperty("wp7_moving_cut_position_count", samples.size());
+    RecordProperty(
+        "wp7_moving_cut_distinct_cell_topology_count",
+        cut_cell_counts.size());
+    RecordProperty(
+        "wp7_moving_cut_distinct_facet_topology_count",
+        cut_facet_counts.size());
+    RecordProperty(
+        "wp7_moving_cut_distinct_aggregate_topology_count",
+        aggregate_pressure_slave_counts.size());
+    RecordProperty(
+        "wp7_moving_cut_condition_spread",
+        realPropertyValue(condition_spread));
+    RecordProperty(
+        "wp7_moving_cut_pressure_control_spread",
+        realPropertyValue(stabilized_control_spread));
     std::cout << std::setprecision(12)
               << "FS14_evolving_cut_summary"
               << " positions=" << samples.size()
@@ -5004,6 +6734,187 @@ TEST(FreeSurfaceCutStabilityMPI,
                   << " accepted_gate=" << mpi_gate
                   << " solved_state_gate=" << mpi_solved_gate << '\n';
     }
+#endif
+}
+
+TEST(FreeSurfaceCutStabilityMPI,
+     FourRankFixedCutIsInvariantAcrossBlockAndMetisPartitions)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH && \
+      defined(FE_HAS_MPI) && defined(MESH_HAS_MPI))
+    GTEST_SKIP() << "Four-rank cut stability requires MPI-enabled FE and Mesh.";
+#else
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized == 0) {
+        GTEST_SKIP() << "Run this test under mpiexec.";
+    }
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+    if (size != 4) {
+        GTEST_SKIP() << "This test requires exactly four MPI ranks.";
+    }
+
+    const ScopedEnvVar pressure_diagnostics(
+        "SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC", "1");
+    const PlaneCutPosition cut{
+        "four_rank_oblique_cut", {{1.0, 0.73, 0.41}}, 2.25};
+    const std::array<std::string, 2> partition_methods = {
+        "block", "metis"};
+    std::array<StabilitySample, 2> samples;
+    std::array<std::uint64_t, 2> partition_hashes{};
+
+    for (std::size_t partition = 0u;
+         partition < partition_methods.size();
+         ++partition) {
+        SCOPED_TRACE(partition_methods[partition]);
+        DistributedStabilityProblem problem(
+            cut, comm, partition_methods[partition]);
+        partition_hashes[partition] = problem.partitionHash();
+        samples[partition] = problem.evaluate(cut);
+        const auto& sample = samples[partition];
+
+        EXPECT_GT(sample.cut_cells, 0u);
+        EXPECT_GT(sample.cut_adjacent_facets, 0u);
+        EXPECT_GT(sample.backend_volume_quadrature_points, 0u);
+        EXPECT_EQ(sample.backend_fallback_cells, 0u);
+        EXPECT_TRUE(sample.pressure_natural_traction_anchor);
+        EXPECT_TRUE(sample.pressure_anchor_has_no_gauge_enforcement);
+        EXPECT_GT(sample.pressure_constraints.master_bearing, 0u);
+        EXPECT_EQ(sample.velocity_constraints.master_bearing,
+                  3u * sample.pressure_constraints.master_bearing);
+        EXPECT_EQ(sample.velocity_constraints.homogeneous_pins,
+                  3u * sample.pressure_constraints.homogeneous_pins);
+        EXPECT_GT(sample.free_pressure_dofs, 0u);
+        EXPECT_EQ(sample.zero_free_pressure_rows, 0u);
+        EXPECT_GT(sample.pressure_ghost_norm, FE::Real{1.0e-14});
+        EXPECT_GT(sample.pspg_pressure_gradient_norm, FE::Real{1.0e-14});
+        EXPECT_EQ(sample.equilibrated_rank, sample.equilibrated_size);
+        EXPECT_TRUE(std::isfinite(sample.equilibrated_condition_inf));
+        EXPECT_LE(sample.equilibrated_condition_inf, FE::Real{1000.0});
+    }
+
+    EXPECT_NE(partition_hashes[0], partition_hashes[1])
+        << "four-rank block and METIS partitions must exercise distinct owner maps";
+    const auto expect_equal_operator =
+        [&](std::span<const FE::Real> block,
+            std::span<const FE::Real> metis,
+            std::string_view name) {
+            EXPECT_EQ(metis.size(), block.size()) << name;
+            if (metis.size() != block.size()) {
+                return std::numeric_limits<FE::Real>::infinity();
+            }
+            const auto difference = compareDenseOperators(block, metis);
+            const auto tolerance =
+                FE::Real{2048.0} *
+                std::numeric_limits<FE::Real>::epsilon() *
+                std::max(FE::Real{1.0},
+                         difference.maximum_absolute_entry);
+            EXPECT_LE(difference.maximum_absolute_difference, tolerance)
+                << "operator=" << name
+                << " flat_index=" << difference.maximum_difference_index;
+            return difference.maximum_absolute_difference;
+        };
+    const auto mixed_difference = expect_equal_operator(
+        samples[0].canonical_mixed_operator,
+        samples[1].canonical_mixed_operator,
+        "mixed Jacobian");
+    const auto ghost_difference = expect_equal_operator(
+        samples[0].canonical_pressure_ghost_operator,
+        samples[1].canonical_pressure_ghost_operator,
+        "pressure ghost penalty");
+    const auto pspg_difference = expect_equal_operator(
+        samples[0].canonical_pressure_pspg_operator,
+        samples[1].canonical_pressure_pspg_operator,
+        "pressure PSPG block");
+    EXPECT_EQ(samples[1].cut_cells, samples[0].cut_cells);
+    EXPECT_EQ(samples[1].cut_adjacent_facets,
+              samples[0].cut_adjacent_facets);
+    EXPECT_EQ(samples[1].cut_adjacent_facet_gid_hash,
+              samples[0].cut_adjacent_facet_gid_hash);
+    EXPECT_EQ(samples[1].free_velocity_dofs,
+              samples[0].free_velocity_dofs);
+    EXPECT_EQ(samples[1].free_pressure_dofs,
+              samples[0].free_pressure_dofs);
+    EXPECT_NEAR(samples[1].pressure_ghost_norm,
+                samples[0].pressure_ghost_norm,
+                FE::Real{1.0e-12});
+    EXPECT_NEAR(samples[1].pspg_pressure_gradient_norm,
+                samples[0].pspg_pressure_gradient_norm,
+                FE::Real{1.0e-10});
+    EXPECT_NEAR(samples[1].equilibrated_condition_inf,
+                samples[0].equilibrated_condition_inf,
+                FE::Real{1.0e-8});
+
+    if (rank == 0) {
+        std::cout << std::setprecision(17)
+                  << "WP7_four_rank_partition_invariance"
+                  << " ranks=" << size
+                  << " cut_cells=" << samples[0].cut_cells
+                  << " cut_adjacent_facets="
+                  << samples[0].cut_adjacent_facets
+                  << " free_velocity_dofs="
+                  << samples[0].free_velocity_dofs
+                  << " free_pressure_dofs="
+                  << samples[0].free_pressure_dofs
+                  << " block_condition="
+                  << samples[0].equilibrated_condition_inf
+                  << " metis_condition="
+                  << samples[1].equilibrated_condition_inf
+                  << " maximum_mixed_operator_difference="
+                  << mixed_difference
+                  << " maximum_pressure_ghost_operator_difference="
+                  << ghost_difference
+                  << " maximum_pressure_pspg_operator_difference="
+                  << pspg_difference
+                  << " qualification=finite_four_rank_partition_invariance"
+                  << '\n';
+    }
+#endif
+}
+
+TEST(FreeSurfaceCutStabilityMPI,
+     TwoRankFractionOrientationRegimeMatrixMatchesSerial)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH && \
+      defined(FE_HAS_MPI) && defined(MESH_HAS_MPI))
+    GTEST_SKIP() << "Two-rank matrix requires MPI-enabled FE and Mesh.";
+#else
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized == 0) {
+        GTEST_SKIP() << "Run this test under mpiexec.";
+    }
+    int size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly two MPI ranks.";
+    }
+    runDistributedFrozenMatrix(/*expected_ranks=*/2);
+#endif
+}
+
+TEST(FreeSurfaceCutStabilityMPI,
+     FourRankFractionOrientationRegimeMatrixMatchesSerial)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH && \
+      defined(FE_HAS_MPI) && defined(MESH_HAS_MPI))
+    GTEST_SKIP() << "Four-rank matrix requires MPI-enabled FE and Mesh.";
+#else
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized == 0) {
+        GTEST_SKIP() << "Run this test under mpiexec.";
+    }
+    int size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size != 4) {
+        GTEST_SKIP() << "This test requires exactly four MPI ranks.";
+    }
+    runDistributedFrozenMatrix(/*expected_ranks=*/4);
 #endif
 }
 

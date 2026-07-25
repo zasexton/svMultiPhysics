@@ -511,6 +511,69 @@ void expectRootlessQuadraticWallFaceExclusion(
 #define SVMP_AGG_TEST_BODY GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #endif
 
+TEST(SmallCutAggregationConstraint,
+     PhysicalRootOrderingIgnoresPartitionNumberedMastersAndProviders)
+{
+    struct RootProposalView {
+        detail::SmallCutAggregationPhysicalRootKey key;
+        int provider_rank;
+        std::vector<GlobalIndex> algebraic_master_dofs;
+        std::vector<std::pair<GlobalIndex, double>> physical_line;
+    };
+
+    const auto select = [](const std::vector<RootProposalView>& proposals)
+        -> const RootProposalView& {
+        return *std::min_element(
+            proposals.begin(),
+            proposals.end(),
+            [](const auto& lhs, const auto& rhs) {
+                return detail::smallCutAggregationPhysicalRootLess(
+                    lhs.key,
+                    lhs.provider_rank,
+                    rhs.key,
+                    rhs.provider_rank);
+            });
+    };
+
+    const std::vector<std::pair<GlobalIndex, double>> expected_line{
+        {900, 2.0},
+        {901, -1.0},
+    };
+
+    // Equal-distance roots receive opposite owner-contiguous master ordering
+    // and opposite providers in these two partition views. A master-DOF key
+    // would therefore choose a different physical root in each view.
+    const std::vector<RootProposalView> first_partition{
+        {{1u, 41}, 1, {100, 101}, expected_line},
+        {{1u, 52}, 0, {1, 2}, {{910, 2.0}, {911, -1.0}}},
+    };
+    const std::vector<RootProposalView> second_partition{
+        {{1u, 41}, 0, {1, 2}, expected_line},
+        {{1u, 52}, 1, {100, 101}, {{910, 2.0}, {911, -1.0}}},
+    };
+
+    const auto& first_choice = select(first_partition);
+    const auto& second_choice = select(second_partition);
+    EXPECT_EQ(first_choice.key.cell_gid, 41);
+    EXPECT_EQ(second_choice.key.cell_gid, 41);
+    EXPECT_EQ(first_choice.physical_line, expected_line);
+    EXPECT_EQ(second_choice.physical_line, expected_line);
+    EXPECT_NE(first_choice.algebraic_master_dofs,
+              second_choice.algebraic_master_dofs);
+    EXPECT_NE(first_choice.provider_rank, second_choice.provider_rank);
+
+    // Provider rank breaks a tie only after the physical root and physical
+    // line are identical.
+    const std::vector<RootProposalView> equivalent_providers{
+        {{1u, 41}, 3, {300, 301}, expected_line},
+        {{1u, 41}, 1, {100, 101}, expected_line},
+    };
+    const auto& provider_choice = select(equivalent_providers);
+    EXPECT_EQ(provider_choice.key.cell_gid, 41);
+    EXPECT_EQ(provider_choice.physical_line, expected_line);
+    EXPECT_EQ(provider_choice.provider_rank, 1);
+}
+
 TEST(SmallCutAggregationConstraint, RejectsInvalidMarkerAndInterfaceActiveSide)
 {
     EXPECT_THROW(
@@ -646,6 +709,7 @@ TEST(SmallCutAggregationConstraint, SlavesOnlyUnsupportedCutVerticesWithExtrapol
     SVMP_AGG_TEST_BODY
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     auto mesh = buildQuadStrip(2);
+    mesh->set_cell_gids({});
     auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
 
     systems::FESystem system(mesh);
@@ -658,6 +722,7 @@ TEST(SmallCutAggregationConstraint, SlavesOnlyUnsupportedCutVerticesWithExtrapol
         kInterfaceMarker));
 
     ASSERT_NO_THROW(system.setup());
+    ASSERT_FALSE(system.meshAccess().globalEntityIdsAvailable());
     system.setCutIntegrationContext(makeCutContext({
         {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
         {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
