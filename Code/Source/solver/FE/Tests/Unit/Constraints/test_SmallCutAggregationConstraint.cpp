@@ -1131,6 +1131,94 @@ TEST(SmallCutAggregationConstraint, NoRootIslandCandidatesArePinnedHomogeneously
 #endif
 }
 
+TEST(SmallCutAggregationConstraint,
+     CompletedRefreshReportSeparatesRootedAndRootlessCandidates)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto mesh = buildQuadStrip(2);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    auto aggregation = std::make_unique<SmallCutAggregationConstraint>(
+        pressure,
+        geometry::CutIntegrationSide::Negative,
+        kInterfaceMarker);
+    const auto* aggregation_view = aggregation.get();
+    system.addSystemConstraint(std::move(aggregation));
+
+    ASSERT_NO_THROW(system.setup());
+    EXPECT_FALSE(aggregation_view->completedRefreshReport().has_value());
+
+    system.setCutIntegrationContext(makeCutContext({
+        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+        {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+    }));
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+    {
+        const auto& report = aggregation_view->completedRefreshReport();
+        ASSERT_TRUE(report.has_value());
+        EXPECT_EQ(report->field, pressure);
+        EXPECT_EQ(report->active_side,
+                  geometry::CutIntegrationSide::Negative);
+        EXPECT_EQ(report->interface_marker, kInterfaceMarker);
+        EXPECT_EQ(report->canonical_candidate_vertices, 2u);
+        EXPECT_EQ(report->canonical_rooted_candidate_vertices, 2u);
+        EXPECT_EQ(report->canonical_rootless_candidate_vertices, 0u);
+        EXPECT_EQ(report->canonical_owned_aggregate_dofs, 2u);
+        EXPECT_EQ(report->canonical_owned_pinned_dofs, 0u);
+        EXPECT_EQ(report->canonical_strong_suppressed_dofs, 0u);
+    }
+
+    system.setCutIntegrationContext(
+        std::make_shared<assembly::CutIntegrationContext>());
+    EXPECT_THROW(system.rebuildConstraintState(), std::runtime_error);
+    EXPECT_FALSE(aggregation_view->completedRefreshReport().has_value());
+
+    auto rootless_context = makeCutContext({
+        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+    });
+    addCellRule(*rootless_context,
+                {.cell = 1,
+                 .volume_fraction = Real{1.0},
+                 .full_cell_equivalent = true},
+                geometry::CutIntegrationSide::Positive);
+    system.setCutIntegrationContext(std::move(rootless_context));
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+
+    const auto& report = aggregation_view->completedRefreshReport();
+    ASSERT_TRUE(report.has_value());
+    EXPECT_EQ(report->field, pressure);
+    EXPECT_EQ(report->active_side, geometry::CutIntegrationSide::Negative);
+    EXPECT_EQ(report->interface_marker, kInterfaceMarker);
+    EXPECT_EQ(report->canonical_candidate_vertices, 4u);
+    EXPECT_EQ(report->canonical_rooted_candidate_vertices, 0u);
+    EXPECT_EQ(report->canonical_rootless_candidate_vertices, 4u);
+    EXPECT_EQ(report->canonical_owned_aggregate_dofs, 0u);
+    EXPECT_EQ(report->canonical_owned_pinned_dofs, 4u);
+    EXPECT_EQ(report->canonical_strong_suppressed_dofs, 0u);
+
+    for (const auto vertex : {0, 1, 3, 4}) {
+        const auto view = system.constraints().getConstraint(
+            vertexDof(system, pressure, vertex));
+        ASSERT_TRUE(view.has_value()) << "vertex " << vertex;
+        EXPECT_TRUE(view->isDirichlet()) << "vertex " << vertex;
+        EXPECT_TRUE(view->entries.empty()) << "vertex " << vertex;
+        EXPECT_NEAR(view->inhomogeneity, 0.0, 1.0e-15) << "vertex " << vertex;
+    }
+
+    {
+        ScopedEnvVar cap("SVMP_AGGREGATION_MAX_LINES", "0");
+        ASSERT_NO_THROW(system.rebuildConstraintState());
+    }
+    EXPECT_FALSE(aggregation_view->completedRefreshReport().has_value());
+#endif
+}
+
 TEST(SmallCutAggregationConstraint, AllowUnaggregatedEnvRestoresFailOpenBehavior)
 {
     SVMP_AGG_TEST_BODY

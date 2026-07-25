@@ -107,6 +107,7 @@
 
 #include <cstddef>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -160,6 +161,26 @@ struct SmallCutAggregationGuardOptions {
     Real maximum_row_l1_norm{32.0};
 };
 
+/**
+ * Canonical result of the most recent successful aggregation refresh.
+ *
+ * Candidate fields count vertices, while aggregate, pin, and suppression
+ * fields count DOFs. These values do not infer connected feature counts or
+ * feature-deletion volume.
+ */
+struct SmallCutAggregationRefreshReport {
+    FieldId field{INVALID_FIELD_ID};
+    geometry::CutIntegrationSide active_side{
+        geometry::CutIntegrationSide::Negative};
+    int interface_marker{-1};
+    std::size_t canonical_candidate_vertices{0u};
+    std::size_t canonical_rooted_candidate_vertices{0u};
+    std::size_t canonical_rootless_candidate_vertices{0u};
+    std::size_t canonical_owned_aggregate_dofs{0u};
+    std::size_t canonical_owned_pinned_dofs{0u};
+    std::size_t canonical_strong_suppressed_dofs{0u};
+};
+
 class SmallCutAggregationConstraint final : public ISystemConstraint {
 public:
     /// @param excluded_boundary_markers Boundary markers whose face vertices
@@ -190,6 +211,19 @@ public:
 
     [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override;
 
+    /**
+     * Report for the current successful canonical refresh, if one exists.
+     *
+     * A refresh clears the prior report before validation. Failed refreshes,
+     * the initial context-free setup pass, and debug line-cap bypasses leave
+     * this empty.
+     */
+    [[nodiscard]] const std::optional<SmallCutAggregationRefreshReport>&
+    completedRefreshReport() const noexcept
+    {
+        return completed_refresh_report_;
+    }
+
 private:
     FieldId field_{INVALID_FIELD_ID};
     geometry::CutIntegrationSide active_side_{geometry::CutIntegrationSide::Negative};
@@ -200,6 +234,7 @@ private:
     // Constraint-instance state avoids the stale address/pointer-reuse hazard
     // of a process-global churn cache keyed by &FESystem.
     std::vector<GlobalIndex> previous_canonical_slaves_{};
+    std::optional<SmallCutAggregationRefreshReport> completed_refresh_report_{};
 };
 
 } // namespace constraints

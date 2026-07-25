@@ -2053,6 +2053,7 @@ SmallCutAggregationConstraint::SmallCutAggregationConstraint(
 void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                           AffineConstraints& constraints)
 {
+    completed_refresh_report_.reset();
     const auto* cut_context = system.cutIntegrationContext();
     bool distributed_aggregation = false;
 #if FE_HAS_MPI
@@ -3764,6 +3765,27 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     "is set (" + oss.str() + ")");
             }
         }
+    }
+
+    if (distributed_validation !=
+        DistributedAggregationValidation::DebugBypass) {
+        completed_refresh_report_ = SmallCutAggregationRefreshReport{
+            .field = field_,
+            .active_side = active_side_,
+            .interface_marker = interface_marker_,
+            .canonical_candidate_vertices =
+                distributed_result.canonical_candidate_vertices,
+            .canonical_rooted_candidate_vertices =
+                distributed_result.canonical_rooted_candidate_vertices,
+            .canonical_rootless_candidate_vertices =
+                distributed_result.canonical_rootless_candidate_vertices,
+            .canonical_owned_aggregate_dofs =
+                distributed_result.canonical_owned_aggregate_dofs,
+            .canonical_owned_pinned_dofs =
+                distributed_result.canonical_owned_pinned_dofs,
+            .canonical_strong_suppressed_dofs =
+                distributed_result.canonical_strong_suppressed_dofs,
+        };
     }
 }
 
