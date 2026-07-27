@@ -387,6 +387,15 @@ bool freeSurfaceConservativeBalanceDiagnosticEnabled()
     return false;
 }
 
+bool symmetricNitscheEnergyDiagnosticEnabled()
+{
+    if (auto value = readDiagnosticBooleanOverride(
+            "SVMP_NS_SYMMETRIC_NITSCHE_ENERGY_DIAGNOSTIC")) {
+        return value->value;
+    }
+    return false;
+}
+
 bool navierStokesPspgContinuityFullCellSupportDiagnosticEnabled()
 {
     if (auto value = readDiagnosticBooleanOverride(
@@ -6917,6 +6926,21 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     if (options_.viscosity_model == nullptr && !(options_.viscosity > 0.0)) {
         throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: viscosity must be > 0 when viscosity_model is not provided");
     }
+    const bool nitsche_energy_diagnostic_requested =
+        symmetricNitscheEnergyDiagnosticEnabled();
+    if (nitsche_energy_diagnostic_requested &&
+        options_
+                .symmetric_nitsche_energy_qualification_scope !=
+            SymmetricNitscheEnergyQualificationScope::
+                JointLowLevelPrerequisite) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule::registerOn: symmetric Nitsche energy diagnostic requires explicit joint_low_level_prerequisite scope");
+    }
+    if (nitsche_energy_diagnostic_requested &&
+        options_.viscosity_model != nullptr) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule::registerOn: symmetric Nitsche energy diagnostic requires constant viscosity; viscosity_model is unsupported");
+    }
     const auto vms_override = navierStokesVmsDiagnosticOverride();
     const bool enable_vms =
         vms_override.has_value() ? vms_override->value : options_.enable_vms;
@@ -8229,6 +8253,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             " velocity_ghost_penalty=skipped_by_aggregation");
     }
 
+    Factories::VelocityNitscheEnergyForms nitsche_energy_forms;
     Factories::applyVelocityNitscheBCs(
         momentum_form,
         continuity_form,
@@ -8239,7 +8264,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         v,
         q,
         mu,
-        generated_active_boundary_for);
+        generated_active_boundary_for,
+        nitsche_energy_diagnostic_requested
+            ? &nitsche_energy_forms
+            : nullptr);
 
     // Install the complete residual (momentum + continuity) via the unified
     // installFormulation() entry point.  It auto-detects the two-field mixed
@@ -8258,6 +8286,106 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     ale_binding.configureInstallOptions(install);
     (void)FE::systems::installFormulation(
         system, options_.operator_tag, {u_id, p_id}, residual, install);
+
+    if (nitsche_energy_diagnostic_requested &&
+        !nitsche_energy_forms.symmetric_boundaries.empty()) {
+        const auto bulk_viscous_form =
+            integrateOnActiveVolume(viscous, active_volume_domain);
+        const auto bulk_plus_consistency_form =
+            bulk_viscous_form +
+            nitsche_energy_forms.symmetric_consistency;
+        const auto symmetric_operator_form =
+            bulk_plus_consistency_form +
+            nitsche_energy_forms.penalty;
+        const auto energy_norm_form =
+            bulk_viscous_form + nitsche_energy_forms.penalty;
+        const auto install_velocity_diagnostic =
+            [&](std::string_view operator_tag,
+                const FormExpr& diagnostic_form) {
+                auto diagnostic_install = install;
+                diagnostic_install.source_component_tag =
+                    std::string(operator_tag);
+                diagnostic_install.extra_trial_fields.clear();
+                (void)FE::systems::installFormulation(
+                    system,
+                    std::string(operator_tag),
+                    {u_id},
+                    diagnostic_form,
+                    diagnostic_install);
+            };
+        install_velocity_diagnostic(
+            SymmetricNitscheEnergyDiagnosticOperators::bulk_viscous,
+            bulk_viscous_form);
+        install_velocity_diagnostic(
+            SymmetricNitscheEnergyDiagnosticOperators::
+                bulk_plus_consistency,
+            bulk_plus_consistency_form);
+        install_velocity_diagnostic(
+            SymmetricNitscheEnergyDiagnosticOperators::symmetric_operator,
+            symmetric_operator_form);
+        install_velocity_diagnostic(
+            SymmetricNitscheEnergyDiagnosticOperators::energy_norm,
+            energy_norm_form);
+        const auto generated_sharp_boundary_count =
+            static_cast<std::size_t>(std::count_if(
+                nitsche_energy_forms.symmetric_boundaries.begin(),
+                nitsche_energy_forms.symmetric_boundaries.end(),
+                [](const auto& route) {
+                    return route.generated_active_boundary_marker
+                        .has_value();
+                }));
+        std::string boundary_routes;
+        for (const auto& route :
+             nitsche_energy_forms.symmetric_boundaries) {
+            if (!boundary_routes.empty()) {
+                boundary_routes += ",";
+            }
+            boundary_routes +=
+                std::to_string(route.physical_boundary_marker) +
+                "->";
+            boundary_routes +=
+                route.generated_active_boundary_marker.has_value()
+                    ? std::to_string(
+                          *route.generated_active_boundary_marker)
+                    : "full";
+        }
+        FE_LOG_INFO(
+            std::string(
+                "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_symmetric_nitsche_energy_operators") +
+            " status=installed"
+            " symmetric_boundary_count=" +
+            std::to_string(
+                nitsche_energy_forms.symmetric_boundaries.size()) +
+            " generated_sharp_boundary_count=" +
+            std::to_string(generated_sharp_boundary_count) +
+            " full_boundary_count=" +
+            std::to_string(
+                nitsche_energy_forms.symmetric_boundaries.size() -
+                generated_sharp_boundary_count) +
+            " boundary_routes='" + boundary_routes + "'" +
+            " bulk_operator='" +
+            std::string(
+                SymmetricNitscheEnergyDiagnosticOperators::bulk_viscous) +
+            "' bulk_plus_consistency_operator='" +
+            std::string(
+                SymmetricNitscheEnergyDiagnosticOperators::
+                    bulk_plus_consistency) +
+            "' symmetric_operator='" +
+            std::string(
+                SymmetricNitscheEnergyDiagnosticOperators::
+                    symmetric_operator) +
+            "' energy_norm_operator='" +
+            std::string(
+                SymmetricNitscheEnergyDiagnosticOperators::energy_norm) +
+            "' scope=velocity_viscous_block_only"
+            " transient_pressure_convection_excluded=1");
+    } else if (nitsche_energy_diagnostic_requested) {
+        FE_LOG_WARNING(
+            "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_symmetric_nitsche_energy_operators"
+            " status=skipped"
+            " reason=no_symmetric_weak_velocity_boundary");
+    }
+
     if (vms_pspg_pressure_gradient_form.isValid()) {
         auto direct_pspg_install = install;
         direct_pspg_install.source_component_tag =

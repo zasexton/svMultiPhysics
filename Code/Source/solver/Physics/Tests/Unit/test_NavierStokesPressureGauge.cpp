@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -45,6 +46,36 @@ namespace Physics {
 namespace test {
 
 namespace {
+
+class ScopedEnvVar final {
+public:
+    ScopedEnvVar(const char* key, const char* value)
+        : key_(key)
+    {
+        if (const char* prior = std::getenv(key_); prior != nullptr) {
+            had_prior_ = true;
+            prior_ = prior;
+        }
+        ::setenv(key_, value, 1);
+    }
+
+    ~ScopedEnvVar()
+    {
+        if (had_prior_) {
+            ::setenv(key_, prior_.c_str(), 1);
+        } else {
+            ::unsetenv(key_);
+        }
+    }
+
+    ScopedEnvVar(const ScopedEnvVar&) = delete;
+    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
+
+private:
+    const char* key_;
+    bool had_prior_{false};
+    std::string prior_{};
+};
 
 class TwoQuadStripMeshAccess final : public FE::assembly::IMeshAccess {
 public:
@@ -1472,6 +1503,114 @@ TEST(NavierStokesPressureGauge, PublishesVariableDynamicViscosityFromResidualExp
     EXPECT_FALSE(law.constant_value_available);
     EXPECT_EQ(law.model, viscosity_model);
     EXPECT_EQ(law.source_operator_tag, "equations");
+}
+
+TEST(NavierStokesPressureGauge,
+     RejectsEnergyDiagnosticWithoutExplicitPrerequisiteScopeBeforeSystemMutation)
+{
+    const ScopedEnvVar energy_diagnostic(
+        "SVMP_NS_SYMMETRIC_NITSCHE_ENERGY_DIAGNOSTIC", "1");
+    auto mesh = std::make_shared<TwoQuadStripMeshAccess>();
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1,
+        mesh,
+        /*order=*/1,
+        /*components=*/2);
+    auto p_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1,
+        mesh,
+        /*order=*/1,
+        /*components=*/1);
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSOptions opts;
+    opts.velocity_field_name = "u";
+    opts.pressure_field_name = "p";
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.density = 1.0;
+    opts.viscosity = 0.007;
+    opts.velocity_dirichlet_weak.push_back(
+        {.boundary_marker = 1});
+
+    FE::systems::FESystem system(mesh);
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
+        u_space,
+        p_space,
+        opts);
+    try {
+        module.registerOn(system);
+        FAIL() << "unscoped energy diagnostic must fail closed";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "requires explicit joint_low_level_prerequisite scope"),
+            std::string::npos)
+            << error.what();
+    }
+
+    EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+    EXPECT_FALSE(system.hasOperator("equations"));
+    EXPECT_TRUE(system.formulationRecords().empty());
+}
+
+TEST(NavierStokesPressureGauge,
+     RejectsVariableViscosityEnergyDiagnosticBeforeSystemMutation)
+{
+    const ScopedEnvVar energy_diagnostic(
+        "SVMP_NS_SYMMETRIC_NITSCHE_ENERGY_DIAGNOSTIC", "1");
+    auto mesh = std::make_shared<TwoQuadStripMeshAccess>();
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1,
+        mesh,
+        /*order=*/1,
+        /*components=*/2);
+    auto p_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1,
+        mesh,
+        /*order=*/1,
+        /*components=*/1);
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSOptions opts;
+    opts.velocity_field_name = "u";
+    opts.pressure_field_name = "p";
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.density = 1.0;
+    opts.viscosity_model =
+        std::make_shared<materials::fluid::CarreauYasudaViscosity>(
+            0.16,
+            0.0035,
+            8.2,
+            0.2128,
+            0.64);
+    opts.symmetric_nitsche_energy_qualification_scope =
+        formulations::navier_stokes::
+            SymmetricNitscheEnergyQualificationScope::
+                JointLowLevelPrerequisite;
+    opts.velocity_dirichlet_weak.push_back(
+        {.boundary_marker = 1});
+
+    FE::systems::FESystem system(mesh);
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
+        u_space,
+        p_space,
+        opts);
+    try {
+        module.registerOn(system);
+        FAIL() << "variable-viscosity energy diagnostic must fail closed";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "requires constant viscosity"),
+            std::string::npos)
+            << error.what();
+    }
+
+    EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+    EXPECT_FALSE(system.hasOperator("equations"));
+    EXPECT_TRUE(system.formulationRecords().empty());
 }
 
 TEST(NavierStokesPressureGauge, PressurePinnedWhenVelocityIsEssentialOnAllBoundaryMarkers)

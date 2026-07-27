@@ -40,6 +40,7 @@
 #include "Constraints/AffineConstraints.h"
 #include "Constraints/Constraint.h"
 #include "Constraints/GaugeRegistry.h"
+#include "Constraints/SmallCutAggregationConstraint.h"
 
 #include "Analysis/ProblemAnalysisTypes.h"
 #include "Analysis/ProblemAnalysisContext.h"
@@ -472,6 +473,9 @@ public:
                               int components = 0);
     void addConstraint(std::unique_ptr<constraints::Constraint> c);
     void addSystemConstraint(std::unique_ptr<constraints::ISystemConstraint> c);
+    [[nodiscard]] std::vector<
+        constraints::SmallCutAggregationRefreshReport>
+    completedSmallCutAggregationRefreshReports() const;
 
     void addOperator(OperatorTag name);
     void setFormInstallCellDomainRestrictions(

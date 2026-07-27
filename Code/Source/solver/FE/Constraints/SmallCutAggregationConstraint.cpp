@@ -3773,6 +3773,28 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             .field = field_,
             .active_side = active_side_,
             .interface_marker = interface_marker_,
+            .maximum_root_path_length =
+                guards_.maximum_root_path_length,
+            .maximum_observed_root_path =
+                maximum_observed_root_path,
+            .root_path_guard_rejections =
+                root_path_guard_rejections,
+            .maximum_reference_extrapolation_distance =
+                guards_.maximum_reference_extrapolation_distance,
+            .maximum_observed_reference_extrapolation =
+                maximum_observed_reference_extrapolation,
+            .extrapolation_guard_rejections =
+                communicator_extrapolation_guard_rejections,
+            .maximum_absolute_coefficient =
+                guards_.maximum_absolute_coefficient,
+            .maximum_observed_absolute_coefficient =
+                maximum_observed_absolute_coefficient,
+            .maximum_row_l1_norm =
+                guards_.maximum_row_l1_norm,
+            .maximum_observed_row_l1_norm =
+                maximum_observed_row_l1_norm,
+            .line_guard_rejections =
+                communicator_line_guard_rejections,
             .canonical_candidate_vertices =
                 distributed_result.canonical_candidate_vertices,
             .canonical_rooted_candidate_vertices =

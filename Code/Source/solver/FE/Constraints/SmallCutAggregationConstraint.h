@@ -166,13 +166,27 @@ struct SmallCutAggregationGuardOptions {
  *
  * Candidate fields count vertices, while aggregate, pin, and suppression
  * fields count DOFs. These values do not infer connected feature counts or
- * feature-deletion volume.
+ * feature-deletion volume. Guard maxima describe provider-visible proposal or
+ * traversal attempts. Extrapolation and line rejection counts are
+ * communicator sums of rank-local attempts; root-path rejection counts are
+ * traversal-attempt counts. None of these fields counts unique physical roots.
  */
 struct SmallCutAggregationRefreshReport {
     FieldId field{INVALID_FIELD_ID};
     geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     int interface_marker{-1};
+    std::size_t maximum_root_path_length{0u};
+    std::size_t maximum_observed_root_path{0u};
+    std::size_t root_path_guard_rejections{0u};
+    Real maximum_reference_extrapolation_distance{0.0};
+    Real maximum_observed_reference_extrapolation{0.0};
+    std::size_t extrapolation_guard_rejections{0u};
+    Real maximum_absolute_coefficient{0.0};
+    Real maximum_observed_absolute_coefficient{0.0};
+    Real maximum_row_l1_norm{0.0};
+    Real maximum_observed_row_l1_norm{0.0};
+    std::size_t line_guard_rejections{0u};
     std::size_t canonical_candidate_vertices{0u};
     std::size_t canonical_rooted_candidate_vertices{0u};
     std::size_t canonical_rootless_candidate_vertices{0u};

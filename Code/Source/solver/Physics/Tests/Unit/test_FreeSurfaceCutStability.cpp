@@ -661,8 +661,6 @@ void attachWetBlockLevelSet(MeshBase& mesh,
     return create_mesh(std::move(base));
 }
 
-#if defined(FE_HAS_MPI) && defined(MESH_HAS_MPI)
-
 struct TetraStripArrays {
     std::vector<real_t> coordinates{};
     std::vector<offset_t> cell_offsets{};
@@ -726,6 +724,186 @@ struct TetraStripArrays {
         18u, CellShape{CellFamily::Tetra, 4, 1});
     return arrays;
 }
+
+[[nodiscard]] FE::GlobalIndex nitscheStripVertex(int i, int j, int k)
+{
+    constexpr int nodes_x = 6;
+    constexpr int nodes_y = 2;
+    return static_cast<FE::GlobalIndex>(
+        i + nodes_x * (j + nodes_y * k));
+}
+
+[[nodiscard]] TetraStripArrays makeFiveCubeTetraStripArrays(
+    FE::Real mesh_scale)
+{
+    if (!(mesh_scale > FE::Real{0.0}) ||
+        !std::isfinite(mesh_scale)) {
+        throw std::invalid_argument(
+            "Nitsche tetra strip requires a finite positive mesh scale");
+    }
+
+    TetraStripArrays arrays;
+    arrays.coordinates.reserve(24u * 3u);
+    for (int k = 0; k < 2; ++k) {
+        for (int j = 0; j < 2; ++j) {
+            for (int i = 0; i < 6; ++i) {
+                arrays.coordinates.push_back(static_cast<real_t>(
+                    mesh_scale * static_cast<FE::Real>(i)));
+                arrays.coordinates.push_back(static_cast<real_t>(
+                    mesh_scale * static_cast<FE::Real>(j)));
+                arrays.coordinates.push_back(static_cast<real_t>(
+                    mesh_scale * static_cast<FE::Real>(k)));
+            }
+        }
+    }
+
+    constexpr std::array<std::array<std::size_t, 4>, 6> tetrahedra = {{
+        {{0, 1, 2, 6}},
+        {{0, 2, 3, 6}},
+        {{0, 3, 7, 6}},
+        {{0, 7, 4, 6}},
+        {{0, 4, 5, 6}},
+        {{0, 5, 1, 6}},
+    }};
+    arrays.cell_offsets = {0};
+    arrays.cell_offsets.reserve(31u);
+    arrays.cell_vertices.reserve(30u * 4u);
+    for (int i = 0; i < 5; ++i) {
+        const std::array<FE::GlobalIndex, 8> nodes = {
+            nitscheStripVertex(i, 0, 0),
+            nitscheStripVertex(i + 1, 0, 0),
+            nitscheStripVertex(i + 1, 1, 0),
+            nitscheStripVertex(i, 1, 0),
+            nitscheStripVertex(i, 0, 1),
+            nitscheStripVertex(i + 1, 0, 1),
+            nitscheStripVertex(i + 1, 1, 1),
+            nitscheStripVertex(i, 1, 1),
+        };
+        for (const auto& tetra : tetrahedra) {
+            for (const auto local : tetra) {
+                arrays.cell_vertices.push_back(
+                    static_cast<index_t>(nodes[local]));
+            }
+            arrays.cell_offsets.push_back(
+                static_cast<offset_t>(arrays.cell_vertices.size()));
+        }
+    }
+    arrays.cell_shapes.assign(
+        30u, CellShape{CellFamily::Tetra, 4, 1});
+    return arrays;
+}
+
+[[nodiscard]] std::shared_ptr<Mesh> makeNitscheEnergyTetraStripMesh(
+    const PlaneCutPosition& cut,
+    FE::Real mesh_scale,
+    int wall_marker,
+    int anchor_marker)
+{
+    const auto arrays =
+        makeFiveCubeTetraStripArrays(mesh_scale);
+    auto base = std::make_shared<MeshBase>();
+    base->build_from_arrays(
+        /*spatial_dim=*/3,
+        arrays.coordinates,
+        arrays.cell_offsets,
+        arrays.cell_vertices,
+        arrays.cell_shapes);
+    base->finalize();
+    base->register_label(
+        "nitsche_energy_wall",
+        static_cast<label_t>(wall_marker));
+    base->register_label(
+        "nitsche_energy_anchor",
+        static_cast<label_t>(anchor_marker));
+
+    std::size_t marked_face_count = 0u;
+    std::size_t anchor_face_count = 0u;
+    const auto on_plane = [](FE::Real value, FE::Real target) {
+        return std::abs(value - target) <=
+               FE::Real{32.0} *
+                   std::numeric_limits<FE::Real>::epsilon() *
+                   std::max(FE::Real{1.0}, std::abs(target));
+    };
+    for (index_t face = 0;
+         face < static_cast<index_t>(base->n_faces());
+         ++face) {
+        const auto vertices = base->face_vertices(face);
+        if (vertices.size() != 3u) {
+            continue;
+        }
+        bool on_wall = true;
+        bool on_anchor = true;
+        std::size_t right_edge_vertex_count = 0u;
+        for (const auto vertex : vertices) {
+            const auto point = base->get_vertex_coords(vertex);
+            on_wall =
+                on_wall && on_plane(point[2], FE::Real{0.0}) &&
+                point[0] >= FE::Real{3.0} * mesh_scale -
+                                FE::Real{1.0e-13} &&
+                point[0] <= FE::Real{4.0} * mesh_scale +
+                                FE::Real{1.0e-13};
+            right_edge_vertex_count += static_cast<std::size_t>(
+                on_plane(
+                    point[0], FE::Real{4.0} * mesh_scale));
+            on_anchor =
+                on_anchor && on_plane(point[0], FE::Real{0.0});
+        }
+        // Qualify one native triangular exterior face.  Its two vertices on
+        // the right edge keep the requested 1e-8 wet fraction away from an
+        // interface fragment whose area is below the authoritative geometry
+        // tolerance; the sweep is about wet-boundary measure, not an
+        // independently collapsed sub-tolerance interface sliver.
+        if (on_wall && right_edge_vertex_count == 2u) {
+            base->set_boundary_label(
+                face, static_cast<label_t>(wall_marker));
+            ++marked_face_count;
+        }
+        if (on_anchor) {
+            base->set_boundary_label(
+                face, static_cast<label_t>(anchor_marker));
+            ++anchor_face_count;
+        }
+    }
+    if (marked_face_count != 1u) {
+        throw std::runtime_error(
+            "Nitsche energy tetra strip requires exactly one marked triangular wall patch");
+    }
+    if (anchor_face_count == 0u) {
+        throw std::runtime_error(
+            "Nitsche energy tetra strip has no fixed strong anchor boundary");
+    }
+
+    const auto phi_handle = MeshFields::attach_field(
+        *base,
+        EntityKind::Vertex,
+        "phi",
+        FieldScalarType::Float64,
+        1);
+    auto* phi = MeshFields::field_data_as<real_t>(
+        *base, phi_handle);
+    if (phi == nullptr) {
+        throw std::runtime_error(
+            "failed to allocate Nitsche energy level-set field");
+    }
+    for (index_t vertex = 0;
+         vertex < static_cast<index_t>(base->n_vertices());
+         ++vertex) {
+        const auto point = base->get_vertex_coords(vertex);
+        phi[static_cast<std::size_t>(vertex)] =
+            static_cast<real_t>(cut.value({{
+                static_cast<FE::Real>(point[0]),
+                static_cast<FE::Real>(point[1]),
+                static_cast<FE::Real>(point[2]),
+            }}));
+    }
+#if defined(MESH_HAS_MPI)
+    return create_mesh(std::move(base), MeshComm(MPI_COMM_SELF));
+#else
+    return create_mesh(std::move(base));
+#endif
+}
+
+#if defined(FE_HAS_MPI) && defined(MESH_HAS_MPI)
 
 [[nodiscard]] TetraStripArrays makeStructuredTetraArrays(
     int cells_per_axis)
@@ -3659,6 +3837,960 @@ private:
     StabilityRegime regime_{};
 };
 
+struct NitscheEnergyOrientation {
+    std::string_view id;
+    std::array<FE::Real, 3> raw_normal;
+};
+
+[[nodiscard]] FE::Real unitRightTriangleLinearCdf(
+    FE::Real value,
+    FE::Real second_span)
+{
+    if (!(second_span >= FE::Real{0.0}) ||
+        !std::isfinite(second_span) ||
+        !std::isfinite(value)) {
+        throw std::invalid_argument(
+            "triangle linear CDF requires finite nonnegative span and value");
+    }
+    if (value <= FE::Real{0.0}) {
+        return FE::Real{0.0};
+    }
+    if (value >= FE::Real{1.0} + second_span) {
+        return FE::Real{1.0};
+    }
+
+    using Point2 = std::array<FE::Real, 2>;
+    std::vector<Point2> polygon{{
+        {{0.0, 0.0}},
+        {{1.0, 0.0}},
+        {{1.0, 1.0}},
+    }};
+    std::vector<Point2> clipped;
+    clipped.reserve(4u);
+    auto previous = polygon.back();
+    auto previous_level =
+        previous[0] + second_span * previous[1] - value;
+    bool previous_inside = previous_level <= FE::Real{0.0};
+    for (const auto& current : polygon) {
+        const auto current_level =
+            current[0] + second_span * current[1] - value;
+        const bool current_inside =
+            current_level <= FE::Real{0.0};
+        const auto append_intersection = [&] {
+            const auto denominator =
+                previous_level - current_level;
+            const auto t =
+                std::abs(denominator) >
+                        std::numeric_limits<FE::Real>::min()
+                    ? std::clamp(
+                          previous_level / denominator,
+                          FE::Real{0.0},
+                          FE::Real{1.0})
+                    : FE::Real{0.5};
+            clipped.push_back({{
+                (FE::Real{1.0} - t) * previous[0] +
+                    t * current[0],
+                (FE::Real{1.0} - t) * previous[1] +
+                    t * current[1],
+            }});
+        };
+        if (previous_inside && current_inside) {
+            clipped.push_back(current);
+        } else if (previous_inside && !current_inside) {
+            append_intersection();
+        } else if (!previous_inside && current_inside) {
+            append_intersection();
+            clipped.push_back(current);
+        }
+        previous = current;
+        previous_level = current_level;
+        previous_inside = current_inside;
+    }
+    if (clipped.size() < 3u) {
+        return FE::Real{0.0};
+    }
+    FE::Real twice_signed_area = FE::Real{0.0};
+    for (std::size_t i = 0u; i < clipped.size(); ++i) {
+        const auto& a = clipped[i];
+        const auto& b = clipped[(i + 1u) % clipped.size()];
+        twice_signed_area += a[0] * b[1] - b[0] * a[1];
+    }
+    // The parent triangle area is 1/2, so its normalized fraction equals
+    // the absolute shoelace sum.
+    return std::clamp(
+        std::abs(twice_signed_area),
+        FE::Real{0.0},
+        FE::Real{1.0});
+}
+
+[[nodiscard]] FE::Real inverseUnitRightTriangleLinearCdf(
+    FE::Real fraction,
+    FE::Real second_span)
+{
+    if (!(fraction >= FE::Real{0.0}) ||
+        !(fraction <= FE::Real{1.0}) ||
+        !std::isfinite(fraction)) {
+        throw std::invalid_argument(
+            "triangle linear inverse requires a fraction in [0,1]");
+    }
+    FE::Real lower = FE::Real{0.0};
+    FE::Real upper = FE::Real{1.0} + second_span;
+    for (int iteration = 0; iteration < 100; ++iteration) {
+        const auto midpoint = FE::Real{0.5} * (lower + upper);
+        if (unitRightTriangleLinearCdf(
+                midpoint, second_span) < fraction) {
+            lower = midpoint;
+        } else {
+            upper = midpoint;
+        }
+    }
+    return FE::Real{0.5} * (lower + upper);
+}
+
+[[nodiscard]] PlaneCutPosition nitscheEnergyStripCut(
+    FE::Real active_wall_fraction,
+    FE::Real mesh_scale,
+    const NitscheEnergyOrientation& orientation,
+    FE::geometry::CutIntegrationSide active_side)
+{
+    if (!(active_wall_fraction >= FE::Real{0.0}) ||
+        !(active_wall_fraction <= FE::Real{1.0}) ||
+        !(mesh_scale > FE::Real{0.0}) ||
+        !std::isfinite(active_wall_fraction) ||
+        !std::isfinite(mesh_scale)) {
+        throw std::invalid_argument(
+            "Nitsche energy strip cut has invalid fraction or scale");
+    }
+    const auto raw_norm = std::sqrt(
+        orientation.raw_normal[0] * orientation.raw_normal[0] +
+        orientation.raw_normal[1] * orientation.raw_normal[1] +
+        orientation.raw_normal[2] * orientation.raw_normal[2]);
+    if (!(raw_norm > FE::Real{0.0}) ||
+        !std::isfinite(raw_norm) ||
+        std::abs(
+            orientation.raw_normal[0] - FE::Real{1.0}) >
+            FE::Real{32.0} *
+                std::numeric_limits<FE::Real>::epsilon() ||
+        !(orientation.raw_normal[1] >= FE::Real{0.0}) ||
+        !(orientation.raw_normal[2] >= FE::Real{0.0})) {
+        throw std::invalid_argument(
+            "Nitsche energy orientation must have unit x coefficient and nonnegative transverse coefficients");
+    }
+
+    FE::Real projected_patch_coordinate = FE::Real{0.0};
+    if (active_wall_fraction == FE::Real{0.0}) {
+        projected_patch_coordinate = FE::Real{-0.05};
+    } else if (active_wall_fraction == FE::Real{1.0}) {
+        projected_patch_coordinate =
+            FE::Real{1.0} + orientation.raw_normal[1] +
+            FE::Real{0.05};
+    } else {
+        projected_patch_coordinate =
+            inverseUnitRightTriangleLinearCdf(
+                active_wall_fraction,
+                orientation.raw_normal[1]);
+    }
+    const auto physical_offset =
+        mesh_scale *
+        (FE::Real{3.0} * orientation.raw_normal[0] +
+         projected_patch_coordinate);
+
+    std::array<FE::Real, 3> unit_normal{{
+        orientation.raw_normal[0] / raw_norm,
+        orientation.raw_normal[1] / raw_norm,
+        orientation.raw_normal[2] / raw_norm,
+    }};
+    FE::Real unit_offset = physical_offset / raw_norm;
+    if (active_side ==
+        FE::geometry::CutIntegrationSide::Positive) {
+        for (auto& component : unit_normal) {
+            component = -component;
+        }
+        unit_offset = -unit_offset;
+    }
+    return PlaneCutPosition{
+        .label =
+            std::string(orientation.id) + "_" +
+            (active_side ==
+                     FE::geometry::CutIntegrationSide::Negative
+                 ? "negative"
+                 : "positive") +
+            "_" + realPropertyValue(active_wall_fraction),
+        .normal = unit_normal,
+        .offset = unit_offset,
+    };
+}
+
+struct NitscheEnergyGeneratedContext {
+    std::shared_ptr<FE::assembly::CutIntegrationContext> context{};
+    int selected_boundary_marker{-1};
+    FE::Real active_boundary_measure{0.0};
+    FE::Real parent_boundary_measure{0.0};
+    std::size_t active_rule_count{0u};
+    std::size_t implicit_backend_fallback_count{0u};
+};
+
+[[nodiscard]] NitscheEnergyGeneratedContext
+makeNitscheEnergyGeneratedContext(
+    FE::systems::FESystem& system,
+    FE::FieldId level_set,
+    int interface_marker,
+    int wall_marker,
+    std::string_view domain_id,
+    FE::geometry::CutIntegrationSide active_side,
+    const FE::level_set::LevelSetGeneratedInterfaceResult& generated,
+    std::span<const FE::Real> solution)
+{
+    const auto* entity_map =
+        system.fieldDofHandler(level_set).getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::runtime_error(
+            "Nitsche energy level-set field has no entity map");
+    }
+    const auto field_offset =
+        system.fieldDofOffset(level_set);
+    const auto& interface_request = generated.domain.request();
+
+    FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey
+        contact_key;
+    contact_key.source = interface_request.source;
+    contact_key.domain_id = std::string(domain_id);
+    contact_key.isovalue = interface_request.isovalue;
+    contact_key.interface_marker = interface_marker;
+    contact_key.boundary_marker = wall_marker;
+    const int contact_marker =
+        FE::interfaces::
+            stableGeneratedInterfaceBoundaryIntersectionMarker(
+                contact_key);
+
+    FE::interfaces::GeneratedInterfaceBoundaryIntersectionRequest
+        contact_request;
+    contact_request.source = interface_request.source;
+    contact_request.generated_domain_id = std::string(domain_id);
+    contact_request.isovalue = interface_request.isovalue;
+    contact_request.interface_marker = interface_marker;
+    contact_request.boundary_marker = wall_marker;
+    contact_request.intersection_marker = contact_marker;
+    contact_request.tolerance = interface_request.tolerance;
+    contact_request.quadrature_order = 2;
+    contact_request.frame = interface_request.frame;
+    contact_request.mesh_geometry_revision =
+        interface_request.mesh_geometry_revision;
+    contact_request.mesh_topology_revision =
+        interface_request.mesh_topology_revision;
+    contact_request.ownership_revision =
+        interface_request.ownership_revision;
+    contact_request.quadrature_policy_key =
+        interface_request.quadrature_policy_key;
+    contact_request.source_value_revision =
+        generated.value_revision;
+    const auto contact_domain =
+        FE::interfaces::
+            buildGeneratedInterfaceBoundaryIntersectionDomain(
+                std::move(contact_request),
+                generated.domain,
+                system.meshAccess());
+
+    const auto active_request =
+        [&](FE::geometry::CutIntegrationSide side) {
+            FE::interfaces::GeneratedActiveBoundaryRequest request;
+            request.source = interface_request.source;
+            request.generated_domain_id = std::string(domain_id);
+            request.isovalue = interface_request.isovalue;
+            request.interface_marker = interface_marker;
+            request.boundary_marker = wall_marker;
+            request.side = side;
+            request.tolerance = interface_request.tolerance;
+            request.quadrature_order = 2;
+            request.frame = interface_request.frame;
+            request.mesh_geometry_revision =
+                interface_request.mesh_geometry_revision;
+            request.mesh_topology_revision =
+                interface_request.mesh_topology_revision;
+            request.ownership_revision =
+                interface_request.ownership_revision;
+            request.quadrature_policy_key =
+                interface_request.quadrature_policy_key;
+            request.source_value_revision =
+                generated.value_revision;
+            return request;
+        };
+    FE::interfaces::GeneratedActiveBoundaryScalarField scalar_field;
+    scalar_field.value_at_node =
+        [&](FE::GlobalIndex vertex) {
+            const auto dofs =
+                entity_map->getVertexDofs(vertex);
+            if (dofs.size() != 1u) {
+                throw std::runtime_error(
+                    "Nitsche energy level-set vertex is not scalar P1");
+            }
+            const auto global_dof = field_offset + dofs.front();
+            if (global_dof < 0 ||
+                static_cast<std::size_t>(global_dof) >=
+                    solution.size()) {
+                throw std::runtime_error(
+                    "Nitsche energy level-set vertex DOF is out of range");
+            }
+            return solution[static_cast<std::size_t>(global_dof)];
+        };
+    const auto negative_active =
+        FE::interfaces::buildGeneratedActiveBoundaryDomain(
+            active_request(
+                FE::geometry::CutIntegrationSide::Negative),
+            generated.domain,
+            contact_domain,
+            system.meshAccess(),
+            scalar_field);
+    const auto positive_active =
+        FE::interfaces::buildGeneratedActiveBoundaryDomain(
+            active_request(
+                FE::geometry::CutIntegrationSide::Positive),
+            generated.domain,
+            contact_domain,
+            system.meshAccess(),
+            scalar_field);
+    const auto partition =
+        FE::interfaces::validateGeneratedActiveBoundaryPartition(
+            negative_active,
+            positive_active,
+            generated.domain,
+            contact_domain,
+            system.meshAccess());
+    if (partition.orphan_source_reference_count != 0u ||
+        partition.stale_revision_count != 0u) {
+        throw std::runtime_error(
+            "Nitsche energy generated boundary partition is inconsistent");
+    }
+
+    const auto& selected =
+        active_side ==
+                FE::geometry::CutIntegrationSide::Negative
+            ? negative_active
+            : positive_active;
+    NitscheEnergyGeneratedContext result;
+    result.selected_boundary_marker = selected.marker();
+    result.active_boundary_measure =
+        active_side ==
+                FE::geometry::CutIntegrationSide::Negative
+            ? partition.negative_boundary_measure
+            : partition.positive_boundary_measure;
+    result.parent_boundary_measure =
+        partition.total_boundary_measure;
+    for (const auto& fragment : selected.fragments()) {
+        if (!fragment.active()) {
+            continue;
+        }
+        result.implicit_backend_fallback_count +=
+            static_cast<std::size_t>(
+                fragment.represented_implicit_fallback_status !=
+                "None");
+    }
+    result.active_rule_count =
+        selected.boundaryQuadratureRules().size();
+
+    result.context =
+        std::make_shared<FE::assembly::CutIntegrationContext>();
+    // Aggregation requires the complete two-sided cell classification even
+    // though each form later selects one configured active side.
+    result.context->addGeneratedInterfaceDomain(generated.domain);
+    result.context
+        ->addGeneratedInterfaceBoundaryIntersectionDomain(
+            contact_domain);
+    result.context->addGeneratedActiveBoundaryDomain(
+        negative_active);
+    result.context->addGeneratedActiveBoundaryDomain(
+        positive_active);
+    return result;
+}
+
+struct NitscheEnergySample {
+    std::string case_id{};
+    FE::Real target_wall_fraction{0.0};
+    FE::Real observed_wall_fraction{0.0};
+    FE::Real mesh_scale{0.0};
+    std::size_t active_rule_count{0u};
+    std::size_t implicit_backend_fallback_count{0u};
+    std::size_t free_velocity_dofs{0u};
+    std::size_t velocity_aggregate_lines{0u};
+    std::size_t velocity_homogeneous_constraints{0u};
+    std::size_t velocity_gauge_line_count{0u};
+    int generated_active_boundary_marker{-1};
+    std::array<std::size_t, 4>
+        diagnostic_boundary_term_counts{};
+    std::array<std::size_t, 4>
+        diagnostic_interface_face_term_counts{};
+    bool diagnostic_routes_use_generated_marker{false};
+    bool generated_active_boundary_marker_registered{false};
+    FE::constraints::SmallCutAggregationRefreshReport
+        aggregation_report{};
+    FE::Real symmetric_operator_relative_skew{0.0};
+    FE::Real energy_norm_relative_skew{0.0};
+    FE::Real production_reconstruction_relative_error{0.0};
+    FE::Real energy_reconstruction_relative_error{0.0};
+    FE::Real consistency_boundary_relative_norm{0.0};
+    FE::Real penalty_boundary_relative_norm{0.0};
+    FE::Real symmetric_boundary_relative_norm{0.0};
+    FE::Real minimum_energy_norm_eigenvalue{0.0};
+    FE::Real minimum_generalized_eigenvalue{0.0};
+    FE::Real maximum_generalized_eigenvalue{0.0};
+    FE::Real eigensolver_tolerance{0.0};
+    FE::Real eigensolver_maximum_off_diagonal{0.0};
+    std::size_t eigensolver_sweeps{0u};
+    bool eigensolver_converged{false};
+    std::vector<FE::Real> bulk_viscous{};
+    std::vector<FE::Real> bulk_plus_consistency{};
+    std::vector<FE::Real> symmetric_operator{};
+    std::vector<FE::Real> energy_norm{};
+};
+
+[[nodiscard]] FE::Real relativeMatrixDifference(
+    std::span<const FE::Real> lhs,
+    std::span<const FE::Real> rhs)
+{
+    if (lhs.size() != rhs.size()) {
+        throw std::invalid_argument(
+            "relative matrix difference requires equal sizes");
+    }
+    FE::Real maximum_difference = 0.0;
+    FE::Real maximum_scale = 0.0;
+    for (std::size_t index = 0u; index < lhs.size(); ++index) {
+        maximum_difference = std::max(
+            maximum_difference,
+            std::abs(lhs[index] - rhs[index]));
+        maximum_scale = std::max(
+            maximum_scale,
+            std::max(std::abs(lhs[index]), std::abs(rhs[index])));
+    }
+    return maximum_difference /
+           std::max(
+               maximum_scale,
+               std::numeric_limits<FE::Real>::min());
+}
+
+[[nodiscard]] std::vector<FE::Real> addMatrices(
+    std::span<const FE::Real> first,
+    std::span<const FE::Real> second,
+    std::span<const FE::Real> third = {})
+{
+    if (first.size() != second.size() ||
+        (!third.empty() && first.size() != third.size())) {
+        throw std::invalid_argument(
+            "matrix sum requires equal sizes");
+    }
+    std::vector<FE::Real> result(
+        first.begin(), first.end());
+    for (std::size_t index = 0u; index < result.size(); ++index) {
+        result[index] += second[index];
+        if (!third.empty()) {
+            result[index] += third[index];
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] std::vector<FE::Real> subtractMatrices(
+    std::span<const FE::Real> lhs,
+    std::span<const FE::Real> rhs)
+{
+    if (lhs.size() != rhs.size()) {
+        throw std::invalid_argument(
+            "matrix difference requires equal sizes");
+    }
+    std::vector<FE::Real> result(lhs.begin(), lhs.end());
+    for (std::size_t index = 0u; index < result.size(); ++index) {
+        result[index] -= rhs[index];
+    }
+    return result;
+}
+
+constexpr std::size_t
+    nitsche_energy_maximum_root_path_length{12u};
+constexpr std::size_t
+    nitsche_energy_default_maximum_root_path_length{
+        FE::constraints::SmallCutAggregationGuardOptions{}
+            .maximum_root_path_length};
+constexpr FE::Real
+    nitsche_energy_maximum_reference_extrapolation_distance{
+        4.0};
+constexpr FE::Real
+    nitsche_energy_maximum_absolute_coefficient{16.0};
+constexpr FE::Real
+    nitsche_energy_maximum_row_l1_norm{32.0};
+
+class PersistentNitscheEnergyProblem {
+public:
+    PersistentNitscheEnergyProblem(
+        FE::Real mesh_scale,
+        NitscheEnergyOrientation orientation,
+        FE::geometry::CutIntegrationSide active_side,
+        std::size_t maximum_root_path_length =
+            nitsche_energy_maximum_root_path_length)
+        : mesh_scale_(mesh_scale)
+        , orientation_(std::move(orientation))
+        , active_side_(active_side)
+        , mesh_(makeNitscheEnergyTetraStripMesh(
+              nitscheEnergyStripCut(
+                  FE::Real{0.25},
+                  mesh_scale_,
+                  orientation_,
+                  active_side_),
+              mesh_scale_,
+              wall_marker,
+              anchor_marker))
+        , velocity_space_(
+              FE::spaces::SpaceFactory::create_vector_h1(
+                  FE::ElementType::Tetra4,
+                  /*order=*/1,
+                  /*components=*/3))
+        , pressure_space_(
+              FE::spaces::SpaceFactory::create_h1(
+                  FE::ElementType::Tetra4,
+                  /*order=*/1))
+        , system_(mesh_)
+    {
+        phi_ = system_.addField(FE::systems::FieldSpec{
+            .name = "phi",
+            .space = pressure_space_,
+            .components = 1,
+            .source_kind =
+                FE::systems::FieldSourceKind::Unknown,
+        });
+
+        ns::IncompressibleNavierStokesVMSOptions options;
+        options.velocity_field_name = "u";
+        options.pressure_field_name = "p";
+        options.density = FE::Real{1.0};
+        options.viscosity = viscosity;
+        options.enable_convection = false;
+        options.enable_vms = false;
+        options.jit_policy.enable = false;
+        options.velocity_dirichlet_weak.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::
+                VelocityDirichletBC{
+                    .boundary_marker = wall_marker,
+                    .value = {0.0, 0.0, 0.0},
+                });
+        options.velocity_dirichlet.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::
+                VelocityDirichletBC{
+                    .boundary_marker = anchor_marker,
+                    .value = {0.0, 0.0, 0.0},
+                });
+        options.nitsche_gamma = nitsche_gamma;
+        options.nitsche_symmetric = true;
+        options.nitsche_scale_with_p = false;
+        options.symmetric_nitsche_energy_qualification_scope =
+            ns::SymmetricNitscheEnergyQualificationScope::
+                JointLowLevelPrerequisite;
+        options.free_surface.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::
+                FreeSurfaceBoundary{
+                    .implementation =
+                        ns::FreeSurfaceImplementation::
+                            UnfittedLevelSet,
+                    .interface_marker = interface_marker,
+                    .level_set_field_name = "phi",
+                    .generated_interface_domain_id =
+                        std::string(domain_id),
+                    .level_set_isovalue = FE::Real{0.0},
+                    .active_domain =
+                        active_side_ ==
+                                FE::geometry::
+                                    CutIntegrationSide::Negative
+                            ? ns::FreeSurfaceActiveDomain::
+                                  LevelSetNegative
+                            : ns::FreeSurfaceActiveDomain::
+                                  LevelSetPositive,
+                    .active_domain_method =
+                        ns::FreeSurfaceActiveDomainMethod::
+                            CutVolume,
+                    .external_pressure = FE::Real{0.0},
+                    .surface_tension = FE::Real{0.0},
+                    .use_level_set_curvature = false,
+                    .cut_cell_stabilization = {
+                        .enabled = false,
+                    },
+                    .small_cut_aggregation = true,
+                    .small_cut_aggregation_guards = {
+                        .maximum_root_path_length =
+                            maximum_root_path_length,
+                        .maximum_reference_extrapolation_distance =
+                            nitsche_energy_maximum_reference_extrapolation_distance,
+                        .maximum_absolute_coefficient =
+                            nitsche_energy_maximum_absolute_coefficient,
+                        .maximum_row_l1_norm =
+                            nitsche_energy_maximum_row_l1_norm,
+                    },
+                });
+
+        ns::IncompressibleNavierStokesVMSModule module(
+            velocity_space_, pressure_space_, options);
+        module.registerOn(system_);
+        FE::systems::SetupOptions setup;
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+        setup.dof_options.my_rank = 0;
+        setup.dof_options.world_size = 1;
+        setup.dof_options.mpi_comm = MPI_COMM_SELF;
+#endif
+        system_.setup(setup);
+
+        velocity_ = system_.findFieldByName("u");
+        if (velocity_ == FE::INVALID_FIELD_ID) {
+            throw std::runtime_error(
+                "Nitsche energy problem did not register velocity");
+        }
+        solution_.assign(
+            static_cast<std::size_t>(
+                system_.dofHandler().getNumDofs()),
+            FE::Real{0.0});
+        previous_ = solution_;
+    }
+
+    [[nodiscard]] NitscheEnergySample evaluate(
+        FE::Real active_wall_fraction)
+    {
+        const auto cut = nitscheEnergyStripCut(
+            active_wall_fraction,
+            mesh_scale_,
+            orientation_,
+            active_side_);
+        setScalarVertexField(
+            solution_, system_, phi_, cut);
+        setMeshVertexField(*mesh_, cut);
+        previous_ = solution_;
+
+        FE::level_set::LevelSetGeneratedInterfaceOptions
+            cut_options;
+        cut_options.level_set_field_name = "phi";
+        cut_options.domain_id = std::string(domain_id);
+        cut_options.requested_interface_marker =
+            interface_marker;
+        cut_options.tolerance = FE::Real{1.0e-12};
+        cut_options.quadrature_order = 2;
+        cut_options.interface_quadrature_order = 2;
+        cut_options.volume_quadrature_order = 2;
+        const auto generated = lifecycle_.build(
+            system_, cut_options, solution_);
+        if (!generated.success) {
+            throw std::runtime_error(generated.diagnostic);
+        }
+        auto generated_context =
+            makeNitscheEnergyGeneratedContext(
+                system_,
+                phi_,
+                interface_marker,
+                wall_marker,
+                domain_id,
+                active_side_,
+                generated,
+                solution_);
+        system_.setCutIntegrationContext(
+            generated_context.context);
+        system_.rebuildConstraintState();
+
+        constexpr std::array<std::string_view, 4>
+            diagnostic_operator_tags = {{
+                ns::SymmetricNitscheEnergyDiagnosticOperators::
+                    bulk_viscous,
+                ns::SymmetricNitscheEnergyDiagnosticOperators::
+                    bulk_plus_consistency,
+                ns::SymmetricNitscheEnergyDiagnosticOperators::
+                    symmetric_operator,
+                ns::SymmetricNitscheEnergyDiagnosticOperators::
+                    energy_norm,
+            }};
+        std::array<std::size_t, 4>
+            diagnostic_boundary_term_counts{};
+        std::array<std::size_t, 4>
+            diagnostic_interface_face_term_counts{};
+        bool diagnostic_routes_use_generated_marker = true;
+        for (std::size_t operator_index = 0u;
+             operator_index < diagnostic_operator_tags.size();
+             ++operator_index) {
+            const auto& definition = system_.operatorDefinition(
+                std::string(
+                    diagnostic_operator_tags[operator_index]));
+            diagnostic_boundary_term_counts[operator_index] =
+                definition.boundary.size();
+            diagnostic_interface_face_term_counts[operator_index] =
+                definition.interface_faces.size();
+            if (operator_index > 0u) {
+                diagnostic_routes_use_generated_marker =
+                    diagnostic_routes_use_generated_marker &&
+                    !definition.interface_faces.empty() &&
+                    std::all_of(
+                        definition.interface_faces.begin(),
+                        definition.interface_faces.end(),
+                        [&](const auto& term) {
+                            return term.marker ==
+                                   generated_context
+                                       .selected_boundary_marker;
+                        });
+            }
+        }
+
+        FE::systems::SystemStateView state;
+        state.dt = FE::Real{1.0};
+        state.u = std::span<const FE::Real>(solution_);
+        state.u_prev =
+            std::span<const FE::Real>(previous_);
+        const FE::systems::BackwardDifferenceIntegrator
+            integrator;
+        const auto time_context =
+            integrator.buildContext(1, state);
+        state.time_integration = &time_context;
+
+        const auto bulk = assembleOperatorMatrix(
+            system_,
+            state,
+            std::string(
+                ns::SymmetricNitscheEnergyDiagnosticOperators::
+                    bulk_viscous));
+        const auto bulk_plus_consistency = assembleOperatorMatrix(
+            system_,
+            state,
+            std::string(
+                ns::SymmetricNitscheEnergyDiagnosticOperators::
+                    bulk_plus_consistency));
+        const auto production = assembleOperatorMatrix(
+            system_,
+            state,
+            std::string(
+                ns::SymmetricNitscheEnergyDiagnosticOperators::
+                    symmetric_operator));
+        const auto energy = assembleOperatorMatrix(
+            system_,
+            state,
+            std::string(
+                ns::SymmetricNitscheEnergyDiagnosticOperators::
+                    energy_norm));
+
+        const auto free_velocity = canonicalFreeP1Dofs(
+            *mesh_, system_, velocity_, 3u);
+        if (free_velocity.empty()) {
+            throw std::runtime_error(
+                "Nitsche energy aggregate space is empty");
+        }
+        const auto reduced_bulk =
+            extractReducedMatrix(bulk, free_velocity);
+        const auto reduced_bulk_plus_consistency =
+            extractReducedMatrix(
+                bulk_plus_consistency, free_velocity);
+        auto reduced_production =
+            extractReducedMatrix(
+                production, free_velocity);
+        auto reduced_energy =
+            extractReducedMatrix(energy, free_velocity);
+        const auto reduced_consistency = subtractMatrices(
+            reduced_bulk_plus_consistency, reduced_bulk);
+        const auto reduced_penalty = subtractMatrices(
+            reduced_energy, reduced_bulk);
+        const auto reconstructed_production = addMatrices(
+            reduced_bulk,
+            reduced_consistency,
+            reduced_penalty);
+        const auto reconstructed_energy =
+            addMatrices(reduced_bulk, reduced_penalty);
+
+        NitscheEnergySample sample;
+        sample.case_id = cut.label;
+        sample.target_wall_fraction =
+            active_wall_fraction;
+        if (!(generated_context.parent_boundary_measure >
+              FE::Real{0.0})) {
+            throw std::runtime_error(
+                "Nitsche energy wall patch has no parent measure");
+        }
+        sample.observed_wall_fraction =
+            generated_context.active_boundary_measure /
+            generated_context.parent_boundary_measure;
+        sample.mesh_scale = mesh_scale_;
+        sample.active_rule_count =
+            generated_context.active_rule_count;
+        sample.implicit_backend_fallback_count =
+            generated_context.implicit_backend_fallback_count;
+        sample.free_velocity_dofs =
+            free_velocity.size();
+        const auto constraint_counts =
+            countFieldConstraints(system_, velocity_);
+        sample.velocity_aggregate_lines =
+            constraint_counts.master_bearing;
+        sample.velocity_homogeneous_constraints =
+            constraint_counts.homogeneous_pins;
+        sample.generated_active_boundary_marker =
+            generated_context.selected_boundary_marker;
+        sample.diagnostic_boundary_term_counts =
+            diagnostic_boundary_term_counts;
+        sample.diagnostic_interface_face_term_counts =
+            diagnostic_interface_face_term_counts;
+        sample.diagnostic_routes_use_generated_marker =
+            diagnostic_routes_use_generated_marker;
+        sample.generated_active_boundary_marker_registered =
+            generated_context.context
+                ->hasGeneratedActiveBoundaryMarker(
+                    generated_context.selected_boundary_marker);
+        sample.production_reconstruction_relative_error =
+            relativeMatrixDifference(
+                reduced_production,
+                reconstructed_production);
+        sample.energy_reconstruction_relative_error =
+            relativeMatrixDifference(
+                reduced_energy, reconstructed_energy);
+        sample.consistency_boundary_relative_norm =
+            relativeMatrixDifference(
+                reduced_bulk_plus_consistency, reduced_bulk);
+        sample.penalty_boundary_relative_norm =
+            relativeMatrixDifference(
+                reduced_energy, reduced_bulk);
+        sample.symmetric_boundary_relative_norm =
+            relativeMatrixDifference(
+                reduced_production, reduced_bulk);
+        sample.symmetric_operator_relative_skew =
+            relativeMatrixSkew(
+                reduced_production, free_velocity.size());
+        sample.energy_norm_relative_skew =
+            relativeMatrixSkew(
+                reduced_energy, free_velocity.size());
+
+        const auto reports =
+            system_
+                .completedSmallCutAggregationRefreshReports();
+        const auto report = std::find_if(
+            reports.begin(),
+            reports.end(),
+            [&](const auto& candidate) {
+                return candidate.field == velocity_ &&
+                       candidate.interface_marker ==
+                           interface_marker &&
+                       candidate.active_side == active_side_;
+            });
+        if (report == reports.end()) {
+            throw std::runtime_error(
+                "Nitsche energy velocity aggregation report is missing");
+        }
+        sample.aggregation_report = *report;
+        const auto* gauge =
+            system_.gaugeRegistryIfPresent();
+        if (gauge != nullptr) {
+            sample.velocity_gauge_line_count =
+                static_cast<std::size_t>(std::count_if(
+                    gauge->resolvedModes().begin(),
+                    gauge->resolvedModes().end(),
+                    [&](const auto& mode) {
+                        return mode.candidate.field ==
+                                   velocity_ &&
+                               mode.policy !=
+                                   FE::gauge::
+                                       EnforcementPolicy::None;
+                    }));
+        }
+
+        if (active_wall_fraction == FE::Real{0.0}) {
+            sample.bulk_viscous = reduced_bulk;
+            sample.bulk_plus_consistency =
+                reduced_bulk_plus_consistency;
+            sample.symmetric_operator =
+                std::move(reduced_production);
+            sample.energy_norm =
+                std::move(reduced_energy);
+            return sample;
+        }
+
+        if (sample.symmetric_operator_relative_skew >
+                FE::Real{1.0e-11} ||
+            sample.energy_norm_relative_skew >
+                FE::Real{1.0e-11}) {
+            throw std::runtime_error(
+                "Nitsche energy operator is not numerically symmetric");
+        }
+        symmetrize(
+            reduced_production, free_velocity.size());
+        symmetrize(
+            reduced_energy, free_velocity.size());
+        const auto energy_spectrum =
+            FE::math::dense_symmetric_eigenvalue_bounds(
+                reduced_energy,
+                free_velocity.size(),
+                "Nitsche energy norm");
+        sample.minimum_energy_norm_eigenvalue =
+            energy_spectrum.smallest_eigenvalue;
+        const auto lower = choleskyLower(
+            reduced_energy,
+            free_velocity.size(),
+            "Nitsche energy norm");
+        auto normalized = reduced_production;
+        leftMultiplyByInverseLower(
+            normalized,
+            free_velocity.size(),
+            free_velocity.size(),
+            lower);
+        rightMultiplyByInverseLowerTranspose(
+            normalized,
+            free_velocity.size(),
+            free_velocity.size(),
+            lower);
+        const auto normalized_skew =
+            relativeMatrixSkew(
+                normalized, free_velocity.size());
+        if (normalized_skew > FE::Real{1.0e-10}) {
+            throw std::runtime_error(
+                "normalized Nitsche operator is not symmetric");
+        }
+        symmetrize(normalized, free_velocity.size());
+        const auto generalized =
+            FE::math::dense_symmetric_eigenvalue_bounds(
+                normalized,
+                free_velocity.size(),
+                "energy-normalized symmetric Nitsche operator");
+        sample.minimum_generalized_eigenvalue =
+            generalized.smallest_eigenvalue;
+        sample.maximum_generalized_eigenvalue =
+            generalized.largest_eigenvalue;
+        sample.eigensolver_tolerance =
+            generalized.tolerance;
+        sample.eigensolver_maximum_off_diagonal =
+            generalized.maximum_off_diagonal;
+        sample.eigensolver_sweeps =
+            generalized.sweeps;
+        sample.eigensolver_converged =
+            generalized.converged;
+        sample.bulk_viscous = reduced_bulk;
+        sample.bulk_plus_consistency =
+            reduced_bulk_plus_consistency;
+        sample.symmetric_operator =
+            std::move(reduced_production);
+        sample.energy_norm =
+            std::move(reduced_energy);
+        return sample;
+    }
+
+private:
+    static constexpr int interface_marker{27231};
+    static constexpr int wall_marker{27232};
+    static constexpr int anchor_marker{27233};
+    static constexpr std::string_view domain_id =
+        "symmetric_nitsche_energy_strip";
+    static constexpr FE::Real viscosity{0.01};
+    static constexpr FE::Real nitsche_gamma{12.0};
+
+    FE::Real mesh_scale_{1.0};
+    NitscheEnergyOrientation orientation_{};
+    FE::geometry::CutIntegrationSide active_side_{
+        FE::geometry::CutIntegrationSide::Negative};
+    std::shared_ptr<Mesh> mesh_{};
+    std::shared_ptr<FE::spaces::ProductSpace>
+        velocity_space_{};
+    std::shared_ptr<FE::spaces::H1Space>
+        pressure_space_{};
+    FE::systems::FESystem system_;
+    FE::FieldId phi_{FE::INVALID_FIELD_ID};
+    FE::FieldId velocity_{FE::INVALID_FIELD_ID};
+    std::vector<FE::Real> solution_{};
+    std::vector<FE::Real> previous_{};
+    FE::level_set::LevelSetGeneratedInterfaceLifecycle
+        lifecycle_{};
+};
+
 #if defined(FE_HAS_MPI) && defined(MESH_HAS_MPI)
 
 [[nodiscard]] MPI_Datatype stabilityMpiRealType()
@@ -6552,6 +7684,1087 @@ TEST(FreeSurfaceCutStability,
               << " maximum_accepted_stabilized_control_spread="
               << maximum_accepted_stabilized_control_spread
               << '\n';
+#endif
+}
+
+TEST(FreeSurfaceCutStability,
+     SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Symmetric Nitsche energy sampling requires native mesh support.";
+#else
+    const ScopedEnvVar energy_diagnostic(
+        "SVMP_NS_SYMMETRIC_NITSCHE_ENERGY_DIAGNOSTIC", "1");
+    const std::array<FE::Real, 9> fractions = {{
+        FE::Real{0.0},
+        FE::Real{1.0e-8},
+        FE::Real{1.0e-6},
+        FE::Real{1.0e-4},
+        FE::Real{1.0e-2},
+        FE::Real{0.1},
+        FE::Real{0.25},
+        FE::Real{0.49},
+        FE::Real{1.0},
+    }};
+    const std::array<FE::Real, 3> mesh_scales = {{
+        FE::Real{0.5},
+        FE::Real{1.0} / FE::Real{3.0},
+        FE::Real{0.25},
+    }};
+    const std::array<NitscheEnergyOrientation, 2> orientations = {{
+        {"axis", {{1.0, 0.0, 0.0}}},
+        {"oblique", {{1.0, 0.73, 0.41}}},
+    }};
+
+    constexpr FE::Real matrix_tolerance{1.0e-11};
+    constexpr FE::Real fraction_tolerance{2.0e-11};
+    constexpr FE::Real parity_tolerance{1.0e-10};
+    constexpr std::size_t expected_case_count{108u};
+    constexpr std::size_t expected_positive_case_count{96u};
+    constexpr std::size_t expected_dry_case_count{12u};
+
+    std::size_t case_count = 0u;
+    std::size_t positive_case_count = 0u;
+    std::size_t dry_case_count = 0u;
+    std::size_t dry_exact_zero_case_count = 0u;
+    std::size_t aggregation_exercised_case_count = 0u;
+    std::size_t diagnostic_structure_verified_case_count = 0u;
+    std::set<int> generated_active_boundary_markers;
+    std::size_t maximum_observed_root_path = 0u;
+    std::size_t maximum_root_path_guard_rejections = 0u;
+    FE::Real maximum_observed_reference_extrapolation{0.0};
+    std::size_t maximum_extrapolation_guard_rejections = 0u;
+    FE::Real maximum_observed_absolute_coefficient{0.0};
+    FE::Real maximum_observed_row_l1_norm{0.0};
+    std::size_t maximum_line_guard_rejections = 0u;
+    FE::Real maximum_fraction_absolute_error{0.0};
+    FE::Real maximum_fraction_relative_error{0.0};
+    FE::Real maximum_operator_reconstruction_error{0.0};
+    FE::Real maximum_energy_reconstruction_error{0.0};
+    FE::Real maximum_operator_skew{0.0};
+    FE::Real maximum_energy_skew{0.0};
+    FE::Real maximum_dry_consistency_boundary_norm{0.0};
+    FE::Real maximum_dry_penalty_boundary_norm{0.0};
+    FE::Real maximum_dry_symmetric_boundary_norm{0.0};
+    FE::Real maximum_eigensolver_off_diagonal_ratio{0.0};
+    FE::Real minimum_sampled_margin{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real minimum_sampled_margin_ratio{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real minimum_sampled_eigenvalue{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real maximum_sampled_eigenvalue{
+        -std::numeric_limits<FE::Real>::infinity()};
+    FE::Real maximum_active_side_operator_difference{0.0};
+    FE::Real maximum_active_side_energy_difference{0.0};
+    FE::Real maximum_active_side_eigenvalue_difference{0.0};
+    FE::Real maximum_affine_scale_eigenvalue_spread{0.0};
+    std::string minimum_sampled_case;
+
+    const auto scalar_relative_difference =
+        [](FE::Real lhs, FE::Real rhs) {
+            return std::abs(lhs - rhs) /
+                   std::max(
+                       FE::Real{1.0},
+                       std::max(std::abs(lhs), std::abs(rhs)));
+        };
+    const auto matrix_is_finite =
+        [](std::span<const FE::Real> matrix) {
+            return std::all_of(
+                matrix.begin(), matrix.end(), [](FE::Real value) {
+                    return std::isfinite(value);
+                });
+        };
+
+    ASSERT_LT(
+        nitsche_energy_default_maximum_root_path_length,
+        nitsche_energy_maximum_root_path_length);
+    std::string default_root_path_rejection_diagnostic;
+    {
+        PersistentNitscheEnergyProblem default_guard_problem(
+            mesh_scales.front(),
+            orientations.back(),
+            FE::geometry::CutIntegrationSide::Negative,
+            nitsche_energy_default_maximum_root_path_length);
+        try {
+            static_cast<void>(
+                default_guard_problem.evaluate(FE::Real{1.0e-4}));
+        } catch (const std::runtime_error& error) {
+            default_root_path_rejection_diagnostic = error.what();
+        }
+    }
+    const bool default_root_path_guard_rejection_verified =
+        default_root_path_rejection_diagnostic.find(
+            "diagnostic=root_path_guard_rejection") !=
+            std::string::npos &&
+        default_root_path_rejection_diagnostic.find(
+            "maximum_observed_path=9") != std::string::npos &&
+        default_root_path_rejection_diagnostic.find(
+            "maximum_allowed_path=" +
+            std::to_string(
+                nitsche_energy_default_maximum_root_path_length)) !=
+            std::string::npos;
+    EXPECT_TRUE(default_root_path_guard_rejection_verified)
+        << default_root_path_rejection_diagnostic;
+
+    for (const auto& orientation : orientations) {
+        std::array<
+            std::array<std::vector<NitscheEnergySample>, 2>,
+            3>
+            samples_by_scale;
+        for (std::size_t scale_index = 0u;
+             scale_index < mesh_scales.size();
+             ++scale_index) {
+            const auto mesh_scale = mesh_scales[scale_index];
+            PersistentNitscheEnergyProblem negative_problem(
+                mesh_scale,
+                orientation,
+                FE::geometry::CutIntegrationSide::Negative);
+            PersistentNitscheEnergyProblem positive_problem(
+                mesh_scale,
+                orientation,
+                FE::geometry::CutIntegrationSide::Positive);
+            samples_by_scale[scale_index][0].reserve(
+                fractions.size());
+            samples_by_scale[scale_index][1].reserve(
+                fractions.size());
+
+            for (const auto fraction : fractions) {
+                SCOPED_TRACE(
+                    std::string(orientation.id) + "_h_" +
+                    realPropertyValue(mesh_scale) + "_fraction_" +
+                    realPropertyValue(fraction));
+                samples_by_scale[scale_index][0].push_back(
+                    negative_problem.evaluate(fraction));
+                samples_by_scale[scale_index][1].push_back(
+                    positive_problem.evaluate(fraction));
+
+                for (std::size_t side_index = 0u;
+                     side_index < 2u;
+                     ++side_index) {
+                    const auto expected_side =
+                        side_index == 0u
+                            ? FE::geometry::
+                                  CutIntegrationSide::Negative
+                            : FE::geometry::
+                                  CutIntegrationSide::Positive;
+                    const auto& sample =
+                        samples_by_scale[scale_index][side_index]
+                                        .back();
+                    const bool dry =
+                        fraction == FE::Real{0.0};
+                    SCOPED_TRACE(
+                        sample.case_id + "_h_" +
+                        realPropertyValue(mesh_scale));
+
+                    ++case_count;
+                    const auto fraction_absolute_error =
+                        std::abs(
+                            sample.observed_wall_fraction -
+                            fraction);
+                    maximum_fraction_absolute_error = std::max(
+                        maximum_fraction_absolute_error,
+                        fraction_absolute_error);
+                    if (!dry) {
+                        maximum_fraction_relative_error = std::max(
+                            maximum_fraction_relative_error,
+                            fraction_absolute_error / fraction);
+                    }
+                    EXPECT_LE(
+                        fraction_absolute_error,
+                        fraction_tolerance);
+                    EXPECT_EQ(
+                        sample.implicit_backend_fallback_count, 0u);
+                    EXPECT_GT(sample.free_velocity_dofs, 0u);
+                    EXPECT_EQ(
+                        sample.aggregation_report.active_side,
+                        expected_side);
+                    EXPECT_EQ(
+                        sample.aggregation_report.interface_marker,
+                        27231);
+                    EXPECT_NE(
+                        sample.aggregation_report.field,
+                        FE::INVALID_FIELD_ID);
+                    EXPECT_EQ(
+                        sample.aggregation_report
+                            .maximum_root_path_length,
+                        nitsche_energy_maximum_root_path_length);
+                    EXPECT_LE(
+                        sample.aggregation_report
+                            .maximum_observed_root_path,
+                        sample.aggregation_report
+                            .maximum_root_path_length);
+                    EXPECT_EQ(
+                        sample.aggregation_report
+                            .root_path_guard_rejections,
+                        0u);
+                    EXPECT_EQ(
+                        sample.aggregation_report
+                            .maximum_reference_extrapolation_distance,
+                        nitsche_energy_maximum_reference_extrapolation_distance);
+                    EXPECT_LE(
+                        sample.aggregation_report
+                            .maximum_observed_reference_extrapolation,
+                        sample.aggregation_report
+                            .maximum_reference_extrapolation_distance);
+                    EXPECT_EQ(
+                        sample.aggregation_report
+                            .extrapolation_guard_rejections,
+                        0u);
+                    EXPECT_EQ(
+                        sample.aggregation_report
+                            .maximum_absolute_coefficient,
+                        nitsche_energy_maximum_absolute_coefficient);
+                    EXPECT_LE(
+                        sample.aggregation_report
+                            .maximum_observed_absolute_coefficient,
+                        sample.aggregation_report
+                            .maximum_absolute_coefficient);
+                    EXPECT_EQ(
+                        sample.aggregation_report
+                            .maximum_row_l1_norm,
+                        nitsche_energy_maximum_row_l1_norm);
+                    EXPECT_LE(
+                        sample.aggregation_report
+                            .maximum_observed_row_l1_norm,
+                        sample.aggregation_report
+                            .maximum_row_l1_norm);
+                    EXPECT_EQ(
+                        sample.aggregation_report
+                            .line_guard_rejections,
+                        0u);
+                    maximum_observed_root_path = std::max(
+                        maximum_observed_root_path,
+                        sample.aggregation_report
+                            .maximum_observed_root_path);
+                    maximum_root_path_guard_rejections = std::max(
+                        maximum_root_path_guard_rejections,
+                        sample.aggregation_report
+                            .root_path_guard_rejections);
+                    maximum_observed_reference_extrapolation =
+                        std::max(
+                            maximum_observed_reference_extrapolation,
+                            sample.aggregation_report
+                                .maximum_observed_reference_extrapolation);
+                    maximum_extrapolation_guard_rejections =
+                        std::max(
+                            maximum_extrapolation_guard_rejections,
+                            sample.aggregation_report
+                                .extrapolation_guard_rejections);
+                    maximum_observed_absolute_coefficient =
+                        std::max(
+                            maximum_observed_absolute_coefficient,
+                            sample.aggregation_report
+                                .maximum_observed_absolute_coefficient);
+                    maximum_observed_row_l1_norm = std::max(
+                        maximum_observed_row_l1_norm,
+                        sample.aggregation_report
+                            .maximum_observed_row_l1_norm);
+                    maximum_line_guard_rejections = std::max(
+                        maximum_line_guard_rejections,
+                        sample.aggregation_report
+                            .line_guard_rejections);
+                    EXPECT_EQ(
+                        sample.aggregation_report
+                            .canonical_candidate_vertices,
+                        sample.aggregation_report
+                                .canonical_rooted_candidate_vertices +
+                            sample.aggregation_report
+                                .canonical_rootless_candidate_vertices);
+                    EXPECT_EQ(
+                        sample.aggregation_report
+                            .canonical_rootless_candidate_vertices,
+                        0u);
+                    EXPECT_EQ(
+                        sample.aggregation_report
+                            .canonical_owned_pinned_dofs,
+                        0u);
+                    EXPECT_EQ(
+                        sample.aggregation_report
+                            .canonical_strong_suppressed_dofs,
+                        0u);
+                    EXPECT_EQ(
+                        sample.velocity_aggregate_lines,
+                        sample.aggregation_report
+                            .canonical_owned_aggregate_dofs);
+                    EXPECT_EQ(
+                        sample.velocity_gauge_line_count, 0u);
+                    if (sample.aggregation_report
+                            .canonical_owned_aggregate_dofs >
+                        0u) {
+                        ++aggregation_exercised_case_count;
+                    }
+
+                    const auto ordinary_boundary_term_count =
+                        std::accumulate(
+                            sample
+                                .diagnostic_boundary_term_counts
+                                .begin(),
+                            sample
+                                .diagnostic_boundary_term_counts
+                                .end(),
+                            std::size_t{0u});
+                    const bool boundary_bearing_operators_present =
+                        std::all_of(
+                            sample
+                                    .diagnostic_interface_face_term_counts
+                                    .begin() +
+                                1,
+                            sample
+                                .diagnostic_interface_face_term_counts
+                                .end(),
+                            [](std::size_t count) {
+                                return count > 0u;
+                            });
+                    EXPECT_EQ(ordinary_boundary_term_count, 0u);
+                    EXPECT_EQ(
+                        sample
+                            .diagnostic_interface_face_term_counts
+                            .front(),
+                        0u);
+                    EXPECT_TRUE(boundary_bearing_operators_present);
+                    EXPECT_TRUE(
+                        sample
+                            .diagnostic_routes_use_generated_marker);
+                    EXPECT_TRUE(
+                        sample
+                            .generated_active_boundary_marker_registered);
+                    EXPECT_NE(
+                        sample.generated_active_boundary_marker, -1);
+                    EXPECT_NE(
+                        sample.generated_active_boundary_marker,
+                        27232);
+                    generated_active_boundary_markers.insert(
+                        sample.generated_active_boundary_marker);
+                    if (ordinary_boundary_term_count == 0u &&
+                        sample
+                                .diagnostic_interface_face_term_counts
+                                .front() ==
+                            0u &&
+                        boundary_bearing_operators_present &&
+                        sample
+                            .diagnostic_routes_use_generated_marker &&
+                        sample
+                            .generated_active_boundary_marker_registered) {
+                        ++diagnostic_structure_verified_case_count;
+                    }
+
+                    maximum_operator_reconstruction_error =
+                        std::max(
+                            maximum_operator_reconstruction_error,
+                            sample
+                                .production_reconstruction_relative_error);
+                    maximum_energy_reconstruction_error =
+                        std::max(
+                            maximum_energy_reconstruction_error,
+                            sample
+                                .energy_reconstruction_relative_error);
+                    maximum_operator_skew = std::max(
+                        maximum_operator_skew,
+                        sample.symmetric_operator_relative_skew);
+                    maximum_energy_skew = std::max(
+                        maximum_energy_skew,
+                        sample.energy_norm_relative_skew);
+                    EXPECT_LE(
+                        sample
+                            .production_reconstruction_relative_error,
+                        matrix_tolerance);
+                    EXPECT_LE(
+                        sample.energy_reconstruction_relative_error,
+                        matrix_tolerance);
+                    EXPECT_LE(
+                        sample.symmetric_operator_relative_skew,
+                        matrix_tolerance);
+                    EXPECT_LE(
+                        sample.energy_norm_relative_skew,
+                        matrix_tolerance);
+                    EXPECT_TRUE(matrix_is_finite(
+                        sample.symmetric_operator));
+                    EXPECT_TRUE(
+                        matrix_is_finite(sample.energy_norm));
+
+                    bool dry_boundary_exact_zero = false;
+                    if (dry) {
+                        ++dry_case_count;
+                        EXPECT_EQ(sample.active_rule_count, 0u);
+                        maximum_dry_consistency_boundary_norm =
+                            std::max(
+                                maximum_dry_consistency_boundary_norm,
+                                sample
+                                    .consistency_boundary_relative_norm);
+                        maximum_dry_penalty_boundary_norm =
+                            std::max(
+                                maximum_dry_penalty_boundary_norm,
+                                sample
+                                    .penalty_boundary_relative_norm);
+                        maximum_dry_symmetric_boundary_norm =
+                            std::max(
+                                maximum_dry_symmetric_boundary_norm,
+                                sample
+                                    .symmetric_boundary_relative_norm);
+                        EXPECT_LE(
+                            sample
+                                .consistency_boundary_relative_norm,
+                            matrix_tolerance);
+                        EXPECT_LE(
+                            sample.penalty_boundary_relative_norm,
+                            matrix_tolerance);
+                        EXPECT_LE(
+                            sample.symmetric_boundary_relative_norm,
+                            matrix_tolerance);
+                        dry_boundary_exact_zero =
+                            sample.bulk_plus_consistency ==
+                                sample.bulk_viscous &&
+                            sample.energy_norm ==
+                                sample.bulk_viscous &&
+                            sample.symmetric_operator ==
+                                sample.bulk_viscous;
+                        EXPECT_TRUE(dry_boundary_exact_zero);
+                        EXPECT_GT(
+                            FE::math::dense_matrix_max_abs(
+                                sample.bulk_viscous),
+                            FE::Real{0.0});
+                        auto anchored_bulk =
+                            sample.bulk_viscous;
+                        symmetrize(
+                            anchored_bulk,
+                            sample.free_velocity_dofs);
+                        EXPECT_NO_THROW((void)choleskyLower(
+                            anchored_bulk,
+                            sample.free_velocity_dofs,
+                            "strongly anchored dry-boundary bulk"));
+                        if (dry_boundary_exact_zero) {
+                            ++dry_exact_zero_case_count;
+                        }
+                    } else {
+                        ++positive_case_count;
+                        EXPECT_GT(sample.active_rule_count, 0u);
+                        EXPECT_GT(
+                            sample.minimum_energy_norm_eigenvalue,
+                            FE::Real{0.0});
+                        EXPECT_TRUE(sample.eigensolver_converged);
+                        EXPECT_GT(
+                            sample.eigensolver_tolerance,
+                            FE::Real{0.0});
+                        const auto off_diagonal_ratio =
+                            sample
+                                .eigensolver_maximum_off_diagonal /
+                            sample.eigensolver_tolerance;
+                        maximum_eigensolver_off_diagonal_ratio =
+                            std::max(
+                                maximum_eigensolver_off_diagonal_ratio,
+                                off_diagonal_ratio);
+                        EXPECT_LE(
+                            off_diagonal_ratio,
+                            FE::Real{1.0});
+                        const auto sampled_margin =
+                            sample.minimum_generalized_eigenvalue -
+                            sample.eigensolver_tolerance;
+                        const auto sampled_margin_ratio =
+                            sample.minimum_generalized_eigenvalue /
+                            sample.eigensolver_tolerance;
+                        minimum_sampled_margin = std::min(
+                            minimum_sampled_margin,
+                            sampled_margin);
+                        minimum_sampled_margin_ratio = std::min(
+                            minimum_sampled_margin_ratio,
+                            sampled_margin_ratio);
+                        EXPECT_GT(sampled_margin, FE::Real{0.0});
+                        EXPECT_GT(
+                            sampled_margin_ratio,
+                            FE::Real{1.0});
+                        if (sample.minimum_generalized_eigenvalue <
+                            minimum_sampled_eigenvalue) {
+                            minimum_sampled_eigenvalue =
+                                sample
+                                    .minimum_generalized_eigenvalue;
+                            minimum_sampled_case =
+                                sample.case_id + "_h_" +
+                                realPropertyValue(mesh_scale);
+                        }
+                        maximum_sampled_eigenvalue = std::max(
+                            maximum_sampled_eigenvalue,
+                            sample
+                                .maximum_generalized_eigenvalue);
+                    }
+
+                    std::cout
+                        << std::setprecision(17)
+                        << "WP3_WP7_NITSCHE_CASE {"
+                        << "\"case_id\":\""
+                        << sample.case_id << "\","
+                        << "\"orientation\":\""
+                        << orientation.id << "\","
+                        << "\"active_side\":\""
+                        << (side_index == 0u
+                                ? "negative"
+                                : "positive")
+                        << "\","
+                        << "\"mesh_scale\":"
+                        << mesh_scale << ","
+                        << "\"target_wall_fraction\":"
+                        << fraction << ","
+                        << "\"observed_wall_fraction\":"
+                        << sample.observed_wall_fraction << ","
+                        << "\"active_rule_count\":"
+                        << sample.active_rule_count << ","
+                        << "\"free_velocity_dofs\":"
+                        << sample.free_velocity_dofs << ","
+                        << "\"aggregate_dofs\":"
+                        << sample.aggregation_report
+                               .canonical_owned_aggregate_dofs
+                        << ","
+                        << "\"rootless_candidates\":"
+                        << sample.aggregation_report
+                               .canonical_rootless_candidate_vertices
+                        << ","
+                        << "\"owned_pins\":"
+                        << sample.aggregation_report
+                               .canonical_owned_pinned_dofs
+                        << ","
+                        << "\"maximum_root_path_length\":"
+                        << sample.aggregation_report
+                               .maximum_root_path_length
+                        << ","
+                        << "\"maximum_observed_root_path\":"
+                        << sample.aggregation_report
+                               .maximum_observed_root_path
+                        << ","
+                        << "\"root_path_guard_rejections\":"
+                        << sample.aggregation_report
+                               .root_path_guard_rejections
+                        << ","
+                        << "\"maximum_reference_extrapolation_distance\":"
+                        << sample.aggregation_report
+                               .maximum_reference_extrapolation_distance
+                        << ","
+                        << "\"maximum_observed_reference_extrapolation\":"
+                        << sample.aggregation_report
+                               .maximum_observed_reference_extrapolation
+                        << ","
+                        << "\"extrapolation_guard_rejections\":"
+                        << sample.aggregation_report
+                               .extrapolation_guard_rejections
+                        << ","
+                        << "\"maximum_absolute_coefficient\":"
+                        << sample.aggregation_report
+                               .maximum_absolute_coefficient
+                        << ","
+                        << "\"maximum_observed_absolute_coefficient\":"
+                        << sample.aggregation_report
+                               .maximum_observed_absolute_coefficient
+                        << ","
+                        << "\"maximum_row_l1_norm\":"
+                        << sample.aggregation_report
+                               .maximum_row_l1_norm
+                        << ","
+                        << "\"maximum_observed_row_l1_norm\":"
+                        << sample.aggregation_report
+                               .maximum_observed_row_l1_norm
+                        << ","
+                        << "\"line_guard_rejections\":"
+                        << sample.aggregation_report
+                               .line_guard_rejections
+                        << ","
+                        << "\"generated_active_boundary_marker\":"
+                        << sample.generated_active_boundary_marker
+                        << ","
+                        << "\"ordinary_boundary_term_count\":"
+                        << ordinary_boundary_term_count
+                        << ","
+                        << "\"bulk_interface_face_term_count\":"
+                        << sample
+                               .diagnostic_interface_face_term_counts[0]
+                        << ","
+                        << "\"bulk_plus_consistency_interface_face_term_count\":"
+                        << sample
+                               .diagnostic_interface_face_term_counts[1]
+                        << ","
+                        << "\"symmetric_operator_interface_face_term_count\":"
+                        << sample
+                               .diagnostic_interface_face_term_counts[2]
+                        << ","
+                        << "\"energy_norm_interface_face_term_count\":"
+                        << sample
+                               .diagnostic_interface_face_term_counts[3]
+                        << ","
+                        << "\"diagnostic_routes_use_generated_marker\":"
+                        << (sample
+                                    .diagnostic_routes_use_generated_marker
+                                ? "true"
+                                : "false")
+                        << ","
+                        << "\"generated_active_boundary_marker_registered\":"
+                        << (sample
+                                    .generated_active_boundary_marker_registered
+                                ? "true"
+                                : "false")
+                        << ","
+                        << "\"bulk_max_abs\":"
+                        << FE::math::dense_matrix_max_abs(
+                               sample.bulk_viscous)
+                        << ","
+                        << "\"bulk_plus_consistency_max_abs\":"
+                        << FE::math::dense_matrix_max_abs(
+                               sample.bulk_plus_consistency)
+                        << ","
+                        << "\"symmetric_operator_max_abs\":"
+                        << FE::math::dense_matrix_max_abs(
+                               sample.symmetric_operator)
+                        << ","
+                        << "\"energy_norm_max_abs\":"
+                        << FE::math::dense_matrix_max_abs(
+                               sample.energy_norm)
+                        << ","
+                        << "\"operator_reconstruction_error\":"
+                        << sample
+                               .production_reconstruction_relative_error
+                        << ","
+                        << "\"energy_reconstruction_error\":"
+                        << sample
+                               .energy_reconstruction_relative_error
+                        << ","
+                        << "\"operator_skew\":"
+                        << sample.symmetric_operator_relative_skew
+                        << ","
+                        << "\"energy_skew\":"
+                        << sample.energy_norm_relative_skew
+                        << ","
+                        << "\"dry_boundary_exact_zero\":"
+                        << (dry_boundary_exact_zero ? 1 : 0)
+                        << ","
+                        << "\"lambda_min\":";
+                    if (dry) {
+                        std::cout << "null";
+                    } else {
+                        std::cout
+                            << sample
+                                   .minimum_generalized_eigenvalue;
+                    }
+                    std::cout << ",\"lambda_max\":";
+                    if (dry) {
+                        std::cout << "null";
+                    } else {
+                        std::cout
+                            << sample
+                                   .maximum_generalized_eigenvalue;
+                    }
+                    std::cout << ",\"eigensolver_tolerance\":";
+                    if (dry) {
+                        std::cout << "null";
+                    } else {
+                        std::cout
+                            << sample.eigensolver_tolerance;
+                    }
+                    std::cout << "}" << '\n';
+                }
+
+                const auto& negative =
+                    samples_by_scale[scale_index][0].back();
+                const auto& positive =
+                    samples_by_scale[scale_index][1].back();
+                ASSERT_EQ(
+                    negative.symmetric_operator.size(),
+                    positive.symmetric_operator.size());
+                ASSERT_EQ(
+                    negative.energy_norm.size(),
+                    positive.energy_norm.size());
+                const auto operator_difference =
+                    relativeMatrixDifference(
+                        negative.symmetric_operator,
+                        positive.symmetric_operator);
+                const auto energy_difference =
+                    relativeMatrixDifference(
+                        negative.energy_norm,
+                        positive.energy_norm);
+                maximum_active_side_operator_difference =
+                    std::max(
+                        maximum_active_side_operator_difference,
+                        operator_difference);
+                maximum_active_side_energy_difference =
+                    std::max(
+                        maximum_active_side_energy_difference,
+                        energy_difference);
+                EXPECT_LE(
+                    operator_difference, parity_tolerance);
+                EXPECT_LE(
+                    energy_difference, parity_tolerance);
+                if (fraction > FE::Real{0.0}) {
+                    const auto minimum_eigenvalue_difference =
+                        scalar_relative_difference(
+                            negative
+                                .minimum_generalized_eigenvalue,
+                            positive
+                                .minimum_generalized_eigenvalue);
+                    const auto maximum_eigenvalue_difference =
+                        scalar_relative_difference(
+                            negative
+                                .maximum_generalized_eigenvalue,
+                            positive
+                                .maximum_generalized_eigenvalue);
+                    maximum_active_side_eigenvalue_difference =
+                        std::max(
+                            maximum_active_side_eigenvalue_difference,
+                            std::max(
+                                minimum_eigenvalue_difference,
+                                maximum_eigenvalue_difference));
+                    EXPECT_LE(
+                        minimum_eigenvalue_difference,
+                        parity_tolerance);
+                    EXPECT_LE(
+                        maximum_eigenvalue_difference,
+                        parity_tolerance);
+                }
+            }
+        }
+
+        for (std::size_t side_index = 0u;
+             side_index < 2u;
+             ++side_index) {
+            for (std::size_t fraction_index = 1u;
+                 fraction_index < fractions.size();
+                 ++fraction_index) {
+                const auto& reference =
+                    samples_by_scale[0][side_index][fraction_index];
+                for (std::size_t scale_index = 1u;
+                     scale_index < mesh_scales.size();
+                     ++scale_index) {
+                    const auto& sample =
+                        samples_by_scale[scale_index][side_index]
+                                        [fraction_index];
+                    const auto minimum_spread =
+                        scalar_relative_difference(
+                            reference
+                                .minimum_generalized_eigenvalue,
+                            sample
+                                .minimum_generalized_eigenvalue);
+                    const auto maximum_spread =
+                        scalar_relative_difference(
+                            reference
+                                .maximum_generalized_eigenvalue,
+                            sample
+                                .maximum_generalized_eigenvalue);
+                    maximum_affine_scale_eigenvalue_spread =
+                        std::max(
+                            maximum_affine_scale_eigenvalue_spread,
+                            std::max(
+                                minimum_spread,
+                                maximum_spread));
+                    EXPECT_LE(
+                        minimum_spread, parity_tolerance);
+                    EXPECT_LE(
+                        maximum_spread, parity_tolerance);
+                }
+            }
+        }
+    }
+
+    EXPECT_EQ(case_count, expected_case_count);
+    EXPECT_EQ(
+        positive_case_count,
+        expected_positive_case_count);
+    EXPECT_EQ(dry_case_count, expected_dry_case_count);
+    EXPECT_EQ(
+        dry_exact_zero_case_count,
+        expected_dry_case_count);
+    EXPECT_GT(aggregation_exercised_case_count, 0u);
+    EXPECT_EQ(
+        diagnostic_structure_verified_case_count,
+        expected_case_count);
+    EXPECT_EQ(generated_active_boundary_markers.size(), 2u);
+    EXPECT_LE(
+        maximum_observed_root_path,
+        nitsche_energy_maximum_root_path_length);
+    EXPECT_EQ(maximum_root_path_guard_rejections, 0u);
+    EXPECT_LE(
+        maximum_observed_reference_extrapolation,
+        nitsche_energy_maximum_reference_extrapolation_distance);
+    EXPECT_EQ(maximum_extrapolation_guard_rejections, 0u);
+    EXPECT_LE(
+        maximum_observed_absolute_coefficient,
+        nitsche_energy_maximum_absolute_coefficient);
+    EXPECT_LE(
+        maximum_observed_row_l1_norm,
+        nitsche_energy_maximum_row_l1_norm);
+    EXPECT_EQ(maximum_line_guard_rejections, 0u);
+    EXPECT_LE(
+        maximum_fraction_absolute_error,
+        fraction_tolerance);
+    EXPECT_LE(
+        maximum_operator_reconstruction_error,
+        matrix_tolerance);
+    EXPECT_LE(
+        maximum_energy_reconstruction_error,
+        matrix_tolerance);
+    EXPECT_LE(maximum_operator_skew, matrix_tolerance);
+    EXPECT_LE(maximum_energy_skew, matrix_tolerance);
+    EXPECT_LE(
+        maximum_dry_consistency_boundary_norm,
+        matrix_tolerance);
+    EXPECT_LE(
+        maximum_dry_penalty_boundary_norm,
+        matrix_tolerance);
+    EXPECT_LE(
+        maximum_dry_symmetric_boundary_norm,
+        matrix_tolerance);
+    EXPECT_LE(
+        maximum_eigensolver_off_diagonal_ratio,
+        FE::Real{1.0});
+    EXPECT_GT(minimum_sampled_margin, FE::Real{0.0});
+    EXPECT_GT(
+        minimum_sampled_margin_ratio, FE::Real{1.0});
+    EXPECT_LE(
+        maximum_active_side_operator_difference,
+        parity_tolerance);
+    EXPECT_LE(
+        maximum_active_side_energy_difference,
+        parity_tolerance);
+    EXPECT_LE(
+        maximum_active_side_eigenvalue_difference,
+        parity_tolerance);
+    EXPECT_LE(
+        maximum_affine_scale_eigenvalue_spread,
+        parity_tolerance);
+
+    RecordProperty("wp3_wp7_nitsche_case_count", case_count);
+    RecordProperty(
+        "wp3_wp7_nitsche_positive_case_count",
+        positive_case_count);
+    RecordProperty(
+        "wp3_wp7_nitsche_dry_case_count",
+        dry_case_count);
+    RecordProperty(
+        "wp3_wp7_nitsche_dry_exact_zero_case_count",
+        dry_exact_zero_case_count);
+    RecordProperty(
+        "wp3_wp7_nitsche_fraction_count",
+        fractions.size());
+    RecordProperty(
+        "wp3_wp7_nitsche_orientation_count",
+        orientations.size());
+    RecordProperty(
+        "wp3_wp7_nitsche_mesh_scale_count",
+        mesh_scales.size());
+    RecordProperty(
+        "wp3_wp7_nitsche_active_side_count", 2);
+    RecordProperty(
+        "wp3_wp7_nitsche_diagnostic_operator_count", 4);
+    RecordProperty(
+        "wp3_wp7_nitsche_diagnostic_structure_verified_case_count",
+        diagnostic_structure_verified_case_count);
+    RecordProperty(
+        "wp3_wp7_nitsche_generated_active_boundary_marker_count",
+        generated_active_boundary_markers.size());
+    RecordProperty(
+        "wp3_wp7_nitsche_aggregation_exercised_case_count",
+        aggregation_exercised_case_count);
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_root_path_length",
+        nitsche_energy_maximum_root_path_length);
+    RecordProperty(
+        "wp3_wp7_nitsche_default_maximum_root_path_length",
+        nitsche_energy_default_maximum_root_path_length);
+    RecordProperty(
+        "wp3_wp7_nitsche_default_root_path_guard_rejection_verified",
+        default_root_path_guard_rejection_verified ? 1 : 0);
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_observed_root_path",
+        maximum_observed_root_path);
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_root_path_guard_rejections",
+        maximum_root_path_guard_rejections);
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_reference_extrapolation_distance",
+        realPropertyValue(
+            nitsche_energy_maximum_reference_extrapolation_distance));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_observed_reference_extrapolation",
+        realPropertyValue(
+            maximum_observed_reference_extrapolation));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_extrapolation_guard_rejections",
+        maximum_extrapolation_guard_rejections);
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_absolute_coefficient",
+        realPropertyValue(
+            nitsche_energy_maximum_absolute_coefficient));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_observed_absolute_coefficient",
+        realPropertyValue(
+            maximum_observed_absolute_coefficient));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_row_l1_norm",
+        realPropertyValue(
+            nitsche_energy_maximum_row_l1_norm));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_observed_row_l1_norm",
+        realPropertyValue(maximum_observed_row_l1_norm));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_line_guard_rejections",
+        maximum_line_guard_rejections);
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_fraction_absolute_error",
+        realPropertyValue(maximum_fraction_absolute_error));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_fraction_relative_error",
+        realPropertyValue(maximum_fraction_relative_error));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_operator_reconstruction_error",
+        realPropertyValue(
+            maximum_operator_reconstruction_error));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_energy_reconstruction_error",
+        realPropertyValue(
+            maximum_energy_reconstruction_error));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_dry_consistency_boundary_norm",
+        realPropertyValue(
+            maximum_dry_consistency_boundary_norm));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_dry_penalty_boundary_norm",
+        realPropertyValue(
+            maximum_dry_penalty_boundary_norm));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_dry_symmetric_boundary_norm",
+        realPropertyValue(
+            maximum_dry_symmetric_boundary_norm));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_operator_skew",
+        realPropertyValue(maximum_operator_skew));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_energy_skew",
+        realPropertyValue(maximum_energy_skew));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_eigensolver_off_diagonal_ratio",
+        realPropertyValue(
+            maximum_eigensolver_off_diagonal_ratio));
+    RecordProperty(
+        "wp3_wp7_nitsche_minimum_sampled_margin",
+        realPropertyValue(minimum_sampled_margin));
+    RecordProperty(
+        "wp3_wp7_nitsche_minimum_sampled_margin_ratio",
+        realPropertyValue(minimum_sampled_margin_ratio));
+    RecordProperty(
+        "wp3_wp7_nitsche_minimum_sampled_eigenvalue",
+        realPropertyValue(minimum_sampled_eigenvalue));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_sampled_eigenvalue",
+        realPropertyValue(maximum_sampled_eigenvalue));
+    RecordProperty(
+        "wp3_wp7_nitsche_minimum_sampled_case",
+        minimum_sampled_case);
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_active_side_operator_difference",
+        realPropertyValue(
+            maximum_active_side_operator_difference));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_active_side_energy_difference",
+        realPropertyValue(
+            maximum_active_side_energy_difference));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_active_side_eigenvalue_difference",
+        realPropertyValue(
+            maximum_active_side_eigenvalue_difference));
+    RecordProperty(
+        "wp3_wp7_nitsche_maximum_affine_scale_eigenvalue_spread",
+        realPropertyValue(
+            maximum_affine_scale_eigenvalue_spread));
+    RecordProperty(
+        "wp3_wp7_nitsche_uniform_bound_status",
+        "UNFROZEN_NO_BOUND_INVENTED");
+    RecordProperty(
+        "wp3_wp7_nitsche_accepted_claim",
+        "joint_low_level_prerequisite");
+
+    std::cout
+        << std::setprecision(17)
+        << "WP3_WP7_NITSCHE_SUMMARY {"
+        << "\"case_count\":" << case_count << ","
+        << "\"positive_case_count\":"
+        << positive_case_count << ","
+        << "\"dry_case_count\":" << dry_case_count << ","
+        << "\"dry_exact_zero_case_count\":"
+        << dry_exact_zero_case_count << ","
+        << "\"aggregation_exercised_case_count\":"
+        << aggregation_exercised_case_count << ","
+        << "\"diagnostic_structure_verified_case_count\":"
+        << diagnostic_structure_verified_case_count << ","
+        << "\"generated_active_boundary_marker_count\":"
+        << generated_active_boundary_markers.size() << ","
+        << "\"maximum_root_path_length\":"
+        << nitsche_energy_maximum_root_path_length << ","
+        << "\"default_maximum_root_path_length\":"
+        << nitsche_energy_default_maximum_root_path_length << ","
+        << "\"default_root_path_guard_rejection_verified\":"
+        << (default_root_path_guard_rejection_verified
+                ? "true"
+                : "false")
+        << ","
+        << "\"maximum_observed_root_path\":"
+        << maximum_observed_root_path << ","
+        << "\"maximum_root_path_guard_rejections\":"
+        << maximum_root_path_guard_rejections << ","
+        << "\"maximum_reference_extrapolation_distance\":"
+        << nitsche_energy_maximum_reference_extrapolation_distance
+        << ","
+        << "\"maximum_observed_reference_extrapolation\":"
+        << maximum_observed_reference_extrapolation << ","
+        << "\"maximum_extrapolation_guard_rejections\":"
+        << maximum_extrapolation_guard_rejections << ","
+        << "\"maximum_absolute_coefficient\":"
+        << nitsche_energy_maximum_absolute_coefficient << ","
+        << "\"maximum_observed_absolute_coefficient\":"
+        << maximum_observed_absolute_coefficient << ","
+        << "\"maximum_row_l1_norm\":"
+        << nitsche_energy_maximum_row_l1_norm << ","
+        << "\"maximum_observed_row_l1_norm\":"
+        << maximum_observed_row_l1_norm << ","
+        << "\"maximum_line_guard_rejections\":"
+        << maximum_line_guard_rejections << ","
+        << "\"maximum_fraction_absolute_error\":"
+        << maximum_fraction_absolute_error << ","
+        << "\"maximum_fraction_relative_error\":"
+        << maximum_fraction_relative_error << ","
+        << "\"maximum_operator_reconstruction_error\":"
+        << maximum_operator_reconstruction_error << ","
+        << "\"maximum_energy_reconstruction_error\":"
+        << maximum_energy_reconstruction_error << ","
+        << "\"maximum_dry_consistency_boundary_norm\":"
+        << maximum_dry_consistency_boundary_norm << ","
+        << "\"maximum_dry_penalty_boundary_norm\":"
+        << maximum_dry_penalty_boundary_norm << ","
+        << "\"maximum_dry_symmetric_boundary_norm\":"
+        << maximum_dry_symmetric_boundary_norm << ","
+        << "\"maximum_operator_skew\":"
+        << maximum_operator_skew << ","
+        << "\"maximum_energy_skew\":"
+        << maximum_energy_skew << ","
+        << "\"maximum_eigensolver_off_diagonal_ratio\":"
+        << maximum_eigensolver_off_diagonal_ratio << ","
+        << "\"minimum_sampled_margin\":"
+        << minimum_sampled_margin << ","
+        << "\"minimum_sampled_margin_ratio\":"
+        << minimum_sampled_margin_ratio << ","
+        << "\"minimum_sampled_eigenvalue\":"
+        << minimum_sampled_eigenvalue << ","
+        << "\"maximum_sampled_eigenvalue\":"
+        << maximum_sampled_eigenvalue << ","
+        << "\"minimum_sampled_case\":\""
+        << minimum_sampled_case << "\","
+        << "\"maximum_active_side_operator_difference\":"
+        << maximum_active_side_operator_difference << ","
+        << "\"maximum_active_side_energy_difference\":"
+        << maximum_active_side_energy_difference << ","
+        << "\"maximum_active_side_eigenvalue_difference\":"
+        << maximum_active_side_eigenvalue_difference << ","
+        << "\"maximum_affine_scale_eigenvalue_spread\":"
+        << maximum_affine_scale_eigenvalue_spread << ","
+        << "\"method_coercivity_lower_bound\":null,"
+        << "\"uniform_bound_status\":"
+        << "\"UNFROZEN_NO_BOUND_INVENTED\","
+        << "\"accepted_claim\":"
+        << "\"joint_low_level_prerequisite\"}"
+        << '\n';
 #endif
 }
 

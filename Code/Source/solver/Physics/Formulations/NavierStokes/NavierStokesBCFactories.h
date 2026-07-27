@@ -378,6 +378,25 @@ namespace detail {
         marker, flux, generated_active_boundary_marker);
 }
 
+struct VelocityNitscheEnergyForms {
+    struct BoundaryRoute {
+        int physical_boundary_marker{-1};
+        std::optional<int> generated_active_boundary_marker{};
+    };
+
+    FE::forms::FormExpr symmetric_consistency{};
+    FE::forms::FormExpr penalty{};
+    std::vector<BoundaryRoute> symmetric_boundaries{};
+};
+
+inline void appendDiagnosticForm(FE::forms::FormExpr& destination,
+                                 const FE::forms::FormExpr& contribution)
+{
+    destination = destination.isValid()
+                      ? destination + contribution
+                      : contribution;
+}
+
 inline void applyVelocityNitscheBCs(
     FE::forms::FormExpr& momentum_form,
     FE::forms::FormExpr& continuity_form,
@@ -389,7 +408,8 @@ inline void applyVelocityNitscheBCs(
     const FE::forms::FormExpr& q,
     const FE::forms::FormExpr& mu,
     const std::function<std::optional<int>(int)>&
-        generated_active_boundary_marker = {})
+        generated_active_boundary_marker = {},
+    VelocityNitscheEnergyForms* energy_forms = nullptr)
 {
     if (options.velocity_dirichlet_weak.empty()) {
         return;
@@ -412,10 +432,9 @@ inline void applyVelocityNitscheBCs(
     const auto stress_u = FE::forms::FormExpr::constant(2.0) * mu * FE::forms::sym(FE::forms::grad(u));
     const auto stress_v = FE::forms::FormExpr::constant(2.0) * mu * FE::forms::sym(FE::forms::grad(v));
     const auto integrate =
-        [&](const FE::forms::FormExpr& integrand, int marker) {
-            const auto generated_marker = generated_active_boundary_marker
-                                              ? generated_active_boundary_marker(marker)
-                                              : std::nullopt;
+        [](const FE::forms::FormExpr& integrand,
+           int marker,
+           std::optional<int> generated_marker) {
             return generated_marker.has_value()
                        ? integrand.dI(*generated_marker)
                        : integrand.ds(marker);
@@ -424,6 +443,10 @@ inline void applyVelocityNitscheBCs(
     for (const auto& bc : options.velocity_dirichlet_weak) {
         const int marker =
             FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::applyVelocityNitscheBCs");
+        const auto generated_marker =
+            generated_active_boundary_marker
+                ? generated_active_boundary_marker(marker)
+                : std::nullopt;
         for (int d = 0; d < dim; ++d) {
             if (!bc.active_components[static_cast<std::size_t>(d)]) {
                 throw std::invalid_argument(
@@ -439,23 +462,70 @@ inline void applyVelocityNitscheBCs(
 
         // Consistency: add the missing stress boundary term -<σ(u,p)n, v>.
         momentum_form =
-            momentum_form + integrate(p * FE::forms::inner(n, v), marker) -
-            integrate(FE::forms::inner(stress_u * n, v), marker);
+            momentum_form +
+            integrate(
+                p * FE::forms::inner(n, v),
+                marker,
+                generated_marker) -
+            integrate(
+                FE::forms::inner(stress_u * n, v),
+                marker,
+                generated_marker);
 
         // Adjoint consistency (variant-dependent) + penalty.
         if (options.nitsche_symmetric) {
             momentum_form = momentum_form -
-                            integrate(FE::forms::inner(stress_v * n, diff), marker);
+                            integrate(
+                                FE::forms::inner(stress_v * n, diff),
+                                marker,
+                                generated_marker);
             continuity_form = continuity_form +
-                              integrate(q * FE::forms::inner(n, diff), marker);
+                              integrate(
+                                  q * FE::forms::inner(n, diff),
+                                  marker,
+                                  generated_marker);
+            if (energy_forms != nullptr) {
+                const auto consistency =
+                    -integrate(
+                        FE::forms::inner(stress_u * n, v),
+                        marker,
+                        generated_marker) -
+                    integrate(
+                        FE::forms::inner(stress_v * n, u),
+                        marker,
+                        generated_marker);
+                const auto penalty_energy = integrate(
+                    penalty * FE::forms::inner(u, v),
+                    marker,
+                    generated_marker);
+                appendDiagnosticForm(
+                    energy_forms->symmetric_consistency, consistency);
+                appendDiagnosticForm(
+                    energy_forms->penalty, penalty_energy);
+                energy_forms->symmetric_boundaries.push_back(
+                    {
+                        .physical_boundary_marker = marker,
+                        .generated_active_boundary_marker =
+                            generated_marker,
+                    });
+            }
         } else {
             momentum_form = momentum_form +
-                            integrate(FE::forms::inner(stress_v * n, diff), marker);
+                            integrate(
+                                FE::forms::inner(stress_v * n, diff),
+                                marker,
+                                generated_marker);
             continuity_form = continuity_form -
-                              integrate(q * FE::forms::inner(n, diff), marker);
+                              integrate(
+                                  q * FE::forms::inner(n, diff),
+                                  marker,
+                                  generated_marker);
         }
         momentum_form = momentum_form +
-                        integrate(penalty * FE::forms::inner(diff, v), marker);
+                        integrate(
+                            penalty * FE::forms::inner(diff, v),
+                            marker,
+                            generated_marker);
     }
 }
 

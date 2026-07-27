@@ -148,6 +148,37 @@ struct FreeSurfaceConservativeBalanceDiagnosticOperators {
         "equations_diagnostic_ns_free_surface_pressure_representability_pair"};
 };
 
+/**
+ * @brief Velocity-block operators for a symmetric Nitsche energy certificate
+ *
+ * These operators are installed only for constant viscosity when
+ * `SVMP_NS_SYMMETRIC_NITSCHE_ENERGY_DIAGNOSTIC` is enabled, the C++ caller
+ * explicitly selects `JointLowLevelPrerequisite`, and at least one symmetric
+ * weak velocity boundary is present. They use the production active-volume
+ * and generated-active-boundary forms. The energy norm is the bulk viscous
+ * form plus the Nitsche penalty; the symmetric operator adds the two
+ * consistency terms. The bulk-plus-consistency operator provides an
+ * independently assembled component-parity check while retaining a volume
+ * anchor for boundary-kernel dispatch. Pressure and transient terms are
+ * deliberately excluded so the generalized spectrum measures the actual
+ * viscous Nitsche form rather than a mass-regularized surrogate.
+ */
+struct SymmetricNitscheEnergyDiagnosticOperators {
+    inline static constexpr std::string_view bulk_viscous{
+        "equations_diagnostic_ns_symmetric_nitsche_bulk_viscous"};
+    inline static constexpr std::string_view bulk_plus_consistency{
+        "equations_diagnostic_ns_symmetric_nitsche_bulk_plus_consistency"};
+    inline static constexpr std::string_view symmetric_operator{
+        "equations_diagnostic_ns_symmetric_nitsche_operator"};
+    inline static constexpr std::string_view energy_norm{
+        "equations_diagnostic_ns_symmetric_nitsche_energy_norm"};
+};
+
+enum class SymmetricNitscheEnergyQualificationScope {
+    RejectUnqualified = 0,
+    JointLowLevelPrerequisite
+};
+
 struct IncompressibleNavierStokesVMSOptions {
     using ScalarValue = FE::forms::bc::ScalarValue;
 
@@ -155,6 +186,12 @@ struct IncompressibleNavierStokesVMSOptions {
     int input_configuration_schema_version{
         current_configuration_schema_version};
     bool explicit_legacy_configuration{false};
+    // C++-only diagnostic authorization. It is intentionally absent from the
+    // input schema and defaults to fail-closed nonqualification.
+    SymmetricNitscheEnergyQualificationScope
+        symmetric_nitsche_energy_qualification_scope{
+            SymmetricNitscheEnergyQualificationScope::
+                RejectUnqualified};
     FreeSurfacePhysicalModel free_surface_physical_model{
         FreeSurfacePhysicalModel::OnePhaseLiquidPrescribedExteriorPressure};
 

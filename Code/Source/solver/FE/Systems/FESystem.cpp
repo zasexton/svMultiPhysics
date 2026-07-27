@@ -10015,6 +10015,25 @@ void FESystem::addSystemConstraint(std::unique_ptr<constraints::ISystemConstrain
     bumpConstraintLayoutRevision();
 }
 
+std::vector<constraints::SmallCutAggregationRefreshReport>
+FESystem::completedSmallCutAggregationRefreshReports() const
+{
+    std::vector<constraints::SmallCutAggregationRefreshReport> reports;
+    for (const auto& definition : system_constraint_defs_) {
+        const auto* aggregation =
+            dynamic_cast<
+                const constraints::SmallCutAggregationConstraint*>(
+                definition.get());
+        if (aggregation == nullptr ||
+            !aggregation->completedRefreshReport().has_value()) {
+            continue;
+        }
+        reports.push_back(
+            *aggregation->completedRefreshReport());
+    }
+    return reports;
+}
+
 void FESystem::addOperator(OperatorTag name)
 {
     invalidateSetup();
