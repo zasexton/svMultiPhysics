@@ -1,0 +1,495 @@
+{
+  "schema_version": 1,
+  "matrix_id": "free_surface_wp3_wp7_symmetric_nitsche_prerequisite_v1",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "work_package": "WP-3/WP-7",
+  "findings": [
+    "FSR-16",
+    "FSR-07"
+  ],
+  "qualification_scope": "Finite serial P1 constant-viscosity symmetric-Nitsche and cut-volume-side-cache prerequisite evidence only; this matrix does not close FSR-16, FSR-07, WP-3, WP-7, Q1, or establish a uniform coercivity bound.",
+  "closure_request_policy": {
+    "accepted_claim": "joint_low_level_prerequisite",
+    "rejected_claims": [
+      "fsr16_closure",
+      "fsr07_closure",
+      "wp3_closure",
+      "wp7_closure",
+      "wp3_wp7_joint_closure",
+      "q1_closure"
+    ],
+    "diagnostic": "The finite serial symmetric-Nitsche spectrum omits the full boundary-operator, regime, pressure-stability, topology, convergence, and MPI exits required for closure."
+  },
+  "qualification_disposition": {
+    "fsr16_closed": false,
+    "fsr07_closed": false,
+    "wp3_closed": false,
+    "wp7_closed": false,
+    "q1_closed": false,
+    "uniform_coercivity_bound_established": false
+  },
+  "open_outcomes": {
+    "fsr16": "OPEN",
+    "fsr07": "OPEN",
+    "wp3": "OPEN",
+    "wp7": "OPEN",
+    "q1": "OPEN"
+  },
+  "implementation_source_commit": "f127ce715f5d9042af3fa409d197667bc289e03f",
+  "method_coercivity_lower_bound": null,
+  "uniform_bound_status": "UNFROZEN_NO_BOUND_INVENTED",
+  "matching_derivation": "Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method.md",
+  "model_envelope": "one_phase_unfitted_p1_velocity_block_with_constant_viscosity_symmetric_nitsche_generated_active_boundary_and_small_cut_aggregation",
+  "parent_artifacts": [
+    {
+      "path": "Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method.md",
+      "sha256": "abc782ef828b3fd3996257f5544f85221d9c6d047b1cf730848ac93b695c6ead"
+    },
+    {
+      "path": "tests/cases/fluid/free_surface_wp3_sharp_boundary_qualification_matrix_v2.json",
+      "sha256": "72cffdc330f07b386fdb89681bcd3da83b7f884c5bd1d09f49eef3f6ae79d883"
+    },
+    {
+      "path": "tests/cases/fluid/run_free_surface_wp3_sharp_boundary_qualification_v2.py",
+      "sha256": "634a003c8cde429756787771bd4c870ee453a372b95d704fb98e2e10b99876e0"
+    },
+    {
+      "path": "tests/cases/fluid/free_surface_wp7_cut_stability_qualification_matrix.json",
+      "sha256": "a49cadbcbe1b56bf69e4520a5281fc942ac4dc9de82da4e3bdaa083d6334ab1f"
+    },
+    {
+      "path": "tests/cases/fluid/run_free_surface_wp7_cut_stability_qualification.py",
+      "sha256": "30c59eb725ba88b87447b935a915c6561b9ae25f082d93052d5cb9be4e337f6f"
+    },
+    {
+      "path": "Documentation/free_surface_wp7_combined_p1_method.md",
+      "sha256": "85ba3d61f50b67a4d719efff6b760323fbe3fcd3124b06e28b67ee6230ca1ff9"
+    },
+    {
+      "path": "tests/cases/fluid/run_free_surface_wp2_geometry_qualification.py",
+      "sha256": "5aea557b1bd3123116bbf034f39c0dd5f914f66286df65dd2250ec9bd906561f"
+    }
+  ],
+  "implementation_sources": [
+    {
+      "path": "Code/Source/solver/FE/Forms/FormKernels.cpp",
+      "sha256": "5d725f97b91ddddda6dbcc191b620e90e0f4af816be32ad89a43cf2cb4b7ff42"
+    },
+    {
+      "path": "Code/Source/solver/FE/Tests/Unit/Forms/test_CutCellForms.cpp",
+      "sha256": "8e4c050ea0a2d53a2e2b8e17fa9aa07abf8e0d81875a7d6c39272dfb62aefc78"
+    },
+    {
+      "path": "Code/Source/solver/FE/Constraints/SmallCutAggregationConstraint.cpp",
+      "sha256": "cac351bfa4f9c19f7270ed186513858506b82dd7503f1280ea52b52e6423f3f6"
+    },
+    {
+      "path": "Code/Source/solver/FE/Constraints/SmallCutAggregationConstraint.h",
+      "sha256": "3b728e30324815bda8a7f36ece8ed211dd1b8c1bb2321cb85a22fb35bb69389c"
+    },
+    {
+      "path": "Code/Source/solver/FE/Systems/FESystem.cpp",
+      "sha256": "12d3ae9854cd7d538fbda28873220d525260a1649c7a2b686dbec93a0b3d8eea"
+    },
+    {
+      "path": "Code/Source/solver/FE/Systems/FESystem.h",
+      "sha256": "f9773065b84fe1dafaae7908bde453c4df43246eb64853ce01b5cf1dc5d0d9a2"
+    },
+    {
+      "path": "Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp",
+      "sha256": "81ae095b5e80075a08febcd4513a44025d83f01601b435fda816659bda136684"
+    },
+    {
+      "path": "Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h",
+      "sha256": "64a239b57dbd9d9de1213baa9673d80a38e347d17f2f69edb5a27c5579d2792e"
+    },
+    {
+      "path": "Code/Source/solver/Physics/Formulations/NavierStokes/NavierStokesBCFactories.h",
+      "sha256": "934ecc235f0e1bc86ea1e8e0faea22dbe6153983131057b46c340b2b398e1919"
+    },
+    {
+      "path": "Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp",
+      "sha256": "20b1658df29367910ccaf956ab3f7b3897a729c57ece61c3308f30bc66293a93"
+    },
+    {
+      "path": "Code/Source/solver/Physics/Tests/Unit/test_NavierStokesPressureGauge.cpp",
+      "sha256": "f0b59029512c186bf56ada6f125aecc8ac2d7eb71bca0de78ba21ef995e822df"
+    }
+  ],
+  "native_fixture_contract": {
+    "space": "tetrahedral_p1_velocity_with_three_components",
+    "parent_mesh": "five_cubes_split_into_thirty_tetrahedra",
+    "sharp_wall_parent_face_count": 1,
+    "sharp_wall_parent_face_shape": "triangle",
+    "strong_velocity_anchor_present": true,
+    "constant_viscosity_required": true,
+    "diagnostic_scope": "JointLowLevelPrerequisite",
+    "diagnostic_operator_count": 4,
+    "diagnostic_operators": [
+      "bulk_viscous",
+      "bulk_plus_consistency",
+      "symmetric_operator",
+      "energy_norm"
+    ],
+    "dry_boundary_contract": "bit_exact_matrix_equality_with_nonzero_spd_anchored_bulk",
+    "generated_boundary_contract": "zero_ordinary_boundary_terms_and_three_boundary_bearing_operators_on_the_selected_registered_generated_marker",
+    "cache_contract": "symbolic_tangent_key_separates_positive_and_negative_cut_volume_sides"
+  },
+  "case_axes": {
+    "wall_fractions": [
+      0.0,
+      1e-08,
+      1e-06,
+      0.0001,
+      0.01,
+      0.1,
+      0.25,
+      0.49,
+      1.0
+    ],
+    "orientations": [
+      "axis",
+      "oblique"
+    ],
+    "affine_mesh_scales": [
+      0.5,
+      0.3333333333333333,
+      0.25
+    ],
+    "active_sides": [
+      "negative",
+      "positive"
+    ],
+    "case_count": 108
+  },
+  "aggregation_guard_contract": {
+    "production_default_maximum_root_path_length": 8,
+    "qualified_maximum_root_path_length": 12,
+    "expected_maximum_observed_root_path": 9,
+    "default_limit_rejection_required": true,
+    "maximum_reference_extrapolation_distance": 4.0,
+    "maximum_absolute_coefficient": 16.0,
+    "maximum_row_l1_norm": 32.0,
+    "guard_rejections_in_accepted_sweep": 0
+  },
+  "method_limitations": [
+    "The generalized eigenvalues are finite samples from a serial P1 velocity block and are not a theorem or frozen method-wide lower bound.",
+    "Pressure, transient, convection, mixed inf-sup behavior, production preconditioning, and MPI repartitioning are outside this child matrix.",
+    "Only symmetric weak velocity enforcement is sampled; unsymmetric Nitsche, traction, Robin, outflow, pressure flux, wall slip, and every other supported sharp operator remain owned by the parent WP-3 matrix.",
+    "Connected and disconnected topology transitions, continuous node crossing, manufactured error rates, and simulation exits remain owned by WP-7.",
+    "The explicit root-path limit of twelve is fixture-specific; the production default of eight remains unchanged and its rejection is required evidence."
+  ],
+  "unresolved_required_evidence": [
+    "all_supported_sharp_boundary_operator_joint_scaling",
+    "unsymmetric_nitsche_joint_scaling",
+    "mixed_velocity_pressure_stability",
+    "viscous_transient_and_advection_regimes",
+    "mpi_ranks_two_and_four_or_more",
+    "cut_relative_reference_conditioning_and_expected_h_scaling",
+    "manufactured_velocity_pressure_and_divergence_error_rates",
+    "connected_disconnected_and_node_crossing_exits",
+    "production_preconditioner_and_iteration_spread",
+    "uniform_method_coercivity_bound"
+  ],
+  "build_targets": {
+    "geometry": "test_fe_forms",
+    "level_set": "test_fe_levelset",
+    "systems": "test_fe_systems",
+    "assembly": "test_fe_assembly",
+    "physics": "test_physics",
+    "application": "test_application",
+    "assembly_mpi": "test_fe_assembly_mpi",
+    "application_mpi": "test_application_mpi"
+  },
+  "build_cmake_homes": {
+    "geometry": "Code/Source/solver/FE",
+    "level_set": "Code/Source/solver/FE",
+    "systems": "Code/Source/solver/FE",
+    "assembly": "Code/Source/solver/FE",
+    "physics": "Code/Source/solver/Physics",
+    "application": "Code",
+    "assembly_mpi": "Code/Source/solver/FE",
+    "application_mpi": "Code"
+  },
+  "groups": [
+    {
+      "id": "cut_volume_side_cache_serial",
+      "binary": "geometry",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "CutCellForms.SymbolicTangentPreservesCutVolumeMeasure",
+        "CutCellForms.SymbolicTangentCacheSeparatesCutVolumeSides"
+      ],
+      "execution": {
+        "wall_time_seconds": 300,
+        "memory_mib": 2048,
+        "output_mib": 64
+      }
+    },
+    {
+      "id": "symmetric_nitsche_prerequisite_serial",
+      "binary": "physics",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "NavierStokesPressureGauge.PublishesVariableDynamicViscosityFromResidualExpression",
+        "NavierStokesPressureGauge.RejectsEnergyDiagnosticWithoutExplicitPrerequisiteScopeBeforeSystemMutation",
+        "NavierStokesPressureGauge.RejectsVariableViscosityEnergyDiagnosticBeforeSystemMutation",
+        "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation"
+      ],
+      "execution": {
+        "wall_time_seconds": 3600,
+        "memory_mib": 8192,
+        "output_mib": 512
+      }
+    }
+  ],
+  "quantitative_evidence": [
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 108
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_positive_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 96
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_dry_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 12
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_dry_exact_zero_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 12
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_diagnostic_operator_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 4
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_diagnostic_structure_verified_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 108
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_generated_active_boundary_marker_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 2
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_aggregation_exercised_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 108
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_root_path_length",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 12
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_default_maximum_root_path_length",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 8
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_default_root_path_guard_rejection_verified",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_observed_root_path",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 9
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_root_path_guard_rejections",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_observed_reference_extrapolation",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 4.0
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_extrapolation_guard_rejections",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_observed_absolute_coefficient",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 16.0
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_observed_row_l1_norm",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 32.0
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_line_guard_rejections",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_fraction_absolute_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 2e-11
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_operator_reconstruction_error",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-11
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_dry_consistency_boundary_norm",
+      "type": "real",
+      "relation": "equal",
+      "threshold": 0.0
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_dry_penalty_boundary_norm",
+      "type": "real",
+      "relation": "equal",
+      "threshold": 0.0
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_dry_symmetric_boundary_norm",
+      "type": "real",
+      "relation": "equal",
+      "threshold": 0.0
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_operator_skew",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-11
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_energy_skew",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-11
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_minimum_sampled_margin",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0.0
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_minimum_sampled_eigenvalue",
+      "type": "real",
+      "relation": "greater_than",
+      "threshold": 0.0
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_active_side_operator_difference",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_active_side_energy_difference",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_active_side_eigenvalue_difference",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    },
+    {
+      "test": "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation",
+      "property": "wp3_wp7_nitsche_maximum_affine_scale_eigenvalue_spread",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 1e-10
+    }
+  ],
+  "gates": {
+    "expected_group_count": 2,
+    "expected_distinct_test_count": 6,
+    "expected_quantitative_evidence_count": 31,
+    "expected_failures": 0,
+    "expected_errors": 0,
+    "expected_disabled": 0,
+    "expected_skipped": 0
+  },
+  "closure_contract": [
+    {
+      "claim": "cut_volume_side_cache_separation_prerequisite",
+      "evidence": [
+        "CutCellForms.SymbolicTangentPreservesCutVolumeMeasure",
+        "CutCellForms.SymbolicTangentCacheSeparatesCutVolumeSides"
+      ]
+    },
+    {
+      "claim": "finite_serial_symmetric_nitsche_prerequisite",
+      "evidence": [
+        "NavierStokesPressureGauge.PublishesVariableDynamicViscosityFromResidualExpression",
+        "NavierStokesPressureGauge.RejectsEnergyDiagnosticWithoutExplicitPrerequisiteScopeBeforeSystemMutation",
+        "NavierStokesPressureGauge.RejectsVariableViscosityEnergyDiagnosticBeforeSystemMutation",
+        "FreeSurfaceCutStability.SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation"
+      ]
+    }
+  ],
+  "prospective_tests": []
+}
