@@ -15738,7 +15738,7 @@ namespace {
 // Symbolic tangent caching (per-process, in-memory)
 // ============================================================================
 
-inline constexpr std::uint32_t kSymbolicTangentCacheVersion = 4u;
+inline constexpr std::uint32_t kSymbolicTangentCacheVersion = 5u;
 inline constexpr std::size_t kSymbolicTangentCacheMaxEntries = 128u;
 
 [[nodiscard]] std::uint64_t fnv1aInit64() noexcept
@@ -15920,6 +15920,10 @@ using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
         hashTag64(h, 0x25ULL);
         hashPod64(h, static_cast<std::int32_t>(*v));
     }
+    if (const auto v = node.cutVolumeSide(); v.has_value()) {
+        hashTag64(h, 0x26ULL);
+        hashPod64(h, static_cast<std::uint8_t>(*v));
+    }
 
     const auto kids = node.childrenShared();
     hashTag64(h, 0x30ULL);
@@ -16000,6 +16004,8 @@ using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
         hashPod64(h, static_cast<std::uint8_t>(term.domain));
         hashPod64(h, static_cast<std::int32_t>(term.boundary_marker));
         hashPod64(h, static_cast<std::int32_t>(term.interface_marker));
+        hashPod64(
+            h, static_cast<std::uint8_t>(term.cut_volume_side));
         hashPod64(h, static_cast<std::int32_t>(term.time_derivative_order));
 
         const auto* root = term.integrand.node();

@@ -1452,6 +1452,44 @@ TEST(CutCellForms, SymbolicTangentPreservesCutVolumeMeasure)
     }
 }
 
+TEST(CutCellForms, SymbolicTangentCacheSeparatesCutVolumeSides)
+{
+    constexpr int marker = 74;
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/1);
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto nonlinear_integrand = (u * u + Real(0.25) * u) * v;
+
+    FormCompiler compiler;
+    auto negative_ir = compiler.compileResidual(
+        nonlinear_integrand.dCutVolume(marker, CutVolumeSide::Negative));
+    SymbolicNonlinearFormKernel negative_kernel(
+        std::move(negative_ir), NonlinearKernelOutput::Both);
+    ASSERT_NO_THROW(negative_kernel.resolveInlinableConstitutives());
+
+    const auto& negative_tangent = negative_kernel.tangentIR();
+    ASSERT_FALSE(negative_tangent.terms().empty());
+    for (const auto& term : negative_tangent.terms()) {
+        EXPECT_EQ(term.domain, IntegralDomain::CutVolume);
+        EXPECT_EQ(term.interface_marker, marker);
+        EXPECT_EQ(term.cut_volume_side, CutVolumeSide::Negative);
+    }
+
+    auto positive_ir = compiler.compileResidual(
+        nonlinear_integrand.dCutVolume(marker, CutVolumeSide::Positive));
+    SymbolicNonlinearFormKernel positive_kernel(
+        std::move(positive_ir), NonlinearKernelOutput::Both);
+    ASSERT_NO_THROW(positive_kernel.resolveInlinableConstitutives());
+
+    const auto& positive_tangent = positive_kernel.tangentIR();
+    ASSERT_FALSE(positive_tangent.terms().empty());
+    for (const auto& term : positive_tangent.terms()) {
+        EXPECT_EQ(term.domain, IntegralDomain::CutVolume);
+        EXPECT_EQ(term.interface_marker, marker);
+        EXPECT_EQ(term.cut_volume_side, CutVolumeSide::Positive);
+    }
+}
+
 TEST(CutCellForms, HighOrderCutVolumeTangentMatchesFixedGeometryFiniteDifference)
 {
     constexpr int marker = 81;
