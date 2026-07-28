@@ -60,6 +60,45 @@ struct DenseSymmetricEigenvalueBounds {
     bool converged{false};
 };
 
+/**
+ * Diagnostics for a symmetric positive-semidefinite generalized eigenproblem
+ *
+ * The finite eigenvalues of
+ *
+ *     numerator * x = lambda * denominator * x
+ *
+ * are evaluated on a Gershgorin-certified positive spectral subspace of
+ * `denominator`.  A null mode is accepted only when it is structurally zero
+ * after diagonalization and `numerator` annihilates its computed basis vector
+ * exactly in the long-double accumulator.  Ambiguous modes fail closed.  The
+ * reported compatibility tolerance is diagnostic only.
+ *
+ * `conservative_upper_bound` is an outward-rounded Gershgorin bound of the
+ * computed quotient with floating-point padding.  Callers that need the
+ * padded coefficient should not use the raw Jacobi diagonal estimate.
+ */
+struct DensePsdGeneralizedEigenvalueBound {
+    std::size_t dimension{0};
+    std::size_t positive_rank{0};
+    std::size_t nullity{0};
+    Real denominator_scale{0};
+    Real numerator_scale{0};
+    Real denominator_eigenvalue_tolerance{0};
+    Real nullspace_compatibility_tolerance{0};
+    Real maximum_nullspace_residual{0};
+    Real smallest_positive_denominator_eigenvalue{0};
+    Real largest_denominator_eigenvalue{0};
+    Real smallest_quotient_eigenvalue{0};
+    Real largest_quotient_eigenvalue{0};
+    Real conservative_upper_bound{0};
+    Real quotient_maximum_off_diagonal{0};
+    Real quotient_tolerance{0};
+    std::size_t denominator_sweeps{0};
+    std::size_t quotient_sweeps{0};
+    bool denominator_converged{false};
+    bool quotient_converged{false};
+};
+
 struct DenseInverseResult {
     std::vector<Real> inverse;
     DenseMatrixDiagnostics diagnostics;
@@ -100,6 +139,22 @@ dense_symmetric_eigenvalue_bounds(
     std::span<const Real> matrix,
     std::size_t n,
     std::string_view label = "dense symmetric matrix");
+
+/**
+ * Compute a finite upper generalized-eigenvalue bound for a PSD pencil.
+ *
+ * This backend-independent path is intended for small certification
+ * problems with a compatible physical nullspace (for example rigid modes in
+ * a symmetric-gradient energy).  It rejects indefinite or unresolved
+ * matrices, inputs that are not exactly symmetric, and any computed numerator
+ * action on the denominator nullspace.
+ */
+[[nodiscard]] DensePsdGeneralizedEigenvalueBound
+dense_psd_generalized_eigenvalue_bound(
+    std::span<const Real> numerator,
+    std::span<const Real> denominator,
+    std::size_t n,
+    std::string_view label = "dense PSD generalized eigenproblem");
 
 [[nodiscard]] DenseLUSolver factor_dense_matrix(std::vector<Real> matrix,
                                                 std::size_t n,

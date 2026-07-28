@@ -9,6 +9,7 @@
 #include "FE/Math/DenseLinearAlgebra.h"
 
 #include <cmath>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -226,6 +227,381 @@ TEST(DenseLinearAlgebra, SymmetricEigenvalueBoundsRejectAsymmetricInput) {
     EXPECT_THROW(
         (void)dense_symmetric_eigenvalue_bounds(
             matrix, 2u, "asymmetric matrix"),
+        FEException);
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundHandlesCompatibleNullspace) {
+    const std::vector<Real> denominator{
+        Real(4), Real(0), Real(0),
+        Real(0), Real(1), Real(0),
+        Real(0), Real(0), Real(0),
+    };
+    const std::vector<Real> numerator{
+        Real(8), Real(0), Real(0),
+        Real(0), Real(3), Real(0),
+        Real(0), Real(0), Real(0),
+    };
+
+    const auto bound = dense_psd_generalized_eigenvalue_bound(
+        numerator, denominator, 3u, "compatible singular pencil");
+    EXPECT_TRUE(bound.denominator_converged);
+    EXPECT_TRUE(bound.quotient_converged);
+    EXPECT_EQ(bound.dimension, 3u);
+    EXPECT_EQ(bound.positive_rank, 2u);
+    EXPECT_EQ(bound.nullity, 1u);
+    EXPECT_NEAR(
+        bound.smallest_quotient_eigenvalue, Real(2), Real(1.0e-11));
+    EXPECT_NEAR(
+        bound.largest_quotient_eigenvalue, Real(3), Real(1.0e-11));
+    EXPECT_GE(
+        bound.conservative_upper_bound,
+        bound.largest_quotient_eigenvalue);
+    EXPECT_NEAR(
+        bound.conservative_upper_bound, Real(3), Real(1.0e-10));
+    EXPECT_LE(
+        bound.maximum_nullspace_residual,
+        bound.nullspace_compatibility_tolerance);
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundHandlesRotatedNullspace) {
+    const std::vector<Real> denominator{
+        Real(1), Real(1),
+        Real(1), Real(1),
+    };
+    const std::vector<Real> numerator{
+        Real(3), Real(3),
+        Real(3), Real(3),
+    };
+
+    const auto bound = dense_psd_generalized_eigenvalue_bound(
+        numerator, denominator, 2u, "rotated rank-one pencil");
+    EXPECT_EQ(bound.positive_rank, 1u);
+    EXPECT_EQ(bound.nullity, 1u);
+    EXPECT_NEAR(
+        bound.largest_quotient_eigenvalue, Real(3), Real(1.0e-11));
+    EXPECT_GE(
+        bound.conservative_upper_bound,
+        bound.largest_quotient_eigenvalue);
+    EXPECT_NEAR(
+        bound.conservative_upper_bound, Real(3), Real(1.0e-10));
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundHandlesNoncommutingQuotient) {
+    const std::vector<Real> denominator{
+        Real(4), Real(0), Real(0), Real(0),
+        Real(0), Real(1), Real(0), Real(0),
+        Real(0), Real(0), Real(0), Real(0),
+        Real(0), Real(0), Real(0), Real(0),
+    };
+    const std::vector<Real> numerator{
+        Real(8), Real(1), Real(0), Real(0),
+        Real(1), Real(3), Real(0), Real(0),
+        Real(0), Real(0), Real(0), Real(0),
+        Real(0), Real(0), Real(0), Real(0),
+    };
+
+    const auto bound = dense_psd_generalized_eigenvalue_bound(
+        numerator,
+        denominator,
+        4u,
+        "noncommuting singular pencil");
+    const Real expected_largest =
+        (Real(5) + std::sqrt(Real(2))) / Real(2);
+    EXPECT_EQ(bound.positive_rank, 2u);
+    EXPECT_EQ(bound.nullity, 2u);
+    EXPECT_NEAR(
+        bound.largest_quotient_eigenvalue,
+        expected_largest,
+        Real(1.0e-10));
+    EXPECT_GE(
+        bound.conservative_upper_bound,
+        bound.largest_quotient_eigenvalue);
+    EXPECT_NEAR(
+        bound.conservative_upper_bound,
+        Real(3.5),
+        Real(1.0e-9));
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundIsCommonScaleInvariant) {
+    const std::vector<Real> base_denominator{
+        Real(4), Real(0), Real(0),
+        Real(0), Real(1), Real(0),
+        Real(0), Real(0), Real(0),
+    };
+    const std::vector<Real> base_numerator{
+        Real(8), Real(0), Real(0),
+        Real(0), Real(3), Real(0),
+        Real(0), Real(0), Real(0),
+    };
+
+    for (const Real scale : {Real(1.0e-120), Real(1.0e120)}) {
+        auto denominator = base_denominator;
+        auto numerator = base_numerator;
+        for (auto& value : denominator) {
+            value *= scale;
+        }
+        for (auto& value : numerator) {
+            value *= scale;
+        }
+        const auto bound = dense_psd_generalized_eigenvalue_bound(
+            numerator, denominator, 3u, "commonly scaled pencil");
+        EXPECT_EQ(bound.positive_rank, 2u);
+        EXPECT_EQ(bound.nullity, 1u);
+        EXPECT_NEAR(
+            bound.largest_quotient_eigenvalue, Real(3), Real(1.0e-10));
+        EXPECT_NEAR(
+            bound.conservative_upper_bound, Real(3), Real(1.0e-9));
+    }
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundHasInverseLengthScaling) {
+    const std::vector<Real> denominator{
+        Real(16), Real(0), Real(0),
+        Real(0), Real(4), Real(0),
+        Real(0), Real(0), Real(0),
+    };
+    const std::vector<Real> numerator{
+        Real(8), Real(0), Real(0),
+        Real(0), Real(3), Real(0),
+        Real(0), Real(0), Real(0),
+    };
+
+    const auto bound = dense_psd_generalized_eigenvalue_bound(
+        numerator, denominator, 3u, "length-scaled pencil");
+    EXPECT_NEAR(
+        bound.largest_quotient_eigenvalue, Real(0.75), Real(1.0e-11));
+    EXPECT_NEAR(
+        bound.conservative_upper_bound, Real(0.75), Real(1.0e-10));
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundAcceptsZeroPencil) {
+    const std::vector<Real> zero(9u, Real(0));
+    const auto bound = dense_psd_generalized_eigenvalue_bound(
+        zero, zero, 3u, "zero pencil");
+    EXPECT_EQ(bound.positive_rank, 0u);
+    EXPECT_EQ(bound.nullity, 3u);
+    EXPECT_TRUE(bound.denominator_converged);
+    EXPECT_TRUE(bound.quotient_converged);
+    EXPECT_EQ(bound.conservative_upper_bound, Real(0));
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundRejectsIncompatibleNullspace) {
+    const std::vector<Real> denominator{
+        Real(1), Real(0),
+        Real(0), Real(0),
+    };
+    const std::vector<Real> numerator{
+        Real(1), Real(0),
+        Real(0), Real(1),
+    };
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound(
+            numerator, denominator, 2u, "incompatible pencil"),
+        FEException);
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundChecksFullNullspaceResidual) {
+    const std::vector<Real> denominator{
+        Real(1), Real(0),
+        Real(0), Real(0),
+    };
+    const std::vector<Real> numerator{
+        Real(1), Real(1),
+        Real(1), Real(0),
+    };
+
+    // The scalar nullspace quadratic form is zero, but N*q0 is not.  A
+    // compatibility check that only inspected q0^T*N*q0 would miss this.
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound(
+            numerator, denominator, 2u, "cross-nullspace pencil"),
+        FEException);
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundRejectsSmallNullspaceAction) {
+    const std::vector<Real> denominator{
+        Real(1), Real(0),
+        Real(0), Real(0),
+    };
+    const std::vector<Real> numerator{
+        Real(1), Real(0),
+        Real(0), Real(1.0e-14),
+    };
+
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound(
+            numerator,
+            denominator,
+            2u,
+            "small incompatible nullspace action"),
+        FEException);
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundRetainsTinyPositiveMode) {
+    const std::vector<Real> denominator{
+        Real(1), Real(0),
+        Real(0), Real(1.0e-300),
+    };
+    const std::vector<Real> numerator{
+        Real(1), Real(0),
+        Real(0), Real(1.0e-14),
+    };
+
+    const auto bound = dense_psd_generalized_eigenvalue_bound(
+        numerator, denominator, 2u, "tiny positive denominator mode");
+    const Real analytic_quotient =
+        numerator[3] / denominator[3];
+    EXPECT_EQ(bound.positive_rank, 2u);
+    EXPECT_EQ(bound.nullity, 0u);
+    EXPECT_GE(bound.conservative_upper_bound, analytic_quotient);
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundRecomputesRotatedDenominator) {
+    const Real quarter_above =
+        std::nextafter(
+            Real(0.25), std::numeric_limits<Real>::infinity());
+    const std::vector<Real> denominator{
+        Real(1), Real(0.5),
+        Real(0.5), quarter_above,
+    };
+    const std::vector<Real> numerator{
+        Real(1), Real(0),
+        Real(0), Real(1),
+    };
+
+    const auto bound = dense_psd_generalized_eigenvalue_bound(
+        numerator,
+        denominator,
+        2u,
+        "rounded Jacobi rotation");
+    const long double determinant =
+        static_cast<long double>(denominator[0]) *
+            static_cast<long double>(denominator[3]) -
+        static_cast<long double>(denominator[1]) *
+            static_cast<long double>(denominator[2]);
+    const long double trace =
+        static_cast<long double>(denominator[0]) +
+        static_cast<long double>(denominator[3]);
+    const long double difference =
+        static_cast<long double>(denominator[0]) -
+        static_cast<long double>(denominator[3]);
+    const long double largest_denominator_eigenvalue =
+        (trace +
+         std::hypot(
+             difference,
+             2.0L *
+                 static_cast<long double>(denominator[1]))) /
+        2.0L;
+    const long double analytic_quotient =
+        largest_denominator_eigenvalue / determinant;
+    EXPECT_GE(
+        static_cast<long double>(bound.conservative_upper_bound),
+        analytic_quotient);
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundUsesWideNormalization) {
+    const Real below_three =
+        std::nextafter(
+            std::nextafter(Real(3), Real(0)),
+            Real(0));
+    const std::vector<Real> denominator{
+        Real(3), below_three,
+        below_three, Real(3),
+    };
+    const std::vector<Real> numerator{
+        Real(1), Real(0),
+        Real(0), Real(1),
+    };
+
+    const auto bound = dense_psd_generalized_eigenvalue_bound(
+        numerator,
+        denominator,
+        2u,
+        "wide denominator normalization");
+    const long double analytic_quotient =
+        1.0L /
+        (static_cast<long double>(denominator[0]) -
+         static_cast<long double>(denominator[1]));
+    EXPECT_GE(
+        static_cast<long double>(bound.conservative_upper_bound),
+        analytic_quotient);
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundRoundsTinyOutputUp) {
+    const std::vector<Real> denominator{
+        std::numeric_limits<Real>::max(),
+    };
+    const std::vector<Real> numerator{
+        std::numeric_limits<Real>::denorm_min(),
+    };
+
+    const auto bound = dense_psd_generalized_eigenvalue_bound(
+        numerator, denominator, 1u, "subnormal generalized bound");
+    const long double analytic_quotient =
+        static_cast<long double>(numerator.front()) /
+        static_cast<long double>(denominator.front());
+    EXPECT_EQ(
+        bound.conservative_upper_bound,
+        std::numeric_limits<Real>::denorm_min());
+    EXPECT_GE(
+        static_cast<long double>(bound.conservative_upper_bound),
+        analytic_quotient);
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundRejectsIndefiniteInputs) {
+    const std::vector<Real> identity{
+        Real(1), Real(0),
+        Real(0), Real(1),
+    };
+    const std::vector<Real> indefinite{
+        Real(1), Real(0),
+        Real(0), Real(-0.25),
+    };
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound(
+            identity, indefinite, 2u, "indefinite denominator"),
+        FEException);
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound(
+            indefinite, identity, 2u, "indefinite numerator"),
+        FEException);
+
+    const std::vector<Real> tiny_negative{
+        Real(1), Real(0),
+        Real(0), Real(-1.0e-20),
+    };
+    const std::vector<Real> compatible_numerator{
+        Real(1), Real(0),
+        Real(0), Real(0),
+    };
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound(
+            compatible_numerator,
+            tiny_negative,
+            2u,
+            "tiny indefinite denominator"),
+        FEException);
+}
+
+TEST(DenseLinearAlgebra, PsdGeneralizedBoundRejectsInvalidEntries) {
+    const std::vector<Real> identity{
+        Real(1), Real(0),
+        Real(0), Real(1),
+    };
+    const std::vector<Real> asymmetric{
+        Real(1), Real(0.1),
+        Real(0), Real(1),
+    };
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound(
+            asymmetric, identity, 2u, "asymmetric numerator"),
+        FEException);
+
+    auto nonfinite = identity;
+    nonfinite[0] = std::numeric_limits<Real>::quiet_NaN();
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound(
+            identity, nonfinite, 2u, "nonfinite denominator"),
         FEException);
 }
 

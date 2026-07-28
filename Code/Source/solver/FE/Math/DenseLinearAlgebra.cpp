@@ -31,6 +31,242 @@ namespace {
 
 constexpr std::size_t kDenseSolveRhsBlock = 32u;
 
+struct SymmetricJacobiDecomposition {
+    std::vector<Real> diagonalized{};
+    std::vector<Real> eigenvectors{};
+    Real tolerance{0};
+    Real maximum_off_diagonal{0};
+    std::size_t sweeps{0};
+    bool converged{false};
+};
+
+[[nodiscard]] Real normalized_relative_tolerance(
+    std::size_t n,
+    Real multiplier) noexcept
+{
+    return multiplier * std::numeric_limits<Real>::epsilon() *
+           static_cast<Real>(std::max<std::size_t>(n, 1u));
+}
+
+[[nodiscard]] Real round_nonnegative_up(
+    long double value,
+    std::string_view label)
+{
+    DENSE_LINALG_CHECK(
+        value >= 0.0L &&
+            value <=
+                static_cast<long double>(
+                    std::numeric_limits<Real>::max()) &&
+            std::isfinite(value),
+        std::string(label) +
+            ": nonnegative value is outside the representable range");
+    if (value == 0.0L) {
+        return Real(0);
+    }
+
+    Real rounded = static_cast<Real>(value);
+    if (static_cast<long double>(rounded) < value) {
+        rounded = std::nextafter(
+            rounded, std::numeric_limits<Real>::infinity());
+    }
+    DENSE_LINALG_CHECK(
+        rounded > Real(0) && std::isfinite(rounded) &&
+            static_cast<long double>(rounded) >= value,
+        std::string(label) +
+            ": nonnegative value cannot be rounded upward safely");
+    return rounded;
+}
+
+[[nodiscard]] Real round_positive_down(
+    long double value,
+    std::string_view label)
+{
+    DENSE_LINALG_CHECK(
+        value > 0.0L && std::isfinite(value),
+        std::string(label) +
+            ": positive value is not finite");
+    Real rounded = static_cast<Real>(value);
+    if (static_cast<long double>(rounded) > value) {
+        rounded = std::nextafter(rounded, Real(0));
+    }
+    DENSE_LINALG_CHECK(
+        rounded > Real(0) && std::isfinite(rounded) &&
+            static_cast<long double>(rounded) <= value,
+        std::string(label) +
+            ": positive value is below the representable range");
+    return rounded;
+}
+
+[[nodiscard]] std::vector<long double> right_multiply_basis(
+    std::span<const long double> matrix,
+    std::span<const Real> basis,
+    std::size_t n)
+{
+    DENSE_LINALG_CHECK(
+        matrix.size() == n * n && basis.size() == n * n,
+        "dense basis multiplication size mismatch");
+    std::vector<long double> product(n * n, 0.0L);
+    for (std::size_t row = 0; row < n; ++row) {
+        for (std::size_t basis_column = 0;
+             basis_column < n;
+             ++basis_column) {
+            long double value = 0.0L;
+            for (std::size_t column = 0; column < n; ++column) {
+                value +=
+                    matrix[row * n + column] *
+                    static_cast<long double>(
+                        basis[column * n + basis_column]);
+            }
+            product[row * n + basis_column] = value;
+        }
+    }
+    return product;
+}
+
+[[nodiscard]] std::vector<Real> validated_symmetric_copy(
+    std::span<const Real> matrix,
+    std::size_t n,
+    Real tolerance,
+    std::string_view label)
+{
+    DENSE_LINALG_CHECK(
+        matrix.size() == n * n,
+        std::string(label) + ": symmetric matrix size mismatch");
+    DENSE_LINALG_CHECK(
+        n > 0,
+        std::string(label) + ": symmetric matrix must be nonempty");
+
+    Real maximum_skew = Real(0);
+    std::vector<Real> work(matrix.begin(), matrix.end());
+    for (std::size_t row = 0; row < n; ++row) {
+        DENSE_LINALG_CHECK(
+            std::isfinite(work[row * n + row]),
+            std::string(label) + ": nonfinite diagonal entry");
+        for (std::size_t column = row + 1u; column < n; ++column) {
+            const Real upper = work[row * n + column];
+            const Real lower = work[column * n + row];
+            DENSE_LINALG_CHECK(
+                std::isfinite(upper) && std::isfinite(lower),
+                std::string(label) + ": nonfinite off-diagonal entry");
+            maximum_skew =
+                std::max(maximum_skew, std::abs(upper - lower));
+            const Real average = Real(0.5) * (upper + lower);
+            work[row * n + column] = average;
+            work[column * n + row] = average;
+        }
+    }
+    DENSE_LINALG_CHECK(
+        maximum_skew <= Real(4) * tolerance,
+        std::string(label) + ": matrix is not numerically symmetric");
+    return work;
+}
+
+[[nodiscard]] SymmetricJacobiDecomposition diagonalize_symmetric(
+    std::vector<Real> work,
+    std::size_t n,
+    Real tolerance,
+    std::string_view label)
+{
+    DENSE_LINALG_CHECK(
+        work.size() == n * n,
+        std::string(label) + ": Jacobi matrix size mismatch");
+    DENSE_LINALG_CHECK(
+        n > 0,
+        std::string(label) + ": Jacobi matrix must be nonempty");
+    DENSE_LINALG_CHECK(
+        std::isfinite(tolerance) && tolerance >= Real(0),
+        std::string(label) + ": invalid Jacobi tolerance");
+
+    SymmetricJacobiDecomposition result;
+    result.tolerance = tolerance;
+    result.eigenvectors.assign(n * n, Real(0));
+    for (std::size_t diagonal = 0; diagonal < n; ++diagonal) {
+        result.eigenvectors[diagonal * n + diagonal] = Real(1);
+    }
+
+    const std::size_t maximum_sweeps =
+        std::max<std::size_t>(16u, 12u * n * n);
+    for (std::size_t sweep = 0; sweep < maximum_sweeps; ++sweep) {
+        Real maximum_off_diagonal = Real(0);
+        for (std::size_t p = 0; p < n; ++p) {
+            for (std::size_t q = p + 1u; q < n; ++q) {
+                maximum_off_diagonal = std::max(
+                    maximum_off_diagonal,
+                    std::abs(work[p * n + q]));
+            }
+        }
+        result.maximum_off_diagonal = maximum_off_diagonal;
+        result.sweeps = sweep;
+        if (maximum_off_diagonal <= tolerance) {
+            result.converged = true;
+            break;
+        }
+
+        for (std::size_t p = 0; p < n; ++p) {
+            for (std::size_t q = p + 1u; q < n; ++q) {
+                const Real off_diagonal = work[p * n + q];
+                if (std::abs(off_diagonal) <= tolerance) {
+                    continue;
+                }
+                const Real diagonal_p = work[p * n + p];
+                const Real diagonal_q = work[q * n + q];
+                const long double tau =
+                    (static_cast<long double>(diagonal_q) -
+                     static_cast<long double>(diagonal_p)) /
+                    (2.0L * static_cast<long double>(off_diagonal));
+                const long double tangent_long = std::copysign(
+                    1.0L /
+                        (std::abs(tau) + std::hypot(1.0L, tau)),
+                    tau);
+                const Real tangent =
+                    static_cast<Real>(tangent_long);
+                const Real cosine =
+                    Real(1) / std::hypot(Real(1), tangent);
+                const Real sine = tangent * cosine;
+
+                work[p * n + p] =
+                    diagonal_p - tangent * off_diagonal;
+                work[q * n + q] =
+                    diagonal_q + tangent * off_diagonal;
+                work[p * n + q] = Real(0);
+                work[q * n + p] = Real(0);
+                for (std::size_t k = 0; k < n; ++k) {
+                    if (k == p || k == q) {
+                        continue;
+                    }
+                    const Real value_p = work[k * n + p];
+                    const Real value_q = work[k * n + q];
+                    const Real rotated_p =
+                        cosine * value_p - sine * value_q;
+                    const Real rotated_q =
+                        sine * value_p + cosine * value_q;
+                    work[k * n + p] = rotated_p;
+                    work[p * n + k] = rotated_p;
+                    work[k * n + q] = rotated_q;
+                    work[q * n + k] = rotated_q;
+                }
+                for (std::size_t row = 0; row < n; ++row) {
+                    const Real value_p =
+                        result.eigenvectors[row * n + p];
+                    const Real value_q =
+                        result.eigenvectors[row * n + q];
+                    result.eigenvectors[row * n + p] =
+                        cosine * value_p - sine * value_q;
+                    result.eigenvectors[row * n + q] =
+                        sine * value_p + cosine * value_q;
+                }
+            }
+        }
+        result.sweeps = sweep + 1u;
+    }
+    DENSE_LINALG_CHECK(
+        result.converged,
+        std::string(label) +
+            ": cyclic Jacobi eigendecomposition did not converge");
+    result.diagonalized = std::move(work);
+    return result;
+}
+
 std::vector<Real> jacobi_singular_values(
     std::span<const Real> matrix,
     std::size_t rows,
@@ -333,95 +569,434 @@ DenseSymmetricEigenvalueBounds dense_symmetric_eigenvalue_bounds(
     const Real tolerance = Real(64) * std::numeric_limits<Real>::epsilon() *
                            static_cast<Real>(std::max<std::size_t>(n, 1u)) *
                            std::max(Real(1), scale);
-    Real maximum_skew = Real(0);
-    std::vector<Real> work(matrix.begin(), matrix.end());
-    for (std::size_t row = 0; row < n; ++row) {
-        DENSE_LINALG_CHECK(std::isfinite(work[row * n + row]),
-                           std::string(label) + ": nonfinite diagonal entry");
-        for (std::size_t column = row + 1u; column < n; ++column) {
-            const Real upper = work[row * n + column];
-            const Real lower = work[column * n + row];
-            DENSE_LINALG_CHECK(std::isfinite(upper) && std::isfinite(lower),
-                               std::string(label) + ": nonfinite off-diagonal entry");
-            maximum_skew = std::max(maximum_skew, std::abs(upper - lower));
-            const Real average = Real(0.5) * (upper + lower);
-            work[row * n + column] = average;
-            work[column * n + row] = average;
-        }
-    }
-    DENSE_LINALG_CHECK(maximum_skew <= Real(4) * tolerance,
-                       std::string(label) + ": matrix is not numerically symmetric");
+    auto decomposition = diagonalize_symmetric(
+        validated_symmetric_copy(matrix, n, tolerance, label),
+        n,
+        tolerance,
+        label);
 
     DenseSymmetricEigenvalueBounds result;
     result.tolerance = tolerance;
-    const std::size_t maximum_sweeps =
-        std::max<std::size_t>(16u, 12u * n * n);
-    for (std::size_t sweep = 0; sweep < maximum_sweeps; ++sweep) {
-        Real maximum_off_diagonal = Real(0);
-        for (std::size_t p = 0; p < n; ++p) {
-            for (std::size_t q = p + 1u; q < n; ++q) {
-                maximum_off_diagonal = std::max(
-                    maximum_off_diagonal, std::abs(work[p * n + q]));
-            }
-        }
-        result.maximum_off_diagonal = maximum_off_diagonal;
-        result.sweeps = sweep;
-        if (maximum_off_diagonal <= tolerance) {
-            result.converged = true;
-            break;
-        }
-
-        for (std::size_t p = 0; p < n; ++p) {
-            for (std::size_t q = p + 1u; q < n; ++q) {
-                const Real off_diagonal = work[p * n + q];
-                if (std::abs(off_diagonal) <= tolerance) {
-                    continue;
-                }
-                const Real diagonal_p = work[p * n + p];
-                const Real diagonal_q = work[q * n + q];
-                const Real tau =
-                    (diagonal_q - diagonal_p) / (Real(2) * off_diagonal);
-                const Real tangent = std::copysign(
-                    Real(1) /
-                        (std::abs(tau) + std::hypot(Real(1), tau)),
-                    tau);
-                const Real cosine =
-                    Real(1) / std::hypot(Real(1), tangent);
-                const Real sine = tangent * cosine;
-
-                work[p * n + p] = diagonal_p - tangent * off_diagonal;
-                work[q * n + q] = diagonal_q + tangent * off_diagonal;
-                work[p * n + q] = Real(0);
-                work[q * n + p] = Real(0);
-                for (std::size_t k = 0; k < n; ++k) {
-                    if (k == p || k == q) {
-                        continue;
-                    }
-                    const Real value_p = work[k * n + p];
-                    const Real value_q = work[k * n + q];
-                    const Real rotated_p = cosine * value_p - sine * value_q;
-                    const Real rotated_q = sine * value_p + cosine * value_q;
-                    work[k * n + p] = rotated_p;
-                    work[p * n + k] = rotated_p;
-                    work[k * n + q] = rotated_q;
-                    work[q * n + k] = rotated_q;
-                }
-            }
-        }
-        result.sweeps = sweep + 1u;
-    }
-    DENSE_LINALG_CHECK(result.converged,
-                       std::string(label) + ": cyclic Jacobi iteration did not converge");
-
-    result.smallest_eigenvalue = work.front();
-    result.largest_eigenvalue = work.front();
+    result.maximum_off_diagonal =
+        decomposition.maximum_off_diagonal;
+    result.sweeps = decomposition.sweeps;
+    result.converged = decomposition.converged;
+    result.smallest_eigenvalue =
+        decomposition.diagonalized.front();
+    result.largest_eigenvalue =
+        decomposition.diagonalized.front();
     for (std::size_t diagonal = 1; diagonal < n; ++diagonal) {
-        const Real value = work[diagonal * n + diagonal];
+        const Real value =
+            decomposition.diagonalized[diagonal * n + diagonal];
         result.smallest_eigenvalue =
             std::min(result.smallest_eigenvalue, value);
         result.largest_eigenvalue =
             std::max(result.largest_eigenvalue, value);
     }
+    return result;
+}
+
+DensePsdGeneralizedEigenvalueBound
+dense_psd_generalized_eigenvalue_bound(
+    std::span<const Real> numerator,
+    std::span<const Real> denominator,
+    std::size_t n,
+    std::string_view label)
+{
+    const std::string label_text(label);
+    DENSE_LINALG_CHECK(
+        numerator.size() == n * n,
+        label_text + ": numerator size mismatch");
+    DENSE_LINALG_CHECK(
+        denominator.size() == n * n,
+        label_text + ": denominator size mismatch");
+    DENSE_LINALG_CHECK(
+        n > 0,
+        label_text + ": generalized eigenproblem must be nonempty");
+    for (const Real value : numerator) {
+        DENSE_LINALG_CHECK(
+            std::isfinite(value),
+            label_text + ": numerator contains a nonfinite entry");
+    }
+    for (const Real value : denominator) {
+        DENSE_LINALG_CHECK(
+            std::isfinite(value),
+            label_text + ": denominator contains a nonfinite entry");
+    }
+    for (std::size_t row = 0; row < n; ++row) {
+        for (std::size_t column = row + 1u; column < n; ++column) {
+            DENSE_LINALG_CHECK(
+                numerator[row * n + column] ==
+                    numerator[column * n + row],
+                label_text + ": numerator is not exactly symmetric");
+            DENSE_LINALG_CHECK(
+                denominator[row * n + column] ==
+                    denominator[column * n + row],
+                label_text + ": denominator is not exactly symmetric");
+        }
+    }
+
+    DensePsdGeneralizedEigenvalueBound result;
+    result.dimension = n;
+    result.denominator_scale = dense_matrix_max_abs(denominator);
+    result.numerator_scale = dense_matrix_max_abs(numerator);
+
+    const Real symmetry_tolerance =
+        normalized_relative_tolerance(n, Real(64));
+    std::vector<Real> normalized_denominator(n * n, Real(0));
+    if (result.denominator_scale > Real(0)) {
+        for (std::size_t i = 0; i < denominator.size(); ++i) {
+            normalized_denominator[i] =
+                denominator[i] / result.denominator_scale;
+            DENSE_LINALG_CHECK(
+                denominator[i] == Real(0) ||
+                    normalized_denominator[i] != Real(0),
+                label_text +
+                    ": denominator normalization loses a nonzero entry");
+        }
+    }
+    normalized_denominator = validated_symmetric_copy(
+        normalized_denominator,
+        n,
+        symmetry_tolerance,
+        label_text + " denominator");
+
+    std::vector<long double> denominator_wide(n * n, 0.0L);
+    std::vector<long double> numerator_wide(n * n, 0.0L);
+    for (std::size_t i = 0; i < n * n; ++i) {
+        denominator_wide[i] =
+            static_cast<long double>(denominator[i]);
+        numerator_wide[i] =
+            static_cast<long double>(numerator[i]);
+    }
+
+    auto denominator_decomposition =
+        diagonalize_symmetric(
+            normalized_denominator,
+            n,
+            symmetry_tolerance,
+            label_text + " denominator");
+    result.denominator_converged =
+        denominator_decomposition.converged;
+    result.denominator_sweeps =
+        denominator_decomposition.sweeps;
+
+    const auto denominator_times_basis =
+        right_multiply_basis(
+            denominator_wide,
+            denominator_decomposition.eigenvectors,
+            n);
+    const auto numerator_times_basis =
+        right_multiply_basis(
+            numerator_wide,
+            denominator_decomposition.eigenvectors,
+            n);
+    std::vector<long double> denominator_in_basis(
+        n * n, 0.0L);
+    long double transformed_maximum_off_diagonal = 0.0L;
+    for (std::size_t a = 0; a < n; ++a) {
+        for (std::size_t b = a; b < n; ++b) {
+            long double projected_denominator = 0.0L;
+            for (std::size_t row = 0; row < n; ++row) {
+                const long double q_row =
+                    static_cast<long double>(
+                        denominator_decomposition
+                            .eigenvectors[row * n + a]);
+                if (q_row == 0.0L) {
+                    continue;
+                }
+                projected_denominator +=
+                    q_row *
+                    denominator_times_basis[row * n + b];
+            }
+            denominator_in_basis[a * n + b] =
+                projected_denominator;
+            denominator_in_basis[b * n + a] =
+                projected_denominator;
+            if (a != b) {
+                transformed_maximum_off_diagonal =
+                    std::max(
+                        transformed_maximum_off_diagonal,
+                        std::abs(projected_denominator));
+            }
+        }
+    }
+
+    const long double denominator_spectral_tolerance =
+        static_cast<long double>(
+            normalized_relative_tolerance(n, Real(256))) *
+            static_cast<long double>(result.denominator_scale) +
+        static_cast<long double>(n > 0 ? n - 1u : 0u) *
+            transformed_maximum_off_diagonal;
+    result.denominator_eigenvalue_tolerance =
+        round_nonnegative_up(
+            denominator_spectral_tolerance,
+            label_text + " denominator spectral tolerance");
+
+    std::vector<std::size_t> positive_indices;
+    std::vector<std::size_t> null_indices;
+    std::vector<long double> safe_denominator_eigenvalues;
+    positive_indices.reserve(n);
+    null_indices.reserve(n);
+    safe_denominator_eigenvalues.reserve(n);
+    for (std::size_t index = 0; index < n; ++index) {
+        const long double diagonal =
+            denominator_in_basis[index * n + index];
+        long double row_radius = 0.0L;
+        for (std::size_t column = 0; column < n; ++column) {
+            if (column == index) {
+                continue;
+            }
+            row_radius += std::abs(
+                denominator_in_basis[index * n + column]);
+        }
+        if (diagonal > row_radius) {
+            positive_indices.push_back(index);
+            safe_denominator_eigenvalues.push_back(
+                diagonal - row_radius);
+        } else if (diagonal == 0.0L && row_radius == 0.0L) {
+            null_indices.push_back(index);
+        } else {
+            DENSE_LINALG_CHECK(
+                false,
+                label_text +
+                    ": denominator has an indefinite or numerically unresolved spectral mode");
+        }
+    }
+    result.positive_rank = positive_indices.size();
+    result.nullity = null_indices.size();
+
+    if (!positive_indices.empty()) {
+        long double smallest =
+            safe_denominator_eigenvalues.front();
+        long double largest =
+            denominator_in_basis[
+                positive_indices.front() * n +
+                positive_indices.front()];
+        for (std::size_t a = 0; a < positive_indices.size(); ++a) {
+            const auto index = positive_indices[a];
+            const long double eigenvalue =
+                denominator_in_basis[index * n + index];
+            smallest = std::min(
+                smallest, safe_denominator_eigenvalues[a]);
+            largest = std::max(largest, eigenvalue);
+        }
+        result.smallest_positive_denominator_eigenvalue =
+            round_positive_down(
+                smallest,
+                label_text +
+                    " smallest positive denominator eigenvalue");
+        result.largest_denominator_eigenvalue = round_nonnegative_up(
+            largest,
+            label_text + " largest denominator eigenvalue");
+    }
+
+    const Real compatibility_tolerance_normalized =
+        normalized_relative_tolerance(n, Real(512));
+    result.nullspace_compatibility_tolerance =
+        compatibility_tolerance_normalized *
+        result.numerator_scale;
+    long double maximum_nullspace_residual = 0.0L;
+    if (result.numerator_scale > Real(0)) {
+        for (const auto null_index : null_indices) {
+            for (std::size_t row = 0; row < n; ++row) {
+                const long double value =
+                    numerator_times_basis[row * n + null_index];
+                maximum_nullspace_residual =
+                    std::max(
+                        maximum_nullspace_residual,
+                        std::abs(value));
+            }
+        }
+    }
+    result.maximum_nullspace_residual = round_nonnegative_up(
+        maximum_nullspace_residual,
+        label_text + " nullspace residual");
+    DENSE_LINALG_CHECK(
+        maximum_nullspace_residual == 0.0L,
+        label_text +
+            ": numerator does not annihilate the denominator nullspace");
+
+    if (positive_indices.empty() ||
+        !(result.numerator_scale > Real(0))) {
+        result.quotient_converged = true;
+        return result;
+    }
+
+    const std::size_t rank = positive_indices.size();
+    std::vector<long double> quotient_wide(
+        rank * rank, 0.0L);
+    std::vector<long double> quotient_row_upper(
+        rank, 0.0L);
+    for (std::size_t a = 0; a < rank; ++a) {
+        const auto index_a = positive_indices[a];
+        for (std::size_t b = a; b < rank; ++b) {
+            const auto index_b = positive_indices[b];
+            long double projected_numerator = 0.0L;
+            for (std::size_t row = 0; row < n; ++row) {
+                const long double q_row =
+                    static_cast<long double>(
+                        denominator_decomposition
+                            .eigenvectors[row * n + index_a]);
+                if (q_row == 0.0L) {
+                    continue;
+                }
+                projected_numerator +=
+                    q_row *
+                    numerator_times_basis[row * n + index_b];
+            }
+            const long double denominator_factor =
+                std::sqrt(
+                    static_cast<long double>(
+                        safe_denominator_eigenvalues[a])) *
+                std::sqrt(
+                    static_cast<long double>(
+                        safe_denominator_eigenvalues[b]));
+            DENSE_LINALG_CHECK(
+                denominator_factor > 0.0L &&
+                    std::isfinite(denominator_factor),
+                label_text +
+                    ": invalid quotient denominator factor");
+            const long double value_long =
+                projected_numerator / denominator_factor;
+            DENSE_LINALG_CHECK(
+                std::isfinite(value_long),
+                label_text +
+                    ": projected quotient entry is not finite");
+            quotient_wide[a * rank + b] = value_long;
+            quotient_wide[b * rank + a] = value_long;
+            if (a == b) {
+                quotient_row_upper[a] += value_long;
+            } else {
+                const long double magnitude =
+                    std::abs(value_long);
+                quotient_row_upper[a] += magnitude;
+                quotient_row_upper[b] += magnitude;
+            }
+        }
+    }
+
+    long double quotient_scale_long = 0.0L;
+    for (const long double value : quotient_wide) {
+        quotient_scale_long =
+            std::max(quotient_scale_long, std::abs(value));
+    }
+    if (!(quotient_scale_long > 0.0L)) {
+        result.quotient_converged = true;
+        return result;
+    }
+
+    DENSE_LINALG_CHECK(
+        quotient_scale_long <=
+                static_cast<long double>(
+                    std::numeric_limits<Real>::max()) &&
+            std::isfinite(quotient_scale_long),
+        label_text + ": generalized eigenvalue scale is not finite");
+    std::vector<Real> quotient_base(
+        rank * rank, Real(0));
+    for (std::size_t i = 0; i < quotient_wide.size(); ++i) {
+        const long double normalized =
+            quotient_wide[i] / quotient_scale_long;
+        quotient_base[i] = static_cast<Real>(normalized);
+        DENSE_LINALG_CHECK(
+            quotient_wide[i] == 0.0L ||
+                quotient_base[i] != Real(0),
+            label_text +
+                ": quotient normalization loses a nonzero entry");
+    }
+
+    const Real quotient_jacobi_tolerance =
+        normalized_relative_tolerance(rank, Real(64));
+    auto quotient_decomposition =
+        diagonalize_symmetric(
+            validated_symmetric_copy(
+                quotient_base,
+                rank,
+                quotient_jacobi_tolerance,
+                label_text + " quotient"),
+            rank,
+            quotient_jacobi_tolerance,
+            label_text + " quotient");
+    result.quotient_converged =
+        quotient_decomposition.converged;
+    result.quotient_sweeps =
+        quotient_decomposition.sweeps;
+    result.quotient_maximum_off_diagonal =
+        round_nonnegative_up(
+            static_cast<long double>(
+                quotient_decomposition
+                    .maximum_off_diagonal) *
+                quotient_scale_long,
+            label_text + " quotient off-diagonal residual");
+    result.quotient_tolerance =
+        round_nonnegative_up(
+            static_cast<long double>(
+                quotient_decomposition.tolerance) *
+                quotient_scale_long,
+            label_text + " quotient tolerance");
+
+    Real smallest_quotient =
+        quotient_decomposition.diagonalized.front();
+    Real largest_quotient = smallest_quotient;
+    for (std::size_t diagonal = 0; diagonal < rank; ++diagonal) {
+        const Real value =
+            quotient_decomposition.diagonalized[
+                diagonal * rank + diagonal];
+        long double row_radius = 0.0L;
+        for (std::size_t column = 0; column < rank; ++column) {
+            if (column == diagonal) {
+                continue;
+            }
+            row_radius += std::abs(
+                static_cast<long double>(
+                    quotient_decomposition.diagonalized[
+                        diagonal * rank + column]));
+        }
+        DENSE_LINALG_CHECK(
+            static_cast<long double>(value) > row_radius ||
+                (value == Real(0) && row_radius == 0.0L),
+            label_text +
+                ": numerator quotient has an indefinite or numerically unresolved spectral mode");
+        smallest_quotient =
+            std::min(smallest_quotient, value);
+        largest_quotient =
+            std::max(largest_quotient, value);
+    }
+    result.smallest_quotient_eigenvalue = round_nonnegative_up(
+        static_cast<long double>(
+            std::max(Real(0), smallest_quotient)) *
+            quotient_scale_long,
+        label_text + " smallest quotient eigenvalue");
+    result.largest_quotient_eigenvalue = round_nonnegative_up(
+        static_cast<long double>(
+            std::max(Real(0), largest_quotient)) *
+            quotient_scale_long,
+        label_text + " largest quotient eigenvalue");
+
+    const long double quotient_base_upper =
+        std::max(
+            0.0L,
+            *std::max_element(
+                quotient_row_upper.begin(),
+                quotient_row_upper.end()));
+    const long double quotient_base_padding =
+        1024.0L *
+        static_cast<long double>(
+            std::numeric_limits<Real>::epsilon()) *
+        static_cast<long double>(rank) *
+        static_cast<long double>(rank) *
+        quotient_scale_long;
+    const long double conservative_upper_long =
+        quotient_base_upper + quotient_base_padding;
+    result.conservative_upper_bound = round_nonnegative_up(
+        conservative_upper_long,
+        label_text + " conservative generalized eigenvalue bound");
+    DENSE_LINALG_CHECK(
+        std::isfinite(result.conservative_upper_bound) &&
+            result.conservative_upper_bound >=
+                result.largest_quotient_eigenvalue,
+        label_text +
+            ": conservative generalized eigenvalue bound is invalid");
     return result;
 }
 
