@@ -1,0 +1,316 @@
+{
+  "schema_version": 1,
+  "matrix_id": "free_surface_wp7_active_cell_topology_prerequisite_v1",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "work_package": "WP-7",
+  "findings": [
+    "FSR-07"
+  ],
+  "implementation_source_commit": "fa97fe108e82b633b44ffe871a89075f9f30f007",
+  "implementation_source_tree": "addeffd2cbf01ef2d154cf9a99d98270d370f3ce",
+  "qualification_scope": "Finite active-cell topology telemetry prerequisite evidence only: serial refresh-report lifecycle, two-rank canonical provider reconciliation, and one serial production P1 velocity/pressure fixture covering connected rooted, disconnected rooted, and rooted-plus-rootless background-cell graphs. This matrix does not establish physical-phase connectivity, liquid-volume deletion or conservation, topology-transition continuity, manufactured convergence, conditioning, Krylov stability, simulation exits, FSR-07, WP-7, or Q1 closure.",
+  "closure_request_policy": {
+    "accepted_claim": "active_cell_topology_telemetry_prerequisite",
+    "rejected_claims": [
+      "fsr07_closure",
+      "wp7_closure",
+      "q1_closure",
+      "uniform_cut_stability",
+      "conservative_feature_deletion",
+      "resolved_disconnected_stability"
+    ],
+    "diagnostic": "The bounded fixtures omit physical-phase component reconstruction, conservative feature transfer, cut-position error and conditioning rates, production solver spread, continuous node crossing, and simulation exits."
+  },
+  "qualification_disposition": {
+    "fsr07_closed": false,
+    "wp7_closed": false,
+    "q1_closed": false,
+    "uniform_inf_sup_established": false,
+    "conservation_established": false,
+    "resolved_feature_survival_established": false
+  },
+  "open_outcomes": {
+    "fsr07": "OPEN",
+    "wp7": "OPEN",
+    "q1": "OPEN"
+  },
+  "parent_state": {
+    "matrix_id": "free_surface_wp7_cut_stability_v2",
+    "closure_state": "BLOCKED_BY_FROZEN_PROSPECTIVE_EVIDENCE",
+    "test": "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+    "classification": "PROSPECTIVE_IN_FROZEN_PARENT",
+    "parent_matrix_modified": false
+  },
+  "parent_artifacts": [
+    {
+      "path": "Documentation/free_surface_boundary_unfitted_audit_20260720.md",
+      "sha256": "f3d39efdafaa16cdb9dabc5b06626906eb05f5a78b1c87583347dcc008473652"
+    },
+    {
+      "path": "Documentation/free_surface_wp7_combined_p1_method.md",
+      "sha256": "85ba3d61f50b67a4d719efff6b760323fbe3fcd3124b06e28b67ee6230ca1ff9"
+    },
+    {
+      "path": "tests/cases/fluid/free_surface_wp7_cut_stability_qualification_matrix.json",
+      "sha256": "a49cadbcbe1b56bf69e4520a5281fc942ac4dc9de82da4e3bdaa083d6334ab1f"
+    },
+    {
+      "path": "tests/cases/fluid/run_free_surface_wp7_cut_stability_qualification.py",
+      "sha256": "30c59eb725ba88b87447b935a915c6561b9ae25f082d93052d5cb9be4e337f6f"
+    },
+    {
+      "path": "tests/cases/fluid/free_surface_wp3_wp7_nitsche_coercivity_qualification_matrix.json",
+      "sha256": "a75bbec8efe800f049375f190c07a121b3e365098da783b43ec1ba9df9610589"
+    },
+    {
+      "path": "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification.py",
+      "sha256": "353c49c10881fd13acececb80cdf000c70abf7937f10021a2816d04d90bb9181"
+    }
+  ],
+  "implementation_sources": [
+    {
+      "path": "Code/Source/solver/FE/Constraints/SmallCutAggregationConstraint.h",
+      "sha256": "a6050cb586cbc9a036d044413843b90b4bc4bb233519ca96dc7b10028da3af92"
+    },
+    {
+      "path": "Code/Source/solver/FE/Constraints/SmallCutAggregationConstraint.cpp",
+      "sha256": "52e64189329aaea76bc05d2ab01675c097fdb1fde5590bfe875e2ca292da00a7"
+    },
+    {
+      "path": "Code/Source/solver/FE/Tests/Unit/Constraints/test_SmallCutAggregationConstraint.cpp",
+      "sha256": "fac8480df9ffa360b323623afa2c04829964546c1f9fa84b19fd5db295ff5187"
+    },
+    {
+      "path": "Code/Source/solver/FE/Tests/Unit/Constraints/test_SmallCutAggregationConstraintMPI.cpp",
+      "sha256": "e7172cb5f4ec57e9dbc9720619bc9842cf1b8783fffc96f8d8a79b4d2797dc82"
+    },
+    {
+      "path": "Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp",
+      "sha256": "905c6bc3aec31ea805863732464c2b23cd82c72c8e45d6c29563b9c22d7e9cca"
+    }
+  ],
+  "telemetry_contract": {
+    "topology": "canonical active physical cells joined by background-cell owner-face adjacency",
+    "stable_feature_id": "minimum canonical physical cell global identifier in the feature",
+    "cell_digest": "ordered digest of canonical physical cell global identifiers",
+    "rooted_disposition": "feature contains at least one structurally full active cell",
+    "rootless_disposition": "feature contains no structurally full active cell",
+    "retained_volume": "canonical physical measure of the selected active-side volume rule, counted once per physical cell",
+    "parallel_provider_policy": "all declarations of one physical cell must agree exactly before one canonical declaration is retained",
+    "rootless_support_policy": "homogeneous support removal with explicitly reported retained physical support volume"
+  },
+  "predecessor_qualification_status": {
+    "matrix_id": "free_surface_wp3_wp7_symmetric_nitsche_prerequisite_v1",
+    "implementation_source_commit": "f127ce715f5d9042af3fa409d197667bc289e03f",
+    "record_scope": "historical_source_commit_only",
+    "current_source_requalified": false,
+    "diagnostic": "The active-cell topology source commit changes byte-locked aggregation and Physics test sources, so the predecessor joint prerequisite is not inherited by the current source."
+  },
+  "method_limitations": [
+    "The topology is a background-cell graph and does not reconstruct multiple selected regions inside one cell or prove a same-phase crossing through a shared face.",
+    "The retained physical volume reports support affected by the homogeneous rootless policy; it is not a conservative transfer, geometric deletion, or liquid-conservation measurement.",
+    "Rooted is a structural classification based on a full active cell and is independent of experimental root-rejection settings.",
+    "Multiple active-side rules for one physical cell require distinct stable provenance identifiers; duplicate anonymous identifiers fail closed.",
+    "The finite strip fixtures do not establish cut-independent conditioning, error convergence, stability constants, production preconditioner behavior, or a method theorem."
+  ],
+  "unresolved_required_evidence": [
+    "physical_phase_component_topology_beyond_background_cell_adjacency",
+    "conservative_rootless_feature_transfer_or_mass_accounting",
+    "manufactured_stokes_and_navier_stokes_error_rates",
+    "cut_position_and_h_scaled_conditioning",
+    "stabilized_pressure_control_and_singular_value_bounds",
+    "production_preconditioner_and_krylov_iteration_spread",
+    "continuous_node_crossing_operator_and_solution_exit",
+    "static_drop_translating_drop_filament_and_d18_d38_simulation_exits",
+    "joint_wp3_wp7_nitsche_prerequisite_successor_requalification"
+  ],
+  "prospective_tests": [],
+  "resource_guard": {
+    "minimum_available_memory_mib": 2048,
+    "minimum_available_storage_mib": 4096,
+    "poll_interval_seconds": 0.1
+  },
+  "build_contract": {
+    "generator": "Unix Makefiles",
+    "parallel": 1,
+    "cmake": "/usr/bin/cmake",
+    "cxx_compiler": "/usr/bin/c++",
+    "mpi_cxx_compiler": "/usr/bin/mpicxx",
+    "mpi_launcher": "/usr/bin/mpiexec",
+    "maximum_build_storage_mib": 6144,
+    "configure_execution": {
+      "wall_time_seconds": 600,
+      "memory_mib": 6144,
+      "output_mib": 256
+    },
+    "build_execution": {
+      "wall_time_seconds": 7200,
+      "memory_mib": 6144,
+      "output_mib": 512
+    },
+    "configurations": [
+      {
+        "id": "constraints",
+        "source_home": "Code/Source/solver/FE",
+        "build_directory": "constraints",
+        "cmake_options": [
+          "-DCMAKE_BUILD_TYPE=Release",
+          "-DCMAKE_CXX_COMPILER=/usr/bin/c++",
+          "-DBUILD_TESTING=ON",
+          "-DFE_BUILD_TESTS=ON",
+          "-DFE_BUILD_DOFS_TESTS=OFF",
+          "-DFE_BUILD_EXAMPLES=OFF",
+          "-DFE_WITH_MESH=ON",
+          "-DFE_ENABLE_MPI=ON",
+          "-DMPI_CXX_COMPILER=/usr/bin/mpicxx",
+          "-DFE_MPI_CXX_WRAPPER=/usr/bin/mpicxx",
+          "-DFE_USE_SYSTEM_GTEST=ON",
+          "-DFE_ENABLE_LLVM_JIT=OFF",
+          "-DFE_ENABLE_SYMENGINE=OFF",
+          "-DFE_ENABLE_METIS=OFF",
+          "-DFE_ENABLE_PARMETIS=OFF",
+          "-DFE_ENABLE_PETSC=OFF"
+        ],
+        "targets": [
+          "test_fe_constraints",
+          "test_fe_constraints_mpi"
+        ],
+        "binaries": {
+          "constraints": "test_fe_constraints",
+          "constraints_mpi": "test_fe_constraints_mpi"
+        }
+      },
+      {
+        "id": "physics",
+        "source_home": "Code/Source/solver/Physics",
+        "build_directory": "physics",
+        "cmake_options": [
+          "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+          "-DCMAKE_CXX_COMPILER=/usr/bin/c++",
+          "-DBUILD_TESTING=ON",
+          "-DFE_BUILD_EXAMPLES=OFF",
+          "-DFE_WITH_MESH=ON",
+          "-DFE_ENABLE_MPI=ON",
+          "-DMPI_CXX_COMPILER=/usr/bin/mpicxx",
+          "-DFE_MPI_CXX_WRAPPER=/usr/bin/mpicxx",
+          "-DFE_USE_SYSTEM_GTEST=ON",
+          "-DFE_ENABLE_LLVM_JIT=OFF",
+          "-DFE_ENABLE_SYMENGINE=OFF",
+          "-DFE_ENABLE_METIS=OFF",
+          "-DFE_ENABLE_PARMETIS=OFF",
+          "-DFE_ENABLE_PETSC=OFF"
+        ],
+        "targets": [
+          "test_physics"
+        ],
+        "binaries": {
+          "physics": "test_physics"
+        }
+      }
+    ]
+  },
+  "binary_keys": [
+    "constraints",
+    "constraints_mpi",
+    "physics"
+  ],
+  "groups": [
+    {
+      "id": "active_cell_report_serial",
+      "binary": "constraints",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "SmallCutAggregationConstraint.CompletedRefreshReportSeparatesRootedAndRootlessCandidates"
+      ],
+      "execution": {
+        "wall_time_seconds": 300,
+        "memory_mib": 2048,
+        "output_mib": 64
+      }
+    },
+    {
+      "id": "active_cell_canonicalization_mpi_2",
+      "binary": "constraints_mpi",
+      "mpi_ranks": 2,
+      "gtest_output_copies": 2,
+      "tests": [
+        "SmallCutAggregationConstraintMPI.FullOverlapOwnerNonCandidateImportsCanonicalGhostRoot",
+        "SmallCutAggregationConstraintMPI.RootlessFeatureTelemetryDoesNotSumReplicatedProviders"
+      ],
+      "execution": {
+        "wall_time_seconds": 600,
+        "memory_mib": 4096,
+        "output_mib": 128
+      }
+    },
+    {
+      "id": "active_cell_production_path_serial",
+      "binary": "physics",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy"
+      ],
+      "execution": {
+        "wall_time_seconds": 1800,
+        "memory_mib": 8192,
+        "output_mib": 256
+      }
+    }
+  ],
+  "quantitative_evidence": [
+    {
+      "test": "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+      "property": "wp7_active_cell_topology_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 3
+    },
+    {
+      "test": "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+      "property": "wp7_active_cell_topology_feature_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 5
+    },
+    {
+      "test": "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+      "property": "wp7_active_cell_topology_rooted_feature_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 4
+    },
+    {
+      "test": "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+      "property": "wp7_active_cell_topology_rootless_feature_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 1
+    },
+    {
+      "test": "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+      "property": "wp7_active_cell_topology_rootless_retained_physical_volume",
+      "type": "real",
+      "relation": "equal",
+      "threshold": 1.0,
+      "absolute_tolerance": 1e-12
+    },
+    {
+      "test": "FreeSurfaceCutStability.ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy",
+      "property": "wp7_active_cell_topology_velocity_pressure_mismatch_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 0
+    }
+  ],
+  "gates": {
+    "expected_group_count": 3,
+    "expected_distinct_test_count": 4,
+    "expected_quantitative_evidence_count": 6,
+    "expected_failures": 0,
+    "expected_errors": 0,
+    "expected_disabled": 0,
+    "expected_skipped": 0
+  }
+}
