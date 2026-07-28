@@ -239,6 +239,19 @@ TEST(LevelSetInterfaceDomain, StableIdsTrackMarkerCellFragmentAndRevision)
     EXPECT_NE(base, cutInterfaceStableId(3, 4, 0, 10));
 }
 
+TEST(LevelSetInterfaceDomain, VolumeStableIdReservesZeroForUnavailableIdentity)
+{
+    constexpr std::uint64_t canceling_revision =
+        3554543661169652019ull;
+
+    EXPECT_EQ(cutVolumeStableId(0,
+                                0,
+                                0,
+                                geometry::CutIntegrationSide::Negative,
+                                canceling_revision),
+              1u);
+}
+
 TEST(LevelSetInterfaceDomain, SummaryCountsDegenerateInactiveFragments)
 {
     CutInterfaceDomainRequest request;

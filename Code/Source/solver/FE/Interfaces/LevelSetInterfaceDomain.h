@@ -779,7 +779,8 @@ struct GeneratedInterfaceTwoSidedBinding {
     mix(static_cast<std::uint64_t>(local_region_index));
     mix(static_cast<std::uint64_t>(side));
     mix(source_revision);
-    return h;
+    // Zero is reserved for an unavailable identity.
+    return h == 0u ? 1u : h;
 }
 
 [[nodiscard]] inline std::string canonicalGeneratedCellTopologyId(

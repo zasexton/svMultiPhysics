@@ -103,6 +103,12 @@ struct ParallelConstraintStats {
  * - Ghost DOF constraints are imported from owning ranks
  * - Conflicts are resolved deterministically
  *
+ * In MPI mode, makeConsistent(), importGhostConstraints(), synchronize(),
+ * and validateConsistency() are collective on the supplied communicator.
+ * Local C++ failures in packing, receive allocation, canonical decoding, or
+ * local reconstruction are coordinated at phase boundaries so every
+ * participating rank exits that operation with an exception.
+ *
  * Usage:
  * @code
  *   // Each rank builds local constraints
@@ -265,7 +271,7 @@ public:
      * Only call for debugging purposes.
      *
      * @param constraints The constraints to validate
-     * @return true if constraints are consistent
+     * @return true only if constraints are consistent on every rank
      */
     [[nodiscard]] bool validateConsistency(const AffineConstraints& constraints) const;
 

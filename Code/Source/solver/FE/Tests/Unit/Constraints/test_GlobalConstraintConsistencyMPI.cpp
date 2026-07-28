@@ -293,7 +293,11 @@ TEST(GlobalConstraintConsistencyMPI, RankLocalGlobalConstraintDefinitionThrows)
         system->setup({}, inputs);
         FAIL() << "Expected setup to reject rank-local GlobalConstraint definitions";
     } catch (const FEException& ex) {
-        EXPECT_NE(std::string(ex.what()).find("GlobalConstraint definitions differ"),
+        EXPECT_NE(std::string(ex.what()).find(
+                      "distributed_constraint_callback_shape_mismatch"),
+                  std::string::npos);
+        EXPECT_NE(std::string(ex.what()).find(
+                      "phase='setup_constraint_callback_preflight'"),
                   std::string::npos);
     }
 }

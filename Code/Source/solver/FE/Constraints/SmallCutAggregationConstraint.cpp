@@ -49,6 +49,30 @@ namespace svmp {
 namespace FE {
 namespace constraints {
 
+namespace detail {
+
+struct SmallCutAggregationPendingProlongation {
+    FieldId field{INVALID_FIELD_ID};
+    geometry::CutIntegrationSide active_side{
+        geometry::CutIntegrationSide::Negative};
+    int interface_marker{-1};
+    bool slave_all_cut{false};
+    bool linear_extension{false};
+    bool allow_unaggregated{false};
+    bool trace_bound_eligible{false};
+    SmallCutAggregationGuardOptions guards{};
+    std::uint64_t cut_context_content_revision{0u};
+    bool has_free_surface_snapshot_revision{false};
+    std::uint64_t free_surface_snapshot_revision{0u};
+    bool has_source_value_revision{false};
+    std::uint64_t source_value_revision{0u};
+    std::vector<SmallCutAggregationProlongationRow> rows{};
+    std::vector<SmallCutAggregationProlongationCell> active_cells{};
+    std::vector<SmallCutAggregationProlongationPatch> patches{};
+};
+
+} // namespace detail
+
 namespace {
 
 using math::Vector;
@@ -213,8 +237,10 @@ struct AggregationLineGuardValidation {
     const auto origin = basis::ReferenceNodeLayout::get_node_coords(
         cell_type, static_cast<std::size_t>(face_corners.front()));
     std::array<Vector<Real, 3>, 2> tangents{};
+    const std::size_t dimension =
+        static_cast<std::size_t>(cell_dimension);
     const std::size_t expected_rank =
-        static_cast<std::size_t>(cell_dimension - 1);
+        dimension - 1u;
     std::size_t rank = 0u;
     Real face_scale = Real{1};
     constexpr Real rank_tolerance = Real{1e-12};
@@ -225,29 +251,29 @@ struct AggregationLineGuardValidation {
             cell_type, static_cast<std::size_t>(face_corners[corner]));
         Vector<Real, 3> residual{};
         Real original_norm_sq = Real{0};
-        for (int d = 0; d < cell_dimension; ++d) {
+        for (std::size_t d = 0; d < dimension; ++d) {
             residual[d] = point[d] - origin[d];
             original_norm_sq += residual[d] * residual[d];
         }
         face_scale = std::max(face_scale, std::sqrt(original_norm_sq));
         for (std::size_t basis_index = 0; basis_index < rank; ++basis_index) {
             Real projection = Real{0};
-            for (int d = 0; d < cell_dimension; ++d) {
+            for (std::size_t d = 0; d < dimension; ++d) {
                 projection += residual[d] * tangents[basis_index][d];
             }
-            for (int d = 0; d < cell_dimension; ++d) {
+            for (std::size_t d = 0; d < dimension; ++d) {
                 residual[d] -= projection * tangents[basis_index][d];
             }
         }
         Real residual_norm_sq = Real{0};
-        for (int d = 0; d < cell_dimension; ++d) {
+        for (std::size_t d = 0; d < dimension; ++d) {
             residual_norm_sq += residual[d] * residual[d];
         }
         const Real residual_norm = std::sqrt(residual_norm_sq);
         if (residual_norm <= rank_tolerance * face_scale) {
             continue;
         }
-        for (int d = 0; d < cell_dimension; ++d) {
+        for (std::size_t d = 0; d < dimension; ++d) {
             tangents[rank][d] = residual[d] / residual_norm;
         }
         ++rank;
@@ -261,21 +287,21 @@ struct AggregationLineGuardValidation {
         basis::ReferenceNodeLayout::get_node_coords(cell_type, local_node);
     Vector<Real, 3> residual{};
     Real point_norm_sq = Real{0};
-    for (int d = 0; d < cell_dimension; ++d) {
+    for (std::size_t d = 0; d < dimension; ++d) {
         residual[d] = point[d] - origin[d];
         point_norm_sq += residual[d] * residual[d];
     }
     for (std::size_t basis_index = 0; basis_index < rank; ++basis_index) {
         Real projection = Real{0};
-        for (int d = 0; d < cell_dimension; ++d) {
+        for (std::size_t d = 0; d < dimension; ++d) {
             projection += residual[d] * tangents[basis_index][d];
         }
-        for (int d = 0; d < cell_dimension; ++d) {
+        for (std::size_t d = 0; d < dimension; ++d) {
             residual[d] -= projection * tangents[basis_index][d];
         }
     }
     Real residual_norm_sq = Real{0};
-    for (int d = 0; d < cell_dimension; ++d) {
+    for (std::size_t d = 0; d < dimension; ++d) {
         residual_norm_sq += residual[d] * residual[d];
     }
     const Real classification_scale =
@@ -393,6 +419,7 @@ struct DistributedAggregationResult {
     std::size_t canonical_owned_aggregate_dofs{0u};
     std::size_t canonical_owned_pinned_dofs{0u};
     std::size_t canonical_strong_suppressed_dofs{0u};
+    std::vector<SmallCutAggregationProlongationRow> canonical_rows{};
 };
 
 struct GatheredInt64Words {
@@ -1164,8 +1191,27 @@ resolveDistributedAggregationDeclarations(
                              return visibility.owned;
                          }));
     };
+    auto ownerRank = [&](GlobalIndex dof) {
+        const auto found = proposal_visibility_by_dof.find(dof);
+        if (found == proposal_visibility_by_dof.end()) {
+            return -1;
+        }
+        int owner = -1;
+        for (const auto& visibility : found->second) {
+            if (!visibility.owned) {
+                continue;
+            }
+            if (owner != -1) {
+                return -1;
+            }
+            owner = visibility.rank;
+        }
+        return owner;
+    };
 
     std::map<GlobalIndex, ConstraintLine> canonical_lines;
+    std::map<GlobalIndex, SmallCutAggregationProlongationRow>
+        canonical_row_metadata;
     std::set<GlobalIndex> expected_slaves;
     std::ostringstream failures;
     std::size_t failure_count = 0u;
@@ -1174,6 +1220,43 @@ resolveDistributedAggregationDeclarations(
     constexpr double line_tolerance = 1.0e-12;
     try {
     for (const auto& [dof, support] : global_candidates) {
+        const auto candidate_dof = dof;
+        const auto* candidate_components =
+            &support.component_dofs;
+        auto make_row =
+            [candidate_dof, candidate_components](
+                GlobalIndex slave,
+                SmallCutAggregationProvisionalRowKind kind) {
+                const auto component_it = std::find(
+                    candidate_components->begin(),
+                    candidate_components->end(),
+                    slave);
+                if (component_it == candidate_components->end()) {
+                    throw std::logic_error(
+                        "SmallCutAggregationConstraint: canonical slave is "
+                        "absent from its candidate component list");
+                }
+                SmallCutAggregationProlongationRow row;
+                row.candidate_dof = candidate_dof;
+                row.component = static_cast<std::size_t>(
+                    std::distance(candidate_components->begin(),
+                                  component_it));
+                row.slave_dof = slave;
+                row.provisional_kind = kind;
+                return row;
+            };
+        auto record_row =
+            [&](SmallCutAggregationProlongationRow row) {
+                const auto [it, inserted] =
+                    canonical_row_metadata.emplace(
+                        row.slave_dof, std::move(row));
+                if (!inserted) {
+                    throw std::runtime_error(
+                        "SmallCutAggregationConstraint: duplicate canonical "
+                        "candidate-row provenance for slave " +
+                        std::to_string(it->first));
+                }
+            };
         const bool all_components_preconstrained = std::all_of(
             support.component_dofs.begin(), support.component_dofs.end(),
             [&](GlobalIndex slave) {
@@ -1182,6 +1265,14 @@ resolveDistributedAggregationDeclarations(
         if (all_components_preconstrained) {
             expected_slaves.insert(support.component_dofs.begin(),
                                    support.component_dofs.end());
+            for (const auto slave : support.component_dofs) {
+                auto row = make_row(
+                    slave,
+                    SmallCutAggregationProvisionalRowKind::
+                        PreexistingConstraint);
+                row.preconstrained_at_apply = true;
+                record_row(std::move(row));
+            }
             continue;
         }
         const auto found = declarations_by_dof.find(dof);
@@ -1207,6 +1298,12 @@ resolveDistributedAggregationDeclarations(
         if (rooted.empty()) {
             if (support.globally_rooted) {
                 if (allow_unaggregated) {
+                    for (const auto slave : support.component_dofs) {
+                        record_row(make_row(
+                            slave,
+                            SmallCutAggregationProvisionalRowKind::
+                                UnaggregatedFreeIdentity));
+                    }
                     continue;
                 }
                 ++failure_count;
@@ -1219,6 +1316,12 @@ resolveDistributedAggregationDeclarations(
             if (slave_all_cut && support.has_full_support) {
                 // Globally supported slave-all candidate with no foreign root:
                 // it remains free by the documented experimental policy.
+                for (const auto slave : support.component_dofs) {
+                    record_row(make_row(
+                        slave,
+                        SmallCutAggregationProvisionalRowKind::
+                            SupportedFreeIdentity));
+                }
                 continue;
             }
             if (!allow_unaggregated) {
@@ -1226,6 +1329,17 @@ resolveDistributedAggregationDeclarations(
                     expected_slaves.insert(slave);
                     canonical_lines.emplace(
                         slave, ConstraintLine{.slave_dof = slave});
+                    record_row(make_row(
+                        slave,
+                        SmallCutAggregationProvisionalRowKind::
+                            RootlessHomogeneousPin));
+                }
+            } else {
+                for (const auto slave : support.component_dofs) {
+                    record_row(make_row(
+                        slave,
+                        SmallCutAggregationProvisionalRowKind::
+                            UnaggregatedFreeIdentity));
                 }
             }
             continue;
@@ -1316,6 +1430,12 @@ resolveDistributedAggregationDeclarations(
         }
         if (available_rooted.empty()) {
             if (allow_unaggregated) {
+                for (const auto slave : support.component_dofs) {
+                    record_row(make_row(
+                        slave,
+                        SmallCutAggregationProvisionalRowKind::
+                            UnaggregatedFreeIdentity));
+                }
                 continue;
             }
             ++failure_count;
@@ -1337,7 +1457,8 @@ resolveDistributedAggregationDeclarations(
                 physicalRootKey(b->declaration),
                 b->rank);
         });
-        const auto& chosen = available_rooted.front()->declaration;
+        const auto* chosen_provider = available_rooted.front();
+        const auto& chosen = chosen_provider->declaration;
         std::vector<const RankedDeclaration*> providers;
         for (const auto* declaration : available_rooted) {
             if (detail::smallCutAggregationSamePhysicalRoot(
@@ -1373,12 +1494,32 @@ resolveDistributedAggregationDeclarations(
             if (selected_line != nullptr) {
                 expected_slaves.insert(slave);
                 canonical_lines.emplace(slave, *selected_line);
+                auto row = make_row(
+                    slave,
+                    SmallCutAggregationProvisionalRowKind::RootedExtension);
+                row.root_cell_gid = chosen.root_cell_gid;
+                row.root_provider_rank = chosen_provider->rank;
+                row.root_distance = chosen.root_distance;
+                row.provisional_entries = selected_line->entries;
+                record_row(std::move(row));
             } else if (!allow_unaggregated) {
                 // Keep the slave in the availability phase: a globally
                 // pre-existing strong constraint legitimately explains the
                 // missing aggregation line; otherwise this is a fail-closed
                 // machinery/overlap error.
                 expected_slaves.insert(slave);
+                auto row = make_row(
+                    slave,
+                    SmallCutAggregationProvisionalRowKind::RootedExtension);
+                row.root_cell_gid = chosen.root_cell_gid;
+                row.root_provider_rank = chosen_provider->rank;
+                row.root_distance = chosen.root_distance;
+                record_row(std::move(row));
+            } else {
+                record_row(make_row(
+                    slave,
+                    SmallCutAggregationProvisionalRowKind::
+                        UnaggregatedFreeIdentity));
             }
         }
     }
@@ -1491,16 +1632,20 @@ resolveDistributedAggregationDeclarations(
     failures.str({});
     failures.clear();
     failure_count = 0u;
+    for (const auto& [slave, row] : canonical_row_metadata) {
+        static_cast<void>(row);
+        const auto owner_count = ownerCount(slave);
+        if (owner_count != 1u) {
+            ++failure_count;
+            if (failure_count <= 4u) {
+                failures << " dof=" << slave
+                         << " reason=canonical_slave_owner_count:"
+                         << owner_count << ";";
+            }
+        }
+    }
     for (const auto slave : expected_slaves) {
         const auto found = visibility_by_slave.find(slave);
-        const std::size_t owner_count =
-            found == visibility_by_slave.end()
-                ? 0u
-                : static_cast<std::size_t>(std::count_if(
-                      found->second.begin(), found->second.end(),
-                      [](const Visibility& visibility) {
-                          return visibility.owned;
-                      }));
         const bool any_preconstrained =
             found != visibility_by_slave.end() &&
             std::any_of(found->second.begin(), found->second.end(),
@@ -1509,15 +1654,6 @@ resolveDistributedAggregationDeclarations(
                         });
         if (any_preconstrained) {
             globally_preconstrained.insert(slave);
-            continue;
-        }
-        if (owner_count != 1u) {
-            ++failure_count;
-            if (failure_count <= 4u) {
-                failures << " dof=" << slave
-                         << " reason=canonical_slave_owner_count:"
-                         << owner_count << ";";
-            }
             continue;
         }
         const auto line_it = canonical_lines.find(slave);
@@ -1577,6 +1713,14 @@ resolveDistributedAggregationDeclarations(
 
     result.canonical_strong_suppressed_dofs =
         globally_preconstrained.size();
+    result.canonical_rows.reserve(canonical_row_metadata.size());
+    for (auto& [slave, row] : canonical_row_metadata) {
+        row.slave_owner_rank = ownerRank(slave);
+        if (globally_preconstrained.count(slave) != 0u) {
+            row.preconstrained_at_apply = true;
+        }
+        result.canonical_rows.push_back(std::move(row));
+    }
     for (const auto& [slave, line] : canonical_lines) {
         if (globally_preconstrained.count(slave) != 0u) {
             continue;
@@ -1646,6 +1790,32 @@ resolveDistributedAggregationDeclarations(
     result.canonical_rootless_candidate_vertices =
         global_candidates.size() - result.canonical_rooted_candidate_vertices;
     for (const auto& [dof, support] : global_candidates) {
+        const auto candidate_dof = dof;
+        const auto* candidate_components =
+            &support.component_dofs;
+        auto make_row =
+            [candidate_dof, candidate_components](
+                GlobalIndex slave,
+                SmallCutAggregationProvisionalRowKind kind) {
+                const auto component_it = std::find(
+                    candidate_components->begin(),
+                    candidate_components->end(),
+                    slave);
+                if (component_it == candidate_components->end()) {
+                    throw std::logic_error(
+                        "SmallCutAggregationConstraint: serial canonical "
+                        "slave is absent from its candidate component list");
+                }
+                SmallCutAggregationProlongationRow row;
+                row.candidate_dof = candidate_dof;
+                row.component = static_cast<std::size_t>(
+                    std::distance(candidate_components->begin(),
+                                  component_it));
+                row.slave_dof = slave;
+                row.slave_owner_rank = 0;
+                row.provisional_kind = kind;
+                return row;
+            };
         const bool all_components_preconstrained = std::all_of(
             support.component_dofs.begin(), support.component_dofs.end(),
             [&](GlobalIndex slave) {
@@ -1654,6 +1824,14 @@ resolveDistributedAggregationDeclarations(
         if (all_components_preconstrained) {
             result.canonical_strong_suppressed_dofs +=
                 support.component_dofs.size();
+            for (const auto slave : support.component_dofs) {
+                auto row = make_row(
+                    slave,
+                    SmallCutAggregationProvisionalRowKind::
+                        PreexistingConstraint);
+                row.preconstrained_at_apply = true;
+                result.canonical_rows.push_back(std::move(row));
+            }
             continue;
         }
         const auto found = local_candidates.find(dof);
@@ -1698,11 +1876,23 @@ resolveDistributedAggregationDeclarations(
                           /*rhs_provider_rank=*/0);
                   });
         if (!valid_declarations.empty()) {
+            const auto& chosen = valid_declarations.front();
             for (const auto& line : valid_declarations.front().lines) {
+                auto row = make_row(
+                    line.slave_dof,
+                    SmallCutAggregationProvisionalRowKind::RootedExtension);
+                row.root_cell_gid = chosen.root_cell_gid;
+                row.root_cell_owner_rank = 0;
+                row.root_provider_rank = 0;
+                row.root_distance = chosen.root_distance;
+                row.provisional_entries = line.entries;
                 if (existing_constraints.isConstrained(line.slave_dof)) {
                     ++result.canonical_strong_suppressed_dofs;
+                    row.preconstrained_at_apply = true;
+                    result.canonical_rows.push_back(std::move(row));
                     continue;
                 }
+                result.canonical_rows.push_back(std::move(row));
                 result.canonical_slaves.push_back(line.slave_dof);
                 ++result.canonical_owned_aggregate_dofs;
                 if (partition.isRelevant(line.slave_dof)) {
@@ -1711,19 +1901,38 @@ resolveDistributedAggregationDeclarations(
             }
         } else if (support.globally_rooted) {
             if (allow_unaggregated) {
+                for (const auto slave : support.component_dofs) {
+                    result.canonical_rows.push_back(make_row(
+                        slave,
+                        SmallCutAggregationProvisionalRowKind::
+                            UnaggregatedFreeIdentity));
+                }
                 continue;
             }
             throw std::runtime_error(
                 "SmallCutAggregationConstraint: globally rooted candidate " +
                 std::to_string(dof) +
                 " has no valid serial root proposal");
-        } else if (!(slave_all_cut && support.has_full_support) &&
-                   !allow_unaggregated) {
+        } else if (slave_all_cut && support.has_full_support) {
             for (const auto slave : support.component_dofs) {
+                result.canonical_rows.push_back(make_row(
+                    slave,
+                    SmallCutAggregationProvisionalRowKind::
+                        SupportedFreeIdentity));
+            }
+        } else if (!allow_unaggregated) {
+            for (const auto slave : support.component_dofs) {
+                auto row = make_row(
+                    slave,
+                    SmallCutAggregationProvisionalRowKind::
+                        RootlessHomogeneousPin);
                 if (existing_constraints.isConstrained(slave)) {
                     ++result.canonical_strong_suppressed_dofs;
+                    row.preconstrained_at_apply = true;
+                    result.canonical_rows.push_back(std::move(row));
                     continue;
                 }
+                result.canonical_rows.push_back(std::move(row));
                 result.canonical_slaves.push_back(slave);
                 ++result.canonical_owned_pinned_dofs;
                 if (partition.isRelevant(slave)) {
@@ -1731,10 +1940,23 @@ resolveDistributedAggregationDeclarations(
                         ConstraintLine{.slave_dof = slave});
                 }
             }
+        } else {
+            for (const auto slave : support.component_dofs) {
+                result.canonical_rows.push_back(make_row(
+                    slave,
+                    SmallCutAggregationProvisionalRowKind::
+                        UnaggregatedFreeIdentity));
+            }
         }
     }
     std::sort(result.canonical_slaves.begin(),
               result.canonical_slaves.end());
+    std::sort(
+        result.canonical_rows.begin(),
+        result.canonical_rows.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return lhs.slave_dof < rhs.slave_dof;
+        });
     return result;
 }
 
@@ -1841,9 +2063,11 @@ resolveDistributedAggregationDeclarations(
                                  Vector<Real, 3>& xi)
 {
     const auto& nodes = mapping.nodes();
-    if (nodes.empty()) {
+    if (nodes.empty() || dimension < 1 || dimension > 3) {
         return false;
     }
+    const std::size_t dimension_size =
+        static_cast<std::size_t>(dimension);
     auto minimum = nodes.front();
     auto maximum = nodes.front();
     Real coordinate_scale = geometry::detail::stable_vector_norm(nodes.front());
@@ -1880,7 +2104,7 @@ resolveDistributedAggregationDeclarations(
         std::max(relative_tolerance, machine_floor);
 
     xi = Vector<Real, 3>{};
-    for (int d = 0; d < dimension; ++d) {
+    for (std::size_t d = 0; d < dimension_size; ++d) {
         xi[d] = Real(0.25);
     }
     bool have_update = false;
@@ -1888,7 +2112,7 @@ resolveDistributedAggregationDeclarations(
     for (int iteration = 0; iteration < 25; ++iteration) {
         const auto mapped = mapping.map_to_physical(xi);
         Vector<Real, 3> residual{};
-        for (int d = 0; d < 3; ++d) {
+        for (std::size_t d = 0; d < 3u; ++d) {
             residual[d] = physical[d] - mapped[d];
         }
         const Real residual_norm =
@@ -1914,8 +2138,8 @@ resolveDistributedAggregationDeclarations(
         auto j_inv = jacobian;
         if (dimension < 3) {
             // Regularize the unused row/column so the 3x3 inverse exists.
-            for (int d = dimension; d < 3; ++d) {
-                for (int k = 0; k < 3; ++k) {
+            for (std::size_t d = dimension_size; d < 3u; ++d) {
+                for (std::size_t k = 0; k < 3u; ++k) {
                     j_inv(d, k) = Real(0);
                     j_inv(k, d) = Real(0);
                 }
@@ -1925,9 +2149,9 @@ resolveDistributedAggregationDeclarations(
         const auto inverse =
             geometry::scaleConditionedJacobianInverse(j_inv);
         Vector<Real, 3> reference_update{};
-        for (int r = 0; r < 3; ++r) {
+        for (std::size_t r = 0; r < 3u; ++r) {
             Real update = Real(0);
-            for (int c = 0; c < 3; ++c) {
+            for (std::size_t c = 0; c < 3u; ++c) {
                 update += inverse(r, c) * residual[c];
             }
             reference_update[r] = update;
@@ -1936,7 +2160,7 @@ resolveDistributedAggregationDeclarations(
         last_update_norm =
             geometry::detail::stable_vector_norm(reference_update);
         have_update = true;
-        for (int d = dimension; d < 3; ++d) {
+        for (std::size_t d = dimension_size; d < 3u; ++d) {
             xi[d] = Real(0);
         }
         if (!std::isfinite(last_update_norm) ||
@@ -2056,6 +2280,27 @@ resolveDistributedAggregationDeclarations(
     }
 }
 
+inline void aggregationDigestMix(std::uint64_t& digest,
+                                 std::uint64_t word) noexcept
+{
+    constexpr std::uint64_t prime = 1099511628211ull;
+    for (std::size_t byte = 0u; byte < sizeof(word); ++byte) {
+        digest ^= (word >> (8u * byte)) & 0xffu;
+        digest *= prime;
+    }
+}
+
+[[nodiscard]] std::uint64_t aggregationDigestReal(double value)
+{
+    if (!std::isfinite(value)) {
+        throw std::logic_error(
+            "SmallCutAggregationConstraint: cannot digest a non-finite "
+            "prolongation value");
+    }
+    const double canonical = value == 0.0 ? 0.0 : value;
+    return std::bit_cast<std::uint64_t>(canonical);
+}
+
 } // namespace
 
 SmallCutAggregationConstraint::SmallCutAggregationConstraint(
@@ -2104,6 +2349,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                           AffineConstraints& constraints)
 {
     completed_refresh_report_.reset();
+    pending_prolongation_.reset();
     const auto* cut_context = system.cutIntegrationContext();
     bool distributed_aggregation = false;
 #if FE_HAS_MPI
@@ -2182,8 +2428,19 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     static_cast<void>(distributed_aggregation);
 #endif
 
-    cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
-        system.meshAccess());
+    // This validation is rank-local and may throw. Coordinate its outcome
+    // before any rank can enter the marker collective below.
+    std::exception_ptr local_snapshot_exception;
+    try {
+        cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+            system.meshAccess());
+    } catch (...) {
+        local_snapshot_exception = std::current_exception();
+    }
+    coordinateDistributedLocalFailure(
+        system,
+        local_snapshot_exception,
+        "free_surface_snapshot_validation");
 
     // Contexts may be ownership-filtered, so an empty-work rank need not
     // retain this marker locally. At least one rank in the field communicator
@@ -2483,6 +2740,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         std::size_t rule_count{0u};
         Real physical_volume{0.0};
         std::set<std::uint64_t> stable_rule_ids{};
+        std::size_t missing_stable_rule_ids{0u};
     };
     std::unordered_map<GlobalIndex, LocalActiveCellMeasure>
         local_active_cell_measures;
@@ -2582,15 +2840,16 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                         local_active_cell_measures[
                             static_cast<GlobalIndex>(cell)];
                     const auto stable_rule_id =
-                        rule.provenance.source_stable_id != 0u
-                            ? rule.provenance.source_stable_id
-                            : rule.provenance.cut_topology_revision;
-                    if (!measure.stable_rule_ids.insert(
-                            stable_rule_id).second) {
+                        rule.provenance.cut_topology_revision;
+                    if (stable_rule_id == 0u) {
+                        ++measure.missing_stable_rule_ids;
+                    } else if (!measure.stable_rule_ids.insert(
+                                   stable_rule_id).second) {
                         throw std::runtime_error(
                             "SmallCutAggregationConstraint: diagnostic="
                             "duplicate_active_feature_volume_rule retained "
-                            "rules for one cell repeat a stable identity");
+                            "rules for one cell repeat a nonzero stable "
+                            "identity");
                     }
                     ++measure.rule_count;
                     measure.physical_volume += physical_volume;
@@ -2698,6 +2957,25 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         local_cell_class_words.push_back(
             std::bit_cast<std::int64_t>(
                 static_cast<double>(physical_volume)));
+        if (measure != local_active_cell_measures.end()) {
+            if (measure->second.stable_rule_ids.size() +
+                    measure->second.missing_stable_rule_ids !=
+                rule_count) {
+                throw std::logic_error(
+                    "SmallCutAggregationConstraint: retained rule identity "
+                    "count does not match the cell measure count");
+            }
+            for (std::size_t missing = 0u;
+                 missing < measure->second.missing_stable_rule_ids;
+                 ++missing) {
+                local_cell_class_words.push_back(0);
+            }
+            for (const auto stable_id :
+                 measure->second.stable_rule_ids) {
+                local_cell_class_words.push_back(
+                    std::bit_cast<std::int64_t>(stable_id));
+            }
+        }
     }
     } catch (...) {
         local_cell_declaration_exception = std::current_exception();
@@ -2730,12 +3008,16 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         GlobalIndex physical_cell_gid{INVALID_GLOBAL_INDEX};
         std::size_t rule_count{0u};
         Real physical_volume{0.0};
+        std::vector<std::uint64_t> stable_rule_ids{};
         int provider_rank{-1};
     };
     std::map<CellKey, std::vector<ActiveCellMeasureDeclaration>>
         active_cell_measure_declarations;
     std::map<CellKey, GlobalIndex> global_physical_cell_gids;
     std::map<CellKey, Real> global_active_cell_physical_volumes;
+    std::map<CellKey, std::vector<std::uint64_t>>
+        global_active_cell_rule_ids;
+    std::map<CellKey, int> global_active_cell_measure_provider_ranks;
     // A declaration is a positive classification fact even when flags==0
     // (inactive-full). Every rank retaining the same cell must therefore
     // report the exact same fact; OR-combining flags would silently accept,
@@ -2793,6 +3075,36 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     "SmallCutAggregationConstraint: malformed distributed "
                     "cell-measure payload");
             }
+            if (static_cast<std::uint64_t>(rule_count_word) >
+                static_cast<std::uint64_t>(end - position)) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: malformed distributed "
+                    "retained-rule identity payload");
+            }
+            std::vector<std::uint64_t> stable_rule_ids;
+            stable_rule_ids.reserve(
+                static_cast<std::size_t>(rule_count_word));
+            for (std::int64_t rule = 0;
+                 rule < rule_count_word;
+                 ++rule) {
+                stable_rule_ids.push_back(
+                    std::bit_cast<std::uint64_t>(
+                        gathered_cell_classes.words[position++]));
+            }
+            const auto repeated_nonzero_identity =
+                std::adjacent_find(
+                    stable_rule_ids.begin(),
+                    stable_rule_ids.end(),
+                    [](std::uint64_t lhs, std::uint64_t rhs) {
+                        return lhs != 0u && lhs == rhs;
+                    });
+            if (!std::is_sorted(stable_rule_ids.begin(),
+                                stable_rule_ids.end()) ||
+                repeated_nonzero_identity != stable_rule_ids.end()) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: non-canonical retained "
+                    "rule identity payload");
+            }
             const bool active = (flags & 3) != 0;
             if ((active &&
                  (rule_count_word == 0 ||
@@ -2824,6 +3136,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                         .rule_count =
                             static_cast<std::size_t>(rule_count_word),
                         .physical_volume = physical_volume,
+                        .stable_rule_ids =
+                            std::move(stable_rule_ids),
                         .provider_rank = rank,
                     });
             }
@@ -2867,7 +3181,9 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     canonical.physical_cell_gid ||
                 provider.rule_count != canonical.rule_count ||
                 provider.physical_volume !=
-                    canonical.physical_volume) {
+                    canonical.physical_volume ||
+                provider.stable_rule_ids !=
+                    canonical.stable_rule_ids) {
                 throw std::runtime_error(
                     "SmallCutAggregationConstraint: diagnostic="
                     "inconsistent_distributed_active_feature_volume "
@@ -2878,6 +3194,10 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             key, canonical.physical_cell_gid);
         global_active_cell_physical_volumes.emplace(
             key, canonical.physical_volume);
+        global_active_cell_rule_ids.emplace(
+            key, canonical.stable_rule_ids);
+        global_active_cell_measure_provider_ranks.emplace(
+            key, canonical.provider_rank);
     }
 
     for (const auto& [key, cell] : local_cell_by_key) {
@@ -2964,6 +3284,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         gathered_cell_visibility.displacements = {0};
     }
     std::map<CellKey, std::size_t> global_cell_owner_counts;
+    std::map<CellKey, int> global_cell_owner_ranks;
     const bool slave_all_cut = runtime_options.slave_all_cut;
     using FaceKey = std::vector<GlobalIndex>;
     struct OwnedCellFaces {
@@ -3003,6 +3324,9 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     gathered_cell_visibility.words[position++]));
             }
             global_cell_owner_counts[key] += owned ? 1u : 0u;
+            if (owned) {
+                global_cell_owner_ranks.emplace(key, rank);
+            }
         }
     }
     for (const auto& [key, klass] : global_cell_classes) {
@@ -3013,6 +3337,11 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 "incomplete_distributed_aggregation_halo reason="
                 "global_cell_owner_count:" +
                 std::to_string(global_cell_owner_counts[key]));
+        }
+        if (global_cell_owner_ranks.count(key) != 1u) {
+            throw std::logic_error(
+                "SmallCutAggregationConstraint: canonical cell owner rank "
+                "was not retained");
         }
     }
 
@@ -3247,6 +3576,9 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     // reduction.
     std::vector<SmallCutAggregationActiveFeatureReport>
         canonical_active_features;
+    std::map<CellKey, GlobalIndex> active_feature_by_cell;
+    std::vector<SmallCutAggregationProlongationCell>
+        canonical_active_cells;
     std::size_t canonical_rooted_active_feature_count = 0u;
     std::size_t canonical_rootless_active_feature_count = 0u;
     Real canonical_rootless_active_physical_volume = 0.0;
@@ -3319,6 +3651,17 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         SmallCutAggregationActiveFeatureReport feature;
         feature.stable_feature_id =
             global_physical_cell_gids.at(component_cells.front());
+        for (const auto& cell : component_cells) {
+            const auto [feature_it, inserted] =
+                active_feature_by_cell.emplace(
+                    cell, feature.stable_feature_id);
+            if (!inserted ||
+                feature_it->second != feature.stable_feature_id) {
+                throw std::logic_error(
+                    "SmallCutAggregationConstraint: active cell was assigned "
+                    "to more than one canonical feature");
+            }
+        }
         feature.canonical_cell_count = component_cells.size();
         feature.canonical_cell_gid_digest = 14695981039346656037ull;
         long double physical_volume = 0.0L;
@@ -3408,6 +3751,59 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             "SmallCutAggregationConstraint: active feature totals are "
             "inconsistent");
     }
+
+    canonical_active_cells.reserve(active_feature_by_cell.size());
+    for (const auto& [cell, feature_id] : active_feature_by_cell) {
+        const auto& klass = global_cell_classes.at(cell);
+        if (klass.full_active == klass.cut) {
+            throw std::logic_error(
+                "SmallCutAggregationConstraint: canonical active cell does "
+                "not have exactly one active class");
+        }
+        SmallCutAggregationProlongationCell record;
+        record.cell_gid = global_physical_cell_gids.at(cell);
+        record.owner_rank = global_cell_owner_ranks.at(cell);
+        record.retained_measure_provider_rank =
+            global_active_cell_measure_provider_ranks.at(cell);
+        record.kind =
+            klass.full_active
+                ? SmallCutAggregationActiveCellKind::FullActive
+                : SmallCutAggregationActiveCellKind::Cut;
+        record.active_feature_id = feature_id;
+        record.retained_physical_volume =
+            global_active_cell_physical_volumes.at(cell);
+        record.retained_rule_stable_ids =
+            global_active_cell_rule_ids.at(cell);
+        record.field_dofs = cell;
+        const auto neighbors = global_neighbors.find(cell);
+        if (neighbors != global_neighbors.end()) {
+            for (const auto& neighbor : neighbors->second) {
+                const auto neighbor_class =
+                    global_cell_classes.find(neighbor);
+                if (neighbor_class == global_cell_classes.end() ||
+                    (!neighbor_class->second.full_active &&
+                     !neighbor_class->second.cut)) {
+                    continue;
+                }
+                record.active_face_neighbor_cell_gids.push_back(
+                    global_physical_cell_gids.at(neighbor));
+            }
+        }
+        std::sort(record.active_face_neighbor_cell_gids.begin(),
+                  record.active_face_neighbor_cell_gids.end());
+        record.active_face_neighbor_cell_gids.erase(
+            std::unique(
+                record.active_face_neighbor_cell_gids.begin(),
+                record.active_face_neighbor_cell_gids.end()),
+            record.active_face_neighbor_cell_gids.end());
+        canonical_active_cells.push_back(std::move(record));
+    }
+    std::sort(
+        canonical_active_cells.begin(),
+        canonical_active_cells.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return lhs.cell_gid < rhs.cell_gid;
+        });
     } catch (...) {
         local_feature_exception = std::current_exception();
     }
@@ -4013,6 +4409,172 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             }
         }
     }
+
+    std::vector<SmallCutAggregationProlongationPatch>
+        canonical_prolongation_patches;
+    if (distributed_result.validation !=
+        DistributedAggregationValidation::DebugBypass) {
+        std::map<GlobalIndex, const SmallCutAggregationProlongationCell*>
+            active_cell_by_gid;
+        std::map<GlobalIndex,
+                 std::vector<
+                     const SmallCutAggregationProlongationCell*>>
+            cut_cells_by_dof;
+        std::map<GlobalIndex, std::set<GlobalIndex>>
+            active_cell_gids_by_feature;
+        for (const auto& cell : canonical_active_cells) {
+            active_cell_by_gid.emplace(cell.cell_gid, &cell);
+            active_cell_gids_by_feature[cell.active_feature_id].insert(
+                cell.cell_gid);
+            if (cell.kind ==
+                SmallCutAggregationActiveCellKind::Cut) {
+                for (const auto dof : cell.field_dofs) {
+                    cut_cells_by_dof[dof].push_back(&cell);
+                }
+            }
+        }
+
+        struct PatchAccumulator {
+            SmallCutAggregationProlongationPatch patch{};
+            std::set<GlobalIndex> active_features{};
+            std::set<GlobalIndex> members{};
+            std::set<GlobalIndex> support{};
+            std::set<GlobalIndex> slaves{};
+        };
+        std::map<std::pair<int, GlobalIndex>, PatchAccumulator>
+            patch_accumulators;
+        for (auto& row : distributed_result.canonical_rows) {
+            if (row.provisional_kind ==
+                SmallCutAggregationProvisionalRowKind::RootedExtension) {
+                const auto root = active_cell_by_gid.find(
+                    row.root_cell_gid);
+                if (root == active_cell_by_gid.end() ||
+                    root->second->kind !=
+                        SmallCutAggregationActiveCellKind::FullActive) {
+                    throw std::logic_error(
+                        "SmallCutAggregationConstraint: selected physical "
+                        "root is absent from the canonical full-active cell "
+                        "ledger");
+                }
+                row.root_cell_owner_rank = root->second->owner_rank;
+                auto& accumulator = patch_accumulators[{
+                    static_cast<int>(SmallCutAggregationPatchKind::Rooted),
+                    row.root_cell_gid}];
+                accumulator.patch.kind =
+                    SmallCutAggregationPatchKind::Rooted;
+                accumulator.patch.root_cell_gid = row.root_cell_gid;
+                accumulator.patch.root_cell_owner_rank =
+                    row.root_cell_owner_rank;
+                accumulator.active_features.insert(
+                    root->second->active_feature_id);
+                accumulator.members.insert(row.root_cell_gid);
+                accumulator.slaves.insert(row.slave_dof);
+                bool found_cut_support = false;
+                const auto cut_support =
+                    cut_cells_by_dof.find(row.slave_dof);
+                if (cut_support != cut_cells_by_dof.end()) {
+                    for (const auto* cell : cut_support->second) {
+                        accumulator.members.insert(cell->cell_gid);
+                        accumulator.active_features.insert(
+                            cell->active_feature_id);
+                        found_cut_support = true;
+                    }
+                }
+                if (!found_cut_support) {
+                    throw std::logic_error(
+                        "SmallCutAggregationConstraint: rooted candidate has "
+                        "no canonical cut-cell support");
+                }
+            } else if (
+                row.provisional_kind ==
+                SmallCutAggregationProvisionalRowKind::
+                    RootlessHomogeneousPin) {
+                std::set<GlobalIndex> feature_ids;
+                const auto cut_support =
+                    cut_cells_by_dof.find(row.slave_dof);
+                if (cut_support != cut_cells_by_dof.end()) {
+                    for (const auto* cell : cut_support->second) {
+                        feature_ids.insert(cell->active_feature_id);
+                    }
+                }
+                if (feature_ids.empty()) {
+                    throw std::logic_error(
+                        "SmallCutAggregationConstraint: rootless candidate "
+                        "has no canonical active-feature support");
+                }
+                for (const auto feature_id : feature_ids) {
+                    auto& accumulator = patch_accumulators[{
+                        static_cast<int>(
+                            SmallCutAggregationPatchKind::Rootless),
+                        feature_id}];
+                    accumulator.patch.kind =
+                        SmallCutAggregationPatchKind::Rootless;
+                    accumulator.active_features.insert(feature_id);
+                    accumulator.slaves.insert(row.slave_dof);
+                    const auto members =
+                        active_cell_gids_by_feature.find(feature_id);
+                    if (members !=
+                        active_cell_gids_by_feature.end()) {
+                        accumulator.members.insert(
+                            members->second.begin(),
+                            members->second.end());
+                    }
+                }
+            }
+        }
+
+        std::set<GlobalIndex> covered_cut_cells;
+        for (const auto& [key, accumulator] : patch_accumulators) {
+            static_cast<void>(key);
+            for (const auto gid : accumulator.members) {
+                const auto cell = active_cell_by_gid.find(gid);
+                if (cell != active_cell_by_gid.end() &&
+                    cell->second->kind ==
+                        SmallCutAggregationActiveCellKind::Cut) {
+                    covered_cut_cells.insert(gid);
+                }
+            }
+        }
+        for (const auto& cell : canonical_active_cells) {
+            if (cell.kind !=
+                    SmallCutAggregationActiveCellKind::Cut ||
+                covered_cut_cells.count(cell.cell_gid) != 0u) {
+                continue;
+            }
+            auto& accumulator = patch_accumulators[{
+                static_cast<int>(
+                    SmallCutAggregationPatchKind::SupportedCut),
+                cell.cell_gid}];
+            accumulator.patch.kind =
+                SmallCutAggregationPatchKind::SupportedCut;
+            accumulator.active_features.insert(
+                cell.active_feature_id);
+            accumulator.members.insert(cell.cell_gid);
+            accumulator.support.insert(cell.cell_gid);
+            accumulator.support.insert(
+                cell.active_face_neighbor_cell_gids.begin(),
+                cell.active_face_neighbor_cell_gids.end());
+        }
+        canonical_prolongation_patches.reserve(
+            patch_accumulators.size());
+        for (auto& [key, accumulator] : patch_accumulators) {
+            static_cast<void>(key);
+            accumulator.patch.active_feature_ids.assign(
+                accumulator.active_features.begin(),
+                accumulator.active_features.end());
+            accumulator.patch.member_cell_gids.assign(
+                accumulator.members.begin(), accumulator.members.end());
+            accumulator.support.insert(
+                accumulator.members.begin(), accumulator.members.end());
+            accumulator.patch.support_cell_gids.assign(
+                accumulator.support.begin(),
+                accumulator.support.end());
+            accumulator.patch.slave_dofs.assign(
+                accumulator.slaves.begin(), accumulator.slaves.end());
+            canonical_prolongation_patches.push_back(
+                std::move(accumulator.patch));
+        }
+    }
     for (const auto& line : distributed_result.relevant_lines) {
         if (constraints.isConstrained(line.slave_dof)) {
             continue;
@@ -4139,12 +4701,15 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         << " pruned_volume_measure=" << cut_context->generatedPrunedVolumeMeasure();
     FE_LOG_INFO(oss.str());
 
+    auto next_previous_canonical_slaves =
+        distributed_result.canonical_slaves;
     {
         // Churn is computed from the replicated canonical slave set, not the
         // overlap-dependent locally relevant set. State belongs to this
         // constraint instance, whose lifetime is tied to the FESystem; this
         // avoids stale process-global state when a system address is reused.
-        const auto& canonical_slaves = distributed_result.canonical_slaves;
+        const auto& canonical_slaves =
+            next_previous_canonical_slaves;
         const auto& previous = previous_canonical_slaves_;
         std::size_t entered = 0u;
         std::size_t left = 0u;
@@ -4173,7 +4738,6 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
               << " entered=" << entered
               << " left=" << left;
         FE_LOG_INFO(churn.str());
-        previous_canonical_slaves_ = canonical_slaves;
     }
 
     // Root-proposal failures are diagnostic at proposal granularity: another
@@ -4197,7 +4761,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
 
     if (distributed_validation !=
         DistributedAggregationValidation::DebugBypass) {
-        completed_refresh_report_ = SmallCutAggregationRefreshReport{
+        auto completed_report = SmallCutAggregationRefreshReport{
             .field = field_,
             .active_side = active_side_,
             .interface_marker = interface_marker_,
@@ -4246,7 +4810,857 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             .canonical_active_features =
                 canonical_active_features,
         };
+
+        auto pending = std::make_shared<
+            detail::SmallCutAggregationPendingProlongation>();
+        pending->field = field_;
+        pending->active_side = active_side_;
+        pending->interface_marker = interface_marker_;
+        pending->slave_all_cut = slave_all_cut;
+        pending->linear_extension = runtime_options.linear_extension;
+        pending->allow_unaggregated = allow_unaggregated;
+        pending->trace_bound_eligible =
+            !allow_unaggregated &&
+            std::all_of(
+                canonical_active_cells.begin(),
+                canonical_active_cells.end(),
+                [](const auto& cell) {
+                    return !cell.retained_rule_stable_ids.empty() &&
+                        std::none_of(
+                            cell.retained_rule_stable_ids.begin(),
+                            cell.retained_rule_stable_ids.end(),
+                            [](std::uint64_t stable_id) {
+                                return stable_id == 0u;
+                            });
+                }) &&
+            std::none_of(
+                distributed_result.canonical_rows.begin(),
+                distributed_result.canonical_rows.end(),
+                [](const auto& row) {
+                    return row.provisional_kind ==
+                        SmallCutAggregationProvisionalRowKind::
+                            UnaggregatedFreeIdentity;
+                });
+        pending->guards = guards_;
+        pending->cut_context_content_revision =
+            cut_context->contentRevision();
+        pending->has_free_surface_snapshot_revision =
+            cut_context->hasFreeSurfaceGeometrySnapshotForMarker(
+                interface_marker_);
+        if (pending->has_free_surface_snapshot_revision) {
+            pending->free_surface_snapshot_revision =
+                cut_context
+                    ->freeSurfaceGeometrySnapshotRevisionForMarker(
+                        interface_marker_);
+        }
+        pending->has_source_value_revision =
+            cut_context->hasExpectedGeneratedSourceValueRevision(
+                interface_marker_);
+        if (pending->has_source_value_revision) {
+            pending->source_value_revision =
+                cut_context->expectedGeneratedSourceValueRevision(
+                    interface_marker_);
+        }
+        pending->rows =
+            std::move(distributed_result.canonical_rows);
+        pending->active_cells = std::move(canonical_active_cells);
+        pending->patches =
+            std::move(canonical_prolongation_patches);
+        pending_prolongation_ = std::move(pending);
+        completed_refresh_report_ =
+            std::move(completed_report);
+        previous_canonical_slaves_.swap(
+            next_previous_canonical_slaves);
     }
+}
+
+std::shared_ptr<const SmallCutAggregationProlongationReport>
+SmallCutAggregationConstraint::finalizeProlongationReport(
+    const systems::FESystem& system,
+    const AffineConstraints& closed_constraints) const
+{
+    int rank = 0;
+    int world_size = 1;
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized != 0) {
+        const auto comm = system.dofHandler().mpiComm();
+        MPI_Comm_rank(comm, &rank);
+        MPI_Comm_size(comm, &world_size);
+        if (world_size > 1) {
+            const int local_has_pending =
+                pending_prolongation_ != nullptr ? 1 : 0;
+            int minimum_has_pending = 0;
+            int maximum_has_pending = 0;
+            MPI_Allreduce(&local_has_pending,
+                          &minimum_has_pending,
+                          1,
+                          MPI_INT,
+                          MPI_MIN,
+                          comm);
+            MPI_Allreduce(&local_has_pending,
+                          &maximum_has_pending,
+                          1,
+                          MPI_INT,
+                          MPI_MAX,
+                          comm);
+            if (minimum_has_pending != maximum_has_pending) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: pending prolongation "
+                    "metadata is inconsistent across communicator ranks");
+            }
+            if (maximum_has_pending == 0) {
+                return {};
+            }
+        }
+    }
+#endif
+    if (pending_prolongation_ == nullptr) {
+        return {};
+    }
+    const auto& pending = *pending_prolongation_;
+
+    std::exception_ptr local_validation_exception;
+    try {
+        if (!closed_constraints.isClosed()) {
+            throw std::logic_error(
+                "SmallCutAggregationConstraint: prolongation finalization "
+                "requires a closed AffineConstraints object");
+        }
+        const auto* cut_context = system.cutIntegrationContext();
+        if (cut_context == nullptr ||
+            cut_context->contentRevision() !=
+                pending.cut_context_content_revision) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: cut-context revision changed "
+                "between aggregation and prolongation finalization");
+        }
+        const bool has_snapshot =
+            cut_context->hasFreeSurfaceGeometrySnapshotForMarker(
+                pending.interface_marker);
+        if (has_snapshot !=
+                pending.has_free_surface_snapshot_revision ||
+            (has_snapshot &&
+             cut_context
+                     ->freeSurfaceGeometrySnapshotRevisionForMarker(
+                         pending.interface_marker) !=
+                 pending.free_surface_snapshot_revision)) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: free-surface snapshot "
+                "revision changed during prolongation finalization");
+        }
+        const bool has_source_revision =
+            cut_context->hasExpectedGeneratedSourceValueRevision(
+                pending.interface_marker);
+        if (has_source_revision !=
+                pending.has_source_value_revision ||
+            (has_source_revision &&
+             cut_context->expectedGeneratedSourceValueRevision(
+                 pending.interface_marker) !=
+                 pending.source_value_revision)) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: source-value revision "
+                "changed during prolongation finalization");
+        }
+    } catch (...) {
+        local_validation_exception = std::current_exception();
+    }
+    coordinateDistributedLocalFailure(
+        system,
+        local_validation_exception,
+        "prolongation_revision_validation");
+
+    struct ClosedRow {
+        bool constrained{false};
+        std::vector<ConstraintEntry> entries{};
+        Real inhomogeneity{0.0};
+    };
+    const auto global_dofs = system.dofHandler().getNumDofs();
+    const auto& partition = system.dofHandler().getPartition();
+    auto extract_closed_row = [&](GlobalIndex slave) {
+        if (slave < 0 || slave >= global_dofs) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: finalized slave is outside "
+                "the global DOF range");
+        }
+        ClosedRow row;
+        const auto view = closed_constraints.getConstraint(slave);
+        if (!view.has_value()) {
+            row.entries.push_back(
+                ConstraintEntry{.master_dof = slave, .weight = 1.0});
+            return row;
+        }
+        row.constrained = true;
+        row.inhomogeneity = static_cast<Real>(view->inhomogeneity);
+        if (!std::isfinite(row.inhomogeneity)) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: finalized row has a "
+                "non-finite inhomogeneity");
+        }
+        row.entries.assign(view->entries.begin(), view->entries.end());
+        GlobalIndex previous_master = INVALID_GLOBAL_INDEX;
+        for (const auto& entry : row.entries) {
+            if (entry.master_dof < 0 ||
+                entry.master_dof >= global_dofs ||
+                entry.master_dof <= previous_master ||
+                !std::isfinite(entry.weight) ||
+                !partition.isRelevant(entry.master_dof) ||
+                closed_constraints.isConstrained(entry.master_dof)) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: finalized row does not "
+                    "contain sorted terminal master DOFs");
+            }
+            previous_master = entry.master_dof;
+        }
+        return row;
+    };
+
+    std::map<
+        GlobalIndex,
+        const SmallCutAggregationProlongationRow*>
+        pending_row_by_slave;
+    std::vector<std::int64_t> local_owner_words;
+    std::exception_ptr local_owner_exception;
+    try {
+        for (const auto& row : pending.rows) {
+            if (!pending_row_by_slave.emplace(
+                    row.slave_dof, &row).second) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: pending prolongation "
+                    "contains a duplicate canonical slave");
+            }
+            if (row.slave_owner_rank < 0 ||
+                row.slave_owner_rank >= world_size) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: finalized row has an "
+                    "invalid canonical owner rank");
+            }
+            if (row.slave_owner_rank != rank) {
+                continue;
+            }
+            if (!partition.isRelevant(row.slave_dof) ||
+                !partition.isOwned(row.slave_dof)) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: canonical owner cannot "
+                    "materialize its finalized slave row");
+            }
+            const auto final_row = extract_closed_row(row.slave_dof);
+            local_owner_words.push_back(
+                static_cast<std::int64_t>(row.slave_dof));
+            local_owner_words.push_back(
+                final_row.constrained ? 1 : 0);
+            local_owner_words.push_back(
+                static_cast<std::int64_t>(
+                    final_row.entries.size()));
+            local_owner_words.push_back(std::bit_cast<std::int64_t>(
+                static_cast<double>(final_row.inhomogeneity)));
+            for (const auto& entry : final_row.entries) {
+                local_owner_words.push_back(
+                    static_cast<std::int64_t>(entry.master_dof));
+                local_owner_words.push_back(
+                    std::bit_cast<std::int64_t>(entry.weight));
+            }
+        }
+    } catch (...) {
+        local_owner_exception = std::current_exception();
+    }
+    coordinateDistributedLocalFailure(
+        system,
+        local_owner_exception,
+        "prolongation_owner_row_serialization");
+
+    GatheredInt64Words gathered_owner_rows;
+#if FE_HAS_MPI
+    if (world_size > 1) {
+        gathered_owner_rows = allGatherInt64Words(
+            system.dofHandler().mpiComm(),
+            std::span<const std::int64_t>(local_owner_words));
+    }
+#endif
+    if (world_size == 1) {
+        gathered_owner_rows.words = local_owner_words;
+        gathered_owner_rows.counts = {
+            static_cast<int>(local_owner_words.size())};
+        gathered_owner_rows.displacements = {0};
+    }
+
+    std::map<GlobalIndex, ClosedRow> canonical_closed_rows;
+    std::exception_ptr local_decode_exception;
+    try {
+        for (int provider = 0; provider < world_size; ++provider) {
+            std::size_t position = static_cast<std::size_t>(
+                gathered_owner_rows
+                    .displacements[static_cast<std::size_t>(provider)]);
+            const auto end = position + static_cast<std::size_t>(
+                gathered_owner_rows
+                    .counts[static_cast<std::size_t>(provider)]);
+            while (position < end) {
+                if (end - position < 4u) {
+                    throw std::runtime_error(
+                        "SmallCutAggregationConstraint: malformed finalized "
+                        "owner-row header");
+                }
+                const auto slave = static_cast<GlobalIndex>(
+                    gathered_owner_rows.words[position++]);
+                const auto pending_row =
+                    pending_row_by_slave.find(slave);
+                if (pending_row == pending_row_by_slave.end() ||
+                    pending_row->second->slave_owner_rank !=
+                        provider) {
+                    throw std::runtime_error(
+                        "SmallCutAggregationConstraint: finalized row was "
+                        "not emitted by its declared canonical owner");
+                }
+                const auto constrained_word =
+                    gathered_owner_rows.words[position++];
+                const auto entry_count =
+                    gathered_owner_rows.words[position++];
+                const auto inhomogeneity = static_cast<Real>(
+                    std::bit_cast<double>(
+                        gathered_owner_rows.words[position++]));
+                if ((constrained_word != 0 &&
+                     constrained_word != 1) ||
+                    entry_count < 0 ||
+                    static_cast<std::uint64_t>(entry_count) * 2u >
+                        static_cast<std::uint64_t>(end - position) ||
+                    !std::isfinite(inhomogeneity)) {
+                    throw std::runtime_error(
+                        "SmallCutAggregationConstraint: malformed finalized "
+                        "owner-row payload");
+                }
+                ClosedRow row;
+                row.constrained = constrained_word != 0;
+                row.inhomogeneity = inhomogeneity;
+                row.entries.reserve(
+                    static_cast<std::size_t>(entry_count));
+                for (std::int64_t entry = 0;
+                     entry < entry_count;
+                     ++entry) {
+                    const auto master = static_cast<GlobalIndex>(
+                        gathered_owner_rows.words[position++]);
+                    const auto weight = std::bit_cast<double>(
+                        gathered_owner_rows.words[position++]);
+                    if (master < 0 || master >= global_dofs ||
+                        !std::isfinite(weight)) {
+                        throw std::runtime_error(
+                            "SmallCutAggregationConstraint: malformed "
+                            "finalized owner-row entry");
+                    }
+                    row.entries.push_back(
+                        ConstraintEntry{.master_dof = master,
+                                        .weight = weight});
+                }
+                const auto [stored, inserted] =
+                    canonical_closed_rows.emplace(
+                        slave, std::move(row));
+                if (!inserted) {
+                    throw std::runtime_error(
+                        "SmallCutAggregationConstraint: finalized row has "
+                        "more than one canonical owner");
+                }
+                static_cast<void>(stored);
+            }
+        }
+        if (canonical_closed_rows.size() != pending.rows.size()) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: finalized owner-row ledger "
+                "does not cover every canonical candidate");
+        }
+        for (const auto& row : pending.rows) {
+            if (canonical_closed_rows.count(row.slave_dof) != 1u) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: finalized owner-row "
+                    "ledger is missing a canonical slave");
+            }
+        }
+    } catch (...) {
+        local_decode_exception = std::current_exception();
+    }
+    coordinateDistributedLocalFailure(
+        system,
+        local_decode_exception,
+        "prolongation_owner_row_decode");
+
+    std::exception_ptr local_consistency_exception;
+    try {
+        for (const auto& pending_row : pending.rows) {
+            if (!partition.isRelevant(pending_row.slave_dof)) {
+                continue;
+            }
+            const auto local =
+                extract_closed_row(pending_row.slave_dof);
+            const auto& canonical =
+                canonical_closed_rows.at(pending_row.slave_dof);
+            if (local.constrained != canonical.constrained ||
+                aggregationDigestReal(local.inhomogeneity) !=
+                    aggregationDigestReal(
+                        canonical.inhomogeneity) ||
+                local.entries.size() != canonical.entries.size()) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: relevant finalized row "
+                    "disagrees with its canonical owner");
+            }
+            for (std::size_t i = 0u;
+                 i < local.entries.size();
+                 ++i) {
+                if (local.entries[i].master_dof !=
+                        canonical.entries[i].master_dof ||
+                    aggregationDigestReal(local.entries[i].weight) !=
+                        aggregationDigestReal(
+                            canonical.entries[i].weight)) {
+                    throw std::runtime_error(
+                        "SmallCutAggregationConstraint: relevant finalized "
+                        "entries disagree with their canonical owner");
+                }
+            }
+        }
+    } catch (...) {
+        local_consistency_exception = std::current_exception();
+    }
+    coordinateDistributedLocalFailure(
+        system,
+        local_consistency_exception,
+        "prolongation_relevant_row_validation");
+
+    std::shared_ptr<SmallCutAggregationProlongationReport> report;
+    std::exception_ptr local_report_exception;
+    try {
+    report =
+        std::make_shared<SmallCutAggregationProlongationReport>();
+    report->field = pending.field;
+    report->active_side = pending.active_side;
+    report->interface_marker = pending.interface_marker;
+    report->slave_all_cut = pending.slave_all_cut;
+    report->linear_extension = pending.linear_extension;
+    report->allow_unaggregated = pending.allow_unaggregated;
+    report->trace_bound_eligible = pending.trace_bound_eligible;
+    report->guards = pending.guards;
+    report->revision.local_rank = rank;
+    report->revision.communicator_size = world_size;
+    report->revision.constraint =
+        system.constraintRevisionSnapshot();
+    report->revision.affine_constraint_layout_revision =
+        closed_constraints.constraintLayoutRevision();
+    report->revision.cut_context_content_revision =
+        pending.cut_context_content_revision;
+    report->revision.has_free_surface_snapshot_revision =
+        pending.has_free_surface_snapshot_revision;
+    report->revision.free_surface_snapshot_revision =
+        pending.free_surface_snapshot_revision;
+    report->revision.has_source_value_revision =
+        pending.has_source_value_revision;
+    report->revision.source_value_revision =
+        pending.source_value_revision;
+    report->rows = pending.rows;
+    report->active_cells = pending.active_cells;
+    report->patches = pending.patches;
+
+    for (auto& row : report->rows) {
+        const auto& final =
+            canonical_closed_rows.at(row.slave_dof);
+        row.final_entries = final.entries;
+        row.final_inhomogeneity = final.inhomogeneity;
+        if (!final.constrained) {
+            row.final_kind =
+                SmallCutAggregationFinalRowKind::Identity;
+        } else if (!final.entries.empty()) {
+            row.final_kind =
+                SmallCutAggregationFinalRowKind::MasterBearing;
+        } else if (final.inhomogeneity == Real{0.0}) {
+            row.final_kind =
+                SmallCutAggregationFinalRowKind::HomogeneousPin;
+        } else {
+            row.final_kind =
+                SmallCutAggregationFinalRowKind::FixedValue;
+        }
+
+        switch (row.provisional_kind) {
+        case SmallCutAggregationProvisionalRowKind::RootedExtension:
+            if (row.final_kind ==
+                    SmallCutAggregationFinalRowKind::Identity ||
+                (row.preconstrained_at_apply &&
+                 row.final_kind ==
+                     SmallCutAggregationFinalRowKind::MasterBearing)) {
+                report->trace_bound_eligible = false;
+            }
+            break;
+        case SmallCutAggregationProvisionalRowKind::
+                RootlessHomogeneousPin:
+            if (row.final_kind !=
+                    SmallCutAggregationFinalRowKind::HomogeneousPin &&
+                row.final_kind !=
+                    SmallCutAggregationFinalRowKind::FixedValue) {
+                report->trace_bound_eligible = false;
+            }
+            break;
+        case SmallCutAggregationProvisionalRowKind::
+                SupportedFreeIdentity:
+            if (row.final_kind ==
+                SmallCutAggregationFinalRowKind::MasterBearing) {
+                report->trace_bound_eligible = false;
+            }
+            break;
+        case SmallCutAggregationProvisionalRowKind::
+                UnaggregatedFreeIdentity:
+            report->trace_bound_eligible = false;
+            break;
+        case SmallCutAggregationProvisionalRowKind::
+                PreexistingConstraint:
+            if (row.final_kind ==
+                    SmallCutAggregationFinalRowKind::Identity ||
+                row.final_kind ==
+                    SmallCutAggregationFinalRowKind::MasterBearing) {
+                report->trace_bound_eligible = false;
+            }
+            break;
+        }
+    }
+
+    std::map<GlobalIndex, const SmallCutAggregationProlongationRow*>
+        finalized_row_by_slave;
+    for (const auto& row : report->rows) {
+        finalized_row_by_slave.emplace(row.slave_dof, &row);
+    }
+    std::map<GlobalIndex, std::vector<GlobalIndex>>
+        active_cell_gids_by_dof;
+    std::map<GlobalIndex, GlobalIndex>
+        active_feature_by_cell_gid;
+    for (const auto& cell : report->active_cells) {
+        const bool inserted =
+            active_feature_by_cell_gid.emplace(
+                cell.cell_gid, cell.active_feature_id).second;
+        if (!inserted) {
+            throw std::logic_error(
+                "SmallCutAggregationConstraint: canonical active-cell "
+                "ledger contains duplicate cell identities");
+        }
+        for (const auto dof : cell.field_dofs) {
+            active_cell_gids_by_dof[dof].push_back(
+                cell.cell_gid);
+        }
+    }
+    std::set<GlobalIndex> covered_cut_cell_gids;
+    for (auto& patch : report->patches) {
+        if (patch.active_feature_ids.empty() ||
+            !std::is_sorted(
+                patch.active_feature_ids.begin(),
+                patch.active_feature_ids.end()) ||
+            std::adjacent_find(
+                patch.active_feature_ids.begin(),
+                patch.active_feature_ids.end()) !=
+                patch.active_feature_ids.end()) {
+            throw std::logic_error(
+                "SmallCutAggregationConstraint: prolongation patch has "
+                "non-canonical active-feature identities");
+        }
+        std::set<GlobalIndex> support(
+            patch.support_cell_gids.begin(),
+            patch.support_cell_gids.end());
+        support.insert(patch.member_cell_gids.begin(),
+                       patch.member_cell_gids.end());
+        for (const auto slave : patch.slave_dofs) {
+            const auto row_it = finalized_row_by_slave.find(slave);
+            if (row_it == finalized_row_by_slave.end()) {
+                throw std::logic_error(
+                    "SmallCutAggregationConstraint: prolongation patch "
+                    "references an unknown canonical slave");
+            }
+            const auto& row = *row_it->second;
+            if (patch.kind ==
+                    SmallCutAggregationPatchKind::Rootless &&
+                !row.final_entries.empty()) {
+                report->trace_bound_eligible = false;
+            }
+            for (const auto& entry : row.final_entries) {
+                const auto master_support =
+                    active_cell_gids_by_dof.find(
+                        entry.master_dof);
+                if (master_support ==
+                    active_cell_gids_by_dof.end()) {
+                    report->trace_bound_eligible = false;
+                    continue;
+                }
+                support.insert(
+                    master_support->second.begin(),
+                    master_support->second.end());
+            }
+        }
+        // Closed affine rows can replace a provisional root master with a
+        // master supported by another active feature. Derive feature identity
+        // from the complete final support instead of retaining the provisional
+        // patch ledger.
+        std::set<GlobalIndex> support_active_features;
+        for (const auto gid : support) {
+            const auto active_cell =
+                active_feature_by_cell_gid.find(gid);
+            if (active_cell ==
+                active_feature_by_cell_gid.end()) {
+                report->trace_bound_eligible = false;
+                continue;
+            }
+            support_active_features.insert(
+                active_cell->second);
+        }
+        patch.active_feature_ids.assign(
+            support_active_features.begin(),
+            support_active_features.end());
+        patch.support_cell_gids.assign(
+            support.begin(), support.end());
+        for (const auto gid : patch.member_cell_gids) {
+            covered_cut_cell_gids.insert(gid);
+        }
+    }
+    for (const auto& cell : report->active_cells) {
+        if (cell.kind != SmallCutAggregationActiveCellKind::Cut) {
+            continue;
+        }
+        if (covered_cut_cell_gids.count(cell.cell_gid) == 0u) {
+            throw std::logic_error(
+                "SmallCutAggregationConstraint: canonical cut cell has no "
+                "prolongation patch");
+        }
+    }
+
+    std::uint64_t digest = 14695981039346656037ull;
+    aggregationDigestMix(digest, 0x53564d5041474731ull);
+    aggregationDigestMix(
+        digest, static_cast<std::uint64_t>(report->field));
+    aggregationDigestMix(
+        digest, static_cast<std::uint64_t>(report->active_side));
+    aggregationDigestMix(
+        digest,
+        static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(report->interface_marker)));
+    aggregationDigestMix(digest, report->slave_all_cut ? 1u : 0u);
+    aggregationDigestMix(digest, report->linear_extension ? 1u : 0u);
+    aggregationDigestMix(digest, report->allow_unaggregated ? 1u : 0u);
+    aggregationDigestMix(
+        digest, report->trace_bound_eligible ? 1u : 0u);
+    aggregationDigestMix(
+        digest,
+        aggregationDigestReal(
+            static_cast<double>(
+                report->guards
+                    .maximum_reference_extrapolation_distance)));
+    aggregationDigestMix(
+        digest,
+        static_cast<std::uint64_t>(
+            report->guards.maximum_root_path_length));
+    aggregationDigestMix(
+        digest,
+        aggregationDigestReal(
+            static_cast<double>(
+                report->guards.maximum_absolute_coefficient)));
+    aggregationDigestMix(
+        digest,
+        aggregationDigestReal(
+            static_cast<double>(
+                report->guards.maximum_row_l1_norm)));
+    aggregationDigestMix(
+        digest, static_cast<std::uint64_t>(report->rows.size()));
+    for (const auto& row : report->rows) {
+        aggregationDigestMix(
+            digest, static_cast<std::uint64_t>(row.candidate_dof));
+        aggregationDigestMix(
+            digest, static_cast<std::uint64_t>(row.component));
+        aggregationDigestMix(
+            digest, static_cast<std::uint64_t>(row.slave_dof));
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(row.slave_owner_rank)));
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(row.provisional_kind));
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(row.final_kind));
+        aggregationDigestMix(
+            digest, row.preconstrained_at_apply ? 1u : 0u);
+        aggregationDigestMix(
+            digest, static_cast<std::uint64_t>(row.root_cell_gid));
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(
+                    row.root_cell_owner_rank)));
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(
+                    row.root_provider_rank)));
+        aggregationDigestMix(
+            digest, static_cast<std::uint64_t>(row.root_distance));
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(
+                row.provisional_entries.size()));
+        for (const auto& entry : row.provisional_entries) {
+            aggregationDigestMix(
+                digest,
+                static_cast<std::uint64_t>(entry.master_dof));
+            aggregationDigestMix(
+                digest, aggregationDigestReal(entry.weight));
+        }
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(
+                row.final_entries.size()));
+        for (const auto& entry : row.final_entries) {
+            aggregationDigestMix(
+                digest,
+                static_cast<std::uint64_t>(entry.master_dof));
+            aggregationDigestMix(
+                digest, aggregationDigestReal(entry.weight));
+        }
+        aggregationDigestMix(
+            digest,
+            aggregationDigestReal(
+                static_cast<double>(row.final_inhomogeneity)));
+    }
+    aggregationDigestMix(
+        digest,
+        static_cast<std::uint64_t>(
+            report->active_cells.size()));
+    for (const auto& cell : report->active_cells) {
+        aggregationDigestMix(
+            digest, static_cast<std::uint64_t>(cell.cell_gid));
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(cell.owner_rank)));
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(
+                    cell.retained_measure_provider_rank)));
+        aggregationDigestMix(
+            digest, static_cast<std::uint64_t>(cell.kind));
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(cell.active_feature_id));
+        aggregationDigestMix(
+            digest,
+            aggregationDigestReal(
+                static_cast<double>(
+                    cell.retained_physical_volume)));
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(
+                cell.retained_rule_stable_ids.size()));
+        for (const auto stable_id :
+             cell.retained_rule_stable_ids) {
+            aggregationDigestMix(digest, stable_id);
+        }
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(
+                cell.field_dofs.size()));
+        for (const auto dof : cell.field_dofs) {
+            aggregationDigestMix(
+                digest, static_cast<std::uint64_t>(dof));
+        }
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(
+                cell.active_face_neighbor_cell_gids.size()));
+        for (const auto gid :
+             cell.active_face_neighbor_cell_gids) {
+            aggregationDigestMix(
+                digest, static_cast<std::uint64_t>(gid));
+        }
+    }
+    aggregationDigestMix(
+        digest,
+        static_cast<std::uint64_t>(report->patches.size()));
+    for (const auto& patch : report->patches) {
+        aggregationDigestMix(
+            digest, static_cast<std::uint64_t>(patch.kind));
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(patch.root_cell_gid));
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(
+                    patch.root_cell_owner_rank)));
+        const auto mix_indices =
+            [&](const std::vector<GlobalIndex>& indices) {
+                aggregationDigestMix(
+                    digest,
+                    static_cast<std::uint64_t>(indices.size()));
+                for (const auto index : indices) {
+                    aggregationDigestMix(
+                        digest,
+                    static_cast<std::uint64_t>(index));
+                }
+            };
+        mix_indices(patch.active_feature_ids);
+        mix_indices(patch.member_cell_gids);
+        mix_indices(patch.support_cell_gids);
+        mix_indices(patch.slave_dofs);
+    }
+    report->canonical_content_digest = digest;
+    } catch (...) {
+        local_report_exception = std::current_exception();
+    }
+    coordinateDistributedLocalFailure(
+        system,
+        local_report_exception,
+        "prolongation_report_construction");
+
+#if FE_HAS_MPI
+    if (world_size > 1) {
+        const auto local_digest =
+            report->canonical_content_digest;
+        std::uint64_t minimum_digest = 0u;
+        std::uint64_t maximum_digest = 0u;
+        MPI_Allreduce(&local_digest,
+                      &minimum_digest,
+                      1,
+                      MPI_UINT64_T,
+                      MPI_MIN,
+                      system.dofHandler().mpiComm());
+        MPI_Allreduce(&local_digest,
+                      &maximum_digest,
+                      1,
+                      MPI_UINT64_T,
+                      MPI_MAX,
+                      system.dofHandler().mpiComm());
+        if (minimum_digest != maximum_digest) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: canonical finalized "
+                "prolongation digest differs across communicator ranks");
+        }
+    }
+#endif
+    return report;
+}
+
+std::shared_ptr<
+    const SmallCutAggregationConstraint::LifecycleCheckpoint>
+SmallCutAggregationConstraint::captureLifecycleCheckpoint() const
+{
+    auto checkpoint = std::shared_ptr<LifecycleCheckpoint>(
+        new LifecycleCheckpoint());
+    checkpoint->previous_canonical_slaves =
+        previous_canonical_slaves_;
+    checkpoint->completed_refresh_report =
+        completed_refresh_report_;
+    checkpoint->pending_prolongation = pending_prolongation_;
+    return checkpoint;
+}
+
+void SmallCutAggregationConstraint::restoreLifecycleCheckpoint(
+    const LifecycleCheckpoint& checkpoint)
+{
+    previous_canonical_slaves_ =
+        checkpoint.previous_canonical_slaves;
+    completed_refresh_report_ =
+        checkpoint.completed_refresh_report;
+    pending_prolongation_ =
+        checkpoint.pending_prolongation;
 }
 
 bool SmallCutAggregationConstraint::updateValues(const systems::FESystem& /*system*/,

@@ -37,6 +37,7 @@
 #include "Dofs/EntityDofMap.h"
 #include "Elements/ReferenceElement.h"
 #include "Geometry/CutQuadrature.h"
+#include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Mesh/Fields/MeshFields.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
@@ -46,6 +47,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 #include <memory>
@@ -265,6 +267,83 @@ std::shared_ptr<Mesh> buildQuadStrip(int n_cells,
     return create_mesh(std::move(base));
 }
 
+/// Three Q1 quads where c0 and c2 meet only at vertex 0, while c0 and c1
+/// share a face. This separates c2 from the c0/c1 active face component
+/// without duplicating its C0 vertex DOF.
+std::shared_ptr<Mesh> buildVertexTouchQuadPatch()
+{
+    auto base = std::make_shared<MeshBase>();
+    const std::vector<real_t> x_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        2.0, 0.0,
+        0.0, 1.0,
+        1.0, 1.0,
+        2.0, 1.0,
+        -1.0, -1.0,
+        0.0, -1.0,
+        -1.0, 0.0,
+    };
+    const std::vector<offset_t> cell2vertex_offsets = {0, 4, 8, 12};
+    const std::vector<index_t> cell2vertex = {
+        0, 1, 4, 3,
+        1, 2, 5, 4,
+        6, 7, 0, 8,
+    };
+
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(
+        /*spatial_dim=*/2,
+        x_ref,
+        cell2vertex_offsets,
+        cell2vertex,
+        std::vector<CellShape>(3, shape));
+    base->finalize();
+    return create_mesh(std::move(base));
+}
+
+/// A face-connected c0/c1 strip plus a detached c2 quad. The detached cell
+/// supplies a master in a distinct active feature without initially
+/// participating in the rooted aggregation patch.
+std::shared_ptr<Mesh> buildDetachedQuadPatch()
+{
+    auto base = std::make_shared<MeshBase>();
+    const std::vector<real_t> x_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        2.0, 0.0,
+        0.0, 1.0,
+        1.0, 1.0,
+        2.0, 1.0,
+        3.0, 0.0,
+        4.0, 0.0,
+        4.0, 1.0,
+        3.0, 1.0,
+    };
+    const std::vector<offset_t> cell2vertex_offsets = {0, 4, 8, 12};
+    const std::vector<index_t> cell2vertex = {
+        0, 1, 4, 3,
+        1, 2, 5, 4,
+        6, 7, 8, 9,
+    };
+
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(
+        /*spatial_dim=*/2,
+        x_ref,
+        cell2vertex_offsets,
+        cell2vertex,
+        std::vector<CellShape>(3, shape));
+    base->finalize();
+    return create_mesh(std::move(base));
+}
+
 /// Two iso-parametric 9-node quads: c0 = [0,1]^2, c1 = [1,2]x[0,1].
 /// Corners 0..5 (bottom 0,1,2; top 3,4,5), c0 midsides 6(0.5,0) 7(1,0.5)
 /// 8(0.5,1) 9(0,0.5) center 10(0.5,0.5); c1 midsides 11(1.5,0) 12(2,0.5)
@@ -319,17 +398,29 @@ struct CellRuleSpec {
     GlobalIndex cell{-1};
     Real volume_fraction{0.0};
     bool full_cell_equivalent{false};
+    std::optional<std::uint64_t> cut_topology_revision{};
 };
 
 void addCellRule(assembly::CutIntegrationContext& context,
                  const CellRuleSpec& spec,
                  geometry::CutIntegrationSide side)
 {
+    const auto cut_topology_revision =
+        spec.cut_topology_revision.value_or(
+            interfaces::cutVolumeStableId(
+                kInterfaceMarker,
+                spec.cell,
+                /*local_region_index=*/0,
+                side,
+                /*source_revision=*/1u));
+
     assembly::CutCellAssemblyMetadata metadata{};
     metadata.cell = spec.cell;
     metadata.parent_entity = spec.cell;
     metadata.side = side;
     metadata.volume_fraction = spec.volume_fraction;
+    metadata.revision_key = cut_topology_revision;
+    metadata.cut_topology_revision = cut_topology_revision;
 
     geometry::CutQuadratureRule rule{};
     rule.kind = geometry::CutQuadratureKind::Volume;
@@ -339,6 +430,11 @@ void addCellRule(assembly::CutIntegrationContext& context,
     rule.volume_fraction = spec.volume_fraction;
     rule.full_cell_equivalent = spec.full_cell_equivalent;
     rule.frame = geometry::CutGeometryFrame::Current;
+    rule.provenance.parent_entity = spec.cell;
+    rule.provenance.parent_entity_global_id = spec.cell;
+    rule.provenance.marker = kInterfaceMarker;
+    rule.provenance.cut_topology_revision =
+        cut_topology_revision;
 
     context.addGeneratedVolumeRule(kInterfaceMarker, metadata, rule);
 }
@@ -371,6 +467,222 @@ std::shared_ptr<assembly::CutIntegrationContext> makeCutContext(
     }
     return system.fieldDofOffset(field) + dofs[component];
 }
+
+class TimeDependentVertexPin final : public ISystemConstraint {
+public:
+    TimeDependentVertexPin(FieldId field,
+                           GlobalIndex vertex,
+                           Real initial_value)
+        : field_(field),
+          vertex_(vertex),
+          current_value_(initial_value)
+    {
+    }
+
+    void apply(const systems::FESystem& system,
+               AffineConstraints& constraints) override
+    {
+        const auto* entity =
+            system.fieldDofHandler(field_).getEntityDofMap();
+        if (entity == nullptr) {
+            throw std::logic_error(
+                "TimeDependentVertexPin requires an entity DOF map");
+        }
+        const auto dofs = entity->getVertexDofs(vertex_);
+        if (dofs.size() != 1u) {
+            throw std::logic_error(
+                "TimeDependentVertexPin requires one scalar vertex DOF");
+        }
+        resolved_dof_ = system.fieldDofOffset(field_) + dofs.front();
+        constraints.addDirichlet(resolved_dof_, current_value_);
+    }
+
+    bool updateValues(const systems::FESystem&,
+                      AffineConstraints& constraints,
+                      double time,
+                      double dt) override
+    {
+        if (resolved_dof_ == INVALID_GLOBAL_INDEX) {
+            throw std::logic_error(
+                "TimeDependentVertexPin was updated before application");
+        }
+        const auto next_value = static_cast<Real>(time + dt);
+        if (next_value == current_value_) {
+            return false;
+        }
+        constraints.updateInhomogeneity(resolved_dof_, next_value);
+        current_value_ = next_value;
+        return true;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return true;
+    }
+
+    [[nodiscard]] ConstraintDependencyDeclaration
+    dependencyDeclaration() const override
+    {
+        auto out = ISystemConstraint::dependencyDeclaration();
+        out.structural.labels = false;
+        out.structural.ownership = false;
+        return out;
+    }
+
+    [[nodiscard]] systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        systems::SetupStorageRequirements requirements;
+        requirements.entity_dof_map = true;
+        return requirements;
+    }
+
+private:
+    FieldId field_{INVALID_FIELD_ID};
+    GlobalIndex vertex_{INVALID_GLOBAL_INDEX};
+    GlobalIndex resolved_dof_{INVALID_GLOBAL_INDEX};
+    Real current_value_{0.0};
+};
+
+class GeometryDependentVertexPin final : public ISystemConstraint {
+public:
+    GeometryDependentVertexPin(FieldId field,
+                               GlobalIndex vertex,
+                               Real initial_value)
+        : field_(field),
+          vertex_(vertex),
+          current_value_(initial_value)
+    {
+    }
+
+    void apply(const systems::FESystem& system,
+               AffineConstraints& constraints) override
+    {
+        const auto* entity =
+            system.fieldDofHandler(field_).getEntityDofMap();
+        if (entity == nullptr) {
+            throw std::logic_error(
+                "GeometryDependentVertexPin requires an entity DOF map");
+        }
+        const auto dofs = entity->getVertexDofs(vertex_);
+        if (dofs.size() != 1u) {
+            throw std::logic_error(
+                "GeometryDependentVertexPin requires one scalar vertex DOF");
+        }
+        resolved_dof_ =
+            system.fieldDofOffset(field_) + dofs.front();
+        constraints.addDirichlet(resolved_dof_, current_value_);
+    }
+
+    bool updateValues(const systems::FESystem&,
+                      AffineConstraints& constraints,
+                      double time,
+                      double dt) override
+    {
+        if (resolved_dof_ == INVALID_GLOBAL_INDEX) {
+            throw std::logic_error(
+                "GeometryDependentVertexPin was updated before application");
+        }
+        const auto next_value = static_cast<Real>(time + dt);
+        if (next_value == current_value_) {
+            return false;
+        }
+        constraints.updateInhomogeneity(resolved_dof_, next_value);
+        current_value_ = next_value;
+        return true;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return false;
+    }
+
+    [[nodiscard]] ConstraintDependencyDeclaration
+    dependencyDeclaration() const override
+    {
+        auto out = ISystemConstraint::dependencyDeclaration();
+        out.value.geometry = true;
+        return out;
+    }
+
+    [[nodiscard]] systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        systems::SetupStorageRequirements requirements;
+        requirements.entity_dof_map = true;
+        return requirements;
+    }
+
+private:
+    FieldId field_{INVALID_FIELD_ID};
+    GlobalIndex vertex_{INVALID_GLOBAL_INDEX};
+    GlobalIndex resolved_dof_{INVALID_GLOBAL_INDEX};
+    Real current_value_{0.0};
+};
+
+class VertexAffineTie final : public ISystemConstraint {
+public:
+    VertexAffineTie(FieldId field,
+                    GlobalIndex slave_vertex,
+                    GlobalIndex master_vertex)
+        : field_(field),
+          slave_vertex_(slave_vertex),
+          master_vertex_(master_vertex)
+    {
+    }
+
+    void apply(const systems::FESystem& system,
+               AffineConstraints& constraints) override
+    {
+        const auto resolve_vertex =
+            [&](GlobalIndex vertex) {
+                const auto* entity =
+                    system.fieldDofHandler(field_).getEntityDofMap();
+                if (entity == nullptr) {
+                    throw std::logic_error(
+                        "VertexAffineTie requires an entity DOF map");
+                }
+                const auto dofs = entity->getVertexDofs(vertex);
+                if (dofs.size() != 1u) {
+                    throw std::logic_error(
+                        "VertexAffineTie requires one scalar vertex DOF");
+                }
+                return system.fieldDofOffset(field_) + dofs.front();
+            };
+
+        ConstraintLine line;
+        line.slave_dof = resolve_vertex(slave_vertex_);
+        line.entries.push_back(
+            {resolve_vertex(master_vertex_), 1.0});
+        constraints.addConstraintLine(line);
+    }
+
+    bool updateValues(const systems::FESystem&,
+                      AffineConstraints&,
+                      double,
+                      double) override
+    {
+        return false;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return false;
+    }
+
+    [[nodiscard]] systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        systems::SetupStorageRequirements requirements;
+        requirements.entity_dof_map = true;
+        return requirements;
+    }
+
+private:
+    FieldId field_{INVALID_FIELD_ID};
+    GlobalIndex slave_vertex_{INVALID_GLOBAL_INDEX};
+    GlobalIndex master_vertex_{INVALID_GLOBAL_INDEX};
+};
 
 /// Scalar-field dof of a cell-local mesh node via the DofHandler's nodal
 /// pairing (cell dofs in mesh-node order).
@@ -453,6 +765,34 @@ void expectEntries(const std::vector<std::pair<GlobalIndex, double>>& actual,
         EXPECT_EQ(actual[i].first, expected[i].first) << "entry " << i;
         EXPECT_NEAR(actual[i].second, expected[i].second, tol) << "entry " << i;
     }
+}
+
+[[nodiscard]] std::vector<std::pair<GlobalIndex, double>>
+prolongationEntries(const std::vector<ConstraintEntry>& entries)
+{
+    std::vector<std::pair<GlobalIndex, double>> out;
+    out.reserve(entries.size());
+    for (const auto& entry : entries) {
+        out.emplace_back(entry.master_dof, entry.weight);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+[[nodiscard]] const SmallCutAggregationProlongationRow*
+findFinalizedProlongationRow(
+    const SmallCutAggregationProlongationReport& report,
+    GlobalIndex slave)
+{
+    const auto found = std::find_if(
+        report.rows.begin(),
+        report.rows.end(),
+        [slave](const auto& row) {
+            return row.slave_dof == slave;
+        });
+    EXPECT_NE(found, report.rows.end())
+        << "missing finalized prolongation row for slave " << slave;
+    return found == report.rows.end() ? nullptr : &*found;
 }
 
 void expectRootlessQuadraticWallFaceExclusion(
@@ -758,6 +1098,124 @@ TEST(SmallCutAggregationConstraint, SlavesOnlyUnsupportedCutVerticesWithExtrapol
                     vertexDof(system, pressure, 0)),
                 0.0, 1.0e-15);
 
+    const auto prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(prolongations.size(), 1u);
+    ASSERT_NE(prolongations.front(), nullptr);
+    const auto& prolongation = *prolongations.front();
+    EXPECT_EQ(prolongation.field, pressure);
+    EXPECT_EQ(prolongation.active_side,
+              geometry::CutIntegrationSide::Negative);
+    EXPECT_EQ(prolongation.interface_marker, kInterfaceMarker);
+    EXPECT_FALSE(prolongation.slave_all_cut);
+    EXPECT_FALSE(prolongation.linear_extension);
+    EXPECT_FALSE(prolongation.allow_unaggregated);
+    EXPECT_TRUE(prolongation.trace_bound_eligible);
+    EXPECT_NE(prolongation.canonical_content_digest, 0u);
+    EXPECT_EQ(prolongation.revision.local_rank, 0);
+    EXPECT_EQ(prolongation.revision.communicator_size, 1);
+    EXPECT_TRUE(prolongation.revision.constraint.valid);
+    EXPECT_EQ(prolongation.revision.constraint.fe_constraint_layout,
+              system.constraintLayoutRevision());
+    EXPECT_EQ(prolongation.revision.affine_constraint_layout_revision,
+              system.constraints().constraintLayoutRevision());
+    ASSERT_NE(system.cutIntegrationContext(), nullptr);
+    EXPECT_EQ(prolongation.revision.cut_context_content_revision,
+              system.cutIntegrationContext()->contentRevision());
+
+    const auto bottom_slave = vertexDof(system, pressure, 0);
+    const auto top_slave = vertexDof(system, pressure, 3);
+    const auto* bottom_row =
+        findFinalizedProlongationRow(prolongation, bottom_slave);
+    const auto* top_row =
+        findFinalizedProlongationRow(prolongation, top_slave);
+    ASSERT_NE(bottom_row, nullptr);
+    ASSERT_NE(top_row, nullptr);
+    for (const auto* row : {bottom_row, top_row}) {
+        EXPECT_EQ(row->candidate_dof, row->slave_dof);
+        EXPECT_EQ(row->component, 0u);
+        EXPECT_EQ(row->slave_owner_rank, 0);
+        EXPECT_EQ(row->provisional_kind,
+                  SmallCutAggregationProvisionalRowKind::RootedExtension);
+        EXPECT_EQ(row->final_kind,
+                  SmallCutAggregationFinalRowKind::MasterBearing);
+        EXPECT_FALSE(row->preconstrained_at_apply);
+        EXPECT_NE(row->root_cell_gid, INVALID_GLOBAL_INDEX);
+        EXPECT_EQ(row->root_cell_owner_rank, 0);
+        EXPECT_EQ(row->root_provider_rank, 0);
+        EXPECT_EQ(row->root_distance, 1u);
+        EXPECT_NEAR(row->final_inhomogeneity, 0.0, 1.0e-15);
+    }
+    EXPECT_EQ(bottom_row->root_cell_gid, top_row->root_cell_gid);
+    expectEntries(
+        prolongationEntries(bottom_row->provisional_entries),
+        {{vertexDof(system, pressure, 1), 2.0},
+         {vertexDof(system, pressure, 2), -1.0}});
+    expectEntries(
+        prolongationEntries(bottom_row->final_entries),
+        {{vertexDof(system, pressure, 1), 2.0},
+         {vertexDof(system, pressure, 2), -1.0}});
+    expectEntries(
+        prolongationEntries(top_row->provisional_entries),
+        {{vertexDof(system, pressure, 4), 2.0},
+         {vertexDof(system, pressure, 5), -1.0}});
+    expectEntries(
+        prolongationEntries(top_row->final_entries),
+        {{vertexDof(system, pressure, 4), 2.0},
+         {vertexDof(system, pressure, 5), -1.0}});
+
+    ASSERT_EQ(prolongation.active_cells.size(), 2u);
+    const auto full_cell = std::find_if(
+        prolongation.active_cells.begin(),
+        prolongation.active_cells.end(),
+        [](const auto& cell) {
+            return cell.kind ==
+                SmallCutAggregationActiveCellKind::FullActive;
+        });
+    const auto cut_cell = std::find_if(
+        prolongation.active_cells.begin(),
+        prolongation.active_cells.end(),
+        [](const auto& cell) {
+            return cell.kind ==
+                SmallCutAggregationActiveCellKind::Cut;
+        });
+    ASSERT_NE(full_cell, prolongation.active_cells.end());
+    ASSERT_NE(cut_cell, prolongation.active_cells.end());
+    EXPECT_EQ(full_cell->cell_gid, bottom_row->root_cell_gid);
+    EXPECT_EQ(full_cell->owner_rank, 0);
+    EXPECT_EQ(cut_cell->owner_rank, 0);
+    EXPECT_EQ(full_cell->retained_measure_provider_rank, 0);
+    EXPECT_EQ(cut_cell->retained_measure_provider_rank, 0);
+    EXPECT_NEAR(full_cell->retained_physical_volume, 1.0, 1.0e-14);
+    EXPECT_NEAR(cut_cell->retained_physical_volume, 0.3, 1.0e-14);
+    EXPECT_EQ(full_cell->retained_rule_stable_ids.size(), 1u);
+    EXPECT_EQ(cut_cell->retained_rule_stable_ids.size(), 1u);
+    EXPECT_EQ(full_cell->active_feature_id, cut_cell->active_feature_id);
+    EXPECT_TRUE(std::binary_search(cut_cell->field_dofs.begin(),
+                                   cut_cell->field_dofs.end(),
+                                   bottom_slave));
+    EXPECT_TRUE(std::binary_search(cut_cell->field_dofs.begin(),
+                                   cut_cell->field_dofs.end(),
+                                   top_slave));
+
+    ASSERT_EQ(prolongation.patches.size(), 1u);
+    const auto& patch = prolongation.patches.front();
+    EXPECT_EQ(patch.kind, SmallCutAggregationPatchKind::Rooted);
+    EXPECT_EQ(patch.root_cell_gid, bottom_row->root_cell_gid);
+    EXPECT_EQ(patch.root_cell_owner_rank, 0);
+    ASSERT_EQ(patch.active_feature_ids.size(), 1u);
+    EXPECT_EQ(patch.active_feature_ids.front(),
+              full_cell->active_feature_id);
+    EXPECT_EQ(patch.member_cell_gids.size(), 2u);
+    EXPECT_EQ(patch.support_cell_gids.size(), 2u);
+    EXPECT_EQ(patch.slave_dofs.size(), 2u);
+    EXPECT_TRUE(std::binary_search(patch.slave_dofs.begin(),
+                                   patch.slave_dofs.end(),
+                                   bottom_slave));
+    EXPECT_TRUE(std::binary_search(patch.slave_dofs.begin(),
+                                   patch.slave_dofs.end(),
+                                   top_slave));
+
     EXPECT_NE(log_output.find("diagnostic=small_cut_aggregation"), std::string::npos);
     EXPECT_NE(log_output.find("candidate_vertices=2"), std::string::npos);
     EXPECT_NE(log_output.find("aggregated_vertices=2"), std::string::npos);
@@ -813,6 +1271,332 @@ TEST(SmallCutAggregationConstraint,
     expectEntries(lineEntries(system, vertexDof(system, pressure, 3)),
                   {{vertexDof(system, pressure, 4), 2.0},
                    {vertexDof(system, pressure, 5), -1.0}});
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
+     FinalizedCellLedgerPreservesDistinctTopologyRevisionsWithinOneCell)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto mesh = buildQuadStrip(2);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<SmallCutAggregationConstraint>(
+            pressure,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+
+    ASSERT_NO_THROW(system.setup());
+    system.setCutIntegrationContext(makeCutContext({
+        {.cell = 0,
+         .volume_fraction = Real{0.1},
+         .full_cell_equivalent = false,
+         .cut_topology_revision = 101u},
+        {.cell = 0,
+         .volume_fraction = Real{0.2},
+         .full_cell_equivalent = false,
+         .cut_topology_revision = 102u},
+        {.cell = 1,
+         .volume_fraction = Real{1.0},
+         .full_cell_equivalent = true,
+         .cut_topology_revision = 201u},
+    }));
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+
+    const auto prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(prolongations.size(), 1u);
+    ASSERT_NE(prolongations.front(), nullptr);
+    const auto& prolongation = *prolongations.front();
+    EXPECT_TRUE(prolongation.trace_bound_eligible);
+    ASSERT_EQ(prolongation.active_cells.size(), 2u);
+    const auto cut_cell = std::find_if(
+        prolongation.active_cells.begin(),
+        prolongation.active_cells.end(),
+        [](const auto& cell) {
+            return cell.kind ==
+                SmallCutAggregationActiveCellKind::Cut;
+        });
+    const auto root_cell = std::find_if(
+        prolongation.active_cells.begin(),
+        prolongation.active_cells.end(),
+        [](const auto& cell) {
+            return cell.kind ==
+                SmallCutAggregationActiveCellKind::FullActive;
+        });
+    ASSERT_NE(cut_cell, prolongation.active_cells.end());
+    ASSERT_NE(root_cell, prolongation.active_cells.end());
+    EXPECT_NEAR(cut_cell->retained_physical_volume, 0.3, 1.0e-14);
+    EXPECT_EQ(cut_cell->retained_rule_stable_ids,
+              (std::vector<std::uint64_t>{101u, 102u}));
+    EXPECT_NEAR(root_cell->retained_physical_volume, 1.0, 1.0e-14);
+    EXPECT_EQ(root_cell->retained_rule_stable_ids,
+              (std::vector<std::uint64_t>{201u}));
+    ASSERT_EQ(prolongation.patches.size(), 1u);
+    EXPECT_EQ(prolongation.patches.front().kind,
+              SmallCutAggregationPatchKind::Rooted);
+    ASSERT_EQ(prolongation.patches.front().active_feature_ids.size(), 1u);
+    EXPECT_EQ(prolongation.patches.front().active_feature_ids.front(),
+              cut_cell->active_feature_id);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
+     ZeroTopologyRevisionMakesFinalizedTraceMetadataIneligible)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto mesh = buildQuadStrip(2);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<SmallCutAggregationConstraint>(
+            pressure,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+
+    ASSERT_NO_THROW(system.setup());
+    system.setCutIntegrationContext(makeCutContext({
+        {.cell = 0,
+         .volume_fraction = Real{0.3},
+         .full_cell_equivalent = false,
+         .cut_topology_revision = 0u},
+        {.cell = 1,
+         .volume_fraction = Real{1.0},
+         .full_cell_equivalent = true},
+    }));
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+
+    const auto prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(prolongations.size(), 1u);
+    ASSERT_NE(prolongations.front(), nullptr);
+    const auto& prolongation = *prolongations.front();
+    EXPECT_FALSE(prolongation.trace_bound_eligible);
+    EXPECT_NE(prolongation.canonical_content_digest, 0u);
+    const auto cut_cell = std::find_if(
+        prolongation.active_cells.begin(),
+        prolongation.active_cells.end(),
+        [](const auto& cell) {
+            return cell.kind ==
+                SmallCutAggregationActiveCellKind::Cut;
+        });
+    ASSERT_NE(cut_cell, prolongation.active_cells.end());
+    EXPECT_EQ(cut_cell->retained_rule_stable_ids,
+              (std::vector<std::uint64_t>{0u}));
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
+     RootedPatchRetainsEveryVertexTouchActiveFeature)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto mesh = buildVertexTouchQuadPatch();
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<SmallCutAggregationConstraint>(
+            pressure,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+
+    ASSERT_NO_THROW(system.setup());
+    system.setCutIntegrationContext(makeCutContext({
+        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+        {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+        {.cell = 2, .volume_fraction = Real{0.4}, .full_cell_equivalent = false},
+    }));
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+
+    const auto prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(prolongations.size(), 1u);
+    ASSERT_NE(prolongations.front(), nullptr);
+    const auto& prolongation = *prolongations.front();
+    EXPECT_TRUE(prolongation.trace_bound_eligible);
+    ASSERT_EQ(prolongation.active_cells.size(), 3u);
+
+    const auto shared_dof = vertexDof(system, pressure, 0);
+    const auto* shared_row =
+        findFinalizedProlongationRow(prolongation, shared_dof);
+    ASSERT_NE(shared_row, nullptr);
+    EXPECT_EQ(shared_row->provisional_kind,
+              SmallCutAggregationProvisionalRowKind::RootedExtension);
+    EXPECT_EQ(shared_row->final_kind,
+              SmallCutAggregationFinalRowKind::MasterBearing);
+
+    std::vector<GlobalIndex> shared_active_features;
+    for (const auto& cell : prolongation.active_cells) {
+        if (cell.kind != SmallCutAggregationActiveCellKind::Cut ||
+            !std::binary_search(cell.field_dofs.begin(),
+                                cell.field_dofs.end(),
+                                shared_dof)) {
+            continue;
+        }
+        shared_active_features.push_back(cell.active_feature_id);
+    }
+    std::sort(shared_active_features.begin(),
+              shared_active_features.end());
+    shared_active_features.erase(
+        std::unique(shared_active_features.begin(),
+                    shared_active_features.end()),
+        shared_active_features.end());
+    ASSERT_EQ(shared_active_features.size(), 2u);
+
+    const auto rooted_patch = std::find_if(
+        prolongation.patches.begin(),
+        prolongation.patches.end(),
+        [](const auto& patch) {
+            return patch.kind ==
+                SmallCutAggregationPatchKind::Rooted;
+        });
+    ASSERT_NE(rooted_patch, prolongation.patches.end());
+    EXPECT_TRUE(std::is_sorted(
+        rooted_patch->active_feature_ids.begin(),
+        rooted_patch->active_feature_ids.end()));
+    EXPECT_EQ(std::adjacent_find(
+                  rooted_patch->active_feature_ids.begin(),
+                  rooted_patch->active_feature_ids.end()),
+              rooted_patch->active_feature_ids.end());
+    EXPECT_EQ(rooted_patch->active_feature_ids,
+              shared_active_features);
+    EXPECT_TRUE(std::binary_search(
+        rooted_patch->slave_dofs.begin(),
+        rooted_patch->slave_dofs.end(),
+        shared_dof));
+    EXPECT_EQ(rooted_patch->member_cell_gids.size(), 3u);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
+     FinalAffineClosureAddsDetachedMasterFeatureToRootedPatch)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto mesh = buildDetachedQuadPatch();
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<SmallCutAggregationConstraint>(
+            pressure,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+    system.addSystemConstraint(
+        std::make_unique<VertexAffineTie>(
+            pressure,
+            /*slave_vertex=*/1,
+            /*master_vertex=*/6));
+
+    ASSERT_NO_THROW(system.setup());
+    system.setCutIntegrationContext(makeCutContext({
+        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+        {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+        {.cell = 2, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+    }));
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+
+    const auto prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(prolongations.size(), 1u);
+    ASSERT_NE(prolongations.front(), nullptr);
+    const auto& prolongation = *prolongations.front();
+    EXPECT_TRUE(prolongation.trace_bound_eligible);
+
+    const auto bottom_slave = vertexDof(system, pressure, 0);
+    const auto tied_root_master = vertexDof(system, pressure, 1);
+    const auto other_root_master = vertexDof(system, pressure, 2);
+    const auto detached_master = vertexDof(system, pressure, 6);
+    const auto* bottom_row =
+        findFinalizedProlongationRow(prolongation, bottom_slave);
+    ASSERT_NE(bottom_row, nullptr);
+    EXPECT_EQ(bottom_row->provisional_kind,
+              SmallCutAggregationProvisionalRowKind::RootedExtension);
+    EXPECT_EQ(bottom_row->final_kind,
+              SmallCutAggregationFinalRowKind::MasterBearing);
+    expectEntries(
+        prolongationEntries(bottom_row->provisional_entries),
+        {{tied_root_master, 2.0},
+         {other_root_master, -1.0}});
+    expectEntries(
+        prolongationEntries(bottom_row->final_entries),
+        {{detached_master, 2.0},
+         {other_root_master, -1.0}});
+
+    const auto root_cell = std::find_if(
+        prolongation.active_cells.begin(),
+        prolongation.active_cells.end(),
+        [&](const auto& cell) {
+            return cell.cell_gid ==
+                bottom_row->root_cell_gid;
+        });
+    const auto detached_cell = std::find_if(
+        prolongation.active_cells.begin(),
+        prolongation.active_cells.end(),
+        [](const auto& cell) {
+            return cell.cell_gid == 2;
+        });
+    ASSERT_NE(root_cell, prolongation.active_cells.end());
+    ASSERT_NE(detached_cell, prolongation.active_cells.end());
+    ASSERT_NE(root_cell->active_feature_id,
+              detached_cell->active_feature_id);
+    EXPECT_TRUE(std::binary_search(
+        detached_cell->field_dofs.begin(),
+        detached_cell->field_dofs.end(),
+        detached_master));
+
+    const auto rooted_patch = std::find_if(
+        prolongation.patches.begin(),
+        prolongation.patches.end(),
+        [&](const auto& patch) {
+            return patch.kind ==
+                       SmallCutAggregationPatchKind::Rooted &&
+                   std::binary_search(
+                       patch.slave_dofs.begin(),
+                       patch.slave_dofs.end(),
+                       bottom_slave);
+        });
+    ASSERT_NE(rooted_patch, prolongation.patches.end());
+    EXPECT_FALSE(std::binary_search(
+        rooted_patch->member_cell_gids.begin(),
+        rooted_patch->member_cell_gids.end(),
+        detached_cell->cell_gid));
+    EXPECT_TRUE(std::binary_search(
+        rooted_patch->support_cell_gids.begin(),
+        rooted_patch->support_cell_gids.end(),
+        detached_cell->cell_gid));
+
+    std::vector<GlobalIndex> expected_features{
+        root_cell->active_feature_id,
+        detached_cell->active_feature_id,
+    };
+    std::sort(expected_features.begin(),
+              expected_features.end());
+    ASSERT_EQ(expected_features.size(), 2u);
+    EXPECT_EQ(rooted_patch->active_feature_ids,
+              expected_features);
 #endif
 }
 
@@ -1154,6 +1938,8 @@ TEST(SmallCutAggregationConstraint,
 
     ASSERT_NO_THROW(system.setup());
     EXPECT_FALSE(aggregation_view->completedRefreshReport().has_value());
+    EXPECT_TRUE(
+        system.finalizedSmallCutAggregationProlongations().empty());
 
     system.setCutIntegrationContext(makeCutContext({
         {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
@@ -1190,11 +1976,27 @@ TEST(SmallCutAggregationConstraint,
         EXPECT_NEAR(
             feature.canonical_retained_physical_volume, 1.3, 1.0e-14);
     }
+    const auto rooted_prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(rooted_prolongations.size(), 1u);
+    ASSERT_NE(rooted_prolongations.front(), nullptr);
+    EXPECT_TRUE(rooted_prolongations.front()->trace_bound_eligible);
+    EXPECT_EQ(rooted_prolongations.front()->rows.size(), 2u);
+    ASSERT_EQ(rooted_prolongations.front()->patches.size(), 1u);
+    EXPECT_EQ(rooted_prolongations.front()->patches.front().kind,
+              SmallCutAggregationPatchKind::Rooted);
+    const auto rooted_digest =
+        rooted_prolongations.front()->canonical_content_digest;
+    EXPECT_NE(rooted_digest, 0u);
 
     system.setCutIntegrationContext(
         std::make_shared<assembly::CutIntegrationContext>());
+    EXPECT_TRUE(
+        system.finalizedSmallCutAggregationProlongations().empty());
     EXPECT_THROW(system.rebuildConstraintState(), std::runtime_error);
     EXPECT_FALSE(aggregation_view->completedRefreshReport().has_value());
+    EXPECT_TRUE(
+        system.finalizedSmallCutAggregationProlongations().empty());
 
     auto rootless_context = makeCutContext({
         {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
@@ -1247,11 +2049,436 @@ TEST(SmallCutAggregationConstraint,
         EXPECT_NEAR(view->inhomogeneity, 0.0, 1.0e-15) << "vertex " << vertex;
     }
 
+    const auto rootless_prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(rootless_prolongations.size(), 1u);
+    ASSERT_NE(rootless_prolongations.front(), nullptr);
+    const auto& rootless = *rootless_prolongations.front();
+    EXPECT_TRUE(rootless.trace_bound_eligible);
+    EXPECT_NE(rootless.canonical_content_digest, 0u);
+    EXPECT_NE(rootless.canonical_content_digest, rooted_digest);
+    ASSERT_EQ(rootless.rows.size(), 4u);
+    for (const auto vertex : {0, 1, 3, 4}) {
+        const auto dof = vertexDof(system, pressure, vertex);
+        const auto* row =
+            findFinalizedProlongationRow(rootless, dof);
+        ASSERT_NE(row, nullptr);
+        EXPECT_EQ(row->candidate_dof, dof);
+        EXPECT_EQ(row->component, 0u);
+        EXPECT_EQ(row->provisional_kind,
+                  SmallCutAggregationProvisionalRowKind::
+                      RootlessHomogeneousPin);
+        EXPECT_EQ(row->final_kind,
+                  SmallCutAggregationFinalRowKind::HomogeneousPin);
+        EXPECT_EQ(row->root_cell_gid, INVALID_GLOBAL_INDEX);
+        EXPECT_TRUE(row->provisional_entries.empty());
+        EXPECT_TRUE(row->final_entries.empty());
+        EXPECT_NEAR(row->final_inhomogeneity, 0.0, 1.0e-15);
+    }
+    ASSERT_EQ(rootless.active_cells.size(), 1u);
+    EXPECT_EQ(rootless.active_cells.front().kind,
+              SmallCutAggregationActiveCellKind::Cut);
+    EXPECT_NEAR(rootless.active_cells.front().retained_physical_volume,
+                0.3,
+                1.0e-14);
+    ASSERT_EQ(rootless.patches.size(), 1u);
+    EXPECT_EQ(rootless.patches.front().kind,
+              SmallCutAggregationPatchKind::Rootless);
+    EXPECT_EQ(rootless.patches.front().member_cell_gids.size(), 1u);
+    EXPECT_EQ(rootless.patches.front().support_cell_gids.size(), 1u);
+    EXPECT_EQ(rootless.patches.front().slave_dofs.size(), 4u);
+
     {
         ScopedEnvVar cap("SVMP_AGGREGATION_MAX_LINES", "0");
         ASSERT_NO_THROW(system.rebuildConstraintState());
     }
     EXPECT_FALSE(aggregation_view->completedRefreshReport().has_value());
+    EXPECT_TRUE(
+        system.finalizedSmallCutAggregationProlongations().empty());
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
+     CutContextTransactionRollbackRestoresFinalizedSnapshotAndConstraintState)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto mesh = buildQuadStrip(2);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    auto aggregation = std::make_unique<SmallCutAggregationConstraint>(
+        pressure,
+        geometry::CutIntegrationSide::Negative,
+        kInterfaceMarker);
+    const auto* aggregation_view = aggregation.get();
+    system.addSystemConstraint(std::move(aggregation));
+
+    ASSERT_NO_THROW(system.setup());
+    auto rooted_context = makeCutContext({
+        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+        {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+    });
+    system.setCutIntegrationContext(rooted_context);
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+
+    const auto prior_prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(prior_prolongations.size(), 1u);
+    ASSERT_NE(prior_prolongations.front(), nullptr);
+    const auto prior_prolongation = prior_prolongations.front();
+    const auto prior_digest =
+        prior_prolongation->canonical_content_digest;
+    ASSERT_NE(prior_digest, 0u);
+    const auto& prior_refresh_optional =
+        aggregation_view->completedRefreshReport();
+    ASSERT_TRUE(prior_refresh_optional.has_value());
+    const auto prior_refresh = *prior_refresh_optional;
+    EXPECT_EQ(prior_refresh.canonical_rooted_candidate_vertices, 2u);
+    EXPECT_EQ(prior_refresh.canonical_rootless_candidate_vertices, 0u);
+
+    const auto bottom_slave = vertexDof(system, pressure, 0);
+    const auto top_slave = vertexDof(system, pressure, 3);
+    const auto prior_bottom_entries =
+        lineEntries(system, bottom_slave);
+    const auto prior_top_entries =
+        lineEntries(system, top_slave);
+    const auto prior_constraint_count =
+        system.constraints().numConstraints();
+    const auto prior_affine_revision =
+        system.constraints().constraintLayoutRevision();
+    const auto prior_fe_constraint_revision =
+        system.constraintLayoutRevision();
+    const auto* prior_context = system.cutIntegrationContext();
+    ASSERT_NE(prior_context, nullptr);
+
+    ASSERT_NO_THROW(system.beginCutIntegrationContextTransaction());
+    EXPECT_TRUE(system.cutIntegrationContextTransactionActive());
+    auto rootless_context = makeCutContext({
+        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+    });
+    addCellRule(*rootless_context,
+                {.cell = 1,
+                 .volume_fraction = Real{1.0},
+                 .full_cell_equivalent = true},
+                geometry::CutIntegrationSide::Positive);
+    system.setCutIntegrationContext(std::move(rootless_context));
+    EXPECT_TRUE(
+        system.finalizedSmallCutAggregationProlongations().empty());
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+
+    const auto trial_prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(trial_prolongations.size(), 1u);
+    ASSERT_NE(trial_prolongations.front(), nullptr);
+    EXPECT_NE(trial_prolongations.front().get(),
+              prior_prolongation.get());
+    EXPECT_NE(trial_prolongations.front()->canonical_content_digest,
+              prior_digest);
+    const auto& trial_refresh =
+        aggregation_view->completedRefreshReport();
+    ASSERT_TRUE(trial_refresh.has_value());
+    EXPECT_EQ(trial_refresh->canonical_rooted_candidate_vertices, 0u);
+    EXPECT_EQ(trial_refresh->canonical_rootless_candidate_vertices, 4u);
+    EXPECT_EQ(system.constraints().numConstraints(), 4u);
+
+    ASSERT_NO_THROW(system.rollbackCutIntegrationContextTransaction());
+    EXPECT_FALSE(system.cutIntegrationContextTransactionActive());
+    EXPECT_EQ(system.cutIntegrationContext(), prior_context);
+    const auto restored_prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(restored_prolongations.size(), 1u);
+    EXPECT_EQ(restored_prolongations.front().get(),
+              prior_prolongation.get());
+    EXPECT_EQ(restored_prolongations.front()->canonical_content_digest,
+              prior_digest);
+
+    const auto& restored_refresh =
+        aggregation_view->completedRefreshReport();
+    ASSERT_TRUE(restored_refresh.has_value());
+    EXPECT_EQ(restored_refresh->field, prior_refresh.field);
+    EXPECT_EQ(restored_refresh->active_side,
+              prior_refresh.active_side);
+    EXPECT_EQ(restored_refresh->interface_marker,
+              prior_refresh.interface_marker);
+    EXPECT_EQ(restored_refresh->canonical_candidate_vertices,
+              prior_refresh.canonical_candidate_vertices);
+    EXPECT_EQ(restored_refresh->canonical_rooted_candidate_vertices,
+              prior_refresh.canonical_rooted_candidate_vertices);
+    EXPECT_EQ(restored_refresh->canonical_rootless_candidate_vertices,
+              prior_refresh.canonical_rootless_candidate_vertices);
+    EXPECT_EQ(restored_refresh->canonical_owned_aggregate_dofs,
+              prior_refresh.canonical_owned_aggregate_dofs);
+    EXPECT_EQ(restored_refresh->canonical_owned_pinned_dofs,
+              prior_refresh.canonical_owned_pinned_dofs);
+    EXPECT_EQ(restored_refresh->canonical_active_features.size(),
+              prior_refresh.canonical_active_features.size());
+    ASSERT_EQ(restored_refresh->canonical_active_features.size(), 1u);
+    ASSERT_EQ(prior_refresh.canonical_active_features.size(), 1u);
+    EXPECT_EQ(
+        restored_refresh->canonical_active_features.front().stable_feature_id,
+        prior_refresh.canonical_active_features.front().stable_feature_id);
+    EXPECT_EQ(
+        restored_refresh->canonical_active_features.front().disposition,
+        prior_refresh.canonical_active_features.front().disposition);
+    EXPECT_EQ(
+        restored_refresh->canonical_active_features.front()
+            .canonical_cell_gid_digest,
+        prior_refresh.canonical_active_features.front()
+            .canonical_cell_gid_digest);
+
+    EXPECT_EQ(system.constraints().numConstraints(),
+              prior_constraint_count);
+    EXPECT_EQ(system.constraints().constraintLayoutRevision(),
+              prior_affine_revision);
+    EXPECT_EQ(system.constraintLayoutRevision(),
+              prior_fe_constraint_revision);
+    expectEntries(lineEntries(system, bottom_slave),
+                  prior_bottom_entries);
+    expectEntries(lineEntries(system, top_slave),
+                  prior_top_entries);
+    EXPECT_NEAR(system.constraints().getInhomogeneity(bottom_slave),
+                0.0,
+                1.0e-15);
+    EXPECT_NEAR(system.constraints().getInhomogeneity(top_slave),
+                0.0,
+                1.0e-15);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
+     SamePointerCutContextMutationInvalidatesFinalizedSnapshot)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto mesh = buildQuadStrip(2);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<SmallCutAggregationConstraint>(
+            pressure,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+
+    ASSERT_NO_THROW(system.setup());
+    auto context = makeCutContext({
+        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+        {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+    });
+    system.setCutIntegrationContext(context);
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+
+    const auto published =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(published.size(), 1u);
+    ASSERT_NE(published.front(), nullptr);
+    const auto published_revision = context->contentRevision();
+    EXPECT_EQ(
+        published.front()->revision.cut_context_content_revision,
+        published_revision);
+    const auto* installed_context = system.cutIntegrationContext();
+    ASSERT_EQ(installed_context, context.get());
+
+    addCellRule(*context,
+                {.cell = 0,
+                 .volume_fraction = Real{0.7},
+                 .full_cell_equivalent = false},
+                geometry::CutIntegrationSide::Positive);
+    ASSERT_GT(context->contentRevision(), published_revision);
+    ASSERT_EQ(system.cutIntegrationContext(), installed_context);
+
+    system.setCutIntegrationContext(context);
+    EXPECT_EQ(system.cutIntegrationContext(), installed_context);
+    EXPECT_TRUE(
+        system.finalizedSmallCutAggregationProlongations().empty());
+    EXPECT_EQ(
+        published.front()->revision.cut_context_content_revision,
+        published_revision);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
+     CutContextTransactionRollbackDetachesMutatedOriginalContext)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto mesh = buildQuadStrip(2);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<SmallCutAggregationConstraint>(
+            pressure,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+
+    ASSERT_NO_THROW(system.setup());
+    auto context = makeCutContext({
+        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+        {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+    });
+    system.setCutIntegrationContext(context);
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+
+    const auto prior_content_revision = context->contentRevision();
+    const auto prior_prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(prior_prolongations.size(), 1u);
+    ASSERT_NE(prior_prolongations.front(), nullptr);
+    const auto prior_prolongation = prior_prolongations.front();
+    const auto prior_bottom_slave = vertexDof(system, pressure, 0);
+    const auto prior_top_slave = vertexDof(system, pressure, 3);
+    const auto prior_bottom_entries =
+        lineEntries(system, prior_bottom_slave);
+    const auto prior_top_entries =
+        lineEntries(system, prior_top_slave);
+    const auto prior_constraint_count =
+        system.constraints().numConstraints();
+
+    ASSERT_NO_THROW(system.beginCutIntegrationContextTransaction());
+    context->clear();
+    addCellRule(
+        *context,
+        {.cell = 0,
+         .volume_fraction = Real{0.3},
+         .full_cell_equivalent = false},
+        geometry::CutIntegrationSide::Negative);
+    addCellRule(
+        *context,
+        {.cell = 1,
+         .volume_fraction = Real{1.0},
+         .full_cell_equivalent = true},
+        geometry::CutIntegrationSide::Positive);
+    ASSERT_GT(context->contentRevision(), prior_content_revision);
+    system.setCutIntegrationContext(context);
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+    ASSERT_EQ(system.cutIntegrationContext(), context.get());
+    ASSERT_EQ(
+        system.finalizedSmallCutAggregationProlongations().size(),
+        1u);
+    EXPECT_NE(
+        system.finalizedSmallCutAggregationProlongations()
+            .front()
+            .get(),
+        prior_prolongation.get());
+
+    ASSERT_NO_THROW(system.rollbackCutIntegrationContextTransaction());
+    ASSERT_NE(system.cutIntegrationContext(), nullptr);
+    EXPECT_NE(system.cutIntegrationContext(), context.get());
+    EXPECT_EQ(system.cutIntegrationContext()->contentRevision(),
+              prior_content_revision);
+    EXPECT_EQ(system.constraints().numConstraints(),
+              prior_constraint_count);
+    expectEntries(lineEntries(system, prior_bottom_slave),
+                  prior_bottom_entries);
+    expectEntries(lineEntries(system, prior_top_slave),
+                  prior_top_entries);
+
+    const auto restored_prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(restored_prolongations.size(), 1u);
+    EXPECT_EQ(restored_prolongations.front().get(),
+              prior_prolongation.get());
+    EXPECT_EQ(
+        restored_prolongations.front()
+            ->revision.cut_context_content_revision,
+        prior_content_revision);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
+     GeometryValueRefreshInvalidatesFinalizedSnapshotUntilRebuild)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto mesh = buildQuadStrip(2);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<SmallCutAggregationConstraint>(
+            pressure,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+    system.addSystemConstraint(
+        std::make_unique<GeometryDependentVertexPin>(
+            pressure,
+            /*vertex=*/2,
+            Real{0.25}));
+
+    ASSERT_NO_THROW(system.setup());
+    auto context = makeCutContext({
+        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+        {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+    });
+    system.setCutIntegrationContext(context);
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+    ASSERT_EQ(
+        system.finalizedSmallCutAggregationProlongations().size(),
+        1u);
+
+    const auto pinned_dof = vertexDof(system, pressure, 2);
+    ASSERT_TRUE(system.constraints().isConstrained(pinned_dof));
+    EXPECT_NEAR(system.constraints().getInhomogeneity(pinned_dof),
+                0.25,
+                1.0e-15);
+    const auto prior_geometry_revision =
+        mesh->local_mesh().geometry_revision();
+    auto moved_vertex =
+        mesh->local_mesh().get_vertex_coords(/*vertex=*/2);
+    moved_vertex[0] += Real{0.125};
+    mesh->local_mesh().set_vertex_coords(
+        /*vertex=*/2,
+        moved_vertex);
+    ASSERT_GT(mesh->local_mesh().geometry_revision(),
+              prior_geometry_revision);
+
+    const auto refresh =
+        system.refreshConstraintStateForCurrentRevisions(
+            /*time=*/3.0,
+            /*dt=*/0.25,
+            /*allow_structural_rebuild=*/true);
+    EXPECT_TRUE(refresh.dependency_changed);
+    EXPECT_FALSE(refresh.structural_rebuild);
+    EXPECT_TRUE(refresh.value_update);
+    EXPECT_NEAR(system.constraints().getInhomogeneity(pinned_dof),
+                3.25,
+                1.0e-15);
+    EXPECT_TRUE(
+        system.finalizedSmallCutAggregationProlongations().empty());
+
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+    ASSERT_EQ(
+        system.finalizedSmallCutAggregationProlongations().size(),
+        1u);
+    const auto unchanged_refresh =
+        system.refreshConstraintStateForCurrentRevisions(
+            /*time=*/4.0,
+            /*dt=*/0.5,
+            /*allow_structural_rebuild=*/true);
+    EXPECT_FALSE(unchanged_refresh.dependency_changed);
+    EXPECT_FALSE(unchanged_refresh.structural_rebuild);
+    EXPECT_FALSE(unchanged_refresh.value_update);
+    EXPECT_EQ(
+        system.finalizedSmallCutAggregationProlongations().size(),
+        1u);
 #endif
 }
 
@@ -1521,6 +2748,132 @@ TEST(SmallCutAggregationConstraint, DirichletInstalledAfterAggregationReplacesMa
     expectEntries(lineEntries(system, vertexDof(system, pressure, 3)),
                   {{vertexDof(system, pressure, 4), 2.0},
                    {vertexDof(system, pressure, 5), -1.0}});
+
+    const auto prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(prolongations.size(), 1u);
+    ASSERT_NE(prolongations.front(), nullptr);
+    const auto& prolongation = *prolongations.front();
+    EXPECT_TRUE(prolongation.trace_bound_eligible);
+    EXPECT_NE(prolongation.canonical_content_digest, 0u);
+    const auto* pinned_row =
+        findFinalizedProlongationRow(prolongation, pinned_dof);
+    ASSERT_NE(pinned_row, nullptr);
+    EXPECT_EQ(pinned_row->provisional_kind,
+              SmallCutAggregationProvisionalRowKind::RootedExtension);
+    EXPECT_EQ(pinned_row->final_kind,
+              SmallCutAggregationFinalRowKind::FixedValue);
+    EXPECT_FALSE(pinned_row->preconstrained_at_apply);
+    EXPECT_EQ(pinned_row->provisional_entries.size(), 2u);
+    EXPECT_TRUE(pinned_row->final_entries.empty());
+    EXPECT_NEAR(pinned_row->final_inhomogeneity, 2.5, 1.0e-12);
+
+    const auto other_slave = vertexDof(system, pressure, 3);
+    const auto* aggregate_row =
+        findFinalizedProlongationRow(prolongation, other_slave);
+    ASSERT_NE(aggregate_row, nullptr);
+    EXPECT_EQ(aggregate_row->provisional_kind,
+              SmallCutAggregationProvisionalRowKind::RootedExtension);
+    EXPECT_EQ(aggregate_row->final_kind,
+              SmallCutAggregationFinalRowKind::MasterBearing);
+    EXPECT_FALSE(aggregate_row->preconstrained_at_apply);
+    expectEntries(
+        prolongationEntries(aggregate_row->final_entries),
+        {{vertexDof(system, pressure, 4), 2.0},
+         {vertexDof(system, pressure, 5), -1.0}});
+    EXPECT_NEAR(aggregate_row->final_inhomogeneity, 0.0, 1.0e-15);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
+     ValueOnlyConstraintUpdateInvalidatesFinalizedSnapshotUntilRebuild)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto mesh = buildQuadStrip(2);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<SmallCutAggregationConstraint>(
+            pressure,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+    constexpr Real initial_pin = Real{1.25};
+    system.addSystemConstraint(
+        std::make_unique<TimeDependentVertexPin>(
+            pressure, 0, initial_pin));
+
+    ASSERT_NO_THROW(system.setup());
+    system.setCutIntegrationContext(makeCutContext({
+        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+        {.cell = 1, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+    }));
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+
+    const auto pinned_dof = vertexDof(system, pressure, 0);
+    EXPECT_NEAR(system.constraints().getInhomogeneity(pinned_dof),
+                initial_pin,
+                1.0e-15);
+    const auto initial_prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(initial_prolongations.size(), 1u);
+    ASSERT_NE(initial_prolongations.front(), nullptr);
+    const auto initial_prolongation =
+        initial_prolongations.front();
+    const auto initial_digest =
+        initial_prolongation->canonical_content_digest;
+    ASSERT_NE(initial_digest, 0u);
+    const auto* initial_row =
+        findFinalizedProlongationRow(
+            *initial_prolongation, pinned_dof);
+    ASSERT_NE(initial_row, nullptr);
+    EXPECT_EQ(initial_row->final_kind,
+              SmallCutAggregationFinalRowKind::FixedValue);
+    EXPECT_NEAR(initial_row->final_inhomogeneity,
+                initial_pin,
+                1.0e-15);
+
+    constexpr double updated_time = 2.0;
+    constexpr double updated_dt = 0.5;
+    constexpr Real updated_pin =
+        static_cast<Real>(updated_time + updated_dt);
+    ASSERT_NO_THROW(
+        system.updateConstraints(updated_time, updated_dt));
+    EXPECT_NEAR(system.constraints().getInhomogeneity(pinned_dof),
+                updated_pin,
+                1.0e-15);
+    EXPECT_TRUE(
+        system.finalizedSmallCutAggregationProlongations().empty());
+    EXPECT_NEAR(initial_row->final_inhomogeneity,
+                initial_pin,
+                1.0e-15);
+
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+    const auto rebuilt_prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(rebuilt_prolongations.size(), 1u);
+    ASSERT_NE(rebuilt_prolongations.front(), nullptr);
+    EXPECT_NE(rebuilt_prolongations.front().get(),
+              initial_prolongation.get());
+    EXPECT_NE(rebuilt_prolongations.front()->canonical_content_digest,
+              initial_digest);
+    const auto* rebuilt_row =
+        findFinalizedProlongationRow(
+            *rebuilt_prolongations.front(), pinned_dof);
+    ASSERT_NE(rebuilt_row, nullptr);
+    EXPECT_EQ(rebuilt_row->final_kind,
+              SmallCutAggregationFinalRowKind::FixedValue);
+    EXPECT_NEAR(rebuilt_row->final_inhomogeneity,
+                updated_pin,
+                1.0e-15);
+    EXPECT_NEAR(system.constraints().getInhomogeneity(pinned_dof),
+                updated_pin,
+                1.0e-15);
 #endif
 }
 

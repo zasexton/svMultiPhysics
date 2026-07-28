@@ -9,7 +9,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
+#include <limits>
 #include <numeric>
+#include <string>
 #include <unordered_map>
 
 #if FE_HAS_MPI
@@ -28,6 +31,48 @@ struct RankedConstraintLine {
     int source_rank{-1};
     bool source_claims_ownership{false};
 };
+
+using CanonicalConstraintMap =
+    std::unordered_map<GlobalIndex, RankedConstraintLine>;
+
+void coordinateDistributedPhaseFailure(
+    MPI_Comm comm,
+    const std::exception_ptr& local_exception,
+    const char* phase)
+{
+    const int local_ok = local_exception == nullptr ? 1 : 0;
+    int all_ok = 0;
+    MPI_Allreduce(&local_ok, &all_ok, 1, MPI_INT, MPI_MIN, comm);
+    if (all_ok != 0) {
+        return;
+    }
+    if (local_exception != nullptr) {
+        std::rethrow_exception(local_exception);
+    }
+    CONSTRAINT_THROW(
+        std::string(
+            "ParallelConstraints: diagnostic="
+            "distributed_parallel_constraint_phase_failure phase='") +
+        phase +
+        "' another communicator rank failed its local constraint phase");
+}
+
+void requireDistributedPartition(
+    MPI_Comm comm,
+    const dofs::DofPartition* partition)
+{
+    std::exception_ptr local_exception;
+    try {
+        if (partition == nullptr) {
+            CONSTRAINT_THROW(
+                "ParallelConstraints requires a DofPartition");
+        }
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+    coordinateDistributedPhaseFailure(
+        comm, local_exception, "partition_precondition");
+}
 
 ConstraintLine toConstraintLine(const AffineConstraints::ConstraintView& view) {
     ConstraintLine line;
@@ -86,6 +131,13 @@ std::vector<char> packLocalConstraints(const AffineConstraints& constraints,
                                       const dofs::DofPartition& partition,
                                       MPI_Comm comm) {
     const auto constrained_dofs = constraints.getConstrainedDofs();
+    if (constrained_dofs.size() >
+        static_cast<std::size_t>(
+            std::numeric_limits<std::int64_t>::max())) {
+        CONSTRAINT_THROW(
+            "ParallelConstraints: local constraint count exceeds the "
+            "distributed wire range");
+    }
     const std::int64_t n_lines = static_cast<std::int64_t>(constrained_dofs.size());
 
     int sz_i64 = 0;
@@ -96,19 +148,38 @@ std::vector<char> packLocalConstraints(const AffineConstraints& constraints,
     MPI_Pack_size(1, MPI_DOUBLE, comm, &sz_double);
 
     // Compute an upper bound for packed buffer size.
-    int total = sz_i64; // n_lines
+    const auto max_packed_size =
+        static_cast<std::size_t>(std::numeric_limits<int>::max());
+    std::size_t total = 0;
+    const auto add_packed_bytes =
+        [&](std::size_t count, int bytes_per_value) {
+            if (bytes_per_value < 0) {
+                CONSTRAINT_THROW(
+                    "ParallelConstraints: MPI returned a negative packed "
+                    "value size");
+            }
+            const auto bytes =
+                static_cast<std::size_t>(bytes_per_value);
+            if (bytes != 0u &&
+                count > (max_packed_size - total) / bytes) {
+                CONSTRAINT_THROW(
+                    "ParallelConstraints: local constraint payload exceeds "
+                    "the MPI count range");
+            }
+            total += count * bytes;
+        };
+    add_packed_bytes(1u, sz_i64); // n_lines
     for (GlobalIndex dof : constrained_dofs) {
         const auto view = constraints.getConstraint(dof);
         if (!view) continue;
-        const std::int64_t n_entries = static_cast<std::int64_t>(view->entries.size());
-        total += sz_i64;     // slave_dof
-        total += sz_int;     // owned flag
-        total += sz_double;  // inhomogeneity
-        total += sz_i64;     // n_entries
-        total += static_cast<int>(n_entries) * (sz_i64 + sz_double);
+        add_packed_bytes(2u, sz_i64);    // slave_dof, n_entries
+        add_packed_bytes(1u, sz_int);    // owned flag
+        add_packed_bytes(1u, sz_double); // inhomogeneity
+        add_packed_bytes(view->entries.size(), sz_i64);
+        add_packed_bytes(view->entries.size(), sz_double);
     }
 
-    std::vector<char> buffer(static_cast<std::size_t>(total));
+    std::vector<char> buffer(total);
     int position = 0;
 
     MPI_Pack(&n_lines, 1, MPI_INT64_T,
@@ -119,6 +190,13 @@ std::vector<char> packLocalConstraints(const AffineConstraints& constraints,
         if (!view) continue;
 
         ConstraintLine line = toConstraintLine(*view);
+        if (line.entries.size() >
+            static_cast<std::size_t>(
+                std::numeric_limits<std::int64_t>::max())) {
+            CONSTRAINT_THROW(
+                "ParallelConstraints: local constraint entry count exceeds "
+                "the distributed wire range");
+        }
         const std::int64_t slave = static_cast<std::int64_t>(line.slave_dof);
         const int owned_flag = partition.isOwned(line.slave_dof) ? 1 : 0;
         const double inhom = line.inhomogeneity;
@@ -195,69 +273,154 @@ std::vector<RankedConstraintLine> unpackConstraintsForRank(std::span<const char>
     return lines;
 }
 
-std::unordered_map<GlobalIndex, RankedConstraintLine>
+CanonicalConstraintMap
 gatherAndResolveConstraints(MPI_Comm comm,
                             int world_size,
                             const dofs::DofPartition& partition,
                             const ParallelConstraintOptions& options,
                             const AffineConstraints& local_constraints,
                             ParallelConstraintStats& stats) {
-    const auto send_buffer = packLocalConstraints(local_constraints, partition, comm);
-    const int send_size = static_cast<int>(send_buffer.size());
-
-    std::vector<int> recv_sizes(static_cast<std::size_t>(world_size), 0);
+    std::vector<char> send_buffer;
+    int send_size = 0;
+    std::vector<int> recv_sizes;
+    std::exception_ptr local_pack_exception;
+    try {
+        send_buffer =
+            packLocalConstraints(local_constraints, partition, comm);
+        if (send_buffer.size() >
+            static_cast<std::size_t>(
+                std::numeric_limits<int>::max())) {
+            CONSTRAINT_THROW(
+                "ParallelConstraints: local constraint payload exceeds the "
+                "MPI count range");
+        }
+        send_size = static_cast<int>(send_buffer.size());
+        recv_sizes.assign(static_cast<std::size_t>(world_size), 0);
+    } catch (...) {
+        local_pack_exception = std::current_exception();
+    }
+    coordinateDistributedPhaseFailure(
+        comm, local_pack_exception, "pack_and_count_allocation");
     MPI_Allgather(&send_size, 1, MPI_INT, recv_sizes.data(), 1, MPI_INT, comm);
 
-    std::vector<int> displs(static_cast<std::size_t>(world_size), 0);
-    int total = 0;
-    for (int r = 0; r < world_size; ++r) {
-        displs[static_cast<std::size_t>(r)] = total;
-        total += recv_sizes[static_cast<std::size_t>(r)];
+    std::vector<int> displs;
+    std::vector<char> recv_buffer;
+    std::exception_ptr local_receive_exception;
+    try {
+        displs.assign(static_cast<std::size_t>(world_size), 0);
+        int total = 0;
+        for (int r = 0; r < world_size; ++r) {
+            const int rank_size =
+                recv_sizes[static_cast<std::size_t>(r)];
+            if (rank_size < 0 ||
+                rank_size > std::numeric_limits<int>::max() - total) {
+                CONSTRAINT_THROW(
+                    "ParallelConstraints: gathered constraint payload "
+                    "exceeds the MPI displacement range");
+            }
+            displs[static_cast<std::size_t>(r)] = total;
+            total += rank_size;
+        }
+        recv_buffer.resize(static_cast<std::size_t>(total));
+    } catch (...) {
+        local_receive_exception = std::current_exception();
     }
-
-    std::vector<char> recv_buffer(static_cast<std::size_t>(total));
+    coordinateDistributedPhaseFailure(
+        comm, local_receive_exception, "receive_layout_allocation");
     MPI_Allgatherv(send_buffer.data(), send_size, MPI_BYTE,
                    recv_buffer.data(), recv_sizes.data(), displs.data(), MPI_BYTE,
                    comm);
 
-    stats.n_messages_sent += static_cast<GlobalIndex>(world_size > 0 ? world_size - 1 : 0);
-    stats.n_messages_received += static_cast<GlobalIndex>(world_size > 0 ? world_size - 1 : 0);
+    CanonicalConstraintMap canonical;
+    std::exception_ptr local_decode_exception;
+    try {
+        stats.n_messages_sent +=
+            static_cast<GlobalIndex>(
+                world_size > 0 ? world_size - 1 : 0);
+        stats.n_messages_received +=
+            static_cast<GlobalIndex>(
+                world_size > 0 ? world_size - 1 : 0);
 
-    std::unordered_map<GlobalIndex, RankedConstraintLine> canonical;
-    canonical.reserve(static_cast<std::size_t>(local_constraints.getConstrainedDofs().size()));
+        canonical.reserve(static_cast<std::size_t>(
+            local_constraints.getConstrainedDofs().size()));
 
-    for (int r = 0; r < world_size; ++r) {
-        const int sz = recv_sizes[static_cast<std::size_t>(r)];
-        const int disp = displs[static_cast<std::size_t>(r)];
-        if (sz <= 0) continue;
+        for (int r = 0; r < world_size; ++r) {
+            const int sz = recv_sizes[static_cast<std::size_t>(r)];
+            const int disp = displs[static_cast<std::size_t>(r)];
+            if (sz <= 0) continue;
 
-        const auto span = std::span<const char>(recv_buffer.data() + disp,
-                                                static_cast<std::size_t>(sz));
-        auto lines = unpackConstraintsForRank(span, r, comm);
-        for (auto& ranked : lines) {
-            const GlobalIndex dof = ranked.line.slave_dof;
-            auto it = canonical.find(dof);
-            if (it == canonical.end()) {
-                canonical.emplace(dof, std::move(ranked));
-                continue;
+            const auto span =
+                std::span<const char>(
+                    recv_buffer.data() + disp,
+                    static_cast<std::size_t>(sz));
+            auto lines = unpackConstraintsForRank(span, r, comm);
+            for (auto& ranked : lines) {
+                const GlobalIndex dof = ranked.line.slave_dof;
+                auto it = canonical.find(dof);
+                if (it == canonical.end()) {
+                    canonical.emplace(dof, std::move(ranked));
+                    continue;
+                }
+
+                bool had_real_conflict = false;
+                const auto winner =
+                    chooseWinner(
+                        it->second,
+                        ranked,
+                        options.conflict_resolution,
+                        options.tolerance,
+                        had_real_conflict);
+
+                if (had_real_conflict &&
+                    options.conflict_resolution !=
+                        ParallelConstraintOptions::
+                            ConflictResolution::Error) {
+                    ++stats.n_conflicts_resolved;
+                }
+
+                it->second = winner;
             }
-
-            bool had_real_conflict = false;
-            const auto winner = chooseWinner(it->second, ranked,
-                                             options.conflict_resolution,
-                                             options.tolerance,
-                                             had_real_conflict);
-
-            if (had_real_conflict &&
-                options.conflict_resolution != ParallelConstraintOptions::ConflictResolution::Error) {
-                ++stats.n_conflicts_resolved;
-            }
-
-            it->second = winner;
         }
+    } catch (...) {
+        local_decode_exception = std::current_exception();
     }
+    coordinateDistributedPhaseFailure(
+        comm, local_decode_exception, "decode_and_resolve");
 
     return canonical;
+}
+
+enum class LocalConstraintSelection {
+    Owned,
+    Relevant
+};
+
+AffineConstraints rebuildLocalConstraints(
+    const CanonicalConstraintMap& canonical,
+    const dofs::DofPartition& partition,
+    const AffineConstraintsOptions& options,
+    LocalConstraintSelection selection,
+    ParallelConstraintStats& stats)
+{
+    AffineConstraints updated(options);
+    stats.n_local_constraints = 0;
+    stats.n_ghost_constraints = 0;
+    for (const auto& [dof, ranked] : canonical) {
+        const bool keep =
+            selection == LocalConstraintSelection::Owned
+                ? partition.isOwned(dof)
+                : partition.isRelevant(dof);
+        if (!keep) {
+            continue;
+        }
+        updated.addConstraintLine(ranked.line);
+        if (partition.isOwned(dof)) {
+            ++stats.n_local_constraints;
+        } else if (partition.isGhost(dof)) {
+            ++stats.n_ghost_constraints;
+        }
+    }
+    return updated;
 }
 
 } // namespace
@@ -310,22 +473,25 @@ ParallelConstraintStats ParallelConstraints::makeConsistent(
     // 2. Exchange constraints for shared DOFs
     // 3. Resolve conflicts using configured strategy
 
-    if (!partition_) {
-        CONSTRAINT_THROW("ParallelConstraints requires a DofPartition");
-    }
+    requireDistributedPartition(comm_, partition_);
 
     auto canonical = gatherAndResolveConstraints(comm_, world_size_, *partition_, options_, constraints, stats);
 
-    // Keep only locally owned constraints after consistency resolution
-    AffineConstraints updated(constraints.getOptions());
-    for (auto& [dof, ranked] : canonical) {
-        if (partition_->isOwned(dof)) {
-            updated.addConstraintLine(ranked.line);
-        }
+    std::optional<AffineConstraints> updated;
+    std::exception_ptr local_rebuild_exception;
+    try {
+        updated.emplace(rebuildLocalConstraints(
+            canonical,
+            *partition_,
+            constraints.getOptions(),
+            LocalConstraintSelection::Owned,
+            stats));
+    } catch (...) {
+        local_rebuild_exception = std::current_exception();
     }
-    constraints = std::move(updated);
-
-    stats.n_local_constraints = static_cast<GlobalIndex>(constraints.getConstrainedDofs().size());
+    coordinateDistributedPhaseFailure(
+        comm_, local_rebuild_exception, "make_consistent_local_rebuild");
+    constraints = std::move(*updated);
     last_stats_ = stats;
 #endif
 
@@ -345,29 +511,25 @@ ParallelConstraintStats ParallelConstraints::importGhostConstraints(
     }
 
 #if FE_HAS_MPI
-    if (!partition_) {
-        CONSTRAINT_THROW("ParallelConstraints requires a DofPartition");
-    }
+    requireDistributedPartition(comm_, partition_);
 
     auto canonical = gatherAndResolveConstraints(comm_, world_size_, *partition_, options_, constraints, stats);
 
-    // Rebuild constraints for all locally relevant DOFs (owned + ghosts)
-    AffineConstraints updated(constraints.getOptions());
-    for (auto& [dof, ranked] : canonical) {
-        if (partition_->isRelevant(dof)) {
-            updated.addConstraintLine(ranked.line);
-        }
+    std::optional<AffineConstraints> updated;
+    std::exception_ptr local_rebuild_exception;
+    try {
+        updated.emplace(rebuildLocalConstraints(
+            canonical,
+            *partition_,
+            constraints.getOptions(),
+            LocalConstraintSelection::Relevant,
+            stats));
+    } catch (...) {
+        local_rebuild_exception = std::current_exception();
     }
-    constraints = std::move(updated);
-
-    for (GlobalIndex dof : constraints.getConstrainedDofs()) {
-        if (partition_->isOwned(dof)) {
-            ++stats.n_local_constraints;
-        } else if (partition_->isGhost(dof)) {
-            ++stats.n_ghost_constraints;
-        }
-    }
-
+    coordinateDistributedPhaseFailure(
+        comm_, local_rebuild_exception, "import_ghost_local_rebuild");
+    constraints = std::move(*updated);
     last_stats_ = stats;
 #endif
 
@@ -384,29 +546,25 @@ ParallelConstraintStats ParallelConstraints::synchronize(AffineConstraints& cons
     }
 
 #if FE_HAS_MPI
-    if (!partition_) {
-        CONSTRAINT_THROW("ParallelConstraints requires a DofPartition");
-    }
+    requireDistributedPartition(comm_, partition_);
 
     auto canonical = gatherAndResolveConstraints(comm_, world_size_, *partition_, options_, constraints, stats);
 
-    // Rebuild constraints for all locally relevant DOFs (owned + ghosts)
-    AffineConstraints updated(constraints.getOptions());
-    for (auto& [dof, ranked] : canonical) {
-        if (partition_->isRelevant(dof)) {
-            updated.addConstraintLine(ranked.line);
-        }
+    std::optional<AffineConstraints> updated;
+    std::exception_ptr local_rebuild_exception;
+    try {
+        updated.emplace(rebuildLocalConstraints(
+            canonical,
+            *partition_,
+            constraints.getOptions(),
+            LocalConstraintSelection::Relevant,
+            stats));
+    } catch (...) {
+        local_rebuild_exception = std::current_exception();
     }
-    constraints = std::move(updated);
-
-    for (GlobalIndex dof : constraints.getConstrainedDofs()) {
-        if (partition_->isOwned(dof)) {
-            ++stats.n_local_constraints;
-        } else if (partition_->isGhost(dof)) {
-            ++stats.n_ghost_constraints;
-        }
-    }
-
+    coordinateDistributedPhaseFailure(
+        comm_, local_rebuild_exception, "synchronize_local_rebuild");
+    constraints = std::move(*updated);
     last_stats_ = stats;
 #endif
 
@@ -449,31 +607,45 @@ bool ParallelConstraints::validateConsistency(
     }
 
 #if FE_HAS_MPI
-    if (!partition_) {
-        CONSTRAINT_THROW("ParallelConstraints requires a DofPartition");
-    }
+    requireDistributedPartition(comm_, partition_);
 
     ParallelConstraintStats stats;
     auto canonical = gatherAndResolveConstraints(comm_, world_size_, *partition_, options_, constraints, stats);
 
-    // Check that all locally relevant constrained DOFs match the canonical constraint
-    for (const auto& [dof, ranked] : canonical) {
-        if (!partition_->isRelevant(dof)) {
-            continue;
-        }
+    bool local_valid = true;
+    std::exception_ptr local_validation_exception;
+    try {
+        // Check that all locally relevant constrained DOFs match the
+        // canonical constraint.
+        for (const auto& [dof, ranked] : canonical) {
+            if (!partition_->isRelevant(dof)) {
+                continue;
+            }
 
-        const auto local = constraints.getConstraint(dof);
-        if (!local) {
-            return false;
-        }
+            const auto local = constraints.getConstraint(dof);
+            if (!local) {
+                local_valid = false;
+                break;
+            }
 
-        ConstraintLine local_line = toConstraintLine(*local);
-        if (!equivalentConstraintLines(local_line, ranked.line, options_.tolerance)) {
-            return false;
+            ConstraintLine local_line = toConstraintLine(*local);
+            if (!equivalentConstraintLines(
+                    local_line, ranked.line, options_.tolerance)) {
+                local_valid = false;
+                break;
+            }
         }
+    } catch (...) {
+        local_validation_exception = std::current_exception();
     }
+    coordinateDistributedPhaseFailure(
+        comm_, local_validation_exception, "validate_local_comparison");
 
-    return true;
+    const int local_valid_int = local_valid ? 1 : 0;
+    int all_valid = 0;
+    MPI_Allreduce(
+        &local_valid_int, &all_valid, 1, MPI_INT, MPI_MIN, comm_);
+    return all_valid != 0;
 #else
     return true;
 #endif

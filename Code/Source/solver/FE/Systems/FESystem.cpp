@@ -68,6 +68,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <exception>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -102,6 +103,68 @@ namespace FE {
 namespace systems {
 
 namespace {
+
+void coordinateFinalizedReportLocalFailure(
+    const FESystem& system,
+    const std::exception_ptr& local_exception,
+    std::string_view phase)
+{
+    static_cast<void>(system);
+    bool any_failed = local_exception != nullptr;
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0) {
+        const auto communicator = system.dofHandler().mpiComm();
+        int world_size = 1;
+        MPI_Comm_size(communicator, &world_size);
+        if (world_size > 1) {
+            const int local_ok =
+                local_exception == nullptr ? 1 : 0;
+            int all_ok = 0;
+            const auto sequence =
+                debug::nextMpiCollectiveTraceSeq();
+            debug::traceMpiCollective(
+                "before",
+                sequence,
+                "FESystem::coordinateFinalizedReportLocalFailure",
+                1,
+                MPI_INT,
+                MPI_MIN,
+                communicator);
+            MPI_Allreduce(&local_ok,
+                          &all_ok,
+                          1,
+                          MPI_INT,
+                          MPI_MIN,
+                          communicator);
+            debug::traceMpiCollective(
+                "after",
+                sequence,
+                "FESystem::coordinateFinalizedReportLocalFailure",
+                1,
+                MPI_INT,
+                MPI_MIN,
+                communicator);
+            any_failed = all_ok == 0;
+        }
+    }
+#endif
+    if (!any_failed) {
+        return;
+    }
+    if (local_exception != nullptr) {
+        std::rethrow_exception(local_exception);
+    }
+    throw std::runtime_error(
+        "FESystem: diagnostic=distributed_constraint_phase_failure phase='" +
+        std::string(phase) +
+        "' another communicator rank rejected finalized report storage");
+}
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 constexpr std::uint64_t kConstraintRevisionHashOffset = 1469598103934665603ull;
@@ -4916,22 +4979,30 @@ FESystem::refreshConstraintStateForCurrentRevisions(double time,
         return result;
     }
 
+    // Value updates may touch only locally relevant rows. Invalidate the
+    // communicator-canonical snapshot on every caller rank before invoking
+    // callbacks, irrespective of each rank's local update count.
+    finalized_small_cut_aggregation_prolongations_.clear();
     bool any_update = false;
-    for (const auto& c : constraint_defs_) {
-        FE_CHECK_NOT_NULL(c.get(), "FESystem::refreshConstraintStateForCurrentRevisions: constraint");
-        const auto decl = c->dependencyDeclaration();
-        if (constraints::value_dependency_changed(decl, constraint_revision_snapshot_, current)) {
-            any_update = c->updateValues(affine_constraints_, time) || any_update;
+    try {
+        for (const auto& c : constraint_defs_) {
+            FE_CHECK_NOT_NULL(c.get(), "FESystem::refreshConstraintStateForCurrentRevisions: constraint");
+            const auto decl = c->dependencyDeclaration();
+            if (constraints::value_dependency_changed(decl, constraint_revision_snapshot_, current)) {
+                any_update = c->updateValues(affine_constraints_, time) || any_update;
+            }
         }
-    }
-    for (auto& c : system_constraint_defs_) {
-        FE_CHECK_NOT_NULL(c.get(), "FESystem::refreshConstraintStateForCurrentRevisions: system constraint");
-        const auto decl = c->dependencyDeclaration();
-        if (constraints::value_dependency_changed(decl, constraint_revision_snapshot_, current)) {
-            any_update = c->updateValues(*this, affine_constraints_, time, dt) || any_update;
+        for (auto& c : system_constraint_defs_) {
+            FE_CHECK_NOT_NULL(c.get(), "FESystem::refreshConstraintStateForCurrentRevisions: system constraint");
+            const auto decl = c->dependencyDeclaration();
+            if (constraints::value_dependency_changed(decl, constraint_revision_snapshot_, current)) {
+                any_update = c->updateValues(*this, affine_constraints_, time, dt) || any_update;
+            }
         }
+    } catch (...) {
+        finalized_small_cut_aggregation_prolongations_.clear();
+        throw;
     }
-
     ++constraint_time_epoch_;
     constraint_revision_snapshot_ =
         captureConstraintRevisionSnapshot(include_mesh_field_values);
@@ -5102,6 +5173,7 @@ void FESystem::invalidateSetup() noexcept
     }
     assembly_plan_by_op_.clear();
     coupled_jac_cache_.clear();
+    finalized_small_cut_aggregation_prolongations_.clear();
     monolithic_aux_committed_rates_.clear();
     monolithic_aux_committed_rates_valid_.clear();
 
@@ -8514,6 +8586,25 @@ void FESystem::addCutIntegrationContextUpdateCallback(
     cut_integration_context_update_callbacks_.push_back(std::move(hook));
 }
 
+void FESystem::setCutIntegrationContext(
+    std::shared_ptr<const assembly::CutIntegrationContext> context)
+{
+    // The pointee can be mutated before a shared_ptr<const> is passed back
+    // with identical pointer identity. Treat every explicit setter call as a
+    // new revision boundary so no finalized snapshot survives an
+    // unobservable same-pointer content change.
+    bumpConstraintLayoutRevision();
+    finalized_small_cut_aggregation_prolongations_.clear();
+    cut_integration_context_ = std::move(context);
+    invalidateAnalysisCache();
+    for (const auto& hook :
+         cut_integration_context_update_callbacks_) {
+        if (hook.callback) {
+            hook.callback(cut_integration_context_.get());
+        }
+    }
+}
+
 namespace {
 
 struct MeshMotionSyncEntry {
@@ -10018,6 +10109,7 @@ void FESystem::addSystemConstraint(std::unique_ptr<constraints::ISystemConstrain
 std::vector<constraints::SmallCutAggregationRefreshReport>
 FESystem::completedSmallCutAggregationRefreshReports() const
 {
+    requireSetup();
     std::vector<constraints::SmallCutAggregationRefreshReport> reports;
     for (const auto& definition : system_constraint_defs_) {
         const auto* aggregation =
@@ -10032,6 +10124,55 @@ FESystem::completedSmallCutAggregationRefreshReports() const
             *aggregation->completedRefreshReport());
     }
     return reports;
+}
+
+std::vector<std::shared_ptr<
+    const constraints::SmallCutAggregationProlongationReport>>
+FESystem::finalizedSmallCutAggregationProlongations() const
+{
+    requireSetup();
+    return finalized_small_cut_aggregation_prolongations_;
+}
+
+void FESystem::publishFinalizedSmallCutAggregationProlongations()
+{
+    std::vector<std::shared_ptr<
+        const constraints::SmallCutAggregationProlongationReport>>
+        finalized;
+    std::exception_ptr local_storage_exception;
+    try {
+        finalized.reserve(system_constraint_defs_.size());
+    } catch (...) {
+        local_storage_exception = std::current_exception();
+    }
+    coordinateFinalizedReportLocalFailure(
+        *this,
+        local_storage_exception,
+        "prolongation_report_storage_reserve");
+    for (const auto& definition : system_constraint_defs_) {
+        const auto* aggregation =
+            dynamic_cast<
+                const constraints::SmallCutAggregationConstraint*>(
+                definition.get());
+        if (aggregation == nullptr) {
+            continue;
+        }
+        auto report = aggregation->finalizeProlongationReport(
+            *this, affine_constraints_);
+        local_storage_exception = nullptr;
+        try {
+            if (report) {
+                finalized.push_back(std::move(report));
+            }
+        } catch (...) {
+            local_storage_exception = std::current_exception();
+        }
+        coordinateFinalizedReportLocalFailure(
+            *this,
+            local_storage_exception,
+            "prolongation_report_storage_append");
+    }
+    finalized_small_cut_aggregation_prolongations_.swap(finalized);
 }
 
 void FESystem::addOperator(OperatorTag name)
@@ -20668,20 +20809,29 @@ void FESystem::updateConstraints(double time, double dt)
     has_last_constraint_update_time_ = true;
     last_constraint_update_time_ = time;
     last_constraint_update_dt_ = dt;
+    // Time-dependent callbacks may report different local update counts on
+    // partitioned storage. All ranks conservatively discard the finalized
+    // communicator snapshot before any callback can mutate a closed row.
+    finalized_small_cut_aggregation_prolongations_.clear();
     bool any_updated = false;
 
-    for (const auto& c : constraint_defs_) {
-        FE_CHECK_NOT_NULL(c.get(), "FESystem::updateConstraints: constraint");
-        if (c->isTimeDependent()) {
-            any_updated = c->updateValues(affine_constraints_, time) || any_updated;
+    try {
+        for (const auto& c : constraint_defs_) {
+            FE_CHECK_NOT_NULL(c.get(), "FESystem::updateConstraints: constraint");
+            if (c->isTimeDependent()) {
+                any_updated = c->updateValues(affine_constraints_, time) || any_updated;
+            }
         }
-    }
 
-    for (auto& c : system_constraint_defs_) {
-        FE_CHECK_NOT_NULL(c.get(), "FESystem::updateConstraints: system constraint");
-        if (c->isTimeDependent()) {
-            any_updated = c->updateValues(*this, affine_constraints_, time, dt) || any_updated;
+        for (auto& c : system_constraint_defs_) {
+            FE_CHECK_NOT_NULL(c.get(), "FESystem::updateConstraints: system constraint");
+            if (c->isTimeDependent()) {
+                any_updated = c->updateValues(*this, affine_constraints_, time, dt) || any_updated;
+            }
         }
+    } catch (...) {
+        finalized_small_cut_aggregation_prolongations_.clear();
+        throw;
     }
 
     if (any_updated) {

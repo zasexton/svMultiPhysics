@@ -476,6 +476,9 @@ public:
     [[nodiscard]] std::vector<
         constraints::SmallCutAggregationRefreshReport>
     completedSmallCutAggregationRefreshReports() const;
+    [[nodiscard]] std::vector<std::shared_ptr<
+        const constraints::SmallCutAggregationProlongationReport>>
+    finalizedSmallCutAggregationProlongations() const;
 
     void addOperator(OperatorTag name);
     void setFormInstallCellDomainRestrictions(
@@ -1621,22 +1624,13 @@ public:
         return cut_integration_context_transaction_backup_ != nullptr;
     }
 
-    void setCutIntegrationContext(std::shared_ptr<const assembly::CutIntegrationContext> context) {
-        if (cut_integration_context_.get() != context.get()) {
-            bumpConstraintLayoutRevision();
-        }
-        cut_integration_context_ = std::move(context);
-        invalidateAnalysisCache();
-        for (const auto& hook : cut_integration_context_update_callbacks_) {
-            if (hook.callback) {
-                hook.callback(cut_integration_context_.get());
-            }
-        }
-    }
+    void setCutIntegrationContext(
+        std::shared_ptr<const assembly::CutIntegrationContext> context);
 
     void clearCutIntegrationContext() {
         if (cut_integration_context_) {
             bumpConstraintLayoutRevision();
+            finalized_small_cut_aggregation_prolongations_.clear();
         }
         cut_integration_context_.reset();
         invalidateAnalysisCache();
@@ -1809,6 +1803,7 @@ private:
     friend class OperatorBackends;
 
     void invalidateSetup() noexcept;
+    void publishFinalizedSmallCutAggregationProlongations();
     void requireSetup() const;
     void requireSingleFieldSetup() const;
     void buildAssemblyPlans();
@@ -1851,6 +1846,9 @@ private:
     std::shared_ptr<const assembly::CutIntegrationContext> cut_integration_context_{};
     struct CutIntegrationContextTransactionBackup {
         std::shared_ptr<const assembly::CutIntegrationContext> context{};
+        std::shared_ptr<const assembly::CutIntegrationContext>
+            context_content_snapshot{};
+        std::uint64_t context_content_revision{0u};
         constraints::AffineConstraints affine_constraints{};
         FELayoutRevisionState fe_layout_revisions{};
         constraints::ConstraintRevisionSnapshot constraint_revision_snapshot{};
@@ -1860,6 +1858,13 @@ private:
         std::optional<analysis::ProblemAnalysisReport> analysis_report_cache{};
         std::uint64_t analysis_inputs_version{0};
         std::uint64_t analysis_report_version{0};
+        std::vector<std::shared_ptr<
+            const constraints::SmallCutAggregationProlongationReport>>
+            finalized_small_cut_aggregation_prolongations{};
+        std::vector<std::shared_ptr<
+            const constraints::SmallCutAggregationConstraint::
+                LifecycleCheckpoint>>
+            small_cut_aggregation_lifecycle_checkpoints{};
     };
     std::unique_ptr<CutIntegrationContextTransactionBackup>
         cut_integration_context_transaction_backup_{};
@@ -2346,6 +2351,9 @@ public:
 
 private:
     BorderedCouplingData bordered_coupling_{};
+    std::vector<std::shared_ptr<
+        const constraints::SmallCutAggregationProlongationReport>>
+        finalized_small_cut_aggregation_prolongations_{};
 	};
 
 } // namespace systems

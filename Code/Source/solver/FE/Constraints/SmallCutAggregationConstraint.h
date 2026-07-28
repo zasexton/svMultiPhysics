@@ -108,6 +108,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -117,6 +118,8 @@ namespace FE {
 namespace constraints {
 
 namespace detail {
+
+struct SmallCutAggregationPendingProlongation;
 
 /**
  * Partition-invariant identity used to choose among aggregation roots.
@@ -236,8 +239,178 @@ struct SmallCutAggregationRefreshReport {
         canonical_active_features{};
 };
 
+/**
+ * How a candidate row left the aggregation resolver before the complete
+ * constraint set was synchronized and closed.
+ */
+enum class SmallCutAggregationProvisionalRowKind : std::uint8_t {
+    RootedExtension,
+    RootlessHomogeneousPin,
+    SupportedFreeIdentity,
+    UnaggregatedFreeIdentity,
+    PreexistingConstraint,
+};
+
+/**
+ * Exact tangent-row shape after all constraints were synchronized and closed.
+ */
+enum class SmallCutAggregationFinalRowKind : std::uint8_t {
+    Identity,
+    MasterBearing,
+    HomogeneousPin,
+    FixedValue,
+};
+
+enum class SmallCutAggregationActiveCellKind : std::uint8_t {
+    FullActive,
+    Cut,
+};
+
+enum class SmallCutAggregationPatchKind : std::uint8_t {
+    Rooted,
+    Rootless,
+    SupportedCut,
+};
+
+/**
+ * One communicator-canonical active background cell used by aggregation.
+ *
+ * Field DOFs, neighbor cell IDs, and retained-rule identity keys are sorted.
+ * A retained-rule key is the rule's nonzero cut-topology revision, scoped by
+ * this report's marker/side and the physical cell GID; the scalar key is not
+ * globally unique on its own. Zero is an explicit unavailable-identity
+ * placeholder retained for audit, and any such placeholder makes the report
+ * ineligible for trace-bound certification. The retained volume is the
+ * selected-side physical measure used by the active-volume assembly.
+ */
+struct SmallCutAggregationProlongationCell {
+    GlobalIndex cell_gid{INVALID_GLOBAL_INDEX};
+    int owner_rank{-1};
+    int retained_measure_provider_rank{-1};
+    SmallCutAggregationActiveCellKind kind{
+        SmallCutAggregationActiveCellKind::Cut};
+    GlobalIndex active_feature_id{INVALID_GLOBAL_INDEX};
+    Real retained_physical_volume{0.0};
+    std::vector<std::uint64_t> retained_rule_stable_ids{};
+    std::vector<GlobalIndex> field_dofs{};
+    std::vector<GlobalIndex> active_face_neighbor_cell_gids{};
+};
+
+/**
+ * One candidate row with both producer lineage and the exact closed tangent.
+ *
+ * Root fields are invalid for non-rooted rows. Provisional entries are the
+ * normalized polynomial-extension row selected by the aggregation resolver;
+ * final entries are terminal unconstrained masters copied after transitive
+ * closure. Identity rows explicitly contain (slave_dof, 1).
+ */
+struct SmallCutAggregationProlongationRow {
+    GlobalIndex candidate_dof{INVALID_GLOBAL_INDEX};
+    std::size_t component{0u};
+    GlobalIndex slave_dof{INVALID_GLOBAL_INDEX};
+    int slave_owner_rank{-1};
+    SmallCutAggregationProvisionalRowKind provisional_kind{
+        SmallCutAggregationProvisionalRowKind::UnaggregatedFreeIdentity};
+    SmallCutAggregationFinalRowKind final_kind{
+        SmallCutAggregationFinalRowKind::Identity};
+    bool preconstrained_at_apply{false};
+    GlobalIndex root_cell_gid{INVALID_GLOBAL_INDEX};
+    int root_cell_owner_rank{-1};
+    int root_provider_rank{-1};
+    std::size_t root_distance{std::numeric_limits<std::size_t>::max()};
+    std::vector<ConstraintEntry> provisional_entries{};
+    std::vector<ConstraintEntry> final_entries{};
+    Real final_inhomogeneity{0.0};
+};
+
+/**
+ * Nonpartitioning patch induced by candidate rows with a common root.
+ *
+ * A rooted patch contains its full-active root and every cut cell containing
+ * one of its canonical slaves. Support cells additionally include active
+ * cells carrying terminal masters introduced by constraint closure. A
+ * supported-cut patch covers a cut cell with no candidate-induced patch and
+ * includes its active face neighbors as support. Active feature IDs list
+ * every face-connected active-cell component represented by the patch. This
+ * is a vector because C0 DOFs at a vertex or edge can couple otherwise
+ * face-disconnected components. A cut cell may therefore occur in more than
+ * one patch.
+ */
+struct SmallCutAggregationProlongationPatch {
+    SmallCutAggregationPatchKind kind{
+        SmallCutAggregationPatchKind::Rooted};
+    GlobalIndex root_cell_gid{INVALID_GLOBAL_INDEX};
+    int root_cell_owner_rank{-1};
+    std::vector<GlobalIndex> active_feature_ids{};
+    std::vector<GlobalIndex> member_cell_gids{};
+    std::vector<GlobalIndex> support_cell_gids{};
+    std::vector<GlobalIndex> slave_dofs{};
+};
+
+struct SmallCutAggregationProlongationRevision {
+    int local_rank{0};
+    int communicator_size{1};
+    ConstraintRevisionSnapshot constraint{};
+    std::uint64_t affine_constraint_layout_revision{0u};
+    std::uint64_t cut_context_content_revision{0u};
+    bool has_free_surface_snapshot_revision{false};
+    std::uint64_t free_surface_snapshot_revision{0u};
+    bool has_source_value_revision{false};
+    std::uint64_t source_value_revision{0u};
+};
+
+/**
+ * Immutable, revision-bound description of the actual aggregate
+ * prolongation installed in an FESystem.
+ *
+ * Rows, cells, and patches are communicator-canonical and sorted. Revision
+ * fields are local cache-validity stamps and are intentionally excluded from
+ * the canonical digest because owner-filtered contexts and locally relevant
+ * constraint storage may advance their counters differently by rank. The
+ * digest covers the exact canonical contents, including IEEE floating-point
+ * bit patterns. It is communicator-canonical for one algebraic partition,
+ * not partition-invariant across rank counts, because algebraic DOFs and
+ * owner ranks are explicit contents.
+ * `trace_bound_eligible` is false whenever a debugging fail-open path or an
+ * unresolved external master-bearing row prevents a closed aggregate-patch
+ * interpretation.
+ */
+struct SmallCutAggregationProlongationReport {
+    FieldId field{INVALID_FIELD_ID};
+    geometry::CutIntegrationSide active_side{
+        geometry::CutIntegrationSide::Negative};
+    int interface_marker{-1};
+    bool slave_all_cut{false};
+    bool linear_extension{false};
+    bool allow_unaggregated{false};
+    bool trace_bound_eligible{false};
+    SmallCutAggregationGuardOptions guards{};
+    SmallCutAggregationProlongationRevision revision{};
+    std::uint64_t canonical_content_digest{0u};
+    std::vector<SmallCutAggregationProlongationRow> rows{};
+    std::vector<SmallCutAggregationProlongationCell> active_cells{};
+    std::vector<SmallCutAggregationProlongationPatch> patches{};
+};
+
 class SmallCutAggregationConstraint final : public ISystemConstraint {
 public:
+    class LifecycleCheckpoint {
+    public:
+        LifecycleCheckpoint(const LifecycleCheckpoint&) = default;
+        LifecycleCheckpoint& operator=(const LifecycleCheckpoint&) = default;
+
+    private:
+        friend class SmallCutAggregationConstraint;
+        LifecycleCheckpoint() = default;
+
+        std::vector<GlobalIndex> previous_canonical_slaves{};
+        std::optional<SmallCutAggregationRefreshReport>
+            completed_refresh_report{};
+        std::shared_ptr<
+            const detail::SmallCutAggregationPendingProlongation>
+            pending_prolongation{};
+    };
+
     /// @param excluded_boundary_markers Boundary markers whose face vertices
     ///        carry strong Dirichlet data and must never become aggregation
     ///        slaves (their BC takes precedence).
@@ -280,6 +453,26 @@ public:
     }
 
 private:
+    friend class systems::FESystem;
+
+    /**
+     * Materialize the immutable prolongation report from a fully closed
+     * system constraint set. Returns null when the most recent apply pass was
+     * context-free, failed, or used the debug line-cap bypass.
+     */
+    [[nodiscard]] std::shared_ptr<
+        const SmallCutAggregationProlongationReport>
+    finalizeProlongationReport(
+        const systems::FESystem& system,
+        const AffineConstraints& closed_constraints) const;
+
+    /**
+     * Internal transaction support for refresh/churn and pending metadata.
+     */
+    [[nodiscard]] std::shared_ptr<const LifecycleCheckpoint>
+    captureLifecycleCheckpoint() const;
+    void restoreLifecycleCheckpoint(const LifecycleCheckpoint& checkpoint);
+
     FieldId field_{INVALID_FIELD_ID};
     geometry::CutIntegrationSide active_side_{geometry::CutIntegrationSide::Negative};
     int interface_marker_{-1};
@@ -290,6 +483,8 @@ private:
     // of a process-global churn cache keyed by &FESystem.
     std::vector<GlobalIndex> previous_canonical_slaves_{};
     std::optional<SmallCutAggregationRefreshReport> completed_refresh_report_{};
+    std::shared_ptr<const detail::SmallCutAggregationPendingProlongation>
+        pending_prolongation_{};
 };
 
 } // namespace constraints

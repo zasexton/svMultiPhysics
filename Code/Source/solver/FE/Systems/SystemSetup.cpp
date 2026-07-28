@@ -63,13 +63,17 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <iterator>
 #include <limits>
 #include <optional>
 #include <numeric>
 #include <sstream>
+#include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <type_traits>
+#include <typeinfo>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -83,6 +87,232 @@ namespace FE {
 namespace systems {
 
 namespace {
+
+void coordinateConstraintPrepublicationFailure(
+    const FESystem& system,
+    const std::exception_ptr& local_exception,
+    std::string_view phase)
+{
+    static_cast<void>(system);
+    bool any_failed = local_exception != nullptr;
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0) {
+        const auto communicator =
+            system.dofHandler().mpiComm();
+        int world_size = 1;
+        MPI_Comm_size(communicator, &world_size);
+        if (world_size > 1) {
+            const int local_ok =
+                local_exception == nullptr ? 1 : 0;
+            int all_ok = 0;
+            const auto sequence =
+                debug::nextMpiCollectiveTraceSeq();
+            debug::traceMpiCollective(
+                "before",
+                sequence,
+                "SystemSetup::coordinateConstraintPrepublicationFailure",
+                1,
+                MPI_INT,
+                MPI_MIN,
+                communicator);
+            MPI_Allreduce(&local_ok,
+                          &all_ok,
+                          1,
+                          MPI_INT,
+                          MPI_MIN,
+                          communicator);
+            debug::traceMpiCollective(
+                "after",
+                sequence,
+                "SystemSetup::coordinateConstraintPrepublicationFailure",
+                1,
+                MPI_INT,
+                MPI_MIN,
+                communicator);
+            any_failed = all_ok == 0;
+        }
+    }
+#endif
+    if (!any_failed) {
+        return;
+    }
+    if (local_exception != nullptr) {
+        std::rethrow_exception(local_exception);
+    }
+    throw std::runtime_error(
+        "FESystem: diagnostic=distributed_constraint_phase_failure phase='" +
+        std::string(phase) +
+        "' another communicator rank rejected its local constraint state");
+}
+
+template <typename Callback>
+void runCoordinatedConstraintPhase(
+    const FESystem& system,
+    std::string_view phase,
+    Callback&& callback)
+{
+    std::exception_ptr local_exception;
+    try {
+        callback();
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+    coordinateConstraintPrepublicationFailure(
+        system, local_exception, phase);
+}
+
+template <typename DefinitionContainer>
+[[nodiscard]] std::uint64_t constraintCallbackSequenceSignature(
+    const DefinitionContainer& definitions,
+    std::uint64_t domain) noexcept
+{
+    constexpr std::uint64_t offset = 14695981039346656037ull;
+    constexpr std::uint64_t prime = 1099511628211ull;
+    std::uint64_t signature = offset;
+    const auto mix = [&](std::uint64_t value) {
+        for (unsigned int byte = 0u; byte < 8u; ++byte) {
+            signature ^=
+                (value >> (byte * 8u)) & std::uint64_t{0xff};
+            signature *= prime;
+        }
+    };
+    mix(domain);
+    mix(static_cast<std::uint64_t>(definitions.size()));
+    for (std::size_t index = 0u;
+         index < definitions.size();
+         ++index) {
+        const auto& definition = definitions[index];
+        mix(static_cast<std::uint64_t>(index));
+        if (!definition) {
+            mix(0u);
+            continue;
+        }
+        mix(1u);
+        mix(definition->isTimeDependent() ? 1u : 0u);
+        const char* type_name = typeid(*definition).name();
+        while (*type_name != '\0') {
+            signature ^=
+                static_cast<unsigned char>(*type_name++);
+            signature *= prime;
+        }
+        mix(std::uint64_t{0xff});
+    }
+    return signature;
+}
+
+void requireConsistentConstraintCallbackShape(
+    const FESystem& system,
+    std::size_t system_constraint_count,
+    std::size_t constraint_count,
+    bool has_time_update,
+    std::uint64_t system_constraint_signature,
+    std::uint64_t constraint_signature,
+    std::string_view phase)
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized == 0 || finalized != 0) {
+        return;
+    }
+
+    const auto communicator = system.dofHandler().mpiComm();
+    int world_size = 1;
+    MPI_Comm_size(communicator, &world_size);
+    if (world_size <= 1) {
+        return;
+    }
+
+    const std::uint64_t local_shape[5]{
+        static_cast<std::uint64_t>(system_constraint_count),
+        static_cast<std::uint64_t>(constraint_count),
+        has_time_update ? std::uint64_t{1} : std::uint64_t{0},
+        system_constraint_signature,
+        constraint_signature};
+    std::uint64_t minimum_shape[5]{};
+    std::uint64_t maximum_shape[5]{};
+    const auto reduce_shape =
+        [&](std::uint64_t* reduced_shape, MPI_Op operation) {
+            const auto sequence =
+                debug::nextMpiCollectiveTraceSeq();
+            debug::traceMpiCollective(
+                "before",
+                sequence,
+                "SystemSetup::requireConsistentConstraintCallbackShape",
+                5,
+                MPI_UINT64_T,
+                operation,
+                communicator);
+            MPI_Allreduce(local_shape,
+                          reduced_shape,
+                          5,
+                          MPI_UINT64_T,
+                          operation,
+                          communicator);
+            debug::traceMpiCollective(
+                "after",
+                sequence,
+                "SystemSetup::requireConsistentConstraintCallbackShape",
+                5,
+                MPI_UINT64_T,
+                operation,
+                communicator);
+        };
+    reduce_shape(minimum_shape, MPI_MIN);
+    reduce_shape(maximum_shape, MPI_MAX);
+
+    if (std::equal(
+            std::begin(minimum_shape),
+            std::end(minimum_shape),
+            std::begin(maximum_shape))) {
+        return;
+    }
+
+    std::ostringstream message;
+    message
+        << "FESystem: "
+           "diagnostic=distributed_constraint_callback_shape_mismatch "
+           "phase='"
+        << phase
+        << "' local_system_constraint_count="
+        << local_shape[0]
+        << " local_constraint_count="
+        << local_shape[1]
+        << " local_has_time_update="
+        << local_shape[2]
+        << " local_system_constraint_signature="
+        << local_shape[3]
+        << " local_constraint_signature="
+        << local_shape[4]
+        << " communicator_min=["
+        << minimum_shape[0] << "," << minimum_shape[1] << ","
+        << minimum_shape[2] << "," << minimum_shape[3] << ","
+        << minimum_shape[4]
+        << "] communicator_max=["
+        << maximum_shape[0] << "," << maximum_shape[1] << ","
+        << maximum_shape[2] << "," << maximum_shape[3] << ","
+        << maximum_shape[4] << "]";
+    FE_THROW(FEException, message.str());
+#else
+    static_cast<void>(system);
+    static_cast<void>(system_constraint_count);
+    static_cast<void>(constraint_count);
+    static_cast<void>(has_time_update);
+    static_cast<void>(system_constraint_signature);
+    static_cast<void>(constraint_signature);
+    static_cast<void>(phase);
+#endif
+}
 
 [[nodiscard]] std::optional<assembly::GhostPolicy> assemblyGhostPolicyOverrideFromEnv()
 {
@@ -2837,31 +3067,71 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     // ---------------------------------------------------------------------
     // Constraints
     // ---------------------------------------------------------------------
+    requireConsistentConstraintCallbackShape(
+        *this,
+        system_constraint_defs_.size(),
+        constraint_defs_.size(),
+        has_last_constraint_update_time_,
+        constraintCallbackSequenceSignature(
+            system_constraint_defs_,
+            0x53595354434f4e53ull),
+        constraintCallbackSequenceSignature(
+            constraint_defs_,
+            0x504c41494e434f4eull),
+        "setup_constraint_callback_preflight");
     affine_constraints_.clear();
     for (auto& c : system_constraint_defs_) {
-        FE_CHECK_NOT_NULL(c.get(), "FESystem::setup: system constraint");
-        c->apply(*this, affine_constraints_);
+        runCoordinatedConstraintPhase(
+            *this,
+            "setup_system_constraint_apply",
+            [&] {
+                FE_CHECK_NOT_NULL(
+                    c.get(), "FESystem::setup: system constraint");
+                c->apply(*this, affine_constraints_);
+            });
     }
     for (const auto& c : constraint_defs_) {
-        FE_CHECK_NOT_NULL(c.get(), "FESystem::setup: constraint");
-        c->apply(affine_constraints_);
+        runCoordinatedConstraintPhase(
+            *this,
+            "setup_constraint_apply",
+            [&] {
+                FE_CHECK_NOT_NULL(
+                    c.get(), "FESystem::setup: constraint");
+                c->apply(affine_constraints_);
+            });
     }
     if (has_last_constraint_update_time_) {
         for (auto& c : system_constraint_defs_) {
-            FE_CHECK_NOT_NULL(c.get(), "FESystem::setup: system constraint time update");
-            if (c->isTimeDependent()) {
-                (void)c->updateValues(*this,
-                                      affine_constraints_,
-                                      last_constraint_update_time_,
-                                      last_constraint_update_dt_);
-            }
+            runCoordinatedConstraintPhase(
+                *this,
+                "setup_system_constraint_time_update",
+                [&] {
+                    FE_CHECK_NOT_NULL(
+                        c.get(),
+                        "FESystem::setup: system constraint time update");
+                    if (c->isTimeDependent()) {
+                        (void)c->updateValues(
+                            *this,
+                            affine_constraints_,
+                            last_constraint_update_time_,
+                            last_constraint_update_dt_);
+                    }
+                });
         }
         for (const auto& c : constraint_defs_) {
-            FE_CHECK_NOT_NULL(c.get(), "FESystem::setup: constraint time update");
-            if (c->isTimeDependent()) {
-                (void)c->updateValues(affine_constraints_,
-                                      last_constraint_update_time_);
-            }
+            runCoordinatedConstraintPhase(
+                *this,
+                "setup_constraint_time_update",
+                [&] {
+                    FE_CHECK_NOT_NULL(
+                        c.get(),
+                        "FESystem::setup: constraint time update");
+                    if (c->isTimeDependent()) {
+                        (void)c->updateValues(
+                            affine_constraints_,
+                            last_constraint_update_time_);
+                    }
+                });
         }
     }
 
@@ -3665,21 +3935,54 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     parallel.emplace(dof_handler_.getPartition());
 #endif
     if (parallel && parallel->isParallel()) {
-        parallel->synchronize(affine_constraints_);
-        if (!parallel->validateConsistency(affine_constraints_)) {
-            FE_THROW(FEException,
-                     "FESystem::setup: algebraic constraints are inconsistent across MPI ranks "
-                     "after synchronization.");
-        }
+        runCoordinatedConstraintPhase(
+            *this,
+            "setup_constraint_synchronize",
+            [&] {
+                parallel->synchronize(affine_constraints_);
+            });
+        runCoordinatedConstraintPhase(
+            *this,
+            "setup_constraint_validate",
+            [&] {
+                if (!parallel->validateConsistency(
+                        affine_constraints_)) {
+                    FE_THROW(
+                        FEException,
+                        "FESystem::setup: algebraic constraints are "
+                        "inconsistent across MPI ranks after "
+                        "synchronization.");
+                }
+            });
     }
 
-    affine_constraints_.close();
-    bumpConstraintLayoutRevision();
-    {
+    std::exception_ptr local_constraint_close_exception;
+    try {
+        affine_constraints_.close();
+    } catch (...) {
+        local_constraint_close_exception =
+            std::current_exception();
+    }
+    coordinateConstraintPrepublicationFailure(
+        *this,
+        local_constraint_close_exception,
+        "setup_constraint_close");
+
+    std::exception_ptr local_constraint_snapshot_exception;
+    try {
+        bumpConstraintLayoutRevision();
         const auto deps = constraintDependencyDeclaration();
         constraint_revision_snapshot_ = captureConstraintRevisionSnapshot(
             deps.structural.mesh_field_values || deps.value.mesh_field_values);
+    } catch (...) {
+        local_constraint_snapshot_exception =
+            std::current_exception();
     }
+    coordinateConstraintPrepublicationFailure(
+        *this,
+        local_constraint_snapshot_exception,
+        "setup_constraint_snapshot");
+    publishFinalizedSmallCutAggregationProlongations();
 
     // ---------------------------------------------------------------------
     // Analysis subsystem: topology + constraint summary
@@ -6208,6 +6511,13 @@ void FESystem::beginCutIntegrationContextTransaction()
     auto backup =
         std::make_unique<CutIntegrationContextTransactionBackup>();
     backup->context = cut_integration_context_;
+    if (cut_integration_context_) {
+        backup->context_content_revision =
+            cut_integration_context_->contentRevision();
+        backup->context_content_snapshot =
+            std::make_shared<assembly::CutIntegrationContext>(
+                *cut_integration_context_);
+    }
     backup->affine_constraints = affine_constraints_;
     backup->fe_layout_revisions = fe_layout_revisions_;
     backup->constraint_revision_snapshot = constraint_revision_snapshot_;
@@ -6218,6 +6528,18 @@ void FESystem::beginCutIntegrationContextTransaction()
     backup->analysis_report_cache = analysis_report_cache_;
     backup->analysis_inputs_version = analysis_inputs_version_;
     backup->analysis_report_version = analysis_report_version_;
+    backup->finalized_small_cut_aggregation_prolongations =
+        finalized_small_cut_aggregation_prolongations_;
+    for (const auto& definition : system_constraint_defs_) {
+        const auto* aggregation =
+            dynamic_cast<
+                const constraints::SmallCutAggregationConstraint*>(
+                definition.get());
+        if (aggregation != nullptr) {
+            backup->small_cut_aggregation_lifecycle_checkpoints.push_back(
+                aggregation->captureLifecycleCheckpoint());
+        }
+    }
     cut_integration_context_transaction_backup_ = std::move(backup);
 }
 
@@ -6237,12 +6559,14 @@ void FESystem::rollbackCutIntegrationContextTransaction()
             "FESystem cut-integration-context transaction is not active");
     }
     auto& backup = *cut_integration_context_transaction_backup_;
-    cut_integration_context_ = backup.context;
-    for (const auto& hook : cut_integration_context_update_callbacks_) {
-        if (hook.callback) {
-            hook.callback(cut_integration_context_.get());
-        }
-    }
+    const bool original_context_was_mutated =
+        backup.context &&
+        backup.context->contentRevision() !=
+            backup.context_content_revision;
+    cut_integration_context_ =
+        original_context_was_mutated
+            ? backup.context_content_snapshot
+            : backup.context;
     affine_constraints_ = backup.affine_constraints;
     refreshSparsityForConstraintStructureChange();
     fe_layout_revisions_ = backup.fe_layout_revisions;
@@ -6254,6 +6578,45 @@ void FESystem::rollbackCutIntegrationContextTransaction()
     analysis_report_cache_ = backup.analysis_report_cache;
     analysis_inputs_version_ = backup.analysis_inputs_version;
     analysis_report_version_ = backup.analysis_report_version;
+    finalized_small_cut_aggregation_prolongations_ =
+        backup.finalized_small_cut_aggregation_prolongations;
+    std::size_t aggregation_checkpoint = 0u;
+    for (auto& definition : system_constraint_defs_) {
+        auto* aggregation =
+            dynamic_cast<
+                constraints::SmallCutAggregationConstraint*>(
+                definition.get());
+        if (aggregation == nullptr) {
+            continue;
+        }
+        if (aggregation_checkpoint >=
+                backup
+                    .small_cut_aggregation_lifecycle_checkpoints
+                    .size() ||
+            !backup
+                 .small_cut_aggregation_lifecycle_checkpoints[
+                     aggregation_checkpoint]) {
+            throw std::logic_error(
+                "FESystem aggregation lifecycle transaction backup is "
+                "incomplete");
+        }
+        aggregation->restoreLifecycleCheckpoint(
+            *backup
+                 .small_cut_aggregation_lifecycle_checkpoints[
+                     aggregation_checkpoint]);
+        ++aggregation_checkpoint;
+    }
+    if (aggregation_checkpoint !=
+        backup.small_cut_aggregation_lifecycle_checkpoints.size()) {
+        throw std::logic_error(
+            "FESystem aggregation lifecycle transaction backup has "
+            "unexpected entries");
+    }
+    for (const auto& hook : cut_integration_context_update_callbacks_) {
+        if (hook.callback) {
+            hook.callback(cut_integration_context_.get());
+        }
+    }
     cut_integration_context_transaction_backup_.reset();
 }
 
@@ -6261,31 +6624,76 @@ void FESystem::rebuildConstraintState()
 {
     requireSetup();
 
+    requireConsistentConstraintCallbackShape(
+        *this,
+        system_constraint_defs_.size(),
+        constraint_defs_.size(),
+        has_last_constraint_update_time_,
+        constraintCallbackSequenceSignature(
+            system_constraint_defs_,
+            0x53595354434f4e53ull),
+        constraintCallbackSequenceSignature(
+            constraint_defs_,
+            0x504c41494e434f4eull),
+        "rebuild_constraint_callback_preflight");
+    finalized_small_cut_aggregation_prolongations_.clear();
     affine_constraints_.clear();
     for (auto& c : system_constraint_defs_) {
-        FE_CHECK_NOT_NULL(c.get(), "FESystem::rebuildConstraintState: system constraint");
-        c->apply(*this, affine_constraints_);
+        runCoordinatedConstraintPhase(
+            *this,
+            "rebuild_system_constraint_apply",
+            [&] {
+                FE_CHECK_NOT_NULL(
+                    c.get(),
+                    "FESystem::rebuildConstraintState: system constraint");
+                c->apply(*this, affine_constraints_);
+            });
     }
     for (const auto& c : constraint_defs_) {
-        FE_CHECK_NOT_NULL(c.get(), "FESystem::rebuildConstraintState: constraint");
-        c->apply(affine_constraints_);
+        runCoordinatedConstraintPhase(
+            *this,
+            "rebuild_constraint_apply",
+            [&] {
+                FE_CHECK_NOT_NULL(
+                    c.get(),
+                    "FESystem::rebuildConstraintState: constraint");
+                c->apply(affine_constraints_);
+            });
     }
     if (has_last_constraint_update_time_) {
         for (auto& c : system_constraint_defs_) {
-            FE_CHECK_NOT_NULL(c.get(), "FESystem::rebuildConstraintState: system constraint time update");
-            if (c->isTimeDependent()) {
-                (void)c->updateValues(*this,
-                                      affine_constraints_,
-                                      last_constraint_update_time_,
-                                      last_constraint_update_dt_);
-            }
+            runCoordinatedConstraintPhase(
+                *this,
+                "rebuild_system_constraint_time_update",
+                [&] {
+                    FE_CHECK_NOT_NULL(
+                        c.get(),
+                        "FESystem::rebuildConstraintState: system "
+                        "constraint time update");
+                    if (c->isTimeDependent()) {
+                        (void)c->updateValues(
+                            *this,
+                            affine_constraints_,
+                            last_constraint_update_time_,
+                            last_constraint_update_dt_);
+                    }
+                });
         }
         for (const auto& c : constraint_defs_) {
-            FE_CHECK_NOT_NULL(c.get(), "FESystem::rebuildConstraintState: constraint time update");
-            if (c->isTimeDependent()) {
-                (void)c->updateValues(affine_constraints_,
-                                      last_constraint_update_time_);
-            }
+            runCoordinatedConstraintPhase(
+                *this,
+                "rebuild_constraint_time_update",
+                [&] {
+                    FE_CHECK_NOT_NULL(
+                        c.get(),
+                        "FESystem::rebuildConstraintState: constraint "
+                        "time update");
+                    if (c->isTimeDependent()) {
+                        (void)c->updateValues(
+                            affine_constraints_,
+                            last_constraint_update_time_);
+                    }
+                });
         }
     }
 
@@ -6303,22 +6711,55 @@ void FESystem::rebuildConstraintState()
     parallel.emplace(dof_handler_.getPartition());
 #endif
     if (parallel && parallel->isParallel()) {
-        parallel->synchronize(affine_constraints_);
-        if (!parallel->validateConsistency(affine_constraints_)) {
-            FE_THROW(FEException,
-                     "FESystem::rebuildConstraintState: algebraic constraints are inconsistent across MPI ranks "
-                     "after synchronization.");
-        }
+        runCoordinatedConstraintPhase(
+            *this,
+            "rebuild_constraint_synchronize",
+            [&] {
+                parallel->synchronize(affine_constraints_);
+            });
+        runCoordinatedConstraintPhase(
+            *this,
+            "rebuild_constraint_validate",
+            [&] {
+                if (!parallel->validateConsistency(
+                        affine_constraints_)) {
+                    FE_THROW(
+                        FEException,
+                        "FESystem::rebuildConstraintState: algebraic "
+                        "constraints are inconsistent across MPI ranks "
+                        "after synchronization.");
+                }
+            });
     }
 
-    affine_constraints_.close();
-    refreshSparsityForConstraintStructureChange();
-    bumpConstraintLayoutRevision();
-    {
+    std::exception_ptr local_constraint_close_exception;
+    try {
+        affine_constraints_.close();
+    } catch (...) {
+        local_constraint_close_exception =
+            std::current_exception();
+    }
+    coordinateConstraintPrepublicationFailure(
+        *this,
+        local_constraint_close_exception,
+        "rebuild_constraint_close");
+
+    std::exception_ptr local_constraint_refresh_exception;
+    try {
+        refreshSparsityForConstraintStructureChange();
+        bumpConstraintLayoutRevision();
         const auto deps = constraintDependencyDeclaration();
         constraint_revision_snapshot_ = captureConstraintRevisionSnapshot(
             deps.structural.mesh_field_values || deps.value.mesh_field_values);
+    } catch (...) {
+        local_constraint_refresh_exception =
+            std::current_exception();
     }
+    coordinateConstraintPrepublicationFailure(
+        *this,
+        local_constraint_refresh_exception,
+        "rebuild_constraint_refresh");
+    publishFinalizedSmallCutAggregationProlongations();
     buildConstraintSummary();
     invalidateAnalysisCache();
 }

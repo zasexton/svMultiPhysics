@@ -18,12 +18,58 @@
 
 #include <mpi.h>
 
+#include <exception>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace svmp {
 namespace FE {
 namespace constraints {
 namespace test {
+
+struct CollectiveOutcome {
+    int minimum_threw{0};
+    int maximum_threw{0};
+    std::string local_message{};
+
+    [[nodiscard]] bool allThrew() const noexcept
+    {
+        return minimum_threw == 1 && maximum_threw == 1;
+    }
+};
+
+template <typename Callable>
+CollectiveOutcome invokeCollectively(MPI_Comm comm, Callable&& callable)
+{
+    int local_threw = 0;
+    std::string local_message;
+    try {
+        std::forward<Callable>(callable)();
+    } catch (const std::exception& error) {
+        local_threw = 1;
+        local_message = error.what();
+    } catch (...) {
+        local_threw = 1;
+        local_message = "non-std exception";
+    }
+
+    CollectiveOutcome outcome;
+    outcome.local_message = std::move(local_message);
+    MPI_Allreduce(&local_threw,
+                  &outcome.minimum_threw,
+                  1,
+                  MPI_INT,
+                  MPI_MIN,
+                  comm);
+    MPI_Allreduce(&local_threw,
+                  &outcome.maximum_threw,
+                  1,
+                  MPI_INT,
+                  MPI_MAX,
+                  comm);
+    return outcome;
+}
 
 TEST(ParallelConstraintsMPITest, OwnerWinsResolvesGhostConflicts) {
     int my_rank = 0;
@@ -162,6 +208,121 @@ TEST(ParallelConstraintsMPITest, SmallestRankResolvesConflictsEvenAgainstOwner) 
         EXPECT_EQ(line->entries[0].master_dof, a_owned);
         EXPECT_DOUBLE_EQ(line->entries[0].weight, 2.0);
     }
+}
+
+TEST(ParallelConstraintsMPITest,
+     RankPrivateDecodeFailureIsCoordinated)
+{
+    int my_rank = 0;
+    int n_ranks = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &n_ranks);
+
+    if (n_ranks < 2) {
+        GTEST_SKIP() << "Requires at least 2 MPI ranks";
+    }
+
+    const GlobalIndex owned_begin =
+        static_cast<GlobalIndex>(my_rank);
+    const GlobalIndex owned_end = owned_begin + 1;
+    std::vector<GlobalIndex> ghosts;
+    if (my_rank != 0) {
+        ghosts.push_back(0);
+    }
+    dofs::DofPartition partition(
+        owned_begin, owned_end, ghosts);
+    partition.setGlobalSize(
+        static_cast<GlobalIndex>(n_ranks));
+
+    // Every rank declares the rank-0 DOF, but nonowners disagree with its
+    // owner. Rank 0 rejects the conflict while other ranks would resolve it;
+    // the post-gather decode checkpoint must make the failure collective.
+    AffineConstraints constraints;
+    constraints.addDirichlet(
+        0, my_rank == 0 ? 0.0 : 1.0);
+
+    ParallelConstraints parallel(MPI_COMM_WORLD, partition);
+    ParallelConstraintOptions options;
+    options.conflict_resolution =
+        my_rank == 0
+            ? ParallelConstraintOptions::ConflictResolution::Error
+            : ParallelConstraintOptions::ConflictResolution::OwnerWins;
+    parallel.setOptions(options);
+
+    const auto outcome = invokeCollectively(
+        MPI_COMM_WORLD,
+        [&] { static_cast<void>(parallel.synchronize(constraints)); });
+    EXPECT_TRUE(outcome.allThrew());
+    if (my_rank == 0) {
+        EXPECT_NE(
+            outcome.local_message.find(
+                "Conflicting constraints from different ranks"),
+            std::string::npos);
+    } else {
+        EXPECT_NE(
+            outcome.local_message.find(
+                "distributed_parallel_constraint_phase_failure"),
+            std::string::npos);
+        EXPECT_NE(
+            outcome.local_message.find(
+                "phase='decode_and_resolve'"),
+            std::string::npos);
+    }
+}
+
+TEST(ParallelConstraintsMPITest,
+     ValidationResultIsReducedAcrossRanks)
+{
+    int my_rank = 0;
+    int n_ranks = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &n_ranks);
+
+    if (n_ranks < 2) {
+        GTEST_SKIP() << "Requires at least 2 MPI ranks";
+    }
+
+    const GlobalIndex owned_begin =
+        static_cast<GlobalIndex>(my_rank);
+    const GlobalIndex owned_end = owned_begin + 1;
+    std::vector<GlobalIndex> ghosts;
+    if (my_rank != 0) {
+        ghosts.push_back(0);
+    }
+    dofs::DofPartition partition(
+        owned_begin, owned_end, ghosts);
+    partition.setGlobalSize(
+        static_cast<GlobalIndex>(n_ranks));
+
+    // OwnerWins makes rank 0's value canonical. Only rank 1 retains a
+    // disagreeing ghost value, so a local-only validation result would differ
+    // across ranks.
+    AffineConstraints constraints;
+    constraints.addDirichlet(
+        0, my_rank == 1 ? 1.0 : 0.0);
+
+    ParallelConstraints parallel(MPI_COMM_WORLD, partition);
+    const bool valid =
+        parallel.validateConsistency(constraints);
+    const int local_valid = valid ? 1 : 0;
+    int minimum_valid = 0;
+    int maximum_valid = 0;
+    MPI_Allreduce(&local_valid,
+                  &minimum_valid,
+                  1,
+                  MPI_INT,
+                  MPI_MIN,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(&local_valid,
+                  &maximum_valid,
+                  1,
+                  MPI_INT,
+                  MPI_MAX,
+                  MPI_COMM_WORLD);
+
+    EXPECT_FALSE(valid);
+    EXPECT_EQ(minimum_valid, 0);
+    EXPECT_EQ(maximum_valid, 0);
 }
 
 } // namespace test

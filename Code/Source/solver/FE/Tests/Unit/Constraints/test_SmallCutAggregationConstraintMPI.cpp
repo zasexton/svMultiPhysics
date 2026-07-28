@@ -19,6 +19,7 @@
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
 #include "Geometry/CutQuadrature.h"
+#include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
 
@@ -27,12 +28,14 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -615,15 +618,27 @@ struct CellRule {
 };
 
 std::shared_ptr<assembly::CutIntegrationContext> cutContext(
-    std::initializer_list<CellRule> cell_rules)
+    std::initializer_list<CellRule> cell_rules,
+    GlobalIndex physical_cell_gid_offset = 0)
 {
     auto context = std::make_shared<assembly::CutIntegrationContext>();
     for (const auto& cell_rule : cell_rules) {
+        const auto physical_cell_gid =
+            cell_rule.cell + physical_cell_gid_offset;
+        const auto cut_topology_revision =
+            interfaces::cutVolumeStableId(
+                kInterfaceMarker,
+                physical_cell_gid,
+                /*local_region_index=*/0,
+                cell_rule.side,
+                /*source_revision=*/1u);
         assembly::CutCellAssemblyMetadata metadata{};
         metadata.cell = cell_rule.cell;
         metadata.parent_entity = cell_rule.cell;
         metadata.side = cell_rule.side;
         metadata.volume_fraction = cell_rule.fraction;
+        metadata.revision_key = cut_topology_revision;
+        metadata.cut_topology_revision = cut_topology_revision;
 
         geometry::CutQuadratureRule rule{};
         rule.kind = geometry::CutQuadratureKind::Volume;
@@ -633,6 +648,12 @@ std::shared_ptr<assembly::CutIntegrationContext> cutContext(
         rule.volume_fraction = cell_rule.fraction;
         rule.full_cell_equivalent = cell_rule.full;
         rule.frame = geometry::CutGeometryFrame::Current;
+        rule.provenance.parent_entity = cell_rule.cell;
+        rule.provenance.parent_entity_global_id =
+            physical_cell_gid;
+        rule.provenance.marker = kInterfaceMarker;
+        rule.provenance.cut_topology_revision =
+            cut_topology_revision;
         context->addGeneratedVolumeRule(kInterfaceMarker, metadata, rule);
     }
     return context;
@@ -642,6 +663,8 @@ std::shared_ptr<assembly::CutIntegrationContext>
 sixQuadEqualRootCutContext(int rank, bool reverse_ownership)
 {
     auto context = std::make_shared<assembly::CutIntegrationContext>();
+    constexpr std::array<GlobalIndex, 6> physical_cell_gids{
+        82, 101, 102, 103, 104, 41};
     for (GlobalIndex cell = 0; cell < 6; ++cell) {
         const int base_owner = cell < 3 ? 0 : 1;
         const int owner =
@@ -651,12 +674,24 @@ sixQuadEqualRootCutContext(int rank, bool reverse_ownership)
         }
         const bool full = cell == 0 || cell == 5;
         const Real fraction = full ? Real{1} : Real{0.25};
+        const auto physical_cell_gid =
+            physical_cell_gids.at(
+                static_cast<std::size_t>(cell));
+        const auto cut_topology_revision =
+            interfaces::cutVolumeStableId(
+                kInterfaceMarker,
+                physical_cell_gid,
+                /*local_region_index=*/0,
+                geometry::CutIntegrationSide::Negative,
+                /*source_revision=*/1u);
 
         assembly::CutCellAssemblyMetadata metadata{};
         metadata.cell = cell;
         metadata.parent_entity = cell;
         metadata.side = geometry::CutIntegrationSide::Negative;
         metadata.volume_fraction = fraction;
+        metadata.revision_key = cut_topology_revision;
+        metadata.cut_topology_revision = cut_topology_revision;
 
         geometry::CutQuadratureRule rule{};
         rule.kind = geometry::CutQuadratureKind::Volume;
@@ -666,10 +701,144 @@ sixQuadEqualRootCutContext(int rank, bool reverse_ownership)
         rule.volume_fraction = fraction;
         rule.full_cell_equivalent = full;
         rule.frame = geometry::CutGeometryFrame::Current;
+        rule.provenance.parent_entity = cell;
+        rule.provenance.parent_entity_global_id =
+            physical_cell_gid;
+        rule.provenance.marker = kInterfaceMarker;
+        rule.provenance.cut_topology_revision =
+            cut_topology_revision;
         context->addGeneratedVolumeRule(kInterfaceMarker, metadata, rule);
     }
     return context;
 }
+
+class RankZeroPrivateCycleOnRebuild final : public ISystemConstraint {
+public:
+    explicit RankZeroPrivateCycleOnRebuild(FieldId field, int rank)
+        : field_(field), rank_(rank)
+    {
+    }
+
+    void apply(const systems::FESystem& system,
+               AffineConstraints& constraints) override
+    {
+        if (!system.isSetup() || rank_ != 0) {
+            return;
+        }
+        const auto* entity_map =
+            system.fieldDofHandler(field_).getEntityDofMap();
+        if (entity_map == nullptr) {
+            throw std::logic_error(
+                "rank-private cycle requires a vertex DOF map");
+        }
+        const auto first = entity_map->getVertexDofs(0);
+        const auto second = entity_map->getVertexDofs(1);
+        if (first.size() != 1u || second.size() != 1u) {
+            throw std::logic_error(
+                "rank-private cycle requires scalar vertex DOFs");
+        }
+        const auto offset = system.fieldDofOffset(field_);
+        const auto first_dof = offset + first.front();
+        const auto second_dof = offset + second.front();
+        constraints.addLine(first_dof);
+        constraints.addEntry(first_dof, second_dof, 1.0);
+        constraints.addLine(second_dof);
+        constraints.addEntry(second_dof, first_dof, 1.0);
+    }
+
+    bool updateValues(const systems::FESystem&,
+                      AffineConstraints&,
+                      double,
+                      double) override
+    {
+        return false;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return false;
+    }
+
+    [[nodiscard]] systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        systems::SetupStorageRequirements requirements;
+        requirements.entity_dof_map = true;
+        return requirements;
+    }
+
+private:
+    FieldId field_{INVALID_FIELD_ID};
+    int rank_{0};
+};
+
+class RankZeroPrivateApplyFailureOnRebuild final
+    : public ISystemConstraint {
+public:
+    explicit RankZeroPrivateApplyFailureOnRebuild(int rank)
+        : rank_(rank)
+    {
+    }
+
+    void apply(const systems::FESystem& system,
+               AffineConstraints&) override
+    {
+        if (system.isSetup() && rank_ == 0) {
+            throw std::runtime_error(
+                "rank-zero private apply failure on rebuild");
+        }
+    }
+
+    bool updateValues(const systems::FESystem&,
+                      AffineConstraints&,
+                      double,
+                      double) override
+    {
+        return false;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return false;
+    }
+
+    [[nodiscard]] systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        return {};
+    }
+
+private:
+    int rank_{0};
+};
+
+template <int Tag>
+class TaggedNoOpSystemConstraint final : public ISystemConstraint {
+public:
+    void apply(const systems::FESystem&,
+               AffineConstraints&) override
+    {
+    }
+
+    bool updateValues(const systems::FESystem&,
+                      AffineConstraints&,
+                      double,
+                      double) override
+    {
+        return false;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return false;
+    }
+
+    [[nodiscard]] systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        return {};
+    }
+};
 
 class ScopedEnvVar {
 public:
@@ -941,6 +1110,77 @@ TEST(SmallCutAggregationConstraintMPI,
     ASSERT_TRUE(rebuild_outcome.allSucceeded())
         << rebuild_outcome.local_message;
 
+    // Perform communicator checks before any rank-local fatal assertion so
+    // every rank reaches the same reductions even when a local expectation
+    // fails.
+    std::vector<std::shared_ptr<
+        const SmallCutAggregationProlongationReport>>
+        prolongations;
+    const auto report_fetch = invokeCollectively(
+        MPI_COMM_WORLD,
+        [&] {
+            prolongations =
+                system
+                    .finalizedSmallCutAggregationProlongations();
+        });
+    ASSERT_TRUE(report_fetch.allSucceeded())
+        << report_fetch.local_message;
+    const auto* prolongation =
+        prolongations.size() == 1u && prolongations.front()
+            ? prolongations.front().get()
+            : nullptr;
+    const std::array<std::uint64_t, 4> local_shape{{
+        static_cast<std::uint64_t>(prolongations.size()),
+        prolongation != nullptr
+            ? static_cast<std::uint64_t>(prolongation->rows.size())
+            : 0u,
+        prolongation != nullptr
+            ? static_cast<std::uint64_t>(
+                  prolongation->active_cells.size())
+            : 0u,
+        prolongation != nullptr
+            ? static_cast<std::uint64_t>(prolongation->patches.size())
+            : 0u,
+    }};
+    std::array<std::uint64_t, 4> minimum_shape{};
+    std::array<std::uint64_t, 4> maximum_shape{};
+    MPI_Allreduce(local_shape.data(),
+                  minimum_shape.data(),
+                  static_cast<int>(local_shape.size()),
+                  MPI_UINT64_T,
+                  MPI_MIN,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(local_shape.data(),
+                  maximum_shape.data(),
+                  static_cast<int>(local_shape.size()),
+                  MPI_UINT64_T,
+                  MPI_MAX,
+                  MPI_COMM_WORLD);
+    EXPECT_EQ(minimum_shape, maximum_shape);
+    EXPECT_EQ(maximum_shape,
+              (std::array<std::uint64_t, 4>{{1u, 2u, 2u, 1u}}));
+
+    const std::uint64_t local_digest =
+        prolongation != nullptr
+            ? prolongation->canonical_content_digest
+            : 0u;
+    std::uint64_t minimum_digest = 0u;
+    std::uint64_t maximum_digest = 0u;
+    MPI_Allreduce(&local_digest,
+                  &minimum_digest,
+                  1,
+                  MPI_UINT64_T,
+                  MPI_MIN,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(&local_digest,
+                  &maximum_digest,
+                  1,
+                  MPI_UINT64_T,
+                  MPI_MAX,
+                  MPI_COMM_WORLD);
+    EXPECT_NE(local_digest, 0u);
+    EXPECT_EQ(minimum_digest, maximum_digest);
+
     const auto bottom_slave = vertexDof(system, pressure, 0);
     const auto top_slave = vertexDof(system, pressure, 1);
     ASSERT_TRUE(system.dofHandler().getPartition().isOwned(bottom_slave) ==
@@ -994,6 +1234,109 @@ TEST(SmallCutAggregationConstraintMPI,
     EXPECT_EQ(feature.canonical_cut_cell_count, 1u);
     EXPECT_DOUBLE_EQ(
         feature.canonical_retained_physical_volume, 1.25);
+
+    ASSERT_EQ(prolongations.size(), 1u);
+    ASSERT_NE(prolongations.front(), nullptr);
+    const auto& finalized = *prolongations.front();
+    EXPECT_EQ(finalized.field, pressure);
+    EXPECT_TRUE(finalized.trace_bound_eligible);
+    EXPECT_EQ(finalized.revision.local_rank, rank);
+    EXPECT_EQ(finalized.revision.communicator_size, world_size);
+
+    const auto expect_rooted_row =
+        [&](GlobalIndex slave,
+            const std::vector<std::pair<GlobalIndex, double>>&
+                expected_entries) {
+            const auto row = std::find_if(
+                finalized.rows.begin(),
+                finalized.rows.end(),
+                [slave](const auto& candidate) {
+                    return candidate.slave_dof == slave;
+                });
+            ASSERT_NE(row, finalized.rows.end());
+            EXPECT_EQ(row->candidate_dof, slave);
+            EXPECT_EQ(row->component, 0u);
+            EXPECT_EQ(row->slave_owner_rank, 0);
+            EXPECT_EQ(
+                row->provisional_kind,
+                SmallCutAggregationProvisionalRowKind::RootedExtension);
+            EXPECT_EQ(row->final_kind,
+                      SmallCutAggregationFinalRowKind::MasterBearing);
+            EXPECT_FALSE(row->preconstrained_at_apply);
+            EXPECT_EQ(row->root_cell_gid, 1);
+            EXPECT_EQ(row->root_cell_owner_rank, 1);
+            EXPECT_EQ(row->root_provider_rank, 0);
+            EXPECT_EQ(row->root_distance, 1u);
+            EXPECT_DOUBLE_EQ(row->final_inhomogeneity, 0.0);
+            ASSERT_EQ(row->provisional_entries.size(),
+                      expected_entries.size());
+            ASSERT_EQ(row->final_entries.size(),
+                      expected_entries.size());
+            for (std::size_t i = 0u; i < expected_entries.size(); ++i) {
+                EXPECT_EQ(row->provisional_entries[i].master_dof,
+                          expected_entries[i].first);
+                EXPECT_DOUBLE_EQ(row->provisional_entries[i].weight,
+                                 expected_entries[i].second);
+                EXPECT_EQ(row->final_entries[i].master_dof,
+                          expected_entries[i].first);
+                EXPECT_DOUBLE_EQ(row->final_entries[i].weight,
+                                 expected_entries[i].second);
+            }
+        };
+    expect_rooted_row(
+        bottom_slave,
+        {{bottom_interface, 2.0}, {bottom_far, -1.0}});
+    expect_rooted_row(
+        top_slave,
+        {{top_interface, 2.0}, {top_far, -1.0}});
+
+    ASSERT_EQ(finalized.active_cells.size(), 2u);
+    const auto& cut_cell = finalized.active_cells[0];
+    EXPECT_EQ(cut_cell.cell_gid, 0);
+    EXPECT_EQ(cut_cell.owner_rank, 0);
+    EXPECT_EQ(cut_cell.retained_measure_provider_rank, 1);
+    EXPECT_EQ(cut_cell.kind, SmallCutAggregationActiveCellKind::Cut);
+    EXPECT_EQ(cut_cell.active_feature_id, 0);
+    EXPECT_DOUBLE_EQ(cut_cell.retained_physical_volume, 0.25);
+    EXPECT_EQ(cut_cell.retained_rule_stable_ids.size(), 1u);
+    auto expected_cut_dofs = std::vector<GlobalIndex>{
+        bottom_slave, top_slave, bottom_interface, top_interface};
+    std::sort(expected_cut_dofs.begin(), expected_cut_dofs.end());
+    EXPECT_EQ(cut_cell.field_dofs, expected_cut_dofs);
+    EXPECT_EQ(cut_cell.active_face_neighbor_cell_gids,
+              (std::vector<GlobalIndex>{1}));
+
+    const auto& root_cell = finalized.active_cells[1];
+    EXPECT_EQ(root_cell.cell_gid, 1);
+    EXPECT_EQ(root_cell.owner_rank, 1);
+    EXPECT_EQ(root_cell.retained_measure_provider_rank, 0);
+    EXPECT_EQ(root_cell.kind,
+              SmallCutAggregationActiveCellKind::FullActive);
+    EXPECT_EQ(root_cell.active_feature_id, 0);
+    EXPECT_DOUBLE_EQ(root_cell.retained_physical_volume, 1.0);
+    EXPECT_EQ(root_cell.retained_rule_stable_ids.size(), 1u);
+    auto expected_root_dofs = std::vector<GlobalIndex>{
+        bottom_interface, top_interface, bottom_far, top_far};
+    std::sort(expected_root_dofs.begin(), expected_root_dofs.end());
+    EXPECT_EQ(root_cell.field_dofs, expected_root_dofs);
+    EXPECT_EQ(root_cell.active_face_neighbor_cell_gids,
+              (std::vector<GlobalIndex>{0}));
+
+    ASSERT_EQ(finalized.patches.size(), 1u);
+    const auto& patch = finalized.patches.front();
+    EXPECT_EQ(patch.kind, SmallCutAggregationPatchKind::Rooted);
+    EXPECT_EQ(patch.root_cell_gid, 1);
+    EXPECT_EQ(patch.root_cell_owner_rank, 1);
+    EXPECT_EQ(patch.active_feature_ids,
+              (std::vector<GlobalIndex>{0}));
+    EXPECT_EQ(patch.member_cell_gids,
+              (std::vector<GlobalIndex>{0, 1}));
+    EXPECT_EQ(patch.support_cell_gids,
+              (std::vector<GlobalIndex>{0, 1}));
+    auto expected_slaves =
+        std::vector<GlobalIndex>{bottom_slave, top_slave};
+    std::sort(expected_slaves.begin(), expected_slaves.end());
+    EXPECT_EQ(patch.slave_dofs, expected_slaves);
 #endif
 }
 
@@ -1102,6 +1445,8 @@ TEST(SmallCutAggregationConstraintMPI,
         GTEST_SKIP() << "Run with exactly two MPI ranks";
     }
 
+    ScopedEnvVar baseline_allow(
+        "SVMP_AGGREGATION_ALLOW_UNAGGREGATED", "0");
     const bool full_view = rank == 1;
     auto mesh = std::make_shared<TwoQuadAggregationMeshAccess>(
         rank, full_view, /*expose_left_wall=*/false);
@@ -1136,6 +1481,57 @@ TEST(SmallCutAggregationConstraintMPI,
     EXPECT_TRUE(anyMessageContains(
         MPI_COMM_WORLD, rebuild_outcome, "canonical_master_not_relevant"));
     EXPECT_EQ(system.constraints().numConstraints(), 0u);
+
+    {
+        ScopedEnvVar allow_unaggregated(
+            "SVMP_AGGREGATION_ALLOW_UNAGGREGATED", "1");
+        const auto fail_open = invokeCollectively(
+            MPI_COMM_WORLD, [&] {
+                system.rebuildConstraintState();
+            });
+        ASSERT_TRUE(fail_open.allSucceeded())
+            << fail_open.local_message;
+
+        const auto reports =
+            system.finalizedSmallCutAggregationProlongations();
+        ASSERT_EQ(reports.size(), 1u);
+        ASSERT_NE(reports.front(), nullptr);
+        const auto& report = *reports.front();
+        EXPECT_TRUE(report.allow_unaggregated);
+        EXPECT_FALSE(report.trace_bound_eligible);
+        ASSERT_EQ(report.rows.size(), 2u);
+        for (const auto& row : report.rows) {
+            EXPECT_EQ(
+                row.provisional_kind,
+                SmallCutAggregationProvisionalRowKind::
+                    UnaggregatedFreeIdentity);
+            EXPECT_EQ(row.final_kind,
+                      SmallCutAggregationFinalRowKind::Identity);
+            EXPECT_FALSE(row.preconstrained_at_apply);
+            EXPECT_EQ(row.candidate_dof, row.slave_dof);
+            EXPECT_EQ(row.slave_owner_rank, 0);
+            EXPECT_EQ(row.root_cell_gid, INVALID_GLOBAL_INDEX);
+            ASSERT_EQ(row.final_entries.size(), 1u);
+            EXPECT_EQ(row.final_entries.front().master_dof,
+                      row.slave_dof);
+            EXPECT_DOUBLE_EQ(
+                row.final_entries.front().weight, 1.0);
+            EXPECT_DOUBLE_EQ(row.final_inhomogeneity, 0.0);
+        }
+
+        ASSERT_EQ(report.patches.size(), 1u);
+        const auto& patch = report.patches.front();
+        EXPECT_EQ(
+            patch.kind,
+            SmallCutAggregationPatchKind::SupportedCut);
+        EXPECT_EQ(patch.active_feature_ids,
+                  (std::vector<GlobalIndex>{0}));
+        EXPECT_EQ(patch.member_cell_gids,
+                  (std::vector<GlobalIndex>{0}));
+        EXPECT_EQ(patch.support_cell_gids,
+                  (std::vector<GlobalIndex>{0, 1}));
+        EXPECT_TRUE(patch.slave_dofs.empty());
+    }
 #endif
 }
 
@@ -1196,6 +1592,120 @@ TEST(SmallCutAggregationConstraintMPI,
 }
 
 TEST(SmallCutAggregationConstraintMPI,
+     PreexistingFixedRowRemainsEligibleAndOutsidePatchSlaves)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    int rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size != 2) {
+        GTEST_SKIP() << "Run with exactly two MPI ranks";
+    }
+
+    ScopedEnvVar baseline_allow(
+        "SVMP_AGGREGATION_ALLOW_UNAGGREGATED", "0");
+    auto mesh = std::make_shared<TwoQuadAggregationMeshAccess>(
+        rank, /*full_view=*/true, /*expose_left_wall=*/false);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{
+            .name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<VertexDirichletConstraint>(
+            pressure,
+            std::vector<VertexDirichletValue>{
+                {.vertex_id = 0, .value = Real{5}}},
+            VertexIdMode::LocalVertexId));
+    system.addSystemConstraint(
+        std::make_unique<SmallCutAggregationConstraint>(
+            pressure,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = fullTopology();
+    const auto setup_outcome =
+        invokeCollectively(MPI_COMM_WORLD, [&] {
+            system.setup(
+                setupOptions(rank, world_size), inputs);
+        });
+    ASSERT_TRUE(setup_outcome.allSucceeded())
+        << setup_outcome.local_message;
+    system.setCutIntegrationContext(
+        cutContext(
+            {{0, Real{0.25}, false}, {1, Real{1}, true}}));
+    const auto rebuild_outcome =
+        invokeCollectively(MPI_COMM_WORLD, [&] {
+            system.rebuildConstraintState();
+        });
+    ASSERT_TRUE(rebuild_outcome.allSucceeded())
+        << rebuild_outcome.local_message;
+
+    const auto fixed_dof = vertexDof(system, pressure, 0);
+    const auto aggregate_dof = vertexDof(system, pressure, 1);
+    const auto reports =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(reports.size(), 1u);
+    ASSERT_NE(reports.front(), nullptr);
+    const auto& report = *reports.front();
+    EXPECT_TRUE(report.trace_bound_eligible);
+    ASSERT_EQ(report.rows.size(), 2u);
+
+    const auto fixed_row = std::find_if(
+        report.rows.begin(),
+        report.rows.end(),
+        [fixed_dof](const auto& row) {
+            return row.slave_dof == fixed_dof;
+        });
+    ASSERT_NE(fixed_row, report.rows.end());
+    EXPECT_EQ(
+        fixed_row->provisional_kind,
+        SmallCutAggregationProvisionalRowKind::
+            PreexistingConstraint);
+    EXPECT_EQ(fixed_row->final_kind,
+              SmallCutAggregationFinalRowKind::FixedValue);
+    EXPECT_TRUE(fixed_row->preconstrained_at_apply);
+    EXPECT_EQ(fixed_row->slave_owner_rank, 0);
+    EXPECT_TRUE(fixed_row->final_entries.empty());
+    EXPECT_DOUBLE_EQ(fixed_row->final_inhomogeneity, 5.0);
+
+    const auto aggregate_row = std::find_if(
+        report.rows.begin(),
+        report.rows.end(),
+        [aggregate_dof](const auto& row) {
+            return row.slave_dof == aggregate_dof;
+        });
+    ASSERT_NE(aggregate_row, report.rows.end());
+    EXPECT_EQ(
+        aggregate_row->provisional_kind,
+        SmallCutAggregationProvisionalRowKind::RootedExtension);
+    EXPECT_EQ(aggregate_row->final_kind,
+              SmallCutAggregationFinalRowKind::MasterBearing);
+    EXPECT_FALSE(aggregate_row->preconstrained_at_apply);
+    EXPECT_EQ(aggregate_row->root_cell_gid, 1);
+
+    ASSERT_EQ(report.patches.size(), 1u);
+    const auto& patch = report.patches.front();
+    EXPECT_EQ(patch.kind, SmallCutAggregationPatchKind::Rooted);
+    EXPECT_EQ(patch.root_cell_gid, 1);
+    EXPECT_EQ(patch.active_feature_ids,
+              (std::vector<GlobalIndex>{0}));
+    EXPECT_EQ(patch.member_cell_gids,
+              (std::vector<GlobalIndex>{0, 1}));
+    EXPECT_EQ(patch.support_cell_gids,
+              (std::vector<GlobalIndex>{0, 1}));
+    EXPECT_EQ(patch.slave_dofs,
+              (std::vector<GlobalIndex>{aggregate_dof}));
+#endif
+}
+
+TEST(SmallCutAggregationConstraintMPI,
      UnavailableLowerKeyRootFallsBackToGloballyVisibleRoot)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -1234,7 +1744,8 @@ TEST(SmallCutAggregationConstraintMPI,
                           {4, Real{1}, true}})
             : cutContext({{1, Real{0.25}, false},
                           {2, Real{0.25}, false},
-                          {3, Real{1}, true}}));
+                          {3, Real{1}, true}},
+                         /*physical_cell_gid_offset=*/1));
     const auto rebuild_outcome = invokeCollectively(
         MPI_COMM_WORLD, [&] { system.rebuildConstraintState(); });
     ASSERT_TRUE(rebuild_outcome.allSucceeded())
@@ -1267,6 +1778,191 @@ TEST(SmallCutAggregationConstraintMPI,
             {vertexDof(system, pressure, right_near_top_local), 3.0},
             {vertexDof(system, pressure, right_far_top_local), -2.0}}));
     expectEveryMasterLineFiniteAndPartitionOfUnity(system);
+#endif
+}
+
+TEST(SmallCutAggregationConstraintMPI,
+     MismatchedCallbackTypesFailDuringCollectivePreflight)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    int rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size != 2) {
+        GTEST_SKIP() << "Run with exactly two MPI ranks";
+    }
+
+    auto mesh =
+        std::make_shared<FiveQuadAggregationMeshAccess>(rank);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    systems::FESystem system(mesh);
+    system.addField(
+        systems::FieldSpec{
+            .name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    if (rank == 0) {
+        system.addSystemConstraint(
+            std::make_unique<TaggedNoOpSystemConstraint<0>>());
+    } else {
+        system.addSystemConstraint(
+            std::make_unique<TaggedNoOpSystemConstraint<1>>());
+    }
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = fiveQuadTopology(rank);
+    const auto failed =
+        invokeCollectively(MPI_COMM_WORLD, [&] {
+            system.setup(
+                setupOptions(rank, world_size), inputs);
+        });
+    ASSERT_TRUE(failed.allThrew())
+        << failed.local_message;
+    EXPECT_NE(
+        failed.local_message.find(
+            "diagnostic=distributed_constraint_callback_shape_mismatch"),
+        std::string::npos);
+    EXPECT_NE(
+        failed.local_message.find(
+            "phase='setup_constraint_callback_preflight'"),
+        std::string::npos);
+#endif
+}
+
+TEST(SmallCutAggregationConstraintMPI,
+     RankZeroPrivateApplyFailureOnRebuildIsCoordinated)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    int rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size != 2) {
+        GTEST_SKIP() << "Run with exactly two MPI ranks";
+    }
+
+    auto mesh =
+        std::make_shared<FiveQuadAggregationMeshAccess>(rank);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    systems::FESystem system(mesh);
+    system.addField(
+        systems::FieldSpec{
+            .name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<RankZeroPrivateApplyFailureOnRebuild>(
+            rank));
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = fiveQuadTopology(rank);
+    const auto setup_outcome =
+        invokeCollectively(MPI_COMM_WORLD, [&] {
+            system.setup(
+                setupOptions(rank, world_size), inputs);
+        });
+    ASSERT_TRUE(setup_outcome.allSucceeded())
+        << setup_outcome.local_message;
+
+    const auto failed =
+        invokeCollectively(MPI_COMM_WORLD, [&] {
+            system.rebuildConstraintState();
+        });
+    ASSERT_TRUE(failed.allThrew())
+        << failed.local_message;
+    if (rank == 0) {
+        EXPECT_NE(
+            failed.local_message.find(
+                "rank-zero private apply failure on rebuild"),
+            std::string::npos);
+        EXPECT_EQ(
+            failed.local_message.find(
+                "diagnostic=distributed_constraint_phase_failure"),
+            std::string::npos);
+    } else {
+        EXPECT_NE(
+            failed.local_message.find(
+                "diagnostic=distributed_constraint_phase_failure"),
+            std::string::npos);
+        EXPECT_NE(
+            failed.local_message.find(
+                "phase='rebuild_system_constraint_apply'"),
+            std::string::npos);
+        EXPECT_EQ(
+            failed.local_message.find(
+                "rank-zero private apply failure on rebuild"),
+            std::string::npos);
+    }
+#endif
+}
+
+TEST(SmallCutAggregationConstraintMPI,
+     RankPrivateCloseFailureIsCoordinatedBeforeReportPublication)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    int rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size != 2) {
+        GTEST_SKIP() << "Run with exactly two MPI ranks";
+    }
+
+    auto mesh =
+        std::make_shared<FiveQuadAggregationMeshAccess>(rank);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{
+            .name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<RankZeroPrivateCycleOnRebuild>(
+            pressure, rank));
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = fiveQuadTopology(rank);
+    const auto setup_outcome =
+        invokeCollectively(MPI_COMM_WORLD, [&] {
+            system.setup(
+                setupOptions(rank, world_size), inputs);
+        });
+    ASSERT_TRUE(setup_outcome.allSucceeded())
+        << setup_outcome.local_message;
+
+    // Rank 0 alone sees the x=0 vertices. The rebuilding-only constraint
+    // creates a cycle on those private DOFs, so parallel synchronization
+    // cannot copy the cycle to rank 1. Closing therefore fails locally on
+    // rank 0 and must be coordinated before rank 1 reaches report
+    // publication or any subsequent collective.
+    const auto failed =
+        invokeCollectively(MPI_COMM_WORLD, [&] {
+            system.rebuildConstraintState();
+        });
+    EXPECT_TRUE(failed.allThrew());
+    EXPECT_TRUE(anyMessageContains(
+        MPI_COMM_WORLD, failed, "Constraint cycle detected"));
+    if (rank == 0) {
+        EXPECT_NE(failed.local_message.find("Constraint cycle detected"),
+                  std::string::npos);
+    } else {
+        EXPECT_NE(
+            failed.local_message.find(
+                "diagnostic=distributed_constraint_phase_failure"),
+            std::string::npos);
+        EXPECT_NE(
+            failed.local_message.find(
+                "phase='rebuild_constraint_close'"),
+            std::string::npos);
+    }
 #endif
 }
 
