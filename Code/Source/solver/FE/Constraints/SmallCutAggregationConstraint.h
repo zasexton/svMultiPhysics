@@ -106,6 +106,7 @@
 #include "Geometry/CutQuadrature.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
@@ -161,15 +162,49 @@ struct SmallCutAggregationGuardOptions {
     Real maximum_row_l1_norm{32.0};
 };
 
+enum class SmallCutAggregationActiveFeatureDisposition {
+    Rooted,
+    Rootless,
+};
+
+/**
+ * Canonical face-connected retained active-cell component.
+ *
+ * The stable feature ID is the minimum physical cell GID in the component.
+ * The digest mixes the sorted physical cell GIDs to expose membership churn;
+ * it is an audit aid and not a collision-free identity proof. Connectivity is
+ * deliberately the background-cell face graph: it neither resolves multiple
+ * selected-side regions within one cut cell nor proves that selected-side
+ * geometry crosses a shared face.
+ */
+struct SmallCutAggregationActiveFeatureReport {
+    GlobalIndex stable_feature_id{INVALID_GLOBAL_INDEX};
+    std::uint64_t canonical_cell_gid_digest{0u};
+    SmallCutAggregationActiveFeatureDisposition disposition{
+        SmallCutAggregationActiveFeatureDisposition::Rootless};
+    std::size_t canonical_cell_count{0u};
+    std::size_t canonical_full_active_cell_count{0u};
+    std::size_t canonical_cut_cell_count{0u};
+    Real canonical_retained_physical_volume{0.0};
+};
+
 /**
  * Canonical result of the most recent successful aggregation refresh.
  *
  * Candidate fields count vertices, while aggregate, pin, and suppression
- * fields count DOFs. These values do not infer connected feature counts or
- * feature-deletion volume. Guard maxima describe provider-visible proposal or
- * traversal attempts. Extrapolation and line rejection counts are
- * communicator sums of rank-local attempts; root-path rejection counts are
- * traversal-attempt counts. None of these fields counts unique physical roots.
+ * fields count DOFs. Active-feature fields count communicator-global,
+ * face-connected components of cells with retained selected-side volume. A
+ * structurally rooted feature contains at least one full-active cell; a
+ * structurally rootless feature contains only cut cells. This classification
+ * is independent of experimental runtime root-rejection options. Rootless
+ * physical volume is selected from one validated canonical declaration per
+ * physical cell and is repeated in each field-specific report. It is retained
+ * geometry affected by the homogeneous support-removal policy, not a claim
+ * that liquid volume was conservatively transferred or geometrically deleted.
+ * Guard maxima describe provider-visible proposal or traversal attempts.
+ * Extrapolation and line rejection counts are communicator sums of rank-local
+ * attempts; root-path rejection counts are traversal-attempt counts. None of
+ * these fields counts unique physical roots.
  */
 struct SmallCutAggregationRefreshReport {
     FieldId field{INVALID_FIELD_ID};
@@ -193,6 +228,12 @@ struct SmallCutAggregationRefreshReport {
     std::size_t canonical_owned_aggregate_dofs{0u};
     std::size_t canonical_owned_pinned_dofs{0u};
     std::size_t canonical_strong_suppressed_dofs{0u};
+    std::size_t canonical_active_feature_count{0u};
+    std::size_t canonical_rooted_active_feature_count{0u};
+    std::size_t canonical_rootless_active_feature_count{0u};
+    Real canonical_rootless_active_physical_volume{0.0};
+    std::vector<SmallCutAggregationActiveFeatureReport>
+        canonical_active_features{};
 };
 
 class SmallCutAggregationConstraint final : public ISystemConstraint {

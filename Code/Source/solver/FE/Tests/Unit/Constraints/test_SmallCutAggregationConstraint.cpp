@@ -338,6 +338,7 @@ void addCellRule(assembly::CutIntegrationContext& context,
     rule.parent_measure = Real{1.0};
     rule.volume_fraction = spec.volume_fraction;
     rule.full_cell_equivalent = spec.full_cell_equivalent;
+    rule.frame = geometry::CutGeometryFrame::Current;
 
     context.addGeneratedVolumeRule(kInterfaceMarker, metadata, rule);
 }
@@ -1172,6 +1173,22 @@ TEST(SmallCutAggregationConstraint,
         EXPECT_EQ(report->canonical_owned_aggregate_dofs, 2u);
         EXPECT_EQ(report->canonical_owned_pinned_dofs, 0u);
         EXPECT_EQ(report->canonical_strong_suppressed_dofs, 0u);
+        EXPECT_EQ(report->canonical_active_feature_count, 1u);
+        EXPECT_EQ(report->canonical_rooted_active_feature_count, 1u);
+        EXPECT_EQ(report->canonical_rootless_active_feature_count, 0u);
+        EXPECT_DOUBLE_EQ(
+            report->canonical_rootless_active_physical_volume, 0.0);
+        ASSERT_EQ(report->canonical_active_features.size(), 1u);
+        const auto& feature = report->canonical_active_features.front();
+        EXPECT_EQ(feature.stable_feature_id, 0);
+        EXPECT_EQ(
+            feature.disposition,
+            SmallCutAggregationActiveFeatureDisposition::Rooted);
+        EXPECT_EQ(feature.canonical_cell_count, 2u);
+        EXPECT_EQ(feature.canonical_full_active_cell_count, 1u);
+        EXPECT_EQ(feature.canonical_cut_cell_count, 1u);
+        EXPECT_NEAR(
+            feature.canonical_retained_physical_volume, 1.3, 1.0e-14);
     }
 
     system.setCutIntegrationContext(
@@ -1201,6 +1218,25 @@ TEST(SmallCutAggregationConstraint,
     EXPECT_EQ(report->canonical_owned_aggregate_dofs, 0u);
     EXPECT_EQ(report->canonical_owned_pinned_dofs, 4u);
     EXPECT_EQ(report->canonical_strong_suppressed_dofs, 0u);
+    EXPECT_EQ(report->canonical_active_feature_count, 1u);
+    EXPECT_EQ(report->canonical_rooted_active_feature_count, 0u);
+    EXPECT_EQ(report->canonical_rootless_active_feature_count, 1u);
+    EXPECT_NEAR(
+        report->canonical_rootless_active_physical_volume, 0.3, 1.0e-14);
+    ASSERT_EQ(report->canonical_active_features.size(), 1u);
+    const auto& rootless_feature =
+        report->canonical_active_features.front();
+    EXPECT_EQ(rootless_feature.stable_feature_id, 0);
+    EXPECT_EQ(
+        rootless_feature.disposition,
+        SmallCutAggregationActiveFeatureDisposition::Rootless);
+    EXPECT_EQ(rootless_feature.canonical_cell_count, 1u);
+    EXPECT_EQ(rootless_feature.canonical_full_active_cell_count, 0u);
+    EXPECT_EQ(rootless_feature.canonical_cut_cell_count, 1u);
+    EXPECT_NEAR(
+        rootless_feature.canonical_retained_physical_volume,
+        0.3,
+        1.0e-14);
 
     for (const auto vertex : {0, 1, 3, 4}) {
         const auto view = system.constraints().getConstraint(

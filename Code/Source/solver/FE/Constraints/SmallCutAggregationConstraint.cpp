@@ -18,6 +18,7 @@
 #include "Geometry/FrameGeometry.h"
 #include "Geometry/GeometryFrameUtils.h"
 #include "Geometry/MappingFactory.h"
+#include "Geometry/CutQuadratureMapping.h"
 #include "Systems/FESystem.h"
 
 #include <algorithm>
@@ -1783,6 +1784,55 @@ resolveDistributedAggregationDeclarations(
     return geometry::MappingFactory::create(request, nodes);
 }
 
+[[nodiscard]] Real physicalRetainedVolumeRuleMeasure(
+    const assembly::IMeshAccess& mesh,
+    GlobalIndex cell,
+    const geometry::CutQuadratureRule& rule)
+{
+    if (rule.kind != geometry::CutQuadratureKind::Volume) {
+        throw std::invalid_argument(
+            "SmallCutAggregationConstraint: retained-volume telemetry "
+            "requires a volume quadrature rule");
+    }
+    Real measure = 0.0;
+    if (!rule.points.empty()) {
+        auto mapped_rule = rule;
+        mapped_rule.provenance.parent_entity =
+            static_cast<MeshIndex>(cell);
+        measure =
+            geometry::physicalCutQuadratureMeasure(mesh, mapped_rule);
+    } else if (rule.frame == geometry::CutGeometryFrame::Current) {
+        // Hand-built constraint fixtures historically provide only a
+        // current-frame measure. Production generated rules carry points and
+        // use the common pointwise mapping path below.
+        if (!std::isfinite(rule.measure) || rule.measure < Real{0.0}) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: diagnostic="
+                "invalid_active_feature_volume current-frame measure must "
+                "be finite and nonnegative");
+        }
+        measure = rule.measure;
+    } else if (rule.full_cell_equivalent) {
+        // Retain compatibility with an empty synthetic reference-frame
+        // full-cell rule. Production rules always take the authoritative
+        // pointwise path above.
+        measure =
+            geometry::physicalCellMeasureFromMapping(mesh, cell);
+    } else {
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: diagnostic="
+            "invalid_active_feature_volume partial retained rule has "
+            "no quadrature points");
+    }
+    if (!std::isfinite(measure) || measure < Real{0.0}) {
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: diagnostic="
+            "invalid_active_feature_volume accumulated physical measure "
+            "is invalid");
+    }
+    return measure;
+}
+
 /// Newton inversion of the cell geometry mapping. Extrapolation (reference
 /// coordinates outside the unit cell) is expected and valid for aggregation.
 [[nodiscard]] bool invertMapping(const geometry::GeometryMapping& mapping,
@@ -2429,6 +2479,13 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
 
     // 1. Classify cells from this marker's retained volume rules.
     std::unordered_map<GlobalIndex, CellClass> cell_class;
+    struct LocalActiveCellMeasure {
+        std::size_t rule_count{0u};
+        Real physical_volume{0.0};
+        std::set<std::uint64_t> stable_rule_ids{};
+    };
+    std::unordered_map<GlobalIndex, LocalActiveCellMeasure>
+        local_active_cell_measures;
     std::size_t active_side_volume_rules = 0u;
     // Mesh-local cell/vertex IDs are not stable communicator identifiers.
     // A C0 cell's sorted system-global field-DOF support is stable.
@@ -2505,6 +2562,45 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     fraction > Real(0) && fraction < Real(1)) {
                     entry.cut = true;
                 }
+                if (side == active_side_ &&
+                    (rule.full_cell_equivalent ||
+                     (fraction > Real(0) && fraction < Real(1)))) {
+                    const auto physical_volume =
+                        physicalRetainedVolumeRuleMeasure(
+                            mesh,
+                            static_cast<GlobalIndex>(cell),
+                            rule);
+                    if (!(physical_volume > Real{0.0}) ||
+                        !std::isfinite(physical_volume)) {
+                        throw std::runtime_error(
+                            "SmallCutAggregationConstraint: diagnostic="
+                            "invalid_active_feature_volume retained "
+                            "active-side rule has no positive physical "
+                            "measure");
+                    }
+                    auto& measure =
+                        local_active_cell_measures[
+                            static_cast<GlobalIndex>(cell)];
+                    const auto stable_rule_id =
+                        rule.provenance.source_stable_id != 0u
+                            ? rule.provenance.source_stable_id
+                            : rule.provenance.cut_topology_revision;
+                    if (!measure.stable_rule_ids.insert(
+                            stable_rule_id).second) {
+                        throw std::runtime_error(
+                            "SmallCutAggregationConstraint: diagnostic="
+                            "duplicate_active_feature_volume_rule retained "
+                            "rules for one cell repeat a stable identity");
+                    }
+                    ++measure.rule_count;
+                    measure.physical_volume += physical_volume;
+                    if (!std::isfinite(measure.physical_volume)) {
+                        throw std::runtime_error(
+                            "SmallCutAggregationConstraint: diagnostic="
+                            "invalid_active_feature_volume per-cell "
+                            "physical measure overflow");
+                    }
+                }
             }
         };
         classify(active_side_);
@@ -2544,6 +2640,64 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         for (const auto dof : key) {
             local_cell_class_words.push_back(static_cast<std::int64_t>(dof));
         }
+        const auto local_cell = local_cell_by_key.find(key);
+        if (local_cell == local_cell_by_key.end()) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: classified cell has no "
+                "local cell-key resolution");
+        }
+        const auto cell = local_cell->second;
+        const auto measure = local_active_cell_measures.find(cell);
+        const bool active = klass.full_active || klass.cut;
+        if (active &&
+            (measure == local_active_cell_measures.end() ||
+             measure->second.rule_count == 0u ||
+             !(measure->second.physical_volume > Real{0.0}) ||
+             !std::isfinite(measure->second.physical_volume))) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: diagnostic="
+                "invalid_active_feature_volume active cell has no complete "
+                "physical measure declaration");
+        }
+        if (!active && measure != local_active_cell_measures.end()) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: diagnostic="
+                "inconsistent_retained_volume_fraction inactive cell has an "
+                "active physical measure declaration");
+        }
+        const auto physical_cell_gid =
+            mesh.globalEntityIdsAvailable()
+                ? mesh.getCellGlobalId(cell)
+                : cell;
+        if (physical_cell_gid < 0) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: diagnostic="
+                "invalid_active_feature_volume physical cell ID is "
+                "unavailable");
+        }
+        const auto rule_count =
+            measure == local_active_cell_measures.end()
+                ? std::size_t{0u}
+                : measure->second.rule_count;
+        if (rule_count >
+            static_cast<std::size_t>(
+                std::numeric_limits<std::int64_t>::max())) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: diagnostic="
+                "invalid_active_feature_volume rule count exceeds the "
+                "distributed wire range");
+        }
+        const auto physical_volume =
+            measure == local_active_cell_measures.end()
+                ? Real{0.0}
+                : measure->second.physical_volume;
+        local_cell_class_words.push_back(
+            static_cast<std::int64_t>(physical_cell_gid));
+        local_cell_class_words.push_back(
+            static_cast<std::int64_t>(rule_count));
+        local_cell_class_words.push_back(
+            std::bit_cast<std::int64_t>(
+                static_cast<double>(physical_volume)));
     }
     } catch (...) {
         local_cell_declaration_exception = std::current_exception();
@@ -2572,6 +2726,16 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     }
 
     std::map<CellKey, CellClass> global_cell_classes;
+    struct ActiveCellMeasureDeclaration {
+        GlobalIndex physical_cell_gid{INVALID_GLOBAL_INDEX};
+        std::size_t rule_count{0u};
+        Real physical_volume{0.0};
+        int provider_rank{-1};
+    };
+    std::map<CellKey, std::vector<ActiveCellMeasureDeclaration>>
+        active_cell_measure_declarations;
+    std::map<CellKey, GlobalIndex> global_physical_cell_gids;
+    std::map<CellKey, Real> global_active_cell_physical_volumes;
     // A declaration is a positive classification fact even when flags==0
     // (inactive-full). Every rank retaining the same cell must therefore
     // report the exact same fact; OR-combining flags would silently accept,
@@ -2606,6 +2770,41 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 key.push_back(static_cast<GlobalIndex>(
                     gathered_cell_classes.words[position++]));
             }
+            if (end - position < 3u) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: malformed distributed "
+                    "cell-measure declaration");
+            }
+            const auto physical_cell_gid = static_cast<GlobalIndex>(
+                gathered_cell_classes.words[position++]);
+            const auto rule_count_word =
+                gathered_cell_classes.words[position++];
+            static_assert(sizeof(double) == sizeof(std::int64_t));
+            const auto physical_volume = static_cast<Real>(
+                std::bit_cast<double>(
+                    gathered_cell_classes.words[position++]));
+            if (physical_cell_gid < 0 || rule_count_word < 0 ||
+                static_cast<std::uint64_t>(rule_count_word) >
+                    static_cast<std::uint64_t>(
+                        std::numeric_limits<std::size_t>::max()) ||
+                !std::isfinite(physical_volume) ||
+                physical_volume < Real{0.0}) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: malformed distributed "
+                    "cell-measure payload");
+            }
+            const bool active = (flags & 3) != 0;
+            if ((active &&
+                 (rule_count_word == 0 ||
+                  !(physical_volume > Real{0.0}))) ||
+                (!active &&
+                 (rule_count_word != 0 ||
+                  physical_volume != Real{0.0}))) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "invalid_active_feature_volume cell class and physical "
+                    "measure declaration disagree");
+            }
             const auto [flags_it, inserted] =
                 global_cell_class_flags.emplace(key, flags);
             if (!inserted && flags_it->second != flags) {
@@ -2618,6 +2817,16 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             auto& global = global_cell_classes[key];
             global.full_active = global.full_active || (flags & 1) != 0;
             global.cut = global.cut || (flags & 2) != 0;
+            if (active) {
+                active_cell_measure_declarations[key].push_back(
+                    ActiveCellMeasureDeclaration{
+                        .physical_cell_gid = physical_cell_gid,
+                        .rule_count =
+                            static_cast<std::size_t>(rule_count_word),
+                        .physical_volume = physical_volume,
+                        .provider_rank = rank,
+                    });
+            }
         }
     }
     const auto inconsistent_cell = std::find_if(
@@ -2631,6 +2840,44 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             "inconsistent_distributed_cell_classification field='" +
             rec.name + "' communicator ranks classified the same cell as "
             "both full-active and cut");
+    }
+
+    for (const auto& [key, klass] : global_cell_classes) {
+        if (!klass.full_active && !klass.cut) {
+            continue;
+        }
+        auto declarations = active_cell_measure_declarations.find(key);
+        if (declarations == active_cell_measure_declarations.end() ||
+            declarations->second.empty()) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: diagnostic="
+                "invalid_active_feature_volume active cell has no "
+                "communicator-visible measure provider");
+        }
+        auto& providers = declarations->second;
+        std::sort(
+            providers.begin(),
+            providers.end(),
+            [](const auto& lhs, const auto& rhs) {
+                return lhs.provider_rank < rhs.provider_rank;
+        });
+        const auto& canonical = providers.front();
+        for (const auto& provider : providers) {
+            if (provider.physical_cell_gid !=
+                    canonical.physical_cell_gid ||
+                provider.rule_count != canonical.rule_count ||
+                provider.physical_volume !=
+                    canonical.physical_volume) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "inconsistent_distributed_active_feature_volume "
+                    "providers disagree for the same physical cell");
+            }
+        }
+        global_physical_cell_gids.emplace(
+            key, canonical.physical_cell_gid);
+        global_active_cell_physical_volumes.emplace(
+            key, canonical.physical_volume);
     }
 
     for (const auto& [key, cell] : local_cell_by_key) {
@@ -2993,6 +3240,179 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     }
     coordinateLocalPhaseFailure(local_face_decode_exception,
                                 "face_ledger_decode_and_graph_construction");
+
+    // 2b. Canonical retained active features. The graph and per-cell measure
+    // declarations are communicator-global on every rank, so component
+    // construction and sorted-GID accumulation require no replicated MPI
+    // reduction.
+    std::vector<SmallCutAggregationActiveFeatureReport>
+        canonical_active_features;
+    std::size_t canonical_rooted_active_feature_count = 0u;
+    std::size_t canonical_rootless_active_feature_count = 0u;
+    Real canonical_rootless_active_physical_volume = 0.0;
+    std::exception_ptr local_feature_exception;
+    try {
+    std::set<GlobalIndex> active_physical_cell_gids;
+    for (const auto& [cell, klass] : global_cell_classes) {
+        if (!klass.full_active && !klass.cut) {
+            continue;
+        }
+        const auto gid = global_physical_cell_gids.find(cell);
+        const auto volume =
+            global_active_cell_physical_volumes.find(cell);
+        if (gid == global_physical_cell_gids.end() ||
+            volume == global_active_cell_physical_volumes.end() ||
+            gid->second < 0 ||
+            !active_physical_cell_gids.insert(gid->second).second) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: diagnostic="
+                "invalid_active_feature_volume communicator active cells "
+                "have missing or duplicate physical cell IDs");
+        }
+    }
+    std::set<CellKey> visited_active_cells;
+    for (const auto& [seed, seed_class] : global_cell_classes) {
+        if ((!seed_class.full_active && !seed_class.cut) ||
+            visited_active_cells.count(seed) > 0u) {
+            continue;
+        }
+
+        std::deque<CellKey> queue;
+        std::vector<CellKey> component_cells;
+        queue.push_back(seed);
+        visited_active_cells.insert(seed);
+        while (!queue.empty()) {
+            auto cell = std::move(queue.front());
+            queue.pop_front();
+            component_cells.push_back(cell);
+            const auto neighbors = global_neighbors.find(cell);
+            if (neighbors == global_neighbors.end()) {
+                continue;
+            }
+            for (const auto& neighbor : neighbors->second) {
+                const auto neighbor_class =
+                    global_cell_classes.find(neighbor);
+                if (neighbor_class == global_cell_classes.end() ||
+                    (!neighbor_class->second.full_active &&
+                     !neighbor_class->second.cut)) {
+                    continue;
+                }
+                if (visited_active_cells.insert(neighbor).second) {
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+
+        std::sort(
+            component_cells.begin(),
+            component_cells.end(),
+            [&](const CellKey& lhs, const CellKey& rhs) {
+                return std::tie(global_physical_cell_gids.at(lhs), lhs) <
+                       std::tie(global_physical_cell_gids.at(rhs), rhs);
+            });
+        if (component_cells.empty()) {
+            throw std::logic_error(
+                "SmallCutAggregationConstraint: active feature traversal "
+                "produced an empty component");
+        }
+
+        SmallCutAggregationActiveFeatureReport feature;
+        feature.stable_feature_id =
+            global_physical_cell_gids.at(component_cells.front());
+        feature.canonical_cell_count = component_cells.size();
+        feature.canonical_cell_gid_digest = 14695981039346656037ull;
+        long double physical_volume = 0.0L;
+        GlobalIndex previous_gid = INVALID_GLOBAL_INDEX;
+        for (const auto& cell : component_cells) {
+            const auto physical_gid =
+                global_physical_cell_gids.at(cell);
+            if (physical_gid < 0 || physical_gid == previous_gid) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "invalid_active_feature_volume active component has "
+                    "missing or duplicate physical cell IDs");
+            }
+            previous_gid = physical_gid;
+            feature.canonical_cell_gid_digest ^=
+                static_cast<std::uint64_t>(physical_gid);
+            feature.canonical_cell_gid_digest *= 1099511628211ull;
+            const auto& klass = global_cell_classes.at(cell);
+            feature.canonical_full_active_cell_count +=
+                klass.full_active ? 1u : 0u;
+            feature.canonical_cut_cell_count += klass.cut ? 1u : 0u;
+            physical_volume += static_cast<long double>(
+                global_active_cell_physical_volumes.at(cell));
+        }
+        if (feature.canonical_cell_count !=
+            feature.canonical_full_active_cell_count +
+                feature.canonical_cut_cell_count) {
+            throw std::logic_error(
+                "SmallCutAggregationConstraint: active feature class "
+                "accounting is inconsistent");
+        }
+        feature.canonical_retained_physical_volume =
+            static_cast<Real>(physical_volume);
+        if (!(feature.canonical_retained_physical_volume > Real{0.0}) ||
+            !std::isfinite(
+                feature.canonical_retained_physical_volume)) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: diagnostic="
+                "invalid_active_feature_volume active component has no "
+                "finite positive retained physical volume");
+        }
+        if (feature.canonical_full_active_cell_count > 0u) {
+            feature.disposition =
+                SmallCutAggregationActiveFeatureDisposition::Rooted;
+            ++canonical_rooted_active_feature_count;
+        } else {
+            feature.disposition =
+                SmallCutAggregationActiveFeatureDisposition::Rootless;
+            ++canonical_rootless_active_feature_count;
+        }
+        canonical_active_features.push_back(std::move(feature));
+    }
+    std::sort(
+        canonical_active_features.begin(),
+        canonical_active_features.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return lhs.stable_feature_id < rhs.stable_feature_id;
+        });
+    if (std::adjacent_find(
+            canonical_active_features.begin(),
+            canonical_active_features.end(),
+            [](const auto& lhs, const auto& rhs) {
+                return lhs.stable_feature_id == rhs.stable_feature_id;
+            }) != canonical_active_features.end()) {
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: diagnostic="
+            "invalid_active_feature_volume active features have duplicate "
+            "stable IDs");
+    }
+    long double rootless_physical_volume = 0.0L;
+    for (const auto& feature : canonical_active_features) {
+        if (feature.disposition ==
+            SmallCutAggregationActiveFeatureDisposition::Rootless) {
+            rootless_physical_volume += static_cast<long double>(
+                feature.canonical_retained_physical_volume);
+        }
+    }
+    canonical_rootless_active_physical_volume =
+        static_cast<Real>(rootless_physical_volume);
+    if (canonical_active_features.size() !=
+            canonical_rooted_active_feature_count +
+                canonical_rootless_active_feature_count ||
+        !std::isfinite(
+            canonical_rootless_active_physical_volume) ||
+        canonical_rootless_active_physical_volume < Real{0.0}) {
+        throw std::logic_error(
+            "SmallCutAggregationConstraint: active feature totals are "
+            "inconsistent");
+    }
+    } catch (...) {
+        local_feature_exception = std::current_exception();
+    }
+    coordinateLocalPhaseFailure(local_feature_exception,
+                                "active_feature_ledger_construction");
 
     // 3. Vertices of cut cells + their incident band cells.
     std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> vertex_cells;
@@ -3698,6 +4118,14 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         << distributed_result.canonical_owned_pinned_dofs
         << " canonical_strong_suppressed_dofs="
         << distributed_result.canonical_strong_suppressed_dofs
+        << " canonical_active_feature_count="
+        << canonical_active_features.size()
+        << " canonical_rooted_active_feature_count="
+        << canonical_rooted_active_feature_count
+        << " canonical_rootless_active_feature_count="
+        << canonical_rootless_active_feature_count
+        << " canonical_rootless_active_physical_volume="
+        << canonical_rootless_active_physical_volume
         << " local_relevant_lines_installed=" << current_slaves.size()
         << " distributed_halo_validation="
         << (distributed_validation == DistributedAggregationValidation::Passed
@@ -3807,6 +4235,16 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 distributed_result.canonical_owned_pinned_dofs,
             .canonical_strong_suppressed_dofs =
                 distributed_result.canonical_strong_suppressed_dofs,
+            .canonical_active_feature_count =
+                canonical_active_features.size(),
+            .canonical_rooted_active_feature_count =
+                canonical_rooted_active_feature_count,
+            .canonical_rootless_active_feature_count =
+                canonical_rootless_active_feature_count,
+            .canonical_rootless_active_physical_volume =
+                canonical_rootless_active_physical_volume,
+            .canonical_active_features =
+                canonical_active_features,
         };
     }
 }

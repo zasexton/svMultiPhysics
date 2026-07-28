@@ -58,6 +58,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -3204,6 +3205,178 @@ void setWetBlockP1Field(
     sample.dry_column_coupling_norm = selectedFrobeniusNorm(
         matrix, wet_dofs, dry_columns);
     return sample;
+}
+
+struct ActiveCellTopologySample {
+    FE::FieldId velocity{FE::INVALID_FIELD_ID};
+    FE::FieldId pressure{FE::INVALID_FIELD_ID};
+    FE::constraints::SmallCutAggregationRefreshReport velocity_report{};
+    FE::constraints::SmallCutAggregationRefreshReport pressure_report{};
+    FE::Real assembled_active_physical_volume{0.0};
+};
+
+[[nodiscard]] ActiveCellTopologySample
+assembleSerialActiveCellTopologySample(
+    std::span<const FE::Real> level_set_by_plane)
+{
+    constexpr int interface_marker = 27315;
+    constexpr std::string_view domain_id =
+        "wp7_active_cell_topology_policy";
+    constexpr std::array<FE::Real, 7> x_coordinates = {
+        FE::Real{0.0},
+        FE::Real{1.0},
+        FE::Real{2.0},
+        FE::Real{3.0},
+        FE::Real{4.0},
+        FE::Real{5.0},
+        FE::Real{6.0},
+    };
+    if (level_set_by_plane.size() != x_coordinates.size()) {
+        throw std::invalid_argument(
+            "active-cell topology sample requires seven level-set planes");
+    }
+
+    auto mesh = makeWetBlockQuadStrip(
+        x_coordinates, level_set_by_plane);
+    const auto& cell_gids = mesh->base().cell_gids();
+    if (cell_gids.size() != x_coordinates.size() - 1u) {
+        throw std::runtime_error(
+            "active-cell topology strip has unexpected cell GIDs");
+    }
+    for (std::size_t cell = 0u; cell < cell_gids.size(); ++cell) {
+        if (cell_gids[cell] != static_cast<gid_t>(cell)) {
+            throw std::runtime_error(
+                "active-cell topology strip requires canonical iota cell GIDs");
+        }
+    }
+
+    auto scalar_space = FE::spaces::SpaceFactory::create_h1(
+        FE::ElementType::Quad4, /*order=*/1);
+    auto velocity_space =
+        FE::spaces::SpaceFactory::create_vector_h1(
+            FE::ElementType::Quad4,
+            /*order=*/1,
+            /*components=*/2);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::Unknown,
+    });
+
+    auto options =
+        stabilityOptions(interface_marker, std::string(domain_id));
+    ns::IncompressibleNavierStokesVMSModule module(
+        velocity_space, scalar_space, options);
+    module.registerOn(system);
+    system.setup({});
+
+    const auto velocity = system.findFieldByName("u");
+    const auto pressure = system.findFieldByName("p");
+    if (phi == FE::INVALID_FIELD_ID ||
+        velocity == FE::INVALID_FIELD_ID ||
+        pressure == FE::INVALID_FIELD_ID) {
+        throw std::runtime_error(
+            "active-cell topology fields were not registered");
+    }
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(
+            system.dofHandler().getNumDofs()),
+        FE::Real{0.0});
+    const auto phi_handle = MeshFields::get_field_handle(
+        mesh->base(), EntityKind::Vertex, "phi");
+    const auto* mesh_phi = MeshFields::field_data_as<real_t>(
+        mesh->base(), phi_handle);
+    const auto* phi_map =
+        system.fieldDofHandler(phi).getEntityDofMap();
+    if (mesh_phi == nullptr || phi_map == nullptr) {
+        throw std::runtime_error(
+            "active-cell topology level-set data is unavailable");
+    }
+    const auto phi_offset = system.fieldDofOffset(phi);
+    for (index_t vertex = 0;
+         vertex < static_cast<index_t>(
+             mesh->base().n_vertices());
+         ++vertex) {
+        const auto dofs = phi_map->getVertexDofs(vertex);
+        if (dofs.size() != 1u) {
+            throw std::runtime_error(
+                "active-cell topology level set is not scalar P1");
+        }
+        solution.at(static_cast<std::size_t>(
+            phi_offset + dofs.front())) =
+            static_cast<FE::Real>(
+                mesh_phi[static_cast<std::size_t>(vertex)]);
+    }
+
+    FE::level_set::LevelSetGeneratedInterfaceOptions cut_options;
+    cut_options.level_set_field_name = "phi";
+    cut_options.domain_id = std::string(domain_id);
+    cut_options.requested_interface_marker = interface_marker;
+    cut_options.tolerance = FE::Real{1.0e-12};
+    cut_options.quadrature_order = 2;
+    cut_options.interface_quadrature_order = 2;
+    cut_options.volume_quadrature_order = 2;
+    FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto generated =
+        lifecycle.build(system, cut_options, solution);
+    if (!generated.success) {
+        throw std::runtime_error(generated.diagnostic);
+    }
+    auto context =
+        std::make_shared<FE::assembly::CutIntegrationContext>();
+    context->addGeneratedInterfaceDomain(generated.domain);
+    system.setCutIntegrationContext(context);
+    system.rebuildConstraintState();
+
+    const auto reports =
+        system.completedSmallCutAggregationRefreshReports();
+    const auto unique_report_for =
+        [&](FE::FieldId field) {
+            const auto count = static_cast<std::size_t>(
+                std::count_if(
+                    reports.begin(),
+                    reports.end(),
+                    [&](const auto& report) {
+                        return report.field == field &&
+                               report.interface_marker ==
+                                   interface_marker &&
+                               report.active_side ==
+                                   FE::geometry::
+                                       CutIntegrationSide::Negative;
+                    }));
+            if (count != 1u) {
+                throw std::runtime_error(
+                    "active-cell topology aggregation report is not unique");
+            }
+            return *std::find_if(
+                reports.begin(),
+                reports.end(),
+                [&](const auto& report) {
+                    return report.field == field &&
+                           report.interface_marker ==
+                               interface_marker &&
+                           report.active_side ==
+                               FE::geometry::
+                                   CutIntegrationSide::Negative;
+                });
+        };
+
+    return ActiveCellTopologySample{
+        .velocity = velocity,
+        .pressure = pressure,
+        .velocity_report = unique_report_for(velocity),
+        .pressure_report = unique_report_for(pressure),
+        .assembled_active_physical_volume =
+            assemblePhysicalActiveVolume(
+                system,
+                phi,
+                *scalar_space,
+                *context,
+                interface_marker),
+    };
 }
 
 struct ManufacturedAffineBalanceSample {
@@ -6462,6 +6635,415 @@ TEST(FreeSurfaceCutStability,
         EXPECT_TRUE(line->isDirichlet());
         EXPECT_DOUBLE_EQ(line->inhomogeneity, 0.0);
     }
+#endif
+}
+
+TEST(FreeSurfaceCutStability,
+     ConnectedDisconnectedAndRootlessFeaturesReportTopologyPolicy)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP()
+        << "Active-cell topology telemetry requires native mesh support.";
+#else
+    using Disposition =
+        FE::constraints::
+            SmallCutAggregationActiveFeatureDisposition;
+    using Feature =
+        FE::constraints::SmallCutAggregationActiveFeatureReport;
+    using Report =
+        FE::constraints::SmallCutAggregationRefreshReport;
+
+    struct ExpectedFeature {
+        FE::GlobalIndex stable_id{FE::INVALID_GLOBAL_INDEX};
+        std::uint64_t digest{0u};
+        Disposition disposition{Disposition::Rootless};
+        std::size_t cells{0u};
+        std::size_t full_cells{0u};
+        std::size_t cut_cells{0u};
+        FE::Real retained_physical_volume{0.0};
+    };
+    struct ExpectedCase {
+        std::string_view label{};
+        std::array<FE::Real, 7> level_set{};
+        std::vector<ExpectedFeature> features{};
+        std::size_t rooted_features{0u};
+        std::size_t rootless_features{0u};
+        std::size_t candidate_vertices{0u};
+        std::size_t rooted_candidate_vertices{0u};
+        std::size_t rootless_candidate_vertices{0u};
+        std::size_t pressure_aggregate_dofs{0u};
+        std::size_t pressure_pinned_dofs{0u};
+        FE::Real rootless_physical_volume{0.0};
+        FE::Real active_physical_volume{0.0};
+    };
+
+    const ExpectedFeature left_rooted{
+        .stable_id = 0,
+        .digest = 590682968308805178ull,
+        .disposition = Disposition::Rooted,
+        .cells = 2u,
+        .full_cells = 1u,
+        .cut_cells = 1u,
+        .retained_physical_volume = FE::Real{1.5},
+    };
+    const std::array<ExpectedCase, 3> cases = {{
+        {
+            .label = "connected_rooted",
+            .level_set = {
+                FE::Real{-1.0},
+                FE::Real{-1.0},
+                FE::Real{1.0},
+                FE::Real{1.0},
+                FE::Real{1.0},
+                FE::Real{1.0},
+                FE::Real{1.0},
+            },
+            .features = {left_rooted},
+            .rooted_features = 1u,
+            .rootless_features = 0u,
+            .candidate_vertices = 2u,
+            .rooted_candidate_vertices = 2u,
+            .rootless_candidate_vertices = 0u,
+            .pressure_aggregate_dofs = 2u,
+            .pressure_pinned_dofs = 0u,
+            .rootless_physical_volume = FE::Real{0.0},
+            .active_physical_volume = FE::Real{1.5},
+        },
+        {
+            .label = "disconnected_rooted",
+            .level_set = {
+                FE::Real{-1.0},
+                FE::Real{-1.0},
+                FE::Real{1.0},
+                FE::Real{1.0},
+                FE::Real{1.0},
+                FE::Real{-1.0},
+                FE::Real{-1.0},
+            },
+            .features = {
+                left_rooted,
+                ExpectedFeature{
+                    .stable_id = 4,
+                    .digest = 586861065889900642ull,
+                    .disposition = Disposition::Rooted,
+                    .cells = 2u,
+                    .full_cells = 1u,
+                    .cut_cells = 1u,
+                    .retained_physical_volume = FE::Real{1.5},
+                },
+            },
+            .rooted_features = 2u,
+            .rootless_features = 0u,
+            .candidate_vertices = 4u,
+            .rooted_candidate_vertices = 4u,
+            .rootless_candidate_vertices = 0u,
+            .pressure_aggregate_dofs = 4u,
+            .pressure_pinned_dofs = 0u,
+            .rootless_physical_volume = FE::Real{0.0},
+            .active_physical_volume = FE::Real{3.0},
+        },
+        {
+            .label = "rooted_plus_rootless",
+            .level_set = {
+                FE::Real{-1.0},
+                FE::Real{-1.0},
+                FE::Real{1.0},
+                FE::Real{1.0},
+                FE::Real{-1.0},
+                FE::Real{1.0},
+                FE::Real{1.0},
+            },
+            .features = {
+                left_rooted,
+                ExpectedFeature{
+                    .stable_id = 3,
+                    .digest = 591645040983300578ull,
+                    .disposition = Disposition::Rootless,
+                    .cells = 2u,
+                    .full_cells = 0u,
+                    .cut_cells = 2u,
+                    .retained_physical_volume = FE::Real{1.0},
+                },
+            },
+            .rooted_features = 1u,
+            .rootless_features = 1u,
+            .candidate_vertices = 8u,
+            .rooted_candidate_vertices = 2u,
+            .rootless_candidate_vertices = 6u,
+            .pressure_aggregate_dofs = 2u,
+            .pressure_pinned_dofs = 6u,
+            .rootless_physical_volume = FE::Real{1.0},
+            .active_physical_volume = FE::Real{2.5},
+        },
+    }};
+
+    const auto tolerance = [](FE::Real expected) {
+        return FE::Real{1.0e-12} *
+               std::max(FE::Real{1.0}, std::abs(expected));
+    };
+    const auto expect_report =
+        [&](const Report& report,
+            const ExpectedCase& expected,
+            FE::FieldId field,
+            std::size_t component_multiplier) {
+            EXPECT_EQ(report.field, field);
+            EXPECT_EQ(report.interface_marker, 27315);
+            EXPECT_EQ(
+                report.active_side,
+                FE::geometry::CutIntegrationSide::Negative);
+            EXPECT_EQ(
+                report.canonical_active_feature_count,
+                expected.features.size());
+            EXPECT_EQ(
+                report.canonical_rooted_active_feature_count,
+                expected.rooted_features);
+            EXPECT_EQ(
+                report.canonical_rootless_active_feature_count,
+                expected.rootless_features);
+            EXPECT_EQ(
+                report.canonical_candidate_vertices,
+                expected.candidate_vertices);
+            EXPECT_EQ(
+                report.canonical_rooted_candidate_vertices,
+                expected.rooted_candidate_vertices);
+            EXPECT_EQ(
+                report.canonical_rootless_candidate_vertices,
+                expected.rootless_candidate_vertices);
+            EXPECT_EQ(
+                report.canonical_owned_aggregate_dofs,
+                component_multiplier *
+                    expected.pressure_aggregate_dofs);
+            EXPECT_EQ(
+                report.canonical_owned_pinned_dofs,
+                component_multiplier *
+                    expected.pressure_pinned_dofs);
+            EXPECT_EQ(
+                report.canonical_strong_suppressed_dofs, 0u);
+            EXPECT_NEAR(
+                report.canonical_rootless_active_physical_volume,
+                expected.rootless_physical_volume,
+                tolerance(expected.rootless_physical_volume));
+
+            ASSERT_EQ(
+                report.canonical_active_features.size(),
+                expected.features.size());
+            long double total_volume = 0.0L;
+            long double rootless_volume = 0.0L;
+            for (const auto& feature : expected.features) {
+                const auto observed_it = std::find_if(
+                    report.canonical_active_features.begin(),
+                    report.canonical_active_features.end(),
+                    [&](const auto& candidate) {
+                        return candidate.stable_feature_id ==
+                               feature.stable_id;
+                    });
+                ASSERT_NE(
+                    observed_it,
+                    report.canonical_active_features.end())
+                    << "missing active-cell feature "
+                    << feature.stable_id;
+                const Feature& observed = *observed_it;
+                EXPECT_EQ(
+                    observed.stable_feature_id,
+                    feature.stable_id);
+                EXPECT_EQ(
+                    observed.canonical_cell_gid_digest,
+                    feature.digest);
+                EXPECT_EQ(
+                    observed.disposition,
+                    feature.disposition);
+                EXPECT_EQ(
+                    observed.canonical_cell_count,
+                    feature.cells);
+                EXPECT_EQ(
+                    observed.canonical_full_active_cell_count,
+                    feature.full_cells);
+                EXPECT_EQ(
+                    observed.canonical_cut_cell_count,
+                    feature.cut_cells);
+                EXPECT_EQ(
+                    observed.canonical_cell_count,
+                    observed.canonical_full_active_cell_count +
+                        observed.canonical_cut_cell_count);
+                EXPECT_NEAR(
+                    observed.canonical_retained_physical_volume,
+                    feature.retained_physical_volume,
+                    tolerance(
+                        feature.retained_physical_volume));
+                total_volume += static_cast<long double>(
+                    observed.canonical_retained_physical_volume);
+                if (observed.disposition ==
+                    Disposition::Rootless) {
+                    rootless_volume += static_cast<long double>(
+                        observed.canonical_retained_physical_volume);
+                }
+            }
+            EXPECT_NEAR(
+                static_cast<FE::Real>(total_volume),
+                expected.active_physical_volume,
+                tolerance(expected.active_physical_volume));
+            EXPECT_NEAR(
+                static_cast<FE::Real>(rootless_volume),
+                expected.rootless_physical_volume,
+                tolerance(expected.rootless_physical_volume));
+        };
+
+    std::size_t observed_case_count = 0u;
+    std::size_t observed_active_features = 0u;
+    std::size_t observed_rooted_features = 0u;
+    std::size_t observed_rootless_features = 0u;
+    std::size_t observed_velocity_pressure_mismatch_count = 0u;
+    FE::Real observed_rootless_physical_volume = 0.0;
+    for (const auto& expected : cases) {
+        SCOPED_TRACE(expected.label);
+        const auto sample =
+            assembleSerialActiveCellTopologySample(
+                expected.level_set);
+        expect_report(
+            sample.velocity_report,
+            expected,
+            sample.velocity,
+            /*component_multiplier=*/2u);
+        expect_report(
+            sample.pressure_report,
+            expected,
+            sample.pressure,
+            /*component_multiplier=*/1u);
+        EXPECT_NE(
+            sample.velocity,
+            sample.pressure);
+        EXPECT_NEAR(
+            sample.assembled_active_physical_volume,
+            expected.active_physical_volume,
+            tolerance(expected.active_physical_volume));
+
+        bool velocity_pressure_match =
+            sample.velocity_report
+                    .canonical_active_feature_count ==
+                sample.pressure_report
+                    .canonical_active_feature_count &&
+            sample.velocity_report
+                    .canonical_rooted_active_feature_count ==
+                sample.pressure_report
+                    .canonical_rooted_active_feature_count &&
+            sample.velocity_report
+                    .canonical_rootless_active_feature_count ==
+                sample.pressure_report
+                    .canonical_rootless_active_feature_count &&
+            sample.velocity_report
+                    .canonical_active_features.size() ==
+                sample.pressure_report
+                    .canonical_active_features.size();
+        EXPECT_EQ(
+            sample.velocity_report.canonical_active_features.size(),
+            sample.pressure_report.canonical_active_features.size());
+        for (const auto& pressure_feature :
+             sample.pressure_report.canonical_active_features) {
+            const auto velocity_it = std::find_if(
+                sample.velocity_report
+                    .canonical_active_features.begin(),
+                sample.velocity_report
+                    .canonical_active_features.end(),
+                [&](const auto& candidate) {
+                    return candidate.stable_feature_id ==
+                           pressure_feature.stable_feature_id;
+                });
+            if (velocity_it ==
+                sample.velocity_report
+                    .canonical_active_features.end()) {
+                velocity_pressure_match = false;
+                ADD_FAILURE()
+                    << "velocity report is missing active-cell feature "
+                    << pressure_feature.stable_feature_id;
+                continue;
+            }
+            const auto& velocity_feature = *velocity_it;
+            EXPECT_EQ(
+                velocity_feature.stable_feature_id,
+                pressure_feature.stable_feature_id);
+            EXPECT_EQ(
+                velocity_feature.canonical_cell_gid_digest,
+                pressure_feature.canonical_cell_gid_digest);
+            EXPECT_EQ(
+                velocity_feature.disposition,
+                pressure_feature.disposition);
+            EXPECT_EQ(
+                velocity_feature.canonical_cell_count,
+                pressure_feature.canonical_cell_count);
+            EXPECT_EQ(
+                velocity_feature.canonical_full_active_cell_count,
+                pressure_feature.canonical_full_active_cell_count);
+            EXPECT_EQ(
+                velocity_feature.canonical_cut_cell_count,
+                pressure_feature.canonical_cut_cell_count);
+            EXPECT_NEAR(
+                velocity_feature
+                    .canonical_retained_physical_volume,
+                pressure_feature
+                    .canonical_retained_physical_volume,
+                tolerance(
+                    pressure_feature
+                        .canonical_retained_physical_volume));
+            velocity_pressure_match =
+                velocity_pressure_match &&
+                velocity_feature.canonical_cell_gid_digest ==
+                    pressure_feature.canonical_cell_gid_digest &&
+                velocity_feature.disposition ==
+                    pressure_feature.disposition &&
+                velocity_feature.canonical_cell_count ==
+                    pressure_feature.canonical_cell_count &&
+                velocity_feature.canonical_full_active_cell_count ==
+                    pressure_feature
+                        .canonical_full_active_cell_count &&
+                velocity_feature.canonical_cut_cell_count ==
+                    pressure_feature.canonical_cut_cell_count &&
+                std::abs(
+                    velocity_feature
+                            .canonical_retained_physical_volume -
+                    pressure_feature
+                            .canonical_retained_physical_volume) <=
+                    tolerance(
+                        pressure_feature
+                            .canonical_retained_physical_volume);
+        }
+        if (!velocity_pressure_match) {
+            ++observed_velocity_pressure_mismatch_count;
+        }
+
+        ++observed_case_count;
+        observed_active_features +=
+            sample.pressure_report
+                .canonical_active_feature_count;
+        observed_rooted_features +=
+            sample.pressure_report
+                .canonical_rooted_active_feature_count;
+        observed_rootless_features +=
+            sample.pressure_report
+                .canonical_rootless_active_feature_count;
+        observed_rootless_physical_volume +=
+            sample.pressure_report
+                .canonical_rootless_active_physical_volume;
+    }
+
+    RecordProperty(
+        "wp7_active_cell_topology_case_count",
+        observed_case_count);
+    RecordProperty(
+        "wp7_active_cell_topology_feature_count",
+        observed_active_features);
+    RecordProperty(
+        "wp7_active_cell_topology_rooted_feature_count",
+        observed_rooted_features);
+    RecordProperty(
+        "wp7_active_cell_topology_rootless_feature_count",
+        observed_rootless_features);
+    RecordProperty(
+        "wp7_active_cell_topology_rootless_retained_physical_volume",
+        realPropertyValue(
+            observed_rootless_physical_volume));
+    RecordProperty(
+        "wp7_active_cell_topology_velocity_pressure_mismatch_count",
+        observed_velocity_pressure_mismatch_count);
 #endif
 }
 

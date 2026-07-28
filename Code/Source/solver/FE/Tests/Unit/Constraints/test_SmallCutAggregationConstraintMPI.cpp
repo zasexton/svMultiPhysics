@@ -632,6 +632,7 @@ std::shared_ptr<assembly::CutIntegrationContext> cutContext(
         rule.parent_measure = Real{1};
         rule.volume_fraction = cell_rule.fraction;
         rule.full_cell_equivalent = cell_rule.full;
+        rule.frame = geometry::CutGeometryFrame::Current;
         context->addGeneratedVolumeRule(kInterfaceMarker, metadata, rule);
     }
     return context;
@@ -664,6 +665,7 @@ sixQuadEqualRootCutContext(int rank, bool reverse_ownership)
         rule.parent_measure = Real{1};
         rule.volume_fraction = fraction;
         rule.full_cell_equivalent = full;
+        rule.frame = geometry::CutGeometryFrame::Current;
         context->addGeneratedVolumeRule(kInterfaceMarker, metadata, rule);
     }
     return context;
@@ -957,6 +959,132 @@ TEST(SmallCutAggregationConstraintMPI,
               (std::vector<std::pair<GlobalIndex, double>>{
                   {top_interface, 2.0}, {top_far, -1.0}}));
     expectEveryMasterLineFiniteAndPartitionOfUnity(system);
+
+    const auto reports =
+        system.completedSmallCutAggregationRefreshReports();
+    ASSERT_EQ(reports.size(), 1u);
+    const auto& report = reports.front();
+    EXPECT_EQ(report.field, pressure);
+    EXPECT_EQ(report.interface_marker, kInterfaceMarker);
+    EXPECT_EQ(
+        report.active_side,
+        geometry::CutIntegrationSide::Negative);
+    EXPECT_EQ(report.canonical_candidate_vertices, 2u);
+    EXPECT_EQ(report.canonical_rooted_candidate_vertices, 2u);
+    EXPECT_EQ(report.canonical_rootless_candidate_vertices, 0u);
+    EXPECT_EQ(report.canonical_owned_aggregate_dofs, 2u);
+    EXPECT_EQ(report.canonical_owned_pinned_dofs, 0u);
+    EXPECT_EQ(report.canonical_strong_suppressed_dofs, 0u);
+    EXPECT_EQ(report.canonical_active_feature_count, 1u);
+    EXPECT_EQ(report.canonical_rooted_active_feature_count, 1u);
+    EXPECT_EQ(report.canonical_rootless_active_feature_count, 0u);
+    EXPECT_DOUBLE_EQ(
+        report.canonical_rootless_active_physical_volume, 0.0);
+    ASSERT_EQ(report.canonical_active_features.size(), 1u);
+    const auto& feature = report.canonical_active_features.front();
+    EXPECT_EQ(feature.stable_feature_id, 0);
+    EXPECT_EQ(
+        feature.canonical_cell_gid_digest,
+        590682968308805178ull);
+    EXPECT_EQ(
+        feature.disposition,
+        SmallCutAggregationActiveFeatureDisposition::Rooted);
+    EXPECT_EQ(feature.canonical_cell_count, 2u);
+    EXPECT_EQ(feature.canonical_full_active_cell_count, 1u);
+    EXPECT_EQ(feature.canonical_cut_cell_count, 1u);
+    EXPECT_DOUBLE_EQ(
+        feature.canonical_retained_physical_volume, 1.25);
+#endif
+}
+
+TEST(SmallCutAggregationConstraintMPI,
+     RootlessFeatureTelemetryDoesNotSumReplicatedProviders)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    int rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size != 2) {
+        GTEST_SKIP() << "Run with exactly two MPI ranks";
+    }
+
+    auto mesh = std::make_shared<TwoQuadAggregationMeshAccess>(
+        rank, /*full_view=*/true, /*expose_left_wall=*/false);
+    auto space = std::make_shared<spaces::H1Space>(
+        ElementType::Quad4, 1);
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{
+            .name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<SmallCutAggregationConstraint>(
+            pressure,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = fullTopology();
+    const auto setup_outcome =
+        invokeCollectively(MPI_COMM_WORLD, [&] {
+            system.setup(
+                setupOptions(rank, world_size), inputs);
+        });
+    ASSERT_TRUE(setup_outcome.allSucceeded())
+        << setup_outcome.local_message;
+
+    // Both ranks provide the same two-cell retained measure. The canonical
+    // feature ledger must connect the cells across their ownership boundary
+    // and retain each once, not reduce replicated provider values as
+    // independent physical volume.
+    system.setCutIntegrationContext(cutContext({
+        {0, Real{0.25}, false},
+        {1, Real{0.5}, false},
+    }));
+    const auto rebuild_outcome =
+        invokeCollectively(MPI_COMM_WORLD, [&] {
+            system.rebuildConstraintState();
+        });
+    ASSERT_TRUE(rebuild_outcome.allSucceeded())
+        << rebuild_outcome.local_message;
+
+    const auto reports =
+        system.completedSmallCutAggregationRefreshReports();
+    ASSERT_EQ(reports.size(), 1u);
+    const auto& report = reports.front();
+    EXPECT_EQ(report.field, pressure);
+    EXPECT_EQ(report.interface_marker, kInterfaceMarker);
+    EXPECT_EQ(
+        report.active_side,
+        geometry::CutIntegrationSide::Negative);
+    EXPECT_EQ(report.canonical_candidate_vertices, 6u);
+    EXPECT_EQ(report.canonical_rooted_candidate_vertices, 0u);
+    EXPECT_EQ(report.canonical_rootless_candidate_vertices, 6u);
+    EXPECT_EQ(report.canonical_owned_aggregate_dofs, 0u);
+    EXPECT_EQ(report.canonical_owned_pinned_dofs, 6u);
+    EXPECT_EQ(report.canonical_strong_suppressed_dofs, 0u);
+    EXPECT_EQ(report.canonical_active_feature_count, 1u);
+    EXPECT_EQ(report.canonical_rooted_active_feature_count, 0u);
+    EXPECT_EQ(report.canonical_rootless_active_feature_count, 1u);
+    EXPECT_DOUBLE_EQ(
+        report.canonical_rootless_active_physical_volume, 0.75);
+    ASSERT_EQ(report.canonical_active_features.size(), 1u);
+    const auto& feature = report.canonical_active_features.front();
+    EXPECT_EQ(feature.stable_feature_id, 0);
+    EXPECT_EQ(
+        feature.canonical_cell_gid_digest,
+        590682968308805178ull);
+    EXPECT_EQ(
+        feature.disposition,
+        SmallCutAggregationActiveFeatureDisposition::Rootless);
+    EXPECT_EQ(feature.canonical_cell_count, 2u);
+    EXPECT_EQ(feature.canonical_full_active_cell_count, 0u);
+    EXPECT_EQ(feature.canonical_cut_cell_count, 2u);
+    EXPECT_DOUBLE_EQ(
+        feature.canonical_retained_physical_volume, 0.75);
 #endif
 }
 
