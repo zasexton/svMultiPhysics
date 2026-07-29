@@ -61,6 +61,32 @@ struct DenseSymmetricEigenvalueBounds {
 };
 
 /**
+ * Diagnostics for an explicitly supplied structural common nullspace.
+ *
+ * The nullspace basis is interpreted as a caller-owned mathematical
+ * contract. The dense helper normalizes its columns, selects deterministic
+ * coordinate anchors, and checks the full numerator and denominator actions
+ * against scale-relative roundoff guards before forming a principal
+ * coordinate quotient. Accepted nonzero actions are therefore diagnostics
+ * for the canonical structural quotient; they do not certify a genuinely
+ * incompatible raw pencil.
+ */
+struct DenseExplicitNullspaceDiagnostics {
+    bool applied{false};
+    std::size_t supplied_nullity{0};
+    std::size_t reduced_dimension{0};
+    Real original_denominator_scale{0};
+    Real original_numerator_scale{0};
+    Real basis_rank_tolerance{0};
+    Real smallest_selected_row_residual{0};
+    Real denominator_action_tolerance{0};
+    Real maximum_denominator_action{0};
+    Real numerator_action_tolerance{0};
+    Real maximum_numerator_action{0};
+    std::vector<std::size_t> eliminated_coordinates{};
+};
+
+/**
  * Diagnostics for a symmetric positive-semidefinite generalized eigenproblem
  *
  * The finite eigenvalues of
@@ -97,6 +123,7 @@ struct DensePsdGeneralizedEigenvalueBound {
     std::size_t quotient_sweeps{0};
     bool denominator_converged{false};
     bool quotient_converged{false};
+    DenseExplicitNullspaceDiagnostics explicit_nullspace{};
 };
 
 struct DenseInverseResult {
@@ -155,6 +182,33 @@ dense_psd_generalized_eigenvalue_bound(
     std::span<const Real> denominator,
     std::size_t n,
     std::string_view label = "dense PSD generalized eigenproblem");
+
+/**
+ * Compute the PSD generalized bound after quotienting a known common kernel.
+ *
+ * `common_nullspace` stores an `n x explicit_nullity` row-major basis. The
+ * helper deterministically selects a nonsingular set of coordinate rows,
+ * removes those coordinates, and applies
+ * `dense_psd_generalized_eigenvalue_bound()` to the remaining principal
+ * pencil. For a true common kernel this coordinate gauge preserves every
+ * finite generalized eigenvalue without introducing a rounded orthogonal
+ * projection. The returned `dimension` is the original dimension and
+ * `nullity` includes both supplied modes and any additional compatible modes
+ * found in the reduced pencil.
+ *
+ * Full input validation and full-action nullspace checks occur before any
+ * coordinate is removed. No diagonal shift, clipping, or small-positive-mode
+ * deletion is performed.
+ */
+[[nodiscard]] DensePsdGeneralizedEigenvalueBound
+dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+    std::span<const Real> numerator,
+    std::span<const Real> denominator,
+    std::size_t n,
+    std::span<const Real> common_nullspace,
+    std::size_t explicit_nullity,
+    std::string_view label =
+        "dense PSD generalized eigenproblem with explicit nullspace");
 
 [[nodiscard]] DenseLUSolver factor_dense_matrix(std::vector<Real> matrix,
                                                 std::size_t n,

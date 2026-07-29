@@ -8,6 +8,7 @@
 #include "FE/Core/FEException.h"
 #include "FE/Math/DenseLinearAlgebra.h"
 
+#include <array>
 #include <cmath>
 #include <limits>
 #include <span>
@@ -28,6 +29,53 @@ Real multiply_entry(const std::vector<Real>& A,
         sum += A[row * n + k] * B[k * n + col];
     }
     return sum;
+}
+
+std::vector<Real> p1_triangle_symmetric_gradient_matrix() {
+    constexpr std::size_t scalar_dofs = 3u;
+    constexpr std::size_t components = 2u;
+    constexpr std::size_t dimension = scalar_dofs * components;
+    const std::array<std::array<Real, 2>, scalar_dofs> gradients{{
+        {{Real(-1), Real(-1)}},
+        {{Real(1), Real(0)}},
+        {{Real(0), Real(1)}},
+    }};
+
+    std::vector<Real> matrix(dimension * dimension, Real(0));
+    for (std::size_t row = 0; row < dimension; ++row) {
+        const std::size_t row_component = row / scalar_dofs;
+        const std::size_t row_basis = row % scalar_dofs;
+        for (std::size_t column = row;
+             column < dimension;
+             ++column) {
+            const std::size_t column_component =
+                column / scalar_dofs;
+            const std::size_t column_basis =
+                column % scalar_dofs;
+            Real gradient_inner = Real(0);
+            for (std::size_t direction = 0;
+                 direction < components;
+                 ++direction) {
+                gradient_inner +=
+                    gradients[row_basis][direction] *
+                    gradients[column_basis][direction];
+            }
+            // On the unit right triangle, area = 1/2 and
+            // 2 eps(phi_i e_c):eps(phi_j e_d)
+            //   = delta_cd grad(phi_i).grad(phi_j)
+            //     + d_c(phi_j) d_d(phi_i).
+            const Real value =
+                Real(0.5) *
+                ((row_component == column_component
+                      ? gradient_inner
+                      : Real(0)) +
+                 gradients[row_basis][column_component] *
+                     gradients[column_basis][row_component]);
+            matrix[row * dimension + column] = value;
+            matrix[column * dimension + row] = value;
+        }
+    }
+    return matrix;
 }
 
 } // namespace
@@ -602,6 +650,430 @@ TEST(DenseLinearAlgebra, PsdGeneralizedBoundRejectsInvalidEntries) {
     EXPECT_THROW(
         (void)dense_psd_generalized_eigenvalue_bound(
             identity, nonfinite, 2u, "nonfinite denominator"),
+        FEException);
+}
+
+TEST(DenseLinearAlgebra,
+     PsdGeneralizedBoundExplicitNullspaceQuotientsScalarP1Constant) {
+    // Unit-right-triangle H1 seminorm and the normal-gradient trace on x=0.
+    // Quotienting the constant leaves diag(1/2, 1/2) in the denominator
+    // and diag(1, 0) in the numerator, so the exact largest quotient is 2.
+    const std::vector<Real> denominator{
+        Real(1), Real(-0.5), Real(-0.5),
+        Real(-0.5), Real(0.5), Real(0),
+        Real(-0.5), Real(0), Real(0.5),
+    };
+    const std::vector<Real> numerator{
+        Real(1), Real(-1), Real(0),
+        Real(-1), Real(1), Real(0),
+        Real(0), Real(0), Real(0),
+    };
+    const std::vector<Real> constant_mode{
+        Real(1), Real(1), Real(1),
+    };
+
+    const auto bound =
+        dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            numerator,
+            denominator,
+            3u,
+            constant_mode,
+            1u,
+            "scalar P1 trace quotient");
+
+    EXPECT_EQ(bound.dimension, 3u);
+    EXPECT_EQ(bound.positive_rank, 2u);
+    EXPECT_EQ(bound.nullity, 1u);
+    EXPECT_TRUE(bound.explicit_nullspace.applied);
+    EXPECT_EQ(bound.explicit_nullspace.supplied_nullity, 1u);
+    EXPECT_EQ(bound.explicit_nullspace.reduced_dimension, 2u);
+    ASSERT_EQ(
+        bound.explicit_nullspace.eliminated_coordinates.size(), 1u);
+    EXPECT_EQ(
+        bound.explicit_nullspace.eliminated_coordinates.front(), 0u);
+    EXPECT_EQ(
+        bound.explicit_nullspace.maximum_denominator_action, Real(0));
+    EXPECT_EQ(
+        bound.explicit_nullspace.maximum_numerator_action, Real(0));
+    EXPECT_NEAR(
+        bound.largest_quotient_eigenvalue, Real(2), Real(1.0e-12));
+    EXPECT_GE(bound.conservative_upper_bound, Real(2));
+    EXPECT_NEAR(
+        bound.conservative_upper_bound, Real(2), Real(1.0e-10));
+}
+
+TEST(DenseLinearAlgebra,
+     PsdGeneralizedBoundExplicitNullspaceQuotientsP1RigidModes) {
+    auto denominator = p1_triangle_symmetric_gradient_matrix();
+    auto numerator = denominator;
+    for (auto& value : numerator) {
+        value *= Real(3);
+    }
+    // Component-major coefficients at (0,0), (1,0), (0,1):
+    // x translation, y translation, and u=(-y,x).
+    const std::vector<Real> rigid_modes{
+        Real(1), Real(0), Real(0),
+        Real(1), Real(0), Real(0),
+        Real(1), Real(0), Real(-1),
+        Real(0), Real(1), Real(0),
+        Real(0), Real(1), Real(1),
+        Real(0), Real(1), Real(0),
+    };
+
+    const auto bound =
+        dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            numerator,
+            denominator,
+            6u,
+            rigid_modes,
+            3u,
+            "P1 symmetric-gradient rigid quotient");
+
+    EXPECT_EQ(bound.dimension, 6u);
+    EXPECT_EQ(bound.positive_rank, 3u);
+    EXPECT_EQ(bound.nullity, 3u);
+    EXPECT_EQ(bound.explicit_nullspace.supplied_nullity, 3u);
+    EXPECT_EQ(bound.explicit_nullspace.reduced_dimension, 3u);
+    EXPECT_EQ(
+        bound.explicit_nullspace.eliminated_coordinates.size(), 3u);
+    EXPECT_EQ(
+        bound.explicit_nullspace.maximum_denominator_action, Real(0));
+    EXPECT_EQ(
+        bound.explicit_nullspace.maximum_numerator_action, Real(0));
+    EXPECT_NEAR(
+        bound.largest_quotient_eigenvalue, Real(3), Real(1.0e-10));
+    EXPECT_GE(bound.conservative_upper_bound, Real(3));
+    EXPECT_NEAR(
+        bound.conservative_upper_bound, Real(3), Real(1.0e-9));
+}
+
+TEST(DenseLinearAlgebra,
+     PsdGeneralizedBoundExplicitNullspaceHandlesMixedPermutedModes) {
+    const std::vector<Real> denominator{
+        Real(0), Real(0), Real(0), Real(0),
+        Real(0), Real(4), Real(0), Real(0),
+        Real(0), Real(0), Real(0), Real(0),
+        Real(0), Real(0), Real(0), Real(1),
+    };
+    const std::vector<Real> numerator{
+        Real(0), Real(0), Real(0), Real(0),
+        Real(0), Real(8), Real(0), Real(0),
+        Real(0), Real(0), Real(0), Real(0),
+        Real(0), Real(0), Real(0), Real(3),
+    };
+    // The common kernel occupies noncontiguous coordinates 0 and 2. Its
+    // columns are independently scaled and nonsingularly mixed.
+    const std::vector<Real> mixed_scaled_modes{
+        Real(2.0e-200), Real(1.0e200),
+        Real(0), Real(0),
+        Real(1.0e-200), Real(1.0e200),
+        Real(0), Real(0),
+    };
+
+    const auto bound =
+        dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            numerator,
+            denominator,
+            4u,
+            mixed_scaled_modes,
+            2u,
+            "mixed scaled and permuted nullspace");
+
+    EXPECT_EQ(bound.dimension, 4u);
+    EXPECT_EQ(bound.positive_rank, 2u);
+    EXPECT_EQ(bound.nullity, 2u);
+    ASSERT_EQ(
+        bound.explicit_nullspace.eliminated_coordinates.size(), 2u);
+    EXPECT_EQ(
+        bound.explicit_nullspace.eliminated_coordinates[0], 0u);
+    EXPECT_EQ(
+        bound.explicit_nullspace.eliminated_coordinates[1], 2u);
+    EXPECT_NEAR(
+        bound.largest_quotient_eigenvalue, Real(3), Real(1.0e-11));
+    EXPECT_GE(bound.conservative_upper_bound, Real(3));
+}
+
+TEST(DenseLinearAlgebra,
+     PsdGeneralizedBoundExplicitNullspaceAuditsStructuralRoundoff) {
+    const Real small_perturbation =
+        Real(32) * std::numeric_limits<Real>::epsilon();
+    const Real large_perturbation =
+        Real(8192) * std::numeric_limits<Real>::epsilon();
+    const std::vector<Real> numerator{
+        Real(1), Real(-1), Real(0),
+        Real(-1), Real(1), Real(0),
+        Real(0), Real(0), Real(0),
+    };
+    const std::vector<Real> constant_mode{
+        Real(1), Real(1), Real(1),
+    };
+    std::vector<Real> accepted_denominator{
+        Real(1), Real(-0.5), Real(-0.5),
+        Real(-0.5), Real(0.5), Real(0),
+        Real(-0.5), Real(0), Real(0.5),
+    };
+    accepted_denominator[0] += small_perturbation;
+
+    const auto accepted =
+        dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            numerator,
+            accepted_denominator,
+            3u,
+            constant_mode,
+            1u,
+            "roundoff-sized structural residual");
+    EXPECT_GT(
+        accepted.explicit_nullspace.maximum_denominator_action,
+        Real(0));
+    EXPECT_LE(
+        accepted.explicit_nullspace.maximum_denominator_action,
+        accepted.explicit_nullspace.denominator_action_tolerance);
+    EXPECT_GE(accepted.conservative_upper_bound, Real(2));
+
+    auto rejected_denominator = accepted_denominator;
+    rejected_denominator[0] =
+        Real(1) + large_perturbation;
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            numerator,
+            rejected_denominator,
+            3u,
+            constant_mode,
+            1u,
+            "oversized structural residual"),
+        FEException);
+}
+
+TEST(DenseLinearAlgebra,
+     PsdGeneralizedBoundExplicitNullspaceRejectsInvalidBasisAndAction) {
+    const std::vector<Real> zero_pencil(9u, Real(0));
+    const std::vector<Real> dependent_modes{
+        Real(1), Real(1),
+        Real(0), Real(0),
+        Real(0), Real(0),
+    };
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            zero_pencil,
+            zero_pencil,
+            3u,
+            dependent_modes,
+            2u,
+            "dependent explicit modes"),
+        FEException);
+
+    const std::vector<Real> zero_mode(3u, Real(0));
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            zero_pencil,
+            zero_pencil,
+            3u,
+            zero_mode,
+            1u,
+            "zero explicit mode"),
+        FEException);
+
+    auto nonfinite_mode = std::vector<Real>{
+        Real(1), Real(0), Real(0)};
+    nonfinite_mode[1] =
+        std::numeric_limits<Real>::quiet_NaN();
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            zero_pencil,
+            zero_pencil,
+            3u,
+            nonfinite_mode,
+            1u,
+            "nonfinite explicit mode"),
+        FEException);
+
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            zero_pencil,
+            zero_pencil,
+            3u,
+            std::span<const Real>{},
+            1u,
+            "wrong-sized explicit nullspace"),
+        FEException);
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            zero_pencil,
+            zero_pencil,
+            3u,
+            std::span<const Real>{},
+            4u,
+            "oversized explicit nullity"),
+        FEException);
+
+    const std::vector<Real> denominator{
+        Real(1), Real(0),
+        Real(0), Real(0),
+    };
+    const std::vector<Real> cross_numerator{
+        Real(1), Real(1.0e-8),
+        Real(1.0e-8), Real(0),
+    };
+    const std::vector<Real> null_mode{
+        Real(0), Real(1),
+    };
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            cross_numerator,
+            denominator,
+            2u,
+            null_mode,
+            1u,
+            "explicit mode with numerator cross action"),
+        FEException);
+}
+
+TEST(DenseLinearAlgebra,
+     PsdGeneralizedBoundExplicitNullspaceValidatesDroppedCoordinates) {
+    const std::vector<Real> denominator{
+        Real(1), Real(-0.5), Real(-0.5),
+        Real(-0.5), Real(0.5), Real(0),
+        Real(-0.5), Real(0), Real(0.5),
+    };
+    std::vector<Real> asymmetric_numerator{
+        Real(1), Real(-1), Real(0),
+        Real(-1), Real(1), Real(0),
+        Real(0), Real(0), Real(0),
+    };
+    asymmetric_numerator[1] =
+        std::nextafter(
+            asymmetric_numerator[1],
+            std::numeric_limits<Real>::infinity());
+    const std::vector<Real> constant_mode{
+        Real(1), Real(1), Real(1),
+    };
+
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            asymmetric_numerator,
+            denominator,
+            3u,
+            constant_mode,
+            1u,
+            "asymmetry in eliminated coordinate"),
+        FEException);
+
+    auto nonfinite_numerator = asymmetric_numerator;
+    nonfinite_numerator[1] = Real(-1);
+    nonfinite_numerator[0] =
+        std::numeric_limits<Real>::quiet_NaN();
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            nonfinite_numerator,
+            denominator,
+            3u,
+            constant_mode,
+            1u,
+            "nonfinite eliminated coordinate"),
+        FEException);
+}
+
+TEST(DenseLinearAlgebra,
+     PsdGeneralizedBoundExplicitNullspacePreservesTinyPositiveFreeMode) {
+    const std::vector<Real> denominator{
+        Real(0), Real(0), Real(0),
+        Real(0), Real(1), Real(0),
+        Real(0), Real(0), Real(1.0e-300),
+    };
+    const std::vector<Real> numerator{
+        Real(0), Real(0), Real(0),
+        Real(0), Real(1), Real(0),
+        Real(0), Real(0), Real(1.0e-14),
+    };
+    const std::vector<Real> explicit_mode{
+        Real(1), Real(0), Real(0),
+    };
+
+    const auto bound =
+        dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            numerator,
+            denominator,
+            3u,
+            explicit_mode,
+            1u,
+            "explicit quotient with tiny positive mode");
+    const Real analytic_quotient =
+        numerator[8] / denominator[8];
+
+    EXPECT_EQ(bound.positive_rank, 2u);
+    EXPECT_EQ(bound.nullity, 1u);
+    EXPECT_GE(bound.conservative_upper_bound, analytic_quotient);
+}
+
+TEST(DenseLinearAlgebra,
+     PsdGeneralizedBoundExplicitNullspaceHandlesEmptyAndFullBasis) {
+    const std::vector<Real> denominator{
+        Real(2), Real(0),
+        Real(0), Real(1),
+    };
+    const std::vector<Real> numerator{
+        Real(4), Real(0),
+        Real(0), Real(3),
+    };
+    const auto direct = dense_psd_generalized_eigenvalue_bound(
+        numerator, denominator, 2u, "direct no-nullspace pencil");
+    const auto empty =
+        dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            numerator,
+            denominator,
+            2u,
+            std::span<const Real>{},
+            0u,
+            "explicit empty-nullspace pencil");
+    EXPECT_EQ(
+        empty.conservative_upper_bound,
+        direct.conservative_upper_bound);
+    EXPECT_EQ(empty.dimension, 2u);
+    EXPECT_FALSE(empty.explicit_nullspace.applied);
+    EXPECT_EQ(empty.explicit_nullspace.supplied_nullity, 0u);
+    EXPECT_EQ(empty.explicit_nullspace.reduced_dimension, 2u);
+
+    const std::vector<Real> zero_pencil(4u, Real(0));
+    const std::vector<Real> full_nullspace{
+        Real(1), Real(0),
+        Real(0), Real(1),
+    };
+    const auto full =
+        dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            zero_pencil,
+            zero_pencil,
+            2u,
+            full_nullspace,
+            2u,
+            "all-null structural pencil");
+    EXPECT_EQ(full.dimension, 2u);
+    EXPECT_EQ(full.positive_rank, 0u);
+    EXPECT_EQ(full.nullity, 2u);
+    EXPECT_EQ(full.conservative_upper_bound, Real(0));
+    EXPECT_TRUE(full.denominator_converged);
+    EXPECT_TRUE(full.quotient_converged);
+    EXPECT_EQ(full.explicit_nullspace.reduced_dimension, 0u);
+}
+
+TEST(DenseLinearAlgebra,
+     PsdGeneralizedBoundRejectsOverflowingDimensionProducts) {
+    const std::size_t overflowing_dimension =
+        std::numeric_limits<std::size_t>::max();
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound(
+            std::span<const Real>{},
+            std::span<const Real>{},
+            overflowing_dimension,
+            "overflowing square pencil"),
+        FEException);
+    EXPECT_THROW(
+        (void)dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+            std::span<const Real>{},
+            std::span<const Real>{},
+            overflowing_dimension,
+            std::span<const Real>{},
+            0u,
+            "overflowing explicit-nullspace pencil"),
         FEException);
 }
 

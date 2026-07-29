@@ -48,6 +48,64 @@ struct SymmetricJacobiDecomposition {
            static_cast<Real>(std::max<std::size_t>(n, 1u));
 }
 
+[[nodiscard]] std::size_t checked_dense_size_product(
+    std::size_t first,
+    std::size_t second,
+    std::string_view label,
+    std::string_view quantity)
+{
+    DENSE_LINALG_CHECK(
+        first == 0u ||
+            second <=
+                std::numeric_limits<std::size_t>::max() / first,
+        std::string(label) + ": " + std::string(quantity) +
+            " dimension product overflows size_t");
+    return first * second;
+}
+
+void validate_psd_generalized_inputs(
+    std::span<const Real> numerator,
+    std::span<const Real> denominator,
+    std::size_t n,
+    std::string_view label)
+{
+    const std::string label_text(label);
+    DENSE_LINALG_CHECK(
+        n > 0,
+        label_text + ": generalized eigenproblem must be nonempty");
+    const std::size_t square_size =
+        checked_dense_size_product(
+            n, n, label, "square matrix");
+    DENSE_LINALG_CHECK(
+        numerator.size() == square_size,
+        label_text + ": numerator size mismatch");
+    DENSE_LINALG_CHECK(
+        denominator.size() == square_size,
+        label_text + ": denominator size mismatch");
+    for (const Real value : numerator) {
+        DENSE_LINALG_CHECK(
+            std::isfinite(value),
+            label_text + ": numerator contains a nonfinite entry");
+    }
+    for (const Real value : denominator) {
+        DENSE_LINALG_CHECK(
+            std::isfinite(value),
+            label_text + ": denominator contains a nonfinite entry");
+    }
+    for (std::size_t row = 0; row < n; ++row) {
+        for (std::size_t column = row + 1u; column < n; ++column) {
+            DENSE_LINALG_CHECK(
+                numerator[row * n + column] ==
+                    numerator[column * n + row],
+                label_text + ": numerator is not exactly symmetric");
+            DENSE_LINALG_CHECK(
+                denominator[row * n + column] ==
+                    denominator[column * n + row],
+                label_text + ": denominator is not exactly symmetric");
+        }
+    }
+}
+
 [[nodiscard]] Real round_nonnegative_up(
     long double value,
     std::string_view label)
@@ -95,6 +153,361 @@ struct SymmetricJacobiDecomposition {
         std::string(label) +
             ": positive value is below the representable range");
     return rounded;
+}
+
+struct ExplicitNullspaceActionDiagnostics {
+    Real scale{0};
+    Real tolerance{0};
+    Real maximum_action{0};
+};
+
+struct ExplicitNullspaceQuotient {
+    std::vector<Real> numerator{};
+    std::vector<Real> denominator{};
+    DenseExplicitNullspaceDiagnostics diagnostics{};
+};
+
+[[nodiscard]] std::vector<long double>
+normalize_explicit_nullspace_columns(
+    std::span<const Real> common_nullspace,
+    std::size_t n,
+    std::size_t nullity,
+    std::string_view label)
+{
+    const std::size_t basis_size =
+        checked_dense_size_product(
+            n, nullity, label, "nullspace basis");
+    DENSE_LINALG_CHECK(
+        common_nullspace.size() == basis_size,
+        std::string(label) + ": explicit nullspace size mismatch");
+
+    std::vector<long double> normalized(basis_size, 0.0L);
+    for (std::size_t mode = 0; mode < nullity; ++mode) {
+        long double scale = 0.0L;
+        for (std::size_t row = 0; row < n; ++row) {
+            const Real value =
+                common_nullspace[row * nullity + mode];
+            DENSE_LINALG_CHECK(
+                std::isfinite(value),
+                std::string(label) +
+                    ": explicit nullspace contains a nonfinite entry");
+            scale = std::max(
+                scale,
+                std::abs(static_cast<long double>(value)));
+        }
+        DENSE_LINALG_CHECK(
+            scale > 0.0L && std::isfinite(scale),
+            std::string(label) +
+                ": explicit nullspace contains a zero mode");
+        for (std::size_t row = 0; row < n; ++row) {
+            normalized[row * nullity + mode] =
+                static_cast<long double>(
+                    common_nullspace[row * nullity + mode]) /
+                scale;
+        }
+    }
+    return normalized;
+}
+
+[[nodiscard]] std::vector<std::size_t>
+select_explicit_nullspace_coordinate_rows(
+    std::span<const long double> normalized_basis,
+    std::size_t n,
+    std::size_t nullity,
+    DenseExplicitNullspaceDiagnostics& diagnostics,
+    std::string_view label)
+{
+    const std::size_t basis_size =
+        checked_dense_size_product(
+            n, nullity, label, "normalized nullspace basis");
+    DENSE_LINALG_CHECK(
+        normalized_basis.size() == basis_size,
+        std::string(label) +
+            ": normalized explicit-nullspace size mismatch");
+    std::vector<std::size_t> selected_rows;
+    selected_rows.reserve(nullity);
+    std::vector<bool> selected(n, false);
+    const std::size_t row_basis_size =
+        checked_dense_size_product(
+            nullity,
+            nullity,
+            label,
+            "orthonormal nullspace row basis");
+    std::vector<long double> orthonormal_rows(
+        row_basis_size, 0.0L);
+    std::vector<long double> residual(nullity, 0.0L);
+    std::vector<long double> best_residual(nullity, 0.0L);
+
+    long double first_selected_residual = 0.0L;
+    long double smallest_selected_residual =
+        std::numeric_limits<long double>::infinity();
+    long double rank_tolerance = 0.0L;
+    for (std::size_t step = 0; step < nullity; ++step) {
+        std::size_t best_row = n;
+        long double best_norm = -1.0L;
+        for (std::size_t row = 0; row < n; ++row) {
+            if (selected[row]) {
+                continue;
+            }
+            for (std::size_t column = 0;
+                 column < nullity;
+                 ++column) {
+                residual[column] =
+                    normalized_basis[row * nullity + column];
+            }
+            // Two modified-Gram--Schmidt passes keep the small (normally at
+            // most six-mode) structural basis selection deterministic and
+            // stable without an optional dense backend.
+            for (int pass = 0; pass < 2; ++pass) {
+                for (std::size_t basis_row = 0;
+                     basis_row < step;
+                     ++basis_row) {
+                    long double projection = 0.0L;
+                    for (std::size_t column = 0;
+                         column < nullity;
+                         ++column) {
+                        projection +=
+                            residual[column] *
+                            orthonormal_rows[
+                                basis_row * nullity + column];
+                    }
+                    for (std::size_t column = 0;
+                         column < nullity;
+                         ++column) {
+                        residual[column] -=
+                            projection *
+                            orthonormal_rows[
+                                basis_row * nullity + column];
+                    }
+                }
+            }
+            long double norm_squared = 0.0L;
+            for (const long double value : residual) {
+                norm_squared += value * value;
+            }
+            DENSE_LINALG_CHECK(
+                norm_squared >= 0.0L &&
+                    std::isfinite(norm_squared),
+                std::string(label) +
+                    ": explicit-nullspace row residual is not finite");
+            const long double norm = std::sqrt(norm_squared);
+            // Rows are visited in ascending order; strict replacement gives
+            // the lowest coordinate deterministic precedence on an exact tie.
+            if (norm > best_norm) {
+                best_norm = norm;
+                best_row = row;
+                best_residual = residual;
+            }
+        }
+        DENSE_LINALG_CHECK(
+            best_row < n && best_norm > 0.0L &&
+                std::isfinite(best_norm),
+            std::string(label) +
+                ": explicit nullspace is rank deficient");
+        if (step == 0u) {
+            first_selected_residual = best_norm;
+            rank_tolerance =
+                512.0L *
+                static_cast<long double>(
+                    std::numeric_limits<Real>::epsilon()) *
+                static_cast<long double>(
+                    std::max(n, nullity)) *
+                first_selected_residual;
+        }
+        DENSE_LINALG_CHECK(
+            best_norm > rank_tolerance,
+            std::string(label) +
+                ": explicit nullspace is rank deficient or numerically "
+                "unresolved");
+
+        selected[best_row] = true;
+        selected_rows.push_back(best_row);
+        smallest_selected_residual =
+            std::min(smallest_selected_residual, best_norm);
+        for (std::size_t column = 0;
+             column < nullity;
+             ++column) {
+            orthonormal_rows[step * nullity + column] =
+                best_residual[column] / best_norm;
+        }
+    }
+
+    diagnostics.basis_rank_tolerance =
+        round_nonnegative_up(
+            rank_tolerance,
+            std::string(label) +
+                " explicit-nullspace rank tolerance");
+    diagnostics.smallest_selected_row_residual =
+        round_positive_down(
+            smallest_selected_residual,
+            std::string(label) +
+                " smallest selected explicit-nullspace row residual");
+    diagnostics.eliminated_coordinates = selected_rows;
+    return selected_rows;
+}
+
+[[nodiscard]] ExplicitNullspaceActionDiagnostics
+evaluate_explicit_nullspace_action(
+    std::span<const Real> matrix,
+    std::span<const long double> normalized_basis,
+    std::size_t n,
+    std::size_t nullity,
+    std::string_view label)
+{
+    ExplicitNullspaceActionDiagnostics result;
+    result.scale = dense_matrix_max_abs(matrix);
+    long double maximum_action = 0.0L;
+    for (std::size_t row = 0; row < n; ++row) {
+        for (std::size_t mode = 0;
+             mode < nullity;
+             ++mode) {
+            long double action = 0.0L;
+            for (std::size_t column = 0;
+                 column < n;
+                 ++column) {
+                action +=
+                    static_cast<long double>(
+                        matrix[row * n + column]) *
+                    normalized_basis[column * nullity + mode];
+            }
+            maximum_action =
+                std::max(maximum_action, std::abs(action));
+        }
+    }
+    const long double tolerance =
+        512.0L *
+        static_cast<long double>(
+            std::numeric_limits<Real>::epsilon()) *
+        static_cast<long double>(std::max<std::size_t>(n, 1u)) *
+        static_cast<long double>(result.scale);
+    result.tolerance = round_nonnegative_up(
+        tolerance,
+        std::string(label) + " action tolerance");
+    result.maximum_action = round_nonnegative_up(
+        maximum_action,
+        std::string(label) + " maximum action");
+    DENSE_LINALG_CHECK(
+        maximum_action <= tolerance,
+        std::string(label) +
+            ": supplied structural mode is not in the matrix nullspace");
+    return result;
+}
+
+[[nodiscard]] ExplicitNullspaceQuotient
+build_explicit_nullspace_quotient(
+    std::span<const Real> numerator,
+    std::span<const Real> denominator,
+    std::size_t n,
+    std::span<const Real> common_nullspace,
+    std::size_t nullity,
+    std::string_view label)
+{
+    DENSE_LINALG_CHECK(
+        nullity <= n,
+        std::string(label) +
+            ": explicit nullity exceeds the pencil dimension");
+    ExplicitNullspaceQuotient result;
+    result.diagnostics.applied = nullity != 0u;
+    result.diagnostics.supplied_nullity = nullity;
+    result.diagnostics.reduced_dimension = n - nullity;
+    result.diagnostics.original_denominator_scale =
+        dense_matrix_max_abs(denominator);
+    result.diagnostics.original_numerator_scale =
+        dense_matrix_max_abs(numerator);
+
+    const std::size_t basis_size =
+        checked_dense_size_product(
+            n, nullity, label, "nullspace basis");
+    DENSE_LINALG_CHECK(
+        common_nullspace.size() == basis_size,
+        std::string(label) + ": explicit nullspace size mismatch");
+    if (nullity == 0u) {
+        result.numerator.assign(
+            numerator.begin(), numerator.end());
+        result.denominator.assign(
+            denominator.begin(), denominator.end());
+        return result;
+    }
+
+    const auto normalized_basis =
+        normalize_explicit_nullspace_columns(
+            common_nullspace, n, nullity, label);
+    const auto selected_rows =
+        select_explicit_nullspace_coordinate_rows(
+            normalized_basis,
+            n,
+            nullity,
+            result.diagnostics,
+            label);
+    const auto denominator_action =
+        evaluate_explicit_nullspace_action(
+            denominator,
+            normalized_basis,
+            n,
+            nullity,
+            std::string(label) + " denominator explicit nullspace");
+    const auto numerator_action =
+        evaluate_explicit_nullspace_action(
+            numerator,
+            normalized_basis,
+            n,
+            nullity,
+            std::string(label) + " numerator explicit nullspace");
+    result.diagnostics.denominator_action_tolerance =
+        denominator_action.tolerance;
+    result.diagnostics.maximum_denominator_action =
+        denominator_action.maximum_action;
+    result.diagnostics.numerator_action_tolerance =
+        numerator_action.tolerance;
+    result.diagnostics.maximum_numerator_action =
+        numerator_action.maximum_action;
+
+    std::vector<bool> eliminated(n, false);
+    for (const std::size_t coordinate : selected_rows) {
+        DENSE_LINALG_CHECK(
+            coordinate < n && !eliminated[coordinate],
+            std::string(label) +
+                ": explicit-nullspace coordinate selection is invalid");
+        eliminated[coordinate] = true;
+    }
+    std::vector<std::size_t> retained;
+    retained.reserve(n - nullity);
+    for (std::size_t coordinate = 0;
+         coordinate < n;
+         ++coordinate) {
+        if (!eliminated[coordinate]) {
+            retained.push_back(coordinate);
+        }
+    }
+    DENSE_LINALG_CHECK(
+        retained.size() == n - nullity,
+        std::string(label) +
+            ": explicit-nullspace coordinate quotient has the wrong size");
+
+    const std::size_t reduced_dimension = retained.size();
+    const std::size_t reduced_size =
+        checked_dense_size_product(
+            reduced_dimension,
+            reduced_dimension,
+            label,
+            "reduced square matrix");
+    result.numerator.assign(reduced_size, Real(0));
+    result.denominator.assign(reduced_size, Real(0));
+    for (std::size_t row = 0;
+         row < reduced_dimension;
+         ++row) {
+        for (std::size_t column = 0;
+             column < reduced_dimension;
+             ++column) {
+            const std::size_t source_row = retained[row];
+            const std::size_t source_column = retained[column];
+            result.numerator[row * reduced_dimension + column] =
+                numerator[source_row * n + source_column];
+            result.denominator[row * reduced_dimension + column] =
+                denominator[source_row * n + source_column];
+        }
+    }
+    return result;
 }
 
 [[nodiscard]] std::vector<long double> right_multiply_basis(
@@ -604,37 +1017,8 @@ dense_psd_generalized_eigenvalue_bound(
     std::string_view label)
 {
     const std::string label_text(label);
-    DENSE_LINALG_CHECK(
-        numerator.size() == n * n,
-        label_text + ": numerator size mismatch");
-    DENSE_LINALG_CHECK(
-        denominator.size() == n * n,
-        label_text + ": denominator size mismatch");
-    DENSE_LINALG_CHECK(
-        n > 0,
-        label_text + ": generalized eigenproblem must be nonempty");
-    for (const Real value : numerator) {
-        DENSE_LINALG_CHECK(
-            std::isfinite(value),
-            label_text + ": numerator contains a nonfinite entry");
-    }
-    for (const Real value : denominator) {
-        DENSE_LINALG_CHECK(
-            std::isfinite(value),
-            label_text + ": denominator contains a nonfinite entry");
-    }
-    for (std::size_t row = 0; row < n; ++row) {
-        for (std::size_t column = row + 1u; column < n; ++column) {
-            DENSE_LINALG_CHECK(
-                numerator[row * n + column] ==
-                    numerator[column * n + row],
-                label_text + ": numerator is not exactly symmetric");
-            DENSE_LINALG_CHECK(
-                denominator[row * n + column] ==
-                    denominator[column * n + row],
-                label_text + ": denominator is not exactly symmetric");
-        }
-    }
+    validate_psd_generalized_inputs(
+        numerator, denominator, n, label);
 
     DensePsdGeneralizedEigenvalueBound result;
     result.dimension = n;
@@ -997,6 +1381,48 @@ dense_psd_generalized_eigenvalue_bound(
                 result.largest_quotient_eigenvalue,
         label_text +
             ": conservative generalized eigenvalue bound is invalid");
+    return result;
+}
+
+DensePsdGeneralizedEigenvalueBound
+dense_psd_generalized_eigenvalue_bound_with_explicit_nullspace(
+    std::span<const Real> numerator,
+    std::span<const Real> denominator,
+    std::size_t n,
+    std::span<const Real> common_nullspace,
+    std::size_t explicit_nullity,
+    std::string_view label)
+{
+    validate_psd_generalized_inputs(
+        numerator, denominator, n, label);
+    auto quotient = build_explicit_nullspace_quotient(
+        numerator,
+        denominator,
+        n,
+        common_nullspace,
+        explicit_nullity,
+        label);
+
+    if (quotient.diagnostics.reduced_dimension == 0u) {
+        DensePsdGeneralizedEigenvalueBound result;
+        result.dimension = n;
+        result.nullity = explicit_nullity;
+        result.denominator_converged = true;
+        result.quotient_converged = true;
+        result.explicit_nullspace =
+            std::move(quotient.diagnostics);
+        return result;
+    }
+
+    auto result = dense_psd_generalized_eigenvalue_bound(
+        quotient.numerator,
+        quotient.denominator,
+        quotient.diagnostics.reduced_dimension,
+        std::string(label) + " coordinate quotient");
+    result.dimension = n;
+    result.nullity += explicit_nullity;
+    result.explicit_nullspace =
+        std::move(quotient.diagnostics);
     return result;
 }
 
