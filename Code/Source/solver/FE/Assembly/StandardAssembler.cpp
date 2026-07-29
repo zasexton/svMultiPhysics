@@ -11,6 +11,7 @@
 #include "Constraints/AffineConstraints.h"
 #include "Constraints/ConstraintDistributor.h"
 #include "Sparsity/SparsityPattern.h"
+#include "Assembly/BackgroundEntityMeasures.h"
 #include "Assembly/CutIntegrationContext.h"
 #include "Spaces/FunctionSpace.h"
 #include "Elements/Element.h"
@@ -11837,118 +11838,6 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
     KernelOutput coupling_mp;
     KernelOutput coupling_pm;
 
-    struct BackgroundEntityMeasures {
-        Real cell_diameter{0.0};
-        Real cell_measure{0.0};
-        Real facet_measure{0.0};
-    };
-
-    const auto background_entity_measures =
-        [&](GlobalIndex cell_id, GlobalIndex face_id) {
-            const auto cell_type = mesh.getCellType(cell_id);
-            const auto local_face_id =
-                mesh.getLocalFaceIndex(face_id, cell_id);
-            FE_THROW_IF(local_face_id == INVALID_LOCAL_INDEX, FEException,
-                        "StandardAssembler::assembleCutInterfaces: generated boundary rule has an invalid parent face");
-
-            const auto reference_element =
-                elements::ReferenceElement::create(cell_type);
-            const auto& face_nodes = reference_element.face_nodes(
-                static_cast<std::size_t>(local_face_id));
-            ElementType face_type = ElementType::Unknown;
-            switch (face_nodes.size()) {
-                case 2u:
-                    face_type = ElementType::Line2;
-                    break;
-                case 3u:
-                    face_type = ElementType::Triangle3;
-                    break;
-                case 4u:
-                    face_type = ElementType::Quad4;
-                    break;
-                default:
-                    FE_THROW(FEException,
-                             "StandardAssembler::assembleCutInterfaces: generated boundary rule has an unsupported parent-face topology");
-            }
-
-            const auto& test_element =
-                getElement(test_space, cell_id, cell_type);
-            const auto& trial_element =
-                getElement(trial_space, cell_id, cell_type);
-            const int measure_order = std::max(
-                {test_element.polynomial_order(),
-                 trial_element.polynomial_order(),
-                 mesh.getCellGeometryOrder(cell_id)});
-            const int quadrature_order =
-                quadrature::QuadratureFactory::recommended_order(
-                    measure_order, false);
-            const auto cell_quadrature_rule =
-                quadrature::QuadratureFactory::create(
-                    cell_type, quadrature_order);
-            const auto face_quadrature_rule =
-                quadrature::QuadratureFactory::create(
-                    face_type, quadrature_order);
-
-            std::vector<std::array<Real, 3>> coordinates;
-            mesh.getCellCoordinates(cell_id, coordinates);
-            const auto cell_geometry = geometry::evaluateCellFrame(
-                cell_type,
-                *cell_quadrature_rule,
-                coordinates);
-            FE_THROW_IF(cell_geometry.measures.size() !=
-                            cell_quadrature_rule->num_points(),
-                        FEException,
-                        "StandardAssembler::assembleCutInterfaces: background-cell geometry has an incompatible quadrature size");
-
-            const auto face_geometry = geometry::evaluateFaceFrame(
-                cell_type,
-                local_face_id,
-                face_type,
-                *face_quadrature_rule,
-                coordinates,
-                {},
-                false,
-                false);
-            FE_THROW_IF(face_geometry.surface_measures.size() !=
-                            face_quadrature_rule->num_points(),
-                        FEException,
-                        "StandardAssembler::assembleCutInterfaces: parent-face geometry has an incompatible quadrature size");
-
-            BackgroundEntityMeasures measures;
-            for (std::size_t a = 0u; a < coordinates.size(); ++a) {
-                for (std::size_t b = a + 1u; b < coordinates.size(); ++b) {
-                    const Real dx = coordinates[a][0] - coordinates[b][0];
-                    const Real dy = coordinates[a][1] - coordinates[b][1];
-                    const Real dz = coordinates[a][2] - coordinates[b][2];
-                    measures.cell_diameter = std::max(
-                        measures.cell_diameter,
-                        std::sqrt(dx * dx + dy * dy + dz * dz));
-                }
-            }
-            for (std::size_t q = 0u;
-                 q < cell_quadrature_rule->num_points();
-                 ++q) {
-                measures.cell_measure += cell_quadrature_rule->weight(q) *
-                                         cell_geometry.measures[q];
-            }
-            for (std::size_t q = 0u;
-                 q < face_quadrature_rule->num_points();
-                 ++q) {
-                measures.facet_measure +=
-                    face_quadrature_rule->weight(q) *
-                    face_geometry.surface_measures[q];
-            }
-            FE_THROW_IF(!std::isfinite(measures.cell_diameter) ||
-                            !(measures.cell_diameter > Real{0.0}) ||
-                            !std::isfinite(measures.cell_measure) ||
-                            !(measures.cell_measure > Real{0.0}) ||
-                            !std::isfinite(measures.facet_measure) ||
-                            !(measures.facet_measure > Real{0.0}),
-                        FEException,
-                        "StandardAssembler::assembleCutInterfaces: generated boundary rule has nonpositive background entity measures");
-            return measures;
-        };
-
     withDevirtualizedKernel(kernel, [&](auto& kernel_impl) {
         for (const auto* rule_ptr : selected_rules) {
             FE_CHECK_NOT_NULL(rule_ptr, "StandardAssembler::assembleCutInterfaces: cut-interface rule");
@@ -11996,13 +11885,20 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
             BackgroundEntityMeasures parent_measures;
             if (hasFlag(required_data, RequiredData::EntityMeasures) &&
                 rule.provenance.parent_boundary_entity >= 0) {
-                parent_measures = background_entity_measures(
+                const auto& measure_test_element =
+                    getElement(test_space, cell_id, cell_type);
+                const auto& measure_trial_element =
+                    getElement(trial_space, cell_id, cell_type);
+                parent_measures = computeBackgroundEntityMeasures(
+                    mesh,
                     cell_id,
                     static_cast<GlobalIndex>(
-                        rule.provenance.parent_boundary_entity));
+                        rule.provenance.parent_boundary_entity),
+                    measure_test_element.polynomial_order(),
+                    measure_trial_element.polynomial_order());
                 context_.setEntityMeasures(parent_measures.cell_diameter,
-                                           parent_measures.cell_measure,
-                                           parent_measures.facet_measure);
+                                           parent_measures.physical_cell_measure,
+                                           parent_measures.physical_parent_face_measure);
             }
 
             if (use_two_sided_kernel) {
@@ -12012,11 +11908,12 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
                 remapCutInterfaceGeometry(
                     context_plus, rule, mesh.dimension(), "StandardAssembler::assembleCutInterfaces");
                 context_plus.markEmbeddedBoundaryFace(cell_id, LocalIndex{0}, active_marker);
-                if (parent_measures.facet_measure > Real{0.0}) {
+                if (parent_measures.physical_parent_face_measure >
+                    Real{0.0}) {
                     context_plus.setEntityMeasures(
                         parent_measures.cell_diameter,
-                        parent_measures.cell_measure,
-                        parent_measures.facet_measure);
+                        parent_measures.physical_cell_measure,
+                        parent_measures.physical_parent_face_measure);
                 }
                 orientGeneratedInterfaceContextForSide(
                     context_, two_sided_binding->minus_side);

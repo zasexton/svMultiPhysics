@@ -776,6 +776,7 @@ set(FE_ASSEMBLY_HEADERS
     Assembly/ContactPairContext.h
     Assembly/CutDomainAssembler.h
     Assembly/CutIntegrationContext.h
+    Assembly/BackgroundEntityMeasures.h
     Assembly/BatchedProjection.h
     Assembly/BatchedStiffness.h
     Assembly/InterfacePairContext.h
@@ -813,6 +814,7 @@ set(FE_ASSEMBLY_SOURCES
     Assembly/GlobalSystemView.cpp
     Assembly/AssemblyKernel.cpp
     Assembly/AssemblyContext.cpp
+    Assembly/BackgroundEntityMeasures.cpp
     Assembly/BatchedProjection.cpp
     Assembly/BatchedStiffness.cpp
     Assembly/StandardAssembler.cpp

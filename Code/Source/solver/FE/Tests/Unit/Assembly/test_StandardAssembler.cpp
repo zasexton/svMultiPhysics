@@ -21,6 +21,7 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/StandardAssembler.h"
+#include "Assembly/BackgroundEntityMeasures.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/Assembler.h"
@@ -210,6 +211,49 @@ public:
 private:
     mutable int cell_coordinate_calls_{0};
 };
+
+class BackgroundMeasureMockMeshAccess final : public MockMeshAccess {
+public:
+    [[nodiscard]] LocalIndex getLocalFaceIndex(
+        GlobalIndex face_id,
+        GlobalIndex cell_id) const override
+    {
+        if (face_id == GlobalIndex{17} &&
+            cell_id == GlobalIndex{0}) {
+            return LocalIndex{2};
+        }
+        return INVALID_LOCAL_INDEX;
+    }
+};
+
+TEST(BackgroundEntityMeasures, UnitTetraUsesBackgroundCellAndParentFace)
+{
+    BackgroundMeasureMockMeshAccess mesh;
+    const auto measures = computeBackgroundEntityMeasures(
+        mesh,
+        /*cell_id=*/0,
+        /*parent_face_id=*/17,
+        /*test_polynomial_order=*/1,
+        /*trial_polynomial_order=*/1);
+
+    EXPECT_NEAR(
+        measures.cell_diameter,
+        std::sqrt(Real{2.0}),
+        Real{1.0e-14});
+    EXPECT_NEAR(
+        measures.physical_cell_measure,
+        Real{1.0} / Real{6.0},
+        Real{1.0e-14});
+    EXPECT_NEAR(
+        measures.physical_parent_face_measure,
+        std::sqrt(Real{3.0}) / Real{2.0},
+        Real{1.0e-14});
+    EXPECT_NEAR(
+        measures.h_normal,
+        Real{2.0} /
+            (Real{3.0} * std::sqrt(Real{3.0})),
+        Real{1.0e-14});
+}
 
 /**
  * @brief Single non-affine Quad4 mesh for Hessian transform regression tests
@@ -2108,6 +2152,41 @@ public:
         for (LocalIndex q = 0; q < ctx_minus.numQuadraturePoints(); ++q) {
             output_minus.vectorEntry(0) += ctx_minus.integrationWeight(q);
         }
+    }
+};
+
+class CutInterfaceEntityMeasuresKernel final : public AssemblyKernel {
+public:
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::EntityMeasures;
+    }
+
+    void computeCell(const AssemblyContext&, KernelOutput&) override {}
+
+    [[nodiscard]] bool hasInterfaceFace() const noexcept override { return true; }
+
+    void computeInterfaceFace(const AssemblyContext& ctx_minus,
+                              const AssemblyContext&,
+                              int,
+                              KernelOutput& output_minus,
+                              KernelOutput& output_plus,
+                              KernelOutput& coupling_mp,
+                              KernelOutput& coupling_pm) override
+    {
+        const auto n_test = ctx_minus.numTestDofs();
+        const auto n_trial = ctx_minus.numTrialDofs();
+        output_minus.reserve(n_test, n_trial, false, true);
+        output_plus.reserve(n_test, n_trial, false, false);
+        coupling_mp.reserve(n_test, n_trial, false, false);
+        coupling_pm.reserve(n_test, n_trial, false, false);
+
+        output_minus.vectorEntry(0) = ctx_minus.cellDiameter();
+        output_minus.vectorEntry(1) = ctx_minus.cellVolume();
+        output_minus.vectorEntry(2) = ctx_minus.facetArea();
+        output_minus.vectorEntry(3) =
+            Real{2.0} * ctx_minus.cellVolume() /
+            ctx_minus.facetArea();
     }
 };
 
@@ -4188,6 +4267,42 @@ TEST(StandardAssemblerCutInterfaces,
     };
 
     EXPECT_NEAR(assemble_measure(half_wet), 1.0, 1.0e-14);
+
+    DenseVectorView entity_measures(4);
+    CutIntegrationContext entity_context;
+    entity_context.addGeneratedActiveBoundaryDomain(half_wet);
+    StandardAssembler entity_assembler;
+    entity_assembler.setDofMap(dof_map);
+    entity_assembler.initialize();
+    CutInterfaceEntityMeasuresKernel entity_kernel;
+    const auto entity_result = entity_assembler.assembleCutInterfaces(
+        mesh,
+        entity_context,
+        marker,
+        space,
+        space,
+        entity_kernel,
+        nullptr,
+        &entity_measures,
+        /*assemble_matrix=*/false,
+        /*assemble_vector=*/true);
+    ASSERT_TRUE(entity_result.success);
+    EXPECT_NEAR(
+        entity_measures.getVectorEntry(0),
+        std::sqrt(Real{5.0}),
+        Real{1.0e-14});
+    EXPECT_NEAR(
+        entity_measures.getVectorEntry(1),
+        Real{2.0},
+        Real{1.0e-14});
+    EXPECT_NEAR(
+        entity_measures.getVectorEntry(2),
+        Real{2.0},
+        Real{1.0e-14});
+    EXPECT_NEAR(
+        entity_measures.getVectorEntry(3),
+        Real{2.0},
+        Real{1.0e-14});
 
     interfaces::GeneratedActiveBoundaryDomain fully_dry(request);
     EXPECT_EQ(assemble_measure(fully_dry), 0.0);
