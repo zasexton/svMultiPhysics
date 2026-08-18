@@ -549,14 +549,15 @@ checksum-bound evidence.
 Execution also remains fail closed on resources. The runner requires
 `MemAvailable >= 10240 MiB` before it starts, retains `4096 MiB` host-memory
 and filesystem-free-space floors while every build or test subprocess
-session is live, forces clean builds to one job, caps each spawned build
-process at `1536 MiB` of address space, keeps each focused test process at
-its `1024 MiB` group ceiling, applies per-file output limits, and pins common
-threaded numerical runtimes to one thread. Each of the four focused test
-groups has a `64 MiB` artifact envelope. Build-target inventory decoding is
-limited to `8 MiB`. Linked-library provenance runs in the same monitored
-process-session path with a `60 s`, `256 MiB`, and `4 MiB` time, memory, and
-output envelope and fails closed on launch, monitoring, process, or parse
-failure. Resource-floor, monitoring, cleanup, process-coverage, or bounded
-post-processing failures are method failures rather than qualification
-evidence.
+session is live, forces clean builds to one job, enforces a `1536 MiB`
+ceiling for both per-process build address space and sampled aggregate
+resident memory across the build process session, keeps each focused test
+process at its `1024 MiB` group ceiling, applies per-file output limits, and
+pins common threaded numerical runtimes to one thread. Each of the four
+focused test groups has a `64 MiB` artifact envelope. Build-target inventory
+decoding is limited to `8 MiB`. Linked-library provenance runs in the same
+monitored process-session path with a `60 s`, `256 MiB`, and `4 MiB` time,
+memory, and output envelope and fails closed on launch, monitoring, process,
+or parse failure. Resource-floor, monitoring, cleanup, process-coverage, or
+bounded post-processing failures are method failures rather than
+qualification evidence.
