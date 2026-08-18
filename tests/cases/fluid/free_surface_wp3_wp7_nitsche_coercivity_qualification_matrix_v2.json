@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "matrix_id": "free_surface_wp3_wp7_symmetric_nitsche_certified_trace_prerequisite_v2",
-  "status": "DRAFT_UNEXECUTED",
-  "status_reason": "The certificate implementation and qualification runner are concurrent worktree artifacts. The observed source hashes below are an inventory snapshot, not a frozen execution baseline, and no v2 qualification evidence has been executed.",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "status_reason": "The implementation sources and v2 runner are frozen before execution at the recorded commit and SHA-256 locks. No v2 qualification evidence has been executed.",
   "work_package": "WP-3/WP-7",
   "findings": [
     "FSR-16",
@@ -36,12 +36,12 @@
     "wp7": "OPEN",
     "q1": "OPEN"
   },
-  "implementation_source_commit": null,
+  "implementation_source_commit": "990b7e15f1ab1ea47a415d0dc0f281e827f75d6c",
   "method_coercivity_lower_bound": null,
   "uniform_bound_status": "UNFROZEN_NO_BOUND_INVENTED",
   "matching_derivation": "Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method_v2.md",
   "proposed_runner": "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification_v2.py",
-  "runner_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "runner_sha256": "f307e6bf1c9cc73d33d858e5673ce683ea3034f6267bb7ca06aae19da9042b4a",
   "qualification_bundle_binding": {
     "authority": "reciprocal_SHA256_plus_clean_qualification_execution_HEAD",
     "matrix_sha256_source": "runner_embedded_normalized_matrix_SHA256",
@@ -79,11 +79,11 @@
     }
   },
   "draft_promotion_contract": {
-    "current_state": "DRAFT_UNEXECUTED",
-    "source_hashes_frozen": false,
+    "current_state": "FROZEN_BEFORE_EXECUTION",
+    "source_hashes_frozen": true,
     "qualification_evidence_executed": false,
     "validate_only_allowed": true,
-    "execution_allowed": false,
+    "execution_allowed": true,
     "required_execution_state": "FROZEN_BEFORE_EXECUTION",
     "promotion_requirements": [
       "stabilize every implementation and evidence source in the inventory",
@@ -109,16 +109,16 @@
       "sha256": "abc782ef828b3fd3996257f5544f85221d9c6d047b1cf730848ac93b695c6ead"
     }
   ],
-  "source_inventory_hash_status": "DRAFT_OBSERVED_NOT_FROZEN",
+  "source_inventory_hash_status": "FROZEN",
   "implementation_sources": [
     {
       "path": "Code/Source/solver/FE/Analysis/GeneratedBoundaryAggregateTraceCertificate.h",
-      "sha256": "2c86846dd8060eefbb894367c5c1500f73c9c5b10abc91c67d8ee1c40981ae08",
+      "sha256": "4ed2f971a57fd319bff6da53684de3699922944ba38de2ba7fc8e39b4a15084e",
       "role": "public certificate envelope and result contract"
     },
     {
       "path": "Code/Source/solver/FE/Analysis/GeneratedBoundaryAggregateTraceCertificate.cpp",
-      "sha256": "a907d4f3ad50519ba6acb7943dfb2d09609a2e75b4aff7d342406220534a944a",
+      "sha256": "baf9ab500e8cab26df4508af2178f85debfcb43f2208ccb3a08c73d6a76522f6",
       "role": "collective patch construction and deterministic generalized trace certification"
     },
     {
@@ -143,7 +143,7 @@
     },
     {
       "path": "Code/Source/solver/FE/Interfaces/FreeSurfaceGeometrySnapshot.cpp",
-      "sha256": "e48adfbe31050c19ee8025bb87cbfbcebb780f083065053e381b24a9765651cf",
+      "sha256": "53fab252ba8575c464f3e42e92f590fc9cd30fc734ff6b2f6508d97df79309a9",
       "role": "authoritative free-surface geometry snapshot implementation"
     },
     {
@@ -158,12 +158,12 @@
     },
     {
       "path": "Code/Source/solver/FE/Math/DenseLinearAlgebra.h",
-      "sha256": "ebd21c2a96deecf63d4f884d99768983f244a06cea7798e054f78fb3c6d5e778",
+      "sha256": "d713f8747f4555393cb9213ec2aaf0ce7ae61bcc5b001e762133b84b1ebb8359",
       "role": "floating diagnostics plus exact dense and factorized binary64-dyadic generalized-bound contracts"
     },
     {
       "path": "Code/Source/solver/FE/Math/DenseExactDyadic.cpp",
-      "sha256": "9333a9d6d09b923c76d71563dfcad2baa5a7226538349805f0c555054006ae01",
+      "sha256": "8180aeda02cf87ded2eb5d7d8739a255935e70c48f76eb07a6b64a3a9ddff34f",
       "role": "authoritative exact binary64-dyadic dense and factorized positive-Gram quotient certification"
     },
     {
@@ -173,22 +173,22 @@
     },
     {
       "path": "Code/Source/solver/FE/Tests/Unit/Math/test_DenseLinearAlgebra.cpp",
-      "sha256": "15835e76e963fc21e33640670dfe81b970413200b04692a5130d933ad1cf21b2",
+      "sha256": "a8b80a09a7e9d35c43eaeb5b64790339628f95fb4f4b6810f11cd594eff2bbe1",
       "role": "floating, exact-dense, and exact-factorized generalized-bound evidence"
     },
     {
       "path": "Code/Source/solver/FE/Constraints/SmallCutAggregationConstraint.h",
-      "sha256": "05e050e52ac87b0a883f6ea92f5346496657d2b5f25db2769298c9ed296c3c83",
+      "sha256": "55907dcae0c750e76b92cd212ff0b9c07394acabfcec2c28b795fb691f2219be",
       "role": "trace-eligible finalized aggregation report schema"
     },
     {
       "path": "Code/Source/solver/FE/Constraints/SmallCutAggregationConstraint.cpp",
-      "sha256": "2af1e4415fd756e16ad9f0d2b9e057a95a566ad9eb813483cc971c6457a11642",
+      "sha256": "a7d7c94f077e529ac282b4a0c5cb74505ba63ca8ced77241284916775dbc0426",
       "role": "canonical closed-tangent aggregation report production"
     },
     {
       "path": "Code/Source/solver/FE/Tests/Unit/Constraints/test_SmallCutAggregationConstraint.cpp",
-      "sha256": "3521cccbc9118409bf0bcaf33478527c0fd5c4297c4d23b15deb1a2059b118fc",
+      "sha256": "80912e12d30e497f7e2139b4d86ac04d89afdc54a9a14975eda19a8ac088af35",
       "role": "immutable aggregation metadata and closed-tangent report evidence"
     },
     {
@@ -213,12 +213,12 @@
     },
     {
       "path": "Code/Source/solver/FE/Systems/FESystem.h",
-      "sha256": "6b0fc46dc4224eb21dbd94b43685c6f8c72b462da590d43a385b985613459b4b",
+      "sha256": "fccc5747b06471bde22a109b32319d16d90809783bf4e103fc2f7304828cdaa5",
       "role": "policy, record, cache, and public lifecycle interfaces"
     },
     {
       "path": "Code/Source/solver/FE/Systems/FESystem.cpp",
-      "sha256": "1c0acf551c6a3a0a4925bb90a801a7c87e5698bec09b77640d44a135766c3471",
+      "sha256": "e15ab2ce7d3158c9636ca276017e6082d3f639385640121a9c54103c1ccdfc10",
       "role": "eager certification, symmetric grouping, revision validation, and collective agreement"
     },
     {
@@ -278,22 +278,22 @@
     },
     {
       "path": "Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
-      "sha256": "864bab4d575db2b8c1dae66a4d920380025fa7a45ab5b99a3bf7b8d314a20bd9",
+      "sha256": "af5509ff955194f7d916d7419781baaa2fafc1709befcb32909d8c4670754bc9",
       "role": "serial analytic, aggregation, policy-threshold, invalidation, and unsymmetric evidence"
     },
     {
       "path": "Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedBoundaryAggregateTraceCertificateMPI.cpp",
-      "sha256": "233eaf0c511a6b3e254ae5ee0c8dbeea0dda56b818255650b6015008d34d335d",
+      "sha256": "2213e6450fd3cbdc7964c1c15cf992c660317bf2edab91d33437203b7bdc116e",
       "role": "exact two-rank cross-owner aggregation and collective certificate evidence"
     },
     {
       "path": "Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp",
-      "sha256": "35ca64d07f3db7f61185d692e2f29fbb27c9ce59e9eca139d3542316fc2ce373",
+      "sha256": "aff34fc54e26f2fd0cf23ebe9efdea7c1879c4ef21c0629dc319a60368ab9a51",
       "role": "108-case certified-trace versus finite-sample spectrum diagnostic"
     },
     {
       "path": "Code/Source/solver/Physics/Tests/Unit/test_MovingDomainPhysics.cpp",
-      "sha256": "0e690c88860c52567ea727fc09a2ec489729e2a99255bf791d052b75780c54db",
+      "sha256": "9b20993c96e41bc92c03f72dcc1528ee7c026b6c7d420f029a576ce119d12995",
       "role": "production generated-boundary form-binding provenance evidence"
     },
     {
@@ -308,7 +308,7 @@
     },
     {
       "path": "Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method_v2.md",
-      "sha256": "6a74b3d4a82c7f0d4cfbcf5cead6a5b1cb467645769b9bcfbd39fca335905e5e",
+      "sha256": "e2befd01d7fbd5b8a2d1f5c470968af49242b461caf8119bcafa1493c9538061",
       "role": "matching finite-dimensional prerequisite derivation and claim boundary"
     },
     {
