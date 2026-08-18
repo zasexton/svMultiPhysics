@@ -424,6 +424,21 @@ TEST_F(MatrixTest, LazyEvaluation) {
     EXPECT_EQ(result(0, 1), 8.0);
 }
 
+TEST_F(MatrixTest, StoredExpressionOwnsTemporaryOperands) {
+    Matrix<double, 2, 2> a{{1.0, 2.0}, {3.0, 4.0}};
+    Matrix<double, 2, 2> b{{0.5, 1.0}, {1.5, 2.0}};
+
+    auto expr =
+        a + Matrix<double, 2, 2>{{4.0, 5.0}, {6.0, 7.0}} -
+        b.transpose() * 2.0;
+    Matrix<double, 2, 2> result = expr;
+
+    EXPECT_DOUBLE_EQ(result(0, 0), 4.0);
+    EXPECT_DOUBLE_EQ(result(0, 1), 4.0);
+    EXPECT_DOUBLE_EQ(result(1, 0), 7.0);
+    EXPECT_DOUBLE_EQ(result(1, 1), 7.0);
+}
+
 // =============================================================================
 // Edge Cases and Error Handling Tests
 // =============================================================================

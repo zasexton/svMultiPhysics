@@ -457,7 +457,6 @@ std::shared_ptr<assembly::CutIntegrationContext> makePublishedCutContext(
     const std::vector<CellRuleSpec>& specs,
     std::uint64_t source_value_revision)
 {
-    auto context = std::make_shared<assembly::CutIntegrationContext>();
     interfaces::CutInterfaceDomainRequest request;
     request.source = interfaces::LevelSetInterfaceSource::fromField(
         /*field_id=*/91,
@@ -469,14 +468,34 @@ std::shared_ptr<assembly::CutIntegrationContext> makePublishedCutContext(
     request.isovalue = Real{0.0};
     request.quadrature_policy_key = 23u;
     request.frame = geometry::CutGeometryFrame::Current;
-    context->addGeneratedInterfaceDomain(
-        interfaces::LevelSetInterfaceDomain(request));
+
+    interfaces::LevelSetInterfaceDomain domain(request);
     for (const auto& spec : specs) {
-        addCellRule(*context,
-                    spec,
+        interfaces::CutInterfaceVolumeRegion region;
+        region.interface_marker = kInterfaceMarker;
+        region.parent_cell = spec.cell;
+        region.parent_cell_global_id = spec.cell;
+        region.local_region_index = 0;
+        region.stable_id =
+            spec.cut_topology_revision.value_or(
+                interfaces::cutVolumeStableId(
+                    kInterfaceMarker,
+                    spec.cell,
+                    /*local_region_index=*/0,
                     geometry::CutIntegrationSide::Negative,
-                    source_value_revision);
+                    /*source_revision=*/1u));
+        region.side =
+            geometry::CutIntegrationSide::Negative;
+        region.parent_measure = Real{1.0};
+        region.measure = spec.volume_fraction;
+        region.volume_fraction = spec.volume_fraction;
+        region.full_cell_equivalent =
+            spec.full_cell_equivalent;
+        domain.addVolumeRegion(std::move(region));
     }
+
+    auto context = std::make_shared<assembly::CutIntegrationContext>();
+    context->addGeneratedInterfaceDomain(domain);
     return context;
 }
 

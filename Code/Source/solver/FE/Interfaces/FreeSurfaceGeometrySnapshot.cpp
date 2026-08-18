@@ -1587,7 +1587,8 @@ makeMomentCertificateFromSamples(
     mix(hash, contract_tag);
     mix(hash, region.parent_corner_topology_key);
     mix(hash, static_cast<std::uint64_t>(region.side));
-    mix(hash, region.full_cell_equivalent ? 1u : 0u);
+    mix(hash, static_cast<std::uint64_t>(
+                  region.full_cell_equivalent ? 1u : 0u));
     return hash == 0u ? 1u : hash;
 }
 
@@ -1621,7 +1622,8 @@ makeMomentCertificateFromSamples(
         0x4653414354565031ull; // "FSACTVP1"
     mix(hash, contract_tag);
     mix(hash, static_cast<std::uint64_t>(fragment.side));
-    mix(hash, fragment.full_face_equivalent ? 1u : 0u);
+    mix(hash, static_cast<std::uint64_t>(
+                  fragment.full_face_equivalent ? 1u : 0u));
     mix(hash, static_cast<std::uint64_t>(fragment.vertices.size()));
     const auto incidences = parentBoundaryIncidences(
         fragment.vertices, parent_element_type, tolerance);

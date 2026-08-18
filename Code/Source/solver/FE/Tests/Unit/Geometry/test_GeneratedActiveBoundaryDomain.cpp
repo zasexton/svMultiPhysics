@@ -2877,6 +2877,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     const std::array<int, 2> active_markers{{negative.marker(),
                                              positive.marker()}};
     auto stale_active_request = negative.request();
+    ++stale_active_request.source.value_revision;
     ++stale_active_request.source_value_revision;
     interfaces::GeneratedActiveBoundaryDomain stale_active(
         stale_active_request);

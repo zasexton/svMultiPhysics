@@ -3026,6 +3026,7 @@ TEST(TimeLoopCallbacks,
     using StateSyncPoint = svmp::FE::timestepping::NewtonOptions::
         StateSynchronizationPoint;
 
+    constexpr double rho_inf = 0.5;
     const std::vector<Real> initial_u_dot = {0.25, -0.5, 0.75, -1.0};
     auto rate_factory = ts_test::createTestFactory();
     ASSERT_NE(rate_factory.get(), nullptr);
@@ -4906,6 +4907,7 @@ TEST(TimeLoopConvergence,
         svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
 
     static constexpr double dt = 0.1;
+    static constexpr double rho_inf = 0.5;
     static constexpr double stage_time = 1.0 / 15.0;
     static constexpr double predictor_scale = 14.0 / 15.0;
     static constexpr double stage_scale = 74.0 / 79.0;

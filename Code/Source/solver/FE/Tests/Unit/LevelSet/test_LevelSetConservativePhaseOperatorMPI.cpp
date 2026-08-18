@@ -723,6 +723,8 @@ TEST(LevelSetConservativePhaseOperatorMPI,
     }
 
     std::fill(indicator.begin(), indicator.end(), FE::Real{0.4});
+    std::fill(lower.begin(), lower.end(), FE::Real{0.4});
+    std::fill(upper.begin(), upper.end(), FE::Real{0.4});
     const auto constant_stage =
         level_set::advanceLevelSetP1ConservativePhaseStage(
             graph, indicator, lower, upper, velocity,

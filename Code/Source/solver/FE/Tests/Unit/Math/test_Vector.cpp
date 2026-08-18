@@ -348,6 +348,18 @@ TEST_F(VectorTest, LazyEvaluation) {
     EXPECT_EQ(result[2], 9.0);
 }
 
+TEST_F(VectorTest, StoredExpressionOwnsTemporaryOperands) {
+    Vector<double, 3> a{1.0, 2.0, 3.0};
+    Vector<double, 3> b{0.5, 1.0, 1.5};
+
+    auto expr = a + Vector<double, 3>{4.0, 5.0, 6.0} - b * 2.0;
+    Vector<double, 3> result = expr;
+
+    EXPECT_DOUBLE_EQ(result[0], 4.0);
+    EXPECT_DOUBLE_EQ(result[1], 5.0);
+    EXPECT_DOUBLE_EQ(result[2], 6.0);
+}
+
 TEST_F(VectorTest, MixedExpressions) {
     Vector<double, 3> a{1.0, 2.0, 3.0};
     Vector<double, 3> b{4.0, 5.0, 6.0};

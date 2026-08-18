@@ -760,7 +760,7 @@ makeGeneratedExteriorContext(FieldId source_field,
 } // namespace
 
 TEST(FormsInstaller,
-     GeneratedExteriorSelectorSetupFailsPendingContextAndRetries)
+     GeneratedExteriorSelectorSetupAllowsPendingContextAndRuntimeRetries)
 {
     namespace forms = svmp::FE::forms;
     namespace systems = svmp::FE::systems;
@@ -815,18 +815,35 @@ TEST(FormsInstaller,
     systems::SetupInputs inputs;
     inputs.topology_override =
         singleTetraTopology();
+    EXPECT_NO_THROW(sys.setup({}, inputs));
+    EXPECT_TRUE(sys.isSetup());
+
+    const auto n_dofs =
+        sys.dofHandler().getNumDofs();
+    std::vector<svmp::FE::Real> solution(
+        static_cast<std::size_t>(n_dofs),
+        svmp::FE::Real{0.0});
+    systems::SystemStateView state;
+    state.u = solution;
+    systems::AssemblyRequest request;
+    request.op = "op";
+    request.want_matrix = true;
+    request.want_vector = true;
+    svmp::FE::assembly::DenseSystemView out(n_dofs);
+
     EXPECT_THROW(
-        sys.setup({}, inputs),
+        (void)sys.assemble(
+            request, state, &out, &out),
         systems::InvalidStateException);
-    EXPECT_FALSE(sys.isSetup());
 
     sys.setCutIntegrationContext(
         makeGeneratedExteriorContext(
             u_field,
             physical_marker,
             active_marker));
-    EXPECT_NO_THROW(sys.setup({}, inputs));
-    EXPECT_TRUE(sys.isSetup());
+    EXPECT_NO_THROW(
+        (void)sys.assemble(
+            request, state, &out, &out));
 }
 
 TEST(FormsInstaller,

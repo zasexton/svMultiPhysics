@@ -405,7 +405,7 @@ TEST(FormCompilerTest,
         std::invalid_argument);
     EXPECT_THROW(
         (void)compiler.compileBilinear(
-            (average(u) * average(v))
+            (avg(u) * avg(v))
                 .dExteriorBoundary(active)),
         std::invalid_argument);
 

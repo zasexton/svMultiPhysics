@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "FE/Basis/LagrangeBasis.h"
+#include "FE/Basis/VectorBasis.h"
 #include "FE/Dofs/DofHandler.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Dofs/GhostDofManager.h"

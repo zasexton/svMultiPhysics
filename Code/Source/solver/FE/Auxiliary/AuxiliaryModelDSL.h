@@ -314,21 +314,21 @@ public:
     template<typename... Names>
     [[nodiscard]] auto params(Names&&... names)
     {
-        return std::make_tuple(param(std::string(std::forward<Names>(names)))...);
+        return std::tuple{param(std::string(std::forward<Names>(names)))...};
     }
 
     /// Declare multiple states (all Differential) and return as a tuple.
     template<typename... Names>
     [[nodiscard]] auto states(Names&&... names)
     {
-        return std::make_tuple(state(std::string(std::forward<Names>(names)))...);
+        return std::tuple{state(std::string(std::forward<Names>(names)))...};
     }
 
     /// Declare multiple inputs (all size=1) and return as a tuple.
     template<typename... Names>
     [[nodiscard]] auto inputs(Names&&... names)
     {
-        return std::make_tuple(input(std::string(std::forward<Names>(names)))...);
+        return std::tuple{input(std::string(std::forward<Names>(names)))...};
     }
 
     /// Declare multiple parameters and return as a vector.

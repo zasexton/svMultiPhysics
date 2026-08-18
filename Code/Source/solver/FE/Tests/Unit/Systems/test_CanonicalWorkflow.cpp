@@ -421,23 +421,34 @@ TEST(CanonicalWorkflow, SameSpace_SameName_DifferentBindings)
     (void)sys->assemble(req, state, &out, &out);
 
     // T block (rows 0-3, cols 0-3) should have k_T=1 scaling
-    // C block (rows 4-7, cols 4-7) should have k_C=10 scaling
-    // If mapping is correct, C block norm should be ~100x larger than T block norm
+    // and C block (rows 4-7, cols 4-7) should have k_C=10 scaling.
+    // Automatic gauges add unscaled algebraic rows to both blocks, so compare
+    // the corresponding unconstrained sub-blocks where the form scaling is
+    // preserved.
     double T_block_norm = 0.0, C_block_norm = 0.0;
-    for (GlobalIndex i = 0; i < 4; ++i)
-        for (GlobalIndex j = 0; j < 4; ++j)
-            T_block_norm += out.getMatrixEntry(i, j) * out.getMatrixEntry(i, j);
-    for (GlobalIndex i = 4; i < 8; ++i)
-        for (GlobalIndex j = 4; j < 8; ++j)
-            C_block_norm += out.getMatrixEntry(i, j) * out.getMatrixEntry(i, j);
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        ASSERT_EQ(sys->constraints().isConstrained(i),
+                  sys->constraints().isConstrained(i + 4));
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            if (sys->constraints().isConstrained(i) ||
+                sys->constraints().isConstrained(j)) {
+                continue;
+            }
+            const auto T_entry = out.getMatrixEntry(i, j);
+            const auto C_entry = out.getMatrixEntry(i + 4, j + 4);
+            T_block_norm += T_entry * T_entry;
+            C_block_norm += C_entry * C_entry;
+        }
+    }
 
     EXPECT_GT(T_block_norm, 0.0) << "T diagonal block should be non-zero";
     EXPECT_GT(C_block_norm, 0.0) << "C diagonal block should be non-zero";
 
     // k_C/k_T = 10 → Frobenius norms scale quadratically → ratio ~100
     const double ratio = C_block_norm / T_block_norm;
-    EXPECT_NEAR(ratio, 100.0, 1.0)
-        << "C block (k=10) should have ~100x the Frobenius norm² of T block (k=1). "
+    EXPECT_NEAR(ratio, 100.0, 1.0e-10)
+        << "C block (k=10) should have 100x the unconstrained Frobenius norm² "
+           "of T block (k=1). "
            "Got ratio=" << ratio << ". If ~1.0, rows are swapped.";
 }
 

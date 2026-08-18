@@ -576,7 +576,7 @@ TEST(AuxiliaryInputRegistry, FrozenPlanRejectsStaleForeignAndRepeatedUse)
     auto stale = first.prepareEvaluation(0.0, 0.1);
     first.markDirty("value");
     EXPECT_THROW(first.executeEvaluationPlan(stale),
-                 svmp::FE::InvalidStateException);
+                 svmp::FE::systems::InvalidStateException);
     EXPECT_EQ(calls, 0);
 
     auto foreign = first.prepareEvaluation(0.0, 0.1);
@@ -590,7 +590,7 @@ TEST(AuxiliaryInputRegistry, FrozenPlanRejectsStaleForeignAndRepeatedUse)
     first.executeEvaluationPlan(executable);
     EXPECT_EQ(calls, 1);
     EXPECT_THROW(first.executeEvaluationPlan(executable),
-                 svmp::FE::InvalidStateException);
+                 svmp::FE::systems::InvalidStateException);
     EXPECT_EQ(calls, 1);
 }
 
@@ -610,7 +610,7 @@ TEST(AuxiliaryInputRegistry, FrozenPlanPublishesOnlyAfterExplicitCommit)
 
     EXPECT_THROW(
         reg.stageNextEvaluation(plan),
-        svmp::FE::InvalidStateException);
+        svmp::FE::systems::InvalidStateException);
     EXPECT_TRUE(reg.canCommitStagedEvaluation(plan));
     reg.commitStagedEvaluation(plan);
     EXPECT_FALSE(plan.hasStagedEvaluation());
@@ -618,7 +618,7 @@ TEST(AuxiliaryInputRegistry, FrozenPlanPublishesOnlyAfterExplicitCommit)
     EXPECT_DOUBLE_EQ(reg.get("staged"), 19.0);
     EXPECT_THROW(
         reg.commitStagedEvaluation(plan),
-        svmp::FE::InvalidStateException);
+        svmp::FE::systems::InvalidStateException);
 }
 
 TEST(AuxiliaryInputRegistry, AbandonedStagedResultRemainsDue)
@@ -655,7 +655,7 @@ TEST(AuxiliaryInputRegistry, DirectWriteInvalidatesStagedPublication)
     EXPECT_FALSE(reg.canCommitStagedEvaluation(plan));
     EXPECT_THROW(
         reg.commitStagedEvaluation(plan),
-        svmp::FE::InvalidStateException);
+        svmp::FE::systems::InvalidStateException);
     EXPECT_DOUBLE_EQ(reg.get("staged"), 13.0);
 }
 
@@ -675,7 +675,7 @@ TEST(AuxiliaryInputRegistry, MutableAccessInvalidatesStagedPublication)
     EXPECT_FALSE(reg.canCommitStagedEvaluation(plan));
     EXPECT_THROW(
         reg.commitStagedEvaluation(plan),
-        svmp::FE::InvalidStateException);
+        svmp::FE::systems::InvalidStateException);
     EXPECT_DOUBLE_EQ(reg.get("staged"), 17.0);
 }
 
@@ -714,7 +714,7 @@ TEST(AuxiliaryInputRegistry, FrozenPlanRejectsCallbackLifecycleMutation)
 
     auto plan = reg.prepareEvaluation(0.0, 0.1);
     EXPECT_THROW(reg.executeEvaluationPlan(plan),
-                 svmp::FE::InvalidStateException);
+                 svmp::FE::systems::InvalidStateException);
     EXPECT_TRUE(plan.consumed());
     EXPECT_EQ(calls, 1);
     EXPECT_EQ(reg.inputCount(), 1u);
@@ -747,7 +747,7 @@ TEST(AuxiliaryInputRegistry, LaterPlanIsStaleAfterInterleavedStep)
     EXPECT_EQ(b_calls, 1);
 
     EXPECT_THROW(reg.executeEvaluationPlan(interleaved),
-                 svmp::FE::InvalidStateException);
+                 svmp::FE::systems::InvalidStateException);
     EXPECT_EQ(b_calls, 1);
 }
 

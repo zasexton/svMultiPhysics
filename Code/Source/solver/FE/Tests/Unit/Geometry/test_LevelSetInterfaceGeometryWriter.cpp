@@ -268,6 +268,7 @@ TEST(LevelSetInterfaceGeometryWriter,
 TEST(LevelSetInterfaceGeometryWriter, DumpsSingleCellQuadratureDebugJson)
 {
     auto request = writer_request();
+    request.generated_domain_id = "writer-interface";
     request.implicit_geometry_mode = "high-order-level-set";
     request.implicit_quadrature_backend = "saye-hyperrectangle";
     request.implicit_fallback_policy = "linear-topology";

@@ -11,13 +11,18 @@
  */
 
 #include <cstddef>
-#include <type_traits>
 #include <cmath>
+#include <memory>
+#include <type_traits>
+#include <utility>
 #include "ExpressionOps.h"
 
 namespace svmp {
 namespace FE {
 namespace math {
+
+template<typename T, std::size_t N>
+class Vector;
 
 /**
  * @brief Base class for all vector expressions using CRTP
@@ -63,6 +68,70 @@ public:
     }
 };
 
+namespace detail {
+
+template<typename T>
+using VectorExprValue = std::remove_cv_t<std::remove_reference_t<T>>;
+
+template<typename T>
+inline constexpr bool is_vector_expression_v =
+    std::is_base_of_v<VectorExpr<VectorExprValue<T>>, VectorExprValue<T>>;
+
+template<typename T>
+struct IsConcreteVector : std::false_type {};
+
+template<typename T, std::size_t N>
+struct IsConcreteVector<Vector<T, N>> : std::true_type {};
+
+template<typename T>
+inline constexpr bool is_concrete_vector_v =
+    IsConcreteVector<VectorExprValue<T>>::value;
+
+/**
+ * @brief Stores lvalue operands by reference and temporary operands by value.
+ *
+ * Expression nodes may outlive the full expression that created their child
+ * nodes (for example, `auto expr = a + b - c`).  Owning temporary children
+ * keeps those chains valid without copying lvalue vector leaves.
+ */
+template<typename Operand>
+class VectorExprOperand {
+private:
+    using value_type = VectorExprValue<Operand>;
+    static constexpr bool stores_reference =
+        std::is_lvalue_reference_v<Operand>;
+    using storage_type =
+        std::conditional_t<stores_reference, const value_type*, value_type>;
+
+    static constexpr storage_type makeStorage(Operand&& operand)
+    {
+        if constexpr (stores_reference) {
+            return std::addressof(operand);
+        } else {
+            return std::forward<Operand>(operand);
+        }
+    }
+
+    storage_type storage_;
+
+public:
+    constexpr explicit VectorExprOperand(Operand&& operand)
+        : storage_(makeStorage(std::forward<Operand>(operand)))
+    {
+    }
+
+    [[nodiscard]] constexpr const value_type& get() const noexcept
+    {
+        if constexpr (stores_reference) {
+            return *storage_;
+        } else {
+            return storage_;
+        }
+    }
+};
+
+} // namespace detail
+
 /**
  * @brief Binary expression for element-wise operations between two vector expressions
  * @tparam LHS Left-hand side expression type
@@ -72,8 +141,8 @@ public:
 template<typename LHS, typename RHS, typename Op>
 class VectorBinaryExpr : public VectorExpr<VectorBinaryExpr<LHS, RHS, Op>> {
 private:
-    const LHS& lhs_;
-    const RHS& rhs_;
+    detail::VectorExprOperand<LHS> lhs_;
+    detail::VectorExprOperand<RHS> rhs_;
     Op op_;
 
 public:
@@ -83,8 +152,12 @@ public:
      * @param rhs Right operand
      * @param op Operation to apply
      */
-    constexpr VectorBinaryExpr(const LHS& lhs, const RHS& rhs, Op op = Op{})
-        : lhs_(lhs), rhs_(rhs), op_(op) {}
+    constexpr VectorBinaryExpr(LHS&& lhs, RHS&& rhs, Op op = Op{})
+        : lhs_(std::forward<LHS>(lhs)),
+          rhs_(std::forward<RHS>(rhs)),
+          op_(op)
+    {
+    }
 
     /**
      * @brief Access element at index
@@ -92,7 +165,7 @@ public:
      * @return Result of operation on elements at index i
      */
     constexpr auto operator[](std::size_t i) const {
-        return op_(lhs_[i], rhs_[i]);
+        return op_(lhs_.get()[i], rhs_.get()[i]);
     }
 
     /**
@@ -100,7 +173,7 @@ public:
      * @return Number of elements
      */
     constexpr std::size_t size() const {
-        return lhs_.size();
+        return lhs_.get().size();
     }
 };
 
@@ -112,7 +185,7 @@ public:
 template<typename Expr, typename Op>
 class VectorUnaryExpr : public VectorExpr<VectorUnaryExpr<Expr, Op>> {
 private:
-    const Expr& expr_;
+    detail::VectorExprOperand<Expr> expr_;
     Op op_;
 
 public:
@@ -121,8 +194,10 @@ public:
      * @param expr Operand expression
      * @param op Operation to apply
      */
-    constexpr VectorUnaryExpr(const Expr& expr, Op op = Op{})
-        : expr_(expr), op_(op) {}
+    constexpr VectorUnaryExpr(Expr&& expr, Op op = Op{})
+        : expr_(std::forward<Expr>(expr)), op_(op)
+    {
+    }
 
     /**
      * @brief Access element at index
@@ -130,7 +205,7 @@ public:
      * @return Result of operation on element at index i
      */
     constexpr auto operator[](std::size_t i) const {
-        return op_(expr_[i]);
+        return op_(expr_.get()[i]);
     }
 
     /**
@@ -138,7 +213,7 @@ public:
      * @return Number of elements
      */
     constexpr std::size_t size() const {
-        return expr_.size();
+        return expr_.get().size();
     }
 };
 
@@ -150,7 +225,7 @@ public:
 template<typename Expr, typename Scalar>
 class VectorScalarExpr : public VectorExpr<VectorScalarExpr<Expr, Scalar>> {
 private:
-    const Expr& expr_;
+    detail::VectorExprOperand<Expr> expr_;
     Scalar scalar_;
 
 public:
@@ -159,8 +234,10 @@ public:
      * @param expr Vector expression
      * @param scalar Scalar value
      */
-    constexpr VectorScalarExpr(const Expr& expr, Scalar scalar)
-        : expr_(expr), scalar_(scalar) {}
+    constexpr VectorScalarExpr(Expr&& expr, Scalar scalar)
+        : expr_(std::forward<Expr>(expr)), scalar_(scalar)
+    {
+    }
 
     /**
      * @brief Access element at index
@@ -168,7 +245,7 @@ public:
      * @return Element multiplied by scalar
      */
     constexpr auto operator[](std::size_t i) const {
-        return expr_[i] * scalar_;
+        return expr_.get()[i] * scalar_;
     }
 
     /**
@@ -176,7 +253,7 @@ public:
      * @return Number of elements
      */
     constexpr std::size_t size() const {
-        return expr_.size();
+        return expr_.get().size();
     }
 };
 
@@ -188,7 +265,7 @@ public:
 template<typename Expr, typename Scalar>
 class VectorScalarDivExpr : public VectorExpr<VectorScalarDivExpr<Expr, Scalar>> {
 private:
-    const Expr& expr_;
+    detail::VectorExprOperand<Expr> expr_;
     Scalar scalar_;
 
 public:
@@ -197,8 +274,10 @@ public:
      * @param expr Vector expression
      * @param scalar Scalar divisor
      */
-    constexpr VectorScalarDivExpr(const Expr& expr, Scalar scalar)
-        : expr_(expr), scalar_(scalar) {}
+    constexpr VectorScalarDivExpr(Expr&& expr, Scalar scalar)
+        : expr_(std::forward<Expr>(expr)), scalar_(scalar)
+    {
+    }
 
     /**
      * @brief Access element at index
@@ -206,7 +285,7 @@ public:
      * @return Element divided by scalar
      */
     constexpr auto operator[](std::size_t i) const {
-        return expr_[i] / scalar_;
+        return expr_.get()[i] / scalar_;
     }
 
     /**
@@ -214,7 +293,7 @@ public:
      * @return Number of elements
      */
     constexpr std::size_t size() const {
-        return expr_.size();
+        return expr_.get().size();
     }
 };
 
@@ -222,13 +301,12 @@ public:
  * @brief Addition operator for vector expressions
  */
 template<typename LHS, typename RHS,
-         typename = std::enable_if_t<
-             std::is_base_of_v<VectorExpr<LHS>, LHS> &&
-             std::is_base_of_v<VectorExpr<RHS>, RHS>
-         >>
-constexpr auto operator+(const VectorExpr<LHS>& lhs, const VectorExpr<RHS>& rhs) {
+         std::enable_if_t<
+             detail::is_vector_expression_v<LHS> &&
+             detail::is_vector_expression_v<RHS>, int> = 0>
+constexpr auto operator+(LHS&& lhs, RHS&& rhs) {
     return VectorBinaryExpr<LHS, RHS, detail::ops::Add>(
-        lhs.derived(), rhs.derived(), detail::ops::Add{}
+        std::forward<LHS>(lhs), std::forward<RHS>(rhs), detail::ops::Add{}
     );
 }
 
@@ -236,13 +314,12 @@ constexpr auto operator+(const VectorExpr<LHS>& lhs, const VectorExpr<RHS>& rhs)
  * @brief Subtraction operator for vector expressions
  */
 template<typename LHS, typename RHS,
-         typename = std::enable_if_t<
-             std::is_base_of_v<VectorExpr<LHS>, LHS> &&
-             std::is_base_of_v<VectorExpr<RHS>, RHS>
-         >>
-constexpr auto operator-(const VectorExpr<LHS>& lhs, const VectorExpr<RHS>& rhs) {
+         std::enable_if_t<
+             detail::is_vector_expression_v<LHS> &&
+             detail::is_vector_expression_v<RHS>, int> = 0>
+constexpr auto operator-(LHS&& lhs, RHS&& rhs) {
     return VectorBinaryExpr<LHS, RHS, detail::ops::Sub>(
-        lhs.derived(), rhs.derived(), detail::ops::Sub{}
+        std::forward<LHS>(lhs), std::forward<RHS>(rhs), detail::ops::Sub{}
     );
 }
 
@@ -250,13 +327,12 @@ constexpr auto operator-(const VectorExpr<LHS>& lhs, const VectorExpr<RHS>& rhs)
  * @brief Element-wise multiplication operator for vector expressions
  */
 template<typename LHS, typename RHS,
-         typename = std::enable_if_t<
-             std::is_base_of_v<VectorExpr<LHS>, LHS> &&
-             std::is_base_of_v<VectorExpr<RHS>, RHS>
-         >>
-constexpr auto hadamard(const VectorExpr<LHS>& lhs, const VectorExpr<RHS>& rhs) {
+         std::enable_if_t<
+             detail::is_vector_expression_v<LHS> &&
+             detail::is_vector_expression_v<RHS>, int> = 0>
+constexpr auto hadamard(LHS&& lhs, RHS&& rhs) {
     return VectorBinaryExpr<LHS, RHS, detail::ops::Mul>(
-        lhs.derived(), rhs.derived(), detail::ops::Mul{}
+        std::forward<LHS>(lhs), std::forward<RHS>(rhs), detail::ops::Mul{}
     );
 }
 
@@ -264,13 +340,12 @@ constexpr auto hadamard(const VectorExpr<LHS>& lhs, const VectorExpr<RHS>& rhs) 
  * @brief Element-wise division operator for vector expressions
  */
 template<typename LHS, typename RHS,
-         typename = std::enable_if_t<
-             std::is_base_of_v<VectorExpr<LHS>, LHS> &&
-             std::is_base_of_v<VectorExpr<RHS>, RHS>
-         >>
-constexpr auto hadamard_div(const VectorExpr<LHS>& lhs, const VectorExpr<RHS>& rhs) {
+         std::enable_if_t<
+             detail::is_vector_expression_v<LHS> &&
+             detail::is_vector_expression_v<RHS>, int> = 0>
+constexpr auto hadamard_div(LHS&& lhs, RHS&& rhs) {
     return VectorBinaryExpr<LHS, RHS, detail::ops::Div>(
-        lhs.derived(), rhs.derived(), detail::ops::Div{}
+        std::forward<LHS>(lhs), std::forward<RHS>(rhs), detail::ops::Div{}
     );
 }
 
@@ -278,12 +353,10 @@ constexpr auto hadamard_div(const VectorExpr<LHS>& lhs, const VectorExpr<RHS>& r
  * @brief Negation operator for vector expressions
  */
 template<typename Expr,
-         typename = std::enable_if_t<
-             std::is_base_of_v<VectorExpr<Expr>, Expr>
-         >>
-constexpr auto operator-(const VectorExpr<Expr>& expr) {
+         std::enable_if_t<detail::is_vector_expression_v<Expr>, int> = 0>
+constexpr auto operator-(Expr&& expr) {
     return VectorUnaryExpr<Expr, detail::ops::Negate>(
-        expr.derived(), detail::ops::Negate{}
+        std::forward<Expr>(expr), detail::ops::Negate{}
     );
 }
 
@@ -291,58 +364,55 @@ constexpr auto operator-(const VectorExpr<Expr>& expr) {
  * @brief Scalar multiplication operator (vector * scalar)
  */
 template<typename Expr, typename Scalar,
-         typename = std::enable_if_t<
-             std::is_base_of_v<VectorExpr<Expr>, Expr> &&
-             std::is_arithmetic_v<Scalar>
-         >>
-constexpr auto operator*(const VectorExpr<Expr>& expr, Scalar scalar) {
-    return VectorScalarExpr<Expr, Scalar>(expr.derived(), scalar);
+         std::enable_if_t<
+             detail::is_vector_expression_v<Expr> &&
+             std::is_arithmetic_v<Scalar>, int> = 0>
+constexpr auto operator*(Expr&& expr, Scalar scalar) {
+    return VectorScalarExpr<Expr, Scalar>(std::forward<Expr>(expr), scalar);
 }
 
 /**
  * @brief Scalar multiplication operator (scalar * vector)
  */
 template<typename Scalar, typename Expr,
-         typename = std::enable_if_t<
+         std::enable_if_t<
              std::is_arithmetic_v<Scalar> &&
-             std::is_base_of_v<VectorExpr<Expr>, Expr>
-         >>
-constexpr auto operator*(Scalar scalar, const VectorExpr<Expr>& expr) {
-    return VectorScalarExpr<Expr, Scalar>(expr.derived(), scalar);
+             detail::is_vector_expression_v<Expr>, int> = 0>
+constexpr auto operator*(Scalar scalar, Expr&& expr) {
+    return VectorScalarExpr<Expr, Scalar>(std::forward<Expr>(expr), scalar);
 }
 
 /**
  * @brief Scalar division operator (vector / scalar)
  */
 template<typename Expr, typename Scalar,
-         typename = std::enable_if_t<
-             std::is_base_of_v<VectorExpr<Expr>, Expr> &&
-             std::is_arithmetic_v<Scalar>
-         >>
-constexpr auto operator/(const VectorExpr<Expr>& expr, Scalar scalar) {
-    return VectorScalarDivExpr<Expr, Scalar>(expr.derived(), scalar);
+         std::enable_if_t<
+             detail::is_vector_expression_v<Expr> &&
+             std::is_arithmetic_v<Scalar>, int> = 0>
+constexpr auto operator/(Expr&& expr, Scalar scalar) {
+    return VectorScalarDivExpr<Expr, Scalar>(std::forward<Expr>(expr), scalar);
 }
 
 /**
  * @brief Element-wise absolute value
  */
 template<typename Expr,
-         typename = std::enable_if_t<
-             std::is_base_of_v<VectorExpr<Expr>, Expr>
-         >>
-constexpr auto abs(const VectorExpr<Expr>& expr) {
-    return VectorUnaryExpr<Expr, detail::ops::Abs>(expr.derived(), detail::ops::Abs{});
+         std::enable_if_t<
+             detail::is_vector_expression_v<Expr> &&
+             !detail::is_concrete_vector_v<Expr>, int> = 0>
+constexpr auto abs(Expr&& expr) {
+    return VectorUnaryExpr<Expr, detail::ops::Abs>(
+        std::forward<Expr>(expr), detail::ops::Abs{});
 }
 
 /**
  * @brief Element-wise square root
  */
 template<typename Expr,
-         typename = std::enable_if_t<
-             std::is_base_of_v<VectorExpr<Expr>, Expr>
-         >>
-constexpr auto sqrt(const VectorExpr<Expr>& expr) {
-    return VectorUnaryExpr<Expr, detail::ops::Sqrt>(expr.derived(), detail::ops::Sqrt{});
+         std::enable_if_t<detail::is_vector_expression_v<Expr>, int> = 0>
+constexpr auto sqrt(Expr&& expr) {
+    return VectorUnaryExpr<Expr, detail::ops::Sqrt>(
+        std::forward<Expr>(expr), detail::ops::Sqrt{});
 }
 
 /**
@@ -408,7 +478,7 @@ template<typename Expr,
              std::is_base_of_v<VectorExpr<Expr>, Expr>
          >>
 constexpr auto normalize(const VectorExpr<Expr>& expr) {
-    return expr / norm(expr);
+    return expr.derived() / norm(expr);
 }
 
 } // namespace math

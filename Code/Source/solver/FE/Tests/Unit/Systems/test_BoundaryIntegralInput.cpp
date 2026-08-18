@@ -795,9 +795,19 @@ TEST(BoundaryIntegralInput,
 
     SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
-    EXPECT_TRUE(throwsException<svmp::FE::systems::InvalidStateException>(
-        [&] { sys.setup({}, inputs); }));
-    EXPECT_FALSE(sys.isSetup());
+    EXPECT_NO_THROW(sys.setup({}, inputs));
+    EXPECT_TRUE(sys.isSetup());
+
+    std::vector<Real> solution(
+        static_cast<std::size_t>(sys.dofHandler().getNumDofs()), Real{2.0});
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = solution;
+
+    EXPECT_TRUE(throwsException<svmp::FE::systems::InvalidStateException>([&] {
+        (void)service.evaluateFunctional(sum_functional.name, state);
+    }));
 
     auto quarter_face = generatedActiveBoundaryContext(
         u_field, physical_marker, active_marker, Real{0.25});
@@ -808,16 +818,6 @@ TEST(BoundaryIntegralInput,
     EXPECT_EQ(
         last_callback_context,
         quarter_face.get());
-    {
-        sys.setup({}, inputs);
-    }
-
-    std::vector<Real> solution(
-        static_cast<std::size_t>(sys.dofHandler().getNumDofs()), Real{2.0});
-    SystemStateView state;
-    state.time = 0.0;
-    state.dt = 0.1;
-    state.u = solution;
 
     const std::array<svmp::FE::GlobalIndex, 1> cell_filter{{0}};
     EXPECT_TRUE(throwsException<svmp::FE::InvalidArgumentException>([&] {
@@ -829,7 +829,8 @@ TEST(BoundaryIntegralInput,
             /*apply_constraints=*/false,
             /*region_marker=*/-1,
             cell_filter,
-            active_marker);
+            active_marker,
+            /*explicit_cell_filter=*/true);
     }));
 
     // The physical face has measure 0.5. A value of 0.5 therefore proves the

@@ -539,14 +539,19 @@ TEST(FESystemSerialParallelEquivalenceMPI,
         {field},
         forms::inner(forms::grad(state), forms::grad(test)).dx());
 
-    // Model an active-side support constraint that exists on only one rank.
+    // Model an active-side support constraint that applies on only one rank.
+    // The callback declaration itself remains communicator-consistent, as it
+    // must in production; only its partition-local algebraic contribution is
+    // empty on rank 0.
     // Before communicator-global anchoring, rank 0 selected mean-zero
     // enforcement while rank 1 selected Anchored, and setup rejected the
     // divergent GaugeRegistry resolutions.
+    std::vector<GlobalIndex> local_anchor_dofs;
     if (rank == 1) {
-        system.addConstraint(
-            std::make_unique<constraints::DirichletBC>(0, 0.0));
+        local_anchor_dofs.push_back(0);
     }
+    system.addConstraint(std::make_unique<constraints::DirichletBC>(
+        std::move(local_anchor_dofs), 0.0));
 
     systems::SetupOptions options;
     options.dof_options.global_numbering =
