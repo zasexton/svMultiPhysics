@@ -19,11 +19,19 @@ window.MathJax = {
     processHtmlClass: 'tex2jax_process'
   },
   loader: {
-    load: ['[tex]/ams']
+    load: ['[tex]/ams','[tex]/physics']
   },
   tex: {
-    macros: {},
-    packages: ['base','configmacros','ams']
+    macros: {    fiberdirection: "{\\mathbf{f}}",
+    sheetdirection: "{\\mathbf{s}}",
+    sheetnormaldirection: "{\\mathbf{n}}",
+    calcium: "{[\\text{Ca}^{2+}]}",
+    Tact: "{T_\\text{act}}",
+    fiberstretch: "{\\lambda}",
+    fiberstretchrate: "{\\dot{\\lambda}}",
+    astressstate: "{\\mathbf{s}}",
+    },
+    packages: ['base','configmacros','newcommand','ams','physics']
   }
 };
 </script>
@@ -94,7 +102,8 @@ $(function() {
 <li>BackendException()&#160;:&#160;<a class="el" href="classsvmp_1_1_f_e_1_1_backend_exception.html#a444b5a8bc8d6bc590ba66894bcc73019">svmp::FE::BackendException</a></li>
 <li>basis_type()&#160;:&#160;<a class="el" href="classsvmp_1_1_f_e_1_1basis_1_1_basis_function.html#a5cf930064ce1b3e34e7f37e8bf8b931a">svmp::FE::basis::BasisFunction</a>, <a class="el" href="structsvmp_1_1_f_e_1_1basis_1_1_basis_request.html#a7e01e5c0cb0ab020763c42758b625de1">svmp::FE::basis::BasisRequest</a>, <a class="el" href="classsvmp_1_1_f_e_1_1basis_1_1_lagrange_basis.html#aba819a6bb10380893e8bef0b4ddcd552">svmp::FE::basis::LagrangeBasis</a>, <a class="el" href="classsvmp_1_1_f_e_1_1basis_1_1_serendipity_basis.html#af9ea15ccb65b27388c207c2f0cd2dea2">svmp::FE::basis::SerendipityBasis</a></li>
 <li>bc&#160;:&#160;<a class="el" href="classeq_type.html#acafb8fd4435f61104f3d9a478702d689">eqType</a></li>
-<li>bcast()&#160;:&#160;<a class="el" href="classcm_type.html#a89d67b06f822df72e6544e15b2f04e1f">cmType</a></li>
+<li>bcast()&#160;:&#160;<a class="el" href="classcm_type.html#a47609099169d1b124ac6f3783ba3ad19">cmType</a></li>
+<li>bcast_coupled_dir_flowrate()&#160;:&#160;<a class="el" href="class_coupled_boundary_condition.html#a0789fab849cfbf29e450f83fae983138">CoupledBoundaryCondition</a></li>
 <li>bcast_coupled_neumann_pressure()&#160;:&#160;<a class="el" href="class_coupled_boundary_condition.html#af964e06ca587a575d47449f3d4d57864">CoupledBoundaryCondition</a></li>
 <li>bcIB&#160;:&#160;<a class="el" href="classeq_type.html#ad0dc4339c1c8d79c2a01361d2df63cc0">eqType</a></li>
 <li>beta&#160;:&#160;<a class="el" href="classeq_type.html#af8b6728acf22adfdf385b3a29c6fed39">eqType</a></li>
@@ -102,7 +111,8 @@ $(function() {
 <li>bf&#160;:&#160;<a class="el" href="classeq_type.html#aa38fe7bb149cec558ca09eacef052ac6">eqType</a></li>
 <li>bin2VTK&#160;:&#160;<a class="el" href="class_com_mod.html#a71096696d480232eb3b82b2e15a050f4">ComMod</a></li>
 <li>binPath&#160;:&#160;<a class="el" href="classcpl_b_c_type.html#a8cd85265d73d2e9ebdb21c097d24cf70">cplBCType</a></li>
-<li>BoundaryCondition()&#160;:&#160;<a class="el" href="class_boundary_condition.html#a2e0903a6b189a3914d02285d32a02096">BoundaryCondition</a></li>
+<li>bool_parameters&#160;:&#160;<a class="el" href="class_active_stress_model_parameters.html#a10285ed7c0de6af74d335a4729848cbc">ActiveStressModelParameters</a></li>
+<li>BoundaryCondition()&#160;:&#160;<a class="el" href="class_boundary_condition.html#af3b8db504d02c32da05785bc4103c6ee">BoundaryCondition</a></li>
 <li>BoundaryConditionBaseException()&#160;:&#160;<a class="el" href="class_boundary_condition_base_exception.html#a2c7179ca2ba0cae35f18b50d22dc97a7">BoundaryConditionBaseException</a></li>
 <li>BoundaryConditionFileException()&#160;:&#160;<a class="el" href="class_boundary_condition_file_exception.html#aeb05e846fe44ad948efd599e3d979815">BoundaryConditionFileException</a></li>
 <li>BoundaryConditionNodeCountException()&#160;:&#160;<a class="el" href="class_boundary_condition_node_count_exception.html#ade0b6b35d410384e9350c1308d231365">BoundaryConditionNodeCountException</a></li>
