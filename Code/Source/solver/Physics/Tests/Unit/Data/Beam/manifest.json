@@ -1,0 +1,46 @@
+{
+  "description": "Long rectangular Ustruct beam test mesh with Hex8 elements.",
+  "mesh_file": "mesh/mesh-complete.mesh.vtu",
+  "exterior_file": "mesh/mesh-complete.exterior.vtp",
+  "surface_files": {
+    "left": "mesh/mesh-surfaces/left.vtp",
+    "right": "mesh/mesh-surfaces/right.vtp",
+    "front": "mesh/mesh-surfaces/front.vtp",
+    "back": "mesh/mesh-surfaces/back.vtp",
+    "bottom": "mesh/mesh-surfaces/bottom.vtp",
+    "top": "mesh/mesh-surfaces/top.vtp"
+  },
+  "surface_ids": {
+    "left": 1,
+    "right": 2,
+    "front": 3,
+    "back": 4,
+    "bottom": 5,
+    "top": 6
+  },
+  "spec": {
+    "length": 10.0,
+    "width": 1.0,
+    "height": 1.0,
+    "nx": 20,
+    "ny": 2,
+    "nz": 2
+  },
+  "points": 189,
+  "hex8_elements": 80,
+  "bounds": [
+    0.0,
+    10.0,
+    0.0,
+    1.0,
+    0.0,
+    1.0
+  ],
+  "tetgen_closed_surface_check": {
+    "status": "passed",
+    "boundary_points": 170,
+    "boundary_triangles": 336,
+    "tetgen_points": 170,
+    "tetgen_tetrahedra": 367
+  }
+}

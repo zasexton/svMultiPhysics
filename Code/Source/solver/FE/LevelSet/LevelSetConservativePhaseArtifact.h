@@ -58,6 +58,9 @@ struct LevelSetConservativePhaseArtifactContext {
     Real accepted_time{0.0};
     Real time_step{0.0};
     std::uint64_t state_revision{0u};
+    int graph_dimension{0};
+    std::size_t graph_nodes{0u};
+    std::size_t graph_edges{0u};
     /// Output-rank mesh cache stamps. These four values are diagnostic local
     /// provenance, not communicator-wide graph identities.
     std::uint64_t graph_geometry_revision{0u};
@@ -66,6 +69,27 @@ struct LevelSetConservativePhaseArtifactContext {
     std::uint64_t graph_numbering_revision{0u};
     /// Communicator-replicated FE field-layout identity.
     std::uint64_t graph_dof_layout_revision{0u};
+    /// Versioned, execution-layout-sensitive fingerprint of graph
+    /// coefficients, communicator layout, and logical edge ownership.
+    std::uint64_t graph_content_revision{0u};
+    /**
+     * Operator-stage binding for the accepted phase update.  Schema-3
+     * artifacts require the fixed-background, endpoint-velocity
+     * Backward-Euler split and exact clamped q^n one-ring bounds implemented
+     * by the production application. The lower-level advance API remains
+     * generic and may execute other caller-supplied bounds.
+     */
+    std::optional<LevelSetP1PhaseSplitStageProvenance>
+        split_stage_provenance{};
+    /**
+     * Accepted discrete phase-indicator boundary-flux evidence.  This is the
+     * nodal q-flux ledger produced by the conservative transport stage; it is
+     * not a pointwise velocity-normal boundary condition or an ALE mesh-flux
+     * claim, and it is blind to velocity-normal leakage where q is zero.
+     */
+    Real maximum_nodal_boundary_mass_transfer{0.0};
+    Real boundary_mass_tolerance{0.0};
+    std::string boundary_flux_scope{};
     bool geometry_validated_before_commit{false};
     bool reinitialization_due{false};
     bool reinitialization_applied{false};

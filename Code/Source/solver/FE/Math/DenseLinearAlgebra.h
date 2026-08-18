@@ -61,6 +61,39 @@ struct DenseSymmetricEigenvalueBounds {
 };
 
 /**
+ * Exact certificate for a binary64 symmetric generalized quotient.
+ *
+ * The implementation interprets every finite `Real` entry as its exact
+ * dyadic rational value.  It proves that the denominator is positive
+ * definite, the numerator is positive semidefinite, and
+ *
+ *     directly_proven_upper_bound * denominator - numerator
+ *
+ * is positive semidefinite using fraction-free integer congruence.  No
+ * tolerance, diagonal shift, or small-mode deletion participates in these
+ * predicates.  The search is over finite nonnegative binary64 values, so the
+ * returned coefficient is itself one of the values proved directly.
+ */
+struct DenseExactDyadicSpdGeneralizedUpperBound {
+    bool applied{false};
+    bool denominator_positive_definite_proven{false};
+    bool numerator_positive_semidefinite_proven{false};
+    bool upper_inequality_proven{false};
+    std::size_t dimension{0};
+    std::size_t denominator_rank{0};
+    std::size_t numerator_rank{0};
+    // False when q=0 is already a passing bound and no failing neighbor
+    // exists; otherwise largest_failing_lower_bound was tested exactly.
+    bool failing_lower_bound_proven{false};
+    Real largest_failing_lower_bound{0};
+    Real directly_proven_upper_bound{0};
+    std::size_t psd_oracle_calls{0};
+    std::size_t binary64_search_steps{0};
+    std::size_t exact_update_count{0};
+    std::size_t maximum_integer_bits{0};
+};
+
+/**
  * Diagnostics for an explicitly supplied structural common nullspace.
  *
  * The nullspace basis is interpreted as a caller-owned mathematical
@@ -83,6 +116,8 @@ struct DenseExplicitNullspaceDiagnostics {
     Real maximum_denominator_action{0};
     Real numerator_action_tolerance{0};
     Real maximum_numerator_action{0};
+    bool exact_binary64_actions_proven{false};
+    bool exact_binary64_anchor_rank_proven{false};
     std::vector<std::size_t> eliminated_coordinates{};
 };
 
@@ -124,6 +159,7 @@ struct DensePsdGeneralizedEigenvalueBound {
     bool denominator_converged{false};
     bool quotient_converged{false};
     DenseExplicitNullspaceDiagnostics explicit_nullspace{};
+    DenseExactDyadicSpdGeneralizedUpperBound exact_dyadic{};
 };
 
 struct DenseInverseResult {
@@ -166,6 +202,22 @@ dense_symmetric_eigenvalue_bounds(
     std::span<const Real> matrix,
     std::size_t n,
     std::string_view label = "dense symmetric matrix");
+
+/**
+ * Prove a generalized upper bound on an already-formed SPD quotient.
+ *
+ * This deliberately does not discover or project a nullspace.  Callers must
+ * first form a mathematically valid coordinate quotient of any common
+ * kernel.  The exact backend has fixed dimension, integer-bit, modeled-work,
+ * and arithmetic-update caps and fails closed when any cap is exceeded.
+ */
+[[nodiscard]] DenseExactDyadicSpdGeneralizedUpperBound
+dense_exact_dyadic_spd_generalized_upper_bound(
+    std::span<const Real> numerator,
+    std::span<const Real> denominator,
+    std::size_t n,
+    std::string_view label =
+        "exact dyadic SPD generalized quotient");
 
 /**
  * Compute a finite upper generalized-eigenvalue bound for a PSD pencil.

@@ -1,0 +1,96 @@
+{
+  "case": "linear_sloshing_2d",
+  "purpose": "Small-amplitude linear standing-wave free-surface regression test for the OOP unfitted level-set path.",
+  "mesh": {
+    "nx": 16,
+    "ny": 16,
+    "length": 1.0,
+    "mean_depth": 0.5,
+    "tank_height": 0.75,
+    "element_size": 0.0625
+  },
+  "fluid": {
+    "density": 998.2,
+    "dynamic_viscosity": 1e-05,
+    "kinematic_viscosity": 1.0018032458425166e-08,
+    "gravity": 9.81,
+    "body_force": [
+      0.0,
+      -9.81,
+      0.0
+    ],
+    "force_sign_convention": "OOP residual uses rho*(... - f) + grad(p) - div(stress), so hydrostatic balance is grad(p)=rho*f."
+  },
+  "run": {
+    "time_step": 0.004924231346267527,
+    "time_steps": 100,
+    "final_time": 0.4924231346267527,
+    "output_cadence": 1,
+    "combine_time_series": true
+  },
+  "analytic_solution": {
+    "L": 1.0,
+    "H0": 0.5,
+    "H_tank": 0.75,
+    "amplitude": 0.005,
+    "mode_n": 1,
+    "k": 3.141592653589793,
+    "omega": 5.316553374316752,
+    "period": 1.1818155231042065,
+    "eta": "A*cos(k*x)*cos(omega*t)",
+    "level_set": "phi=y-(H0+A*cos(k*x)*cos(omega*t))",
+    "velocity_potential": "-(A*omega/k)*(cosh(k*y)/sinh(k*H0))*cos(k*x)*sin(omega*t)",
+    "pressure": "rho*g*(H0-y)+rho*(A*omega^2/k)*(cosh(k*y)/sinh(k*H0))*cos(k*x)*cos(omega*t)",
+    "expected_area": 0.5
+  },
+  "boundary_conditions": {
+    "free_surface": {
+      "implementation": "UnfittedLevelSet",
+      "active_domain": "LevelSetNegative",
+      "external_pressure": 0.0,
+      "surface_tension": 0.0
+    },
+    "solid_walls": {
+      "realization": "exact_time_space_dirichlet_velocity",
+      "note": "The linear theory assumes impermeable slip walls. The current OOP XML path supports exact time/space Dirichlet data, so the wall velocity components are prescribed from the analytic potential-flow solution."
+    }
+  },
+  "verification": {
+    "checked_fields": [
+      "phi",
+      "Velocity",
+      "Pressure"
+    ],
+    "wet_region": "phi_exact < -2*h_mesh and finite result values",
+    "suggested_tolerances": {
+      "interface_mean_abs": 0.01,
+      "interface_amplitude_relative": 0.25,
+      "interface_l2_height_abs": 0.01,
+      "interface_max_height_abs": 0.02,
+      "area_relative": 0.05,
+      "velocity_relative_l2": 0.35,
+      "velocity_max_abs": 0.08,
+      "pressure_relative_rms": 0.35,
+      "pressure_rms_after_offset_relative": 0.25,
+      "interface_pressure_abs": 24.480855000000002
+    }
+  },
+  "suggested_tolerances": {
+    "interface_mean_abs": 0.01,
+    "interface_amplitude_relative": 0.25,
+    "interface_l2_height_abs": 0.01,
+    "interface_max_height_abs": 0.02,
+    "area_relative": 0.05,
+    "velocity_relative_l2": 0.35,
+    "velocity_max_abs": 0.08,
+    "pressure_relative_rms": 0.35,
+    "pressure_rms_after_offset_relative": 0.25,
+    "interface_pressure_abs": 24.480855000000002
+  },
+  "assumptions": [
+    "linearized free-surface kinematics and dynamics",
+    "inviscid potential-flow analytic solution",
+    "small amplitude",
+    "low positive viscosity is used because the OOP constant-viscosity parser requires mu > 0"
+  ]
+}

@@ -373,7 +373,21 @@ Real OperatorBackends::evaluateBoundaryFunctional(const FESystem& system,
         assembler.setPreviousSolution(state.u_prev);
         assembler.setPreviousSolution2(state.u_prev2);
     }
-    return assembler.assembleBoundaryScalar(kernel, boundary_marker);
+    const Real value =
+        assembler.assembleBoundaryScalar(
+            kernel, boundary_marker);
+    const auto& result =
+        assembler.getLastResult();
+    FE_THROW_IF(
+        !result.success,
+        InvalidStateException,
+        "OperatorBackends::evaluateBoundaryFunctional: "
+        "boundary assembly failed" +
+            (result.error_message.empty()
+                 ? std::string{}
+                 : std::string(": ") +
+                       result.error_message));
+    return value;
 }
 
 SetupStorageRequirements OperatorBackends::storageRequirements() const noexcept

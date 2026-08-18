@@ -1002,6 +1002,34 @@ interfaces::GeneratedActiveBoundaryRequest activeRequest(
     return request;
 }
 
+TEST(GeneratedActiveBoundaryDomain,
+     RejectsNonfiniteRequestScalars)
+{
+    auto nonfinite_isovalue =
+        activeRequest(
+            101,
+            8,
+            FE::geometry::CutIntegrationSide::Negative);
+    nonfinite_isovalue.isovalue =
+        std::numeric_limits<FE::Real>::quiet_NaN();
+    EXPECT_THROW(
+        interfaces::GeneratedActiveBoundaryDomain(
+            std::move(nonfinite_isovalue)),
+        std::invalid_argument);
+
+    auto nonfinite_tolerance =
+        activeRequest(
+            101,
+            8,
+            FE::geometry::CutIntegrationSide::Negative);
+    nonfinite_tolerance.tolerance =
+        std::numeric_limits<FE::Real>::infinity();
+    EXPECT_THROW(
+        interfaces::GeneratedActiveBoundaryDomain(
+            std::move(nonfinite_tolerance)),
+        std::invalid_argument);
+}
+
 struct ActiveBoundaryMoments {
     FE::Real constant{0.0};
     FE::Real x{0.0};
@@ -1376,6 +1404,310 @@ TEST(GeneratedActiveBoundaryDomain, CompletelyDrySideHasExactlyZeroRules)
                    ::testing::PrintToString(negative.summary().measure));
     RecordProperty("active_boundary_full_measure",
                    ::testing::PrintToString(positive.summary().measure));
+}
+
+TEST(GeneratedActiveBoundaryDomain,
+     EmptyActiveMarkerCannotBeReusedByContactDomain)
+{
+    constexpr int interface_marker = 102;
+    constexpr int wall_marker = 8;
+    constexpr int shared_generated_marker = 3102102;
+
+    auto active_request = activeRequest(
+        interface_marker,
+        wall_marker,
+        FE::geometry::CutIntegrationSide::Negative);
+    active_request.active_boundary_marker = shared_generated_marker;
+    interfaces::GeneratedActiveBoundaryDomain active_domain(
+        std::move(active_request));
+    ASSERT_TRUE(active_domain.empty());
+
+    FE::assembly::CutIntegrationContext context;
+    context.addGeneratedActiveBoundaryDomain(active_domain);
+    const auto revision_before_contact = context.contentRevision();
+    const auto interface_rule_count_before_contact =
+        context.interfaceRules().size();
+    const auto generated_markers_before_contact =
+        context.generatedInterfaceMarkers();
+    ASSERT_TRUE(
+        context.hasGeneratedActiveBoundaryMarker(shared_generated_marker));
+    ASSERT_NE(
+        context.findGeneratedActiveBoundaryProvenance(
+            shared_generated_marker),
+        nullptr);
+    ASSERT_EQ(
+        context.generatedActiveBoundaryMarkersForPhysicalBoundary(
+                   wall_marker)
+            .size(),
+        1u);
+
+    auto contact_request =
+        contactRequest(interface_marker, wall_marker);
+    contact_request.intersection_marker = shared_generated_marker;
+    interfaces::GeneratedInterfaceBoundaryIntersectionDomain
+        contact_domain(std::move(contact_request));
+
+    EXPECT_THROW(
+        context.addGeneratedInterfaceBoundaryIntersectionDomain(
+            contact_domain),
+        std::invalid_argument);
+    EXPECT_EQ(context.contentRevision(), revision_before_contact);
+    EXPECT_EQ(context.interfaceRules().size(),
+              interface_rule_count_before_contact);
+    EXPECT_EQ(context.generatedInterfaceMarkers(),
+              generated_markers_before_contact);
+    EXPECT_TRUE(
+        context.hasGeneratedActiveBoundaryMarker(shared_generated_marker));
+    const auto* provenance =
+        context.findGeneratedActiveBoundaryProvenance(
+            shared_generated_marker);
+    ASSERT_NE(provenance, nullptr);
+    EXPECT_EQ(provenance->owner.boundary_marker, wall_marker);
+    EXPECT_EQ(
+        provenance->clipping_tolerance,
+        active_domain.request().tolerance);
+    const auto inverse_markers =
+        context.generatedActiveBoundaryMarkersForPhysicalBoundary(
+            wall_marker);
+    ASSERT_EQ(inverse_markers.size(), 1u);
+    EXPECT_EQ(inverse_markers.front(), shared_generated_marker);
+}
+
+TEST(GeneratedActiveBoundaryDomain,
+     VolumeOnlyInterfaceMarkerCannotBeReusedByBoundaryDomains)
+{
+    constexpr int shared_generated_marker = 104;
+    constexpr int wall_marker = 8;
+
+    FE::assembly::CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(
+        fullNegativeCell(shared_generated_marker));
+    ASSERT_TRUE(
+        context.hasGeneratedVolumeMarker(shared_generated_marker));
+    ASSERT_FALSE(
+        context.hasGeneratedInterfaceMarker(shared_generated_marker));
+    const auto revision_before_boundary_domains =
+        context.contentRevision();
+    const auto volume_rule_count_before_boundary_domains =
+        context.volumeRules().size();
+
+    auto contact_request =
+        contactRequest(shared_generated_marker, wall_marker);
+    contact_request.intersection_marker =
+        shared_generated_marker;
+    interfaces::GeneratedInterfaceBoundaryIntersectionDomain
+        contact_domain(std::move(contact_request));
+    EXPECT_THROW(
+        context.addGeneratedInterfaceBoundaryIntersectionDomain(
+            contact_domain),
+        std::invalid_argument);
+
+    auto active_request = activeRequest(
+        shared_generated_marker,
+        wall_marker,
+        FE::geometry::CutIntegrationSide::Negative);
+    active_request.active_boundary_marker =
+        shared_generated_marker;
+    interfaces::GeneratedActiveBoundaryDomain active_domain(
+        std::move(active_request));
+    EXPECT_THROW(
+        context.addGeneratedActiveBoundaryDomain(active_domain),
+        std::invalid_argument);
+
+    EXPECT_EQ(context.contentRevision(),
+              revision_before_boundary_domains);
+    EXPECT_EQ(context.volumeRules().size(),
+              volume_rule_count_before_boundary_domains);
+    EXPECT_TRUE(
+        context.hasGeneratedVolumeMarker(shared_generated_marker));
+    EXPECT_FALSE(
+        context.hasGeneratedInterfaceMarker(shared_generated_marker));
+    EXPECT_FALSE(
+        context.hasGeneratedActiveBoundaryMarker(
+            shared_generated_marker));
+}
+
+TEST(GeneratedActiveBoundaryDomain,
+     EmptyLevelSetInterfaceMarkerCannotBeReusedByBoundaryDomains)
+{
+    constexpr int shared_generated_marker = 105;
+    constexpr int wall_marker = 8;
+
+    interfaces::LevelSetInterfaceDomain empty_interface(
+        interfaceRequest(shared_generated_marker));
+    ASSERT_TRUE(empty_interface.empty());
+
+    FE::assembly::CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(empty_interface);
+    ASSERT_TRUE(
+        context.hasGeneratedLevelSetInterfaceMarker(
+            shared_generated_marker));
+    ASSERT_FALSE(
+        context.hasGeneratedVolumeMarker(shared_generated_marker));
+    ASSERT_FALSE(
+        context.hasGeneratedInterfaceMarker(shared_generated_marker));
+    const auto revision_before_boundary_domains =
+        context.contentRevision();
+
+    auto contact_request =
+        contactRequest(shared_generated_marker, wall_marker);
+    contact_request.intersection_marker =
+        shared_generated_marker;
+    interfaces::GeneratedInterfaceBoundaryIntersectionDomain
+        contact_domain(std::move(contact_request));
+    EXPECT_THROW(
+        context.addGeneratedInterfaceBoundaryIntersectionDomain(
+            contact_domain),
+        std::invalid_argument);
+
+    auto active_request = activeRequest(
+        shared_generated_marker,
+        wall_marker,
+        FE::geometry::CutIntegrationSide::Negative);
+    active_request.active_boundary_marker =
+        shared_generated_marker;
+    interfaces::GeneratedActiveBoundaryDomain active_domain(
+        std::move(active_request));
+    EXPECT_THROW(
+        context.addGeneratedActiveBoundaryDomain(active_domain),
+        std::invalid_argument);
+
+    EXPECT_EQ(context.contentRevision(),
+              revision_before_boundary_domains);
+    EXPECT_TRUE(
+        context.hasGeneratedLevelSetInterfaceMarker(
+            shared_generated_marker));
+    EXPECT_FALSE(
+        context.hasGeneratedActiveBoundaryMarker(
+            shared_generated_marker));
+}
+
+TEST(GeneratedActiveBoundaryDomain,
+     GeneratedInterfaceMarkersRejectLaterVolumeRuleReuse)
+{
+    constexpr int wall_marker = 8;
+    FE::assembly::CutIntegrationContext donor;
+    donor.addGeneratedInterfaceDomain(
+        fullNegativeCell(190));
+    ASSERT_FALSE(donor.metadata().empty());
+    ASSERT_FALSE(donor.volumeRules().empty());
+    const auto metadata =
+        donor.metadata().front();
+    const auto rule =
+        donor.volumeRules().front();
+
+    const auto expect_volume_rejected =
+        [&](FE::assembly::CutIntegrationContext&
+                context,
+            int marker) {
+            const auto revision =
+                context.contentRevision();
+            const auto volume_rule_count =
+                context.volumeRules().size();
+            auto candidate_rule = rule;
+            candidate_rule.provenance.marker =
+                marker;
+            EXPECT_THROW(
+                context.addGeneratedVolumeRule(
+                    marker,
+                    metadata,
+                    std::move(candidate_rule)),
+                std::invalid_argument);
+            EXPECT_EQ(
+                context.contentRevision(),
+                revision);
+            EXPECT_EQ(
+                context.volumeRules().size(),
+                volume_rule_count);
+        };
+
+    constexpr int base_marker = 191;
+    interfaces::LevelSetInterfaceDomain
+        empty_interface(
+            interfaceRequest(base_marker));
+    FE::assembly::CutIntegrationContext
+        base_context;
+    base_context.addGeneratedInterfaceDomain(
+        empty_interface);
+    expect_volume_rejected(
+        base_context, base_marker);
+
+    constexpr int contact_marker = 192;
+    auto contact_request =
+        contactRequest(
+            contact_marker, wall_marker);
+    contact_request.intersection_marker =
+        contact_marker;
+    interfaces::
+        GeneratedInterfaceBoundaryIntersectionDomain
+            contact_domain(
+                std::move(contact_request));
+    FE::assembly::CutIntegrationContext
+        contact_context;
+    contact_context
+        .addGeneratedInterfaceBoundaryIntersectionDomain(
+            contact_domain);
+    expect_volume_rejected(
+        contact_context, contact_marker);
+
+    constexpr int active_marker = 193;
+    auto active_request = activeRequest(
+        active_marker,
+        wall_marker,
+        FE::geometry::CutIntegrationSide::
+            Negative);
+    active_request.active_boundary_marker =
+        active_marker;
+    interfaces::GeneratedActiveBoundaryDomain
+        active_domain(
+            std::move(active_request));
+    FE::assembly::CutIntegrationContext
+        active_context;
+    active_context
+        .addGeneratedActiveBoundaryDomain(
+            active_domain);
+    expect_volume_rejected(
+        active_context, active_marker);
+}
+
+TEST(GeneratedActiveBoundaryDomain,
+     DirectGeneratedVolumeRuleCanonicalizesAndChecksMarker)
+{
+    FE::assembly::CutIntegrationContext donor;
+    donor.addGeneratedInterfaceDomain(
+        fullNegativeCell(194));
+    ASSERT_FALSE(donor.metadata().empty());
+    ASSERT_FALSE(donor.volumeRules().empty());
+
+    auto unbound_rule =
+        donor.volumeRules().front();
+    unbound_rule.provenance.marker = -1;
+    FE::assembly::CutIntegrationContext context;
+    context.addGeneratedVolumeRule(
+        195,
+        donor.metadata().front(),
+        std::move(unbound_rule));
+    ASSERT_EQ(context.volumeRules().size(), 1u);
+    EXPECT_EQ(
+        context.volumeRules().front().provenance.marker,
+        195);
+
+    auto mismatched_rule =
+        donor.volumeRules().front();
+    ASSERT_NE(
+        mismatched_rule.provenance.marker,
+        196);
+    const auto revision = context.contentRevision();
+    const auto rule_count =
+        context.volumeRules().size();
+    EXPECT_THROW(
+        context.addGeneratedVolumeRule(
+            196,
+            donor.metadata().front(),
+            std::move(mismatched_rule)),
+        std::invalid_argument);
+    EXPECT_EQ(context.contentRevision(), revision);
+    EXPECT_EQ(context.volumeRules().size(), rule_count);
 }
 
 TEST(GeneratedActiveBoundaryDomain,
@@ -2075,6 +2407,28 @@ TEST(FreeSurfaceGeometrySnapshot,
     FE::assembly::CutIntegrationContext context;
     context.addFreeSurfaceGeometrySnapshot(snapshot);
     EXPECT_EQ(context.freeSurfaceGeometrySnapshots().size(), 1u);
+    const auto* interface_publication =
+        context
+            .findGeneratedLevelSetInterfacePublicationProvenance(
+                interface_marker);
+    ASSERT_NE(interface_publication, nullptr);
+    EXPECT_EQ(
+        interface_publication
+            ->publication_domain_id,
+        snapshot->revision().domain_id);
+    for (const auto& contact :
+         snapshot->contactDomains()) {
+        const auto* contact_publication =
+            context
+                .findGeneratedInterfaceBoundaryPublicationProvenance(
+                    contact.marker());
+        ASSERT_NE(contact_publication, nullptr);
+        EXPECT_EQ(
+            contact_publication
+                ->request
+                .generated_domain_id,
+            contact.request().generated_domain_id);
+    }
     EXPECT_EQ(context.freeSurfaceGeometrySnapshotRevisionForMarker(
                   interface_marker),
               snapshot->revision().snapshot_revision_key);
@@ -2106,9 +2460,17 @@ TEST(FreeSurfaceGeometrySnapshot,
             context.assertFreeSurfaceGeometrySnapshotCurrentForMarker(
                 active.marker()));
     }
-    context.addGeneratedInterfaceDomain(snapshot->interfaceDomain());
-    EXPECT_THROW((void)context.interfaceRulesForMarker(interface_marker),
-                 std::invalid_argument);
+    const auto revision_before_duplicate_domain =
+        context.contentRevision();
+    EXPECT_THROW(
+        context.addGeneratedInterfaceDomain(
+            snapshot->interfaceDomain()),
+        std::invalid_argument);
+    EXPECT_EQ(context.contentRevision(),
+              revision_before_duplicate_domain);
+    EXPECT_NO_THROW(
+        context.assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+            interface_marker));
 }
 
 TEST(FreeSurfaceGeometrySnapshot,
@@ -3260,6 +3622,242 @@ TEST(FreeSurfaceGeometrySnapshot,
 }
 
 TEST(FreeSurfaceGeometrySnapshot,
+     GeneralFiniteElementPressureMatchesMaterialDomainVariation)
+{
+    constexpr int interface_marker = 124;
+    constexpr int wall_marker = 21;
+    constexpr FE::Real epsilon = FE::Real{1.0e-6};
+    constexpr std::array<std::array<FE::Real, 3>, 4> base_coordinates{{
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 0.0, 0.0}},
+        {{1.0, 1.0, 0.0}},
+        {{0.0, 1.0, 0.0}},
+    }};
+
+    // Both p_h and V_h are nonconstant Q1 fields.  Pressure coefficients are
+    // held fixed in parent coordinates while x_t = x + t V_h(x), which is the
+    // material-transport convention for
+    //
+    //   d/dt integral_{Omega_t} p_h,t dx
+    //       = integral_{Omega_h} p_h div(V_h) dx.
+    //
+    // This is deliberately separate from the constant lambda V_h term in the
+    // capillary functional.
+    const auto deformation_value =
+        [](const std::array<FE::Real, 3>& point) {
+            const FE::Real x = point[0];
+            const FE::Real y = point[1];
+            return std::array<FE::Real, 3>{{
+                FE::Real{0.07} + FE::Real{0.20} * x -
+                    FE::Real{0.11} * y + FE::Real{0.13} * x * y,
+                FE::Real{-0.04} + FE::Real{0.08} * x +
+                    FE::Real{0.17} * y - FE::Real{0.09} * x * y,
+                FE::Real{0.0},
+            }};
+        };
+    const auto deformation_divergence =
+        [](const std::array<FE::Real, 3>& point) {
+            return FE::Real{0.37} + FE::Real{0.13} * point[1] -
+                   FE::Real{0.09} * point[0];
+        };
+    const auto reference_to_base_point =
+        [](const std::array<FE::Real, 3>& xi) {
+            return std::array<FE::Real, 3>{{
+                FE::Real{0.5} * (xi[0] + FE::Real{1.0}),
+                FE::Real{0.5} * (xi[1] + FE::Real{1.0}),
+                FE::Real{0.0},
+            }};
+        };
+    const auto material_pressure =
+        [&reference_to_base_point](
+            const std::array<FE::Real, 3>& parent_coordinate) {
+            const auto point =
+                reference_to_base_point(parent_coordinate);
+            const FE::Real x = point[0];
+            const FE::Real y = point[1];
+            return FE::Real{0.60} + FE::Real{0.70} * x -
+                   FE::Real{0.40} * y + FE::Real{0.50} * x * y;
+        };
+
+    const std::array<FE::Real, 4> level_set_values{{
+        FE::Real{-0.42},
+        FE::Real{0.58},
+        FE::Real{0.40},
+        FE::Real{-0.60},
+    }};
+    const auto build_snapshot =
+        [&](FE::Real perturbation, std::string domain_id) {
+            std::vector<std::array<FE::Real, 3>> coordinates;
+            coordinates.reserve(base_coordinates.size());
+            for (const auto& point : base_coordinates) {
+                const auto displacement = deformation_value(point);
+                coordinates.push_back({{
+                    point[0] + perturbation * displacement[0],
+                    point[1] + perturbation * displacement[1],
+                    FE::Real{0.0},
+                }});
+            }
+            const SingleQuadBoundaryMesh mesh(
+                wall_marker,
+                /*rank=*/0,
+                /*size=*/1,
+                /*owner_rank=*/0,
+                /*owned=*/true,
+                FE::ElementType::Quad4,
+                std::move(coordinates));
+            auto interface_domain =
+                linearQuadCutDomain(interface_marker, level_set_values);
+            auto contact_domain =
+                interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+                    contactRequest(interface_marker, wall_marker),
+                    interface_domain,
+                    mesh);
+            interfaces::GeneratedActiveBoundaryScalarField nodal_field;
+            nodal_field.value_at_node =
+                [level_set_values](FE::GlobalIndex node) {
+                    return level_set_values.at(
+                        static_cast<std::size_t>(node));
+                };
+            auto negative =
+                interfaces::buildGeneratedActiveBoundaryDomain(
+                    activeRequest(
+                        interface_marker,
+                        wall_marker,
+                        FE::geometry::CutIntegrationSide::Negative),
+                    interface_domain,
+                    contact_domain,
+                    mesh,
+                    nodal_field);
+            auto positive =
+                interfaces::buildGeneratedActiveBoundaryDomain(
+                    activeRequest(
+                        interface_marker,
+                        wall_marker,
+                        FE::geometry::CutIntegrationSide::Positive),
+                    interface_domain,
+                    contact_domain,
+                    mesh,
+                    nodal_field);
+            return interfaces::buildFreeSurfaceGeometrySnapshot(
+                std::move(interface_domain),
+                {std::move(contact_domain)},
+                {std::move(negative), std::move(positive)},
+                mesh,
+                {},
+                bilinearQuadScalar(level_set_values),
+                std::move(domain_id));
+        };
+
+    const auto base_snapshot =
+        build_snapshot(FE::Real{0.0}, "pressure_domain_variation_base");
+    const auto plus_snapshot =
+        build_snapshot(epsilon, "pressure_domain_variation_plus");
+    const auto minus_snapshot =
+        build_snapshot(-epsilon, "pressure_domain_variation_minus");
+
+    const auto volume_role =
+        [](FE::geometry::CutIntegrationSide side) {
+            return side == FE::geometry::CutIntegrationSide::Negative
+                ? interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume
+                : interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume;
+        };
+    const auto integrate_owned_pressure =
+        [&](const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+            FE::geometry::CutIntegrationSide side) {
+            FE::Real integral{0.0};
+            for (const auto& record : snapshot.rules()) {
+                if (!record.locally_owned ||
+                    record.retention !=
+                        interfaces::FreeSurfaceGeometryRetention::Retained ||
+                    record.role != volume_role(side)) {
+                    continue;
+                }
+                if (record.reference_rule.points.size() !=
+                    record.physical_rule.points.size()) {
+                    throw std::logic_error(
+                        "pressure-domain regression found mismatched quadrature points");
+                }
+                for (std::size_t q = 0u;
+                     q < record.reference_rule.points.size();
+                     ++q) {
+                    integral +=
+                        material_pressure(
+                            record.reference_rule.points[q]
+                                .parent_coordinate) *
+                        record.physical_rule.points[q].physical_weight;
+                }
+            }
+            return integral;
+        };
+    const auto integrate_owned_pressure_divergence =
+        [&](FE::geometry::CutIntegrationSide side) {
+            FE::Real integral{0.0};
+            for (const auto& record : base_snapshot->rules()) {
+                if (!record.locally_owned ||
+                    record.retention !=
+                        interfaces::FreeSurfaceGeometryRetention::Retained ||
+                    record.role != volume_role(side)) {
+                    continue;
+                }
+                for (std::size_t q = 0u;
+                     q < record.reference_rule.points.size();
+                     ++q) {
+                    const auto& parent_coordinate =
+                        record.reference_rule.points[q].parent_coordinate;
+                    const auto point =
+                        reference_to_base_point(parent_coordinate);
+                    integral +=
+                        material_pressure(parent_coordinate) *
+                        deformation_divergence(point) *
+                        record.physical_rule.points[q].physical_weight;
+                }
+            }
+            return integral;
+        };
+
+    FE::Real maximum_relative_error{0.0};
+    std::size_t case_count{0u};
+    for (const auto liquid_side : {
+             FE::geometry::CutIntegrationSide::Negative,
+             FE::geometry::CutIntegrationSide::Positive}) {
+        SCOPED_TRACE(static_cast<int>(liquid_side));
+        const FE::Real domain_variation =
+            (integrate_owned_pressure(*plus_snapshot, liquid_side) -
+             integrate_owned_pressure(*minus_snapshot, liquid_side)) /
+            (FE::Real{2.0} * epsilon);
+        const FE::Real pressure_divergence =
+            integrate_owned_pressure_divergence(liquid_side);
+        const FE::Real scale =
+            std::max({FE::Real{1.0e-12},
+                      std::abs(domain_variation),
+                      std::abs(pressure_divergence)});
+        const FE::Real relative_error =
+            std::abs(domain_variation - pressure_divergence) / scale;
+
+        EXPECT_GT(std::abs(domain_variation), FE::Real{1.0e-8});
+        EXPECT_LT(relative_error, FE::Real{2.0e-8});
+        EXPECT_NEAR(-pressure_divergence,
+                    -domain_variation,
+                    FE::Real{2.0e-8} * scale)
+            << "the pressure virtual-work sign is the negative material "
+               "domain variation";
+        maximum_relative_error =
+            std::max(maximum_relative_error, relative_error);
+        ++case_count;
+    }
+
+    EXPECT_NE(material_pressure({{-1.0, -1.0, 0.0}}),
+              material_pressure({{1.0, 1.0, 0.0}}));
+    EXPECT_NE(deformation_divergence({{0.0, 0.0, 0.0}}),
+              deformation_divergence({{1.0, 1.0, 0.0}}));
+    RecordProperty("general_pressure_domain_variation_case_count",
+                   case_count);
+    RecordProperty(
+        "general_pressure_domain_variation_max_relative_error",
+        ::testing::PrintToString(maximum_relative_error));
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
      DiscreteFunctionalFirstVariationMatchesThreeDimensionalCentralDifference)
 {
     constexpr int interface_marker = 125;
@@ -3612,11 +4210,244 @@ TEST(FreeSurfaceGeometrySnapshot,
     const auto owner_variation =
         interfaces::evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
             *owner_snapshot, parameters, deformation);
+    interfaces::FreeSurfaceActiveVolumeEnergyParameters
+        volume_energy_parameters;
+    volume_energy_parameters.density = 3.0;
+    volume_energy_parameters.gravitational_acceleration =
+        {{0.0, -2.0, 0.0}};
+    interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
+        volume_velocity;
+    volume_velocity.value =
+        [](FE::GlobalIndex,
+           const std::array<FE::Real, 3>&,
+           const FE::geometry::CutQuadratureProvenance&) {
+            return std::array<FE::Real, 3>{{2.0, -1.0, 0.0}};
+        };
+    volume_velocity.physical_gradient =
+        [](FE::GlobalIndex,
+           const std::array<FE::Real, 3>&,
+           const FE::geometry::CutQuadratureProvenance&) {
+            return FE::interfaces::
+                FreeSurfaceDiscreteFunctionalPhysicalGradient{{
+                    {{1.0, 2.0, 0.0}},
+                    {{0.0, -1.0, 0.0}},
+                    {{0.0, 0.0, 0.0}},
+                }};
+        };
+    const auto owner_volume_energy =
+        interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
+            *owner_snapshot,
+            volume_energy_parameters,
+            volume_velocity);
+    interfaces::FreeSurfaceActiveVolumeDissipationParameters
+        volume_dissipation_parameters;
+    volume_dissipation_parameters.dynamic_viscosity = 0.5;
+    const auto owner_volume_dissipation =
+        interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
+            *owner_snapshot,
+            volume_dissipation_parameters,
+            volume_velocity);
+    interfaces::FreeSurfaceExternalPressurePowerParameters
+        exterior_pressure_parameters;
+    exterior_pressure_parameters.external_pressure = 2.5;
+    const auto owner_exterior_pressure_power =
+        interfaces::evaluateFreeSurfaceExternalPressurePower(
+            *owner_snapshot,
+            exterior_pressure_parameters,
+            volume_velocity);
+    interfaces::FreeSurfaceDiscreteFunctionalDeformationEvaluator
+        endpoint_velocity_deformation;
+    endpoint_velocity_deformation.value = volume_velocity.value;
+    endpoint_velocity_deformation.physical_gradient =
+        volume_velocity.physical_gradient;
+    const auto endpoint_velocity_variation =
+        interfaces::evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
+            *owner_snapshot,
+            parameters,
+            endpoint_velocity_deformation);
+    interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
+        previous_volume_velocity;
+    previous_volume_velocity.value =
+        [](FE::GlobalIndex,
+           const std::array<FE::Real, 3>&,
+           const FE::geometry::CutQuadratureProvenance&) {
+            return std::array<FE::Real, 3>{{1.0, 0.0, 0.0}};
+        };
+    const auto owner_kinetic_work =
+        interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
+            *owner_snapshot,
+            volume_energy_parameters.liquid_side,
+            volume_energy_parameters.density,
+            /*previous_velocity_revision=*/17u,
+            /*endpoint_velocity_revision=*/18u,
+            previous_volume_velocity,
+            volume_velocity);
     EXPECT_GT(owner_state.owned_liquid_volume, 0.0);
     EXPECT_GT(owner_state.owned_liquid_gas_area, 0.0);
     EXPECT_GT(owner_variation.owned_liquid_volume_variation, 0.0);
     EXPECT_GT(owner_variation.owned_liquid_gas_area_variation, 0.0);
     EXPECT_GT(owner_variation.total_potential_variation, 0.0);
+    EXPECT_EQ(
+        owner_volume_energy.snapshot_revision_key,
+        owner_snapshot->revision().snapshot_revision_key);
+    EXPECT_GT(owner_volume_energy.owned_quadrature_point_count, 0u);
+    EXPECT_NEAR(
+        owner_volume_energy.owned_liquid_volume,
+        owner_state.owned_liquid_volume,
+        1.0e-14);
+    EXPECT_NEAR(
+        owner_volume_energy.kinetic_energy,
+        FE::Real{0.5} * FE::Real{3.0} * FE::Real{5.0} *
+            owner_state.owned_liquid_volume,
+        1.0e-14);
+    EXPECT_NEAR(
+        owner_volume_energy.gravitational_energy,
+        1.5,
+        1.0e-14);
+    EXPECT_NEAR(
+        owner_volume_energy.gravitational_potential_power,
+        FE::Real{-6.0} * owner_state.owned_liquid_volume,
+        1.0e-14);
+    EXPECT_NEAR(
+        owner_volume_energy.total_energy,
+        owner_volume_energy.kinetic_energy +
+            owner_volume_energy.gravitational_energy,
+        1.0e-14);
+    EXPECT_EQ(
+        owner_volume_dissipation.snapshot_revision_key,
+        owner_snapshot->revision().snapshot_revision_key);
+    EXPECT_EQ(
+        owner_volume_dissipation.owned_quadrature_point_count,
+        owner_volume_energy.owned_quadrature_point_count);
+    EXPECT_NEAR(
+        owner_volume_dissipation.owned_liquid_volume,
+        owner_state.owned_liquid_volume,
+        1.0e-14);
+    EXPECT_NEAR(
+        owner_volume_dissipation.bulk_viscous_dissipation_rate,
+        FE::Real{4.0} * owner_state.owned_liquid_volume,
+        1.0e-14);
+    EXPECT_EQ(
+        owner_exterior_pressure_power.snapshot_revision_key,
+        owner_snapshot->revision().snapshot_revision_key);
+    EXPECT_GT(
+        owner_exterior_pressure_power.owned_quadrature_point_count,
+        0u);
+    EXPECT_NEAR(
+        owner_exterior_pressure_power.owned_liquid_gas_area,
+        owner_state.owned_liquid_gas_area,
+        1.0e-14);
+    EXPECT_NEAR(
+        owner_exterior_pressure_power
+            .outward_liquid_volume_flux_rate,
+        endpoint_velocity_variation
+            .owned_liquid_volume_variation,
+        1.0e-14);
+    EXPECT_NEAR(
+        owner_exterior_pressure_power.external_pressure_power,
+        -exterior_pressure_parameters.external_pressure *
+            owner_exterior_pressure_power
+                .outward_liquid_volume_flux_rate,
+        1.0e-14);
+    EXPECT_EQ(
+        owner_kinetic_work.snapshot_revision_key,
+        owner_snapshot->revision().snapshot_revision_key);
+    EXPECT_EQ(owner_kinetic_work.previous_velocity_revision, 17u);
+    EXPECT_EQ(owner_kinetic_work.endpoint_velocity_revision, 18u);
+    EXPECT_EQ(
+        owner_kinetic_work.owned_quadrature_point_count,
+        owner_volume_energy.owned_quadrature_point_count);
+    EXPECT_NEAR(
+        owner_kinetic_work.owned_liquid_volume,
+        owner_state.owned_liquid_volume,
+        1.0e-14);
+    EXPECT_NEAR(
+        owner_kinetic_work.kinetic_energy_before_on_endpoint_domain,
+        FE::Real{1.5} * owner_state.owned_liquid_volume,
+        1.0e-14);
+    EXPECT_NEAR(
+        owner_kinetic_work.kinetic_energy_after,
+        FE::Real{7.5} * owner_state.owned_liquid_volume,
+        1.0e-14);
+    EXPECT_NEAR(
+        owner_kinetic_work.kinetic_energy_change_on_endpoint_domain,
+        FE::Real{6.0} * owner_state.owned_liquid_volume,
+        1.0e-14);
+    EXPECT_NEAR(
+        owner_kinetic_work.step_integrated_inertia_work,
+        FE::Real{9.0} * owner_state.owned_liquid_volume,
+        1.0e-14);
+    EXPECT_NEAR(
+        owner_kinetic_work.time_discretization_loss,
+        FE::Real{3.0} * owner_state.owned_liquid_volume,
+        1.0e-14);
+    EXPECT_NEAR(owner_kinetic_work.identity_residual, 0.0, 1.0e-14);
+    EXPECT_THROW(
+        (void)interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
+            *owner_snapshot,
+            volume_energy_parameters,
+            {}),
+        std::invalid_argument);
+    auto invalid_volume_energy_parameters =
+        volume_energy_parameters;
+    invalid_volume_energy_parameters.density = 0.0;
+    EXPECT_THROW(
+        (void)interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
+            *owner_snapshot,
+            invalid_volume_energy_parameters,
+            volume_velocity),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
+            *owner_snapshot,
+            volume_energy_parameters.liquid_side,
+            volume_energy_parameters.density,
+            /*previous_velocity_revision=*/17u,
+            /*endpoint_velocity_revision=*/18u,
+            previous_volume_velocity,
+            {}),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
+            *owner_snapshot,
+            volume_energy_parameters.liquid_side,
+            volume_energy_parameters.density,
+            /*previous_velocity_revision=*/0u,
+            /*endpoint_velocity_revision=*/18u,
+            previous_volume_velocity,
+            volume_velocity),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
+            *owner_snapshot,
+            volume_dissipation_parameters,
+            previous_volume_velocity),
+        std::invalid_argument);
+    auto invalid_volume_dissipation_parameters =
+        volume_dissipation_parameters;
+    invalid_volume_dissipation_parameters.dynamic_viscosity = 0.0;
+    EXPECT_THROW(
+        (void)interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
+            *owner_snapshot,
+            invalid_volume_dissipation_parameters,
+            volume_velocity),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)interfaces::evaluateFreeSurfaceExternalPressurePower(
+            *owner_snapshot,
+            exterior_pressure_parameters,
+            {}),
+        std::invalid_argument);
+    auto invalid_exterior_pressure_parameters =
+        exterior_pressure_parameters;
+    invalid_exterior_pressure_parameters.external_pressure =
+        std::numeric_limits<FE::Real>::quiet_NaN();
+    EXPECT_THROW(
+        (void)interfaces::evaluateFreeSurfaceExternalPressurePower(
+            *owner_snapshot,
+            invalid_exterior_pressure_parameters,
+            volume_velocity),
+        std::invalid_argument);
 
     const SingleQuadBoundaryMesh ghost_mesh(
         /*marker=*/7,
@@ -3654,6 +4485,30 @@ TEST(FreeSurfaceGeometrySnapshot,
     const auto ghost_variation =
         interfaces::evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
             *ghost_snapshot, parameters, deformation);
+    const auto ghost_volume_energy =
+        interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
+            *ghost_snapshot,
+            volume_energy_parameters,
+            volume_velocity);
+    const auto ghost_volume_dissipation =
+        interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
+            *ghost_snapshot,
+            volume_dissipation_parameters,
+            volume_velocity);
+    const auto ghost_exterior_pressure_power =
+        interfaces::evaluateFreeSurfaceExternalPressurePower(
+            *ghost_snapshot,
+            exterior_pressure_parameters,
+            volume_velocity);
+    const auto ghost_kinetic_work =
+        interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
+            *ghost_snapshot,
+            volume_energy_parameters.liquid_side,
+            volume_energy_parameters.density,
+            /*previous_velocity_revision=*/17u,
+            /*endpoint_velocity_revision=*/18u,
+            previous_volume_velocity,
+            volume_velocity);
     EXPECT_EQ(ghost_snapshot->revision().snapshot_revision_key,
               owner_snapshot->revision().snapshot_revision_key);
     EXPECT_EQ(ghost_state.owned_liquid_volume, 0.0);
@@ -3668,6 +4523,46 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_EQ(ghost_variation.young_wall_energy_variation, 0.0);
     EXPECT_EQ(ghost_variation.volume_constraint_potential_variation, 0.0);
     EXPECT_EQ(ghost_variation.total_potential_variation, 0.0);
+    EXPECT_EQ(ghost_volume_energy.owned_quadrature_point_count, 0u);
+    EXPECT_EQ(ghost_volume_energy.owned_liquid_volume, 0.0);
+    EXPECT_EQ(ghost_volume_energy.kinetic_energy, 0.0);
+    EXPECT_EQ(ghost_volume_energy.gravitational_energy, 0.0);
+    EXPECT_EQ(
+        ghost_volume_energy.gravitational_potential_power, 0.0);
+    EXPECT_EQ(ghost_volume_energy.total_energy, 0.0);
+    EXPECT_EQ(
+        ghost_volume_dissipation.owned_quadrature_point_count, 0u);
+    EXPECT_EQ(ghost_volume_dissipation.owned_liquid_volume, 0.0);
+    EXPECT_EQ(
+        ghost_volume_dissipation.bulk_viscous_dissipation_rate,
+        0.0);
+    EXPECT_EQ(
+        ghost_exterior_pressure_power.owned_quadrature_point_count,
+        0u);
+    EXPECT_EQ(
+        ghost_exterior_pressure_power.owned_liquid_gas_area,
+        0.0);
+    EXPECT_EQ(
+        ghost_exterior_pressure_power
+            .outward_liquid_volume_flux_rate,
+        0.0);
+    EXPECT_EQ(
+        ghost_exterior_pressure_power.external_pressure_power,
+        0.0);
+    EXPECT_EQ(ghost_kinetic_work.owned_quadrature_point_count, 0u);
+    EXPECT_EQ(ghost_kinetic_work.previous_velocity_revision, 17u);
+    EXPECT_EQ(ghost_kinetic_work.endpoint_velocity_revision, 18u);
+    EXPECT_EQ(ghost_kinetic_work.owned_liquid_volume, 0.0);
+    EXPECT_EQ(
+        ghost_kinetic_work.kinetic_energy_before_on_endpoint_domain,
+        0.0);
+    EXPECT_EQ(ghost_kinetic_work.kinetic_energy_after, 0.0);
+    EXPECT_EQ(
+        ghost_kinetic_work.kinetic_energy_change_on_endpoint_domain,
+        0.0);
+    EXPECT_EQ(ghost_kinetic_work.step_integrated_inertia_work, 0.0);
+    EXPECT_EQ(ghost_kinetic_work.time_discretization_loss, 0.0);
+    EXPECT_EQ(ghost_kinetic_work.identity_residual, 0.0);
     RecordProperty("functional_first_variation_ghost_contribution_count", 0);
 }
 

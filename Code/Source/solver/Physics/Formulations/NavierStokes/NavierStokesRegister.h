@@ -13,6 +13,16 @@ struct EquationModuleInput;
 namespace svmp::Physics::formulations::navier_stokes {
 
 /**
+ * Validate the fitted free-surface/contact capability encoded by an input.
+ *
+ * This typed translation preflight does not mutate an FE system.  Application
+ * orchestration uses it before cross-equation field pre-registration so an
+ * excluded fitted request cannot leave a partially declared system behind.
+ */
+void preflightFittedSurfaceContactCapability(
+    const EquationModuleInput& input);
+
+/**
  * Predeclare the primary velocity unknown described by a fluid/stokes input.
  *
  * This field-only hook supports coupled modules that are intentionally listed

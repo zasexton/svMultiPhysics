@@ -73,6 +73,10 @@ EXPECTED_ZERO_RESULT_GATES = {
     "expected_skipped",
 }
 GTEST_LIST_TIMEOUT_SECONDS = 60
+TARGET_INVENTORY_PARSE_LIMIT_BYTES = 8 * 1024 * 1024
+BINARY_LINK_PROVENANCE_TIMEOUT_SECONDS = 60
+BINARY_LINK_PROVENANCE_MEMORY_MIB = 256
+BINARY_LINK_PROVENANCE_OUTPUT_MIB = 4
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -85,6 +89,18 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def read_text_with_limit(path: Path, maximum_bytes: int) -> str:
+    if maximum_bytes <= 0:
+        raise ValueError("text-file read limit must be positive")
+    with path.open("rb") as source:
+        payload = source.read(maximum_bytes + 1)
+    if len(payload) > maximum_bytes:
+        raise ValueError(
+            f"text file exceeds {maximum_bytes}-byte parse limit: {path}"
+        )
+    return payload.decode(encoding="utf-8", errors="replace")
 
 
 def path_present(path: Path) -> bool:
@@ -938,6 +954,26 @@ def directory_size(path: Path) -> int:
     return total
 
 
+def host_available_memory_mib() -> int | None:
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def filesystem_free_mib(path: Path) -> int | None:
+    try:
+        statistics = os.statvfs(path)
+    except OSError:
+        return None
+    return (
+        statistics.f_bavail * statistics.f_frsize
+    ) // (1024 * 1024)
+
+
 def process_resident_kib(process_id: int) -> int | None:
     try:
         for line in (
@@ -1154,6 +1190,10 @@ def run_monitored(
     output_mib: int,
     launch_mode: str,
     required_simultaneous_process_samples: int = 1,
+    minimum_host_available_mib: int | None = None,
+    minimum_filesystem_free_mib: int | None = None,
+    filesystem_path: Path | None = None,
+    additional_filesystem_paths: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
     if launch_mode not in {"direct_serial", "mpi"}:
         raise ValueError(f"unsupported monitored launch mode: {launch_mode}")
@@ -1164,12 +1204,39 @@ def run_monitored(
         and required_simultaneous_process_samples != 1
     ):
         raise ValueError("direct serial monitoring requires one process sample")
+    if (
+        minimum_host_available_mib is not None
+        and minimum_host_available_mib <= 0
+    ):
+        raise ValueError("minimum host-available memory must be positive")
+    if (
+        minimum_filesystem_free_mib is not None
+        and minimum_filesystem_free_mib <= 0
+    ):
+        raise ValueError("minimum filesystem free space must be positive")
+    primary_filesystem = (
+        output_directory
+        if filesystem_path is None
+        else filesystem_path
+    )
+    monitored_filesystems = tuple(
+        dict.fromkeys(
+            (
+                primary_filesystem,
+                *additional_filesystem_paths,
+            )
+        )
+    )
     allow_reaped_serial_launcher_rusage = launch_mode == "direct_serial"
     memory_bytes = memory_mib * 1024 * 1024
     output_bytes = output_mib * 1024 * 1024
 
     def set_limits() -> None:
         resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+        resource.setrlimit(
+            resource.RLIMIT_FSIZE,
+            (output_bytes, output_bytes),
+        )
 
     started = time.monotonic()
     peak_resident_kib = 0
@@ -1182,11 +1249,64 @@ def run_monitored(
     session_enumeration_failure_count = 0
     stat_read_failure_count = 0
     resident_read_failure_count = 0
+    minimum_observed_host_available_mib: int | None = None
+    minimum_observed_filesystem_free_mib: int | None = None
+    host_available_sample_count = 0
+    filesystem_free_sample_count = 0
     reaped_launcher_max_resident_kib: int | None = None
     reaped_launcher_rusage_available = False
     process_session_id: int | None = None
     termination_reason: str | None = None
     termination: dict[str, Any] | None = None
+    initial_host_available_mib = host_available_memory_mib()
+    initial_filesystem_samples = {
+        str(path): filesystem_free_mib(path)
+        for path in monitored_filesystems
+    }
+    initial_filesystem_free_mib = (
+        min(
+            available
+            for available in initial_filesystem_samples.values()
+            if available is not None
+        )
+        if all(
+            available is not None
+            for available in initial_filesystem_samples.values()
+        )
+        else None
+    )
+    if (
+        minimum_host_available_mib is not None
+        and (
+            initial_host_available_mib is None
+            or initial_host_available_mib <
+                minimum_host_available_mib
+        )
+    ):
+        raise RuntimeError(
+            "host available-memory floor is not satisfied before launch"
+        )
+    if (
+        minimum_filesystem_free_mib is not None
+        and (
+            initial_filesystem_free_mib is None
+            or initial_filesystem_free_mib <
+                minimum_filesystem_free_mib
+        )
+    ):
+        raise RuntimeError(
+            "filesystem free-space floor is not satisfied before launch"
+        )
+    if initial_host_available_mib is not None:
+        minimum_observed_host_available_mib = (
+            initial_host_available_mib
+        )
+        host_available_sample_count = 1
+    if initial_filesystem_free_mib is not None:
+        minimum_observed_filesystem_free_mib = (
+            initial_filesystem_free_mib
+        )
+        filesystem_free_sample_count = 1
     with stdout_path.open("xb") as stdout_file, stderr_path.open("xb") as stderr_file:
         process = subprocess.Popen(
             command,
@@ -1198,63 +1318,131 @@ def run_monitored(
             preexec_fn=set_limits,
         )
         process_session_id = process.pid
-        while True:
-            elapsed = time.monotonic() - started
-            resident = process_resident_kib(process.pid)
-            if resident is not None:
-                peak_resident_kib = max(peak_resident_kib, resident)
-            session_sample = process_session_resources(process.pid)
-            monitor_sample_count += 1
-            if not session_sample["enumeration_available"]:
-                session_enumeration_failure_count += 1
-            stat_read_failure_count += session_sample["stat_read_failure_count"]
-            resident_read_failure_count += session_sample["resident_read_failure_count"]
-            aggregate_resident_kib = session_sample["aggregate_resident_kib"]
-            process_count = session_sample["process_count"]
-            resident_sample_count = session_sample["resident_sample_count"]
-            process_group_count = session_sample["process_group_count"]
-            if (
-                session_sample["enumeration_available"]
-                and session_sample["resident_sample_count"] > 0
-                and process_count > 0
-            ):
-                successful_session_sample_count += 1
-            peak_aggregate_resident_kib = max(
-                peak_aggregate_resident_kib, aggregate_resident_kib
-            )
-            peak_process_count = max(peak_process_count, process_count)
-            peak_resident_sample_count = max(
-                peak_resident_sample_count, resident_sample_count
-            )
-            peak_process_group_count = max(
-                peak_process_group_count, process_group_count
-            )
-            (
-                polled_return_code,
-                polled_max_resident_kib,
-                polled_rusage_available,
-            ) = poll_process_with_rusage(process)
-            if polled_rusage_available:
-                reaped_launcher_rusage_available = True
-                reaped_launcher_max_resident_kib = polled_max_resident_kib
-            if polled_return_code is not None:
-                break
-            if not session_sample["enumeration_available"]:
-                termination_reason = "session_resource_monitoring_unavailable"
-            elif elapsed > wall_time_seconds:
-                termination_reason = "wall_time_envelope_exceeded"
-            elif directory_size(output_directory) > output_bytes:
-                termination_reason = "output_envelope_exceeded"
-            elif aggregate_resident_kib > memory_mib * 1024:
-                termination_reason = "memory_envelope_exceeded"
-            if termination_reason is not None:
+        try:
+            while True:
+                elapsed = time.monotonic() - started
+                resident = process_resident_kib(process.pid)
+                if resident is not None:
+                    peak_resident_kib = max(peak_resident_kib, resident)
+                session_sample = process_session_resources(process.pid)
+                monitor_sample_count += 1
+                if not session_sample["enumeration_available"]:
+                    session_enumeration_failure_count += 1
+                stat_read_failure_count += session_sample["stat_read_failure_count"]
+                resident_read_failure_count += session_sample["resident_read_failure_count"]
+                aggregate_resident_kib = session_sample["aggregate_resident_kib"]
+                process_count = session_sample["process_count"]
+                resident_sample_count = session_sample["resident_sample_count"]
+                process_group_count = session_sample["process_group_count"]
+                if (
+                    session_sample["enumeration_available"]
+                    and session_sample["resident_sample_count"] > 0
+                    and process_count > 0
+                ):
+                    successful_session_sample_count += 1
+                peak_aggregate_resident_kib = max(
+                    peak_aggregate_resident_kib, aggregate_resident_kib
+                )
+                peak_process_count = max(peak_process_count, process_count)
+                peak_resident_sample_count = max(
+                    peak_resident_sample_count, resident_sample_count
+                )
+                peak_process_group_count = max(
+                    peak_process_group_count, process_group_count
+                )
+                host_available_mib = host_available_memory_mib()
+                filesystem_samples = {
+                    str(path): filesystem_free_mib(path)
+                    for path in monitored_filesystems
+                }
+                filesystem_available_mib = (
+                    min(
+                        available
+                        for available in filesystem_samples.values()
+                        if available is not None
+                    )
+                    if all(
+                        available is not None
+                        for available in filesystem_samples.values()
+                    )
+                    else None
+                )
+                if host_available_mib is not None:
+                    host_available_sample_count += 1
+                    minimum_observed_host_available_mib = (
+                        host_available_mib
+                        if minimum_observed_host_available_mib is None
+                        else min(
+                            minimum_observed_host_available_mib,
+                            host_available_mib,
+                        )
+                    )
+                if filesystem_available_mib is not None:
+                    filesystem_free_sample_count += 1
+                    minimum_observed_filesystem_free_mib = (
+                        filesystem_available_mib
+                        if minimum_observed_filesystem_free_mib is None
+                        else min(
+                            minimum_observed_filesystem_free_mib,
+                            filesystem_available_mib,
+                        )
+                    )
+                (
+                    polled_return_code,
+                    polled_max_resident_kib,
+                    polled_rusage_available,
+                ) = poll_process_with_rusage(process)
+                if polled_rusage_available:
+                    reaped_launcher_rusage_available = True
+                    reaped_launcher_max_resident_kib = polled_max_resident_kib
+                if directory_size(output_directory) > output_bytes:
+                    termination_reason = "output_envelope_exceeded"
+                elif (
+                    minimum_host_available_mib is not None
+                    and (
+                        host_available_mib is None
+                        or host_available_mib <
+                            minimum_host_available_mib
+                    )
+                ):
+                    termination_reason = "host_available_memory_floor_breached"
+                elif (
+                    minimum_filesystem_free_mib is not None
+                    and (
+                        filesystem_available_mib is None
+                        or filesystem_available_mib <
+                            minimum_filesystem_free_mib
+                    )
+                ):
+                    termination_reason = "filesystem_free_space_floor_breached"
+                elif elapsed > wall_time_seconds:
+                    termination_reason = "wall_time_envelope_exceeded"
+                elif aggregate_resident_kib > memory_mib * 1024:
+                    termination_reason = "memory_envelope_exceeded"
+                if termination_reason is not None:
+                    termination = terminate_process_session(process)
+                    break
+                if polled_return_code is not None:
+                    break
+                if not session_sample["enumeration_available"]:
+                    termination_reason = "session_resource_monitoring_unavailable"
+                if termination_reason is not None:
+                    termination = terminate_process_session(process)
+                    break
+                time.sleep(0.05)
+            if termination_reason is None and process_session_members(process.pid):
+                termination_reason = "launcher_exited_with_lingering_session_processes"
                 termination = terminate_process_session(process)
-                break
-            time.sleep(0.05)
-        if termination_reason is None and process_session_members(process.pid):
-            termination_reason = "launcher_exited_with_lingering_session_processes"
-            termination = terminate_process_session(process)
-        return_code = process.wait()
+            try:
+                return_code = process.wait(
+                    timeout=1 if termination_reason is not None else None
+                )
+            except subprocess.TimeoutExpired:
+                termination_reason = "process_session_termination_incomplete"
+                return_code = process.poll()
+        except BaseException:
+            terminate_process_session(process)
+            raise
     final_wall_time_seconds = time.monotonic() - started
     final_output_bytes = directory_size(output_directory)
     reaped_launcher_fallback_used = (
@@ -1295,7 +1483,7 @@ def run_monitored(
         "wall_time_seconds": final_wall_time_seconds,
         "memory_enforcement_scope": "spawned_process_session",
         "memory_enforcement_method": (
-            "per_process_address_space_limit_and_sampled_session_resident_memory"
+            "per_process_address_and_file_size_limits_plus_sampled_session_resident_memory"
         ),
         "aggregate_memory_measurement": "sampled_peak",
         "resource_monitoring_outcome": (
@@ -1319,6 +1507,19 @@ def run_monitored(
         "session_enumeration_failure_count": session_enumeration_failure_count,
         "stat_read_failure_count": stat_read_failure_count,
         "resident_read_failure_count": resident_read_failure_count,
+        "minimum_host_available_mib": minimum_host_available_mib,
+        "minimum_observed_host_available_mib": (
+            minimum_observed_host_available_mib
+        ),
+        "host_available_sample_count": host_available_sample_count,
+        "minimum_filesystem_free_mib": minimum_filesystem_free_mib,
+        "minimum_observed_filesystem_free_mib": (
+            minimum_observed_filesystem_free_mib
+        ),
+        "filesystem_free_sample_count": filesystem_free_sample_count,
+        "monitored_filesystems": [
+            str(path) for path in monitored_filesystems
+        ],
         "process_session_id": process_session_id,
         "peak_resident_kib_sampled": peak_resident_kib,
         "peak_aggregate_resident_kib_sampled": peak_aggregate_resident_kib,
@@ -1529,9 +1730,22 @@ def run_clean_builds(
             inventory_stderr,
             min(timeout_seconds, GTEST_LIST_TIMEOUT_SECONDS),
         )
-        help_text = inventory_stdout.read_text(
-            encoding="utf-8", errors="replace"
-        )
+        inventory_parse_diagnostic = None
+        try:
+            help_text = read_text_with_limit(
+                inventory_stdout,
+                TARGET_INVENTORY_PARSE_LIMIT_BYTES,
+            )
+        except ValueError:
+            help_text = ""
+            inventory_parse_diagnostic = (
+                "target_inventory_stdout_exceeds_parse_limit"
+            )
+        except OSError:
+            help_text = ""
+            inventory_parse_diagnostic = (
+                "target_inventory_stdout_unreadable"
+            )
         listed_targets = [
             target
             for target in targets
@@ -1545,6 +1759,7 @@ def run_clean_builds(
         inventory_passed = (
             not inventory["timed_out"]
             and inventory["return_code"] == 0
+            and inventory_parse_diagnostic is None
             and not missing_targets
         )
         inventory.update(
@@ -1553,6 +1768,12 @@ def run_clean_builds(
                 "expected_targets": targets,
                 "listed_expected_targets": listed_targets,
                 "missing_targets": missing_targets,
+                "stdout_parse_limit_bytes": (
+                    TARGET_INVENTORY_PARSE_LIMIT_BYTES
+                ),
+                "stdout_parse_diagnostic": (
+                    inventory_parse_diagnostic
+                ),
                 "outcome": "PASS" if inventory_passed else "FAIL_METHOD",
             }
         )
@@ -1833,26 +2054,84 @@ def run_clean_builds(
     return result
 
 
-def binary_record(binary: Path, source_root: Path) -> dict[str, Any]:
+def binary_record(
+    binary: Path,
+    source_root: Path,
+    output_root: Path,
+    binary_key: str,
+) -> dict[str, Any]:
     cache = find_cmake_cache(binary)
     try:
         recorded_path = binary.relative_to(source_root).as_posix()
     except ValueError:
         recorded_path = str(binary)
-    linked = subprocess.run(
-        ["ldd", str(binary)],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    ).stdout
+
+    provenance_root = output_root / "binary_provenance"
+    provenance_root.mkdir(parents=True, exist_ok=True)
+    binary_provenance_root = provenance_root / binary_key
+    binary_provenance_root.mkdir(exist_ok=False)
+    stdout_path = binary_provenance_root / "stdout.txt"
+    stderr_path = binary_provenance_root / "stderr.txt"
+    resource_record: dict[str, Any] | None = None
+    diagnostic: str | None = None
+    linked_libraries: list[str] = []
+    try:
+        resource_record = run_monitored(
+            ["ldd", str(binary)],
+            os.environ.copy(),
+            source_root,
+            stdout_path,
+            stderr_path,
+            binary_provenance_root,
+            BINARY_LINK_PROVENANCE_TIMEOUT_SECONDS,
+            BINARY_LINK_PROVENANCE_MEMORY_MIB,
+            BINARY_LINK_PROVENANCE_OUTPUT_MIB,
+            "direct_serial",
+        )
+    except (OSError, RuntimeError) as error:
+        diagnostic = (
+            "linked_library_provenance_launch_failed:"
+            f"{type(error).__name__}"
+        )
+
+    monitoring_passed = (
+        resource_record is not None
+        and resource_record["return_code"] == 0
+        and resource_record["termination_reason"] is None
+        and resource_record["resource_monitoring_outcome"] == "PASS"
+    )
+    if resource_record is not None and not monitoring_passed:
+        diagnostic = "linked_library_provenance_process_failed"
+    if monitoring_passed:
+        try:
+            linked_libraries = read_text_with_limit(
+                stdout_path,
+                BINARY_LINK_PROVENANCE_OUTPUT_MIB * 1024 * 1024,
+            ).splitlines()
+        except (OSError, ValueError):
+            diagnostic = "linked_library_provenance_stdout_unreadable"
+            monitoring_passed = False
+
     return {
         "path": recorded_path,
         "sha256": sha256_file(binary),
         "cmake_cache_path": str(cache) if cache else None,
         "cmake_cache_sha256": sha256_file(cache) if cache else None,
         "selected_cmake_cache": selected_cmake_cache(cache),
-        "linked_libraries": linked.splitlines(),
+        "linked_libraries": linked_libraries,
+        "linked_library_provenance": resource_record,
+        "linked_library_stdout": (
+            str(stdout_path.relative_to(output_root))
+            if stdout_path.is_file()
+            else None
+        ),
+        "linked_library_stderr": (
+            str(stderr_path.relative_to(output_root))
+            if stderr_path.is_file()
+            else None
+        ),
+        "diagnostic": diagnostic,
+        "outcome": "PASS" if monitoring_passed else "FAIL_METHOD",
     }
 
 
@@ -2017,8 +2296,16 @@ def run_gtest_group(
         launch_mode=("direct_serial" if ranks == 1 else "mpi"),
         required_simultaneous_process_samples=(ranks + 1 if ranks > 1 else 1),
     )
-    stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
-    stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+    stdout = (
+        stdout_path.read_text(encoding="utf-8", errors="replace")
+        if ranks > 1
+        else ""
+    )
+    stderr = (
+        stderr_path.read_text(encoding="utf-8", errors="replace")
+        if ranks > 1
+        else ""
+    )
     diagnostic: str | None = None
     gtest_result_error: str | None = None
     mpi_gtest_results: list[dict[str, Any]] = []
@@ -2130,49 +2417,39 @@ def write_checksums(output_directory: Path) -> None:
     write_text(output_directory / "checksums.txt", "\n".join(entries) + "\n")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
-    parser.add_argument("--geometry-binary", type=Path, required=True)
-    parser.add_argument("--level-set-binary", type=Path, required=True)
-    parser.add_argument("--systems-binary", type=Path, required=True)
-    parser.add_argument("--assembly-binary", type=Path, required=True)
-    parser.add_argument("--physics-binary", type=Path, required=True)
-    parser.add_argument("--application-binary", type=Path, required=True)
-    parser.add_argument("--assembly-mpi-binary", type=Path, required=True)
-    parser.add_argument("--application-mpi-binary", type=Path, required=True)
-    parser.add_argument("--timestepping-binary", type=Path)
-    parser.add_argument("--mpiexec", type=Path, default=Path("/usr/bin/mpiexec"))
-    parser.add_argument("--cmake", type=Path, default=Path("/usr/bin/cmake"))
-    parser.add_argument("--build-parallel", type=int, default=2)
-    parser.add_argument("--build-timeout-seconds", type=int, default=3600)
-    parser.add_argument("--source-root", type=Path, default=SCRIPT_PATH.parents[3])
-    parser.add_argument("--output", type=Path, required=True)
-    arguments = parser.parse_args()
-
+def run_qualification(
+    arguments: argparse.Namespace,
+    binaries: dict[str, Path],
+    *,
+    expected_binary_keys: set[str] | frozenset[str] | None = None,
+    parser: argparse.ArgumentParser | None = None,
+    record_title: str = "WP-2 authoritative-geometry qualification record",
+    test_discovery: Any = None,
+) -> int:
+    expected_keys = (
+        QUALIFICATION_BINARY_KEYS
+        if expected_binary_keys is None
+        else set(expected_binary_keys)
+    )
+    error_parser = parser or argparse.ArgumentParser(add_help=False)
+    discover_tests = (
+        listed_gtests
+        if test_discovery is None
+        else test_discovery
+    )
     source_root = arguments.source_root.resolve()
     registry_path = arguments.registry.resolve()
     output_directory = arguments.output.resolve()
     mpiexec = arguments.mpiexec.resolve()
     cmake = arguments.cmake.resolve()
     binaries = {
-        "geometry": arguments.geometry_binary.resolve(),
-        "level_set": arguments.level_set_binary.resolve(),
-        "systems": arguments.systems_binary.resolve(),
-        "assembly": arguments.assembly_binary.resolve(),
-        "physics": arguments.physics_binary.resolve(),
-        "application": arguments.application_binary.resolve(),
-        "assembly_mpi": arguments.assembly_mpi_binary.resolve(),
-        "application_mpi": arguments.application_mpi_binary.resolve(),
+        key: path.resolve()
+        for key, path in binaries.items()
     }
-    if arguments.timestepping_binary is not None:
-        binaries["timestepping"] = (
-            arguments.timestepping_binary.resolve()
-        )
-    if set(binaries) != QUALIFICATION_BINARY_KEYS:
-        missing = sorted(QUALIFICATION_BINARY_KEYS - set(binaries))
-        unexpected = sorted(set(binaries) - QUALIFICATION_BINARY_KEYS)
-        parser.error(
+    if set(binaries) != expected_keys:
+        missing = sorted(expected_keys - set(binaries))
+        unexpected = sorted(set(binaries) - expected_keys)
+        error_parser.error(
             "qualification binary arguments do not match the declared "
             f"binary keys; missing={missing}, unexpected={unexpected}"
         )
@@ -2384,7 +2661,9 @@ def main() -> int:
         if not validation["executable"]:
             continue
         try:
-            missing = sorted(expected - listed_gtests(binaries[binary_key]))
+            missing = sorted(
+                expected - discover_tests(binaries[binary_key])
+            )
         except (
             OSError,
             subprocess.CalledProcessError,
@@ -2441,6 +2720,23 @@ def main() -> int:
             "qualification_scope": registry["qualification_scope"],
         },
     )
+    binary_records: dict[str, dict[str, Any]] = {}
+    for key in sorted(binaries):
+        binary_records[key] = binary_record(
+            binaries[key],
+            source_root,
+            output_directory,
+            key,
+        )
+        if binary_records[key]["outcome"] != "PASS":
+            break
+    binary_provenance_passed = (
+        len(binary_records) == len(binaries)
+        and all(
+            record["outcome"] == "PASS"
+            for record in binary_records.values()
+        )
+    )
     write_json(
         output_directory / "build.json",
         {
@@ -2449,12 +2745,14 @@ def main() -> int:
             "tracked_sources_clean": True,
             "clean_build_preflight": "build_preflight.json",
             "clean_build_preflight_outcome": build_preflight["outcome"],
+            "binary_provenance_outcome": (
+                "PASS"
+                if binary_provenance_passed
+                else "FAIL_METHOD"
+            ),
             "untracked_sources_before_build": initial_untracked,
             "path_contract": path_contract,
-            "binaries": {
-                key: binary_record(binary, source_root)
-                for key, binary in binaries.items()
-            },
+            "binaries": binary_records,
             "machine": {
                 "platform": platform.platform(),
                 "machine": platform.machine(),
@@ -2464,6 +2762,19 @@ def main() -> int:
             },
         },
     )
+    if not binary_provenance_passed:
+        failure_summary = {
+            "matrix_id": registry["matrix_id"],
+            "source_commit": source_commit,
+            "overall_outcome": "FAIL_METHOD",
+            "failure_stage": "binary_link_provenance",
+            "diagnostic": "binary_link_provenance_failed",
+        }
+        write_json(output_directory / "summary.json", failure_summary)
+        write_checksums(output_directory)
+        print(output_directory)
+        print("FAIL_METHOD")
+        return 2
     write_json(
         output_directory / "gates.json",
         {
@@ -2537,7 +2848,7 @@ def main() -> int:
     }
     write_json(output_directory / "summary.json", summary)
     record_lines = [
-        "# WP-2 authoritative-geometry qualification record",
+        f"# {record_title}",
         "",
         f"- Source commit: `{source_commit}`",
         f"- Frozen matrix: `{registry['matrix_id']}`",
@@ -2560,6 +2871,40 @@ def main() -> int:
     print(output_directory)
     print(summary["overall_outcome"])
     return 0 if passed else 2
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
+    parser.add_argument("--geometry-binary", type=Path, required=True)
+    parser.add_argument("--level-set-binary", type=Path, required=True)
+    parser.add_argument("--systems-binary", type=Path, required=True)
+    parser.add_argument("--assembly-binary", type=Path, required=True)
+    parser.add_argument("--physics-binary", type=Path, required=True)
+    parser.add_argument("--application-binary", type=Path, required=True)
+    parser.add_argument("--assembly-mpi-binary", type=Path, required=True)
+    parser.add_argument("--application-mpi-binary", type=Path, required=True)
+    parser.add_argument("--timestepping-binary", type=Path)
+    parser.add_argument("--mpiexec", type=Path, default=Path("/usr/bin/mpiexec"))
+    parser.add_argument("--cmake", type=Path, default=Path("/usr/bin/cmake"))
+    parser.add_argument("--build-parallel", type=int, default=2)
+    parser.add_argument("--build-timeout-seconds", type=int, default=3600)
+    parser.add_argument("--source-root", type=Path, default=SCRIPT_PATH.parents[3])
+    parser.add_argument("--output", type=Path, required=True)
+    arguments = parser.parse_args()
+    binaries = {
+        "geometry": arguments.geometry_binary,
+        "level_set": arguments.level_set_binary,
+        "systems": arguments.systems_binary,
+        "assembly": arguments.assembly_binary,
+        "physics": arguments.physics_binary,
+        "application": arguments.application_binary,
+        "assembly_mpi": arguments.assembly_mpi_binary,
+        "application_mpi": arguments.application_mpi_binary,
+    }
+    if arguments.timestepping_binary is not None:
+        binaries["timestepping"] = arguments.timestepping_binary
+    return run_qualification(arguments, binaries, parser=parser)
 
 
 if __name__ == "__main__":

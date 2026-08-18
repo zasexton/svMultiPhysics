@@ -40,9 +40,13 @@ The frozen prerequisite harness checks:
   registry and validator, plus the executable WP-10 one-phase scope guard.
   The inventory also pins the Physics CTest registration, the tracked
   push/pull-request test workflow, and the Ubuntu and macOS composite actions.
-  The WP-10 definition transitively pins its schema-2 physical-model artifact,
-  canonical XML parser boundary, and direct-map production boundary. It
-  freezes seven dedicated C++ test names and records the binaries when its
+  The WP-2 runner definition also pins its host-available-memory and
+  filesystem-free-space floors, bounded binary-link provenance, and
+  monitored clean-build/execution base.
+  The WP-10 definition transitively pins its schema-3 physical-model and
+  fitted surface/contact capability artifact, canonical XML parser boundary,
+  and direct-map production boundary. It
+  freezes eight dedicated C++ test names and records the binaries when its
   groups execute; Q0 does not reclassify those tests as Q0 campaign execution;
 - all 24 WP-0 configuration-containment test names, including negative cases,
   in an executable Physics test binary;
@@ -55,11 +59,17 @@ The frozen prerequisite harness checks:
 - the machine-readable unresolved Q0 state.
 
 The exact matrix SHA-256 is
-`74c6e2a01178b5d2946edf1e9572a000d6e32117bbb7bf30de9a5f1514274108`.
+`f1e7c0446dc9a5af2678c53e15b018dd235e307a87aab1483c091a34c6635eaa`.
 The runner accepts only the canonical, non-symbolic-link matrix path and
 rejects any byte mutation before discovery or execution. Every path component
 of every frozen source definition is checked for symbolic links before path
 resolution.
+
+Current-tree validation-only returns `PASS_PREREQUISITE_NONCLOSURE` with all
+20 source definitions, 24 frozen C++ test names, 44 frozen Python node
+identifiers, and 8 open exits intact; all 52 runner unit tests pass. No test
+binary or accepted-step campaign was executed by that validation, and the
+runner continues to report that the Q0 checkbox may not be checked.
 
 Execution passes the 44 frozen pytest node identifiers directly to pytest.
 The resulting JUnit record must contain exactly one completed, passing

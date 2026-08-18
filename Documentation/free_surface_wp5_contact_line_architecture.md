@@ -126,11 +126,14 @@ active-domain integration requires zero smoothing width.
 Every accepted dynamic-contact record binds the following to one
 generalized-alpha stage:
 
-- accepted step, accepted time, stage time, and stage fraction;
+- accepted step, accepted time, stage time, and stage fraction and, for a
+  first-order generalized-alpha stage, the authentic `alpha_m`, `alpha_f`,
+  `gamma`, and `dt` supplied by `TimeLoop`;
 - communicator-consistent content fingerprints for the previous and endpoint
   algebraic states;
 - a composite stage fingerprint over those content identities, the accepted
-  snapshot, stage time and fraction, and reconstructed stage solution;
+  snapshot, stage coordinates and generalized-alpha tuple when present, and
+  the stage solution used by the contact operators;
 - the pre-maintenance endpoint revision, which exactly matches every contact
   stage endpoint content fingerprint, and the separately retained
   post-maintenance accepted-state content fingerprint in `state_revision`;
@@ -138,11 +141,25 @@ generalized-alpha stage:
 - wall normal, footprint direction, oriented contact-line tangent, and
   contact position;
 - dynamic angle, contact speed, and advancing/receding classification;
+- when two consecutive accepted stages have contact measure and a usable
+  common footprint direction, the projected secant speed of the
+  measure-weighted contact-position centroid and its difference from the
+  accepted-stage mean fluid-trace contact speed;
 - wall-slip speed and constitutive residual; and
 - line-friction and wall-slip dissipation.
 
-The stage solution is reconstructed at commit readiness from the finalized
-endpoint, its authoritative geometry is refreshed transactionally, and the
+For a first-order generalized-alpha solve, `TimeLoop` copies the converged
+operator-stage state before endpoint reconstruction. The application retains
+the canonical level-set and velocity field slices required by every dynamic
+contact declaration through backend-certified owned rows. It first constructs
+the remaining stage solution from the previous and finalized endpoint states,
+then overlays those exact retained slices before refreshing geometry or
+evaluating a contact operator. This state-only contract also supports an
+algebraic velocity field; it does not infer an advertised field-rate value.
+All eight rank-local mesh revision domains captured with the operator stage
+must still match the live mesh at both prospective and final consumption.
+
+The authoritative stage geometry is refreshed transactionally and the
 endpoint geometry is restored afterward. At the start of the accepted-step
 callback, after the time history accepts that endpoint but before any
 accepted-step maintenance, its algebraic revision is captured and bound into
@@ -154,6 +171,19 @@ Binding first verifies communicator-consistent stage coverage and every
 recomputed composite stage fingerprint. Endpoint and composite revisions are
 updated only after the complete collective preflight succeeds, so asymmetric
 stage solutions or metadata leave all stage records unchanged.
+
+The geometric comparison is deliberately narrower than a pointwise
+contact-line velocity. It uses the previous and current accepted stage times,
+the previous accepted step/time, stage-state and snapshot revisions, both
+measure-weighted contact-position centroids, and the normalized average of
+their oriented mean footprint directions. The history record stores that
+projection direction, the projected centroid secant speed, the current mean
+fluid-trace speed, and `fluid - geometric` mismatch. The initial baseline, a
+missing contact on either endpoint, a nonpositive stage interval, or a
+degenerate/incompatibly oriented mean footprint leaves the geometric diagnostic
+explicitly unavailable; it does not substitute zero. This diagnostic exposes
+stage mismatch for refinement studies but does not establish pointwise
+material contact-line kinematics or physical qualification.
 
 The frozen serial application test explicitly emulates the four relevant
 transitions in order: generalized-alpha endpoint finalization, commit-ready
@@ -173,6 +203,18 @@ artifact contract.
 Accepted dynamic-angle contact patches are preserved by one positive common
 scale. This leaves their zero crossing and unit normal unchanged while
 allowing signed-distance repair away from the accepted contact.
+
+Maintenance publishes an accepted endpoint and its stored history, not an
+independent generalized-alpha stage state. A repair computed from a
+non-endpoint stage therefore may not be added to the endpoint as though it
+were a representation-only update. The application compares the exact
+maintained level-set slices before repair: when `stage_alpha_f != 1` and the
+accepted stage slice differs from the endpoint slice, the complete
+maintenance attempt is rejected before the low-level repair or any history
+mutation. An endpoint stage (`stage_alpha_f = 1`) remains supported. Separate
+stage and endpoint repairs, together with their corresponding history/rate
+updates and geometric-motion account, remain required before non-endpoint
+generalized-alpha wall-aware maintenance can be enabled.
 
 For prescribed angle, the accepted contact point, physical wall normal, and
 oriented contact-line tangent define a complete physical frame. The target
@@ -224,6 +266,26 @@ record, and propagates an explicit open disposition into artifacts.
 The two MPI groups are frozen at two ranks. Four-rank audit runs exercise the
 same rank-independent repair and accepted-frame tests but do not replace the
 still-open representative partition campaign.
+
+The current stage/endpoint fail-closed guard, endpoint-root regression, and
+accepted-history geometric-speed/mismatch telemetry postdate that frozen
+evidence. On 2026-08-17, a current-tree diagnostic application binary compiled
+`FESystem.cpp` and `test_ApplicationDriverLevelSetWorkflows.cpp` at `-O0` under
+a 1 GiB address-space safety cap; the remaining linked application objects
+were the existing Release objects. The focused rollback, static-capillary,
+stage/endpoint, and contact-history filters passed, all 65
+`ApplicationDriverLevelSetWorkflows` tests passed, and the complete diagnostic
+application binary passed 219/219 tests. This is mixed-optimization diagnostic
+evidence, not an exact Release build or execution of the frozen 43-test matrix.
+The matrix therefore remains historical prerequisite evidence and does not
+establish Release source-to-binary correspondence or qualification for these
+changes.
+
+The authentic generalized-alpha tuple, exact operator-stage slice retention,
+and residual/Jacobian tag-separation regressions described above postdate both
+the frozen matrix and the 2026-08-17 diagnostic execution. They have received
+static source review only in the current resource-constrained worktree and are
+not execution evidence.
 
 ## Open qualification campaigns
 

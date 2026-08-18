@@ -16,6 +16,7 @@
 
 #include <petscvec.h>
 
+#include <unordered_map>
 #include <vector>
 
 namespace svmp {
@@ -51,13 +52,31 @@ public:
     [[nodiscard]] Real norm() const override;
 
     void updateGhosts() override;
+    [[nodiscard]] bool ghostUpdateRequiresCollectiveParticipation()
+        const noexcept override
+    {
+        return ghosted_;
+    }
 
     [[nodiscard]] std::unique_ptr<assembly::GlobalSystemView> createAssemblyView() override;
+    [[nodiscard]] std::unique_ptr<assembly::GlobalSystemView>
+    createGhostedReadView() override;
 
     [[nodiscard]] std::span<Real> localSpan() override;
     [[nodiscard]] std::span<const Real> localSpan() const override;
+    [[nodiscard]] std::vector<GlobalIndex> ownedGlobalRows() const override;
 
     [[nodiscard]] Vec petsc() const;
+
+    /**
+     * @brief Read owned or refreshed ghost entries by public global index.
+     *
+     * Call updateGhosts() collectively before reading overlap entries. A
+     * valid global index outside this vector's owned/ghost layout is rejected
+     * rather than being sampled as zero.
+     */
+    void readGlobalEntries(std::span<const GlobalIndex> dofs,
+                           std::span<Real> values) const;
 
     void invalidateLocalCache() const noexcept;
 
@@ -68,6 +87,7 @@ private:
     PetscInt local_owned_{0};
     PetscInt ghost_count_{0};
     bool ghosted_{false};
+    std::unordered_map<GlobalIndex, PetscInt> ghost_local_indices_{};
 
     mutable Vec vec_{nullptr};
     mutable std::vector<Real> local_cache_{};

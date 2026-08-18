@@ -331,8 +331,17 @@ void collectTerminals(const forms::FormExprNode& node,
             context.interface_marker = -1;
             break;
         case FT::InterfaceIntegral:
-            context.domain = DomainKind::InterfaceFace;
-            context.boundary_marker = -1;
+            if (const auto* measure =
+                    node.exteriorBoundaryMeasure();
+                measure != nullptr &&
+                measure->isGeneratedActiveSubset()) {
+                context.domain = DomainKind::Boundary;
+                context.boundary_marker =
+                    measure->physicalBoundaryMarker();
+            } else {
+                context.domain = DomainKind::InterfaceFace;
+                context.boundary_marker = -1;
+            }
             context.interface_marker = node.interfaceMarker().value_or(-1);
             break;
         default:

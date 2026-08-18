@@ -11,6 +11,7 @@ add_executable(test_application
   Unit/test_ApplicationDriverLevelSetWorkflows.cpp
   Unit/test_ActiveDomainOutput.cpp
   Unit/test_EquationTranslator.cpp
+  Unit/test_FreeSurfaceEnergyLedger.cpp
   Unit/test_LevelSetCutConfiguration.cpp
   Unit/test_LevelSetEquationTranslator.cpp
   Unit/test_LevelSetMaintenanceHistory.cpp
@@ -21,6 +22,7 @@ add_executable(test_application
   Unit/test_OpenVesselExamples.cpp
   Unit/test_OpenVesselStabilizationMetadata.cpp
   ../Core/ActiveDomainOutput.cpp
+  ../Core/FreeSurfaceEnergyLedger.cpp
   ../Core/LevelSetCutConfiguration.cpp
   ../Core/LevelSetCurvatureSamples.cpp
   ../Core/LevelSetMaintenanceHistory.cpp

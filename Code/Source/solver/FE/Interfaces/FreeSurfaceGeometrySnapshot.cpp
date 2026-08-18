@@ -1,6 +1,7 @@
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 
 #include "Assembly/Assembler.h"
+#include "Elements/ReferenceElement.h"
 #include "Quadrature/QuadratureFactory.h"
 #include "Quadrature/ReferenceMonomialIntegrals.h"
 
@@ -206,6 +207,7 @@ void mixRuleContent(std::uint64_t& hash,
     mix(hash, static_cast<std::uint64_t>(
                   record.physical_boundary_marker + 1));
     mix(hash, record.topology_id);
+    mix(hash, record.source_topology_key);
     mix(hash, static_cast<std::uint64_t>(record.component_id));
     mix(hash, record.reference_rule.provenance.cut_topology_revision);
     mix(hash, static_cast<std::uint64_t>(
@@ -407,8 +409,12 @@ void mixRuleContent(std::uint64_t& hash,
     const auto& request = domain.request();
     FreeSurfaceGeometryRevision revision;
     revision.source_id = request.source.identifier();
-    revision.domain_id = domain_id.empty() ? revision.source_id
-                                           : std::move(domain_id);
+    revision.domain_id =
+        domain_id.empty()
+            ? (request.generated_domain_id.empty()
+                   ? revision.source_id
+                   : request.generated_domain_id)
+            : std::move(domain_id);
     revision.interface_marker = request.interface_marker;
     revision.isovalue = request.isovalue;
     revision.source_layout_revision = request.source.layout_revision;
@@ -731,6 +737,7 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
              const assembly::IMeshAccess& mesh,
              const FreeSurfaceGeometrySnapshotPolicy& policy,
              FreeSurfaceGeometryMomentCertificate moment_certificate,
+             std::uint64_t source_topology_key,
              int physical_boundary_marker = -1,
              std::vector<std::uint64_t> source_ids = {},
              std::int64_t component_id = -1)
@@ -807,6 +814,7 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
             rule.provenance.source_stable_id);
     }
     record.topology_id = rule.provenance.cut_topology_id;
+    record.source_topology_key = source_topology_key;
     record.component_id =
         component_id >= 0
             ? component_id
@@ -1439,6 +1447,188 @@ makeMomentCertificateFromSamples(
     return {{a[1] * b[2] - a[2] * b[1],
              a[2] * b[0] - a[0] * b[2],
              a[0] * b[1] - a[1] * b[0]}};
+}
+
+[[nodiscard]] std::array<Real, 3> referenceNodeCoordinate(
+    ElementType type,
+    LocalIndex node)
+{
+    const auto coordinate =
+        basis::ReferenceNodeLayout::get_node_coords(
+            type, static_cast<std::size_t>(node));
+    return {{coordinate[0], coordinate[1], coordinate[2]}};
+}
+
+[[nodiscard]] std::uint64_t parentBoundaryIncidence(
+    const std::array<Real, 3>& point,
+    ElementType type,
+    const elements::ReferenceElement& reference,
+    Real tolerance)
+{
+    if (!finitePoint(point)) {
+        throw std::invalid_argument(
+            "free-surface source topology has a nonfinite reference vertex");
+    }
+    const Real incidence_tolerance = std::max(
+        Real{64.0} * tolerance,
+        Real{512.0} * std::numeric_limits<Real>::epsilon());
+    std::uint64_t edge_mask{0u};
+    for (std::size_t edge = 0u; edge < reference.num_edges(); ++edge) {
+        const auto& nodes = reference.edge_nodes(edge);
+        if (nodes.size() < 2u || edge >= 16u) {
+            continue;
+        }
+        const auto a = referenceNodeCoordinate(type, nodes[0]);
+        const auto b = referenceNodeCoordinate(type, nodes[1]);
+        const auto ab = subtractPoint(b, a);
+        const auto ap = subtractPoint(point, a);
+        const Real denominator = dot(ab, ab);
+        if (!(denominator > Real{0.0})) {
+            continue;
+        }
+        const Real parameter = dot(ap, ab) / denominator;
+        const auto projection = std::array<Real, 3>{{
+            a[0] + parameter * ab[0],
+            a[1] + parameter * ab[1],
+            a[2] + parameter * ab[2]}};
+        if (parameter >= -incidence_tolerance &&
+            parameter <= Real{1.0} + incidence_tolerance &&
+            norm(subtractPoint(point, projection)) <=
+                incidence_tolerance * std::max(Real{1.0}, norm(ab))) {
+            edge_mask |= (std::uint64_t{1} << edge);
+        }
+    }
+
+    std::uint64_t face_mask{0u};
+    if (reference.dimension() == 3 &&
+        insideReferenceCell(type, point, incidence_tolerance)) {
+        for (std::size_t face = 0u; face < reference.num_faces(); ++face) {
+            const auto& nodes = reference.face_nodes(face);
+            if (nodes.size() < 3u || face >= 16u) {
+                continue;
+            }
+            const auto a = referenceNodeCoordinate(type, nodes[0]);
+            const auto b = referenceNodeCoordinate(type, nodes[1]);
+            const auto c = referenceNodeCoordinate(type, nodes[2]);
+            const auto face_normal =
+                crossPoint(subtractPoint(b, a), subtractPoint(c, a));
+            const Real normal_length = norm(face_normal);
+            if (!(normal_length > Real{0.0})) {
+                continue;
+            }
+            const Real distance =
+                std::abs(dot(subtractPoint(point, a), face_normal)) /
+                normal_length;
+            if (distance <= incidence_tolerance) {
+                face_mask |= (std::uint64_t{1} << face);
+            }
+        }
+    }
+    return edge_mask | (face_mask << 16u);
+}
+
+[[nodiscard]] std::vector<std::uint64_t> parentBoundaryIncidences(
+    std::span<const std::array<Real, 3>> vertices,
+    ElementType type,
+    Real tolerance)
+{
+    const auto reference = elements::ReferenceElement::create(type);
+    std::vector<std::uint64_t> incidences;
+    incidences.reserve(vertices.size());
+    for (const auto& vertex : vertices) {
+        incidences.push_back(
+            parentBoundaryIncidence(vertex, type, reference, tolerance));
+    }
+    std::sort(incidences.begin(), incidences.end());
+    return incidences;
+}
+
+[[nodiscard]] std::uint64_t interfaceSourceTopologyKey(
+    const CutInterfaceFragment& fragment,
+    ElementType parent_element_type,
+    Real tolerance)
+{
+    if (fragment.parent_corner_topology_key == 0u) {
+        return 0u;
+    }
+    std::uint64_t hash = kHashOffset;
+    constexpr std::uint64_t contract_tag =
+        0x4653494e54545031ull; // "FSINTTP1"
+    mix(hash, contract_tag);
+    mix(hash, fragment.parent_corner_topology_key);
+    mix(hash, static_cast<std::uint64_t>(fragment.kind));
+    mix(hash, static_cast<std::uint64_t>(fragment.degeneracy));
+    mix(hash, static_cast<std::uint64_t>(fragment.vertices.size()));
+    // Branch multiplicity is represented by the rule multiset.  Do not mix
+    // branch_id or topology_id here: before domain publication their generated
+    // cell prefixes/order are local rather than canonical connectivity IDs.
+    std::vector<std::array<Real, 3>> parent_vertices;
+    parent_vertices.reserve(fragment.vertices.size());
+    for (const auto& vertex : fragment.vertices) {
+        parent_vertices.push_back(vertex.parent_coordinate);
+    }
+    const auto incidences = parentBoundaryIncidences(
+        parent_vertices, parent_element_type, tolerance);
+    for (const auto incidence : incidences) {
+        mix(hash, incidence);
+    }
+    return hash == 0u ? 1u : hash;
+}
+
+[[nodiscard]] std::uint64_t volumeSourceTopologyKey(
+    const CutInterfaceVolumeRegion& region)
+{
+    if (region.parent_corner_topology_key == 0u) {
+        return 0u;
+    }
+    std::uint64_t hash = kHashOffset;
+    constexpr std::uint64_t contract_tag =
+        0x4653564f4c545031ull; // "FSVOLTP1"
+    mix(hash, contract_tag);
+    mix(hash, region.parent_corner_topology_key);
+    mix(hash, static_cast<std::uint64_t>(region.side));
+    mix(hash, region.full_cell_equivalent ? 1u : 0u);
+    return hash == 0u ? 1u : hash;
+}
+
+[[nodiscard]] std::uint64_t contactSourceTopologyKey(
+    const GeneratedInterfaceBoundaryIntersectionFragment& fragment,
+    ElementType parent_element_type,
+    Real tolerance)
+{
+    std::uint64_t hash = kHashOffset;
+    constexpr std::uint64_t contract_tag =
+        0x4653434f4e545031ull; // "FSCONTP1"
+    mix(hash, contract_tag);
+    mix(hash, static_cast<std::uint64_t>(fragment.kind));
+    mix(hash, static_cast<std::uint64_t>(fragment.degeneracy));
+    mix(hash, static_cast<std::uint64_t>(fragment.vertices.size()));
+    const auto incidences = parentBoundaryIncidences(
+        fragment.vertices, parent_element_type, tolerance);
+    for (const auto incidence : incidences) {
+        mix(hash, incidence);
+    }
+    return hash == 0u ? 1u : hash;
+}
+
+[[nodiscard]] std::uint64_t activeBoundarySourceTopologyKey(
+    const GeneratedActiveBoundaryFragment& fragment,
+    ElementType parent_element_type,
+    Real tolerance)
+{
+    std::uint64_t hash = kHashOffset;
+    constexpr std::uint64_t contract_tag =
+        0x4653414354565031ull; // "FSACTVP1"
+    mix(hash, contract_tag);
+    mix(hash, static_cast<std::uint64_t>(fragment.side));
+    mix(hash, fragment.full_face_equivalent ? 1u : 0u);
+    mix(hash, static_cast<std::uint64_t>(fragment.vertices.size()));
+    const auto incidences = parentBoundaryIncidences(
+        fragment.vertices, parent_element_type, tolerance);
+    for (const auto incidence : incidences) {
+        mix(hash, incidence);
+    }
+    return hash == 0u ? 1u : hash;
 }
 
 [[nodiscard]] bool representedSimplexCoordinates(
@@ -2271,6 +2461,15 @@ void validateVolumePartition(
 
 } // namespace
 
+std::uint64_t freeSurfaceGeometrySourceTopologyKey(
+    const CutInterfaceFragment& fragment,
+    ElementType parent_element_type,
+    Real tolerance)
+{
+    return interfaceSourceTopologyKey(
+        fragment, parent_element_type, tolerance);
+}
+
 bool FreeSurfaceGeometryRevision::complete() const noexcept
 {
     return !source_id.empty() && !domain_id.empty() && interface_marker >= 0 &&
@@ -2481,6 +2680,534 @@ FreeSurfaceDiscreteFunctionalState evaluateFreeSurfaceDiscreteFunctional(
     if (!std::isfinite(state.total_potential)) {
         throw std::invalid_argument(
             "free-surface functional produced a non-finite potential");
+    }
+    return state;
+}
+
+FreeSurfaceActiveVolumeEnergyState
+evaluateFreeSurfaceActiveVolumeEnergy(
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    const FreeSurfaceActiveVolumeEnergyParameters& parameters,
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity)
+{
+    if (!snapshot.revision().complete()) {
+        throw std::invalid_argument(
+            "free-surface active-volume energy requires a revision-complete snapshot");
+    }
+    if (parameters.liquid_side !=
+            geometry::CutIntegrationSide::Negative &&
+        parameters.liquid_side !=
+            geometry::CutIntegrationSide::Positive) {
+        throw std::invalid_argument(
+            "free-surface active-volume energy requires a physical liquid side");
+    }
+    if (!std::isfinite(parameters.density) ||
+        !(parameters.density > Real{0.0}) ||
+        !finitePoint(parameters.gravitational_acceleration) ||
+        !finitePoint(parameters.gravitational_reference_point)) {
+        throw std::invalid_argument(
+            "free-surface active-volume energy requires positive finite density and finite gravitational data");
+    }
+    if (!velocity.canEvaluateValue()) {
+        throw std::invalid_argument(
+            "free-surface active-volume energy requires a velocity evaluator");
+    }
+
+    const auto volume_role =
+        parameters.liquid_side ==
+                geometry::CutIntegrationSide::Negative
+            ? FreeSurfaceGeometryRuleRole::NegativeVolume
+            : FreeSurfaceGeometryRuleRole::PositiveVolume;
+    FreeSurfaceActiveVolumeEnergyState state;
+    state.snapshot_revision_key =
+        snapshot.revision().snapshot_revision_key;
+    state.liquid_side = parameters.liquid_side;
+    state.density = parameters.density;
+    state.gravitational_acceleration =
+        parameters.gravitational_acceleration;
+    state.gravitational_reference_point =
+        parameters.gravitational_reference_point;
+
+    for (const auto& record : snapshot.rules()) {
+        if (!record.locally_owned ||
+            record.retention !=
+                FreeSurfaceGeometryRetention::Retained ||
+            record.role != volume_role) {
+            continue;
+        }
+        if (record.reference_rule.kind !=
+                geometry::CutQuadratureKind::Volume ||
+            record.physical_rule.kind !=
+                geometry::CutQuadratureKind::Volume ||
+            record.reference_rule.side != parameters.liquid_side ||
+            record.physical_rule.side != parameters.liquid_side ||
+            record.reference_rule.points.size() !=
+                record.physical_rule.points.size()) {
+            throw std::invalid_argument(
+                "free-surface active-volume energy encountered an inconsistent liquid-volume rule");
+        }
+        for (std::size_t point_index = 0;
+             point_index < record.physical_rule.points.size();
+             ++point_index) {
+            const auto& physical =
+                record.physical_rule.points[point_index];
+            const auto& reference =
+                record.reference_rule.points[point_index];
+            const Real weight = physical.physical_weight;
+            if (!std::isfinite(weight) ||
+                !(weight > Real{0.0}) ||
+                !finitePoint(physical.physical_point) ||
+                !finitePoint(reference.parent_coordinate)) {
+                throw std::invalid_argument(
+                    "free-surface active-volume energy encountered invalid physical quadrature data");
+            }
+            const auto value = velocity.value(
+                record.reference_rule.provenance.parent_entity,
+                reference.parent_coordinate,
+                record.reference_rule.provenance);
+            if (!finitePoint(value)) {
+                throw std::invalid_argument(
+                    "free-surface active-volume energy velocity evaluator returned a non-finite value");
+            }
+            const Real speed_squared = dot(value, value);
+            std::array<Real, 3> displacement{};
+            for (std::size_t component = 0u; component < 3u;
+                 ++component) {
+                displacement[component] =
+                    physical.physical_point[component] -
+                    parameters.gravitational_reference_point[component];
+            }
+            const Real kinetic_density =
+                Real{0.5} * parameters.density * speed_squared;
+            const Real gravitational_density =
+                -parameters.density *
+                dot(parameters.gravitational_acceleration,
+                    displacement);
+            const Real gravitational_potential_power_density =
+                -parameters.density *
+                dot(parameters.gravitational_acceleration, value);
+            if (!std::isfinite(speed_squared) ||
+                speed_squared < Real{0.0} ||
+                !std::isfinite(kinetic_density) ||
+                !std::isfinite(gravitational_density) ||
+                !std::isfinite(
+                    gravitational_potential_power_density)) {
+                throw std::invalid_argument(
+                    "free-surface active-volume energy produced a non-finite point contribution");
+            }
+            ++state.owned_quadrature_point_count;
+            state.owned_liquid_volume += weight;
+            state.kinetic_energy += kinetic_density * weight;
+            state.gravitational_energy +=
+                gravitational_density * weight;
+            state.gravitational_potential_power +=
+                gravitational_potential_power_density * weight;
+        }
+    }
+    state.total_energy =
+        state.kinetic_energy + state.gravitational_energy;
+    if (!std::isfinite(state.owned_liquid_volume) ||
+        state.owned_liquid_volume < Real{0.0} ||
+        !std::isfinite(state.kinetic_energy) ||
+        state.kinetic_energy < Real{0.0} ||
+        !std::isfinite(state.gravitational_energy) ||
+        !std::isfinite(state.gravitational_potential_power) ||
+        !std::isfinite(state.total_energy)) {
+        throw std::invalid_argument(
+            "free-surface active-volume energy produced invalid totals");
+    }
+    return state;
+}
+
+FreeSurfaceActiveVolumeDissipationState
+evaluateFreeSurfaceActiveVolumeDissipation(
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    const FreeSurfaceActiveVolumeDissipationParameters& parameters,
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity)
+{
+    if (!snapshot.revision().complete()) {
+        throw std::invalid_argument(
+            "free-surface active-volume dissipation requires a revision-complete snapshot");
+    }
+    if (parameters.liquid_side !=
+            geometry::CutIntegrationSide::Negative &&
+        parameters.liquid_side !=
+            geometry::CutIntegrationSide::Positive) {
+        throw std::invalid_argument(
+            "free-surface active-volume dissipation requires a physical liquid side");
+    }
+    if (!std::isfinite(parameters.dynamic_viscosity) ||
+        !(parameters.dynamic_viscosity > Real{0.0})) {
+        throw std::invalid_argument(
+            "free-surface active-volume dissipation requires positive finite dynamic viscosity");
+    }
+    if (!velocity.canEvaluatePhysicalGradient()) {
+        throw std::invalid_argument(
+            "free-surface active-volume dissipation requires a physical velocity-gradient evaluator");
+    }
+
+    const auto volume_role =
+        parameters.liquid_side ==
+                geometry::CutIntegrationSide::Negative
+            ? FreeSurfaceGeometryRuleRole::NegativeVolume
+            : FreeSurfaceGeometryRuleRole::PositiveVolume;
+    FreeSurfaceActiveVolumeDissipationState state;
+    state.snapshot_revision_key =
+        snapshot.revision().snapshot_revision_key;
+    state.liquid_side = parameters.liquid_side;
+    state.dynamic_viscosity = parameters.dynamic_viscosity;
+
+    for (const auto& record : snapshot.rules()) {
+        if (!record.locally_owned ||
+            record.retention !=
+                FreeSurfaceGeometryRetention::Retained ||
+            record.role != volume_role) {
+            continue;
+        }
+        if (record.reference_rule.kind !=
+                geometry::CutQuadratureKind::Volume ||
+            record.physical_rule.kind !=
+                geometry::CutQuadratureKind::Volume ||
+            record.reference_rule.side != parameters.liquid_side ||
+            record.physical_rule.side != parameters.liquid_side ||
+            record.reference_rule.points.size() !=
+                record.physical_rule.points.size()) {
+            throw std::invalid_argument(
+                "free-surface active-volume dissipation encountered an inconsistent liquid-volume rule");
+        }
+        for (std::size_t point_index = 0;
+             point_index < record.physical_rule.points.size();
+             ++point_index) {
+            const auto& physical =
+                record.physical_rule.points[point_index];
+            const auto& reference =
+                record.reference_rule.points[point_index];
+            const Real weight = physical.physical_weight;
+            if (!std::isfinite(weight) ||
+                !(weight > Real{0.0}) ||
+                !finitePoint(physical.physical_point) ||
+                !finitePoint(reference.parent_coordinate)) {
+                throw std::invalid_argument(
+                    "free-surface active-volume dissipation encountered invalid physical quadrature data");
+            }
+            const auto gradient = velocity.physical_gradient(
+                record.reference_rule.provenance.parent_entity,
+                reference.parent_coordinate,
+                record.reference_rule.provenance);
+            const bool finite_gradient = std::all_of(
+                gradient.begin(), gradient.end(), [](const auto& row) {
+                    return std::all_of(
+                        row.begin(), row.end(), [](Real value) {
+                            return std::isfinite(value);
+                        });
+                });
+            if (!finite_gradient) {
+                throw std::invalid_argument(
+                    "free-surface active-volume dissipation velocity-gradient evaluator returned a non-finite value");
+            }
+            Real symmetric_gradient_squared = Real{0.0};
+            for (std::size_t row = 0u; row < 3u; ++row) {
+                for (std::size_t column = 0u; column < 3u;
+                     ++column) {
+                    const Real symmetric_component =
+                        Real{0.5} *
+                        (gradient[row][column] +
+                         gradient[column][row]);
+                    symmetric_gradient_squared +=
+                        symmetric_component * symmetric_component;
+                }
+            }
+            const Real dissipation_density =
+                Real{2.0} * parameters.dynamic_viscosity *
+                symmetric_gradient_squared;
+            if (!std::isfinite(symmetric_gradient_squared) ||
+                symmetric_gradient_squared < Real{0.0} ||
+                !std::isfinite(dissipation_density) ||
+                dissipation_density < Real{0.0}) {
+                throw std::invalid_argument(
+                    "free-surface active-volume dissipation produced an invalid point contribution");
+            }
+            ++state.owned_quadrature_point_count;
+            state.owned_liquid_volume += weight;
+            state.bulk_viscous_dissipation_rate +=
+                dissipation_density * weight;
+        }
+    }
+    if (!std::isfinite(state.owned_liquid_volume) ||
+        state.owned_liquid_volume < Real{0.0} ||
+        !std::isfinite(state.bulk_viscous_dissipation_rate) ||
+        state.bulk_viscous_dissipation_rate < Real{0.0}) {
+        throw std::invalid_argument(
+            "free-surface active-volume dissipation produced invalid totals");
+    }
+    return state;
+}
+
+FreeSurfaceExternalPressurePowerState
+evaluateFreeSurfaceExternalPressurePower(
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    const FreeSurfaceExternalPressurePowerParameters& parameters,
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity)
+{
+    if (!snapshot.revision().complete()) {
+        throw std::invalid_argument(
+            "free-surface exterior-pressure power requires a revision-complete snapshot");
+    }
+    if (parameters.liquid_side !=
+            geometry::CutIntegrationSide::Negative &&
+        parameters.liquid_side !=
+            geometry::CutIntegrationSide::Positive) {
+        throw std::invalid_argument(
+            "free-surface exterior-pressure power requires a physical liquid side");
+    }
+    if (!std::isfinite(parameters.external_pressure)) {
+        throw std::invalid_argument(
+            "free-surface exterior-pressure power requires finite pressure");
+    }
+    if (!velocity.canEvaluateValue()) {
+        throw std::invalid_argument(
+            "free-surface exterior-pressure power requires a velocity evaluator");
+    }
+
+    FreeSurfaceExternalPressurePowerState state;
+    state.snapshot_revision_key =
+        snapshot.revision().snapshot_revision_key;
+    state.liquid_side = parameters.liquid_side;
+    state.external_pressure = parameters.external_pressure;
+    const bool positive_liquid =
+        parameters.liquid_side ==
+        geometry::CutIntegrationSide::Positive;
+
+    for (const auto& record : snapshot.rules()) {
+        if (!record.locally_owned ||
+            record.retention !=
+                FreeSurfaceGeometryRetention::Retained ||
+            record.role != FreeSurfaceGeometryRuleRole::Interface) {
+            continue;
+        }
+        if (record.reference_rule.kind !=
+                geometry::CutQuadratureKind::Interface ||
+            record.physical_rule.kind !=
+                geometry::CutQuadratureKind::Interface ||
+            record.reference_rule.points.size() !=
+                record.physical_rule.points.size()) {
+            throw std::invalid_argument(
+                "free-surface exterior-pressure power encountered an inconsistent interface rule");
+        }
+        for (std::size_t point_index = 0u;
+             point_index < record.physical_rule.points.size();
+             ++point_index) {
+            const auto& physical =
+                record.physical_rule.points[point_index];
+            const auto& reference =
+                record.reference_rule.points[point_index];
+            const Real weight = physical.physical_weight;
+            if (!std::isfinite(weight) ||
+                !(weight > Real{0.0}) ||
+                !finitePoint(physical.physical_point) ||
+                !finitePoint(physical.normal) ||
+                !finitePoint(reference.parent_coordinate)) {
+                throw std::invalid_argument(
+                    "free-surface exterior-pressure power encountered invalid physical quadrature data");
+            }
+            const auto value = velocity.value(
+                record.reference_rule.provenance.parent_entity,
+                reference.parent_coordinate,
+                record.reference_rule.provenance);
+            if (!finitePoint(value)) {
+                throw std::invalid_argument(
+                    "free-surface exterior-pressure power velocity evaluator returned a non-finite value");
+            }
+            auto liquid_normal = physical.normal;
+            if (positive_liquid) {
+                for (auto& component : liquid_normal) {
+                    component = -component;
+                }
+            }
+            const Real flux_density = dot(value, liquid_normal);
+            const Real pressure_power_density =
+                -parameters.external_pressure * flux_density;
+            if (!std::isfinite(flux_density) ||
+                !std::isfinite(pressure_power_density)) {
+                throw std::invalid_argument(
+                    "free-surface exterior-pressure power produced a non-finite point contribution");
+            }
+            ++state.owned_quadrature_point_count;
+            state.owned_liquid_gas_area += weight;
+            state.outward_liquid_volume_flux_rate +=
+                flux_density * weight;
+            state.external_pressure_power +=
+                pressure_power_density * weight;
+        }
+    }
+    if (!std::isfinite(state.owned_liquid_gas_area) ||
+        state.owned_liquid_gas_area < Real{0.0} ||
+        !std::isfinite(state.outward_liquid_volume_flux_rate) ||
+        !std::isfinite(state.external_pressure_power)) {
+        throw std::invalid_argument(
+            "free-surface exterior-pressure power produced invalid totals");
+    }
+    return state;
+}
+
+FreeSurfaceBackwardEulerKineticWorkState
+evaluateFreeSurfaceBackwardEulerKineticWork(
+    const FreeSurfaceGeometrySnapshot& endpoint_snapshot,
+    geometry::CutIntegrationSide liquid_side,
+    Real density,
+    std::uint64_t previous_velocity_revision,
+    std::uint64_t endpoint_velocity_revision,
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& previous_velocity,
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& endpoint_velocity)
+{
+    if (!endpoint_snapshot.revision().complete()) {
+        throw std::invalid_argument(
+            "free-surface backward-Euler kinetic work requires a revision-complete endpoint snapshot");
+    }
+    if (liquid_side != geometry::CutIntegrationSide::Negative &&
+        liquid_side != geometry::CutIntegrationSide::Positive) {
+        throw std::invalid_argument(
+            "free-surface backward-Euler kinetic work requires a physical liquid side");
+    }
+    if (!std::isfinite(density) || !(density > Real{0.0})) {
+        throw std::invalid_argument(
+            "free-surface backward-Euler kinetic work requires positive finite density");
+    }
+    if (previous_velocity_revision == 0u ||
+        endpoint_velocity_revision == 0u) {
+        throw std::invalid_argument(
+            "free-surface backward-Euler kinetic work requires both velocity endpoint revisions");
+    }
+    if (!previous_velocity.canEvaluateValue() ||
+        !endpoint_velocity.canEvaluateValue()) {
+        throw std::invalid_argument(
+            "free-surface backward-Euler kinetic work requires both endpoint velocity evaluators");
+    }
+
+    const auto volume_role =
+        liquid_side == geometry::CutIntegrationSide::Negative
+            ? FreeSurfaceGeometryRuleRole::NegativeVolume
+            : FreeSurfaceGeometryRuleRole::PositiveVolume;
+    FreeSurfaceBackwardEulerKineticWorkState state;
+    state.snapshot_revision_key =
+        endpoint_snapshot.revision().snapshot_revision_key;
+    state.previous_velocity_revision = previous_velocity_revision;
+    state.endpoint_velocity_revision = endpoint_velocity_revision;
+    state.liquid_side = liquid_side;
+    state.density = density;
+
+    for (const auto& record : endpoint_snapshot.rules()) {
+        if (!record.locally_owned ||
+            record.retention != FreeSurfaceGeometryRetention::Retained ||
+            record.role != volume_role) {
+            continue;
+        }
+        if (record.reference_rule.kind !=
+                geometry::CutQuadratureKind::Volume ||
+            record.physical_rule.kind !=
+                geometry::CutQuadratureKind::Volume ||
+            record.reference_rule.side != liquid_side ||
+            record.physical_rule.side != liquid_side ||
+            record.reference_rule.points.size() !=
+                record.physical_rule.points.size()) {
+            throw std::invalid_argument(
+                "free-surface backward-Euler kinetic work encountered an inconsistent liquid-volume rule");
+        }
+        for (std::size_t point_index = 0;
+             point_index < record.physical_rule.points.size();
+             ++point_index) {
+            const auto& physical =
+                record.physical_rule.points[point_index];
+            const auto& reference =
+                record.reference_rule.points[point_index];
+            const Real weight = physical.physical_weight;
+            if (!std::isfinite(weight) || !(weight > Real{0.0}) ||
+                !finitePoint(physical.physical_point) ||
+                !finitePoint(reference.parent_coordinate)) {
+                throw std::invalid_argument(
+                    "free-surface backward-Euler kinetic work encountered invalid physical quadrature data");
+            }
+            const auto before = previous_velocity.value(
+                record.reference_rule.provenance.parent_entity,
+                reference.parent_coordinate,
+                record.reference_rule.provenance);
+            const auto after = endpoint_velocity.value(
+                record.reference_rule.provenance.parent_entity,
+                reference.parent_coordinate,
+                record.reference_rule.provenance);
+            if (!finitePoint(before) || !finitePoint(after)) {
+                throw std::invalid_argument(
+                    "free-surface backward-Euler kinetic work velocity evaluator returned a non-finite value");
+            }
+            std::array<Real, 3> increment{};
+            for (std::size_t component = 0u; component < 3u;
+                 ++component) {
+                increment[component] =
+                    after[component] - before[component];
+            }
+            const Real before_squared = dot(before, before);
+            const Real after_squared = dot(after, after);
+            const Real increment_squared = dot(increment, increment);
+            const Real inertia_density =
+                density * dot(increment, after);
+            const Real time_loss_density =
+                Real{0.5} * density * increment_squared;
+            const std::array<Real, 5> point_values{
+                before_squared,
+                after_squared,
+                increment_squared,
+                inertia_density,
+                time_loss_density};
+            if (!std::all_of(
+                    point_values.begin(),
+                    point_values.end(),
+                    [](Real value) { return std::isfinite(value); }) ||
+                before_squared < Real{0.0} ||
+                after_squared < Real{0.0} ||
+                increment_squared < Real{0.0} ||
+                time_loss_density < Real{0.0}) {
+                throw std::invalid_argument(
+                    "free-surface backward-Euler kinetic work produced a non-finite point contribution");
+            }
+
+            ++state.owned_quadrature_point_count;
+            state.owned_liquid_volume += weight;
+            state.kinetic_energy_before_on_endpoint_domain +=
+                Real{0.5} * density * before_squared * weight;
+            state.kinetic_energy_after +=
+                Real{0.5} * density * after_squared * weight;
+            state.step_integrated_inertia_work +=
+                inertia_density * weight;
+            state.time_discretization_loss +=
+                time_loss_density * weight;
+        }
+    }
+
+    state.kinetic_energy_change_on_endpoint_domain =
+        state.kinetic_energy_after -
+        state.kinetic_energy_before_on_endpoint_domain;
+    state.identity_residual =
+        state.step_integrated_inertia_work -
+        state.kinetic_energy_change_on_endpoint_domain -
+        state.time_discretization_loss;
+    const std::array<Real, 7> totals{
+        state.owned_liquid_volume,
+        state.kinetic_energy_before_on_endpoint_domain,
+        state.kinetic_energy_after,
+        state.kinetic_energy_change_on_endpoint_domain,
+        state.step_integrated_inertia_work,
+        state.time_discretization_loss,
+        state.identity_residual};
+    if (!std::all_of(
+            totals.begin(),
+            totals.end(),
+            [](Real value) { return std::isfinite(value); }) ||
+        state.owned_liquid_volume < Real{0.0} ||
+        state.kinetic_energy_before_on_endpoint_domain < Real{0.0} ||
+        state.kinetic_energy_after < Real{0.0} ||
+        state.time_discretization_loss < Real{0.0}) {
+        throw std::invalid_argument(
+            "free-surface backward-Euler kinetic work produced invalid totals");
     }
     return state;
 }
@@ -3196,6 +3923,7 @@ std::size_t FreeSurfaceGeometrySnapshot::residentBytes() const noexcept
     };
     const auto& interface_request = interface_domain_.request();
     add_source(interface_request.source);
+    bytes += interface_request.generated_domain_id.capacity();
     bytes += interface_request.implicit_geometry_mode.capacity();
     bytes += interface_request.implicit_quadrature_backend.capacity();
     bytes += interface_request.implicit_fallback_policy.capacity();
@@ -3382,7 +4110,8 @@ buildFreeSurfaceGeometrySnapshot(
                 FreeSurfaceGeometryRuleRole::Interface,
                 mesh,
                 policy,
-                std::move(moment_certificate));
+                std::move(moment_certificate),
+                volumeSourceTopologyKey(*region));
     }
     for (auto& rule : interface_rules) {
         const auto fragment = std::find_if(
@@ -3404,7 +4133,11 @@ buildFreeSurfaceGeometrySnapshot(
                 FreeSurfaceGeometryRuleRole::Interface,
                 mesh,
                 policy,
-                std::move(moment_certificate));
+                std::move(moment_certificate),
+                interfaceSourceTopologyKey(
+                    *fragment,
+                    mesh.getCellType(fragment->parent_cell),
+                    policy.tolerance));
     }
 
     std::map<int, const GeneratedInterfaceBoundaryIntersectionDomain*>
@@ -3455,6 +4188,10 @@ buildFreeSurfaceGeometrySnapshot(
                     mesh,
                     policy,
                     std::move(moment_certificate),
+                    contactSourceTopologyKey(
+                        *fragment,
+                        mesh.getCellType(fragment->parent_cell),
+                        policy.tolerance),
                     contact.boundaryMarker());
         }
     }
@@ -3513,6 +4250,10 @@ buildFreeSurfaceGeometrySnapshot(
                     mesh,
                     policy,
                     std::move(moment_certificate),
+                    activeBoundarySourceTopologyKey(
+                        *fragment,
+                        mesh.getCellType(fragment->parent_cell),
+                        policy.tolerance),
                     active.request().boundary_marker,
                     std::move(source_ids),
                     componentIdForActiveRule(active, stable_id));

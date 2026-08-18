@@ -1210,6 +1210,55 @@ buildOutletCoupledTransientSystemRCR(MPI_Comm comm,
     return sys;
 }
 
+class RecordingFinalCandidateGateController final
+    : public timestepping::StepController {
+public:
+    [[nodiscard]] int maxRetries() const noexcept override { return 1; }
+
+    [[nodiscard]] timestepping::StepDecision onAccepted(
+        const timestepping::StepAttemptInfo& info) override
+    {
+        ++accepted_calls;
+        accepted_attempt = info.attempt_index;
+        accepted_step = info.step_index;
+        accepted_info_converged = info.nonlinear_converged;
+        return timestepping::StepDecision{
+            .accept = true,
+            .retry = false,
+            .next_dt = info.dt,
+            .next_order = info.scheme_order,
+            .message = "accepted after final candidate gate"};
+    }
+
+    [[nodiscard]] timestepping::StepDecision onRejected(
+        const timestepping::StepAttemptInfo& info,
+        timestepping::StepRejectReason reason) override
+    {
+        ++rejected_calls;
+        rejected_attempt = info.attempt_index;
+        rejected_step = info.step_index;
+        rejected_info_converged = info.nonlinear_converged;
+        rejected_for_cut_topology =
+            reason == timestepping::StepRejectReason::CutTopologyChanged;
+        return timestepping::StepDecision{
+            .accept = false,
+            .retry = info.attempt_index < maxRetries(),
+            .next_dt = info.dt,
+            .next_order = info.scheme_order,
+            .message = "retry final candidate after cut topology change"};
+    }
+
+    int accepted_calls{0};
+    int rejected_calls{0};
+    int accepted_attempt{-1};
+    int rejected_attempt{-1};
+    int accepted_step{-1};
+    int rejected_step{-1};
+    bool accepted_info_converged{false};
+    bool rejected_info_converged{false};
+    bool rejected_for_cut_topology{false};
+};
+
 } // namespace
 
 TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
@@ -1416,6 +1465,514 @@ TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
 
     run_case(/*deterministic_mode=*/true, /*overlap_communication=*/false);
     run_case(/*deterministic_mode=*/true, /*overlap_communication=*/true);
+#endif
+}
+
+TEST(TimeLoopFsilsConvergenceMPI,
+     CandidateStageObserverRankFailureRollsBackCollectively)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size < 2) {
+        GTEST_SKIP() << "Run with 2+ MPI ranks to enable this test";
+    }
+
+    const int n_cells = size;
+    auto mesh = std::make_shared<StripQuadMeshAccess>(
+        n_cells, rank, size);
+    const auto space = spaces::Space(
+        spaces::SpaceType::H1,
+        ElementType::Quad4,
+        /*order=*/1,
+        /*components=*/1);
+    ASSERT_TRUE(space);
+
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        systems::FieldSpec{.name = "u",
+                           .space = space,
+                           .components = 1});
+    sys.addOperator("op");
+
+    const auto u = forms::FormExpr::stateField(
+        u_field, *space, "u");
+    const auto v = forms::TestFunction(*space, "v");
+    (void)systems::installFormulation(
+        sys, "op", {u_field}, (u.dt(1) * v + u * v).dx());
+
+    systems::SetupOptions setup_opts;
+    setup_opts.assembler_name = "StandardAssembler";
+    setup_opts.assembly_options.ghost_policy =
+        GhostPolicy::ReverseScatter;
+    setup_opts.assembly_options.deterministic = true;
+    setup_opts.assembly_options.overlap_communication = false;
+    setup_opts.dof_options.global_numbering =
+        dofs::GlobalNumberingMode::DenseGlobalIds;
+    setup_opts.dof_options.ownership =
+        dofs::OwnershipStrategy::LowestRank;
+    setup_opts.dof_options.my_rank = rank;
+    setup_opts.dof_options.world_size = size;
+    setup_opts.dof_options.mpi_comm = comm;
+
+    systems::SetupInputs inputs;
+    inputs.topology_override =
+        buildStripTopology(n_cells, rank, size);
+    sys.setup(setup_opts, inputs);
+    ASSERT_TRUE(sys.isSetup());
+
+    const GlobalIndex n_dofs = sys.dofHandler().getNumDofs();
+    auto permutation = getFsilsDofPermutation(
+        sys, /*dof_per_node=*/1, setup_opts.dof_options);
+    ASSERT_TRUE(permutation);
+
+    backends::FsilsFactory factory(
+        /*dof_per_node=*/1, permutation, comm);
+    auto linear = factory.createLinearSolver(
+        fsilsGmresDiagOptions());
+    ASSERT_TRUE(linear);
+
+    auto history = timestepping::TimeHistory::allocate(
+        factory,
+        n_dofs,
+        /*history_depth=*/2,
+        /*allocate_second_order_state=*/false);
+    constexpr double dt = 0.1;
+    history.setTime(0.0);
+    history.setDt(dt);
+    history.setPrevDt(dt);
+    history.setStepIndex(0);
+    history.uPrev().zero();
+    history.uPrev2().zero();
+    history.resetCurrentToPrevious();
+
+    auto integrator =
+        std::make_shared<systems::BackwardDifferenceIntegrator>();
+    systems::TransientSystem transient(sys, std::move(integrator));
+
+    timestepping::TimeLoopOptions loop_opts;
+    loop_opts.t0 = 0.0;
+    loop_opts.t_end = dt;
+    loop_opts.dt = dt;
+    loop_opts.max_steps = 1;
+    loop_opts.scheme = timestepping::SchemeKind::BackwardEuler;
+    loop_opts.newton.residual_op = "op";
+    loop_opts.newton.jacobian_op = "op";
+    loop_opts.newton.max_iterations = 4;
+    loop_opts.newton.abs_tolerance = 1e-12;
+    loop_opts.newton.rel_tolerance = 0.0;
+
+    timestepping::TimeLoop loop(loop_opts);
+    bool staged = false;
+    bool observation_shape_ok = false;
+    int candidate_calls = 0;
+    int discard_calls = 0;
+    int commit_calls = 0;
+    int accepted_calls = 0;
+    timestepping::TimeLoopCallbacks callbacks;
+    callbacks.on_candidate_stage =
+        [&](const timestepping::CandidateStageObservation& observation) {
+            ++candidate_calls;
+            staged = true;
+            observation_shape_ok =
+                observation.state_vector != nullptr &&
+                observation.rate_vector != nullptr &&
+                observation.time_derivative_fields.size() == 1u &&
+                observation.time_derivative_fields.front() == u_field;
+            if (rank == 0) {
+                throw systems::InvalidStateException(
+                    "rank-zero candidate-stage observer failure");
+            }
+        };
+    callbacks.on_step_candidate_discarded =
+        [&](timestepping::TimeHistory&) {
+            ++discard_calls;
+            staged = false;
+        };
+    callbacks.on_step_commit_ready =
+        [&](timestepping::TimeHistory&) { ++commit_calls; };
+    callbacks.on_step_accepted =
+        [&](timestepping::TimeHistory&) { ++accepted_calls; };
+
+    bool caught = false;
+    std::string caught_message;
+    try {
+        (void)loop.run(
+            transient, factory, *linear, history, callbacks);
+    } catch (const FEException& error) {
+        caught = true;
+        caught_message = error.what();
+    }
+
+    const bool has_local_failure =
+        caught_message.find(
+            "rank-zero candidate-stage observer failure") !=
+        std::string::npos;
+    const bool has_remote_failure =
+        caught_message.find(
+            "candidate-stage observer failed on another active FE "
+            "communicator rank") != std::string::npos;
+    const std::array<int, 9> local_counts{{
+        caught ? 1 : 0,
+        candidate_calls,
+        discard_calls,
+        commit_calls,
+        accepted_calls,
+        staged ? 1 : 0,
+        observation_shape_ok ? 1 : 0,
+        has_local_failure ? 1 : 0,
+        has_remote_failure ? 1 : 0,
+    }};
+    std::array<int, 9> global_counts{};
+    MPI_Allreduce(local_counts.data(),
+                  global_counts.data(),
+                  static_cast<int>(local_counts.size()),
+                  MPI_INT,
+                  MPI_SUM,
+                  comm);
+
+    EXPECT_EQ(global_counts[0], size);
+    EXPECT_EQ(global_counts[1], size);
+    EXPECT_EQ(global_counts[2], size);
+    EXPECT_EQ(global_counts[3], 0);
+    EXPECT_EQ(global_counts[4], 0);
+    EXPECT_EQ(global_counts[5], 0);
+    EXPECT_EQ(global_counts[6], size);
+    EXPECT_EQ(global_counts[7], 1);
+    EXPECT_EQ(global_counts[8], size - 1);
+    EXPECT_DOUBLE_EQ(history.time(), 0.0);
+    EXPECT_EQ(history.stepIndex(), 0);
+#endif
+}
+
+TEST(TimeLoopFsilsConvergenceMPI,
+     FinalCandidateGateRankLocalCutRetriesCollectivelyBeforeCommit)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size < 2) {
+        GTEST_SKIP() << "Run with 2+ MPI ranks to enable this test";
+    }
+
+    auto all_ranks_ready = [comm](bool local_ready) {
+        const int local_value = local_ready ? 1 : 0;
+        int global_value = 0;
+        MPI_Allreduce(&local_value,
+                      &global_value,
+                      1,
+                      MPI_INT,
+                      MPI_MIN,
+                      comm);
+        return global_value != 0;
+    };
+
+    // Reuse the distributed scalar strip problem from the candidate-stage
+    // observer rollback regression above.  Only rank zero rejects the first
+    // projected endpoint; TimeLoop must turn that into one communicator-wide
+    // retry before any controller acceptance or commit callback.
+    const int n_cells = size;
+    auto mesh = std::make_shared<StripQuadMeshAccess>(
+        n_cells, rank, size);
+    const auto space = spaces::Space(
+        spaces::SpaceType::H1,
+        ElementType::Quad4,
+        /*order=*/1,
+        /*components=*/1);
+    ASSERT_TRUE(all_ranks_ready(static_cast<bool>(space)));
+
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        systems::FieldSpec{.name = "u",
+                           .space = space,
+                           .components = 1});
+    sys.addOperator("op");
+
+    const auto u = forms::FormExpr::stateField(
+        u_field, *space, "u");
+    const auto v = forms::TestFunction(*space, "v");
+    (void)systems::installFormulation(
+        sys, "op", {u_field}, (u.dt(1) * v + u * v).dx());
+
+    systems::SetupOptions setup_opts;
+    setup_opts.assembler_name = "StandardAssembler";
+    setup_opts.assembly_options.ghost_policy =
+        GhostPolicy::ReverseScatter;
+    setup_opts.assembly_options.deterministic = true;
+    setup_opts.assembly_options.overlap_communication = false;
+    setup_opts.dof_options.global_numbering =
+        dofs::GlobalNumberingMode::DenseGlobalIds;
+    setup_opts.dof_options.ownership =
+        dofs::OwnershipStrategy::LowestRank;
+    setup_opts.dof_options.my_rank = rank;
+    setup_opts.dof_options.world_size = size;
+    setup_opts.dof_options.mpi_comm = comm;
+
+    systems::SetupInputs inputs;
+    inputs.topology_override =
+        buildStripTopology(n_cells, rank, size);
+    sys.setup(setup_opts, inputs);
+    ASSERT_TRUE(all_ranks_ready(sys.isSetup()));
+
+    const GlobalIndex n_dofs = sys.dofHandler().getNumDofs();
+    auto permutation = getFsilsDofPermutation(
+        sys, /*dof_per_node=*/1, setup_opts.dof_options);
+    ASSERT_TRUE(all_ranks_ready(static_cast<bool>(permutation)));
+
+    backends::FsilsFactory factory(
+        /*dof_per_node=*/1, permutation, comm);
+    auto linear = factory.createLinearSolver(
+        fsilsGmresDiagOptions());
+    ASSERT_TRUE(all_ranks_ready(static_cast<bool>(linear)));
+
+    auto history = timestepping::TimeHistory::allocate(
+        factory,
+        n_dofs,
+        /*history_depth=*/2,
+        /*allocate_second_order_state=*/false);
+    constexpr double dt = 0.1;
+    history.setTime(0.0);
+    history.setDt(dt);
+    history.setPrevDt(dt);
+    history.setStepIndex(0);
+    history.uPrev().zero();
+    history.uPrev2().zero();
+    history.resetCurrentToPrevious();
+
+    auto integrator =
+        std::make_shared<systems::BackwardDifferenceIntegrator>();
+    systems::TransientSystem transient(sys, std::move(integrator));
+
+    auto controller =
+        std::make_shared<RecordingFinalCandidateGateController>();
+    timestepping::TimeLoopOptions loop_opts;
+    loop_opts.t0 = 0.0;
+    loop_opts.t_end = dt;
+    loop_opts.dt = dt;
+    loop_opts.max_steps = 1;
+    loop_opts.scheme = timestepping::SchemeKind::BackwardEuler;
+    loop_opts.newton.residual_op = "op";
+    loop_opts.newton.jacobian_op = "op";
+    loop_opts.newton.max_iterations = 4;
+    loop_opts.newton.abs_tolerance = 1e-12;
+    loop_opts.newton.rel_tolerance = 0.0;
+    loop_opts.step_controller = controller;
+
+    int step_start_calls = 0;
+    int gate_calls = 0;
+    int local_cut_returns = 0;
+    int discard_calls = 0;
+    int rejected_callback_calls = 0;
+    int dt_update_calls = 0;
+    int commit_calls = 0;
+    int accepted_callback_calls = 0;
+    int lifecycle_errors = 0;
+    bool pending_candidate = false;
+
+    timestepping::TimeLoopCallbacks callbacks;
+    callbacks.on_step_start =
+        [&](const timestepping::TimeHistory& observed_history) {
+            ++step_start_calls;
+            if (observed_history.stepIndex() != 0 ||
+                std::abs(observed_history.time()) > 1e-12) {
+                ++lifecycle_errors;
+            }
+        };
+    callbacks.on_step_candidate_ready =
+        [&](timestepping::TimeHistory& observed_history,
+            const timestepping::NewtonReport& report)
+            -> std::optional<timestepping::StepRejectReason> {
+            ++gate_calls;
+            if (!report.converged || pending_candidate ||
+                observed_history.stepIndex() != 0 ||
+                std::abs(observed_history.time()) > 1e-12 ||
+                controller->accepted_calls != 0 || commit_calls != 0) {
+                ++lifecycle_errors;
+            }
+            pending_candidate = true;
+
+            if (gate_calls == 1) {
+                if (controller->rejected_calls != 0 ||
+                    discard_calls != 0 ||
+                    rejected_callback_calls != 0 ||
+                    dt_update_calls != 0) {
+                    ++lifecycle_errors;
+                }
+                if (rank == 0) {
+                    ++local_cut_returns;
+                    return timestepping::StepRejectReason::CutTopologyChanged;
+                }
+                return std::nullopt;
+            }
+
+            if (gate_calls != 2 || controller->rejected_calls != 1 ||
+                discard_calls != 1 || rejected_callback_calls != 1 ||
+                dt_update_calls != 1) {
+                ++lifecycle_errors;
+            }
+            return std::nullopt;
+        };
+    callbacks.on_step_candidate_discarded =
+        [&](timestepping::TimeHistory&) {
+            ++discard_calls;
+            if (!pending_candidate || gate_calls != 1 ||
+                controller->accepted_calls != 0 ||
+                controller->rejected_calls != 0 || commit_calls != 0) {
+                ++lifecycle_errors;
+            }
+            pending_candidate = false;
+        };
+    callbacks.on_step_rejected =
+        [&](const timestepping::TimeHistory& observed_history,
+            timestepping::StepRejectReason reason,
+            const timestepping::NewtonReport& report) {
+            ++rejected_callback_calls;
+            if (reason !=
+                    timestepping::StepRejectReason::CutTopologyChanged ||
+                !report.converged || pending_candidate ||
+                discard_calls != 1 || controller->rejected_calls != 0 ||
+                controller->accepted_calls != 0 || commit_calls != 0 ||
+                observed_history.stepIndex() != 0 ||
+                std::abs(observed_history.time()) > 1e-12) {
+                ++lifecycle_errors;
+            }
+        };
+    callbacks.on_dt_updated =
+        [&](double old_dt,
+            double new_dt,
+            int step_index,
+            int attempt_index) {
+            ++dt_update_calls;
+            if (std::abs(old_dt - dt) > 1e-12 ||
+                std::abs(new_dt - dt) > 1e-12 || step_index != 0 ||
+                attempt_index != 0 || controller->rejected_calls != 1 ||
+                controller->accepted_calls != 0 || commit_calls != 0) {
+                ++lifecycle_errors;
+            }
+        };
+    callbacks.on_step_commit_ready =
+        [&](timestepping::TimeHistory& observed_history) {
+            ++commit_calls;
+            if (!pending_candidate || gate_calls != 2 ||
+                discard_calls != 1 || rejected_callback_calls != 1 ||
+                controller->rejected_calls != 1 ||
+                controller->accepted_calls != 1 ||
+                accepted_callback_calls != 0 ||
+                observed_history.stepIndex() != 0) {
+                ++lifecycle_errors;
+            }
+            pending_candidate = false;
+        };
+    callbacks.on_step_accepted =
+        [&](timestepping::TimeHistory& observed_history) {
+            ++accepted_callback_calls;
+            if (pending_candidate || commit_calls != 1 ||
+                controller->accepted_calls != 1 ||
+                observed_history.stepIndex() != 1 ||
+                std::abs(observed_history.time() - dt) > 1e-12) {
+                ++lifecycle_errors;
+            }
+        };
+
+    timestepping::TimeLoopReport report;
+    report.success = false;
+    bool caught = false;
+    try {
+        timestepping::TimeLoop loop(loop_opts);
+        report = loop.run(
+            transient, factory, *linear, history, callbacks);
+    } catch (...) {
+        caught = true;
+    }
+
+    enum CountIndex : std::size_t {
+        DidNotThrow,
+        ReportSucceeded,
+        ReportTookOneStep,
+        ReportReachedEndTime,
+        HistoryAcceptedOneStep,
+        GateCalls,
+        LocalCutReturns,
+        DiscardCalls,
+        RejectedCallbackCalls,
+        DtUpdateCalls,
+        StepStartCalls,
+        CommitCalls,
+        AcceptedCallbackCalls,
+        ControllerRejectedCalls,
+        ControllerAcceptedCalls,
+        ControllerRejectionMetadataOk,
+        ControllerAcceptanceMetadataOk,
+        LifecycleErrors,
+        PendingCandidates,
+        Count
+    };
+    std::array<int, Count> local_counts{{
+        caught ? 0 : 1,
+        report.success ? 1 : 0,
+        report.steps_taken == 1 ? 1 : 0,
+        std::abs(report.final_time - dt) <= 1e-12 ? 1 : 0,
+        history.stepIndex() == 1 &&
+                std::abs(history.time() - dt) <= 1e-12
+            ? 1
+            : 0,
+        gate_calls,
+        local_cut_returns,
+        discard_calls,
+        rejected_callback_calls,
+        dt_update_calls,
+        step_start_calls,
+        commit_calls,
+        accepted_callback_calls,
+        controller->rejected_calls,
+        controller->accepted_calls,
+        controller->rejected_attempt == 0 &&
+                controller->rejected_step == 0 &&
+                controller->rejected_info_converged &&
+                controller->rejected_for_cut_topology
+            ? 1
+            : 0,
+        controller->accepted_attempt == 1 &&
+                controller->accepted_step == 0 &&
+                controller->accepted_info_converged
+            ? 1
+            : 0,
+        lifecycle_errors,
+        pending_candidate ? 1 : 0,
+    }};
+    std::array<int, Count> global_counts{};
+    MPI_Allreduce(local_counts.data(),
+                  global_counts.data(),
+                  static_cast<int>(local_counts.size()),
+                  MPI_INT,
+                  MPI_SUM,
+                  comm);
+
+    EXPECT_EQ(global_counts[DidNotThrow], size);
+    EXPECT_EQ(global_counts[ReportSucceeded], size);
+    EXPECT_EQ(global_counts[ReportTookOneStep], size);
+    EXPECT_EQ(global_counts[ReportReachedEndTime], size);
+    EXPECT_EQ(global_counts[HistoryAcceptedOneStep], size);
+    EXPECT_EQ(global_counts[GateCalls], 2 * size);
+    EXPECT_EQ(global_counts[LocalCutReturns], 1);
+    EXPECT_EQ(global_counts[DiscardCalls], size);
+    EXPECT_EQ(global_counts[RejectedCallbackCalls], size);
+    EXPECT_EQ(global_counts[DtUpdateCalls], size);
+    EXPECT_EQ(global_counts[StepStartCalls], 2 * size);
+    EXPECT_EQ(global_counts[CommitCalls], size);
+    EXPECT_EQ(global_counts[AcceptedCallbackCalls], size);
+    EXPECT_EQ(global_counts[ControllerRejectedCalls], size);
+    EXPECT_EQ(global_counts[ControllerAcceptedCalls], size);
+    EXPECT_EQ(global_counts[ControllerRejectionMetadataOk], size);
+    EXPECT_EQ(global_counts[ControllerAcceptanceMetadataOk], size);
+    EXPECT_EQ(global_counts[LifecycleErrors], 0);
+    EXPECT_EQ(global_counts[PendingCandidates], 0);
 #endif
 }
 
@@ -2748,7 +3305,56 @@ TEST(TimeLoopFsilsConvergenceMPI,
         require_collective_rejection(
             std::move(options),
             /*initialized=*/false,
-            "threshold validity differs");
+              "threshold validity differs");
+    }
+    {
+        timestepping::NewtonOptions options;
+        if (rank == 0) {
+            options
+                .accepted_static_constant_pressure_kkt_max_relative_distance =
+                1.0e-10;
+        }
+        require_collective_rejection(
+            std::move(options),
+            /*initialized=*/false,
+            "constant-pressure KKT threshold presence differs");
+    }
+    {
+        timestepping::NewtonOptions options;
+        options
+            .accepted_static_constant_pressure_kkt_max_relative_distance =
+            rank == 0 ? 1.0e-10 : 2.0e-10;
+        require_collective_rejection(
+            std::move(options),
+            /*initialized=*/false,
+            "constant-pressure KKT threshold value differs");
+    }
+    {
+        timestepping::NewtonOptions options;
+        options
+            .accepted_static_constant_pressure_kkt_max_relative_distance =
+            rank == 0 ? -1.0 : 1.0e-10;
+        require_collective_rejection(
+            std::move(options),
+            /*initialized=*/false,
+            "constant-pressure KKT threshold validity differs");
+    }
+    {
+        constexpr const char* threshold_environment =
+            "SVMP_NS_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE";
+        ScopedEnvironmentValue scoped_threshold(
+            threshold_environment,
+            rank == 0 ? "not-a-number" : nullptr);
+        timestepping::NewtonOptions options;
+        if (rank != 0) {
+            options
+                .accepted_static_constant_pressure_kkt_max_relative_distance =
+                1.0e-10;
+        }
+        require_collective_rejection(
+            std::move(options),
+            /*initialized=*/false,
+            "constant-pressure KKT threshold validity differs");
     }
     {
         timestepping::NewtonOptions options;

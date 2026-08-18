@@ -1158,6 +1158,237 @@ def test_free_surface_pressure_representability_gate_accepts_complete_telemetry(
         metrics, args) == []
 
 
+def _complete_pressure_representability_record():
+    return {
+        "pressure_representability_available": True,
+        "pressure_representability_method": "lsqr",
+        "pressure_representability_convergence": (
+            "normal_equation_stationarity"
+        ),
+        "pressure_representability_distance_gate_applied": False,
+        "pressure_representability_claimed": False,
+        "pressure_representability_residual_norm": 0.25,
+        "pressure_representability_relative_residual": 0.025,
+        "pressure_representability_normal_residual_norm": 0.01,
+        "pressure_representability_relative_normal_residual": 0.001,
+        "pressure_representability_pressure_norm": 2.5,
+        "pressure_representability_iterations": 7,
+        "pressure_representability_converged": True,
+        "pressure_representability_breakdown": False,
+        "pressure_representability_norm": "constrained_reduced_coefficient_l2",
+        "pressure_representability_load": (
+            "surface_area_variation_plus_young_wall_energy"
+        ),
+    }
+
+
+def _passing_pressure_representability_distance_gate_record():
+    return {
+        "accepted_static_state": 1,
+        "pressure_representability_distance_gate_applied": 1,
+        "pressure_representability_available": 1,
+        "pressure_representability_converged": 1,
+        "pressure_representability_breakdown": 0,
+        "pressure_representability_relative_residual": 0.025,
+        "pressure_representability_max_relative_distance": 0.05,
+        "pressure_representability_distance_gate_passed": 1,
+        "pressure_representability_claimed": 1,
+        "pressure_representability_reason": "available",
+        "reason": "within_threshold",
+    }
+
+
+def _passing_static_compatible_pressure_initializer_record():
+    return {
+        "requested": 1,
+        "applied": 1,
+        "passed": 1,
+        "reason": "initialized_within_threshold",
+        "pressure_representability_available": 1,
+        "pressure_representability_converged": 1,
+        "pressure_representability_breakdown": 0,
+        "pressure_representability_relative_residual": 0.025,
+        "pressure_representability_max_relative_distance": 0.05,
+        "force_projection_applied": 0,
+        "production_capillary_operator_changed": 0,
+    }
+
+
+def test_static_compatible_pressure_initializer_is_parsed_and_required():
+    smoke = _load_smoke_module()
+    output = (
+        "NewtonSolver: static compatible free-surface pressure initializer "
+        "diagnostic=free_surface_static_compatible_pressure_initializer "
+        "requested=1 applied=1 passed=1 "
+        "reason=initialized_within_threshold "
+        "pressure_representability_available=1 "
+        "pressure_representability_converged=1 "
+        "pressure_representability_breakdown=0 "
+        "pressure_representability_relative_residual=0.025 "
+        "pressure_representability_max_relative_distance=0.05 "
+        "force_projection_applied=0 production_capillary_operator_changed=0"
+    )
+    diagnostics = smoke.parse_solver_diagnostics(output)
+    diagnostics["free_surface_conservative_balances"] = [
+        _complete_pressure_representability_record()
+    ]
+    diagnostics[
+        "free_surface_pressure_representability_distance_gates"
+    ] = [_passing_pressure_representability_distance_gate_record()]
+    metrics = {}
+    smoke.add_diagnostic_metrics(metrics, diagnostics)
+    args = argparse.Namespace(
+        require_free_surface_pressure_representability_diagnostic=True,
+        max_free_surface_pressure_representability_relative_distance=0.05,
+        initialize_static_compatible_pressure=True,
+    )
+
+    assert diagnostics["counts"][
+        "free_surface_static_compatible_pressure_initializers"] == 1
+    assert metrics[
+        "diagnostic_free_surface_static_compatible_pressure_initializer_count"
+    ] == 1
+    assert smoke.free_surface_pressure_representability_errors(
+        metrics, args) == []
+
+
+@pytest.mark.parametrize(
+    ("records", "expected"),
+    [
+        ([], "was not reported"),
+        ([{
+            **_passing_static_compatible_pressure_initializer_record(),
+            "applied": 0,
+            "passed": 0,
+            "reason": "relative_distance_exceeds_threshold",
+        }], "failed attempt"),
+    ],
+)
+def test_static_compatible_pressure_initializer_fails_closed(records, expected):
+    smoke = _load_smoke_module()
+    metrics = {
+        "diagnostics": {
+            "free_surface_conservative_balances": [
+                _complete_pressure_representability_record()
+            ],
+            "free_surface_pressure_representability_distance_gates": [
+                _passing_pressure_representability_distance_gate_record()
+            ],
+            "free_surface_static_compatible_pressure_initializers": records,
+        },
+    }
+    args = argparse.Namespace(
+        require_free_surface_pressure_representability_diagnostic=True,
+        max_free_surface_pressure_representability_relative_distance=0.05,
+        initialize_static_compatible_pressure=True,
+    )
+
+    errors = smoke.free_surface_pressure_representability_errors(metrics, args)
+
+    assert any(expected in error for error in errors)
+
+
+def test_accepted_static_pressure_representability_distance_gate_is_required():
+    smoke = _load_smoke_module()
+    output = (
+        "NewtonSolver: accepted static pressure-representability distance gate "
+        "diagnostic=free_surface_pressure_representability_distance_gate "
+        "accepted_static_state=1 iteration=0 phase='pre_linear_convergence' "
+        "pressure_representability_distance_gate_applied=1 "
+        "pressure_representability_available=1 "
+        "pressure_representability_converged=1 "
+        "pressure_representability_breakdown=0 "
+        "pressure_representability_relative_residual=0.025 "
+        "pressure_representability_max_relative_distance=0.05 "
+        "pressure_representability_distance_gate_passed=1 "
+        "pressure_representability_claimed=1 "
+        "pressure_representability_reason=available reason=within_threshold"
+    )
+    diagnostics = smoke.parse_solver_diagnostics(output)
+    diagnostics["free_surface_conservative_balances"] = [
+        _complete_pressure_representability_record()
+    ]
+    metrics = {}
+    smoke.add_diagnostic_metrics(metrics, diagnostics)
+    args = argparse.Namespace(
+        require_free_surface_pressure_representability_diagnostic=False,
+        max_free_surface_pressure_representability_relative_distance=0.05,
+    )
+
+    assert diagnostics["counts"][
+        "free_surface_pressure_representability_distance_gates"] == 1
+    assert metrics[
+        "diagnostic_free_surface_pressure_representability_distance_gate_count"
+    ] == 1
+    assert metrics[
+        "latest_free_surface_pressure_representability_distance_gate"
+    ]["reason"] == "within_threshold"
+    assert smoke.free_surface_pressure_representability_errors(
+        metrics, args) == []
+
+
+def test_accepted_static_pressure_representability_distance_gate_missing_fails_closed():
+    smoke = _load_smoke_module()
+    metrics = {
+        "diagnostics": {
+            "free_surface_conservative_balances": [
+                _complete_pressure_representability_record()
+            ],
+        },
+    }
+    args = argparse.Namespace(
+        require_free_surface_pressure_representability_diagnostic=False,
+        max_free_surface_pressure_representability_relative_distance=0.05,
+    )
+
+    errors = smoke.free_surface_pressure_representability_errors(metrics, args)
+
+    assert any("distance gate was not reported" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("update", "expected"),
+    [
+        ({
+            "pressure_representability_available": 0,
+            "pressure_representability_distance_gate_passed": 0,
+            "pressure_representability_claimed": 0,
+            "reason": "diagnostic_unavailable",
+        }, "pressure_representability_available"),
+        ({
+            "pressure_representability_relative_residual": 0.08,
+            "pressure_representability_distance_gate_passed": 0,
+            "pressure_representability_claimed": 0,
+            "reason": "relative_distance_exceeds_threshold",
+        }, "0.08 exceeds 0.05"),
+    ],
+)
+def test_accepted_static_pressure_representability_distance_gate_fails_closed(
+        update, expected):
+    smoke = _load_smoke_module()
+    gate_record = _passing_pressure_representability_distance_gate_record()
+    gate_record.update(update)
+    metrics = {
+        "diagnostics": {
+            "free_surface_conservative_balances": [
+                _complete_pressure_representability_record()
+            ],
+            "free_surface_pressure_representability_distance_gates": [
+                gate_record
+            ],
+        },
+    }
+    args = argparse.Namespace(
+        require_free_surface_pressure_representability_diagnostic=False,
+        max_free_surface_pressure_representability_relative_distance=0.05,
+    )
+
+    errors = smoke.free_surface_pressure_representability_errors(metrics, args)
+
+    assert errors
+    assert any(expected in error for error in errors)
+
+
 def test_pressure_representability_diagnostic_accepts_stationary_unit_residual_without_claim():
     smoke = _load_smoke_module()
     record = {
@@ -1214,6 +1445,69 @@ def test_pressure_representability_requirement_enables_solver_diagnostic(
         "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC"] == "1"
 
 
+def test_pressure_representability_distance_threshold_enables_static_gate(
+        monkeypatch):
+    smoke = _load_smoke_module()
+
+    class GateArgs:
+        require_free_surface_pressure_representability_diagnostic = False
+        max_free_surface_pressure_representability_relative_distance = 0.05
+
+        def __getattr__(self, _name):
+            return None
+
+    monkeypatch.delenv(
+        "SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE",
+        raising=False,
+    )
+
+    env = smoke.solver_environment(GateArgs())
+
+    assert env[
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC"] == "1"
+    assert float(env[
+        "SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE"
+    ]) == 0.05
+
+
+def test_static_compatible_pressure_initializer_enables_solver_preload(
+        monkeypatch):
+    smoke = _load_smoke_module()
+
+    class GateArgs:
+        initialize_static_compatible_pressure = True
+        max_free_surface_pressure_representability_relative_distance = 0.05
+
+        def __getattr__(self, _name):
+            return None
+
+    monkeypatch.delenv(
+        "SVMP_NS_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER",
+        raising=False,
+    )
+
+    env = smoke.solver_environment(GateArgs())
+
+    assert env[
+        "SVMP_NS_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER"] == "1"
+    assert env[
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC"] == "1"
+
+
+def test_static_compatible_pressure_initializer_requires_distance_gate():
+    smoke = _load_smoke_module()
+
+    class GateArgs:
+        initialize_static_compatible_pressure = True
+        max_free_surface_pressure_representability_relative_distance = None
+
+        def __getattr__(self, _name):
+            return None
+
+    with pytest.raises(ValueError, match="requires"):
+        smoke.solver_environment(GateArgs())
+
+
 def test_sessile_defaults_require_pressure_representability_but_dynamic_do_not():
     smoke = _load_smoke_module()
     base = argparse.Namespace(
@@ -1224,6 +1518,8 @@ def test_sessile_defaults_require_pressure_representability_but_dynamic_do_not()
         surface_tension=None,
         require_free_surface_conservative_balance=False,
         require_free_surface_pressure_representability_diagnostic=False,
+        max_free_surface_pressure_representability_relative_distance=None,
+        initialize_static_compatible_pressure=None,
     )
 
     sessile = smoke.case_args_for_run("sessile2d", base)
@@ -1234,11 +1530,21 @@ def test_sessile_defaults_require_pressure_representability_but_dynamic_do_not()
         sessile.require_free_surface_pressure_representability_diagnostic
         is True
     )
+    assert (
+        sessile.max_free_surface_pressure_representability_relative_distance ==
+        smoke.STATIC_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE
+    )
+    assert sessile.initialize_static_compatible_pressure is True
     assert dynamic.require_free_surface_conservative_balance is False
     assert (
         dynamic.require_free_surface_pressure_representability_diagnostic
         is False
     )
+    assert (
+        dynamic.max_free_surface_pressure_representability_relative_distance
+        is None
+    )
+    assert dynamic.initialize_static_compatible_pressure is False
 
 
 @pytest.mark.parametrize(

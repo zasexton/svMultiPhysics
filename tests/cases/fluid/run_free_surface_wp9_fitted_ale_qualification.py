@@ -31,12 +31,12 @@ DEFAULT_MATRIX = SCRIPT_PATH.with_name(
     "free_surface_wp9_fitted_ale_qualification_matrix.json"
 )
 EXPECTED_MATRIX_SHA256 = (
-    "bf3d0a2d9f8fc9d9530ae916460a07460181de63deffc6f735bedb4f57c76123"
+    "46225d9c90e71c90881725d4e871466f7a0e19e04a4309627b82e376583715d9"
 )
 SHARED_RUNNER_PATH = Path(base_runner.__file__).resolve()
 SHARED_RUNNER_SHA256 = base_runner.sha256_file(SHARED_RUNNER_PATH)
 
-EXPECTED_MATRIX_ID = "free_surface_wp9_fitted_ale_prerequisite_v2"
+EXPECTED_MATRIX_ID = "free_surface_wp9_fitted_ale_prerequisite_v4"
 EXPECTED_STATUS = "FROZEN_BEFORE_EXECUTION"
 EXPECTED_ARCHITECTURE_RECORD = (
     "Documentation/free_surface_wp9_fitted_ale_architecture.md"
@@ -48,19 +48,28 @@ EXPECTED_SCOPE = (
 )
 EXPECTED_CLOSURE_STATE = "OPEN_METHOD_AND_PHYSICAL_ALE_CAMPAIGNS_REQUIRED"
 EXPECTED_AUDIT_BASIS = {
-    "head_at_freeze": "963cb4c256a2e7db7dede519ea8dafe5a52aacd0",
+    "head_at_freeze": "a3f8ccfe82e0a9d32e2ee30c35a9e48325de8f07",
     "dirty_tracked_sources_reviewed": True,
     "source_binary_correspondence_claimed_for_dirty_runs": False,
 }
 EXPECTED_CONFIGURATION_CONTRACT = {
     "schema_2": {
         "qualification": "supported_configuration_envelope",
-        "accepted_consumed_path": {
+        "accepted_consumed_paths": {
             "ale_enabled": True,
             "mesh_velocity_source": "CoupledDisplacement",
             "normal_policy": "MatchFluidNormalVelocity",
             "normal_enforcement": ["Penalty", "Nitsche"],
-            "tangential_policy": "Prescribed",
+            "tangential_policy": ["Free", "SmoothingOnly", "Prescribed"],
+            "policy_state": {
+                "Free": "natural_no_tangential_boundary_row",
+                "SmoothingOnly": (
+                    "current_geometry_tangential_surface_gradient_functional"
+                ),
+                "Prescribed": (
+                    "weak_current_geometry_projected_velocity_penalty"
+                ),
+            },
             "policy_consumed": True,
         },
         "rejected_before_system_mutation": [
@@ -68,8 +77,7 @@ EXPECTED_CONFIGURATION_CONTRACT = {
             "PrescribedData_mesh_velocity_source",
             "normal_policy_None",
             "normal_enforcement_None",
-            "tangential_policy_Free",
-            "tangential_policy_SmoothingOnly",
+            "Free_with_tangential_weight",
             "fitted_DynamicRenE_contact_model",
         ],
         "kinematic_penalty_auto_promotes_none": False,
@@ -91,10 +99,14 @@ EXPECTED_SUPPORTED_SLICE = {
     "ale_mesh_velocity_source": "CoupledDisplacement",
     "normal_policy": "MatchFluidNormalVelocity",
     "normal_enforcement": ["Penalty", "Nitsche"],
-    "tangential_policy": "Prescribed",
-    "prescribed_tangential_enforcement": (
-        "weak_current_geometry_projected_velocity_penalty"
-    ),
+    "tangential_policy": ["Free", "SmoothingOnly", "Prescribed"],
+    "tangential_policy_state": {
+        "Free": "natural_no_tangential_boundary_row",
+        "SmoothingOnly": (
+            "current_geometry_tangential_surface_gradient_functional"
+        ),
+        "Prescribed": "weak_current_geometry_projected_velocity_penalty",
+    },
     "tangential_owner_registry": (
         "FESystem_mesh_displacement_field_and_boundary_marker"
     ),
@@ -102,8 +114,12 @@ EXPECTED_SUPPORTED_SLICE = {
     "fitted_contact_models": ["None", "Pinned"],
 }
 EXPECTED_PROVENANCE_CONTRACT = {
-    "owner_source": ("matching_central_mesh_tangential_policy_declaration"),
-    "consumption_source": ("matching_fitted_prescribed_tangential_boundary_descriptor"),
+    "owner_source": (
+        "matching_central_mesh_tangential_policy_declaration_with_exact_policy"
+    ),
+    "consumption_source": (
+        "matching_policy_specific_fitted_tangential_boundary_descriptor"
+    ),
     "required_consumed_fields": [
         "tangential_mesh_owner",
         "policy_consumed",
@@ -166,11 +182,19 @@ EXPECTED_TEST_GROUPS = {
             "NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults"
         ),
     ],
-    "schema_2_supported_prescribed_and_mode_provenance": [
+    "schema_2_policy_operator_and_provenance": [
         ("MovingDomainPhysics.FittedFreeSurfaceQualifiedContractRejectsBeforeMutation"),
         (
             "MovingDomainPhysics."
             "FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership"
+        ),
+        (
+            "MovingDomainPhysics."
+            "MeshTangentialPolicyConsumerBindingRequiresUniqueExactDescriptor"
+        ),
+        (
+            "MovingDomainPhysics."
+            "FittedFreeSurfaceFreeAndSmoothingPoliciesProduceDistinctMeshRows"
         ),
         (
             "MovingDomainPhysics."
@@ -246,7 +270,7 @@ EXPECTED_TEST_GROUPS = {
     ],
 }
 EXPECTED_METHOD_EXITS = {
-    "free_and_smoothing_supported_operator_contract",
+    "three_policy_operator_source_execution",
     "tangential_penalty_dimensional_h_dt_and_polynomial_scaling",
     "coupled_fluid_mesh_consistency_stability_and_work_argument",
     "actual_boundary_mesh_velocity_projection_error_and_surface_work_history",
@@ -278,16 +302,16 @@ EXPECTED_CLOSURE_REQUEST_POLICY = {
         "fitted_ale_qualified",
     ],
     "diagnostic": (
-        "This matrix is prerequisite-only: schema-2 Free and SmoothingOnly "
-        "have no consumed supported operator, method exits remain open, and "
-        "no required physical fitted-ALE campaign has run."
+        "This matrix is prerequisite-only: the three-policy source paths "
+        "are not qualification evidence, method exits remain open, and no "
+        "required physical fitted-ALE campaign has run."
     ),
 }
 
 EXPECTED_TESTS = [test for tests in EXPECTED_TEST_GROUPS.values() for test in tests]
 EXPECTED_PREREQUISITE_CLAIMS = {
     "xml_aliases_and_explicit_none_fail_closed_are_wired_end_to_end",
-    "schema_2_prescribed_is_the_only_consumed_supported_tangential_path",
+    "schema_2_three_policy_states_are_distinct_and_consumed",
     "schema_1_paths_are_explicitly_unqualified_and_can_report_no_owner_or_operator",
     "owner_conflicts_and_unsupported_fitted_capabilities_fail_closed",
 }
@@ -388,7 +412,7 @@ def validate_wp9_contract(matrix: dict[str, Any]) -> dict[str, Any]:
     exclusions = matrix.get("current_capability_exclusions")
     if (
         not isinstance(exclusions, list)
-        or len(exclusions) != 7
+        or len(exclusions) != 5
         or len(set(exclusions)) != len(exclusions)
         or any(
             not isinstance(exclusion, str) or not exclusion.strip()
@@ -402,7 +426,7 @@ def validate_wp9_contract(matrix: dict[str, Any]) -> dict[str, Any]:
         "mpi_ranks": 1,
         "threads": 1,
         "wall_time_seconds": 900,
-        "memory_mib": 6144,
+        "memory_mib": 1024,
         "output_mib": 128,
     }:
         raise ValueError("WP-9 execution envelope changed after freeze")

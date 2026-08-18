@@ -4,6 +4,7 @@
 #include "Mesh/Core/MeshComm.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -38,6 +39,14 @@ void appendOptionalRevision(
   appendWord(words, revision.value_or(0u));
 }
 
+void appendOptionalDouble(
+    CanonicalWords& words,
+    const std::optional<double>& value)
+{
+  appendWord(words, value.has_value() ? 1u : 0u);
+  appendDouble(words, value.value_or(0.0));
+}
+
 void appendFunctional(
     CanonicalWords& words,
     const LevelSetAuthoritativeFunctionalValue& value)
@@ -57,6 +66,18 @@ void appendFunctional(
   appendDouble(words, value.young_wall_energy);
   appendDouble(words, value.volume_constraint_potential);
   appendDouble(words, value.total_potential);
+  appendOptionalDouble(words, value.kinetic_energy);
+  appendOptionalDouble(words, value.gravitational_energy);
+  appendOptionalDouble(
+      words, value.gravitational_potential_power);
+  appendOptionalDouble(
+      words, value.surface_wall_potential_power);
+  appendOptionalDouble(
+      words, value.volume_constraint_potential_power);
+  appendOptionalDouble(
+      words, value.bulk_viscous_dissipation_rate);
+  appendOptionalDouble(words, value.external_pressure_power);
+  appendOptionalDouble(words, value.modeled_stored_energy);
 }
 
 void appendFunctionals(
@@ -109,6 +130,10 @@ void appendRow(
   appendFunctionals(words, row.after);
   appendDouble(words, row.numerical_work);
   appendDouble(words, row.accepted_numerical_work);
+  appendOptionalDouble(
+      words, row.modeled_energy_numerical_work);
+  appendOptionalDouble(
+      words, row.accepted_modeled_energy_numerical_work);
 }
 
 CanonicalWords canonicalActiveTransaction(
@@ -117,7 +142,7 @@ CanonicalWords canonicalActiveTransaction(
 {
   CanonicalWords words;
   words.reserve(
-      32u + 48u * ledger.trialRows().size() +
+      32u + 80u * ledger.trialRows().size() +
       commit_state_words.size());
   appendWord(words, 1u);
   const auto* transaction = ledger.activeTransaction();
@@ -170,35 +195,53 @@ bool collectiveLevelSetMaintenanceCanonicalWordsAgree(
       MPI_MAX,
       comm.native());
 
-  CanonicalWords words(local_words.begin(), local_words.end());
-  words.resize(static_cast<std::size_t>(maximum_word_count), 0u);
-  CanonicalWords minimum_words(words.size(), 0u);
-  CanonicalWords maximum_words(words.size(), 0u);
-  std::size_t offset = 0u;
-  while (offset < words.size()) {
-    const auto remaining = words.size() - offset;
-    const auto count = static_cast<int>(std::min<std::size_t>(
-        remaining,
-        static_cast<std::size_t>(std::numeric_limits<int>::max())));
+  // Keep the comparison scratch bounded and allocation-free after ranks have
+  // entered the collective schedule. A rank-local allocation failure here
+  // would otherwise strand peers inside the first value reduction.
+  constexpr std::size_t chunk_words = 4096u;
+  std::array<std::uint64_t, chunk_words> words{};
+  std::array<std::uint64_t, chunk_words> minimum_words{};
+  std::array<std::uint64_t, chunk_words> maximum_words{};
+  bool values_agree = true;
+  const auto global_word_count =
+      static_cast<std::size_t>(maximum_word_count);
+  for (std::size_t offset = 0u; offset < global_word_count;
+       offset += chunk_words) {
+    const auto words_this_chunk = std::min(
+        chunk_words, global_word_count - offset);
+    std::fill_n(words.begin(), words_this_chunk, 0u);
+    const auto local_words_this_chunk = offset < local_words.size()
+        ? std::min(words_this_chunk, local_words.size() - offset)
+        : 0u;
+    std::copy_n(
+        local_words.begin() + static_cast<std::ptrdiff_t>(
+                                  std::min(offset, local_words.size())),
+        local_words_this_chunk,
+        words.begin());
+    const auto count = static_cast<int>(words_this_chunk);
     MPI_Allreduce(
-        words.data() + offset,
-        minimum_words.data() + offset,
+        words.data(),
+        minimum_words.data(),
         count,
         MPI_UINT64_T,
         MPI_MIN,
         comm.native());
     MPI_Allreduce(
-        words.data() + offset,
-        maximum_words.data() + offset,
+        words.data(),
+        maximum_words.data(),
         count,
         MPI_UINT64_T,
         MPI_MAX,
         comm.native());
-    offset += static_cast<std::size_t>(count);
+    values_agree = values_agree && std::equal(
+        minimum_words.begin(),
+        minimum_words.begin() +
+            static_cast<std::ptrdiff_t>(words_this_chunk),
+        maximum_words.begin());
   }
 
   return minimum_word_count == maximum_word_count &&
-         minimum_words == maximum_words;
+         values_agree;
 #else
   (void)local_words;
   return true;
@@ -221,26 +264,39 @@ collectiveLevelSetMaintenanceTransactionDecision(
   }
 
 #ifdef MESH_HAS_MPI
-  const int local_flags[2]{
+  std::vector<std::uint64_t> words;
+  bool local_canonical_prepared = true;
+  try {
+    words = canonicalActiveTransaction(
+        ledger, local_commit_state_words);
+  } catch (...) {
+    local_canonical_prepared = false;
+  }
+
+  // Prepare every variable-size canonical payload before the first
+  // collective.  Allocating it after ranks have entered the flag reduction
+  // can strand peers in the subsequent word comparison if one rank throws.
+  const int local_flags[3]{
       local_transaction_active ? 1 : 0,
       local_invariants_satisfied ? 1 : 0,
+      local_canonical_prepared ? 1 : 0,
   };
-  int global_flags[2]{0, 0};
+  int global_flags[3]{0, 0, 0};
   MPI_Allreduce(
       local_flags,
       global_flags,
-      2,
+      3,
       MPI_INT,
       MPI_MIN,
       comm.native());
 
-  const auto words = canonicalActiveTransaction(
-      ledger, local_commit_state_words);
+  if (global_flags[0] == 0 || global_flags[1] == 0 ||
+      global_flags[2] == 0) {
+    return LevelSetMaintenanceTransactionDecision::Reject;
+  }
   const bool identical =
       collectiveLevelSetMaintenanceCanonicalWordsAgree(words, comm);
-  return global_flags[0] != 0 &&
-             global_flags[1] != 0 &&
-             identical
+  return identical
       ? LevelSetMaintenanceTransactionDecision::Commit
       : LevelSetMaintenanceTransactionDecision::Reject;
 #else

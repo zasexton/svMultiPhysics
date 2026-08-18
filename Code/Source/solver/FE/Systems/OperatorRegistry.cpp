@@ -75,15 +75,17 @@ OperatorRegistry::Snapshot OperatorRegistry::snapshot() const
 
 void OperatorRegistry::rollback(const Snapshot& snap)
 {
-    // Build a set of tags that existed at snapshot time
-    std::unordered_map<OperatorTag, const Snapshot::OpSizes*> snap_map;
-    for (const auto& os : snap.ops) {
-        snap_map[os.tag] = &os;
-    }
-
     // Remove operators added after snapshot
     for (auto it = ops_.begin(); it != ops_.end(); ) {
-        if (snap_map.count(it->first) == 0) {
+        const auto existed =
+            std::find_if(
+                snap.ops.begin(),
+                snap.ops.end(),
+                [&](const auto& sizes) {
+                    return sizes.tag ==
+                           it->first;
+                });
+        if (existed == snap.ops.end()) {
             it = ops_.erase(it);
         } else {
             ++it;

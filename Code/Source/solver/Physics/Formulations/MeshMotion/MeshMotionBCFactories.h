@@ -11,14 +11,18 @@
 #include "FE/Analysis/BoundaryConditionDescriptor.h"
 #include "FE/Forms/BoundaryConditions.h"
 #include "FE/Forms/BoundaryCondition.h"
+#include "FE/Forms/JIT/JITValidation.h"
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Forms/Vocabulary.h"
 
+#include <cmath>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace svmp {
@@ -26,6 +30,24 @@ namespace Physics {
 namespace formulations {
 namespace mesh_motion {
 namespace Factories {
+
+[[nodiscard]] inline bool isFinitePositiveScalarLiteral(
+    const FE::forms::bc::ScalarValue& value)
+{
+    const auto literal = [&]() -> std::optional<FE::Real> {
+        if (const auto* real = std::get_if<FE::Real>(&value)) {
+            return *real;
+        }
+        if (const auto* expression =
+                std::get_if<FE::forms::FormExpr>(&value);
+            expression != nullptr && expression->node() != nullptr) {
+            return expression->node()->constantValue();
+        }
+        return std::nullopt;
+    }();
+    return literal.has_value() && std::isfinite(*literal) &&
+           *literal > FE::Real{0.0};
+}
 
 class TangentialConstraintBoundaryCondition final : public FE::forms::bc::BoundaryCondition {
 public:
@@ -154,17 +176,15 @@ toVectorEssentialBC(const DirichletBC& bc,
         std::string(field_symbol));
 }
 
-[[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition>
-toNormalConstraintBC(const NormalConstraintBC& bc,
-                     std::string_view context,
-                     std::string_view penalty_prefix = "mesh_motion_normal_penalty",
-                     std::string_view target_prefix = "mesh_motion_normal_target",
-                     std::string_view time_scale_prefix = "mesh_motion_normal_time_scale")
+[[nodiscard]] inline FE::forms::FormExpr
+effectiveNormalConstraintTarget(
+    const NormalConstraintBC& bc,
+    int dimension,
+    std::string_view context,
+    std::string_view target_prefix = "mesh_motion_normal_target",
+    std::string_view time_scale_prefix = "mesh_motion_normal_time_scale")
 {
     const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, context);
-    const auto penalty = FE::forms::bc::toScalarExpr(
-        bc.penalty,
-        FE::forms::bc::markerValueName(penalty_prefix, marker));
     auto target = FE::forms::bc::toScalarExpr(
         bc.target,
         FE::forms::bc::markerValueName(target_prefix, marker));
@@ -173,13 +193,53 @@ toNormalConstraintBC(const NormalConstraintBC& bc,
     case NormalConstraintQuantity::Displacement:
         break;
     case NormalConstraintQuantity::Velocity: {
+        if (!isFinitePositiveScalarLiteral(bc.velocity_time_scale)) {
+            throw std::invalid_argument(
+                std::string(context) +
+                ": normal constraint velocity time scale must be a "
+                "finite positive literal");
+        }
         const auto time_scale = FE::forms::bc::toScalarExpr(
             bc.velocity_time_scale,
             FE::forms::bc::markerValueName(time_scale_prefix, marker));
         target = time_scale * target;
         break;
     }
+    default:
+        throw std::invalid_argument(
+            std::string(context) +
+            ": unknown normal constraint quantity");
     }
+
+    if (!FE::forms::jit::hasScalarValueShape(target, dimension)) {
+        throw std::invalid_argument(
+            std::string(context) +
+            ": normal constraint target must be scalar-valued");
+    }
+
+    return target;
+}
+
+[[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition>
+toNormalConstraintBC(const NormalConstraintBC& bc,
+                     int dimension,
+                     std::string_view context,
+                     std::string_view penalty_prefix = "mesh_motion_normal_penalty",
+                     std::string_view target_prefix = "mesh_motion_normal_target",
+                     std::string_view time_scale_prefix = "mesh_motion_normal_time_scale")
+{
+    const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, context);
+    if (!isFinitePositiveScalarLiteral(bc.penalty)) {
+        throw std::invalid_argument(
+            std::string(context) +
+            ": normal constraint penalty must be a finite positive "
+            "literal");
+    }
+    const auto penalty = FE::forms::bc::toScalarExpr(
+        bc.penalty,
+        FE::forms::bc::markerValueName(penalty_prefix, marker));
+    const auto target = effectiveNormalConstraintTarget(
+        bc, dimension, context, target_prefix, time_scale_prefix);
 
     return FE::forms::bc::makeTraceRobinBC(
         marker,

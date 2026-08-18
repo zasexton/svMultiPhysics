@@ -19,7 +19,8 @@ namespace timestepping {
 
 enum class StepRejectReason : std::uint8_t {
     NonlinearSolveFailed,
-    ErrorTooLarge
+    ErrorTooLarge,
+    CutTopologyChanged
 };
 
 struct StepAttemptInfo {

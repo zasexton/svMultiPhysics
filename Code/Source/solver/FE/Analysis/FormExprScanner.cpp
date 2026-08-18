@@ -167,6 +167,16 @@ struct ScanContext {
     int interface_marker{-1};
 };
 
+void addExteriorBoundaryMeasureIfAbsent(
+    std::vector<forms::ExteriorBoundaryMeasure>& measures,
+    const forms::ExteriorBoundaryMeasure& measure)
+{
+    if (std::find(measures.begin(), measures.end(), measure) ==
+        measures.end()) {
+        measures.push_back(measure);
+    }
+}
+
 struct AffineFieldExpression {
     FieldId field{INVALID_FIELD_ID};
     Real constant{0.0};
@@ -902,8 +912,14 @@ void collectScaleUsages(const forms::FormExprNode& node,
         child_context.boundary_marker = -1;
         child_context.interface_marker = node.interfaceMarker().value_or(-1);
     } else if (type == FT::InterfaceIntegral) {
-        child_context.domain = DomainKind::InterfaceFace;
-        child_context.boundary_marker = -1;
+        const auto* exterior = node.exteriorBoundaryMeasure();
+        child_context.domain =
+            exterior != nullptr &&
+                    exterior->isGeneratedActiveSubset()
+                ? DomainKind::Boundary
+                : DomainKind::InterfaceFace;
+        child_context.boundary_marker =
+            exterior == nullptr ? -1 : exterior->physicalBoundaryMarker();
         child_context.interface_marker = node.interfaceMarker().value_or(-1);
     }
 
@@ -986,6 +1002,10 @@ void scanNode(const forms::FormExprNode& node,
                     result.boundary_markers.push_back(*marker);
                 }
             }
+            if (const auto* exterior = node.exteriorBoundaryMeasure()) {
+                addExteriorBoundaryMeasureIfAbsent(
+                    result.exterior_boundary_measures, *exterior);
+            }
             break;
         }
         case FT::InteriorFaceIntegral:
@@ -995,16 +1015,39 @@ void scanNode(const forms::FormExprNode& node,
             child_context.interface_marker = node.interfaceMarker().value_or(-1);
             break;
         case FT::InterfaceIntegral: {
-            result.has_interface_integral = true;
             auto marker = node.interfaceMarker();
-            child_context.domain = DomainKind::InterfaceFace;
-            child_context.boundary_marker = -1;
+            const auto* exterior = node.exteriorBoundaryMeasure();
             child_context.interface_marker = marker.value_or(-1);
-            if (marker && *marker >= 0) {
-                if (std::find(result.interface_markers.begin(),
-                              result.interface_markers.end(), *marker)
-                    == result.interface_markers.end()) {
-                    result.interface_markers.push_back(*marker);
+            if (exterior != nullptr &&
+                exterior->isGeneratedActiveSubset()) {
+                result.has_boundary_integral = true;
+                child_context.domain = DomainKind::Boundary;
+                child_context.boundary_marker =
+                    exterior->physicalBoundaryMarker();
+                const int physical_marker =
+                    exterior->physicalBoundaryMarker();
+                if (std::find(
+                        result.boundary_markers.begin(),
+                        result.boundary_markers.end(),
+                        physical_marker) ==
+                    result.boundary_markers.end()) {
+                    result.boundary_markers.push_back(
+                        physical_marker);
+                }
+                addExteriorBoundaryMeasureIfAbsent(
+                    result.exterior_boundary_measures, *exterior);
+            } else {
+                result.has_interface_integral = true;
+                child_context.domain = DomainKind::InterfaceFace;
+                child_context.boundary_marker = -1;
+                if (marker && *marker >= 0) {
+                    if (std::find(
+                            result.interface_markers.begin(),
+                            result.interface_markers.end(),
+                            *marker) ==
+                        result.interface_markers.end()) {
+                        result.interface_markers.push_back(*marker);
+                    }
                 }
             }
             break;

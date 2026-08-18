@@ -1077,6 +1077,249 @@ TEST(DenseLinearAlgebra,
         FEException);
 }
 
+TEST(DenseLinearAlgebra,
+     ExactDyadicSpdGeneralizedBoundProvesDiagonalEquality) {
+    const std::vector<Real> denominator{
+        Real(2), Real(0),
+        Real(0), Real(4),
+    };
+    const std::vector<Real> numerator{
+        Real(6), Real(0),
+        Real(0), Real(8),
+    };
+
+    const auto bound =
+        dense_exact_dyadic_spd_generalized_upper_bound(
+            numerator,
+            denominator,
+            2u,
+            "exact diagonal quotient");
+    EXPECT_TRUE(bound.applied);
+    EXPECT_TRUE(bound.denominator_positive_definite_proven);
+    EXPECT_TRUE(bound.numerator_positive_semidefinite_proven);
+    EXPECT_TRUE(bound.upper_inequality_proven);
+    EXPECT_EQ(bound.denominator_rank, 2u);
+    EXPECT_EQ(bound.numerator_rank, 2u);
+    EXPECT_TRUE(bound.failing_lower_bound_proven);
+    EXPECT_EQ(bound.directly_proven_upper_bound, Real(3));
+    EXPECT_EQ(
+        bound.largest_failing_lower_bound,
+        std::nextafter(Real(3), Real(0)));
+    EXPECT_GT(bound.psd_oracle_calls, 2u);
+    EXPECT_LE(bound.binary64_search_steps, 64u);
+    EXPECT_GT(bound.maximum_integer_bits, 0u);
+
+    const std::vector<Real> zero_numerator(4u, Real(0));
+    const auto zero_bound =
+        dense_exact_dyadic_spd_generalized_upper_bound(
+            zero_numerator,
+            denominator,
+            2u,
+            "zero exact numerator");
+    EXPECT_EQ(zero_bound.numerator_rank, 0u);
+    EXPECT_FALSE(zero_bound.failing_lower_bound_proven);
+    EXPECT_EQ(zero_bound.directly_proven_upper_bound, Real(0));
+    EXPECT_TRUE(zero_bound.upper_inequality_proven);
+}
+
+TEST(DenseLinearAlgebra,
+     ExactDyadicSpdGeneralizedBoundRetainsTinyPositiveMode) {
+    const Real adjacent_to_one =
+        std::nextafter(Real(1), Real(0));
+    const std::vector<Real> denominator{
+        Real(1), adjacent_to_one,
+        adjacent_to_one, Real(1),
+    };
+    const std::vector<Real> numerator{
+        Real(2), Real(2) * adjacent_to_one,
+        Real(2) * adjacent_to_one, Real(2),
+    };
+
+    const auto bound =
+        dense_exact_dyadic_spd_generalized_upper_bound(
+            numerator,
+            denominator,
+            2u,
+            "one-ulp exact quotient");
+    EXPECT_EQ(bound.denominator_rank, 2u);
+    EXPECT_EQ(bound.numerator_rank, 2u);
+    EXPECT_EQ(bound.directly_proven_upper_bound, Real(2));
+    EXPECT_TRUE(bound.upper_inequality_proven);
+}
+
+TEST(DenseLinearAlgebra,
+     ExactDyadicSpdGeneralizedBoundExercisesThreeByThreeBareissDivision) {
+    const std::vector<Real> denominator{
+        Real(4), Real(1), Real(1),
+        Real(1), Real(3), Real(1),
+        Real(1), Real(1), Real(2),
+    };
+    std::vector<Real> numerator = denominator;
+    for (auto& value : numerator) {
+        value *= Real(2);
+    }
+
+    const auto bound =
+        dense_exact_dyadic_spd_generalized_upper_bound(
+            numerator,
+            denominator,
+            3u,
+            "three-by-three Bareiss quotient");
+    EXPECT_EQ(bound.denominator_rank, 3u);
+    EXPECT_EQ(bound.numerator_rank, 3u);
+    EXPECT_EQ(bound.directly_proven_upper_bound, Real(2));
+    EXPECT_GT(bound.exact_update_count, 0u);
+}
+
+TEST(DenseLinearAlgebra,
+     ExactDyadicSpdGeneralizedBoundExercisesSymmetricPsdPivotSwap) {
+    const std::vector<Real> denominator{
+        Real(1), Real(0), Real(0),
+        Real(0), Real(1), Real(0),
+        Real(0), Real(0), Real(1),
+    };
+    const std::vector<Real> numerator{
+        Real(0), Real(0), Real(0),
+        Real(0), Real(2), Real(1),
+        Real(0), Real(1), Real(2),
+    };
+
+    const auto bound =
+        dense_exact_dyadic_spd_generalized_upper_bound(
+            numerator,
+            denominator,
+            3u,
+            "pivoted semidefinite numerator");
+    EXPECT_EQ(bound.denominator_rank, 3u);
+    EXPECT_EQ(bound.numerator_rank, 2u);
+    EXPECT_EQ(bound.directly_proven_upper_bound, Real(3));
+}
+
+TEST(DenseLinearAlgebra,
+     ExactDyadicSpdGeneralizedBoundRejectsLateIndefinitePivot) {
+    const std::vector<Real> denominator{
+        Real(1), Real(0), Real(0),
+        Real(0), Real(1), Real(0),
+        Real(0), Real(0), Real(1),
+    };
+    const std::vector<Real> numerator{
+        Real(2), Real(1), Real(0),
+        Real(1), Real(2), Real(2),
+        Real(0), Real(2), Real(1),
+    };
+    EXPECT_THROW(
+        (void)dense_exact_dyadic_spd_generalized_upper_bound(
+            numerator,
+            denominator,
+            3u,
+            "late indefinite exact numerator"),
+        FEException);
+}
+
+TEST(DenseLinearAlgebra,
+     ExactDyadicSpdGeneralizedBoundRejectsSemidefiniteDenominator) {
+    const std::vector<Real> denominator{
+        Real(1), Real(1),
+        Real(1), Real(1),
+    };
+    const std::vector<Real> numerator{
+        Real(1), Real(0),
+        Real(0), Real(1),
+    };
+    EXPECT_THROW(
+        (void)dense_exact_dyadic_spd_generalized_upper_bound(
+            numerator,
+            denominator,
+            2u,
+            "singular exact quotient"),
+        FEException);
+}
+
+TEST(DenseLinearAlgebra,
+     ExactDyadicSpdGeneralizedBoundRejectsIndefiniteNumerator) {
+    const std::vector<Real> denominator{
+        Real(1), Real(0),
+        Real(0), Real(1),
+    };
+    const std::vector<Real> numerator{
+        Real(1), Real(0),
+        Real(0), Real(-1),
+    };
+    EXPECT_THROW(
+        (void)dense_exact_dyadic_spd_generalized_upper_bound(
+            numerator,
+            denominator,
+            2u,
+            "indefinite exact numerator"),
+        FEException);
+}
+
+TEST(DenseLinearAlgebra,
+     ExactDyadicSpdGeneralizedBoundRejectsUnrepresentableUpperBound) {
+    const std::vector<Real> denominator{
+        std::numeric_limits<Real>::denorm_min(),
+    };
+    const std::vector<Real> numerator{
+        std::numeric_limits<Real>::max(),
+    };
+    EXPECT_THROW(
+        (void)dense_exact_dyadic_spd_generalized_upper_bound(
+            numerator,
+            denominator,
+            1u,
+            "unrepresentable exact upper bound"),
+        FEException);
+}
+
+TEST(DenseLinearAlgebra,
+     ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap) {
+    EXPECT_THROW(
+        (void)dense_exact_dyadic_spd_generalized_upper_bound(
+            std::span<const Real>{},
+            std::span<const Real>{},
+            33u,
+            "oversized exact quotient"),
+        FEException);
+}
+
+TEST(DenseLinearAlgebra,
+     ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs) {
+    const std::vector<Real> identity{
+        Real(1), Real(0),
+        Real(0), Real(1),
+    };
+    const std::vector<Real> asymmetric{
+        Real(1), Real(1),
+        Real(0), Real(1),
+    };
+    EXPECT_THROW(
+        (void)dense_exact_dyadic_spd_generalized_upper_bound(
+            asymmetric,
+            identity,
+            2u,
+            "asymmetric exact numerator"),
+        FEException);
+
+    auto nonfinite = identity;
+    nonfinite.front() =
+        std::numeric_limits<Real>::quiet_NaN();
+    EXPECT_THROW(
+        (void)dense_exact_dyadic_spd_generalized_upper_bound(
+            identity,
+            nonfinite,
+            2u,
+            "nonfinite exact denominator"),
+        FEException);
+
+    EXPECT_THROW(
+        (void)dense_exact_dyadic_spd_generalized_upper_bound(
+            std::span<const Real>(identity.data(), 3u),
+            identity,
+            2u,
+            "wrong-sized exact numerator"),
+        FEException);
+}
+
 TEST(DenseLinearAlgebra, PseudoInverseHandlesSingularMatrixWithoutNormalEquations) {
 #if !(defined(FE_HAS_EIGEN) && FE_HAS_EIGEN)
     GTEST_SKIP() << "rank-revealing pseudo-inverse requires FE_ENABLE_EIGEN";

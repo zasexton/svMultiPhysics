@@ -19,6 +19,16 @@ namespace backends {
 
 #if defined(FE_HAS_EIGEN)
 
+std::vector<GlobalIndex> EigenVector::ownedGlobalRows() const
+{
+    std::vector<GlobalIndex> rows;
+    rows.reserve(static_cast<std::size_t>(size()));
+    for (GlobalIndex row = 0; row < size(); ++row) {
+        rows.push_back(row);
+    }
+    return rows;
+}
+
 namespace {
 
 class EigenVectorView final : public assembly::GlobalSystemView {

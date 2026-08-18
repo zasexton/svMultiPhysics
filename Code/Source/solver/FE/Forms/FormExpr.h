@@ -14,6 +14,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -101,6 +102,96 @@ enum class GeometryTangentPath : std::uint8_t {
 enum class CutVolumeSide : std::uint8_t {
     Negative,
     Positive
+};
+
+enum class ExteriorBoundaryScope : std::uint8_t {
+    FullPhysical,
+    GeneratedActiveSubset
+};
+
+/**
+ * @brief Explicit selection of a physical exterior boundary integration
+ * domain.
+ *
+ * FullPhysical is deliberately distinct from GeneratedActiveSubset. The
+ * latter retains both the physical marker requested by the formulation and
+ * the generated marker used by cut assembly, so later installation can
+ * validate their provenance before mutating a system.
+ */
+class ExteriorBoundaryMeasure {
+public:
+    [[nodiscard]] static ExteriorBoundaryMeasure fullPhysical(
+        int physical_boundary_marker)
+    {
+        if (physical_boundary_marker < 0) {
+            throw std::invalid_argument(
+                "ExteriorBoundaryMeasure::fullPhysical requires a nonnegative physical boundary marker");
+        }
+        return ExteriorBoundaryMeasure(
+            ExteriorBoundaryScope::FullPhysical,
+            physical_boundary_marker,
+            -1);
+    }
+
+    [[nodiscard]] static ExteriorBoundaryMeasure generatedActiveSubset(
+        int physical_boundary_marker,
+        int generated_active_boundary_marker)
+    {
+        if (physical_boundary_marker < 0 ||
+            generated_active_boundary_marker < 0) {
+            throw std::invalid_argument(
+                "ExteriorBoundaryMeasure::generatedActiveSubset requires nonnegative physical and generated markers");
+        }
+        return ExteriorBoundaryMeasure(
+            ExteriorBoundaryScope::GeneratedActiveSubset,
+            physical_boundary_marker,
+            generated_active_boundary_marker);
+    }
+
+    [[nodiscard]] ExteriorBoundaryScope scope() const noexcept
+    {
+        return scope_;
+    }
+
+    [[nodiscard]] int physicalBoundaryMarker() const noexcept
+    {
+        return physical_boundary_marker_;
+    }
+
+    [[nodiscard]] int generatedActiveBoundaryMarker() const noexcept
+    {
+        return generated_active_boundary_marker_;
+    }
+
+    [[nodiscard]] bool isFullPhysical() const noexcept
+    {
+        return scope_ == ExteriorBoundaryScope::FullPhysical;
+    }
+
+    [[nodiscard]] bool isGeneratedActiveSubset() const noexcept
+    {
+        return scope_ == ExteriorBoundaryScope::GeneratedActiveSubset;
+    }
+
+    [[nodiscard]] friend bool operator==(
+        const ExteriorBoundaryMeasure&,
+        const ExteriorBoundaryMeasure&) noexcept = default;
+
+private:
+    ExteriorBoundaryMeasure(
+        ExteriorBoundaryScope scope,
+        int physical_boundary_marker,
+        int generated_active_boundary_marker) noexcept
+        : scope_(scope)
+        , physical_boundary_marker_(physical_boundary_marker)
+        , generated_active_boundary_marker_(
+              generated_active_boundary_marker)
+    {
+    }
+
+    ExteriorBoundaryScope scope_{ExteriorBoundaryScope::FullPhysical};
+    int physical_boundary_marker_{-1};
+    int generated_active_boundary_marker_{-1};
 };
 
 struct SpaceSignature {
@@ -525,6 +616,12 @@ public:
     [[nodiscard]] virtual std::vector<const FormExprNode*> children() const {
         return {};
     }
+
+    [[nodiscard]] virtual const ExteriorBoundaryMeasure*
+    exteriorBoundaryMeasure() const
+    {
+        return nullptr;
+    }
 };
 
 // ============================================================================
@@ -775,6 +872,8 @@ public:
 	    [[nodiscard]] FormExpr ds(int boundary_marker = -1) const;
 	    [[nodiscard]] FormExpr dS(int interior_facet_marker = -1) const;
 	    [[nodiscard]] FormExpr dI(int interface_marker = -1) const;
+        [[nodiscard]] FormExpr dExteriorBoundary(
+            const ExteriorBoundaryMeasure& measure) const;
         [[nodiscard]] FormExpr dCutVolume(int interface_marker,
                                           CutVolumeSide side) const;
 

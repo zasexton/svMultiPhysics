@@ -77,12 +77,17 @@ StepDecision SimpleStepController::onRejected(const StepAttemptInfo& info, StepR
     d.retry = true;
 
     double next = info.dt;
-    if (reason == StepRejectReason::NonlinearSolveFailed) {
-        next *= options_.decrease_factor;
-        d.message = "rejected: nonlinear solve failed";
-    } else {
-        next *= options_.decrease_factor;
-        d.message = "rejected: error too large";
+    next *= options_.decrease_factor;
+    switch (reason) {
+        case StepRejectReason::NonlinearSolveFailed:
+            d.message = "rejected: nonlinear solve failed";
+            break;
+        case StepRejectReason::ErrorTooLarge:
+            d.message = "rejected: error too large";
+            break;
+        case StepRejectReason::CutTopologyChanged:
+            d.message = "rejected: cut topology changed";
+            break;
     }
 
     d.next_dt = clamp(next);

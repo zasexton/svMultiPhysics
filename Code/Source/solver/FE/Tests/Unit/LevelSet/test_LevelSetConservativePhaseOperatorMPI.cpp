@@ -23,6 +23,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -427,8 +428,20 @@ TEST(LevelSetConservativePhaseOperatorMPI,
 
     const auto& dofs = system.fieldDofHandler(indicator_field);
     std::vector<FE::Real> indicator = projection.liquid_indicator;
-    std::vector<FE::Real> lower(graph.nodes, 0.0);
-    std::vector<FE::Real> upper(graph.nodes, 1.0);
+    std::vector<FE::Real> lower = indicator;
+    std::vector<FE::Real> upper = indicator;
+    for (const auto& edge : graph.edges) {
+        const auto first = static_cast<std::size_t>(edge.first_node);
+        const auto second = static_cast<std::size_t>(edge.second_node);
+        lower[first] = std::min(lower[first], indicator[second]);
+        lower[second] = std::min(lower[second], indicator[first]);
+        upper[first] = std::max(upper[first], indicator[second]);
+        upper[second] = std::max(upper[second], indicator[first]);
+    }
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        lower[node] = std::clamp(lower[node], FE::Real{0.0}, FE::Real{1.0});
+        upper[node] = std::clamp(upper[node], FE::Real{0.0}, FE::Real{1.0});
+    }
     std::vector<std::array<FE::Real, 3>> velocity(graph.nodes);
     for (FE::GlobalIndex vertex = 0; vertex < mesh->numVertices(); ++vertex) {
         const auto dof = vertexDof(dofs, vertex);
@@ -493,6 +506,9 @@ TEST(LevelSetConservativePhaseOperatorMPI,
     const auto stage = level_set::advanceLevelSetP1ConservativePhaseStage(
         graph, indicator, lower, upper, velocity, /*time_step=*/0.02);
     ASSERT_TRUE(stage.success) << stage.diagnostic;
+    ASSERT_TRUE(stage.replicated_stage_inputs_satisfied);
+    ASSERT_EQ(stage.sampled_nodal_velocity.size(), graph.nodes);
+    EXPECT_NE(stage.sampled_nodal_velocity.front()[0], FE::Real{0.0});
     EXPECT_TRUE(stage.courant_satisfied);
     EXPECT_TRUE(stage.strong_form_decomposition_satisfied);
     EXPECT_TRUE(stage.correction.interior_cancellation_satisfied);
@@ -504,6 +520,171 @@ TEST(LevelSetConservativePhaseOperatorMPI,
     EXPECT_LE(stage.correction.maximum_limited_liquid_indicator, 1.0);
     EXPECT_EQ(stage.correction.maximum_edge_pair_cancellation_residual, 0.0);
     ASSERT_EQ(stage.correction.node_component_ids.size(), graph.nodes);
+    ASSERT_FALSE(stage.correction.components.empty());
+
+    // Local mesh cache stamps may legitimately differ across partitions. The
+    // fixed-background contract compares them from q^n to the operator stage
+    // on each rank, while the execution-layout-sensitive graph content/layout
+    // remains replicated within this communicator.
+    auto validation_graph = graph;
+    validation_graph.geometry_revision +=
+        static_cast<std::uint64_t>(rank);
+    validation_graph.topology_revision +=
+        static_cast<std::uint64_t>(2 * rank);
+    validation_graph.ownership_revision +=
+        static_cast<std::uint64_t>(3 * rank);
+    validation_graph.numbering_revision +=
+        static_cast<std::uint64_t>(4 * rank);
+    const auto graph_identity =
+        level_set::levelSetP1PhaseGraphIdentity(validation_graph);
+    const FE::Real split_start_time{1.0};
+    const auto provenance =
+        level_set::LevelSetP1PhaseSplitStageProvenance{
+            .scheme = level_set::LevelSetP1PhaseSplitScheme::
+                BackwardEulerExplicitIndicatorEndpointVelocity,
+            .transport_mesh_policy =
+                level_set::LevelSetP1PhaseTransportMeshPolicy::
+                    FixedBackground,
+            .temporal_order = 1,
+            .prospective_step = 9u,
+            .attempt = 3u,
+            .step_start_time = split_start_time,
+            .step_end_time = split_start_time + stage.time_step,
+            .q_input_time = split_start_time,
+            .velocity_state_time = split_start_time + stage.time_step,
+            .time_step = stage.time_step,
+            .operator_state_revision = 0xb701u,
+            .previous_q_revision =
+                level_set::levelSetP1PhaseScalarContentRevision(indicator),
+            .nodal_velocity_revision =
+                level_set::levelSetP1PhaseVelocityContentRevision(
+                    stage.sampled_nodal_velocity),
+            .previous_graph_identity = graph_identity,
+            .operator_graph_identity = graph_identity,
+            .final_flux_ledger_digest =
+                level_set::levelSetP1PhaseFluxLedgerDigest(stage),
+            .stage_options = stage.executed_options,
+        };
+    const auto split_validation =
+        level_set::validateLevelSetP1PhaseSplitStage(
+            validation_graph, indicator, stage, provenance);
+    ASSERT_TRUE(split_validation.valid) << split_validation.diagnostic;
+    const auto local_flux_digest = static_cast<unsigned long long>(
+        split_validation.computed_flux_ledger_digest);
+    unsigned long long minimum_flux_digest = 0u;
+    unsigned long long maximum_flux_digest = 0u;
+    MPI_Allreduce(&local_flux_digest, &minimum_flux_digest, 1,
+                  MPI_UNSIGNED_LONG_LONG, MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(&local_flux_digest, &maximum_flux_digest, 1,
+                  MPI_UNSIGNED_LONG_LONG, MPI_MAX, MPI_COMM_WORLD);
+    EXPECT_NE(minimum_flux_digest, 0u);
+    EXPECT_EQ(minimum_flux_digest, maximum_flux_digest);
+
+    const auto expect_collective_provenance_rejection =
+        [&](const auto& candidate_stage,
+            const auto& candidate_provenance,
+            std::string_view expected_text) {
+            const auto validation =
+                level_set::validateLevelSetP1PhaseSplitStage(
+                    validation_graph,
+                    indicator,
+                    candidate_stage,
+                    candidate_provenance);
+            const int local_rejected = validation.valid ? 0 : 1;
+            int every_rank_rejected = 0;
+            MPI_Allreduce(&local_rejected, &every_rank_rejected, 1,
+                          MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+            EXPECT_EQ(every_rank_rejected, 1);
+            EXPECT_NE(validation.diagnostic.find(expected_text),
+                      std::string::npos)
+                << validation.diagnostic;
+            int root_length =
+                rank == 0
+                    ? static_cast<int>(validation.diagnostic.size())
+                    : 0;
+            MPI_Bcast(&root_length, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            std::string root_diagnostic(
+                static_cast<std::size_t>(root_length), '\0');
+            if (rank == 0) {
+                std::copy(validation.diagnostic.begin(),
+                          validation.diagnostic.end(),
+                          root_diagnostic.begin());
+            }
+            MPI_Bcast(root_diagnostic.data(), root_length, MPI_CHAR, 0,
+                      MPI_COMM_WORLD);
+            EXPECT_EQ(validation.diagnostic, root_diagnostic);
+        };
+    {
+        auto drifted = provenance;
+        if (rank == 1) {
+            ++drifted.attempt;
+        }
+        expect_collective_provenance_rejection(
+            stage, drifted, "identical attempt");
+    }
+    {
+        auto drifted_stage = stage;
+        auto drifted = provenance;
+        if (rank == 1) {
+            drifted_stage.executed_options.maximum_courant =
+                std::nextafter(
+                    drifted_stage.executed_options.maximum_courant,
+                    FE::Real{0.0});
+            drifted.stage_options = drifted_stage.executed_options;
+            drifted.final_flux_ledger_digest =
+                level_set::levelSetP1PhaseFluxLedgerDigest(
+                    drifted_stage);
+        }
+        expect_collective_provenance_rejection(
+            drifted_stage, drifted,
+            "identical maximum Courant option");
+    }
+    {
+        auto drifted_stage = stage;
+        auto drifted = provenance;
+        if (rank == 1) {
+            drifted_stage.sampled_nodal_velocity.front()[0] =
+                std::nextafter(
+                    drifted_stage.sampled_nodal_velocity.front()[0],
+                    std::numeric_limits<FE::Real>::infinity());
+        }
+        expect_collective_provenance_rejection(
+            drifted_stage, drifted, "failed on rank 1");
+    }
+    {
+        auto drifted_stage = stage;
+        auto drifted = provenance;
+        if (rank == 1) {
+            drifted_stage.sampled_nodal_velocity.front()[2] =
+                std::nextafter(
+                    drifted_stage.sampled_nodal_velocity.front()[2],
+                    std::numeric_limits<FE::Real>::infinity());
+            drifted.nodal_velocity_revision =
+                level_set::levelSetP1PhaseVelocityContentRevision(
+                    drifted_stage.sampled_nodal_velocity);
+        }
+        expect_collective_provenance_rejection(
+            drifted_stage, drifted,
+            "identical nodal velocity revision");
+    }
+    {
+        auto drifted_stage = stage;
+        auto drifted = provenance;
+        if (rank == 1) {
+            drifted_stage.correction.components.front()
+                .limited_balance_residual = std::nextafter(
+                    drifted_stage.correction.components.front()
+                        .limited_balance_residual,
+                    std::numeric_limits<FE::Real>::infinity());
+            drifted.final_flux_ledger_digest =
+                level_set::levelSetP1PhaseFluxLedgerDigest(
+                    drifted_stage);
+        }
+        expect_collective_provenance_rejection(
+            drifted_stage, drifted,
+            "failed on rank 1");
+    }
+
     const auto local_component_count = static_cast<unsigned long long>(
         stage.correction.components.size());
     unsigned long long minimum_component_count = 0u;
@@ -661,6 +842,17 @@ TEST(LevelSetConservativePhaseOperatorMPI,
         auto velocity = base_velocity;
         if (rank == 1) {
             velocity[4][1] = 0.2;
+        }
+        expect_collective_rejection(
+            level_set::advanceLevelSetP1ConservativePhaseStage(
+                graph, base_indicator, base_lower, base_upper,
+                velocity, 0.02, base_options),
+            "nodal velocity");
+    }
+    {
+        auto velocity = base_velocity;
+        if (rank == 1) {
+            velocity[4][1] = -FE::Real{0.0};
         }
         expect_collective_rejection(
             level_set::advanceLevelSetP1ConservativePhaseStage(

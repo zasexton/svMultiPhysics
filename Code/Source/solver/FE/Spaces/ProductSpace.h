@@ -63,6 +63,11 @@ public:
     Value evaluate(const Value& xi,
                    const std::vector<Real>& coefficients) const override;
 
+    /// Evaluate the component-by-reference-coordinate field Jacobian.
+    Jacobian evaluate_jacobian(
+        const Value& xi,
+        const std::vector<Real>& coefficients) const override;
+
 private:
     std::shared_ptr<FunctionSpace> base_;
     int components_;

@@ -26,12 +26,16 @@
 #include "Dofs/EntityDofMap.h"
 
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
+#include "Tests/Unit/Systems/BoundaryReductionSparseReadVector.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <memory>
+#include <span>
+#include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -415,6 +419,118 @@ bool throwsException(Callable&& callable)
 //  FESystem-level tests with real FE boundary assembly
 // ===========================================================================
 
+TEST(BoundaryIntegralInput,
+     BoundaryFunctionalPublishesTypedExteriorMeasure)
+{
+    BoundaryFunctional functional;
+    functional.boundary_marker = 5;
+
+    const auto full =
+        functional.exteriorBoundaryMeasure();
+    EXPECT_TRUE(full.isFullPhysical());
+    EXPECT_EQ(full.physicalBoundaryMarker(), 5);
+    EXPECT_EQ(full.generatedActiveBoundaryMarker(), -1);
+
+    functional.generated_active_boundary_marker = 7005;
+    const auto active =
+        functional.exteriorBoundaryMeasure();
+    EXPECT_TRUE(active.isGeneratedActiveSubset());
+    EXPECT_EQ(active.physicalBoundaryMarker(), 5);
+    EXPECT_EQ(active.generatedActiveBoundaryMarker(), 7005);
+
+    functional.is_domain_functional = true;
+    EXPECT_THROW(
+        (void)functional.exteriorBoundaryMeasure(),
+        std::logic_error);
+}
+
+TEST(BoundaryIntegralInput,
+     GeneratedBoundaryOwnershipMismatchDoesNotRegister)
+{
+    constexpr int claimed_physical_marker = 5;
+    constexpr int owned_physical_marker = 6;
+    constexpr int active_marker = 7005;
+    auto mesh = std::make_shared<
+        svmp::FE::forms::test::
+            SingleTetraOneBoundaryFaceMeshAccess>(
+        claimed_physical_marker);
+    auto space =
+        std::make_shared<svmp::FE::spaces::H1Space>(
+            ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto u_field =
+        sys.addField(
+            FieldSpec{
+                .name = "u",
+                .space = space,
+                .components = 1});
+    sys.setCutIntegrationContext(
+        generatedActiveBoundaryContext(
+            u_field,
+            owned_physical_marker,
+            active_marker,
+            Real{0.25}));
+
+    BoundaryFunctional functional;
+    functional.name = "Q_wrong_owner";
+    functional.integrand =
+        FormExpr::discreteField(
+            u_field, *space, "u");
+    functional.boundary_marker =
+        claimed_physical_marker;
+    functional.generated_active_boundary_marker =
+        active_marker;
+
+    EXPECT_TRUE(
+        throwsException<svmp::FE::InvalidArgumentException>(
+            [&] {
+                (void)sys.boundaryIntegral(
+                    functional.name,
+                    functional,
+                    AuxiliaryInputUpdateSchedule::
+                        EachNonlinearIteration);
+            }));
+    EXPECT_EQ(
+        sys.boundaryReductionServiceIfPresent(u_field),
+        nullptr);
+    EXPECT_EQ(
+        sys.auxiliaryInputRegistryIfPresent(),
+        nullptr);
+    EXPECT_EQ(
+        sys.feQuantityRegistryIfPresent(),
+        nullptr);
+
+    auto& service =
+        sys.boundaryReductionService(u_field);
+    EXPECT_TRUE(
+        throwsException<svmp::FE::InvalidArgumentException>(
+            [&] {
+                service.addBoundaryFunctional(
+                    functional);
+            }));
+    EXPECT_EQ(service.functionalCount(), 0u);
+    EXPECT_FALSE(
+        service.hasFunctional(functional.name));
+
+    SystemStateView state;
+    EXPECT_TRUE(
+        throwsException<svmp::FE::InvalidArgumentException>(
+            [&] {
+                (void)sys.assembleBoundaryGradient(
+                    u_field,
+                    FormExpr::trialFunction(
+                        *space, "u"),
+                    claimed_physical_marker,
+                    state,
+                    /*apply_constraints=*/false,
+                    /*region_marker=*/-1,
+                    std::span<
+                        const svmp::FE::GlobalIndex>{},
+                    active_marker);
+            }));
+}
+
 TEST(BoundaryIntegralInput, FESystem_ConstantIntegrandOnOneFace)
 {
     // Constant integrand 1.0 on boundary face 0 of a unit tet.
@@ -467,6 +583,50 @@ TEST(BoundaryIntegralInput, FESystem_FieldDependentIntegrand)
     sys.prepareAuxiliaryForAssembly(state, false);
 
     EXPECT_NEAR(sys.auxiliaryInputRegistryIfPresent()->get("Q"), 0.5, 1e-10);
+}
+
+TEST(BoundaryIntegralInput,
+     BackendReadViewEvaluatesWithoutDenseStateSpan)
+{
+    const int marker = 5;
+    auto mesh = std::make_shared<
+        svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(
+        marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        FieldSpec{.name = "u", .space = space, .components = 1});
+    BoundaryFunctional functional;
+    functional.name = "Q_backend_read_view";
+    functional.integrand =
+        FormExpr::discreteField(u_field, *space, "u");
+    functional.boundary_marker = marker;
+    auto& service = sys.boundaryReductionService(u_field);
+    service.addBoundaryFunctional(functional);
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    std::unordered_map<svmp::FE::GlobalIndex, Real> local_values;
+    for (svmp::FE::GlobalIndex dof = 0; dof < n_dofs; ++dof) {
+        local_values.emplace(dof, Real{1.0});
+    }
+    svmp::FE::systems::testing::BoundaryReductionSparseReadVector vector(
+        n_dofs, std::move(local_values));
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u_vector = &vector;
+    EXPECT_NEAR(service.evaluateFunctional(functional.name, state),
+                0.5,
+                1e-10);
+    EXPECT_GT(vector.ghostRefreshCount(), 0u);
+    EXPECT_GT(vector.readCount(), 0u);
 }
 
 TEST(BoundaryIntegralInput, FESystem_EmptyBoundary)
@@ -536,6 +696,33 @@ TEST(BoundaryIntegralInput,
     (void)sys.boundaryIntegral(
         average_functional,
         AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+
+    BoundaryFunctional full_functional =
+        sum_functional;
+    full_functional.name =
+        "Q_full_physical";
+    full_functional
+        .generated_active_boundary_marker
+        .reset();
+    (void)sys.boundaryIntegral(
+        full_functional,
+        AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+
+    int context_update_callback_count = 0;
+    const svmp::FE::assembly::CutIntegrationContext*
+        last_callback_context = nullptr;
+    sys.addCutIntegrationContextUpdateCallback(
+        CutIntegrationContextUpdateCallback{
+            .name =
+                "boundary-functional-provenance-test",
+            .callback =
+                [&](const svmp::FE::assembly::
+                        CutIntegrationContext*
+                            candidate) {
+                    ++context_update_callback_count;
+                    last_callback_context = candidate;
+                },
+        });
     auto& service = sys.boundaryReductionService(u_field);
     const auto supported_functional_count = service.functionalCount();
 
@@ -590,14 +777,38 @@ TEST(BoundaryIntegralInput,
         handle.definition()->generated_active_boundary_marker.has_value());
     EXPECT_EQ(
         *handle.definition()->generated_active_boundary_marker, active_marker);
+    const auto handle_measure =
+        handle.definition()->exteriorBoundaryMeasure();
+    ASSERT_TRUE(handle_measure.has_value());
+    EXPECT_TRUE(handle_measure->isGeneratedActiveSubset());
+    EXPECT_EQ(
+        handle_measure->physicalBoundaryMarker(),
+        physical_marker);
+    EXPECT_EQ(
+        handle_measure->generatedActiveBoundaryMarker(),
+        active_marker);
 
     const auto u = FormExpr::stateField(u_field, *space, "u");
     const auto v = FormExpr::testFunction(*space, "v");
     (void)installFormulation(
         sys, "op", {u_field}, inner(grad(u), grad(v)).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    EXPECT_TRUE(throwsException<svmp::FE::systems::InvalidStateException>(
+        [&] { sys.setup({}, inputs); }));
+    EXPECT_FALSE(sys.isSetup());
+
+    auto quarter_face = generatedActiveBoundaryContext(
+        u_field, physical_marker, active_marker, Real{0.25});
+    ASSERT_TRUE(
+        quarter_face->hasGeneratedActiveBoundaryMarker(active_marker));
+    sys.setCutIntegrationContext(quarter_face);
+    EXPECT_GT(context_update_callback_count, 0);
+    EXPECT_EQ(
+        last_callback_context,
+        quarter_face.get());
     {
-        SetupInputs inputs;
-        inputs.topology_override = singleTetraTopology();
         sys.setup({}, inputs);
     }
 
@@ -621,16 +832,14 @@ TEST(BoundaryIntegralInput,
             active_marker);
     }));
 
-    auto quarter_face = generatedActiveBoundaryContext(
-        u_field, physical_marker, active_marker, Real{0.25});
-    ASSERT_TRUE(
-        quarter_face->hasGeneratedActiveBoundaryMarker(active_marker));
-    sys.setCutIntegrationContext(quarter_face);
-
     // The physical face has measure 0.5. A value of 0.5 therefore proves the
     // generated quarter-face (and not the physical marker) was integrated.
     EXPECT_NEAR(
         service.evaluateFunctional(sum_functional.name, state), 0.5, 1e-12);
+    EXPECT_NEAR(
+        service.evaluateFunctional(full_functional.name, state),
+        1.0,
+        1e-12);
     EXPECT_NEAR(
         service.evaluateFunctional(average_functional.name, state), 2.0, 1e-12);
 
@@ -699,7 +908,13 @@ TEST(BoundaryIntegralInput,
             /*apply_constraints=*/false);
     }));
 
+    const auto callbacks_before_clear =
+        context_update_callback_count;
     sys.clearCutIntegrationContext();
+    EXPECT_EQ(
+        context_update_callback_count,
+        callbacks_before_clear + 1);
+    EXPECT_EQ(last_callback_context, nullptr);
     EXPECT_TRUE(throwsException<svmp::FE::systems::InvalidStateException>([&] {
         (void)service.evaluateFunctional(sum_functional.name, state);
     }));
@@ -711,35 +926,69 @@ TEST(BoundaryIntegralInput,
             /*apply_constraints=*/false);
     }));
 
-    sys.setCutIntegrationContext(generatedActiveBoundaryContext(
-        u_field, physical_marker, active_marker + 1, Real{0.25}));
-    EXPECT_TRUE(throwsException<svmp::FE::InvalidArgumentException>([&] {
-        (void)service.evaluateFunctional(sum_functional.name, state);
-    }));
-    EXPECT_TRUE(throwsException<svmp::FE::InvalidArgumentException>([&] {
-        (void)service.evaluateFunctionalGradient(
-            sum_functional.name,
+    auto restored_context = generatedActiveBoundaryContext(
+        u_field, physical_marker, active_marker, Real{0.25});
+    sys.setCutIntegrationContext(restored_context);
+    EXPECT_EQ(
+        last_callback_context,
+        restored_context.get());
+    const auto revision_before_rejected_contexts =
+        sys.constraintLayoutRevision();
+    const int callbacks_before_rejected_contexts =
+        context_update_callback_count;
+
+    const auto missing_marker_context =
+        generatedActiveBoundaryContext(
             u_field,
-            state,
-            /*apply_constraints=*/false);
+            physical_marker,
+            active_marker + 1,
+            Real{0.25});
+    EXPECT_TRUE(throwsException<svmp::FE::InvalidArgumentException>([&] {
+        sys.setCutIntegrationContext(missing_marker_context);
     }));
+    EXPECT_EQ(sys.cutIntegrationContext(), restored_context.get());
+    EXPECT_EQ(
+        sys.constraintLayoutRevision(),
+        revision_before_rejected_contexts);
+    EXPECT_EQ(
+        context_update_callback_count,
+        callbacks_before_rejected_contexts);
+    EXPECT_NEAR(
+        service.evaluateFunctional(sum_functional.name, state),
+        Real{0.5},
+        1e-12);
 
     auto wrong_marker_kind = generatedIntersectionOnlyContext(
         u_field, physical_marker, active_marker);
     ASSERT_TRUE(wrong_marker_kind->hasGeneratedInterfaceMarker(active_marker));
     ASSERT_FALSE(
         wrong_marker_kind->hasGeneratedActiveBoundaryMarker(active_marker));
-    sys.setCutIntegrationContext(wrong_marker_kind);
     EXPECT_TRUE(throwsException<svmp::FE::InvalidArgumentException>([&] {
-        (void)service.evaluateFunctional(sum_functional.name, state);
+        sys.setCutIntegrationContext(wrong_marker_kind);
     }));
+    EXPECT_EQ(sys.cutIntegrationContext(), restored_context.get());
+    EXPECT_EQ(
+        sys.constraintLayoutRevision(),
+        revision_before_rejected_contexts);
+    EXPECT_EQ(
+        context_update_callback_count,
+        callbacks_before_rejected_contexts);
+
+    auto wrong_physical_owner = generatedActiveBoundaryContext(
+        u_field,
+        physical_marker + 1,
+        active_marker,
+        Real{0.25});
     EXPECT_TRUE(throwsException<svmp::FE::InvalidArgumentException>([&] {
-        (void)service.evaluateFunctionalGradient(
-            sum_functional.name,
-            u_field,
-            state,
-            /*apply_constraints=*/false);
+        sys.setCutIntegrationContext(wrong_physical_owner);
     }));
+    EXPECT_EQ(sys.cutIntegrationContext(), restored_context.get());
+    EXPECT_EQ(
+        sys.constraintLayoutRevision(),
+        revision_before_rejected_contexts);
+    EXPECT_EQ(
+        context_update_callback_count,
+        callbacks_before_rejected_contexts);
 
     auto duplicate = sum_functional;
     duplicate.generated_active_boundary_marker = active_marker + 1;
@@ -1576,6 +1825,130 @@ TEST(BoundaryIntegralInput, FESystem_AcceptsMultiFieldIntegrand)
             p_disc * inner(u_disc, FormExpr::normal()), marker));
 }
 
+TEST(BoundaryIntegralInput,
+     CandidateStageRateAliasEvaluatesStateAndExactRateFields)
+{
+    const int marker = 7;
+    auto mesh = std::make_shared<
+        svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(
+        marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto displacement = sys.addField(
+        FieldSpec{
+            .name = "d",
+            .space = space,
+            .components = 1});
+    const auto velocity = sys.addField(
+        FieldSpec{
+            .name = "u",
+            .space = space,
+            .components = 1});
+    sys.addOperator("op");
+
+    const auto d = FormExpr::stateField(
+        displacement, *space, "d");
+    const auto u = FormExpr::stateField(
+        velocity, *space, "u");
+    sys.registerBoundaryIntegralInput(
+        "candidate_stage_state_plus_rate",
+        d.dt() + u,
+        marker);
+    const auto test = FormExpr::testFunction(*space, "v");
+    (void)installFormulation(
+        sys,
+        "op",
+        {displacement},
+        (d * test).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    const auto dof_count = static_cast<std::size_t>(
+        sys.dofHandler().getNumDofs());
+    std::vector<Real> stage_state(dof_count, Real{0.0});
+    std::vector<Real> exact_stage_rate(dof_count, Real{0.0});
+    for (svmp::FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        setFieldComponent(
+            stage_state,
+            sys,
+            displacement,
+            vertex,
+            0,
+            Real{100.0});
+        setFieldComponent(
+            stage_state,
+            sys,
+            velocity,
+            vertex,
+            0,
+            Real{2.0});
+        setFieldComponent(
+            exact_stage_rate,
+            sys,
+            displacement,
+            vertex,
+            0,
+            Real{3.0});
+        setFieldComponent(
+            exact_stage_rate,
+            sys,
+            velocity,
+            vertex,
+            0,
+            Real{-7.0});
+    }
+
+    svmp::FE::assembly::TimeIntegrationContext rate_alias_context;
+    rate_alias_context.integrator_name =
+        "candidate-stage-rate-alias";
+    rate_alias_context.dt1 =
+        svmp::FE::assembly::TimeDerivativeStencil{
+            .order = 1,
+            .a = {Real{0.0}, Real{1.0}},
+        };
+
+    SystemStateView state;
+    state.time = 0.25;
+    state.dt = 0.1;
+    state.effective_dt = 0.1;
+    std::unordered_map<svmp::FE::GlobalIndex, Real>
+        stage_backend_values;
+    std::unordered_map<svmp::FE::GlobalIndex, Real>
+        rate_backend_values;
+    for (std::size_t index = 0u; index < dof_count; ++index) {
+        const auto row = static_cast<svmp::FE::GlobalIndex>(index);
+        stage_backend_values.emplace(row, stage_state[index]);
+        rate_backend_values.emplace(row, exact_stage_rate[index]);
+    }
+    svmp::FE::systems::testing::BoundaryReductionSparseReadVector
+        stage_backend(
+            static_cast<svmp::FE::GlobalIndex>(dof_count),
+            std::move(stage_backend_values));
+    svmp::FE::systems::testing::BoundaryReductionSparseReadVector
+        rate_backend(
+            static_cast<svmp::FE::GlobalIndex>(dof_count),
+            std::move(rate_backend_values));
+    state.u_vector = &stage_backend;
+    state.u_prev_vector = &rate_backend;
+    state.time_integration = &rate_alias_context;
+    sys.prepareAuxiliaryForAssembly(state, false);
+
+    // The face area is 0.5. StateField(u) samples 2 from the stage while
+    // dt(StateField(d)) samples 3 from the aliased exact-rate history slot;
+    // the unrelated stage displacement value 100 must not enter dt(d).
+    EXPECT_NEAR(
+        sys.auxiliaryInputRegistryIfPresent()->get(
+            "candidate_stage_state_plus_rate"),
+        Real{2.5},
+        1e-10);
+    EXPECT_GT(stage_backend.readCount(), 0u);
+    EXPECT_GT(rate_backend.readCount(), 0u);
+}
+
 TEST(BoundaryIntegralInput, FESystem_VectorFieldIntegrand)
 {
     // Vector-field boundary integral: inner(u_disc, n) on a 3-component field.
@@ -2359,6 +2732,11 @@ TEST(FEQuantityHandle, BoundaryAverageRegisters)
     ASSERT_TRUE(Q_avg.hasDefinition());
     EXPECT_EQ(Q_avg.kind(), svmp::FE::systems::FEQuantityKind::BoundaryAverage);
     EXPECT_EQ(Q_avg.registryName(), "Q_avg");
+    const auto measure =
+        Q_avg.definition()->exteriorBoundaryMeasure();
+    ASSERT_TRUE(measure.has_value());
+    EXPECT_TRUE(measure->isFullPhysical());
+    EXPECT_EQ(measure->physicalBoundaryMarker(), marker);
 }
 
 TEST(FEQuantityHandle, FEQuantityRegistryTracksDefinitions)

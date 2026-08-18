@@ -5650,6 +5650,31 @@ TEST(NewtonSolver,
         std::string::npos);
     EXPECT_NE(telemetry.find("pressure_representability_iteration_cap=4"),
               std::string::npos);
+    EXPECT_TRUE(report.constant_pressure_kkt_available);
+    EXPECT_TRUE(
+        report.constant_pressure_unit_coefficients_represent_constant);
+    EXPECT_TRUE(
+        report.constant_pressure_constraints_preserve_constants);
+    EXPECT_NEAR(
+        report.constant_pressure_kkt_pressure_jump, 2.0, 1.0e-12);
+    EXPECT_NEAR(
+        report.constant_pressure_kkt_volume_multiplier, -2.0, 1.0e-12);
+    EXPECT_NEAR(
+        report.constant_pressure_kkt_residual_norm, 0.0, 1.0e-13);
+    EXPECT_LE(
+        report.constant_pressure_kkt_relative_distance, 1.0e-12);
+    EXPECT_LE(
+        report.constant_pressure_kkt_relative_orthogonality, 1.0e-12);
+    EXPECT_EQ(report.constant_pressure_kkt_reason, "available");
+    EXPECT_NE(telemetry.find("constant_pressure_kkt_available=1"),
+              std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "constant_pressure_kkt_method=closed_form_one_dimensional_pressure_trace"),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find("constant_pressure_kkt_force_projection_applied=0"),
+        std::string::npos);
     for (const std::string op : {
              "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
              "equations_diagnostic_ns_free_surface_pressure_representability_pair"}) {
@@ -5661,6 +5686,396 @@ TEST(NewtonSolver,
             std::string::npos)
             << op;
     }
+}
+
+TEST(NewtonSolver,
+     ConstantPressureKktReportsNonconstantPressureRemainderWithoutProjectingLoad)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr std::array<svmp::FE::Real, 4> pressure_pair_diagonal{
+        1.0, 2.0, 3.0, 4.0};
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar enable_balance(
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/1.0,
+        pressure_pair_diagonal);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+
+    EXPECT_TRUE(report.converged);
+    EXPECT_TRUE(report.pressure_representability_available);
+    EXPECT_TRUE(report.pressure_representability_converged);
+    EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-10);
+    EXPECT_TRUE(report.constant_pressure_kkt_available);
+    EXPECT_TRUE(
+        report.constant_pressure_unit_coefficients_represent_constant);
+    EXPECT_TRUE(
+        report.constant_pressure_constraints_preserve_constants);
+    EXPECT_NEAR(
+        report.constant_pressure_kkt_pressure_jump,
+        -1.0 / 3.0,
+        1.0e-13);
+    EXPECT_NEAR(
+        report.constant_pressure_kkt_volume_multiplier,
+        1.0 / 3.0,
+        1.0e-13);
+    EXPECT_NEAR(
+        report.constant_pressure_kkt_relative_distance,
+        std::sqrt(1.0 / 6.0),
+        1.0e-13);
+    EXPECT_LE(
+        report.constant_pressure_kkt_relative_orthogonality, 1.0e-13);
+    EXPECT_GT(report.constant_pressure_kkt_residual_norm, 0.0);
+    EXPECT_GT(report.constant_pressure_kkt_relative_distance, 0.4);
+    EXPECT_NE(telemetry.find("constant_pressure_kkt_available=1"),
+              std::string::npos);
+    EXPECT_NE(
+        telemetry.find("constant_pressure_kkt_force_projection_applied=0"),
+        std::string::npos);
+    RecordProperty(
+        "constant_pressure_kkt_nonconstant_remainder_relative_distance",
+        ::testing::PrintToString(
+            report.constant_pressure_kkt_relative_distance));
+    RecordProperty(
+        "constant_pressure_kkt_production_load_projected", 0);
+}
+
+TEST(NewtonSolver,
+     AcceptedStaticConstantPressureKktDistanceGateAcceptsEquilibrium)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    RecordProperty(
+        "constant_pressure_kkt_distance_gate_backend_available", 0);
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    RecordProperty(
+        "constant_pressure_kkt_distance_gate_backend_available", 1);
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    auto problem = makePressureRepresentabilityProblem(diagnostic_counts);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options
+        .accepted_static_constant_pressure_kkt_max_relative_distance =
+        1.0e-10;
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+
+    EXPECT_TRUE(report.converged);
+    EXPECT_EQ(report.iterations, 0);
+    EXPECT_TRUE(report.pressure_representability_diagnostic_sampled);
+    EXPECT_TRUE(report.constant_pressure_kkt_available);
+    EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_applied);
+    EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_passed);
+    EXPECT_FALSE(report.pressure_representability_distance_gate_applied);
+    EXPECT_LE(report.constant_pressure_kkt_relative_distance, 1.0e-10);
+    EXPECT_NEAR(
+        report.constant_pressure_kkt_max_relative_distance, 1.0e-10, 0.0);
+    EXPECT_NE(
+        telemetry.find(
+            "diagnostic=free_surface_constant_pressure_kkt_distance_gate"),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find("constant_pressure_kkt_distance_gate_passed=1"),
+        std::string::npos);
+    EXPECT_NE(telemetry.find("constant_pressure_kkt_claimed=1"),
+              std::string::npos);
+    EXPECT_NE(
+        telemetry.find("constant_pressure_kkt_force_projection_applied=0"),
+        std::string::npos);
+    RecordProperty(
+        "constant_pressure_kkt_distance_gate_in_range_accept_count", 1);
+}
+
+TEST(NewtonSolver,
+     InitialResidualOnlyCertificateSkipsJacobianAndLeavesStateUnchanged)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    ScopedEnvVar ambient_pressure_initializer(
+        "SVMP_NS_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER",
+        "1");
+    ScopedEnvVar ambient_pressure_gate(
+        "SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE",
+        "invalid");
+    auto problem = makePressureRepresentabilityProblem(diagnostic_counts);
+    const auto entry_state =
+        ts_test::getVectorByDof(problem.history.u());
+
+    using SyncPoint = svmp::FE::timestepping::NewtonOptions::
+        StateSynchronizationPoint;
+    int residual_synchronizations = 0;
+    int jacobian_synchronizations = 0;
+    int combined_synchronizations = 0;
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.min_iterations = 0;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options.initial_residual_only_certificate = true;
+    options.read_static_free_surface_environment_options = false;
+    options
+        .accepted_static_constant_pressure_kkt_max_relative_distance =
+        1.0e-10;
+    options.synchronize_state =
+        [&](const svmp::FE::systems::SystemStateView&,
+            SyncPoint point) {
+            residual_synchronizations +=
+                point == SyncPoint::ResidualAssembly ? 1 : 0;
+            jacobian_synchronizations +=
+                point == SyncPoint::JacobianAssembly ? 1 : 0;
+            combined_synchronizations +=
+                point == SyncPoint::JacobianAndResidualAssembly ? 1 : 0;
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+
+    EXPECT_TRUE(report.converged);
+    EXPECT_EQ(report.iterations, 0);
+    EXPECT_TRUE(report.constant_pressure_kkt_available);
+    EXPECT_EQ(jacobian_synchronizations, 0);
+    EXPECT_EQ(combined_synchronizations, 0);
+    EXPECT_GT(residual_synchronizations, 0);
+    EXPECT_EQ(
+        ts_test::getVectorByDof(problem.history.u()),
+        entry_state);
+    RecordProperty(
+        "initial_residual_certificate_production_jacobian_assemblies",
+        jacobian_synchronizations + combined_synchronizations);
+}
+
+TEST(NewtonSolver,
+     AcceptedStaticConstantPressureKktDistanceGateRejectsNonconstantRemainder)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    RecordProperty(
+        "constant_pressure_kkt_distance_gate_backend_available", 0);
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    RecordProperty(
+        "constant_pressure_kkt_distance_gate_backend_available", 1);
+    constexpr std::array<svmp::FE::Real, 4> pressure_pair_diagonal{
+        1.0, 2.0, 3.0, 4.0};
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        /*pressure_dirichlet_state=*/{},
+        /*entry_velocity=*/1.0,
+        pressure_pair_diagonal);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options
+        .accepted_static_constant_pressure_kkt_max_relative_distance =
+        0.1;
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+
+    EXPECT_FALSE(report.converged);
+    EXPECT_EQ(report.iterations, 0);
+    EXPECT_TRUE(report.pressure_representability_available);
+    EXPECT_TRUE(report.pressure_representability_converged);
+    EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-10);
+    EXPECT_FALSE(report.pressure_representability_distance_gate_applied);
+    EXPECT_TRUE(report.constant_pressure_kkt_available);
+    EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_applied);
+    EXPECT_FALSE(report.constant_pressure_kkt_distance_gate_passed);
+    EXPECT_NEAR(
+        report.constant_pressure_kkt_relative_distance,
+        std::sqrt(1.0 / 6.0),
+        1.0e-13);
+    EXPECT_NE(
+        telemetry.find("reason=relative_distance_exceeds_threshold"),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find("constant_pressure_kkt_distance_gate_passed=0"),
+        std::string::npos);
+    EXPECT_NE(telemetry.find("constant_pressure_kkt_claimed=0"),
+              std::string::npos);
+    RecordProperty(
+        "constant_pressure_kkt_distance_gate_nonconstant_reject_count", 1);
+    RecordProperty(
+        "constant_pressure_kkt_distance_gate_nonconstant_relative_distance",
+        ::testing::PrintToString(
+            report.constant_pressure_kkt_relative_distance));
+}
+
+TEST(NewtonSolver,
+     AcceptedStaticConstantPressureKktDistanceGateRejectsRemovedConstantMode)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    RecordProperty(
+        "constant_pressure_kkt_distance_gate_backend_available", 0);
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    RecordProperty(
+        "constant_pressure_kkt_distance_gate_backend_available", 1);
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    auto pressure_dirichlet =
+        std::make_shared<FixedPressureDirichletState>();
+    pressure_dirichlet->value = 0.0;
+    auto problem = makePressureRepresentabilityProblem(
+        diagnostic_counts,
+        /*two_cells=*/false,
+        /*pressure_mpc_state=*/{},
+        pressure_dirichlet);
+
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "op";
+    options.jacobian_op = "op";
+    options.max_iterations = 1;
+    options.abs_tolerance = 1.0e-14;
+    options.rel_tolerance = 0.0;
+    options.use_line_search = false;
+    options
+        .accepted_static_constant_pressure_kkt_max_relative_distance =
+        0.5;
+    svmp::FE::timestepping::NewtonSolver newton(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(
+        *problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    const auto stderr_text = testing::internal::GetCapturedStderr();
+    const auto stdout_text = testing::internal::GetCapturedStdout();
+    const auto telemetry = stdout_text + stderr_text;
+
+    EXPECT_FALSE(report.converged);
+    EXPECT_EQ(report.iterations, 0);
+    EXPECT_TRUE(report.pressure_representability_diagnostic_sampled);
+    EXPECT_FALSE(report.constant_pressure_kkt_available);
+    EXPECT_FALSE(
+        report.constant_pressure_constraints_preserve_constants);
+    EXPECT_EQ(
+        report.constant_pressure_kkt_reason,
+        "pressure_constraints_do_not_preserve_constants");
+    EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_applied);
+    EXPECT_FALSE(report.constant_pressure_kkt_distance_gate_passed);
+    EXPECT_NE(
+        telemetry.find("reason=constant_pressure_kkt_unavailable"),
+        std::string::npos);
+    EXPECT_NE(
+        telemetry.find("constant_pressure_kkt_distance_gate_passed=0"),
+        std::string::npos);
+    RecordProperty(
+        "constant_pressure_kkt_distance_gate_removed_mode_reject_count", 1);
+}
+
+TEST(NewtonSolver,
+     AcceptedStaticConstantPressureKktDistanceGateRejectsInvalidThresholds)
+{
+    svmp::FE::timestepping::NewtonOptions negative_options;
+    negative_options
+        .accepted_static_constant_pressure_kkt_max_relative_distance =
+        -1.0;
+    EXPECT_THROW(
+        svmp::FE::timestepping::NewtonSolver(std::move(negative_options)),
+        svmp::FE::InvalidArgumentException);
+
+    svmp::FE::timestepping::NewtonOptions nonfinite_options;
+    nonfinite_options
+        .accepted_static_constant_pressure_kkt_max_relative_distance =
+        std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(
+        svmp::FE::timestepping::NewtonSolver(std::move(nonfinite_options)),
+        svmp::FE::InvalidArgumentException);
 }
 
 TEST(NewtonSolver,
@@ -5881,6 +6296,20 @@ TEST(NewtonSolver,
         std::string::npos);
     EXPECT_NE(telemetry.find("pressure_representability_claimed=0"),
               std::string::npos);
+    EXPECT_FALSE(report.constant_pressure_kkt_available);
+    EXPECT_TRUE(
+        report.constant_pressure_unit_coefficients_represent_constant);
+    EXPECT_FALSE(
+        report.constant_pressure_constraints_preserve_constants);
+    EXPECT_EQ(
+        report.constant_pressure_kkt_reason,
+        "pressure_constraints_do_not_preserve_constants");
+    EXPECT_NE(telemetry.find("constant_pressure_kkt_available=0"),
+              std::string::npos);
+    EXPECT_NE(
+        telemetry.find(
+            "constant_pressure_kkt_reason=pressure_constraints_do_not_preserve_constants"),
+        std::string::npos);
 }
 
 TEST(NewtonSolver,
@@ -6944,6 +7373,9 @@ TEST(NewtonSolver,
     options
         .accepted_static_pressure_representability_max_relative_distance =
         1.0e-10;
+    options
+        .accepted_static_constant_pressure_kkt_max_relative_distance =
+        1.0e-10;
     options.external_state_fixed_point.enabled = true;
     options.external_state_fixed_point.max_iterations = 2;
     options.synchronize_state =
@@ -6988,6 +7420,12 @@ TEST(NewtonSolver,
         problem.history,
         workspace);
     EXPECT_TRUE(retry_report.converged);
+    EXPECT_TRUE(
+        retry_report.pressure_representability_distance_gate_applied);
+    EXPECT_TRUE(
+        retry_report.pressure_representability_distance_gate_passed);
+    EXPECT_TRUE(retry_report.constant_pressure_kkt_distance_gate_applied);
+    EXPECT_TRUE(retry_report.constant_pressure_kkt_distance_gate_passed);
     EXPECT_TRUE(workspace.static_compatible_pressure_initialized);
     ASSERT_GE(outer_entry_initializer_states.size(), 4u);
     EXPECT_FALSE(outer_entry_initializer_states[0]);
@@ -7436,6 +7874,11 @@ TEST(NewtonSolver,
     EXPECT_TRUE(report.converged);
     EXPECT_EQ(workspace.sparsity_revision,
               problem.sys->sparsityPatternRevision());
+    EXPECT_TRUE(
+        report.constant_pressure_unit_coefficients_represent_constant);
+    EXPECT_TRUE(
+        report.constant_pressure_constraints_preserve_constants);
+    EXPECT_TRUE(report.constant_pressure_kkt_available);
 
     const std::array<const void*, 8> refreshed_vectors{
         workspace.pressure_representability_load.get(),

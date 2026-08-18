@@ -76,6 +76,18 @@ PetscVector::PetscVector(GlobalIndex local_size, GlobalIndex global_size, const 
         ghosts.push_back(gi);
     }
 
+    ghost_local_indices_.reserve(ghost_global_indices.size());
+    for (std::size_t i = 0; i < ghost_global_indices.size(); ++i) {
+        const auto [it, inserted] = ghost_local_indices_.emplace(
+            ghost_global_indices[i],
+            n_local + static_cast<PetscInt>(i));
+        FE_THROW_IF(!inserted,
+                    InvalidArgumentException,
+                    "PETSc: duplicate ghost index " +
+                        std::to_string(ghost_global_indices[i]));
+        (void)it;
+    }
+
     FE_PETSC_CALL(VecCreateGhost(PETSC_COMM_WORLD,
                                 n_local,
                                 n_global,
@@ -87,7 +99,10 @@ PetscVector::PetscVector(GlobalIndex local_size, GlobalIndex global_size, const 
 
     local_owned_ = n_local;
     ghost_count_ = n_ghost;
-    ghosted_ = (n_ghost > 0);
+    // VecCreateGhost establishes a collective ghost-update layout even on a
+    // rank with no local ghost leaves.  Such a rank can still own values that
+    // peer ranks import, so it must participate in VecGhostUpdate.
+    ghosted_ = true;
 }
 
 PetscVector::~PetscVector()
@@ -115,6 +130,7 @@ PetscVector& PetscVector::operator=(PetscVector&& other) noexcept
     local_owned_ = other.local_owned_;
     ghost_count_ = other.ghost_count_;
     ghosted_ = other.ghosted_;
+    ghost_local_indices_ = std::move(other.ghost_local_indices_);
     vec_ = other.vec_;
     local_cache_ = std::move(other.local_cache_);
     local_cache_valid_ = other.local_cache_valid_;
@@ -124,6 +140,7 @@ PetscVector& PetscVector::operator=(PetscVector&& other) noexcept
     other.local_owned_ = 0;
     other.ghost_count_ = 0;
     other.ghosted_ = false;
+    other.ghost_local_indices_.clear();
     other.vec_ = nullptr;
     other.local_cache_valid_ = false;
     other.local_cache_dirty_ = false;
@@ -137,6 +154,28 @@ GlobalIndex PetscVector::size() const noexcept
     PetscInt n = 0;
     VecGetSize(vec_, &n);
     return static_cast<GlobalIndex>(n);
+}
+
+std::vector<GlobalIndex> PetscVector::ownedGlobalRows() const
+{
+    FE_THROW_IF(
+        vec_ == nullptr,
+        FEException,
+        "PetscVector::ownedGlobalRows: vector is null");
+    PetscInt first = 0;
+    PetscInt last = 0;
+    FE_PETSC_CALL(VecGetOwnershipRange(vec_, &first, &last));
+    FE_THROW_IF(
+        first < 0 || last < first || last - first != local_owned_ ||
+            static_cast<GlobalIndex>(last) > size(),
+        FEException,
+        "PetscVector::ownedGlobalRows: PETSc ownership range is invalid");
+    std::vector<GlobalIndex> rows;
+    rows.reserve(static_cast<std::size_t>(last - first));
+    for (PetscInt row = first; row < last; ++row) {
+        rows.push_back(static_cast<GlobalIndex>(row));
+    }
+    return rows;
 }
 
 void PetscVector::ensureVecUpToDate() const
@@ -269,7 +308,7 @@ Real PetscVector::norm() const
 
 void PetscVector::updateGhosts()
 {
-    if (!vec_ || !ghosted_ || ghost_count_ == 0) {
+    if (!vec_ || !ghosted_) {
         return;
     }
 
@@ -280,6 +319,51 @@ void PetscVector::updateGhosts()
     FE_PETSC_CALL(VecGhostUpdateEnd(vec_, INSERT_VALUES, SCATTER_FORWARD));
     invalidateLocalCache();
     markModified();
+}
+
+void PetscVector::readGlobalEntries(
+    std::span<const GlobalIndex> dofs,
+    std::span<Real> values) const
+{
+    FE_THROW_IF(dofs.size() != values.size(),
+                InvalidArgumentException,
+                "PetscVector::readGlobalEntries: size mismatch");
+    FE_THROW_IF(vec_ == nullptr,
+                FEException,
+                "PetscVector::readGlobalEntries: vector is null");
+
+    ensureCacheUpToDate();
+    PetscInt owned_first = 0;
+    PetscInt owned_end = 0;
+    FE_PETSC_CALL(VecGetOwnershipRange(vec_, &owned_first, &owned_end));
+    FE_THROW_IF(owned_end - owned_first != local_owned_,
+                FEException,
+                "PetscVector::readGlobalEntries: ownership range changed");
+
+    const auto global_size = size();
+    for (std::size_t i = 0; i < dofs.size(); ++i) {
+        const auto dof = dofs[i];
+        FE_THROW_IF(dof < 0 || dof >= global_size,
+                    InvalidArgumentException,
+                    "PetscVector::readGlobalEntries: global index out of range");
+
+        PetscInt local = -1;
+        if (dof >= static_cast<GlobalIndex>(owned_first) &&
+            dof < static_cast<GlobalIndex>(owned_end)) {
+            local = static_cast<PetscInt>(dof) - owned_first;
+        } else if (const auto ghost = ghost_local_indices_.find(dof);
+                   ghost != ghost_local_indices_.end()) {
+            local = ghost->second;
+        }
+
+        FE_THROW_IF(local < 0 ||
+                        static_cast<std::size_t>(local) >= local_cache_.size(),
+                    FEException,
+                    "PetscVector::readGlobalEntries: global index " +
+                        std::to_string(dof) +
+                        " is outside the owned/ghost read layout");
+        values[i] = local_cache_[static_cast<std::size_t>(local)];
+    }
 }
 
 namespace {
@@ -297,7 +381,11 @@ InsertMode toPetscInsertMode(assembly::AddMode mode)
 
 class PetscVectorView final : public assembly::GlobalSystemView {
 public:
-    explicit PetscVectorView(PetscVector& vec) : vec_(&vec) {}
+    explicit PetscVectorView(PetscVector& vec,
+                             bool locally_relevant_reads = false)
+        : vec_(&vec), locally_relevant_reads_(locally_relevant_reads)
+    {
+    }
 
     // Matrix operations (no-op)
     void addMatrixEntries(std::span<const GlobalIndex>, std::span<const Real>, assembly::AddMode) override {}
@@ -359,11 +447,37 @@ public:
     [[nodiscard]] Real getVectorEntry(GlobalIndex dof) const override
     {
         FE_CHECK_NOT_NULL(vec_, "PetscVectorView::vec");
-        FE_THROW_IF(dof < 0, InvalidArgumentException, "PetscVectorView: negative dof index");
-        const PetscInt idx = static_cast<PetscInt>(dof);
-        PetscScalar v = 0.0;
-        FE_PETSC_CALL(VecGetValues(vec_->petsc(), 1, &idx, &v));
-        return static_cast<Real>(v);
+        if (!locally_relevant_reads_) {
+            FE_THROW_IF(dof < 0,
+                        InvalidArgumentException,
+                        "PetscVectorView: negative dof index");
+            const PetscInt idx = static_cast<PetscInt>(dof);
+            PetscScalar value = 0.0;
+            FE_PETSC_CALL(VecGetValues(
+                vec_->petsc(), 1, &idx, &value));
+            return static_cast<Real>(value);
+        }
+        Real value = 0.0;
+        vec_->readGlobalEntries(
+            std::span<const GlobalIndex>(&dof, 1u),
+            std::span<Real>(&value, 1u));
+        return value;
+    }
+
+    void getVectorEntries(std::span<const GlobalIndex> dofs,
+                          std::span<Real> values) const override
+    {
+        FE_CHECK_NOT_NULL(vec_, "PetscVectorView::vec");
+        FE_THROW_IF(dofs.size() != values.size(),
+                    InvalidArgumentException,
+                    "PetscVectorView::getVectorEntries: size mismatch");
+        if (locally_relevant_reads_) {
+            vec_->readGlobalEntries(dofs, values);
+            return;
+        }
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            values[i] = getVectorEntry(dofs[i]);
+        }
     }
 
     void beginAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Building; }
@@ -400,6 +514,7 @@ public:
 
 private:
     PetscVector* vec_{nullptr};
+    bool locally_relevant_reads_{false};
     assembly::AssemblyPhase phase_{assembly::AssemblyPhase::NotStarted};
 };
 
@@ -408,6 +523,13 @@ private:
 std::unique_ptr<assembly::GlobalSystemView> PetscVector::createAssemblyView()
 {
     return std::make_unique<PetscVectorView>(*this);
+}
+
+std::unique_ptr<assembly::GlobalSystemView>
+PetscVector::createGhostedReadView()
+{
+    return std::make_unique<PetscVectorView>(
+        *this, /*locally_relevant_reads=*/true);
 }
 
 std::span<Real> PetscVector::localSpan()

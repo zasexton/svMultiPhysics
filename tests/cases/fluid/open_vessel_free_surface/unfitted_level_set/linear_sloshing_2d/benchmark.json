@@ -1,0 +1,26 @@
+{
+  "name": "linear_sloshing_2d",
+  "type": "fluid_free_surface_unfitted_level_set",
+  "solver": "new_oop",
+  "description": "Small-amplitude 2D standing sloshing wave with exact wall velocity data.",
+  "mesh": {
+    "nx": 16,
+    "ny": 16
+  },
+  "run": {
+    "dt": 0.004924231346267527,
+    "steps": 100,
+    "final_time": 0.4924231346267527
+  },
+  "targets": {
+    "omega": 5.316553374316752,
+    "period": 1.1818155231042065,
+    "final_phase": "short transient regression at the checked final time; not a half-period benchmark.",
+    "most_important_metrics": [
+      "interface_cos_coeff",
+      "area_relative_error",
+      "pressure_rms_error_after_constant_offset_removal",
+      "interface_pressure_rms"
+    ]
+  }
+}

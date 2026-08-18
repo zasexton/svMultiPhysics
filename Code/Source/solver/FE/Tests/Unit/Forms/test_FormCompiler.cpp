@@ -308,6 +308,112 @@ TEST(FormCompilerTest, CompileImplMarksFaceGeometryAndNeighborRequirements)
     EXPECT_TRUE(saw_interface);
 }
 
+TEST(FormCompilerTest, CompilePreservesExplicitExteriorBoundarySelection)
+{
+    FormCompiler compiler;
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto integrand = u * v;
+
+    const auto full =
+        ExteriorBoundaryMeasure::fullPhysical(/*physical_boundary_marker=*/4);
+    const auto full_ir =
+        compiler.compileBilinear(integrand.dExteriorBoundary(full));
+    ASSERT_EQ(full_ir.terms().size(), 1u);
+    const auto& full_term = full_ir.terms().front();
+    EXPECT_EQ(full_term.domain, IntegralDomain::Boundary);
+    EXPECT_EQ(full_term.boundary_marker, 4);
+    EXPECT_EQ(full_term.interface_marker, -1);
+    ASSERT_TRUE(full_term.exterior_boundary_measure.has_value());
+    EXPECT_EQ(*full_term.exterior_boundary_measure, full);
+    EXPECT_TRUE(assembly::hasFlag(
+        full_term.required_data, assembly::RequiredData::Normals));
+    EXPECT_FALSE(assembly::hasFlag(
+        full_term.required_data, assembly::RequiredData::NeighborData));
+    EXPECT_FALSE(assembly::hasFlag(
+        full_term.required_data,
+        assembly::RequiredData::FaceOrientations));
+
+    const auto active =
+        ExteriorBoundaryMeasure::generatedActiveSubset(
+            /*physical_boundary_marker=*/4,
+            /*generated_active_boundary_marker=*/31);
+    const auto active_ir =
+        compiler.compileBilinear(
+            integrand.dExteriorBoundary(active));
+    ASSERT_EQ(active_ir.terms().size(), 1u);
+    const auto& active_term = active_ir.terms().front();
+    EXPECT_EQ(active_term.domain, IntegralDomain::InterfaceFace);
+    EXPECT_EQ(active_term.boundary_marker, -1);
+    EXPECT_EQ(active_term.interface_marker, 31);
+    ASSERT_TRUE(active_term.exterior_boundary_measure.has_value());
+    EXPECT_EQ(*active_term.exterior_boundary_measure, active);
+    EXPECT_TRUE(assembly::hasFlag(
+        active_term.required_data, assembly::RequiredData::Normals));
+    EXPECT_FALSE(assembly::hasFlag(
+        active_term.required_data, assembly::RequiredData::NeighborData));
+    EXPECT_FALSE(assembly::hasFlag(
+        active_term.required_data,
+        assembly::RequiredData::FaceOrientations));
+
+    const auto raw_boundary_ir =
+        compiler.compileBilinear(integrand.ds(4));
+    ASSERT_EQ(raw_boundary_ir.terms().size(), 1u);
+    EXPECT_FALSE(raw_boundary_ir.terms()
+                     .front()
+                     .exterior_boundary_measure.has_value());
+
+    const auto raw_interface_ir =
+        compiler.compileBilinear(integrand.dI(31));
+    ASSERT_EQ(raw_interface_ir.terms().size(), 1u);
+    const auto& raw_interface_term =
+        raw_interface_ir.terms().front();
+    EXPECT_FALSE(
+        raw_interface_term.exterior_boundary_measure.has_value());
+    EXPECT_TRUE(assembly::hasFlag(
+        raw_interface_term.required_data,
+        assembly::RequiredData::NeighborData));
+    EXPECT_TRUE(assembly::hasFlag(
+        raw_interface_term.required_data,
+        assembly::RequiredData::FaceOrientations));
+}
+
+TEST(FormCompilerTest,
+     GeneratedExteriorBoundaryRejectsTwoSidedOperators)
+{
+    FormCompiler compiler;
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u =
+        FormExpr::trialFunction(space, "u");
+    const auto v =
+        FormExpr::testFunction(space, "v");
+    const auto active =
+        ExteriorBoundaryMeasure::generatedActiveSubset(
+            /*physical_boundary_marker=*/4,
+            /*generated_active_boundary_marker=*/31);
+
+    EXPECT_THROW(
+        (void)compiler.compileBilinear(
+            (plus(u) * minus(v))
+                .dExteriorBoundary(active)),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)compiler.compileBilinear(
+            (jump(u) * jump(v))
+                .dExteriorBoundary(active)),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)compiler.compileBilinear(
+            (average(u) * average(v))
+                .dExteriorBoundary(active)),
+        std::invalid_argument);
+
+    EXPECT_NO_THROW(
+        (void)compiler.compileBilinear(
+            (plus(u) * minus(v)).dI(31)));
+}
+
 TEST(FormCompilerTest, CompileImplPopulatesDumpAndSortedFieldRequirements)
 {
     FormCompiler compiler;

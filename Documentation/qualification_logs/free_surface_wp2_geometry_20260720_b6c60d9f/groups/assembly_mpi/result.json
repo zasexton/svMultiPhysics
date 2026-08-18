@@ -1,0 +1,133 @@
+{
+  "checks": [
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "process_return_code",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": null,
+      "expected": null,
+      "metric": "termination_reason",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "failure_marker_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "stderr_failure_marker_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_run_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_completed_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 2,
+      "expected": 2,
+      "metric": "run_multiplicity:GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 2,
+      "expected": 2,
+      "metric": "pass_multiplicity:GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 2,
+      "expected": 2,
+      "metric": "run_multiplicity:GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 2,
+      "expected": 2,
+      "metric": "pass_multiplicity:GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 2,
+      "expected": 2,
+      "metric": "run_multiplicity:LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 2,
+      "expected": 2,
+      "metric": "pass_multiplicity:LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 2,
+      "expected": 2,
+      "metric": "run_multiplicity:LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 2,
+      "expected": 2,
+      "metric": "pass_multiplicity:LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks",
+      "passed": true,
+      "relation": "equal"
+    }
+  ],
+  "command": [
+    "/usr/bin/orterun",
+    "--oversubscribe",
+    "-n",
+    "2",
+    "/home/zack/Downloads/svMultiPhysics/build-fe-check/test_fe_assembly_mpi",
+    "--gtest_filter=GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity:GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure:LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure:LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks",
+    "--gtest_color=no"
+  ],
+  "execution": {
+    "memory_mib": 4096,
+    "output_mib": 192,
+    "wall_time_seconds": 1200
+  },
+  "expected_tests": [
+    "GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity",
+    "GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure",
+    "LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure",
+    "LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks"
+  ],
+  "group_id": "assembly_mpi",
+  "gtest_output_copies": 2,
+  "mpi_ranks": 2,
+  "outcome": "PASS",
+  "resources": {
+    "final_output_bytes": 3260,
+    "peak_resident_kib_sampled": 27552,
+    "return_code": 0,
+    "termination_reason": null,
+    "wall_time_seconds": 2.1352210389450192
+  }
+}

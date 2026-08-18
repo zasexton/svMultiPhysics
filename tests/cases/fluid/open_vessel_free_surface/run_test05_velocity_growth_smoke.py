@@ -260,6 +260,11 @@ CAPILLARY_WAVE_MAX_TEMPORAL_LIQUID_VOLUME_RELATIVE_DRIFT = 1.0e-5
 # remains separate from any claim of a discrete energy theorem.
 FREE_SURFACE_ENERGY_MAX_POSITIVE_STEP_INCREMENT_RELATIVE = 1.0e-4
 FREE_SURFACE_ENERGY_MAX_ABOVE_INITIAL_RELATIVE = 1.0e-4
+# The accepted static sessile state must leave at most five percent of the
+# surface-area plus Young-wall load outside the constrained pressure-gradient
+# range.  This is intentionally opt-in: moving-interface qualifications report
+# the same diagnostic without rejecting physically necessary capillary loads.
+STATIC_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE = 5.0e-2
 # The generated FS16 mini-decks initialize phi in physical length units on a
 # one-metre tank.  Their P1 transport solve is allowed one part per million of
 # length as coefficient-representability slack while sign preservation remains
@@ -1021,6 +1026,13 @@ def solver_command(solver: Path, args: argparse.Namespace) -> list[str]:
 
 def solver_environment(args: argparse.Namespace) -> dict[str, str]:
     env = os.environ.copy()
+    pressure_distance_maximum = getattr(
+        args,
+        "max_free_surface_pressure_representability_relative_distance",
+        None,
+    )
+    initialize_static_compatible_pressure = bool(getattr(
+        args, "initialize_static_compatible_pressure", False))
     if (getattr(args,
                 "enable_free_surface_conservative_balance_diagnostic",
                 False) or
@@ -1033,9 +1045,32 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
             getattr(
                 args,
                 "max_free_surface_conservative_balance_normalized_imbalance",
-                None) is not None):
+                None) is not None or
+            pressure_distance_maximum is not None or
+            initialize_static_compatible_pressure):
         env[
             "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC"
+        ] = "1"
+    if pressure_distance_maximum is not None:
+        if (isinstance(pressure_distance_maximum, bool) or
+                not isinstance(pressure_distance_maximum, (int, float)) or
+                not math.isfinite(float(pressure_distance_maximum)) or
+                float(pressure_distance_maximum) < 0.0):
+            raise ValueError(
+                "--max-free-surface-pressure-representability-relative-distance "
+                "must be finite and nonnegative"
+            )
+        env[
+            "SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE"
+        ] = f"{float(pressure_distance_maximum):.17g}"
+    if initialize_static_compatible_pressure:
+        if pressure_distance_maximum is None:
+            raise ValueError(
+                "--initialize-static-compatible-pressure requires "
+                "--max-free-surface-pressure-representability-relative-distance"
+            )
+        env[
+            "SVMP_NS_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER"
         ] = "1"
     if getattr(args, "require_compiled_cut_volume_jit", False):
         # Qualification must not inherit an ambient opt-out and silently run
@@ -1709,9 +1744,6 @@ def configure_sessile_solver_xml(case_dir: Path,
     set_text(free_surface, "Contact_line_mobility", f"{mobility:.16g}")
     set_text(free_surface, "Wall_slip_model", "Navier")
     set_text(free_surface, "Wall_slip_length", f"{slip_length:.16g}")
-    contact_angle_penalty = free_surface.find("Contact_angle_penalty")
-    if contact_angle_penalty is not None:
-        free_surface.remove(contact_angle_penalty)
 
     ET.indent(tree, space="  ")
     tree.write(solver_xml, encoding="utf-8", xml_declaration=True)
@@ -3361,6 +3393,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "curvature_projections": [],
         "dynamic_contact_operator_angles": [],
         "free_surface_conservative_balances": [],
+        "free_surface_pressure_representability_distance_gates": [],
+        "free_surface_static_compatible_pressure_initializers": [],
         "level_set_advection_velocity_updates": [],
         "level_set_volume_corrections": [],
         "level_set_maintenance": [],
@@ -3452,6 +3486,18 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["free_surface_conservative_balances"].append(
                 parse_key_values(line)
             )
+        elif (
+                "diagnostic=free_surface_pressure_representability_distance_gate"
+                in line):
+            diagnostics[
+                "free_surface_pressure_representability_distance_gates"
+            ].append(parse_key_values(line))
+        elif (
+                "diagnostic=free_surface_static_compatible_pressure_initializer"
+                in line):
+            diagnostics[
+                "free_surface_static_compatible_pressure_initializers"
+            ].append(parse_key_values(line))
         elif "residual block norms" in line:
             diagnostics["residual_block_norms"].append(parse_key_values(line))
         elif "diagnostic=newton_assembly" in line:
@@ -5100,14 +5146,23 @@ def free_surface_pressure_representability_errors(
     """Validate the pressure-space representability diagnostic contract.
 
     The diagnostic solves the constrained reduced pressure-to-velocity pairing
-    problem for the surface-area plus Young-wall-energy load. This check only
-    establishes finite normal-equation stationarity and deliberately applies
-    no residual-distance threshold or physical representability claim.
+    problem for the surface-area plus Young-wall-energy load. Telemetry-only
+    callers require finite normal-equation stationarity. A configured maximum
+    additionally requires the solver's accepted-static-state distance gate.
     """
-    if not bool(getattr(
-            args,
-            "require_free_surface_pressure_representability_diagnostic",
-            False)):
+    maximum = getattr(
+        args,
+        "max_free_surface_pressure_representability_relative_distance",
+        None,
+    )
+    required = bool(getattr(
+        args,
+        "require_free_surface_pressure_representability_diagnostic",
+        False,
+    ))
+    initializer_required = bool(getattr(
+        args, "initialize_static_compatible_pressure", False))
+    if not required and maximum is None and not initializer_required:
         return []
 
     diagnostics = metrics.get("diagnostics", {})
@@ -5196,6 +5251,195 @@ def free_surface_pressure_representability_errors(
         errors.append(
             "free-surface pressure-representability diagnostic "
             "pressure_representability_iterations is unavailable or negative"
+        )
+
+    if maximum is None:
+        if initializer_required:
+            errors.append(
+                "static compatible-pressure initializer requires a finite "
+                "pressure-representability maximum relative distance"
+            )
+        return errors
+    if (isinstance(maximum, bool) or
+            not isinstance(maximum, (int, float)) or
+            not math.isfinite(float(maximum)) or float(maximum) < 0.0):
+        errors.append(
+            "free-surface pressure-representability maximum relative distance "
+            "is unavailable, nonfinite, or negative"
+        )
+        return errors
+
+    if initializer_required:
+        initializer_records = diagnostics.get(
+            "free_surface_static_compatible_pressure_initializers", [])
+        if not isinstance(initializer_records, list) or not initializer_records:
+            errors.append(
+                "static compatible-pressure initializer was not reported"
+            )
+        else:
+            malformed = any(
+                not isinstance(item, dict) for item in initializer_records)
+            if malformed:
+                errors.append(
+                    "static compatible-pressure initializer record is malformed"
+                )
+            else:
+                failed = [
+                    item for item in initializer_records
+                    if item.get("passed") not in (1, True)
+                ]
+                if failed:
+                    errors.append(
+                        "static compatible-pressure initializer reported a "
+                        f"failed attempt ({failed[-1].get('reason', 'unknown')})"
+                    )
+                applied = [
+                    item for item in initializer_records
+                    if item.get("applied") in (1, True)
+                ]
+                if not applied:
+                    errors.append(
+                        "static compatible-pressure initializer never applied "
+                        "the pressure preload"
+                    )
+                else:
+                    initialized = applied[0]
+                    expected_initializer_flags = {
+                        "requested": 1,
+                        "applied": 1,
+                        "passed": 1,
+                        "pressure_representability_available": 1,
+                        "pressure_representability_converged": 1,
+                        "pressure_representability_breakdown": 0,
+                        "force_projection_applied": 0,
+                        "production_capillary_operator_changed": 0,
+                    }
+                    for key, expected in expected_initializer_flags.items():
+                        value = initialized.get(key)
+                        if value not in (expected, bool(expected)):
+                            errors.append(
+                                "static compatible-pressure initializer has "
+                                f"unexpected {key} {value!r}; expected {expected}"
+                            )
+                    if initialized.get("reason") != (
+                            "initialized_within_threshold"):
+                        errors.append(
+                            "static compatible-pressure initializer has "
+                            f"unexpected reason {initialized.get('reason')!r}"
+                        )
+                    initializer_distance = initialized.get(
+                        "pressure_representability_relative_residual")
+                    initializer_maximum = initialized.get(
+                        "pressure_representability_max_relative_distance")
+                    for key, value in (
+                            ("pressure_representability_relative_residual",
+                             initializer_distance),
+                            ("pressure_representability_max_relative_distance",
+                             initializer_maximum)):
+                        if (isinstance(value, bool) or
+                                not isinstance(value, (int, float)) or
+                                not math.isfinite(float(value)) or
+                                float(value) < 0.0):
+                            errors.append(
+                                "static compatible-pressure initializer "
+                                f"{key} is unavailable, nonfinite, or negative"
+                            )
+                    if (isinstance(initializer_maximum, (int, float)) and
+                            not isinstance(initializer_maximum, bool) and
+                            math.isfinite(float(initializer_maximum)) and
+                            not math.isclose(
+                                float(initializer_maximum), float(maximum),
+                                rel_tol=1.0e-13, abs_tol=1.0e-15)):
+                        errors.append(
+                            "static compatible-pressure initializer maximum "
+                            f"{float(initializer_maximum):.6g} does not match "
+                            f"{float(maximum):.6g}"
+                        )
+                    if (isinstance(initializer_distance, (int, float)) and
+                            not isinstance(initializer_distance, bool) and
+                            math.isfinite(float(initializer_distance)) and
+                            float(initializer_distance) > float(maximum)):
+                        errors.append(
+                            "static compatible-pressure initializer distance "
+                            f"{float(initializer_distance):.6g} exceeds "
+                            f"{float(maximum):.6g}"
+                        )
+
+    gate_records = diagnostics.get(
+        "free_surface_pressure_representability_distance_gates", [])
+    if not isinstance(gate_records, list) or not gate_records:
+        errors.append(
+            "accepted-static pressure-representability distance gate was not "
+            "reported"
+        )
+        return errors
+    gate_record = gate_records[-1]
+    if not isinstance(gate_record, dict):
+        errors.append(
+            "accepted-static pressure-representability distance gate record "
+            "is malformed"
+        )
+        return errors
+
+    expected_gate_flags = {
+        "accepted_static_state": 1,
+        "pressure_representability_distance_gate_applied": 1,
+        "pressure_representability_available": 1,
+        "pressure_representability_converged": 1,
+        "pressure_representability_breakdown": 0,
+        "pressure_representability_distance_gate_passed": 1,
+        "pressure_representability_claimed": 1,
+    }
+    for key, expected in expected_gate_flags.items():
+        value = gate_record.get(key)
+        if value not in (expected, bool(expected)):
+            errors.append(
+                "accepted-static pressure-representability distance gate has "
+                f"unexpected {key} {value!r}; expected {expected}"
+            )
+
+    relative_distance = gate_record.get(
+        "pressure_representability_relative_residual")
+    reported_maximum = gate_record.get(
+        "pressure_representability_max_relative_distance")
+    for key, value in (
+            ("pressure_representability_relative_residual", relative_distance),
+            ("pressure_representability_max_relative_distance",
+             reported_maximum)):
+        if (isinstance(value, bool) or
+                not isinstance(value, (int, float)) or
+                not math.isfinite(float(value)) or float(value) < 0.0):
+            errors.append(
+                "accepted-static pressure-representability distance gate "
+                f"{key} is unavailable, nonfinite, or negative"
+            )
+
+    if (isinstance(reported_maximum, (int, float)) and
+            not isinstance(reported_maximum, bool) and
+            math.isfinite(float(reported_maximum)) and
+            not math.isclose(
+                float(reported_maximum),
+                float(maximum),
+                rel_tol=1.0e-13,
+                abs_tol=1.0e-15)):
+        errors.append(
+            "accepted-static pressure-representability distance gate reported "
+            f"maximum {float(reported_maximum):.6g}; expected "
+            f"{float(maximum):.6g}"
+        )
+    if (isinstance(relative_distance, (int, float)) and
+            not isinstance(relative_distance, bool) and
+            math.isfinite(float(relative_distance)) and
+            float(relative_distance) > float(maximum)):
+        errors.append(
+            "accepted-static pressure-representability relative distance "
+            f"{float(relative_distance):.6g} exceeds {float(maximum):.6g}"
+        )
+    if gate_record.get("reason") != "within_threshold":
+        errors.append(
+            "accepted-static pressure-representability distance gate has "
+            f"unexpected reason {gate_record.get('reason')!r}; expected "
+            "'within_threshold'"
         )
     return errors
 
@@ -5539,6 +5783,28 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
                 value = latest_available.get(source)
                 if isinstance(value, (int, float)):
                     metrics[target] = float(value)
+
+    pressure_distance_gates = diagnostics.get(
+        "free_surface_pressure_representability_distance_gates", [])
+    if isinstance(pressure_distance_gates, list):
+        metrics[
+            "diagnostic_free_surface_pressure_representability_distance_gate_count"
+        ] = len(pressure_distance_gates)
+        if pressure_distance_gates:
+            metrics[
+                "latest_free_surface_pressure_representability_distance_gate"
+            ] = pressure_distance_gates[-1]
+
+    compatible_pressure_initializers = diagnostics.get(
+        "free_surface_static_compatible_pressure_initializers", [])
+    if isinstance(compatible_pressure_initializers, list):
+        metrics[
+            "diagnostic_free_surface_static_compatible_pressure_initializer_count"
+        ] = len(compatible_pressure_initializers)
+        if compatible_pressure_initializers:
+            metrics[
+                "latest_free_surface_static_compatible_pressure_initializer"
+            ] = compatible_pressure_initializers[-1]
 
     velocity_range = diagnostic_solution_velocity_range(diagnostics)
     if velocity_range is not None:
@@ -6712,6 +6978,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "max_free_surface_energy_positive_step_increment_relative",
         "max_free_surface_energy_above_initial_relative",
         "max_free_surface_conservative_balance_normalized_imbalance",
+        "max_free_surface_pressure_representability_relative_distance",
         "capillary_convergence_resolution_key",
         "capillary_convergence_metric",
         "min_capillary_convergence_rate",
@@ -6744,6 +7011,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "enable_newton_direction_check",
         "enable_newton_assembly_diagnostics",
         "enable_free_surface_conservative_balance_diagnostic",
+        "initialize_static_compatible_pressure",
         "newton_line_search_fail_on_no_reduction",
         "disable_cut_stabilization",
         "enable_linear_solve_history",
@@ -6786,6 +7054,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "require_reference_profile_comparison",
         "require_free_surface_energy_history",
         "require_free_surface_conservative_balance",
+        "require_free_surface_pressure_representability_diagnostic",
         "enable_adaptive_time_loop",
         "allow_experimental_profile_linear_solver",
         "allow_failure_diagnostics",
@@ -10722,11 +10991,22 @@ def case_args_for_run(case_name: str,
             # priori; this requirement still fails closed on missing,
             # malformed, or internally inconsistent operator evidence.
             case_args.require_free_surface_conservative_balance = True
-            # Require a normal-equation-stationary pressure-space diagnostic
-            # for the same surface-area plus Young-wall load. This is a
-            # fail-closed telemetry contract only: it applies no distance gate
-            # and makes no physical representability claim.
+            # Static qualification also requires the accepted Newton state to
+            # lie within a fixed distance of the constrained pressure-gradient
+            # range. Moving contact-line runs deliberately remain telemetry-
+            # only so genuine interface motion is not rejected by this gate.
             case_args.require_free_surface_pressure_representability_diagnostic = True
+            set_default(
+                case_args,
+                "max_free_surface_pressure_representability_relative_distance",
+                STATIC_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE,
+            )
+            # Seed the first static solve with the stationary pressure from
+            # the same constrained G/surface-energy pair used by the distance
+            # gate.  This changes only the initial pressure coefficients; the
+            # production capillary load remains unprojected.
+            set_default(
+                case_args, "initialize_static_compatible_pressure", True)
             # Fixed before execution for the n=16/32 FS-16 matrix.  The angle,
             # area, and pressure bounds are intentionally well below an
             # order-one error while allowing P1 interface sampling error.  A
@@ -10737,6 +11017,8 @@ def case_args_for_run(case_name: str,
             set_default(case_args, "max_sessile_liquid_area_relative_error", 0.05)
             set_default(case_args, "max_sessile_parasitic_capillary_number", 1.0e-2)
         else:
+            set_default(
+                case_args, "initialize_static_compatible_pressure", False)
             # The continuum Ren--E law supplies a deliberately strict target.
             # The direct gate compares the final wall-interpolated u.m used by
             # the contact residual with the force-law prediction at the same
@@ -12978,6 +13260,21 @@ def main() -> int:
               "space diagnostic telemetry for the surface-area plus Young-"
               "wall-energy load; this applies no residual-distance gate and "
               "makes no physical representability claim"),
+    )
+    parser.add_argument(
+        "--max-free-surface-pressure-representability-relative-distance",
+        type=float,
+        help=("opt into a fail-closed pressure-range distance gate at the "
+              "final accepted static Newton state; moving qualifications "
+              "leave this unset"),
+    )
+    parser.add_argument(
+        "--initialize-static-compatible-pressure",
+        action="store_true",
+        default=None,
+        help=("once preload the static pressure coefficients from the same "
+              "constrained surface-energy/pressure pair used by the required "
+              "representability-distance gate"),
     )
     parser.add_argument(
         "--max-free-surface-conservative-balance-normalized-imbalance",

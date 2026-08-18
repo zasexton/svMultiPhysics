@@ -7,6 +7,7 @@
 #include "LevelSet/LevelSetOptions.h"
 #include "LevelSet/LevelSetReinitialization.h"
 #include "LevelSet/LevelSetRestart.h"
+#include "LevelSet/LevelSetStaticCapillaryEquilibrium.h"
 #include "LevelSet/LevelSetTransport.h"
 #include "LevelSet/LevelSetVolume.h"
 

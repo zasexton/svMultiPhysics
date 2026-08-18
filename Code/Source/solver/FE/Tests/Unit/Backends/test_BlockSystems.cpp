@@ -57,6 +57,23 @@ TEST(BlockSystems, BlockVectorAssembly)
 #endif
 }
 
+TEST(BlockSystems, BlockVectorOffsetsCertifiedOwnedRows)
+{
+#if !defined(FE_HAS_EIGEN)
+    GTEST_SKIP() << "FE_HAS_EIGEN not enabled";
+#else
+    EigenFactory factory;
+    std::vector<std::unique_ptr<GenericVector>> blocks;
+    blocks.push_back(factory.createVector(2));
+    blocks.push_back(factory.createVector(3));
+
+    BlockVector vector(std::move(blocks));
+    EXPECT_EQ(
+        vector.ownedGlobalRows(),
+        (std::vector<GlobalIndex>{0, 1, 2, 3, 4}));
+#endif
+}
+
 TEST(BlockSystems, BlockMatrixAssemblyAndMult)
 {
 #if !defined(FE_HAS_EIGEN)

@@ -1,0 +1,231 @@
+% =============================================================================
+% svMultiPhysics: Automated Finite Element Methods for Multiphysics Simulation
+% =============================================================================
+%
+% The svMultiPhysics Book
+%
+% Build:  pdflatex main && bibtex main && pdflatex main && pdflatex main
+%    or:  make
+%
+\documentclass[11pt,twoside,openright]{book}
+
+% ---------------------------------------------------------------------------
+% Packages
+% ---------------------------------------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+
+% Page geometry
+\usepackage[
+  paperwidth=7in,
+  paperheight=10in,
+  margin=1in,
+  inner=1.2in,
+  outer=0.8in,
+  bindingoffset=0.2in
+]{geometry}
+
+% Mathematics
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+
+% Algorithms and code
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{listings}
+
+% Graphics and figures
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc}
+
+% Tables
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+
+% Cross-referencing and hyperlinks
+\usepackage[hidelinks,bookmarksnumbered]{hyperref}
+\usepackage[nameinlink,capitalise]{cleveref}
+
+% Bibliography
+\usepackage[numbers,sort&compress]{natbib}
+
+% Index
+\usepackage{makeidx}
+\makeindex
+
+% Misc
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{emptypage}
+
+% ---------------------------------------------------------------------------
+% Project-specific macros and style
+% ---------------------------------------------------------------------------
+\usepackage{svmultiphysics}
+
+% ---------------------------------------------------------------------------
+% Header/footer style
+% ---------------------------------------------------------------------------
+\pagestyle{fancy}
+\setlength{\headheight}{23pt}
+\fancyhf{}
+\fancyhead[LE]{\small\thepage\quad\textit{\nouppercase{\leftmark}}}
+\fancyhead[RO]{\small\textit{\nouppercase{\rightmark}}\quad\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancypagestyle{plain}{%
+  \fancyhf{}
+  \fancyfoot[C]{\thepage}
+  \renewcommand{\headrulewidth}{0pt}
+}
+
+% ---------------------------------------------------------------------------
+% Listings style for C++ code
+% ---------------------------------------------------------------------------
+\lstdefinestyle{svmpcode}{
+  language=C++,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\bfseries\color{blue!70!black},
+  commentstyle=\itshape\color{green!50!black},
+  stringstyle=\color{red!60!black},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=8pt,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{gray!50},
+  backgroundcolor=\color{gray!5},
+  breaklines=true,
+  breakatwhitespace=true,
+  tabsize=4,
+  showstringspaces=false,
+  captionpos=b,
+  xleftmargin=1.5em,
+  framexleftmargin=1em,
+  columns=flexible,
+  morekeywords={Vector,Matrix,Mesh,FESystem,FormExpr,auto,constexpr,nullptr},
+}
+\lstset{style=svmpcode}
+
+% ---------------------------------------------------------------------------
+% Theorem environments
+% ---------------------------------------------------------------------------
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[chapter]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% ---------------------------------------------------------------------------
+% Document metadata
+% ---------------------------------------------------------------------------
+\title{%
+  \textbf{svMultiPhysics} \\[0.5em]
+  \Large Automated Finite Element Methods \\
+  for Multiphysics Simulation
+}
+\author{The svMultiPhysics Development Team}
+\date{\today}
+
+% ===========================================================================
+\begin{document}
+
+% ---------------------------------------------------------------------------
+% Front matter
+% ---------------------------------------------------------------------------
+\frontmatter
+
+% Title page
+\include{chapters/titlepage}
+
+% Copyright
+\include{chapters/copyright}
+
+% Preface
+\include{chapters/preface}
+
+% Table of contents
+\tableofcontents
+
+% List of figures (optional, uncomment when figures exist)
+% \listoffigures
+
+% List of tables (optional, uncomment when tables exist)
+% \listoftables
+
+% ---------------------------------------------------------------------------
+% Main matter
+% ---------------------------------------------------------------------------
+\mainmatter
+
+% === Part I: Mathematical Foundations ======================================
+\part{Mathematical Foundations}
+\label{part:foundations}
+
+\include{chapters/ch01_pdes_and_fem}
+\include{chapters/ch02_weak_forms_and_galerkin_methods}
+\include{chapters/ch03_function_spaces_and_well_posedness}
+\include{chapters/ch04_meshes_reference_cells_and_mappings}
+\include{chapters/ch05_finite_elements_and_basis_functions}
+\include{chapters/ch06_interpolation_projection_and_approximation}
+\include{chapters/ch07_numerical_integration_and_element_operators}
+\include{chapters/ch08_assembly_boundary_conditions_and_constraints}
+\include{chapters/ch09_stability_convergence_and_error_estimation}
+\include{chapters/ch10_mixed_nonconforming_discontinuous_and_stabilized_methods}
+\include{chapters/ch11_eigenvalue_problems_modal_analysis_and_buckling}
+\include{chapters/ch12_time_dependent_and_nonlinear_problems}
+
+% === Part II: Software Architecture ========================================
+\part{Software Architecture and Implementation}
+\label{part:implementation}
+
+\include{chapters/ch13_architecture_overview}
+\include{chapters/ch14_mesh_library}
+\include{chapters/ch15_form_language}
+\include{chapters/ch16_form_compiler}
+\include{chapters/ch17_jit_compilation}
+\include{chapters/ch18_linear_solvers}
+\include{chapters/ch19_parallel_computing}
+
+% === Part III: Physics Modules =============================================
+\part{Physics Modules}
+\label{part:physics}
+
+\include{chapters/ch20_navier_stokes}
+\include{chapters/ch21_structural_mechanics}
+\include{chapters/ch22_fluid_structure_interaction}
+\include{chapters/ch23_coupled_multiphysics}
+
+% === Part IV: Applications and Verification ================================
+\part{Applications and Verification}
+\label{part:applications}
+
+\include{chapters/ch24_tutorials}
+\include{chapters/ch25_verification}
+\include{chapters/ch26_performance}
+
+% ---------------------------------------------------------------------------
+% Back matter
+% ---------------------------------------------------------------------------
+\backmatter
+
+% Bibliography
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+% Index
+\printindex
+
+\end{document}

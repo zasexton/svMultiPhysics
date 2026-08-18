@@ -68,6 +68,7 @@
 #include "Auxiliary/AuxiliaryTransferOperator.h"
 #include "Systems/SystemsExceptions.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -258,6 +259,16 @@ public:
      * @brief Synchronize ghost values for a single block.
      */
     void syncGhosts(std::string_view block_name);
+
+    /**
+     * @brief Rank-invariant signature of the manager-wide ghost-hook schedule.
+     *
+     * The signature includes every `OwnedAndGhost` block in invocation order
+     * together with hook presence. It intentionally excludes local storage
+     * sizes and entity counts.
+     */
+    [[nodiscard]] std::array<std::uint64_t, 2>
+    ghostSyncRouteSignature() const noexcept;
 
     // -----------------------------------------------------------------
     //  Lifecycle

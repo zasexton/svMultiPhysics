@@ -194,6 +194,62 @@ void compareADAndSymbolic(const assembly::IMeshAccess& mesh,
 
 } // namespace
 
+TEST(SymbolicDifferentiationMeasureTest,
+     ExteriorBoundarySelectionSurvivesDifferentiation)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto residual_integrand = u * u * v;
+
+    const auto full =
+        ExteriorBoundaryMeasure::fullPhysical(
+            /*physical_boundary_marker=*/6);
+    const auto full_tangent = differentiateResidual(
+        residual_integrand.dExteriorBoundary(full));
+    ASSERT_TRUE(full_tangent.isValid());
+    ASSERT_EQ(
+        full_tangent.node()->type(), FormExprType::BoundaryIntegral);
+    ASSERT_NE(
+        full_tangent.node()->exteriorBoundaryMeasure(), nullptr);
+    EXPECT_EQ(
+        *full_tangent.node()->exteriorBoundaryMeasure(), full);
+
+    const auto active =
+        ExteriorBoundaryMeasure::generatedActiveSubset(
+            /*physical_boundary_marker=*/6,
+            /*generated_active_boundary_marker=*/37);
+    const auto active_tangent = differentiateResidual(
+        residual_integrand.dExteriorBoundary(active));
+    ASSERT_TRUE(active_tangent.isValid());
+    ASSERT_EQ(
+        active_tangent.node()->type(), FormExprType::InterfaceIntegral);
+    ASSERT_NE(
+        active_tangent.node()->exteriorBoundaryMeasure(), nullptr);
+    EXPECT_EQ(
+        *active_tangent.node()->exteriorBoundaryMeasure(), active);
+
+    const auto raw_boundary_tangent =
+        differentiateResidual(residual_integrand.ds(6));
+    ASSERT_TRUE(raw_boundary_tangent.isValid());
+    ASSERT_EQ(
+        raw_boundary_tangent.node()->type(),
+        FormExprType::BoundaryIntegral);
+    EXPECT_EQ(
+        raw_boundary_tangent.node()->exteriorBoundaryMeasure(),
+        nullptr);
+
+    const auto raw_interface_tangent =
+        differentiateResidual(residual_integrand.dI(37));
+    ASSERT_TRUE(raw_interface_tangent.isValid());
+    ASSERT_EQ(
+        raw_interface_tangent.node()->type(),
+        FormExprType::InterfaceIntegral);
+    EXPECT_EQ(
+        raw_interface_tangent.node()->exteriorBoundaryMeasure(),
+        nullptr);
+}
+
 TEST(SymbolicDifferentiationMultiFieldTest, DifferentiateWrtFieldIdMatchesAD)
 {
     SingleTetraMeshAccess mesh;

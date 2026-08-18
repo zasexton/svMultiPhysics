@@ -369,6 +369,21 @@ Use equality/Robin/Nitsche helpers for equality-style laws such as
 `tau(u) = g` or weak continuity. Use `TraceInequalityBC` for one-sided laws
 whose active set can change during nonlinear solve.
 
+Exterior weak-form helpers and wrappers accept
+`ExteriorBoundaryMeasure::generatedActiveSubset(physical_marker,
+generated_marker)` when a background exterior face is sharply clipped.
+This preserves physical-boundary ownership while dispatching assembly through
+the provenance-checked generated domain. A bare interface integral is not an
+equivalent exterior-boundary selector. The selector establishes routing, not
+a cut-stability certificate for a user-supplied Nitsche penalty.
+Bare integer-marker overloads remain legacy routes and fail closed when the
+same physical marker has generated-active provenance. Use
+`ExteriorBoundaryMeasure::fullPhysical(physical_marker)` only for an
+intentional complete-background-face operator.
+The selector overloads of `CouplingFormBuilder::integrate(...)` additionally
+verify that the selector's physical marker matches the coupling boundary
+region.
+
 Advanced `H(div)` trace infrastructure also exposes periodic/MPC pairing
 helpers and marker-scoped mortar/interface field workflows through the Spaces
 and Systems layers. See `Docs/HDIV_ADVANCED_USAGE_GUIDE.md` for those flows.

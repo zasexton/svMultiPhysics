@@ -45,6 +45,7 @@ public:
 
     [[nodiscard]] std::span<Real> localSpan() override;
     [[nodiscard]] std::span<const Real> localSpan() const override;
+    [[nodiscard]] std::vector<GlobalIndex> ownedGlobalRows() const override;
 
     [[nodiscard]] Eigen::VectorXd& eigen() noexcept
     {

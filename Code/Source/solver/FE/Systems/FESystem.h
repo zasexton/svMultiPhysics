@@ -12,6 +12,7 @@
 #include "Core/FEException.h"
 
 #include "Forms/BoundaryFunctional.h"
+#include "Forms/FormExpr.h"
 #include "Auxiliary/AuxiliaryBindings.h"
 #include "Auxiliary/AuxiliaryInputRegistry.h"
 #include "Auxiliary/AuxiliaryStateTypes.h"
@@ -50,6 +51,7 @@
 #include "Analysis/TopologyAnalysisContext.h"
 #include "Analysis/ContributionDescriptor.h"
 #include "Analysis/ConstraintAnalysisSummary.h"
+#include "Analysis/GeneratedBoundaryAggregateTraceCertificate.h"
 #include "Analysis/InterfaceTopologyContext.h"
 
 #include "Dofs/DofHandler.h"
@@ -112,6 +114,11 @@ struct DofPermutation;
 class GenericMatrix;
 } // namespace backends
 
+namespace forms {
+class FormExpr;
+class MixedFormIR;
+}
+
 namespace systems {
 
 using BoundaryId = int;
@@ -131,6 +138,8 @@ class AuxiliaryDerivativeProvider;
 class AuxiliaryEventManager;
 class AuxiliaryBlockStorage;
 struct MixedSystemLayout;
+struct FormInstallOptions;
+struct CoupledResidualKernels;
 
 struct SetupOptions {
     dofs::DofDistributionOptions dof_options{};
@@ -195,6 +204,194 @@ enum class MeshMotionFieldRole : std::uint8_t {
     PredictedVelocity
 };
 
+enum class MeshNormalBoundaryQuantity : std::uint8_t {
+    DisplacementTrace,
+    MeshVelocityTrace
+};
+
+enum class MeshNormalBoundaryTargetKind : std::uint8_t {
+    PrescribedDisplacement,
+    TimeScaledPrescribedVelocity,
+    FluidNormalVelocity
+};
+
+struct MeshNormalBoundaryRelatedFluidConsumerBinding {
+    analysis::EnforcementKind enforcement_kind{
+        analysis::EnforcementKind::WeakPenalty};
+    std::string descriptor_source{};
+
+    [[nodiscard]] friend bool operator==(
+        const MeshNormalBoundaryRelatedFluidConsumerBinding&,
+        const MeshNormalBoundaryRelatedFluidConsumerBinding&) = default;
+};
+
+struct MeshNormalBoundaryConstraintConsumerBinding {
+    std::string operator_tag{};
+    std::string mesh_descriptor_source{};
+    std::optional<MeshNormalBoundaryRelatedFluidConsumerBinding>
+        related_fluid{};
+
+    [[nodiscard]] friend bool operator==(
+        const MeshNormalBoundaryConstraintConsumerBinding&,
+        const MeshNormalBoundaryConstraintConsumerBinding&) = default;
+};
+
+struct MeshNormalBoundaryConstraintDeclaration {
+    FieldId mesh_displacement_field{INVALID_FIELD_ID};
+    int boundary_marker{-1};
+    MeshNormalBoundaryQuantity quantity{
+        MeshNormalBoundaryQuantity::DisplacementTrace};
+    MeshNormalBoundaryTargetKind target_kind{
+        MeshNormalBoundaryTargetKind::PrescribedDisplacement};
+    forms::FormExpr target_expression{};
+    analysis::EnforcementKind enforcement_kind{
+        analysis::EnforcementKind::WeakPenalty};
+    FieldId related_velocity_field{INVALID_FIELD_ID};
+    std::string owner_component{};
+    std::optional<MeshNormalBoundaryConstraintConsumerBinding>
+        consumer_binding{};
+};
+
+struct MeshNormalBoundaryConstraintHistoryRecord {
+    std::uint64_t accepted_step{0};
+    Real accepted_time{0.0};
+    Real dt{0.0};
+    std::uint64_t state_revision{0};
+    /** Rank-local mesh geometry stamp retained as local provenance. */
+    std::uint64_t mesh_geometry_revision{0};
+    /** Exact in-memory symbolic declaration; not an evaluated target value. */
+    MeshNormalBoundaryConstraintDeclaration declaration{};
+};
+
+/** Canonical identity of one fitted-ALE normal-kinematics measurement. */
+struct FittedALENormalMeasurementKey {
+    FieldId mesh_displacement_field{INVALID_FIELD_ID};
+    int boundary_marker{-1};
+
+    [[nodiscard]] friend bool operator==(
+        const FittedALENormalMeasurementKey&,
+        const FittedALENormalMeasurementKey&) = default;
+};
+
+/**
+ * @brief Generalized-alpha coordinates for a neutral operator-stage record.
+ *
+ * These coordinates describe where the converged operator sampled state and
+ * rate.  They do not assert that either sample is an accepted-step endpoint.
+ */
+struct OperatorStageGeneralizedAlphaMetadata {
+    Real alpha_f{1.0};
+    Real alpha_m{1.0};
+
+    [[nodiscard]] friend bool operator==(
+        const OperatorStageGeneralizedAlphaMetadata&,
+        const OperatorStageGeneralizedAlphaMetadata&) = default;
+};
+
+/** Rank-local mesh stamp captured with an operator-stage state snapshot. */
+struct OperatorStageGeometryMetadata {
+    std::uint64_t geometry_revision{0};
+    std::uint64_t topology_revision{0};
+    std::uint64_t ownership_revision{0};
+    std::uint64_t numbering_revision{0};
+    std::uint64_t field_layout_revision{0};
+    std::uint64_t label_revision{0};
+    std::uint64_t active_configuration_epoch{0};
+    std::uint64_t coordinate_configuration_key{0};
+
+    [[nodiscard]] friend bool operator==(
+        const OperatorStageGeometryMetadata&,
+        const OperatorStageGeometryMetadata&) = default;
+};
+
+/**
+ * @brief Time-integrator-neutral provenance for a prospective accepted stage.
+ *
+ * `state_time` and `rate_time` are the exact converged operator sampling
+ * times.  For generalized-alpha they are generally not the step endpoint.
+ * `derivative_fields` states which entries of the supplied exact-rate vector
+ * are meaningful time derivatives.
+ */
+struct OperatorStageMeasurementMetadata {
+    /** V1 identity: BackwardEuler, DG0, or GeneralizedAlphaFirstOrder. */
+    std::string scheme_name{};
+    int temporal_order{0};
+    std::uint64_t prospective_accepted_step{0};
+    std::uint64_t prospective_attempt{0};
+    Real step_start_time{0.0};
+    Real step_end_time{0.0};
+    Real state_time{0.0};
+    Real rate_time{0.0};
+    Real dt{0.0};
+    std::optional<OperatorStageGeneralizedAlphaMetadata>
+        generalized_alpha{};
+    /** Expected rank-local stamp; deliberately excluded from MPI consensus. */
+    std::optional<OperatorStageGeometryMetadata> expected_stage_geometry{};
+    /**
+     * Communicator-certified exact algebraic fingerprint/revision of the
+     * copied operator-stage state.  The core compares the supplied token
+     * across ranks but cannot independently prove the caller's certification.
+     */
+    std::uint64_t state_revision{0};
+    /**
+     * Communicator-certified exact algebraic fingerprint/revision of the
+     * copied rate alias, subject to the same caller-certification boundary.
+     */
+    std::uint64_t rate_revision{0};
+    std::vector<FieldId> derivative_fields{};
+
+    [[nodiscard]] friend bool operator==(
+        const OperatorStageMeasurementMetadata&,
+        const OperatorStageMeasurementMetadata&) = default;
+};
+
+/**
+ * @brief Registered fitted-ALE normal measurement and its reduction names.
+ *
+ * The copied constraint is the exact, consumer-bound symbolic declaration
+ * measured by this record.  The mesh-displacement field remains the primary
+ * BoundaryReductionService field because only the primary field owns history.
+ */
+struct FittedALENormalMeasurementDeclaration {
+    FittedALENormalMeasurementKey key{};
+    FieldId related_velocity_field{INVALID_FIELD_ID};
+    MeshNormalBoundaryConstraintDeclaration normal_constraint{};
+    std::string mesh_normal_integral_functional{};
+    std::string fluid_normal_integral_functional{};
+    std::string normal_gap_squared_integral_functional{};
+};
+
+/**
+ * @brief Raw fitted-ALE normal moments sampled at one operator stage.
+ *
+ * A is boundary measure, Wn is the integral of mesh normal velocity, Un is
+ * the integral of fluid normal velocity, and gap_sq is the integral of their
+ * squared difference.  These are raw operator-stage moments: they are not
+ * endpoint values and must not be reported as work or dissipation.
+ */
+struct FittedALENormalOperatorStageRawValue {
+    FittedALENormalMeasurementKey key{};
+    Real A{0.0};
+    Real Wn{0.0};
+    Real Un{0.0};
+    Real gap_sq{0.0};
+    /** Complete rank-local live stamp; deliberately excluded from consensus. */
+    OperatorStageGeometryMetadata stage_mesh_revision{};
+};
+
+/**
+ * @brief Pending or accepted fitted-ALE operator-stage measurement record.
+ *
+ * Generalized-alpha records retain their operator-stage coordinates and are
+ * not silently relabelled as endpoint observations.  The raw moments carry no
+ * work, power, penalty-energy, or dissipation interpretation.
+ */
+struct FittedALENormalOperatorStageHistoryRecord {
+    FittedALENormalMeasurementDeclaration declaration{};
+    OperatorStageMeasurementMetadata stage{};
+    FittedALENormalOperatorStageRawValue raw{};
+};
+
 enum class MeshTangentialBoundaryPolicy : std::uint8_t {
     Free,
     SmoothingOnly,
@@ -207,6 +404,9 @@ struct MeshTangentialBoundaryPolicyDeclaration {
     MeshTangentialBoundaryPolicy policy{
         MeshTangentialBoundaryPolicy::SmoothingOnly};
     std::string owner_component{};
+    bool consumer_bound{false};
+    std::string consumer_operator_tag{};
+    std::string consumer_source{};
 };
 
 struct MeshTangentialBoundaryPolicyHistoryRecord {
@@ -214,12 +414,31 @@ struct MeshTangentialBoundaryPolicyHistoryRecord {
     Real accepted_time{0.0};
     Real dt{0.0};
     std::uint64_t state_revision{0};
+    /** Rank-local mesh geometry stamp retained as local provenance. */
     std::uint64_t mesh_geometry_revision{0};
     FieldId mesh_displacement_field{INVALID_FIELD_ID};
     int boundary_marker{-1};
     MeshTangentialBoundaryPolicy policy{
         MeshTangentialBoundaryPolicy::SmoothingOnly};
     std::string owner_component{};
+    bool consumer_bound{false};
+    std::string consumer_operator_tag{};
+    std::string consumer_source{};
+};
+
+/** Static one-phase capillary-balance construction selected by the owner. */
+enum class FreeSurfaceCapillaryBalanceMethod : std::uint8_t {
+    Unselected,
+    /** Snapshot energy variation plus a fixed-volume stationary geometry. */
+    DiscreteEnergyVolumeStationarity
+};
+
+/** Evidence boundary for the selected capillary-balance construction. */
+enum class FreeSurfaceCapillaryBalanceQualification : std::uint8_t {
+    Unselected,
+    /** Low-level identities only; static-cap qualification is still open. */
+    PrerequisiteOnly,
+    Qualified
 };
 
 struct FreeSurfaceDiscreteFunctionalDeclaration {
@@ -228,27 +447,105 @@ struct FreeSurfaceDiscreteFunctionalDeclaration {
     FieldId velocity_field{INVALID_FIELD_ID};
     std::string geometry_domain_id{};
     interfaces::FreeSurfaceDiscreteFunctionalParameters parameters{};
+    std::optional<interfaces::FreeSurfaceActiveVolumeEnergyParameters>
+        active_volume_energy_parameters{};
+    std::optional<
+        interfaces::FreeSurfaceActiveVolumeDissipationParameters>
+        active_volume_dissipation_parameters{};
+    std::optional<
+        interfaces::FreeSurfaceExternalPressurePowerParameters>
+        external_pressure_power_parameters{};
+    bool endpoint_functional_power_enabled{false};
+    FreeSurfaceCapillaryBalanceMethod capillary_balance_method{
+        FreeSurfaceCapillaryBalanceMethod::Unselected};
+    FreeSurfaceCapillaryBalanceQualification
+        capillary_balance_qualification{
+            FreeSurfaceCapillaryBalanceQualification::Unselected};
     std::string owner_component{};
+};
+
+/**
+ * Authentic first-order generalized-alpha parameters retained with an
+ * accepted contact stage.  This is optional only for endpoint stages.  The
+ * supported TimeLoop rho-infinity family has alpha_f == gamma in [0.5, 1]
+ * and alpha_m == 2*alpha_f - 0.5 in [0.5, 1.5].
+ */
+struct FreeSurfaceFirstOrderGeneralizedAlphaProvenance {
+    Real alpha_m{1.0};
+    Real alpha_f{1.0};
+    Real gamma{1.0};
+    Real dt{0.0};
+
+    [[nodiscard]] friend bool operator==(
+        const FreeSurfaceFirstOrderGeneralizedAlphaProvenance&,
+        const FreeSurfaceFirstOrderGeneralizedAlphaProvenance&) = default;
 };
 
 struct FreeSurfaceAcceptedContactStageState {
     Real stage_time{0.0};
     Real stage_alpha_f{1.0};
+    std::optional<FreeSurfaceFirstOrderGeneralizedAlphaProvenance>
+        first_order_generalized_alpha{};
     // Communicator-consistent fingerprints of FE-ordered algebraic content.
     std::uint64_t previous_state_revision{0};
     std::uint64_t endpoint_state_revision{0};
     // Composite fingerprint over the previous/endpoint content, accepted
-    // snapshot, stage time/alpha, and stage solution.
+    // snapshot, stage time/parameters, and stage solution.
     std::uint64_t stage_state_revision{0};
     interfaces::FreeSurfaceGeometryRevision geometry_revision{};
     interfaces::FreeSurfaceDynamicContactState state{};
 };
 
+/**
+ * Accepted-stage contact-centroid kinematics derived from two consecutive
+ * history records.
+ *
+ * This is a secant velocity of the measure-weighted contact-position
+ * centroid projected onto a common oriented footprint direction.  It is not
+ * a pointwise contact-line velocity.  The previous accepted record and stage
+ * revisions make the comparison with the instantaneous fluid-trace speed
+ * reproducible.
+ */
+struct FreeSurfaceAcceptedContactLineKinematics {
+    int boundary_marker{-1};
+    std::uint64_t previous_accepted_step{0};
+    Real previous_accepted_time{0.0};
+    Real previous_stage_time{0.0};
+    std::uint64_t previous_stage_state_revision{0};
+    std::uint64_t previous_snapshot_revision_key{0};
+    Real stage_time_interval{0.0};
+    std::array<Real, 3> previous_mean_contact_position{
+        {0.0, 0.0, 0.0}};
+    std::array<Real, 3> projection_direction{{0.0, 0.0, 0.0}};
+    Real projected_contact_centroid_speed{0.0};
+    Real mean_fluid_contact_speed{0.0};
+    Real fluid_minus_geometric_contact_speed{0.0};
+};
+
 struct AcceptedFreeSurfaceDiscreteFunctionalState {
     int interface_marker{-1};
     interfaces::FreeSurfaceGeometryRevision geometry_revision{};
+    // Communicator-consistent topology-only fingerprint for the exact
+    // authoritative snapshot rules used by this state.
+    std::uint64_t cut_topology_revision{0};
     interfaces::FreeSurfaceDiscreteFunctionalState state{};
+    std::optional<
+        interfaces::FreeSurfaceDiscreteFunctionalVariationState>
+        endpoint_functional_power{};
+    std::optional<interfaces::FreeSurfaceActiveVolumeEnergyState>
+        active_volume_energy{};
+    std::optional<
+        interfaces::FreeSurfaceActiveVolumeDissipationState>
+        active_volume_dissipation{};
+    std::optional<
+        interfaces::FreeSurfaceExternalPressurePowerState>
+        external_pressure_power{};
+    std::optional<
+        interfaces::FreeSurfaceBackwardEulerKineticWorkState>
+        backward_euler_kinetic_work{};
     std::optional<FreeSurfaceAcceptedContactStageState> contact_stage{};
+    std::vector<FreeSurfaceAcceptedContactLineKinematics>
+        contact_line_kinematics{};
 };
 
 struct FreeSurfaceDiscreteFunctionalHistoryRecord {
@@ -258,11 +555,35 @@ struct FreeSurfaceDiscreteFunctionalHistoryRecord {
     // Communicator-consistent fingerprints before and after maintenance.
     std::uint64_t pre_maintenance_endpoint_state_revision{0};
     std::uint64_t state_revision{0};
+    std::optional<std::uint64_t> extension_map_revision{};
     FreeSurfaceDiscreteFunctionalDeclaration declaration{};
     interfaces::FreeSurfaceGeometryRevision geometry_revision{};
+    std::uint64_t cut_topology_revision{0};
     interfaces::FreeSurfaceDiscreteFunctionalState state{};
+    std::optional<
+        interfaces::FreeSurfaceDiscreteFunctionalVariationState>
+        endpoint_functional_power{};
+    std::optional<interfaces::FreeSurfaceActiveVolumeEnergyState>
+        active_volume_energy{};
+    std::optional<
+        interfaces::FreeSurfaceActiveVolumeDissipationState>
+        active_volume_dissipation{};
+    std::optional<
+        interfaces::FreeSurfaceExternalPressurePowerState>
+        external_pressure_power{};
+    std::optional<
+        interfaces::FreeSurfaceBackwardEulerKineticWorkState>
+        backward_euler_kinetic_work{};
     std::optional<FreeSurfaceAcceptedContactStageState> contact_stage{};
+    std::vector<FreeSurfaceAcceptedContactLineKinematics>
+        contact_line_kinematics{};
 };
+
+[[nodiscard]] std::vector<FreeSurfaceAcceptedContactLineKinematics>
+deriveFreeSurfaceAcceptedContactLineKinematics(
+    const FreeSurfaceDiscreteFunctionalHistoryRecord& previous,
+    std::uint64_t accepted_step,
+    const FreeSurfaceAcceptedContactStageState& current);
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 enum class MeshCoordinateUpdateMode : std::uint8_t {
@@ -330,6 +651,25 @@ struct GeometryTransactionCallback {
 
 struct CutIntegrationContextUpdateCallback {
     std::string name;
+
+    /**
+     * The argument is the authoritative candidate and may be null.  Setters
+     * invoke callbacks before publication, so cutIntegrationContext() still
+     * exposes the previous context while the callback runs.  A throw rejects
+     * publication; callbacks that completed earlier may run again on retry.
+     *
+     * Rollback invokes the same contract after restoring the saved state.
+     * Callbacks must therefore use this argument rather than infer candidate
+     * identity from the system getter.  The candidate pointee must remain
+     * immutable throughout dispatch, including through any retained mutable
+     * alias.  A callback that enters collectives must coordinate every
+     * rank-local preflight failure before doing so.  Callback dispatch is
+     * non-reentrant: callbacks may not register another context callback,
+     * publish or clear a context, or mutate a context transaction.
+     * A distributed abstract mesh without an available multi-rank system
+     * communicator must defer context publication until its DOF layout is
+     * finalized.
+     */
     std::function<void(const assembly::CutIntegrationContext*)> callback;
 };
 
@@ -344,6 +684,105 @@ struct MeshParticipantInfo {
     GlobalIndex num_boundary_faces{0};
     GlobalIndex interior_face_offset{0};
     GlobalIndex num_interior_faces{0};
+};
+
+using ExteriorBoundaryMeasurePolicyId = std::uint64_t;
+inline constexpr ExteriorBoundaryMeasurePolicyId
+    INVALID_EXTERIOR_BOUNDARY_MEASURE_POLICY_ID{0u};
+inline constexpr std::size_t
+    NO_EXTERIOR_BOUNDARY_MEASURE_FORMULATION_RECORD{
+        std::numeric_limits<std::size_t>::max()};
+
+/**
+ * Definition-time intent for one exterior-boundary form measure.
+ *
+ * LegacyBoundary and LegacyInterface retain enough information to reject a
+ * raw ds/dI route if a later cut context gives the same marker generated-active
+ * provenance. FullPhysical and GeneratedActiveSubset are explicit, disjoint
+ * selector intents.
+ */
+enum class ExteriorBoundaryMeasureIntent : std::uint8_t {
+    LegacyBoundary,
+    LegacyInterface,
+    FullPhysical,
+    GeneratedActiveSubset
+};
+
+struct ExteriorBoundaryMeasurePolicy {
+    ExteriorBoundaryMeasurePolicyId id{
+        INVALID_EXTERIOR_BOUNDARY_MEASURE_POLICY_ID};
+    OperatorTag op{};
+    ExteriorBoundaryMeasureIntent intent{
+        ExteriorBoundaryMeasureIntent::LegacyBoundary};
+    /// Raw ds marker or the physical owner of an explicit selector.
+    int physical_boundary_marker{-1};
+    /// Raw dI marker or the generated marker of an explicit active subset.
+    int generated_active_boundary_marker{-1};
+    /// Formulation record owning this route, or the sentinel above for a
+    /// lower-level precompiled IR installation.
+    std::size_t source_formulation_record_index{
+        NO_EXTERIOR_BOUNDARY_MEASURE_FORMULATION_RECORD};
+};
+
+using GeneratedBoundaryNitscheTracePolicyId = std::uint64_t;
+inline constexpr GeneratedBoundaryNitscheTracePolicyId
+    INVALID_GENERATED_BOUNDARY_NITSCHE_TRACE_POLICY_ID{0u};
+
+/**
+ * Immutable setup-time requirement for one generated-boundary velocity
+ * Nitsche route.
+ *
+ * The policy is derived from an opaque form binding that seals the canonical
+ * state/test roles and complete velocity-space signature and whose exact
+ * route anchor was verified once as an unscaled top-level additive summand in
+ * the residual installed for its source formulation. Certification consumes
+ * the effective penalty sealed by that binding; it does not mutate or select
+ * a penalty. Symmetric routes are accepted only when the grouped certified
+ * trace-to-penalty ratio for their operator is strictly below one.
+ * Unsymmetric routes retain the same revision-bound trace certificate as a
+ * continuity diagnostic without applying the symmetric coercivity
+ * inequality.
+ */
+struct GeneratedBoundaryNitscheTracePolicy {
+    GeneratedBoundaryNitscheTracePolicyId id{
+        INVALID_GENERATED_BOUNDARY_NITSCHE_TRACE_POLICY_ID};
+    OperatorTag op{};
+    FieldId velocity_field{INVALID_FIELD_ID};
+    forms::SpaceSignature velocity_space_signature{};
+    int physical_boundary_marker{-1};
+    int volume_interface_marker{-1};
+    int generated_active_boundary_marker{-1};
+    Real dynamic_viscosity{0.0};
+    Real penalty_gamma{0.0};
+    bool scale_with_polynomial_order{true};
+    int penalty_polynomial_order{0};
+    Real effective_penalty_multiplier{0.0};
+    bool symmetric{true};
+    std::size_t maximum_reduced_dimension{128u};
+    std::size_t source_formulation_record_index{
+        std::numeric_limits<std::size_t>::max()};
+    std::uint64_t form_binding_digest{0u};
+};
+
+/**
+ * Current eager certificate and the exact policy coefficient it validates.
+ *
+ * For symmetric routes, every record on the same operator carries the same
+ * grouped normalized trace sum and guaranteed finite-space energy ratio.
+ * The ratio is intentionally absent for unsymmetric routes.
+ */
+struct GeneratedBoundaryNitscheTraceCertificateRecord {
+    GeneratedBoundaryNitscheTracePolicy policy{};
+    analysis::GeneratedBoundaryAggregateTraceCertificate certificate{};
+    constraints::ConstraintRevisionSnapshot constraint_revision{};
+    std::shared_ptr<
+        const constraints::SmallCutAggregationProlongationReport>
+        aggregation_report{};
+    int polynomial_order{0};
+    Real effective_penalty_multiplier{0.0};
+    Real trace_to_penalty_ratio{0.0};
+    Real grouped_symmetric_trace_to_penalty_ratio{0.0};
+    std::optional<Real> symmetric_energy_ratio_lower_bound{};
 };
 
 class FESystem {
@@ -422,12 +861,109 @@ public:
     void bindMeshMotionField(std::string_view role_name, std::string_view field_name);
     [[nodiscard]] std::optional<FieldId> meshMotionField(MeshMotionFieldRole role) const noexcept;
     [[nodiscard]] assembly::MeshMotionFieldAccess meshMotionFieldAccess() const noexcept;
+    void declareMeshNormalBoundaryConstraint(
+        MeshNormalBoundaryConstraintDeclaration declaration);
+    void bindMeshNormalBoundaryConstraintConsumer(
+        FieldId mesh_displacement_field,
+        int boundary_marker,
+        std::string operator_tag,
+        std::string mesh_descriptor_source,
+        std::optional<std::string> related_fluid_descriptor_source =
+            std::nullopt);
+    /**
+     * @brief Register raw operator-stage moments for one bound fitted-ALE
+     * fluid-normal constraint.
+     *
+     * Registration is deterministic and an exact duplicate is a no-op.  It
+     * must occur after the constraint's reciprocal consumer binding is
+     * complete and before a measurement stage or accepted history exists.
+     */
+    void registerFittedALENormalOperatorStageMeasurement(
+        FieldId mesh_displacement_field,
+        int boundary_marker);
+    [[nodiscard]] std::span<
+        const FittedALENormalMeasurementDeclaration>
+    fittedALENormalOperatorStageMeasurementDeclarations() const noexcept {
+        return fitted_ale_normal_measurement_declarations_;
+    }
+    /**
+     * @brief Evaluate every registered fitted-ALE normal declaration at the
+     * supplied converged operator stage.
+     *
+     * `state.u`/`state.u_vector` supplies the current stage and
+     * `state.u_prev`/`state.u_prev_vector` supplies an exact first-rate alias.
+     * Only fields named by `metadata.derivative_fields` are advertised as
+     * derivatives.  Results remain pending until explicit accepted-step
+     * publication.
+     */
+    void stageFittedALENormalOperatorStageMeasurements(
+        const SystemStateView& state,
+        OperatorStageMeasurementMetadata metadata);
+    /** Discard a rejected candidate without throwing or publishing history. */
+    void discardPendingFittedALENormalOperatorStageMeasurements() noexcept;
+    /**
+     * @brief Collectively publish the pending group after irreversible step
+     * acceptance.
+     *
+     * The accepted step/time/dt must exactly match the prospective metadata
+     * captured at staging.  This API is intended for the accepted-step hook,
+     * not a commit-ready hook.
+     */
+    void commitPendingFittedALENormalOperatorStageMeasurements(
+        std::uint64_t accepted_step,
+        Real accepted_time,
+        Real dt);
+    [[nodiscard]] std::span<
+        const FittedALENormalOperatorStageHistoryRecord>
+    pendingFittedALENormalOperatorStageMeasurements() const noexcept {
+        return pending_fitted_ale_normal_measurements_;
+    }
+    [[nodiscard]] std::span<
+        const FittedALENormalOperatorStageHistoryRecord>
+    fittedALENormalOperatorStageMeasurementHistory() const noexcept {
+        return fitted_ale_normal_measurement_history_;
+    }
+    [[nodiscard]] std::span<
+        const MeshNormalBoundaryConstraintDeclaration>
+    meshNormalBoundaryConstraints() const noexcept {
+        return mesh_normal_boundary_constraints_;
+    }
+    /**
+     * @brief Publish normal history in a serial/rank-local workflow.
+     *
+     * A distributed system must use @ref
+     * recordAcceptedMeshBoundaryProvenance from its first nonempty accepted
+     * record so normal and tangential publication share one transaction.
+     */
+    void recordAcceptedMeshNormalBoundaryConstraints(
+        std::uint64_t accepted_step,
+        Real accepted_time,
+        Real dt,
+        std::uint64_t state_revision);
+    [[nodiscard]] std::span<
+        const MeshNormalBoundaryConstraintHistoryRecord>
+    meshNormalBoundaryConstraintHistory() const noexcept {
+        return mesh_normal_boundary_constraint_history_;
+    }
     void declareMeshTangentialBoundaryPolicy(
         MeshTangentialBoundaryPolicyDeclaration declaration);
+    void bindMeshTangentialBoundaryPolicyConsumer(
+        FieldId mesh_displacement_field,
+        int boundary_marker,
+        MeshTangentialBoundaryPolicy policy,
+        std::string operator_tag,
+        std::string consumer_source);
     [[nodiscard]] std::span<const MeshTangentialBoundaryPolicyDeclaration>
     meshTangentialBoundaryPolicies() const noexcept {
         return mesh_tangential_boundary_policies_;
     }
+    /**
+     * @brief Publish tangential history in a serial/rank-local workflow.
+     *
+     * A distributed system must use @ref
+     * recordAcceptedMeshBoundaryProvenance from its first nonempty accepted
+     * record so normal and tangential publication share one transaction.
+     */
     void recordAcceptedMeshTangentialBoundaryPolicies(
         std::uint64_t accepted_step,
         Real accepted_time,
@@ -438,6 +974,26 @@ public:
     meshTangentialBoundaryPolicyHistory() const noexcept {
         return mesh_tangential_boundary_policy_history_;
     }
+    /**
+     * @brief Atomically publish accepted normal and tangential mesh-boundary
+     * provenance across the active FE communicator.
+     *
+     * Every communicator rank must call this method after every participating
+     * system is fully set up with the same finalized active communicator.
+     * Entering the collective with divergent setup or communicator state is a
+     * caller error and cannot be coordinated. A local validation or allocation
+     * failure after entry rolls both history vectors back on every rank. The
+     * accepted step metadata and symbolic declarations must match exactly;
+     * only each record's mesh geometry revision is deliberately rank-local.
+     * Opaque callback targets are rejected for multi-rank publication until
+     * they have a stable cross-rank identity contract. A globally empty
+     * declaration set is a no-op and does not seal later declarations.
+     */
+    void recordAcceptedMeshBoundaryProvenance(
+        std::uint64_t accepted_step,
+        Real accepted_time,
+        Real dt,
+        std::uint64_t state_revision);
     void declareFreeSurfaceDiscreteFunctional(
         FreeSurfaceDiscreteFunctionalDeclaration declaration);
     [[nodiscard]] std::span<
@@ -451,7 +1007,9 @@ public:
         Real dt,
         std::uint64_t pre_maintenance_endpoint_state_revision,
         std::uint64_t state_revision,
-        std::span<const AcceptedFreeSurfaceDiscreteFunctionalState> states);
+        std::span<const AcceptedFreeSurfaceDiscreteFunctionalState> states,
+        std::optional<std::uint64_t> extension_map_revision =
+            std::nullopt);
     [[nodiscard]] std::span<
         const FreeSurfaceDiscreteFunctionalHistoryRecord>
     freeSurfaceDiscreteFunctionalHistory() const noexcept {
@@ -479,6 +1037,20 @@ public:
     [[nodiscard]] std::vector<std::shared_ptr<
         const constraints::SmallCutAggregationProlongationReport>>
     finalizedSmallCutAggregationProlongations() const;
+    [[nodiscard]] std::span<const ExteriorBoundaryMeasurePolicy>
+    exteriorBoundaryMeasurePolicies() const noexcept
+    {
+        return exterior_boundary_measure_policies_;
+    }
+    [[nodiscard]] std::span<
+        const GeneratedBoundaryNitscheTracePolicy>
+    generatedBoundaryNitscheTracePolicies() const noexcept
+    {
+        return generated_boundary_nitsche_trace_policies_;
+    }
+    [[nodiscard]] std::span<
+        const GeneratedBoundaryNitscheTraceCertificateRecord>
+    generatedBoundaryNitscheTraceCertificates() const;
 
     void addOperator(OperatorTag name);
     void setFormInstallCellDomainRestrictions(
@@ -564,9 +1136,11 @@ public:
                              std::shared_ptr<assembly::FunctionalKernel> kernel);
     [[nodiscard]] Real evaluateFunctional(const std::string& tag,
                                           const SystemStateView& state) const;
-    [[nodiscard]] Real evaluateBoundaryFunctional(const std::string& tag,
-                                                  int boundary_marker,
-                                                  const SystemStateView& state) const;
+    [[deprecated("use BoundaryReductionService for boundary reductions")]]
+    [[nodiscard]] Real evaluateBoundaryFunctional(
+        const std::string& tag,
+        int boundary_marker,
+        const SystemStateView& state) const;
 
     /**
      * @brief Access the boundary reduction service for a given primary field.
@@ -1487,10 +2061,11 @@ public:
     /**
      * @brief Communicator governing this system's collective operations.
      *
-     * After setup this is the DOF-handler communicator. Before setup,
-     * systems constructed from a native distributed mesh use that
-     * mesh's communicator. Systems without communicator metadata are
-     * local to MPI_COMM_SELF until setup supplies one.
+     * Once the DOF handler is finalized this is its communicator, including
+     * during setup and after a failed or invalidated setup.  Before a DOF
+     * layout exists, systems constructed from a native distributed mesh use
+     * that mesh's communicator.  Systems without communicator metadata are
+     * local to MPI_COMM_SELF.
      */
     [[nodiscard]] MPI_Comm activeMpiCommunicator() const noexcept;
 #endif
@@ -1522,6 +2097,9 @@ public:
 
     void addFormulationRecord(analysis::FormulationRecord record);
     void addBoundaryConditionDescriptor(analysis::BoundaryConditionDescriptor desc);
+    void addBoundaryConditionDescriptor(
+        analysis::BoundaryConditionDescriptor desc,
+        std::string_view operator_tag);
     void addContribution(analysis::ContributionDescriptor desc);
     void addVariableDescriptor(analysis::VariableDescriptor desc);
     void addInvariantDomainDescriptor(analysis::InvariantDomainDescriptor desc);
@@ -1548,6 +2126,10 @@ public:
     }
     [[nodiscard]] const std::vector<analysis::BoundaryConditionDescriptor>& boundaryConditionDescriptors() const noexcept {
         return bc_descriptors_;
+    }
+    [[nodiscard]] std::span<const std::string>
+    boundaryConditionDescriptorOperatorTags() const noexcept {
+        return bc_descriptor_operator_tags_;
     }
     [[nodiscard]] const std::vector<analysis::VariableDescriptor>& variableDescriptors() const noexcept {
         return variable_descriptors_;
@@ -1628,17 +2210,7 @@ public:
         std::shared_ptr<const assembly::CutIntegrationContext> context);
 
     void clearCutIntegrationContext() {
-        if (cut_integration_context_) {
-            bumpConstraintLayoutRevision();
-            finalized_small_cut_aggregation_prolongations_.clear();
-        }
-        cut_integration_context_.reset();
-        invalidateAnalysisCache();
-        for (const auto& hook : cut_integration_context_update_callbacks_) {
-            if (hook.callback) {
-                hook.callback(nullptr);
-            }
-        }
+        setCutIntegrationContext(nullptr);
     }
 
     [[nodiscard]] const assembly::CutIntegrationContext* cutIntegrationContext() const noexcept {
@@ -1674,16 +2246,44 @@ public:
     template <typename Fn>
     auto executeWithOperatorRollback_(Fn&& fn) -> decltype(fn()) {
         auto snap = operator_registry_.snapshot();
+        auto field_registry_snapshot = field_registry_;
+        auto generated_interface_marker_snapshot =
+            generated_embedded_interface_markers_;
+        const auto formulation_record_size =
+            formulation_records_.size();
+        auto contribution_snapshot =
+            contributions_;
+        const auto contribution_definition_count =
+            contributions_def_count_;
+        const auto auxiliary_output_consumer_size =
+            auxiliary_output_consumers_.size();
         try {
             return fn();
         } catch (...) {
             operator_registry_.rollback(snap);
+            field_registry_ =
+                std::move(field_registry_snapshot);
+            generated_embedded_interface_markers_ =
+                std::move(
+                    generated_interface_marker_snapshot);
+            formulation_records_.resize(
+                formulation_record_size);
+            contributions_ =
+                std::move(contribution_snapshot);
+            contributions_def_count_ =
+                contribution_definition_count;
+            auxiliary_output_consumers_.resize(
+                auxiliary_output_consumer_size);
             throw;
         }
     }
     /// @endcond
 
 private:
+    void emitAcceptedMeshNormalBoundaryConstraintHistory(
+        std::size_t group_begin) const noexcept;
+    void emitAcceptedMeshTangentialBoundaryPolicyHistory(
+        std::size_t group_begin) const noexcept;
     [[nodiscard]] analysis::ProblemAnalysisContext buildProblemAnalysisContext() const;
     [[nodiscard]] analysis::ProblemAnalysisReport runProblemAnalysisPlanOnly() const;
     [[nodiscard]] std::unique_ptr<sparsity::SparsityPattern>
@@ -1800,10 +2400,57 @@ private:
         const SystemStateView& state,
         assembly::GlobalSystemView* matrix_out,
         assembly::GlobalSystemView* vector_out);
+    friend CoupledResidualKernels installFormulation(
+        FESystem& system,
+        const OperatorTag& op,
+        std::span<const FieldId> fields,
+        const forms::FormExpr& residual,
+        const FormInstallOptions& options);
+    friend std::vector<std::vector<
+        std::shared_ptr<assembly::AssemblyKernel>>>
+    installMixedFormIR(
+        FESystem& system,
+        const OperatorTag& op,
+        std::span<const FieldId> test_fields,
+        std::span<const FieldId> trial_fields,
+        const forms::MixedFormIR& mixed_ir,
+        const FormInstallOptions& options);
+    friend class BoundaryReductionService;
     friend class OperatorBackends;
 
+    void prepareFormBoundExteriorBoundaryMeasurePolicies(
+        const std::vector<ExteriorBoundaryMeasurePolicy>& policies);
+    void commitPreparedFormBoundExteriorBoundaryMeasurePolicies(
+        std::vector<ExteriorBoundaryMeasurePolicy> policies) noexcept;
+    void validateExteriorBoundaryMeasurePoliciesAgainstCutContext(
+        std::span<const ExteriorBoundaryMeasurePolicy> policies,
+        const assembly::CutIntegrationContext* context,
+        bool require_generated_active_context) const;
+    void requireCurrentExteriorBoundaryMeasurePolicies(
+        const OperatorTag& op) const;
+    void requireCurrentBoundaryReductionExteriorMeasures(
+        bool use_dof_handler_communicator = false) const;
+    void requireBoundaryReductionExteriorMeasure(
+        const forms::BoundaryFunctional& functional) const;
+    void requireConsistentCutIntegrationContextCandidate(
+        const assembly::CutIntegrationContext* context,
+        bool use_dof_handler_communicator = false) const;
+    void runCutIntegrationContextUpdateCallbacks(
+        const assembly::CutIntegrationContext* context,
+        bool use_dof_handler_communicator = false);
+    void prepareFormBoundGeneratedBoundaryNitscheTracePolicies(
+        const std::vector<
+            GeneratedBoundaryNitscheTracePolicy>& policies);
+    void commitPreparedFormBoundGeneratedBoundaryNitscheTracePolicies(
+        std::vector<
+            GeneratedBoundaryNitscheTracePolicy> policies) noexcept;
     void invalidateSetup() noexcept;
     void publishFinalizedSmallCutAggregationProlongations();
+    void invalidateGeneratedBoundaryNitscheTraceCertificates() noexcept;
+    void refreshGeneratedBoundaryNitscheTraceCertificates(
+        bool allow_missing_cut_context);
+    void requireCurrentGeneratedBoundaryNitscheTraceCertificates(
+        const OperatorTag& op) const;
     void requireSetup() const;
     void requireSingleFieldSetup() const;
     void buildAssemblyPlans();
@@ -1844,11 +2491,16 @@ private:
     OperatorRegistry operator_registry_;
     std::vector<FormCellDomainRestriction> form_install_cell_domain_restrictions_{};
     std::shared_ptr<const assembly::CutIntegrationContext> cut_integration_context_{};
+    std::unordered_map<int, std::string>
+        generated_active_boundary_owner_bindings_{};
     struct CutIntegrationContextTransactionBackup {
         std::shared_ptr<const assembly::CutIntegrationContext> context{};
         std::shared_ptr<const assembly::CutIntegrationContext>
             context_content_snapshot{};
         std::uint64_t context_content_revision{0u};
+        bool rollback_started{false};
+        std::unordered_map<int, std::string>
+            generated_active_boundary_owner_bindings{};
         constraints::AffineConstraints affine_constraints{};
         FELayoutRevisionState fe_layout_revisions{};
         constraints::ConstraintRevisionSnapshot constraint_revision_snapshot{};
@@ -1861,6 +2513,8 @@ private:
         std::vector<std::shared_ptr<
             const constraints::SmallCutAggregationProlongationReport>>
             finalized_small_cut_aggregation_prolongations{};
+        std::vector<GeneratedBoundaryNitscheTraceCertificateRecord>
+            generated_boundary_nitsche_trace_certificates{};
         std::vector<std::shared_ptr<
             const constraints::SmallCutAggregationConstraint::
                 LifecycleCheckpoint>>
@@ -1870,6 +2524,8 @@ private:
         cut_integration_context_transaction_backup_{};
     std::vector<CutIntegrationContextUpdateCallback>
         cut_integration_context_update_callbacks_{};
+    mutable bool
+        cut_integration_context_callback_dispatch_active_{false};
     std::set<InterfaceId> generated_embedded_interface_markers_{};
     std::vector<std::unique_ptr<constraints::Constraint>> constraint_defs_;
     std::vector<std::unique_ptr<constraints::ISystemConstraint>> system_constraint_defs_;
@@ -1896,10 +2552,25 @@ private:
     double last_constraint_update_time_{0.0};
     double last_constraint_update_dt_{0.0};
     assembly::MeshMotionFieldAccess mesh_motion_fields_{};
+    std::vector<MeshNormalBoundaryConstraintDeclaration>
+        mesh_normal_boundary_constraints_{};
+    std::vector<MeshNormalBoundaryConstraintHistoryRecord>
+        mesh_normal_boundary_constraint_history_{};
+    std::vector<FittedALENormalMeasurementDeclaration>
+        fitted_ale_normal_measurement_declarations_{};
+    std::vector<FittedALENormalOperatorStageHistoryRecord>
+        pending_fitted_ale_normal_measurements_{};
+    std::vector<FittedALENormalOperatorStageHistoryRecord>
+        fitted_ale_normal_measurement_history_{};
+    bool fitted_ale_normal_measurement_declarations_frozen_{false};
+    bool fitted_ale_normal_measurement_transaction_active_{false};
     std::vector<MeshTangentialBoundaryPolicyDeclaration>
         mesh_tangential_boundary_policies_{};
     std::vector<MeshTangentialBoundaryPolicyHistoryRecord>
         mesh_tangential_boundary_policy_history_{};
+    bool mesh_boundary_history_transaction_active_{false};
+    bool mesh_boundary_history_collective_call_active_{false};
+    bool mesh_boundary_history_defer_logging_{false};
     std::vector<FreeSurfaceDiscreteFunctionalDeclaration>
         free_surface_discrete_functional_declarations_{};
     std::vector<FreeSurfaceDiscreteFunctionalHistoryRecord>
@@ -1944,6 +2615,20 @@ private:
 
     /// Cache a SystemStateView's fields for auxiliary input callbacks.
     void cacheSystemState(const SystemStateView& state) const;
+
+    /**
+     * @brief Freeze, certify, and execute the due auxiliary input callbacks.
+     *
+     * Distributed callers agree on registry presence and the complete ordered
+     * callback schedule before any provider runs.  Provider failures are then
+     * coordinated after every frozen input so no peer can enter a later
+     * collective route after another rank has already failed.
+     */
+    void evaluateAuxiliaryInputsCollectively_(
+        Real time,
+        Real dt,
+        bool is_nonlinear_iteration,
+        std::string_view phase);
 
     mutable std::vector<Real> field_endpoint_scratch_src_{}; ///< Scratch for distributed field source endpoint.
     mutable std::vector<Real> field_endpoint_scratch_tgt_{}; ///< Scratch for distributed field target endpoint.
@@ -2079,6 +2764,10 @@ private:
     void bindSecondaryFields(BoundaryReductionService& svc,
                               FieldId primary_fid,
                               const std::vector<FieldId>& referenced_fields);
+    [[nodiscard]] const MeshNormalBoundaryConstraintDeclaration&
+    validatedFittedALENormalConstraint_(
+        FieldId mesh_displacement_field,
+        int boundary_marker) const;
     std::unique_ptr<AuxiliaryMultirateScheduler> aux_scheduler_{};
 
 public:
@@ -2094,10 +2783,10 @@ public:
                               int region_marker = -1,
                               std::span<const GlobalIndex> cell_filter = {},
                               std::optional<int> generated_active_boundary_marker =
-                                  std::nullopt);
+                                  std::nullopt,
+                              bool explicit_cell_filter = false);
 
 private:
-
     void advanceOneEntry(DeployedAuxEntry& entry, Real time, Real dt, int substep_count);
 
     /// Run one-time DAE consistent initialization for materialized auxiliary blocks.
@@ -2225,7 +2914,8 @@ private:
     std::vector<analysis::FormulationRecord> formulation_records_;
     std::vector<analysis::ContributionDescriptor> contributions_;
     std::size_t contributions_def_count_{0}; ///< Watermark for definition-phase contributions
-    std::vector<analysis::BoundaryConditionDescriptor> bc_descriptors_;
+	    std::vector<analysis::BoundaryConditionDescriptor> bc_descriptors_;
+        std::vector<std::string> bc_descriptor_operator_tags_{};
     std::vector<analysis::VariableDescriptor> variable_descriptors_;
     std::vector<analysis::InvariantDomainDescriptor> invariant_domain_descriptors_;
 
@@ -2354,6 +3044,18 @@ private:
     std::vector<std::shared_ptr<
         const constraints::SmallCutAggregationProlongationReport>>
         finalized_small_cut_aggregation_prolongations_{};
+    std::vector<ExteriorBoundaryMeasurePolicy>
+        exterior_boundary_measure_policies_{};
+    ExteriorBoundaryMeasurePolicyId
+        next_exterior_boundary_measure_policy_id_{1u};
+    std::vector<GeneratedBoundaryNitscheTracePolicy>
+        generated_boundary_nitsche_trace_policies_{};
+    std::vector<GeneratedBoundaryNitscheTraceCertificateRecord>
+        generated_boundary_nitsche_trace_certificates_{};
+    GeneratedBoundaryNitscheTracePolicyId
+        next_generated_boundary_nitsche_trace_policy_id_{1u};
+    bool generated_boundary_nitsche_trace_policy_shape_validated_{false};
+    std::uint64_t generated_boundary_nitsche_trace_policy_signature_{0u};
 	};
 
 } // namespace systems

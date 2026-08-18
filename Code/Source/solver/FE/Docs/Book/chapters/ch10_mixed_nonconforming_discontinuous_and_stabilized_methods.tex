@@ -1,0 +1,55 @@
+% =============================================================================
+\chapter[Mixed, Nonconforming, DG, and Stabilized Methods]{Mixed, Nonconforming, Discontinuous, and Stabilized Methods}
+\label{ch:advanced_methods}
+% =============================================================================
+
+This chapter broadens the finite element framework beyond standard conforming
+$H^1$ Galerkin discretizations. It introduces saddle-point formulations,
+nonconforming and discontinuous Galerkin methods, and stabilization techniques
+that are central to incompressible flow, transport-dominated problems, and
+multiphysics constraints.
+
+\section{Saddle-point problems and the inf-sup condition}
+\label{sec:advanced_methods:infsup}
+
+% Mixed variational structure, compatibility conditions, and Brezzi theory
+
+\section{Mixed formulations for fluxes and incompressibility}
+\label{sec:advanced_methods:mixed}
+
+% Darcy, Stokes, and nearly incompressible elasticity as model settings
+
+\section{\texorpdfstring{$H(\mathrm{div})$ and $H(\mathrm{curl})$ conforming discretizations}{H(div) and H(curl) conforming discretizations}}
+\label{sec:advanced_methods:compatible_spaces}
+
+% Raviart-Thomas, BDM, Nedelec, and commuting diagrams
+
+\section{Nonconforming finite elements}
+\label{sec:advanced_methods:nonconforming}
+
+% Crouzeix-Raviart ideas, consistency, and continuity conditions weaker than conformity
+
+\section{Discontinuous Galerkin formulations}
+\label{sec:advanced_methods:dg}
+
+% Interior penalty, numerical fluxes, jump and average operators, and locality
+
+\section{Locking, reduced integration, and consistency checks}
+\label{sec:advanced_methods:locking}
+
+% Volumetric and shear locking, selective integration, patch tests, and practical consistency diagnostics
+
+\section{Stabilized finite element methods}
+\label{sec:advanced_methods:stabilization}
+
+% SUPG, GLS, PSPG, VMS, and other residual-based stabilization ideas
+
+\section{Rank deficiency, spurious modes, and hourglass control}
+\label{sec:advanced_methods:spurious_modes}
+
+% Null modes, rank checks, and remedies for underintegrated or poorly constrained discretizations
+
+\section{Hybridization and condensed formulations}
+\label{sec:advanced_methods:hybridization}
+
+% Trace unknowns, local elimination, and reduced global systems

@@ -38,7 +38,7 @@ def test_wp8_matrix_bytes_are_exactly_frozen():
 
     assert digest == runner.EXPECTED_REGISTRY_SHA256
     matrix = runner.load_registry(MATRIX_PATH)
-    assert matrix["matrix_id"] == "free_surface_wp8_energy_prerequisite_v2"
+    assert matrix["matrix_id"] == "free_surface_wp8_energy_prerequisite_v3"
     assert matrix["status"] == "FROZEN_BEFORE_EXECUTION"
 
 
@@ -54,6 +54,14 @@ def test_wp8_matrix_has_no_duplicate_json_keys():
         MATRIX_PATH.read_text(encoding="utf-8"),
         object_pairs_hook=unique_object,
     )
+
+
+def test_wp8_matrix_tests_have_exact_frozen_source_definitions():
+    runner = load_runner()
+    matrix = runner.load_registry(MATRIX_PATH)
+
+    assert matrix["source_test_files"] == runner.EXPECTED_SOURCE_TEST_FILES
+    runner._validate_source_definitions(matrix)
 
 
 def test_wp8_maintenance_evidence_is_exactly_the_prerequisite_slice():
@@ -102,8 +110,48 @@ def test_wp8_maintenance_evidence_is_exactly_the_prerequisite_slice():
             "ApplicationDriverLevelSetWorkflowsMPI."
             "MaintenanceAlgebraicRevisionRejectsRankLocalSlices"
         ),
+        (
+            "FreeSurfaceEnergyLedger."
+            "CommitsOneCompleteBackwardEulerFixedTopologyBalance"
+        ),
+        (
+            "FreeSurfaceEnergyLedger."
+            "AcceptedHistoryRequiresContinuousEndpointAndOwnerProvenance"
+        ),
+        (
+            "FreeSurfaceEnergyLedger."
+            "RejectedHistoryAlsoLocksChannelOwnerProvenance"
+        ),
+        (
+            "FreeSurfaceEnergyLedger."
+            "UnstagedRejectionPreservesReasonWithoutInventingBalanceValues"
+        ),
+        (
+            "FreeSurfaceEnergyLedger."
+            "PartialEndpointProvenanceCannotStageOrClaimTopologyChange"
+        ),
+        (
+            "FreeSurfaceEnergyLedger."
+            "TopologyChangeCannotCommitAndRejectedAttemptContributesZero"
+        ),
+        (
+            "FreeSurfaceEnergyLedger."
+            "MissingChannelsAndNegativeDissipationFailClosed"
+        ),
+        (
+            "FreeSurfaceEnergyLedger."
+            "EveryChannelRequiresOneNamedApplicableOwner"
+        ),
+        (
+            "FreeSurfaceEnergyLedger."
+            "RequiresOneEndpointIntervalAndIncreasingTransactionIdentifiers"
+        ),
+        (
+            "FreeSurfaceEnergyLedger."
+            "GasApplicabilityMustBeExplicitAndStableAcrossTheStep"
+        ),
     } <= tests
-    assert len(tests) == 31
+    assert len(tests) == 41
     assert {
         (
             "GeneralSimulationParameters."
@@ -324,8 +372,8 @@ def test_wp8_validate_only_reports_prerequisite_nonclosure():
 
     assert summary["outcome"] == "PASS_PREREQUISITE_NONCLOSURE"
     assert summary["requested_claim"] == "low_level_prerequisite"
-    assert summary["test_count"] == 31
-    assert summary["group_count"] == 4
+    assert summary["test_count"] == 41
+    assert summary["group_count"] == 5
     assert summary["serial_quantitative_gate_count"] == 9
     assert summary["unqualified_method_exit_count"] == 10
     assert summary["unqualified_simulation_exit_count"] == 6

@@ -20,6 +20,44 @@ namespace FE {
 namespace interfaces {
 namespace {
 
+constexpr std::uint64_t kTopologyHashOffset = 1469598103934665603ull;
+constexpr std::uint64_t kTopologyHashPrime = 1099511628211ull;
+
+void mixTopologyHash(std::uint64_t& hash, std::uint64_t value) noexcept
+{
+    hash ^= value;
+    hash *= kTopologyHashPrime;
+}
+
+[[nodiscard]] std::size_t topologyCornerCount(ElementType element_type) noexcept
+{
+    switch (element_type) {
+    case ElementType::Triangle3:
+    case ElementType::Triangle6:
+        return 3u;
+    case ElementType::Quad4:
+    case ElementType::Quad8:
+    case ElementType::Quad9:
+    case ElementType::Tetra4:
+    case ElementType::Tetra10:
+        return 4u;
+    case ElementType::Pyramid5:
+    case ElementType::Pyramid13:
+    case ElementType::Pyramid14:
+        return 5u;
+    case ElementType::Wedge6:
+    case ElementType::Wedge15:
+    case ElementType::Wedge18:
+        return 6u;
+    case ElementType::Hex8:
+    case ElementType::Hex20:
+    case ElementType::Hex27:
+        return 8u;
+    default:
+        return 0u;
+    }
+}
+
 struct CutPointCandidate {
     std::array<Real, 3> point{{0.0, 0.0, 0.0}};
     std::array<Real, 3> parent_coordinate{{0.0, 0.0, 0.0}};
@@ -374,6 +412,36 @@ void addUniqueCandidate(std::vector<CutPointCandidate>& points,
         c = add(c, point.point);
     }
     return scale(c, Real{1.0} / static_cast<Real>(points.size()));
+}
+
+[[nodiscard]] std::array<Real, 3> polygonCentroid(
+    const std::vector<CutPointCandidate>& points) noexcept {
+    const auto fallback = centroid(points);
+    if (points.size() < 3u) {
+        return fallback;
+    }
+    const auto& a = points.front().point;
+    std::array<Real, 3> weighted_centroid{{0.0, 0.0, 0.0}};
+    Real total_area{0.0};
+    for (std::size_t triangle = 1u;
+         triangle + 1u < points.size();
+         ++triangle) {
+        const auto& b = points[triangle].point;
+        const auto& c = points[triangle + 1u].point;
+        const Real area =
+            Real{0.5} * norm3(cross(sub(b, a), sub(c, a)));
+        if (!(area > Real{0.0}) || !std::isfinite(area)) {
+            continue;
+        }
+        const auto triangle_centroid =
+            scale(add(add(a, b), c), Real{1.0} / Real{3.0});
+        weighted_centroid =
+            add(weighted_centroid, scale(triangle_centroid, area));
+        total_area += area;
+    }
+    return total_area > Real{0.0}
+               ? scale(weighted_centroid, Real{1.0} / total_area)
+               : fallback;
 }
 
 void orderPolygonPoints(std::vector<CutPointCandidate>& points,
@@ -1049,6 +1117,8 @@ referenceTetrahedraFromFaces(
     region.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
     region.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
     region.topology_id = "cell-" + std::to_string(input.parent_cell) + "-" + suffix;
+    region.parent_corner_topology_key =
+        levelSetParentCornerTopologyKey(request, input);
     region.full_cell_equivalent = full_cell_equivalent;
     region.achieved_quadrature_order = achieved_quadrature_order;
     region.reference_subcells = std::move(reference_subcells);
@@ -1073,6 +1143,44 @@ void appendSideVolumeRegion(LevelSetCellCutResult& result,
 }
 
 } // namespace
+
+std::uint64_t levelSetParentCornerTopologyKey(
+    const CutInterfaceDomainRequest& request,
+    const LevelSetCellCutInput& input)
+{
+    const std::size_t count = topologyCornerCount(input.element_type);
+    if (count == 0u || input.level_set_values.size() < count ||
+        !std::isfinite(request.isovalue) ||
+        !std::isfinite(request.tolerance) ||
+        request.tolerance <= Real{0.0}) {
+        throw std::invalid_argument(
+            "level-set parent-corner topology key requires a supported element and finite corner classification policy");
+    }
+
+    std::uint64_t hash = kTopologyHashOffset;
+    constexpr std::uint64_t contract_tag =
+        0x4c53434f524e5231ull; // "LSCORNR1"
+    mixTopologyHash(hash, contract_tag);
+    mixTopologyHash(hash, static_cast<std::uint64_t>(input.element_type));
+    mixTopologyHash(hash, static_cast<std::uint64_t>(count));
+    for (std::size_t i = 0u; i < count; ++i) {
+        const Real value = input.level_set_values[i];
+        if (!std::isfinite(value)) {
+            throw std::invalid_argument(
+                "level-set parent-corner topology key requires finite corner values");
+        }
+        const Real signed_value = value - request.isovalue;
+        const std::uint64_t sign_class =
+            signed_value < -request.tolerance
+                ? 0u
+                : (signed_value > request.tolerance ? 2u : 1u);
+        // Canonical reference-corner position is part of the topology.  This
+        // distinguishes, for example, adjacent and opposite cuts of a quad.
+        mixTopologyHash(hash, static_cast<std::uint64_t>(i));
+        mixTopologyHash(hash, sign_class);
+    }
+    return hash == 0u ? 1u : hash;
+}
 
 bool supportsLinearLevelSetCellCut2D(ElementType element_type) noexcept
 {
@@ -1457,6 +1565,8 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     fragment.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
     fragment.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
     fragment.topology_id = "cell-" + std::to_string(input.parent_cell) + "-segment-0";
+    fragment.parent_corner_topology_key =
+        levelSetParentCornerTopologyKey(request, input);
     fragment.vertices = {
         CutInterfaceVertex{.point = a.point,
                            .parent_coordinate = a.parent_coordinate,
@@ -1815,6 +1925,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     fragment.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
     fragment.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
     fragment.topology_id = "cell-" + std::to_string(input.parent_cell) + "-polygon-0";
+    fragment.parent_corner_topology_key =
+        levelSetParentCornerTopologyKey(request, input);
     fragment.vertices.reserve(cut_points.size());
     for (std::size_t i = 0; i < cut_points.size(); ++i) {
         const auto stable_index = static_cast<LocalIndex>(i + 1u);
@@ -1827,7 +1939,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                                                                  stable_index,
                                                                  request.source.value_revision)});
     }
-    const auto qp = centroid(cut_points);
+    const auto qp = polygonCentroid(cut_points);
     fragment.quadrature_points = {
         CutInterfaceQuadraturePoint{.point = qp,
                                     .parent_coordinate = qp,

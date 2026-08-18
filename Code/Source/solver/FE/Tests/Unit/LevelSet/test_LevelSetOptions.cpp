@@ -78,6 +78,8 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
     EXPECT_DOUBLE_EQ(
         options.conservative_phase.impermeable_normal_velocity_tolerance,
         1.0e-10);
+    EXPECT_FALSE(options.conservative_phase
+                     .pointwise_impermeable_velocity_tolerance_explicitly_requested);
     EXPECT_TRUE(options.conservative_phase.reconcile_geometry);
     EXPECT_DOUBLE_EQ(options.conservative_phase.geometry_measure_tolerance,
                      1.0e-10);

@@ -49,11 +49,16 @@ public:
     [[nodiscard]] Real norm() const override;
 
     void updateGhosts() override;
+    [[nodiscard]] bool ghostUpdateRequiresCollectiveParticipation()
+        const noexcept override;
 
     [[nodiscard]] std::unique_ptr<assembly::GlobalSystemView> createAssemblyView() override;
+    [[nodiscard]] std::unique_ptr<assembly::GlobalSystemView>
+    createGhostedReadView() override;
 
     [[nodiscard]] std::span<Real> localSpan() override;
     [[nodiscard]] std::span<const Real> localSpan() const override;
+    [[nodiscard]] std::vector<GlobalIndex> ownedGlobalRows() const override;
 
     [[nodiscard]] std::size_t numBlocks() const noexcept { return blocks_.size(); }
     [[nodiscard]] GenericVector& block(std::size_t i);

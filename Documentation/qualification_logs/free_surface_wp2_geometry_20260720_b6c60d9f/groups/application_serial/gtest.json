@@ -1,0 +1,196 @@
+{
+  "tests": 19,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-22T09:24:57Z",
+  "time": "0.018s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "ApplicationDriverLevelSetWorkflows",
+      "tests": 5,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T09:24:57Z",
+      "time": "0.017s",
+      "testsuite": [
+        {
+          "name": "RefreshesMultipleGeneratedCutDomainsIntoOneContext",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0.002s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "AcceptedFunctionalUsesAuthoritativeSnapshotAndRecordsGlobalState",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "ConsumedContactMarkerAcceptsCurvedHighOrderFragments",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0.002s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "PrescribedWallSnapshotDrivesEndpointReinitialization",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0.01s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        },
+        {
+          "name": "ActiveOnlyRetentionRejectsInactiveCutVolumeConsumerWithoutRules",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "ApplicationDriverLevelSetWorkflows"
+        }
+      ]
+    },
+    {
+      "name": "ActiveDomainOutput",
+      "tests": 12,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T09:24:57Z",
+      "time": "0s",
+      "testsuite": [
+        {
+          "name": "WritesWetVolumeFractionForCutCell",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "ActiveDomainOutput"
+        },
+        {
+          "name": "WetFractionsMatchGeneratedCutVolumeMetadata",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "ActiveDomainOutput"
+        },
+        {
+          "name": "WritesHighOrderWetVolumeFractionFromRetainedRules",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "ActiveDomainOutput"
+        },
+        {
+          "name": "WritesFullWetAndFullDryFractions",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "ActiveDomainOutput"
+        },
+        {
+          "name": "TracksWetVolumeDriftAcrossAcceptedSteps",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "ActiveDomainOutput"
+        },
+        {
+          "name": "RestartedGeneratedActiveDomainWritesWetVolumeFields",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "ActiveDomainOutput"
+        },
+        {
+          "name": "CollectsPhysicalCutVolumeMeasureOnScaledQuad",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "ActiveDomainOutput"
+        },
+        {
+          "name": "CollectsPhysicalMeasureForHighOrderCurvedCutRule",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "ActiveDomainOutput"
+        },
+        {
+          "name": "WritesMappedWetVolumeFractionForCurvedRule",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "ActiveDomainOutput"
+        },
+        {
+          "name": "HighOrderWetVolumeDriftUsesPhysicalMeasure",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "ActiveDomainOutput"
+        },
+        {
+          "name": "CollectsPhysicalFullCellMeasureOnDistortedQuad",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "ActiveDomainOutput"
+        },
+        {
+          "name": "UnflaggedFullMeasureRuleUsesMappedQuadraturePoints",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "ActiveDomainOutput"
+        }
+      ]
+    },
+    {
+      "name": "LevelSetCurvatureSamples",
+      "tests": 2,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T09:24:57Z",
+      "time": "0s",
+      "testsuite": [
+        {
+          "name": "CollectsGeneratedCutVolumeQuadratureSamplesForActiveSide",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "LevelSetCurvatureSamples"
+        },
+        {
+          "name": "MapsWarpedHighOrderValueAndCoordinateAtIdenticalReferencePoint",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "LevelSetCurvatureSamples"
+        }
+      ]
+    }
+  ]
+}

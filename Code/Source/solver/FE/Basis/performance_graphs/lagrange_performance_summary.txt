@@ -1,0 +1,42 @@
+LagrangeBasis performance graph summary
+======================================
+
+Source CSV: Code/Source/solver/FE/Basis/performance_graphs/lagrange_basis_benchmark.csv
+Total benchmark rows: 585
+Parsed Lagrange order-sweep rows: 507
+Parsed Lagrange parallel rows: 10
+
+Compiler: clang 14.0.0
+Build flags token: optimized
+CPU: Intel(R) Core(TM) i7-8565U CPU @ 1.80GHz
+Hardware threads reported: 8
+SIMD width bytes: 16
+
+Parallel scaling, hex order 4 strided all:
+  threads=1: ns_per_call=8474.265, speedup=1.000, efficiency=1.000
+  threads=2: ns_per_call=4371.427, speedup=1.939, efficiency=0.969
+  threads=4: ns_per_call=4327.506, speedup=1.958, efficiency=0.490
+  threads=8: ns_per_call=3518.177, speedup=2.409, efficiency=0.301
+  threads=16: ns_per_call=3281.720, speedup=2.582, efficiency=0.161
+
+Reference line definitions:
+  Scalar/strided order sweeps: dashed lines are the benchmark's modeled
+  flop-count growth, normalized to the first measured positive-flop order
+  for that topology and operation. They are not hardware roofline lower
+  bounds.
+  Construction sweep: dashed lines are normalized O(dofs) growth. This is
+  a coarse reference only; construction may include topology-specific
+  setup with higher complexity.
+  Parallel scaling: dashed lines are true ideal references: speedup =
+  thread_count and efficiency = 1.0.
+
+Generated plots:
+  lagrange_construction_order_sweep.png/.svg
+  lagrange_parallel_scaling.png/.svg
+  lagrange_scalar_order_sweep.png/.svg
+  lagrange_strided_order_sweep.png/.svg
+
+Interpretation note: these are local wall-clock microbenchmarks. CPU
+frequency scaling, thermal state, and background load can move the
+absolute numbers; the order trends and relative scaling are usually
+the more stable signal.

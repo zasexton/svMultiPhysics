@@ -12,8 +12,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <limits>
+#include <locale>
+#include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -461,9 +465,49 @@ collectBoundaryFaces(const assembly::IMeshAccess& mesh, int boundary_marker)
 
 std::string GeneratedInterfaceBoundaryIntersectionMarkerKey::stableKey() const
 {
-    return source.identifier() + "|" + domain_id + "|" +
-           std::to_string(isovalue) + "|" + std::to_string(interface_marker) +
-           "|" + std::to_string(boundary_marker);
+    const Real canonical_isovalue =
+        isovalue == Real{0.0}
+            ? Real{0.0}
+            : isovalue;
+    std::ostringstream encoded_isovalue;
+    encoded_isovalue.imbue(
+        std::locale::classic());
+    encoded_isovalue
+        << std::scientific
+        << std::setprecision(
+               std::numeric_limits<
+                   Real>::max_digits10)
+        << canonical_isovalue;
+
+    std::string key;
+    const auto append_component =
+        [&](std::string_view value) {
+            key += std::to_string(
+                value.size());
+            key.push_back(':');
+            key.append(value);
+        };
+    append_component(
+        std::to_string(
+            static_cast<int>(
+                source.kind)));
+    if (source.kind ==
+        CutInterfaceSourceKind::Field) {
+        append_component(
+            std::to_string(
+                source.field_id));
+    } else {
+        append_component(
+            source.evaluator_id);
+    }
+    append_component(domain_id);
+    append_component(
+        encoded_isovalue.str());
+    append_component(
+        std::to_string(interface_marker));
+    append_component(
+        std::to_string(boundary_marker));
+    return key;
 }
 
 std::uint64_t stableGeneratedInterfaceBoundaryIntersectionMarkerHash(

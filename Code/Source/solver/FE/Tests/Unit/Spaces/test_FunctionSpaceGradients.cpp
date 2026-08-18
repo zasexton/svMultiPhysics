@@ -8,6 +8,7 @@
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/HCurlSpace.h"
 #include "FE/Spaces/HDivSpace.h"
+#include "FE/Spaces/ProductSpace.h"
 
 using namespace svmp::FE;
 using namespace svmp::FE::spaces;
@@ -77,6 +78,37 @@ TEST(FunctionSpaceGradients, VectorValuedSpacesExposeJacobianWithoutChangingGrad
                         fd[static_cast<std::size_t>(comp)],
                         1e-8);
         }
+    }
+}
+
+TEST(FunctionSpaceGradients,
+     ProductSpaceJacobianUsesComponentBlockedScalarGradients) {
+    auto scalar =
+        std::make_shared<H1Space>(ElementType::Triangle3, 1);
+    ProductSpace space(scalar, 2);
+    const std::vector<Real> coefficients{
+        Real(0), Real(2), Real(3),
+        Real(5), Real(4), Real(1)};
+    ASSERT_EQ(coefficients.size(), space.dofs_per_element());
+
+    const FunctionSpace::Value xi{Real(0.2), Real(0.3), Real(0)};
+    const auto jacobian = space.evaluate_jacobian(xi, coefficients);
+    const std::vector<Real> first{
+        coefficients.begin(), coefficients.begin() + 3};
+    const std::vector<Real> second{
+        coefficients.begin() + 3, coefficients.end()};
+    const auto first_gradient =
+        scalar->evaluate_gradient(xi, first);
+    const auto second_gradient =
+        scalar->evaluate_gradient(xi, second);
+
+    for (std::size_t direction = 0u; direction < 3u;
+         ++direction) {
+        EXPECT_DOUBLE_EQ(
+            jacobian(0u, direction), first_gradient[direction]);
+        EXPECT_DOUBLE_EQ(
+            jacobian(1u, direction), second_gradient[direction]);
+        EXPECT_DOUBLE_EQ(jacobian(2u, direction), Real(0));
     }
 }
 

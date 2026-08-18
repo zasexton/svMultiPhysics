@@ -62,6 +62,11 @@ struct FormExprScanResult {
     /// Exact interface markers found on InterfaceIntegral nodes
     std::vector<int> interface_markers;
 
+    /// Explicit physical/generated exterior-boundary selections.
+    ///
+    /// Legacy raw ds/dI nodes do not populate this collection.
+    std::vector<forms::ExteriorBoundaryMeasure> exterior_boundary_measures;
+
     /// Constitutive law metadata discovered from constitutive model nodes
     std::vector<ConstitutiveLawMetadata> constitutive_laws;
 

@@ -62,6 +62,28 @@ namespace constraints {
 
 // Forward declarations
 class ConstraintDistributor;
+class AffineConstraints;
+
+/**
+ * Deterministic semantic fingerprint of one closed affine-constraint set.
+ *
+ * Unlike the layout revision, this fingerprint includes slave and master
+ * indices, weights, and inhomogeneities. It provides a strong guard against
+ * changing the admissible algebraic space between residual or geometry
+ * evaluations.
+ */
+struct ConstraintSemanticFingerprint {
+    std::uint64_t hash_a{1469598103934665603ULL};
+    std::uint64_t hash_b{0x9e3779b97f4a7c15ULL};
+    std::uint64_t line_count{0u};
+    std::uint64_t entry_count{0u};
+
+    [[nodiscard]] bool operator==(
+        const ConstraintSemanticFingerprint&) const noexcept = default;
+};
+
+[[nodiscard]] ConstraintSemanticFingerprint constraintSemanticFingerprint(
+    const AffineConstraints& affine_constraints);
 
 /**
  * @brief Single entry in a constraint line (master DOF with weight)

@@ -144,6 +144,26 @@ struct FEQuantityDefinition {
     /// Generated active-boundary marker used for cut-boundary integration.
     std::optional<int> generated_active_boundary_marker{};
 
+    /**
+     * @brief Typed exterior-boundary selection for boundary-integral
+     * quantities.
+     */
+    [[nodiscard]] std::optional<forms::ExteriorBoundaryMeasure>
+    exteriorBoundaryMeasure() const
+    {
+        if (kind != FEQuantityKind::BoundaryIntegral &&
+            kind != FEQuantityKind::BoundaryAverage) {
+            return std::nullopt;
+        }
+        return generated_active_boundary_marker.has_value()
+            ? forms::ExteriorBoundaryMeasure::
+                  generatedActiveSubset(
+                      boundary_marker,
+                      *generated_active_boundary_marker)
+            : forms::ExteriorBoundaryMeasure::
+                  fullPhysical(boundary_marker);
+    }
+
     /// Region descriptor (for RegionIntegral, RegionAverage).
     /// Uses the same region kind/identity scheme as AuxiliaryDeploymentRegion.
     int region_marker{-1};

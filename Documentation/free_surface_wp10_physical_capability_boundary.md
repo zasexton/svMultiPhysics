@@ -37,7 +37,7 @@ boundary operator uses that value as the prescribed exterior traction
 reference. It does not solve an exterior momentum equation or an exterior
 pressure field.
 
-Effective-artifact schema 2 retains the momentum capability label
+Effective-artifact schema 3 retains the momentum capability label
 `one_phase_liquid_sharp_interface` and adds a `physical_model` record named
 `one_phase_liquid_prescribed_exterior_pressure`. That record states that
 there is one liquid phase, one liquid velocity field, one liquid pressure
@@ -45,7 +45,8 @@ field, one material density state, and one material viscosity state. Its
 exterior-pressure mode is `prescribed_scalar_traction_reference`; exterior
 momentum and pressure fields are not solved. Explicit schema-1 legacy
 artifacts carry `physical_model: null` and cannot inherit this current model
-record.
+record. Schema 3 also adds the fitted surface/contact request envelope and
+stable fail-closed reason codes; it does not add a second fluid or gas model.
 
 Level-set transport independently labels its nonlocally conservative and
 locally conservative indicator variants as one-phase transport. The locally
@@ -150,12 +151,14 @@ wrapper
 freeze only the following evidence:
 
 - the option enum and default make the supported physical model explicit;
-- artifact schema 2 emits the canonical physical-model record and prescribed
-  exterior-pressure state, while explicit legacy output carries a null model;
+- artifact schema 3 emits the canonical physical-model record, prescribed
+  exterior-pressure state, and fitted surface/contact request envelope, while
+  explicit legacy output carries a null model;
 - canonical XML aliases, direct maps, domains, boundary conditions, and
   inline module options fail closed before Navier--Stokes system mutation;
-- both the normal factory and primary-velocity pre-registration path execute
-  the same early production validation;
+- the normal factory, primary-velocity pre-registration path, and
+  cross-equation wet-extension dependency pass execute the same early fitted
+  surface/contact capability validation before field mutation;
 - the two level-set transport modes emit one-phase labels;
 - the production option record still contains a single liquid
   velocity/pressure/density/viscosity state; and
@@ -166,10 +169,10 @@ freeze only the following evidence:
   be mappings; a non-mapping root is structural invalidity rather than an
   unsupported-physics diagnostic.
 
-The two frozen groups contain seven tests: four Physics tests for the current
+The two frozen groups contain eight tests: four Physics tests for the current
 artifact, legacy artifact, invalid enum, direct-map, and pre-registration
-boundaries, and three Application tests for both transport labels and XML
-containment.
+boundaries, and four Application tests for both transport labels, XML
+containment, and cross-equation fitted-capability preflight ordering.
 
 The wrapper accepts only the claim `one_phase_capability_boundary`. It rejects
 requests for FSR-08 closure, WP-10 closure, Q7 closure, incompressible
@@ -179,6 +182,13 @@ contract and require its exact rejection diagnostic. There are deliberately
 no invented numerical thresholds:
 artifact-label tests are categorical containment checks, not physical
 validation.
+
+Current-tree validation-only passes the one-phase boundary with all 7 source
+checks and the frozen scope-guard cases (3 accepted, 21 rejected, and 2
+structurally invalid); all 16 runner unit tests pass. The result still records
+9 unimplemented WP-10 requirements and 8 blocked exits each for WP-10 and Q7.
+No Physics or Application binary was supplied, so the eight frozen binary
+tests are not counted as executed evidence.
 
 ## Required WP-10 progression
 
@@ -218,12 +228,15 @@ matrix, so Q7 and WP-10 must remain unchecked.
 
 - One liquid field pair and material state:
   `Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h`
-- Schema-2 physical-model artifact, invalid-enum stop, and prescribed exterior
-  pressure:
+- Schema-3 physical-model and fitted surface/contact capability artifact,
+  invalid-enum stop, and prescribed exterior pressure:
   `Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp`
 - Direct-map, domain, boundary, module-option, factory, and pre-registration
   containment:
   `Code/Source/solver/Physics/Formulations/NavierStokes/NavierStokesRegister.cpp`
+- Cross-module capability preflight before future wet-extension velocity
+  pre-registration:
+  `Code/Source/solver/Application/Core/SimulationBuilder.cpp`
 - Canonical XML alias placement, duplication, and value containment:
   `Code/Source/solver/Parameters.cpp`
 - One-phase transport capability artifacts:
@@ -235,3 +248,6 @@ matrix, so Q7 and WP-10 must remain unchecked.
   `Code/Source/solver/Physics/Tests/Unit/test_NavierStokesLegacyBCs.cpp`,
   `Code/Source/solver/Application/Tests/Unit/test_EquationTranslator.cpp`, and
   `Code/Source/solver/Application/Tests/Unit/test_LevelSetEquationTranslator.cpp`
+- Application ordering evidence for capability rejection before wet-extension
+  preregistration:
+  `Code/Source/solver/Application/Tests/Unit/test_OpenVesselExamples.cpp`

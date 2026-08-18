@@ -10,6 +10,7 @@
 #include "Systems/FESystem.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Auxiliary/AuxiliaryInputRegistry.h"
+#include "Auxiliary/AuxiliaryMultirateScheduler.h"
 #include "Auxiliary/AuxiliaryOperatorRegistry.h"
 #include "Systems/GlobalKernel.h"
 #include "Systems/SystemsExceptions.h"
@@ -31,20 +32,24 @@
 #include "Core/Alignment.h"
 #include "Core/AlignedAllocator.h"
 #include "Core/FEConfig.h"
+#include "Core/MpiCollectiveTrace.h"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <exception>
 #include <fstream>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <type_traits>
 #include <sstream>
 #include <string>
@@ -63,6 +68,382 @@ namespace FE {
 namespace systems {
 
 namespace {
+
+void coordinateAssemblyPreflightFailure(
+    const FESystem& system,
+    const std::exception_ptr& local_exception,
+    std::string_view phase)
+{
+    static_cast<void>(system);
+    bool any_failed = local_exception != nullptr;
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0) {
+        const auto communicator =
+            system.activeMpiCommunicator();
+        int world_size = 1;
+        MPI_Comm_size(communicator, &world_size);
+        if (world_size > 1) {
+            const int local_ok =
+                local_exception == nullptr ? 1 : 0;
+            int all_ok = 0;
+            const auto sequence =
+                debug::nextMpiCollectiveTraceSeq();
+            debug::traceMpiCollective(
+                "before",
+                sequence,
+                "SystemAssembly::coordinateAssemblyPreflightFailure",
+                1,
+                MPI_INT,
+                MPI_MIN,
+                communicator);
+            MPI_Allreduce(
+                &local_ok,
+                &all_ok,
+                1,
+                MPI_INT,
+                MPI_MIN,
+                communicator);
+            debug::traceMpiCollective(
+                "after",
+                sequence,
+                "SystemAssembly::coordinateAssemblyPreflightFailure",
+                1,
+                MPI_INT,
+                MPI_MIN,
+                communicator);
+            any_failed = all_ok == 0;
+        }
+    }
+#endif
+    if (!any_failed) {
+        return;
+    }
+    if (local_exception != nullptr) {
+        std::rethrow_exception(local_exception);
+    }
+    throw std::runtime_error(
+        "FESystem: diagnostic=distributed_assembly_preflight_failure phase='" +
+        std::string(phase) +
+        "' another communicator rank rejected its local assembly state");
+}
+
+void requireConsistentAssemblyRequest(
+    const FESystem& system,
+    const AssemblyRequest& request)
+{
+    static_cast<void>(system);
+    static_cast<void>(request);
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized == 0 || finalized != 0) {
+        return;
+    }
+
+    const auto communicator =
+        system.activeMpiCommunicator();
+    if (communicator == MPI_COMM_NULL) {
+        return;
+    }
+    int world_size = 1;
+    MPI_Comm_size(communicator, &world_size);
+    if (world_size <= 1) {
+        return;
+    }
+
+    constexpr std::uint64_t offset =
+        14695981039346656037ull;
+    constexpr std::uint64_t prime =
+        1099511628211ull;
+    std::uint64_t digest = offset;
+    const auto mix_byte = [&](std::uint8_t value) {
+        digest ^= value;
+        digest *= prime;
+    };
+    const auto mix_u64 = [&](std::uint64_t value) {
+        for (unsigned int byte = 0u;
+             byte < 8u;
+             ++byte) {
+            mix_byte(static_cast<std::uint8_t>(
+                (value >> (byte * 8u)) &
+                std::uint64_t{0xffu}));
+        }
+    };
+    mix_u64(static_cast<std::uint64_t>(
+        request.op.size()));
+    for (const unsigned char character : request.op) {
+        mix_byte(character);
+    }
+    const std::array<bool, 10> flags{{
+        request.want_matrix,
+        request.want_vector,
+        request.zero_outputs,
+        request.assemble_boundary_terms,
+        request.assemble_interior_face_terms,
+        request.assemble_interface_face_terms,
+        request.assemble_global_terms,
+        request.suppress_constraint_inhomogeneity,
+        request.is_nonlinear_iteration,
+        request.suppress_auxiliary_coupling_assembly,
+    }};
+    for (const bool flag : flags) {
+        mix_byte(flag ? std::uint8_t{1u}
+                      : std::uint8_t{0u});
+    }
+
+    const std::uint64_t local_shape[2]{
+        static_cast<std::uint64_t>(
+            request.op.size()),
+        digest};
+    std::uint64_t minimum_shape[2]{};
+    std::uint64_t maximum_shape[2]{};
+    const auto reduce =
+        [&](std::uint64_t* reduced,
+            MPI_Op operation) {
+            const auto sequence =
+                debug::nextMpiCollectiveTraceSeq();
+            debug::traceMpiCollective(
+                "before",
+                sequence,
+                "SystemAssembly::requireConsistentAssemblyRequest",
+                2,
+                MPI_UINT64_T,
+                operation,
+                communicator);
+            MPI_Allreduce(
+                local_shape,
+                reduced,
+                2,
+                MPI_UINT64_T,
+                operation,
+                communicator);
+            debug::traceMpiCollective(
+                "after",
+                sequence,
+                "SystemAssembly::requireConsistentAssemblyRequest",
+                2,
+                MPI_UINT64_T,
+                operation,
+                communicator);
+        };
+    reduce(minimum_shape, MPI_MIN);
+    reduce(maximum_shape, MPI_MAX);
+    FE_THROW_IF(
+        minimum_shape[0] != maximum_shape[0] ||
+            minimum_shape[1] !=
+                maximum_shape[1],
+        InvalidArgumentException,
+        "assembleOperator: assembly request differs across "
+        "communicator ranks");
+#endif
+}
+
+void requireConsistentPartitionedAuxiliaryAdvance(
+    const FESystem& system,
+    double state_time,
+    double state_dt,
+    bool has_partitioned_auxiliary,
+    bool needs_partitioned_auxiliary_advance,
+    std::uint64_t partitioned_auxiliary_count,
+    std::uint64_t partitioned_auxiliary_digest)
+{
+    static_cast<void>(system);
+    static_cast<void>(state_time);
+    static_cast<void>(state_dt);
+    static_cast<void>(
+        has_partitioned_auxiliary);
+    static_cast<void>(
+        needs_partitioned_auxiliary_advance);
+    static_cast<void>(
+        partitioned_auxiliary_count);
+    static_cast<void>(
+        partitioned_auxiliary_digest);
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized == 0 || finalized != 0) {
+        return;
+    }
+
+    const auto communicator =
+        system.dofHandler().mpiComm();
+    int world_size = 1;
+    MPI_Comm_size(communicator, &world_size);
+    if (world_size <= 1) {
+        return;
+    }
+
+    const int local_flags[3]{
+        std::isfinite(state_time) &&
+                std::isfinite(state_dt) &&
+                std::isfinite(
+                    static_cast<Real>(state_time)) &&
+                std::isfinite(
+                    static_cast<Real>(state_dt))
+            ? 1
+            : 0,
+        has_partitioned_auxiliary ? 1 : 0,
+        needs_partitioned_auxiliary_advance
+            ? 1
+            : 0};
+    int minimum_flags[3]{};
+    int maximum_flags[3]{};
+    const auto reduce_flags =
+        [&](int* reduced,
+            MPI_Op operation) {
+            const auto sequence =
+                debug::nextMpiCollectiveTraceSeq();
+            debug::traceMpiCollective(
+                "before",
+                sequence,
+                "SystemAssembly::requireConsistentPartitionedAuxiliaryAdvanceFlags",
+                3,
+                MPI_INT,
+                operation,
+                communicator);
+            MPI_Allreduce(
+                local_flags,
+                reduced,
+                3,
+                MPI_INT,
+                operation,
+                communicator);
+            debug::traceMpiCollective(
+                "after",
+                sequence,
+                "SystemAssembly::requireConsistentPartitionedAuxiliaryAdvanceFlags",
+                3,
+                MPI_INT,
+                operation,
+                communicator);
+        };
+    reduce_flags(minimum_flags, MPI_MIN);
+    reduce_flags(maximum_flags, MPI_MAX);
+    FE_THROW_IF(
+        minimum_flags[0] == 0,
+        InvalidArgumentException,
+        "assembleOperator: state time and dt must be finite "
+        "on every communicator rank");
+    const double local_time_state[2]{
+        state_time == 0.0 ? 0.0 : state_time,
+        state_dt == 0.0 ? 0.0 : state_dt};
+    double minimum_time_state[2]{};
+    double maximum_time_state[2]{};
+    const auto reduce_time_state =
+        [&](double* reduced,
+            MPI_Op operation) {
+            const auto sequence =
+                debug::nextMpiCollectiveTraceSeq();
+            debug::traceMpiCollective(
+                "before",
+                sequence,
+                "SystemAssembly::requireConsistentPartitionedAuxiliaryAdvanceTime",
+                2,
+                MPI_DOUBLE,
+                operation,
+                communicator);
+            MPI_Allreduce(
+                local_time_state,
+                reduced,
+                2,
+                MPI_DOUBLE,
+                operation,
+                communicator);
+            debug::traceMpiCollective(
+                "after",
+                sequence,
+                "SystemAssembly::requireConsistentPartitionedAuxiliaryAdvanceTime",
+                2,
+                MPI_DOUBLE,
+                operation,
+                communicator);
+        };
+    reduce_time_state(
+        minimum_time_state, MPI_MIN);
+    reduce_time_state(
+        maximum_time_state, MPI_MAX);
+
+    const std::uint64_t local_deployment_shape[2]{
+        partitioned_auxiliary_count,
+        partitioned_auxiliary_digest};
+    std::uint64_t minimum_deployment_shape[2]{};
+    std::uint64_t maximum_deployment_shape[2]{};
+    const auto reduce_deployment_shape =
+        [&](std::uint64_t* reduced,
+            MPI_Op operation) {
+            const auto sequence =
+                debug::nextMpiCollectiveTraceSeq();
+            debug::traceMpiCollective(
+                "before",
+                sequence,
+                "SystemAssembly::requireConsistentPartitionedAuxiliaryAdvanceDeployment",
+                2,
+                MPI_UINT64_T,
+                operation,
+                communicator);
+            MPI_Allreduce(
+                local_deployment_shape,
+                reduced,
+                2,
+                MPI_UINT64_T,
+                operation,
+                communicator);
+            debug::traceMpiCollective(
+                "after",
+                sequence,
+                "SystemAssembly::requireConsistentPartitionedAuxiliaryAdvanceDeployment",
+                2,
+                MPI_UINT64_T,
+                operation,
+                communicator);
+        };
+    reduce_deployment_shape(
+        minimum_deployment_shape, MPI_MIN);
+    reduce_deployment_shape(
+        maximum_deployment_shape, MPI_MAX);
+
+    FE_THROW_IF(
+        minimum_time_state[0] !=
+                maximum_time_state[0] ||
+            minimum_time_state[1] !=
+                maximum_time_state[1],
+        InvalidArgumentException,
+        "assembleOperator: state time or dt differs across "
+        "communicator ranks");
+    FE_THROW_IF(
+        minimum_flags[1] != maximum_flags[1],
+        InvalidStateException,
+        "assembleOperator: partitioned auxiliary deployment "
+        "differs across communicator ranks");
+    FE_THROW_IF(
+        minimum_flags[2] != maximum_flags[2],
+        InvalidStateException,
+        "assembleOperator: partitioned auxiliary advance "
+        "decision differs across communicator ranks");
+    FE_THROW_IF(
+        minimum_deployment_shape[0] !=
+                maximum_deployment_shape[0] ||
+            minimum_deployment_shape[1] !=
+                maximum_deployment_shape[1],
+        InvalidStateException,
+        "assembleOperator: active partitioned auxiliary deployment "
+        "table differs across communicator ranks");
+#endif
+}
 
 struct ProcessMemorySnapshot {
     long vm_kb{-1};
@@ -1327,36 +1708,548 @@ assembly::AssemblyResult assembleOperator(
     assembly::GlobalSystemView* matrix_out,
     assembly::GlobalSystemView* vector_out)
 {
-    system.requireSetup();
-    if (!request.suppress_auxiliary_coupling_assembly) {
-        system.last_rank_one_updates_.clear();
-        system.last_reduced_field_updates_.clear();
+    std::exception_ptr local_request_exception;
+    try {
+        system.requireSetup();
+        FE_THROW_IF(
+            request.op.empty(),
+            InvalidArgumentException,
+            "assembleOperator: empty operator tag");
+        FE_THROW_IF(
+            !system.operator_registry_.has(request.op),
+            InvalidArgumentException,
+            "assembleOperator: unknown operator '" +
+                request.op + "'");
+        FE_THROW_IF(
+            request.want_matrix &&
+                matrix_out == nullptr,
+            InvalidArgumentException,
+            "assembleOperator: want_matrix but matrix_out is null");
+        FE_THROW_IF(
+            request.want_vector &&
+                vector_out == nullptr,
+            InvalidArgumentException,
+            "assembleOperator: want_vector but vector_out is null");
+        FE_THROW_IF(
+            !request.want_matrix &&
+                !request.want_vector,
+            InvalidArgumentException,
+            "assembleOperator: nothing requested "
+            "(want_matrix=false and want_vector=false)");
+        FE_CHECK_NOT_NULL(
+            system.assembler_.get(),
+            "FESystem::assembler");
+    } catch (...) {
+        local_request_exception =
+            std::current_exception();
     }
+    coordinateAssemblyPreflightFailure(
+        system,
+        local_request_exception,
+        "assembly_request");
+    requireConsistentAssemblyRequest(
+        system,
+        request);
 
-    FE_THROW_IF(request.op.empty(), InvalidArgumentException, "assembleOperator: empty operator tag");
-    FE_THROW_IF(!system.operator_registry_.has(request.op), InvalidArgumentException,
-                "assembleOperator: unknown operator '" + request.op + "'");
-
-    FE_THROW_IF(request.want_matrix && matrix_out == nullptr, InvalidArgumentException,
-                "assembleOperator: want_matrix but matrix_out is null");
-    FE_THROW_IF(request.want_vector && vector_out == nullptr, InvalidArgumentException,
-                "assembleOperator: want_vector but vector_out is null");
-    FE_THROW_IF(!request.want_matrix && !request.want_vector, InvalidArgumentException,
-                "assembleOperator: nothing requested (want_matrix=false and want_vector=false)");
-
-    FE_CHECK_NOT_NULL(system.assembler_.get(), "FESystem::assembler");
+    std::exception_ptr local_preflight_exception;
+    try {
+        system.requireCurrentExteriorBoundaryMeasurePolicies(
+            request.op);
+    } catch (...) {
+        local_preflight_exception =
+            std::current_exception();
+    }
+    coordinateAssemblyPreflightFailure(
+        system,
+        local_preflight_exception,
+        "exterior_boundary_measure_policy_preflight");
+    system.requireCurrentBoundaryReductionExteriorMeasures();
+    system.requireCurrentGeneratedBoundaryNitscheTraceCertificates(
+        request.op);
 
     // Partitioned auxiliary blocks must be stepped from committed state
     // before assembly so their outputs match the current FE iterate. This
     // mirrors the legacy coupled-boundary timing, while monolithic blocks
     // remain part of the assembled global system and are not stepped here.
-    bool has_partitioned_auxiliary = false;
-    for (const auto& entry : system.deployed_aux_entries_) {
-        if (entry.spec.solve_mode == AuxiliarySolveMode::Partitioned) {
-            has_partitioned_auxiliary = true;
-            break;
+    constexpr std::uint64_t partitioned_digest_offset =
+        14695981039346656037ull;
+    constexpr std::uint64_t partitioned_digest_prime =
+        1099511628211ull;
+    std::uint64_t partitioned_auxiliary_count = 0u;
+    std::uint64_t partitioned_auxiliary_digest =
+        partitioned_digest_offset;
+    const auto mix_partitioned_byte =
+        [&](std::uint8_t value) {
+            partitioned_auxiliary_digest ^= value;
+            partitioned_auxiliary_digest *=
+                partitioned_digest_prime;
+        };
+    const auto mix_partitioned_u64 =
+        [&](std::uint64_t value) {
+            for (unsigned int byte = 0u;
+                 byte < 8u;
+                 ++byte) {
+                mix_partitioned_byte(
+                    static_cast<std::uint8_t>(
+                        (value >> (byte * 8u)) &
+                        std::uint64_t{0xffu}));
+            }
+        };
+    const auto mix_partitioned_string =
+        [&](std::string_view value) {
+            mix_partitioned_u64(
+                static_cast<std::uint64_t>(
+                    value.size()));
+            for (const unsigned char character : value) {
+                mix_partitioned_byte(character);
+            }
+        };
+    const auto canonical_double_bits =
+        [](double value) noexcept {
+            if (value == 0.0) {
+                value = 0.0;
+            }
+            return std::bit_cast<std::uint64_t>(value);
+        };
+    const auto stable_string_value_digest =
+        [&](std::string_view key,
+            std::uint64_t value) noexcept {
+            std::uint64_t digest =
+                partitioned_digest_offset;
+            const auto mix_byte =
+                [&](std::uint8_t byte) {
+                    digest ^= byte;
+                    digest *= partitioned_digest_prime;
+                };
+            for (unsigned int byte = 0u;
+                 byte < 8u;
+                 ++byte) {
+                mix_byte(
+                    static_cast<std::uint8_t>(
+                        (static_cast<std::uint64_t>(
+                             key.size()) >>
+                         (byte * 8u)) &
+                        std::uint64_t{0xffu}));
+            }
+            for (const unsigned char character : key) {
+                mix_byte(character);
+            }
+            for (unsigned int byte = 0u;
+                 byte < 8u;
+                 ++byte) {
+                mix_byte(
+                    static_cast<std::uint8_t>(
+                        (value >> (byte * 8u)) &
+                        std::uint64_t{0xffu}));
+            }
+            return digest;
+        };
+    const auto stable_string_pair_digest =
+        [&](std::string_view first,
+            std::string_view second) noexcept {
+            std::uint64_t digest =
+                partitioned_digest_offset;
+            const auto mix_byte =
+                [&](std::uint8_t byte) {
+                    digest ^= byte;
+                    digest *= partitioned_digest_prime;
+                };
+            const auto mix_u64 =
+                [&](std::uint64_t value) {
+                    for (unsigned int byte = 0u;
+                         byte < 8u;
+                         ++byte) {
+                        mix_byte(
+                            static_cast<std::uint8_t>(
+                                (value >>
+                                 (byte * 8u)) &
+                                std::uint64_t{0xffu}));
+                    }
+                };
+            const auto mix_string =
+                [&](std::string_view value) {
+                    mix_u64(
+                        static_cast<std::uint64_t>(
+                            value.size()));
+                    for (const unsigned char character :
+                         value) {
+                        mix_byte(character);
+                    }
+                };
+            mix_string(first);
+            mix_string(second);
+            return digest;
+        };
+
+    const auto is_active_partitioned =
+        [](const auto& entry) {
+            return entry.materialized &&
+                   entry.spec.solve_mode ==
+                       AuxiliarySolveMode::Partitioned;
+        };
+    const bool has_partitioned_deployment =
+        std::any_of(
+            system.deployed_aux_entries_.begin(),
+            system.deployed_aux_entries_.end(),
+            is_active_partitioned);
+    const bool has_partitioned_multirate =
+        std::any_of(
+            system.deployed_aux_entries_.begin(),
+            system.deployed_aux_entries_.end(),
+            [&](const auto& entry) {
+                return is_active_partitioned(entry) &&
+                       entry.spec.schedule_mode ==
+                           AuxiliaryScheduleMode::Multirate;
+            });
+    if (has_partitioned_deployment) {
+        mix_partitioned_byte(
+            system.auxiliary_state_manager_
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        if (system.auxiliary_state_manager_) {
+            const auto ghost_route =
+                system.auxiliary_state_manager_
+                    ->ghostSyncRouteSignature();
+            mix_partitioned_u64(ghost_route[0]);
+            mix_partitioned_u64(ghost_route[1]);
+        }
+        if (has_partitioned_multirate) {
+            mix_partitioned_byte(
+                system.aux_scheduler_
+                    ? std::uint8_t{1u}
+                    : std::uint8_t{0u});
         }
     }
+    for (const auto& entry : system.deployed_aux_entries_) {
+        if (!is_active_partitioned(entry)) {
+            continue;
+        }
+
+        ++partitioned_auxiliary_count;
+        mix_partitioned_string(entry.instance_name);
+        mix_partitioned_byte(
+            system.auxiliary_state_manager_ &&
+                    system.auxiliary_state_manager_
+                        ->hasBlock(entry.instance_name)
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_partitioned_string(entry.spec.name);
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(entry.spec.size));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(entry.spec.scope));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.layout_mode));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.ordering));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.history_mode));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.history_depth));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.history_interpolation));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.sync_policy));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.transfer_policy));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.schedule_mode));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.event_mode));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.n_event_functions));
+        mix_partitioned_byte(
+            entry.spec.has_nonsmooth
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_partitioned_byte(
+            entry.spec.has_mass_matrix
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.dae_index_hint));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.constraint_groups.size()));
+        for (const auto& group :
+             entry.spec.constraint_groups) {
+            mix_partitioned_u64(
+                static_cast<std::uint64_t>(
+                    group.size()));
+            for (const int component : group) {
+                mix_partitioned_u64(
+                    static_cast<std::uint64_t>(
+                        component));
+            }
+        }
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.nonsmooth_policy
+                    .active_set));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.nonsmooth_policy
+                    .complementarity));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.nonsmooth_policy
+                    .transition));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.nonsmooth_policy
+                    .max_active_set_iters));
+        mix_partitioned_u64(
+            canonical_double_bits(
+                entry.spec.nonsmooth_policy
+                    .complementarity_tol));
+        mix_partitioned_u64(
+            canonical_double_bits(
+                entry.spec.nonsmooth_policy
+                    .blend_width));
+        mix_partitioned_u64(
+            canonical_double_bits(
+                entry.spec.nonsmooth_policy
+                    .hysteresis_band));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.derivative_policy
+                    .jacobian_source));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.derivative_policy
+                    .second_deriv_source));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.derivative_policy
+                    .second_deriv_mode));
+        mix_partitioned_byte(
+            entry.spec.derivative_policy
+                    .analytic_override_enabled
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_partitioned_u64(
+            canonical_double_bits(
+                entry.spec.derivative_policy
+                    .fd_epsilon));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.derivative_policy
+                    .ad_seed_dim));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.failure_policy
+                    .max_local_retries));
+        mix_partitioned_byte(
+            entry.spec.failure_policy
+                    .reject_timestep_on_failure
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_partitioned_byte(
+            entry.spec.failure_policy
+                    .fatal_on_singular_jacobian
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_partitioned_byte(
+            entry.spec.failure_policy
+                    .fatal_on_event_failure
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_partitioned_byte(
+            entry.consistent_initialization_done
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.deployment_region.kind));
+        mix_partitioned_string(
+            entry.spec.deployment_region.identity);
+        mix_partitioned_string(
+            entry.spec.deployment_region.version);
+
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.component_names.size()));
+        for (const auto& component :
+             entry.spec.component_names) {
+            mix_partitioned_string(component);
+        }
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.variable_kinds.size()));
+        for (const auto kind :
+             entry.spec.variable_kinds) {
+            mix_partitioned_u64(
+                static_cast<std::uint64_t>(kind));
+        }
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.spec.mass_diagonal.size()));
+        for (const auto value :
+             entry.spec.mass_diagonal) {
+            mix_partitioned_u64(
+                canonical_double_bits(
+                    static_cast<double>(value)));
+        }
+
+        mix_partitioned_string(
+            entry.stepper_spec.method_name);
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.stepper_spec.input_refresh));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.stepper_spec.commit_policy));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.stepper_spec.max_nonlinear_iters));
+        mix_partitioned_u64(
+            canonical_double_bits(
+                entry.stepper_spec.nonlinear_tol_abs));
+        mix_partitioned_u64(
+            canonical_double_bits(
+                entry.stepper_spec.nonlinear_tol_rel));
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.stepper_spec.substep_count));
+        std::uint64_t method_option_xor = 0u;
+        std::uint64_t method_option_sum = 0u;
+        for (const auto& [name, value] :
+             entry.stepper_spec.method_options) {
+            const auto option_digest =
+                stable_string_value_digest(
+                    name,
+                    canonical_double_bits(value));
+            method_option_xor ^= option_digest;
+            method_option_sum += option_digest;
+        }
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.stepper_spec.method_options.size()));
+        mix_partitioned_u64(method_option_xor);
+        mix_partitioned_u64(method_option_sum);
+
+        std::uint64_t input_binding_xor = 0u;
+        std::uint64_t input_binding_sum = 0u;
+        for (const auto& [model_input, registry_input] :
+             entry.input_bindings) {
+            const auto binding_digest =
+                stable_string_pair_digest(
+                    model_input,
+                    registry_input);
+            input_binding_xor ^= binding_digest;
+            input_binding_sum += binding_digest;
+        }
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.input_bindings.size()));
+        mix_partitioned_u64(input_binding_xor);
+        mix_partitioned_u64(input_binding_sum);
+        std::uint64_t parameter_xor = 0u;
+        std::uint64_t parameter_sum = 0u;
+        for (const auto& [name, value] :
+             entry.param_values) {
+            const auto parameter_digest =
+                stable_string_value_digest(
+                    name,
+                    canonical_double_bits(
+                        static_cast<double>(value)));
+            parameter_xor ^= parameter_digest;
+            parameter_sum += parameter_digest;
+        }
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.param_values.size()));
+        mix_partitioned_u64(parameter_xor);
+        mix_partitioned_u64(parameter_sum);
+
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.output_ids.size()));
+        for (const auto output_id : entry.output_ids) {
+            mix_partitioned_u64(output_id);
+        }
+        mix_partitioned_string(entry.variant_group);
+        mix_partitioned_string(entry.variant_key);
+        mix_partitioned_u64(
+            static_cast<std::uint64_t>(
+                entry.activation_mode));
+        mix_partitioned_byte(
+            entry.selected
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_partitioned_byte(
+            entry.lower_to_direct_only
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_partitioned_byte(
+            entry.local_condensed
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_partitioned_byte(
+            entry.model
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_partitioned_byte(
+            entry.stepper
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_partitioned_byte(
+            entry.deriv_provider
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        const auto* multirate_schedule =
+            has_partitioned_multirate &&
+                    system.aux_scheduler_
+                ? system.aux_scheduler_->getSchedule(
+                      entry.instance_name)
+                : nullptr;
+        mix_partitioned_byte(
+            multirate_schedule != nullptr
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        if (multirate_schedule != nullptr) {
+            mix_partitioned_u64(
+                static_cast<std::uint64_t>(
+                    multirate_schedule->rate_ratio));
+            mix_partitioned_u64(
+                static_cast<std::uint64_t>(
+                    multirate_schedule->predictor));
+            mix_partitioned_u64(
+                static_cast<std::uint64_t>(
+                    multirate_schedule->corrector));
+            mix_partitioned_u64(
+                static_cast<std::uint64_t>(
+                    multirate_schedule
+                        ->error_estimator));
+            mix_partitioned_u64(
+                canonical_double_bits(
+                    static_cast<double>(
+                        multirate_schedule
+                            ->error_tolerance)));
+            mix_partitioned_u64(
+                static_cast<std::uint64_t>(
+                    multirate_schedule
+                        ->max_corrector_iters));
+            mix_partitioned_byte(
+                multirate_schedule
+                        ->checkpoint_before_advance
+                    ? std::uint8_t{1u}
+                    : std::uint8_t{0u});
+        }
+    }
+    const bool has_partitioned_auxiliary =
+        partitioned_auxiliary_count != 0u;
 
     auto same_partitioned_auxiliary_step = [&](Real time, Real dt) {
         if (!system.partitioned_auxiliary_advance_valid_) {
@@ -1371,9 +2264,28 @@ assembly::AssemblyResult assembleOperator(
                nearly_equal(system.partitioned_auxiliary_advance_dt_, dt);
     };
 
-    if (!request.suppress_auxiliary_coupling_assembly &&
-        has_partitioned_auxiliary &&
-        !same_partitioned_auxiliary_step(state.time, state.dt)) {
+    const bool
+        needs_partitioned_auxiliary_advance =
+            !request
+                 .suppress_auxiliary_coupling_assembly &&
+            has_partitioned_auxiliary &&
+            !same_partitioned_auxiliary_step(
+                state.time, state.dt);
+    requireConsistentPartitionedAuxiliaryAdvance(
+        system,
+        state.time,
+        state.dt,
+        has_partitioned_auxiliary,
+        needs_partitioned_auxiliary_advance,
+        partitioned_auxiliary_count,
+        partitioned_auxiliary_digest);
+
+    if (!request.suppress_auxiliary_coupling_assembly) {
+        system.last_rank_one_updates_.clear();
+        system.last_reduced_field_updates_.clear();
+    }
+
+    if (needs_partitioned_auxiliary_advance) {
         // Advance partitioned auxiliary blocks exactly once for the current
         // nonlinear solve state. The first assembly of a time step is often a
         // Newton iteration, so gating on request.is_nonlinear_iteration would

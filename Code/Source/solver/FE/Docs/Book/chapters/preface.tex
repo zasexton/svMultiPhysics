@@ -1,0 +1,34 @@
+% =============================================================================
+% Preface
+% =============================================================================
+\chapter*{Preface}
+\addcontentsline{toc}{chapter}{Preface}
+
+The svMultiPhysics project provides an open-source, high-performance finite element
+framework for multiphysics simulation, with a particular emphasis on cardiovascular
+fluid dynamics and fluid--structure interaction. Building on the legacy of the
+SimVascular project, svMultiPhysics introduces a modern C++ finite element library
+that combines expressive variational form specification with aggressive
+performance optimization through just-in-time (JIT) compilation.
+
+This book is written by the developers of svMultiPhysics and serves three purposes.
+First, it provides the mathematical background necessary for understanding the
+finite element formulations implemented in the software.
+Second, it documents the software architecture, from the mesh data structures and
+form language through the LLVM-based JIT compiler and parallel assembly engine.
+Third, it presents the physics modules and application examples that demonstrate the
+capabilities of the framework.
+
+The presentation spans mathematical background, software design, and use of
+svMultiPhysics in applications. The mathematical framework is outlined in
+Part~\ref{part:foundations}, the software architecture and implementation of
+central components is described in Part~\ref{part:implementation}, the physics
+modules are presented in Part~\ref{part:physics}, and Part~\ref{part:applications}
+concerns tutorials, verification, and performance.
+
+New users of svMultiPhysics may find the tutorial chapter particularly useful as a
+starting point. Developers seeking to extend the framework with new physics modules
+or element types will benefit from the architecture and form language chapters.
+
+\bigskip\noindent
+\textit{The svMultiPhysics Development Team, \the\year}

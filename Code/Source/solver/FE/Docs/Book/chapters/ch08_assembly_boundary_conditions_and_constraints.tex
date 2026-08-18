@@ -1,0 +1,97 @@
+% =============================================================================
+\chapter{Assembly, Boundary Conditions, and Constraints}
+\label{ch:assembly}
+% =============================================================================
+
+This chapter connects local element equations to global algebraic systems. It
+focuses on local-to-global mappings, constrained degrees of freedom, and the
+different mathematical interpretations of essential and natural boundary
+conditions.
+
+\section{Element connectivity and global assembly maps}
+\label{sec:assembly:connectivity}
+
+% Global numbering, sparsity patterns, and assembly graphs
+
+\section{The assembly of linear and multilinear forms}
+\label{sec:assembly:forms}
+
+% Accumulation of vectors, matrices, and higher-order tensors from element contributions
+
+\section{Essential and natural boundary conditions}
+\label{sec:assembly:boundary}
+
+The FE layer distinguishes pointwise essential data from trace-essential data.
+For standard $H^1$ spaces, strong Dirichlet conditions remain pointwise
+constraints on nodal degrees of freedom. For trace-conforming vector spaces,
+such as $H(\mathrm{div})$, the essential datum is not a point value but a
+scalar trace. The canonical example is the normal trace $u \cdot n$.
+
+This distinction matters because the FE surface must remain physics-agnostic.
+The library therefore exposes generic trace-condition objects rather than
+Darcy-specific or contact-specific boundary types. Equality-based trace laws
+are represented by strong normal-trace constraints, weak trace loads, or weak
+Robin relations. Boundary and interface traces use the same vocabulary, so the
+same scalar trace operator can be applied on $\mathrm{d}s(\Gamma)$ or on
+interior interface measures.
+
+\section{Strong imposition of constraints}
+\label{sec:assembly:strong_constraints}
+
+Strong constraints are algebraic statements about DOFs. They are applied
+through elimination or lifting and therefore do not alter the variational form
+directly. Periodicity, tied-node relations, and strong $H(\mathrm{div})$
+normal-trace data all live in this category. The modern FE surface therefore
+includes both pointwise Dirichlet constraints and orientation-aware trace
+constraints for vector-basis spaces.
+
+\section{Weak imposition of constraints}
+\label{sec:assembly:weak_constraints}
+
+Weak constraints remain part of the residual and Jacobian. The FE library now
+provides a unified trace-oriented weak-constraint surface:
+
+\begin{itemize}
+\item load and Robin trace terms on boundaries and interfaces,
+\item trace-oriented Nitsche terms for equality-style weak imposition,
+\item one-sided scalar-trace inequalities for semismooth nonlinear solves.
+\end{itemize}
+
+This taxonomy avoids encoding PDE-specific semantics in FE while still letting
+applications express normal-flux, exchange, penalty, and unilateral laws in a
+mathematically consistent way.
+
+\section{Multi-point constraints and nonmatching interfaces}
+\label{sec:assembly:mpc}
+
+Multi-point constraints include periodic relations, tied interfaces, and other
+algebraic trace relations that do not belong in the weak form. For
+orientation-sensitive vector-basis spaces, matching coordinates alone are not
+sufficient; the trace relation must also account for facet ordering and outward
+normal orientation. The FE helper surface therefore includes dedicated
+$H(\mathrm{div})$ periodic and MPC trace utilities.
+
+For nonconforming or hybridized couplings, the FE layer now also supports
+mortar-style facet fields. These fields are assembled on interface faces,
+occupy their own algebraic block, and couple to neighboring volume fields
+through interface kernels rather than through pointwise tied DOF logic.
+
+\section{Structure of the global algebraic system}
+\label{sec:assembly:global_system}
+
+Modern FE systems are rarely a single nodal block. Trace fields, mortar
+multipliers, and mixed-dimensional interface fields all introduce additional
+rows and columns that are topologically lower-dimensional but algebraically
+first-class. The global system can therefore contain:
+
+\begin{itemize}
+\item volume-volume blocks,
+\item volume-interface coupling blocks,
+\item interface-interface or mortar-mortar facet blocks,
+\item weak trace-law contributions and one-sided nonlinear trace terms.
+\end{itemize}
+
+The practical consequence is that assembly metadata, sparsity construction, and
+solver strategy must understand these blocks as part of the core FE
+infrastructure rather than as afterthoughts layered on a purely cell-based
+system.

@@ -148,6 +148,72 @@ It does not remove cases, loosen numerical thresholds, change the selected
 method, or alter any closure claim. Both v2 distributed groups must start
 afresh from frozen source and complete inside the new envelope.
 
+## Canonical transition telemetry source slice
+
+`SmallCutAggregationConstraint` now retains a production-owned transition
+ledger between successive successful publications of the same field,
+interface marker, and active side when no failed refresh intervenes. A failed
+refresh deliberately leaves the completed report empty, so the next success
+starts a new comparison sequence rather than bridging the failure. The ledger
+is derived from the already communicator-canonical active-feature and
+aggregate-slave sets. Those canonical subfields are repeated identically on
+every participating rank; the report also carries explicitly rank-local
+lineage and therefore is not wholly communicator-canonical. It records feature
+entry, exit, persistence, full/cut classification change, rooted/rootless
+disposition change, aggregate-slave entry and exit, and the rootless
+retained-volume delta.
+
+Each completed report retains a successful-publication ordinal and an explicit
+geometry-identity slot. When available, the identity is rank-invariant. An
+authoritative free-surface snapshot uses its source/domain state and
+distributed snapshot/revision keys. The generated-
+publication fallback uses only the source, domain, isovalue, source revisions,
+and quadrature-policy fields whose publication contract is communicator-wide;
+request mesh epochs are excluded from that identity. Cut-context, snapshot-
+local mesh, publication-request mesh, live mesh, FE-layout, and affine-
+constraint stamps are segregated into the rank-local lineage. The final
+collective checks 64-bit fingerprints of the geometry identity, class-tagged
+features, canonical slaves, and ordinal. Its
+`communicator_fingerprint_consensus_validated` state is collision-prone audit
+evidence, not an exact all-rank comparison of every string and scalar, and an
+unavailable source identity remains explicitly unavailable.
+
+The complete post-resolver tail is one local guarded region: patch formation,
+constraint-line insertion, diagnostics, copies, transition/report formation,
+and pending-prolongation formation all finish before exactly one all-rank
+readiness/fingerprint reduction. Constraint lines are inserted into a copied
+`AffineConstraints`; a coordinated failure discards that copy and leaves the
+caller-owned object untouched by this constraint. After consensus, only the
+class's statically checked no-throw move assignment, optional/shared-pointer
+moves, vector swap, and scalar writes publish constraint and lifecycle state.
+The completed report and successful ordinal are captured and restored together
+by the lifecycle checkpoint using an allocate-first, no-throw-commit sequence.
+
+Feature entry/exit, counts, dispositions, and aggregate-slave set changes are
+exact within those canonical ledgers. Each feature now has separate
+domain-tagged 64-bit full-active and cut-cell GID digests in addition to the
+whole-membership digest, so an equal-count full/cut swap is no longer hidden by
+unchanged totals and membership. Those digests can still collide;
+`canonical_topology_changed` is therefore auditable transition telemetry, not
+a collision-free topology oracle.
+
+The serial production-fixture regression
+`FreeSurfaceCutStability.ContinuousNodeCrossingReportsCanonicalAggregationTopologyTransitions`
+translates a P1 level-set plane on both sides of an interior node plane and
+requires the velocity and pressure instances of the combined method to report
+the same feature transition, source-publication sequence, and component-scaled
+slave churn. The direct constraint regression
+`SmallCutAggregationConstraint.SameCountFullCutSwapHasClassSensitiveTransitionAndProvenance`
+holds feature membership and class counts fixed while swapping the physical
+full/cut cell identities, and checks the class digests plus before/after source
+and ordinal provenance. Existing rollback coverage additionally checks that
+the checkpoint restores the ordinal with the report. This source slice was
+added under the repository memory gate and has not been built or executed in
+this worktree. It is deliberately not the frozen prospective test
+`FreeSurfaceCutStability.ContinuousNodeCrossingHasNoUnreportedOperatorOrSolutionJump`:
+the ledger compares neither assembled operators nor solved states, so the full
+node-crossing exit and every qualification claim remain open.
+
 ## Closure boundary
 
 Passing the finite cross-product can establish only that the named P1 fixtures

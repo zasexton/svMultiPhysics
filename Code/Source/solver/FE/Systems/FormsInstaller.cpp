@@ -90,6 +90,11 @@ struct DomainDispatch {
     std::vector<CutVolumeRegion> cut_volume_regions{};
 };
 
+[[nodiscard]] std::vector<ExteriorBoundaryMeasurePolicy>
+makeFormBoundExteriorBoundaryMeasurePolicies(
+    const OperatorTag& op,
+    const forms::MixedFormIR& mixed_ir);
+
 [[nodiscard]] bool formBlockDiagnosticsEnabled() noexcept
 {
     static const bool enabled = [] {
@@ -1431,7 +1436,15 @@ void collectAuxiliaryOutputConsumerDomains(
             child_domain = analysis::DomainKind::InteriorFace;
             break;
         case FT::InterfaceIntegral:
-            child_domain = analysis::DomainKind::InterfaceFace;
+            if (const auto* measure =
+                    node.exteriorBoundaryMeasure();
+                measure != nullptr &&
+                measure->isGeneratedActiveSubset()) {
+                child_domain = analysis::DomainKind::Boundary;
+            } else {
+                child_domain =
+                    analysis::DomainKind::InterfaceFace;
+            }
             break;
         case FT::AuxiliaryOutputSymbol: {
             auto sym = node.symbolName();
@@ -2790,6 +2803,18 @@ installMixedFormIR(
     FE_THROW_IF(trial_fields.size() != mir.numTrialFields(), InvalidArgumentException,
                 "installMixedFormIR: trial_fields size does not match mir.numTrialFields()");
 
+    auto operator_snapshot =
+        system.operator_registry_.snapshot();
+    auto field_registry_snapshot =
+        system.field_registry_;
+    auto generated_interface_marker_snapshot =
+        system.generated_embedded_interface_markers_;
+    try {
+    auto form_bound_exterior_boundary_measure_policies =
+        makeFormBoundExteriorBoundaryMeasurePolicies(op, mir);
+    system.prepareFormBoundExteriorBoundaryMeasurePolicies(
+        form_bound_exterior_boundary_measure_policies);
+
     const auto n_test = mir.numTestFields();
     const auto n_trial = mir.numTrialFields();
 
@@ -2967,7 +2992,20 @@ installMixedFormIR(
         system.addCellKernel(op, test_fields[0], trial_fields[0], mixed_block_kernel);
     }
 
+    system.commitPreparedFormBoundExteriorBoundaryMeasurePolicies(
+        std::move(
+            form_bound_exterior_boundary_measure_policies));
     return result;
+    } catch (...) {
+        system.operator_registry_.rollback(
+            operator_snapshot);
+        system.field_registry_ =
+            std::move(field_registry_snapshot);
+        system.generated_embedded_interface_markers_ =
+            std::move(
+                generated_interface_marker_snapshot);
+        throw;
+    }
 }
 
 // ============================================================================
@@ -3020,6 +3058,408 @@ std::size_t countUniqueTestSpaces(const forms::FormExprNode& root)
     };
     visit(visit, root);
     return found.size();
+}
+
+struct ExactRouteAnchorOccurrences {
+    std::size_t total{0u};
+    std::size_t canonical_additive{0u};
+};
+
+void countExactRouteAnchorOccurrences(
+    const forms::FormExprNode& root,
+    const forms::FormExprNode* target,
+    bool canonical_additive_path,
+    ExactRouteAnchorOccurrences& occurrences)
+{
+    if (target == nullptr) {
+        return;
+    }
+    if (&root == target) {
+        ++occurrences.total;
+        if (canonical_additive_path) {
+            ++occurrences.canonical_additive;
+        }
+        return;
+    }
+    const bool child_has_canonical_additive_path =
+        canonical_additive_path &&
+        root.type() == forms::FormExprType::Add;
+    for (const auto& child : root.childrenShared()) {
+        if (child) {
+            countExactRouteAnchorOccurrences(
+                *child,
+                target,
+                child_has_canonical_additive_path,
+                occurrences);
+        }
+    }
+}
+
+[[nodiscard]] std::vector<GeneratedBoundaryNitscheTracePolicy>
+makeFormBoundGeneratedBoundaryNitscheTracePolicies(
+    const FESystem& system,
+    const OperatorTag& op,
+    std::span<const FieldId> fields,
+    const forms::FormExpr& residual,
+    const FormInstallOptions& options)
+{
+    std::vector<GeneratedBoundaryNitscheTracePolicy> result;
+    result.reserve(
+        options.generated_boundary_nitsche_trace_requests.size());
+    const auto source_formulation_record_index =
+        system.formulationRecords().size();
+    const auto same_route = [](const auto& lhs,
+                               const auto& rhs) noexcept {
+        return lhs.op == rhs.op &&
+               lhs.velocity_field == rhs.velocity_field &&
+               lhs.volume_interface_marker ==
+                   rhs.volume_interface_marker &&
+               lhs.generated_active_boundary_marker ==
+                   rhs.generated_active_boundary_marker;
+    };
+
+    for (const auto& request :
+         options.generated_boundary_nitsche_trace_requests) {
+        const auto& binding = request.binding;
+        const auto& anchor = binding.routeAnchor();
+        ExactRouteAnchorOccurrences anchor_occurrences;
+        if (anchor.isValid() && anchor.node() != nullptr &&
+            residual.node() != nullptr) {
+            countExactRouteAnchorOccurrences(
+                *residual.node(),
+                anchor.node(),
+                true,
+                anchor_occurrences);
+        }
+        FE_THROW_IF(
+            !anchor.isValid() || anchor.node() == nullptr ||
+                residual.node() == nullptr ||
+                anchor_occurrences.total != 1u ||
+                anchor_occurrences.canonical_additive != 1u,
+            InvalidArgumentException,
+            "installFormulation: generated-boundary Nitsche "
+            "binding route anchor must occur exactly once as an "
+            "unscaled top-level additive summand in the original "
+            "residual");
+        FE_THROW_IF(
+            std::find(
+                fields.begin(),
+                fields.end(),
+                binding.velocityField()) == fields.end(),
+            InvalidArgumentException,
+            "installFormulation: generated-boundary Nitsche "
+            "binding velocity field is not installed by this "
+            "formulation");
+        FE_THROW_IF(
+            request.volume_interface_marker < 0 ||
+                request.maximum_reduced_dimension == 0u ||
+                request.maximum_reduced_dimension > 128u ||
+                binding.metadataDigest() == 0u ||
+                binding.penaltyPolynomialOrder() < 1 ||
+                !(binding.effectivePenaltyMultiplier() >
+                  Real{0.0}) ||
+                !std::isfinite(
+                    binding.effectivePenaltyMultiplier()),
+            InvalidArgumentException,
+            "installFormulation: generated-boundary Nitsche "
+            "binding request is invalid");
+
+        GeneratedBoundaryNitscheTracePolicy policy{
+            .op = op,
+            .velocity_field = binding.velocityField(),
+            .velocity_space_signature =
+                binding.velocitySpaceSignature(),
+            .physical_boundary_marker =
+                binding.physicalBoundaryMarker(),
+            .volume_interface_marker =
+                request.volume_interface_marker,
+            .generated_active_boundary_marker =
+                binding.generatedActiveBoundaryMarker(),
+            .dynamic_viscosity =
+                binding.dynamicViscosity(),
+            .penalty_gamma = binding.penaltyGamma(),
+            .scale_with_polynomial_order =
+                binding.scaleWithPolynomialOrder(),
+            .penalty_polynomial_order =
+                binding.penaltyPolynomialOrder(),
+            .effective_penalty_multiplier =
+                binding.effectivePenaltyMultiplier(),
+            .symmetric = binding.symmetric(),
+            .maximum_reduced_dimension =
+                request.maximum_reduced_dimension,
+            .source_formulation_record_index =
+                source_formulation_record_index,
+            .form_binding_digest =
+                binding.metadataDigest(),
+        };
+        FE_THROW_IF(
+            std::any_of(
+                system
+                    .generatedBoundaryNitscheTracePolicies()
+                    .begin(),
+                system
+                    .generatedBoundaryNitscheTracePolicies()
+                    .end(),
+                [&](const auto& existing) {
+                    return same_route(existing, policy);
+                }) ||
+                std::any_of(
+                    result.begin(),
+                    result.end(),
+                    [&](const auto& existing) {
+                        return same_route(existing, policy);
+                    }),
+            InvalidArgumentException,
+            "installFormulation: duplicate form-bound "
+            "generated-boundary Nitsche route");
+        result.push_back(std::move(policy));
+    }
+    return result;
+}
+
+[[nodiscard]] std::vector<ExteriorBoundaryMeasurePolicy>
+makeFormBoundExteriorBoundaryMeasurePolicies(
+    const FESystem& system,
+    const OperatorTag& op,
+    const forms::FormExpr& residual)
+{
+    std::vector<ExteriorBoundaryMeasurePolicy> result;
+    const auto source_formulation_record_index =
+        system.formulationRecords().size();
+
+    const auto append =
+        [&](ExteriorBoundaryMeasurePolicy policy) {
+            const auto duplicate =
+                std::find_if(
+                    result.begin(),
+                    result.end(),
+                    [&](const auto& existing) {
+                        return existing.intent ==
+                                   policy.intent &&
+                               existing
+                                       .physical_boundary_marker ==
+                                   policy
+                                       .physical_boundary_marker &&
+                               existing
+                                       .generated_active_boundary_marker ==
+                                   policy
+                                       .generated_active_boundary_marker;
+                    });
+            if (duplicate == result.end()) {
+                result.push_back(std::move(policy));
+            }
+        };
+
+    const auto visit =
+        [&](const auto& self,
+            const forms::FormExprNode& node) -> void {
+            if (node.type() ==
+                forms::FormExprType::BoundaryIntegral) {
+                const auto* measure =
+                    node.exteriorBoundaryMeasure();
+                if (measure != nullptr) {
+                    FE_THROW_IF(
+                        !measure->isFullPhysical() ||
+                            node.boundaryMarker().value_or(-1) !=
+                                measure
+                                    ->physicalBoundaryMarker(),
+                        InvalidArgumentException,
+                        "installFormulation: explicit full-physical exterior-boundary selection is inconsistent with its boundary integral");
+                    append(ExteriorBoundaryMeasurePolicy{
+                        .op = op,
+                        .intent =
+                            ExteriorBoundaryMeasureIntent::
+                                FullPhysical,
+                        .physical_boundary_marker =
+                            measure->physicalBoundaryMarker(),
+                        .generated_active_boundary_marker = -1,
+                        .source_formulation_record_index =
+                            source_formulation_record_index,
+                    });
+                } else {
+                    append(ExteriorBoundaryMeasurePolicy{
+                        .op = op,
+                        .intent =
+                            ExteriorBoundaryMeasureIntent::
+                                LegacyBoundary,
+                        .physical_boundary_marker =
+                            node.boundaryMarker().value_or(-1),
+                        .generated_active_boundary_marker = -1,
+                        .source_formulation_record_index =
+                            source_formulation_record_index,
+                    });
+                }
+            } else if (
+                node.type() ==
+                forms::FormExprType::InterfaceIntegral) {
+                const auto* measure =
+                    node.exteriorBoundaryMeasure();
+                if (measure != nullptr) {
+                    FE_THROW_IF(
+                        !measure
+                             ->isGeneratedActiveSubset() ||
+                            node.interfaceMarker().value_or(-1) !=
+                                measure
+                                    ->generatedActiveBoundaryMarker(),
+                        InvalidArgumentException,
+                        "installFormulation: explicit generated-active exterior-boundary selection is inconsistent with its interface integral");
+                    append(ExteriorBoundaryMeasurePolicy{
+                        .op = op,
+                        .intent =
+                            ExteriorBoundaryMeasureIntent::
+                                GeneratedActiveSubset,
+                        .physical_boundary_marker =
+                            measure->physicalBoundaryMarker(),
+                        .generated_active_boundary_marker =
+                            measure
+                                ->generatedActiveBoundaryMarker(),
+                        .source_formulation_record_index =
+                            source_formulation_record_index,
+                    });
+                } else {
+                    append(ExteriorBoundaryMeasurePolicy{
+                        .op = op,
+                        .intent =
+                            ExteriorBoundaryMeasureIntent::
+                                LegacyInterface,
+                        .physical_boundary_marker = -1,
+                        .generated_active_boundary_marker =
+                            node.interfaceMarker().value_or(-1),
+                        .source_formulation_record_index =
+                            source_formulation_record_index,
+                    });
+                }
+            }
+            for (const auto& child :
+                 node.childrenShared()) {
+                if (child) {
+                    self(self, *child);
+                }
+            }
+        };
+    visit(visit, *residual.node());
+    return result;
+}
+
+[[nodiscard]] std::vector<ExteriorBoundaryMeasurePolicy>
+makeFormBoundExteriorBoundaryMeasurePolicies(
+    const OperatorTag& op,
+    const forms::MixedFormIR& mixed_ir)
+{
+    std::vector<ExteriorBoundaryMeasurePolicy> result;
+    const auto append =
+        [&](ExteriorBoundaryMeasurePolicy policy) {
+            const auto duplicate =
+                std::find_if(
+                    result.begin(),
+                    result.end(),
+                    [&](const auto& existing) {
+                        return existing.intent ==
+                                   policy.intent &&
+                               existing
+                                       .physical_boundary_marker ==
+                                   policy
+                                       .physical_boundary_marker &&
+                               existing
+                                       .generated_active_boundary_marker ==
+                                   policy
+                                       .generated_active_boundary_marker;
+                    });
+            if (duplicate == result.end()) {
+                result.push_back(std::move(policy));
+            }
+        };
+
+    for (const auto [test_index, trial_index] :
+         mixed_ir.activeBlocks()) {
+        const auto& block =
+            mixed_ir.block(test_index, trial_index);
+        for (const auto& term : block.terms()) {
+            if (term.domain ==
+                forms::IntegralDomain::Boundary) {
+                if (term.exterior_boundary_measure.has_value()) {
+                    const auto& measure =
+                        *term.exterior_boundary_measure;
+                    FE_THROW_IF(
+                        !measure.isFullPhysical() ||
+                            measure.physicalBoundaryMarker() !=
+                                term.boundary_marker ||
+                            term.interface_marker != -1,
+                        InvalidArgumentException,
+                        "installMixedFormIR: explicit full-physical exterior-boundary selection is inconsistent with its compiled boundary term");
+                    append(ExteriorBoundaryMeasurePolicy{
+                        .op = op,
+                        .intent =
+                            ExteriorBoundaryMeasureIntent::
+                                FullPhysical,
+                        .physical_boundary_marker =
+                            measure.physicalBoundaryMarker(),
+                        .generated_active_boundary_marker = -1,
+                        .source_formulation_record_index =
+                            NO_EXTERIOR_BOUNDARY_MEASURE_FORMULATION_RECORD,
+                    });
+                } else {
+                    append(ExteriorBoundaryMeasurePolicy{
+                        .op = op,
+                        .intent =
+                            ExteriorBoundaryMeasureIntent::
+                                LegacyBoundary,
+                        .physical_boundary_marker =
+                            term.boundary_marker,
+                        .generated_active_boundary_marker = -1,
+                        .source_formulation_record_index =
+                            NO_EXTERIOR_BOUNDARY_MEASURE_FORMULATION_RECORD,
+                    });
+                }
+            } else if (
+                term.domain ==
+                forms::IntegralDomain::InterfaceFace) {
+                if (term.exterior_boundary_measure.has_value()) {
+                    const auto& measure =
+                        *term.exterior_boundary_measure;
+                    FE_THROW_IF(
+                        !measure.isGeneratedActiveSubset() ||
+                            measure
+                                    .generatedActiveBoundaryMarker() !=
+                                term.interface_marker ||
+                            term.boundary_marker != -1,
+                        InvalidArgumentException,
+                        "installMixedFormIR: explicit generated-active exterior-boundary selection is inconsistent with its compiled interface term");
+                    append(ExteriorBoundaryMeasurePolicy{
+                        .op = op,
+                        .intent =
+                            ExteriorBoundaryMeasureIntent::
+                                GeneratedActiveSubset,
+                        .physical_boundary_marker =
+                            measure.physicalBoundaryMarker(),
+                        .generated_active_boundary_marker =
+                            measure
+                                .generatedActiveBoundaryMarker(),
+                        .source_formulation_record_index =
+                            NO_EXTERIOR_BOUNDARY_MEASURE_FORMULATION_RECORD,
+                    });
+                } else {
+                    append(ExteriorBoundaryMeasurePolicy{
+                        .op = op,
+                        .intent =
+                            ExteriorBoundaryMeasureIntent::
+                                LegacyInterface,
+                        .physical_boundary_marker = -1,
+                        .generated_active_boundary_marker =
+                            term.interface_marker,
+                        .source_formulation_record_index =
+                            NO_EXTERIOR_BOUNDARY_MEASURE_FORMULATION_RECORD,
+                    });
+                }
+            } else {
+                FE_THROW_IF(
+                    term.exterior_boundary_measure.has_value(),
+                    InvalidArgumentException,
+                    "installMixedFormIR: exterior-boundary selection is attached to a non-boundary compiled term");
+            }
+        }
+    }
+    return result;
 }
 
 bool hasStateFieldNodes(const forms::FormExprNode& root)
@@ -3185,6 +3625,18 @@ CoupledResidualKernels installFormulation(
                 "installFormulation: empty field list");
     FE_THROW_IF(!residual.isValid(), InvalidArgumentException,
                 "installFormulation: invalid residual expression");
+
+    auto form_bound_exterior_boundary_measure_policies =
+        makeFormBoundExteriorBoundaryMeasurePolicies(
+            system, op, residual);
+    system.prepareFormBoundExteriorBoundaryMeasurePolicies(
+        form_bound_exterior_boundary_measure_policies);
+
+    auto form_bound_generated_boundary_nitsche_policies =
+        makeFormBoundGeneratedBoundaryNitscheTracePolicies(
+            system, op, fields, residual, options);
+    system.prepareFormBoundGeneratedBoundaryNitscheTracePolicies(
+        form_bound_generated_boundary_nitsche_policies);
 
     auto install_options = options;
     install_options.compiler_options =
@@ -3626,6 +4078,14 @@ CoupledResidualKernels installFormulation(
             system.addContribution(std::move(c));
         }
         system.addFormulationRecord(std::move(rec));
+        system
+            .commitPreparedFormBoundExteriorBoundaryMeasurePolicies(
+                std::move(
+                    form_bound_exterior_boundary_measure_policies));
+        system
+            .commitPreparedFormBoundGeneratedBoundaryNitscheTracePolicies(
+                std::move(
+                    form_bound_generated_boundary_nitsche_policies));
     };
 
     // Transactional installation: snapshot operator state, rollback on failure.
@@ -3666,8 +4126,6 @@ CoupledResidualKernels installFormulation(
                 install_options.source_component_tag);
         }
 
-        commitRecord();
-
         CoupledResidualKernels out;
         out.residual = {kernel};
         if (!is_source_only) {
@@ -3675,6 +4133,7 @@ CoupledResidualKernels installFormulation(
         } else {
             out.jacobian_blocks = {{nullptr}};
         }
+        commitRecord();
         return out;
     }
 
@@ -3843,10 +4302,10 @@ installMixedLinear(
     }
 
     return system.executeWithOperatorRollback_([&]() {
+        std::vector<KernelPtr> result(test_fields.size());
         auto block_kernels = installMixedFormIR(system, op, test_fields,
                                                  std::span<const FieldId>(trial_fields_vec), mir, options);
 
-        std::vector<KernelPtr> result(test_fields.size());
         for (std::size_t i = 0; i < test_fields.size() && i < block_kernels.size(); ++i) {
             if (!block_kernels[i].empty()) {
                 result[i] = block_kernels[i][0];

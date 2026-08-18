@@ -1,0 +1,40 @@
+Note: Google Test filter = GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity:GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure:LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure:LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks
+[==========] Running 4 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 2 tests from GeneratedContactMeasureMPI
+[ RUN      ] GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity
+Note: Google Test filter = GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity:GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure:LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure:LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks
+[==========] Running 4 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 2 tests from GeneratedContactMeasureMPI
+[ RUN      ] GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity
+[       OK ] GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity (0 ms)
+[ RUN      ] GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure
+[       OK ] GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity (0 ms)
+[ RUN      ] GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure
+[       OK ] GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure (0 ms)
+[----------] 2 tests from GeneratedContactMeasureMPI (0 ms total)
+
+[----------] 2 tests from LevelSetInterfaceBuilderMPI
+[ RUN      ] LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure
+[       OK ] GeneratedContactMeasureMPI.TwoDimensionalContactPointsHaveExactRankIndependentCountingMeasure (0 ms)
+[----------] 2 tests from GeneratedContactMeasureMPI (0 ms total)
+
+[----------] 2 tests from LevelSetInterfaceBuilderMPI
+[ RUN      ] LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure
+[       OK ] LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure (0 ms)
+[ RUN      ] LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks
+[       OK ] LevelSetInterfaceBuilderMPI.OwnedFragmentsReduceToConsistentGlobalMeasure (0 ms)
+[ RUN      ] LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks
+[       OK ] LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks (24 ms)
+[----------] 2 tests from LevelSetInterfaceBuilderMPI (24 ms total)
+
+[----------] Global test environment tear-down
+[==========] 4 tests from 2 test suites ran. (25 ms total)
+[  PASSED  ] 4 tests.
+[       OK ] LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks (24 ms)
+[----------] 2 tests from LevelSetInterfaceBuilderMPI (24 ms total)
+
+[----------] Global test environment tear-down
+[==========] 4 tests from 2 test suites ran. (25 ms total)
+[  PASSED  ] 4 tests.

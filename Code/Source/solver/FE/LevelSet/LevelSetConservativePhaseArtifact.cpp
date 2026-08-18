@@ -1,19 +1,43 @@
 #include "LevelSet/LevelSetConservativePhaseArtifact.h"
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <exception>
 #include <fstream>
 #include <iomanip>
 #include <limits>
-#include <set>
 #include <sstream>
 #include <string_view>
 #include <system_error>
 
 namespace svmp::FE::level_set {
 namespace {
+
+[[nodiscard]] bool sameArtifactRealBits(Real left, Real right) noexcept
+{
+    static_assert(sizeof(Real) == sizeof(std::uint64_t));
+    return std::bit_cast<std::uint64_t>(left) ==
+           std::bit_cast<std::uint64_t>(right);
+}
+
+[[nodiscard]] bool sameArtifactStageOptions(
+    const LevelSetP1PhaseStageOptions& left,
+    const LevelSetP1PhaseStageOptions& right) noexcept
+{
+    return sameArtifactRealBits(
+               left.invariant_tolerance, right.invariant_tolerance) &&
+           sameArtifactRealBits(
+               left.component_activity_tolerance,
+               right.component_activity_tolerance) &&
+           sameArtifactRealBits(
+               left.maximum_courant, right.maximum_courant) &&
+           left.enforce_courant_limit == right.enforce_courant_limit &&
+           left.require_constant_preservation ==
+               right.require_constant_preservation;
+}
 
 [[nodiscard]] std::string safeFileToken(std::string_view value)
 {
@@ -122,6 +146,8 @@ template <typename... Values>
         reinitialization.max_unconstrained_signed_distance_error,
         reinitialization.max_wall_constrained_signed_distance_error,
         reinitialization.max_wall_contact_scale_residual,
+        reinitialization.max_prescribed_contact_value_residual,
+        reinitialization.max_prescribed_contact_angle_error_radians,
         reinitialization.max_contact_line_displacement,
         reinitialization.max_contact_angle_change_radians,
         reinitialization.preserve_band_width);
@@ -174,8 +200,13 @@ template <typename... Values>
 [[nodiscard]] bool finiteContext(
     const LevelSetConservativePhaseArtifactContext& context) noexcept
 {
-    return finiteValues(context.accepted_time, context.time_step) &&
+    return finiteValues(context.accepted_time,
+                        context.time_step,
+                        context.maximum_nodal_boundary_mass_transfer,
+                        context.boundary_mass_tolerance) &&
            context.time_step > Real{0.0} &&
+           context.maximum_nodal_boundary_mass_transfer >= Real{0.0} &&
+           context.boundary_mass_tolerance >= Real{0.0} &&
            finiteReinitialization(context.reinitialization) &&
            finiteReconciliation(context.reconciliation) &&
            finiteMismatch(context.post_reinitialization_mismatch) &&
@@ -190,6 +221,36 @@ template <typename... Values>
                         context.post_correction_phase_measure,
                         context.post_correction_geometry_measure,
                         context.retained_assembly_geometry_measure);
+}
+
+[[nodiscard]] bool validBoundaryFluxEvidence(
+    const LevelSetConservativePhaseArtifactContext& context,
+    const LevelSetP1PhaseTransportStageResult& stage) noexcept
+{
+    constexpr std::string_view expected_scope{
+        "discrete_q_flux_not_pointwise_velocity_normal"};
+    if (context.boundary_flux_scope != expected_scope) {
+        return false;
+    }
+    Real maximum_nodal_transfer{0.0};
+    long double total_nodal_transfer_accumulator{0.0L};
+    for (const Real transfer : stage.physical_boundary_mass_transfer) {
+        maximum_nodal_transfer =
+            std::max(maximum_nodal_transfer, std::abs(transfer));
+        total_nodal_transfer_accumulator +=
+            static_cast<long double>(transfer);
+    }
+    const Real total_nodal_transfer =
+        static_cast<Real>(total_nodal_transfer_accumulator);
+    return sameArtifactRealBits(
+               context.maximum_nodal_boundary_mass_transfer,
+               maximum_nodal_transfer) &&
+           sameArtifactRealBits(
+               stage.correction.total_physical_boundary_mass_transfer,
+               total_nodal_transfer) &&
+           maximum_nodal_transfer <= context.boundary_mass_tolerance &&
+           std::abs(total_nodal_transfer) <=
+               context.boundary_mass_tolerance;
 }
 
 [[nodiscard]] bool finiteComponent(
@@ -213,7 +274,42 @@ template <typename... Values>
     const LevelSetP1PhaseTransportStageResult& stage) noexcept
 {
     const auto& correction = stage.correction;
-    if (!finiteValues(stage.maximum_courant,
+    const bool semantic_invariants_satisfied =
+        stage.success && stage.replicated_stage_inputs_satisfied &&
+        stage.courant_satisfied &&
+        stage.low_order_coefficients_nonnegative &&
+        stage.strong_form_decomposition_satisfied && correction.success &&
+        correction.low_order_bounds_satisfied &&
+        correction.limited_bounds_satisfied &&
+        correction.interior_cancellation_satisfied &&
+        correction.local_balance_satisfied &&
+        correction.global_balance_satisfied &&
+        correction.component_balance_satisfied &&
+        correction.component_measure_closure_satisfied &&
+        (!correction.constant_preservation_required ||
+         correction.constant_preservation_satisfied);
+    if (!semantic_invariants_satisfied) {
+        return false;
+    }
+    const auto& executed_options = stage.executed_options;
+    if (!finiteValues(
+            executed_options.invariant_tolerance,
+            executed_options.component_activity_tolerance,
+            executed_options.maximum_courant) ||
+        executed_options.invariant_tolerance < Real{0.0} ||
+        !(executed_options.component_activity_tolerance > Real{0.0}) ||
+        executed_options.component_activity_tolerance > Real{1.0} ||
+        !(executed_options.maximum_courant > Real{0.0}) ||
+        executed_options.maximum_courant > Real{1.0} ||
+        !sameArtifactRealBits(
+            executed_options.component_activity_tolerance,
+            correction.component_activity_tolerance) ||
+        executed_options.require_constant_preservation !=
+            correction.constant_preservation_required) {
+        return false;
+    }
+    if (!finiteValues(stage.time_step,
+                      stage.maximum_courant,
                       stage.minimum_low_order_coefficient,
                       stage.maximum_strong_form_decomposition_residual,
                       correction.total_previous_liquid_measure,
@@ -252,7 +348,9 @@ template <typename... Values>
                       correction.maximum_limited_liquid_indicator)) {
         return false;
     }
-    if (stage.nodal_courant.size() != correction.nodes.size() ||
+    if (!(stage.time_step > Real{0.0}) ||
+        stage.sampled_nodal_velocity.size() != correction.nodes.size() ||
+        stage.nodal_courant.size() != correction.nodes.size() ||
         stage.physical_boundary_mass_transfer.size() !=
             correction.nodes.size() ||
         stage.discrete_divergence_mass_source.size() !=
@@ -262,7 +360,10 @@ template <typename... Values>
     }
     for (std::size_t index = 0u; index < correction.nodes.size(); ++index) {
         const auto& node = correction.nodes[index];
-        if (!finiteValues(
+        const auto& velocity = stage.sampled_nodal_velocity[index];
+        if (node.node != static_cast<GlobalIndex>(index) ||
+            !finiteValues(
+                velocity[0], velocity[1], velocity[2],
                 stage.nodal_courant[index],
                 stage.physical_boundary_mass_transfer[index],
                 stage.discrete_divergence_mass_source[index],
@@ -285,10 +386,12 @@ template <typename... Values>
                 node.low_order_local_mass_balance_residual,
                 node.raw_target_local_mass_balance_residual,
                 node.local_mass_balance_residual) ||
-            stage.physical_boundary_mass_transfer[index] !=
-                node.physical_boundary_mass_transfer ||
-            stage.discrete_divergence_mass_source[index] !=
-                node.discrete_divergence_mass_source) {
+            !sameArtifactRealBits(
+                stage.physical_boundary_mass_transfer[index],
+                node.physical_boundary_mass_transfer) ||
+            !sameArtifactRealBits(
+                stage.discrete_divergence_mass_source[index],
+                node.discrete_divergence_mass_source)) {
             return false;
         }
     }
@@ -306,10 +409,12 @@ template <typename... Values>
                           edge.limited_pair_cancellation_residual) ||
             input_edge.first_node != edge.first_node ||
             input_edge.second_node != edge.second_node ||
-            input_edge.low_order_mass_transfer !=
-                edge.low_order_mass_transfer ||
-            input_edge.raw_antidiffusive_mass_transfer !=
-                edge.raw_antidiffusive_mass_transfer) {
+            !sameArtifactRealBits(
+                input_edge.low_order_mass_transfer,
+                edge.low_order_mass_transfer) ||
+            !sameArtifactRealBits(
+                input_edge.raw_antidiffusive_mass_transfer,
+                edge.raw_antidiffusive_mass_transfer)) {
             return false;
         }
     }
@@ -321,23 +426,159 @@ template <typename... Values>
            finiteComponent(correction.subthreshold_component);
 }
 
+[[nodiscard]] bool graphIdentityMatchesContext(
+    const LevelSetP1PhaseGraphIdentity& identity,
+    const LevelSetConservativePhaseArtifactContext& context) noexcept
+{
+    return identity.dimension == context.graph_dimension &&
+           identity.nodes == context.graph_nodes &&
+           identity.edges == context.graph_edges &&
+           identity.geometry_revision == context.graph_geometry_revision &&
+           identity.topology_revision == context.graph_topology_revision &&
+           identity.ownership_revision == context.graph_ownership_revision &&
+           identity.numbering_revision == context.graph_numbering_revision &&
+           identity.dof_layout_revision ==
+               context.graph_dof_layout_revision &&
+           identity.content_revision == context.graph_content_revision;
+}
+
+[[nodiscard]] bool graphIdentitiesEqual(
+    const LevelSetP1PhaseGraphIdentity& left,
+    const LevelSetP1PhaseGraphIdentity& right) noexcept
+{
+    return left.dimension == right.dimension &&
+           left.nodes == right.nodes && left.edges == right.edges &&
+           left.geometry_revision == right.geometry_revision &&
+           left.topology_revision == right.topology_revision &&
+           left.ownership_revision == right.ownership_revision &&
+           left.numbering_revision == right.numbering_revision &&
+           left.dof_layout_revision == right.dof_layout_revision &&
+           left.content_revision == right.content_revision;
+}
+
+[[nodiscard]] bool validSplitStageBinding(
+    const LevelSetConservativePhaseArtifactContext& context,
+    const LevelSetP1PhaseTransportStageResult& stage)
+{
+    if (!context.split_stage_provenance.has_value()) {
+        return false;
+    }
+    const auto& provenance = *context.split_stage_provenance;
+    if (provenance.scheme !=
+            LevelSetP1PhaseSplitScheme::
+                BackwardEulerExplicitIndicatorEndpointVelocity ||
+        provenance.transport_mesh_policy !=
+            LevelSetP1PhaseTransportMeshPolicy::FixedBackground ||
+        provenance.temporal_order != 1 ||
+        provenance.prospective_step != context.accepted_step ||
+        provenance.attempt == 0u ||
+        provenance.operator_state_revision == 0u ||
+        context.state_revision == 0u ||
+        provenance.previous_q_revision == 0u ||
+        provenance.nodal_velocity_revision == 0u ||
+        provenance.final_flux_ledger_digest == 0u ||
+        context.graph_nodes == 0u ||
+        context.graph_dof_layout_revision == 0u ||
+        context.graph_content_revision == 0u ||
+        !sameArtifactRealBits(
+            provenance.step_end_time, context.accepted_time) ||
+        !sameArtifactRealBits(
+            provenance.time_step, context.time_step) ||
+        !sameArtifactRealBits(
+            provenance.time_step, stage.time_step) ||
+        !sameArtifactRealBits(
+            provenance.q_input_time, provenance.step_start_time) ||
+        !sameArtifactRealBits(
+            provenance.velocity_state_time,
+            provenance.step_end_time) ||
+        !sameArtifactRealBits(
+            provenance.step_start_time + provenance.time_step,
+            provenance.step_end_time) ||
+        !sameArtifactStageOptions(
+            provenance.stage_options, stage.executed_options) ||
+        !graphIdentitiesEqual(
+            provenance.previous_graph_identity,
+            provenance.operator_graph_identity) ||
+        !graphIdentityMatchesContext(
+            provenance.operator_graph_identity, context) ||
+        context.graph_nodes != stage.correction.nodes.size() ||
+        context.graph_edges != stage.correction.edges.size() ||
+        context.graph_dimension < 2 || context.graph_dimension > 3) {
+        return false;
+    }
+
+    std::vector<Real> previous_q;
+    std::vector<std::array<Real, 2>> one_ring_bounds;
+    previous_q.reserve(stage.correction.nodes.size());
+    one_ring_bounds.reserve(stage.correction.nodes.size());
+    for (const auto& node : stage.correction.nodes) {
+        previous_q.push_back(node.previous_liquid_indicator);
+        one_ring_bounds.push_back({
+            node.previous_liquid_indicator,
+            node.previous_liquid_indicator});
+    }
+    for (const auto& edge : stage.flux_edges) {
+        if (edge.first_node < 0 || edge.second_node < 0 ||
+            edge.first_node >= edge.second_node ||
+            static_cast<std::size_t>(edge.second_node) >=
+                previous_q.size()) {
+            return false;
+        }
+        const auto first = static_cast<std::size_t>(edge.first_node);
+        const auto second = static_cast<std::size_t>(edge.second_node);
+        one_ring_bounds[first][0] = std::min(
+            one_ring_bounds[first][0], previous_q[second]);
+        one_ring_bounds[second][0] = std::min(
+            one_ring_bounds[second][0], previous_q[first]);
+        one_ring_bounds[first][1] = std::max(
+            one_ring_bounds[first][1], previous_q[second]);
+        one_ring_bounds[second][1] = std::max(
+            one_ring_bounds[second][1], previous_q[first]);
+    }
+    for (std::size_t node = 0u; node < previous_q.size(); ++node) {
+        const Real expected_lower = std::clamp(
+            one_ring_bounds[node][0], Real{0.0}, Real{1.0});
+        const Real expected_upper = std::clamp(
+            one_ring_bounds[node][1], Real{0.0}, Real{1.0});
+        if (!sameArtifactRealBits(
+                stage.correction.nodes[node].lower_liquid_indicator,
+                expected_lower) ||
+            !sameArtifactRealBits(
+                stage.correction.nodes[node].upper_liquid_indicator,
+                expected_upper)) {
+            return false;
+        }
+    }
+    return levelSetP1PhaseScalarContentRevision(previous_q) ==
+               provenance.previous_q_revision &&
+           levelSetP1PhaseVelocityContentRevision(
+               stage.sampled_nodal_velocity) ==
+               provenance.nodal_velocity_revision &&
+           levelSetP1PhaseFluxLedgerDigest(stage) ==
+               provenance.final_flux_ledger_digest;
+}
+
 [[nodiscard]] bool validRegionLedgerShape(
     const std::optional<LevelSetPhaseRegionLedgerResult>& result,
-    const LevelSetPhaseFluxCorrectionResult& correction) noexcept
+    const LevelSetPhaseFluxCorrectionResult& correction)
 {
     if (!result.has_value()) {
         return true;
     }
     const auto node_count = correction.nodes.size();
-    std::set<std::pair<GlobalIndex, GlobalIndex>> correction_edges;
-    for (const auto& edge : correction.edges) {
-        correction_edges.emplace(edge.first_node, edge.second_node);
-    }
-    std::set<std::string> names;
-    for (const auto& region : result->regions) {
+    for (std::size_t region_index = 0u;
+         region_index < result->regions.size(); ++region_index) {
+        const auto& region = result->regions[region_index];
+        bool duplicate_name = false;
+        for (std::size_t preceding = 0u;
+             preceding < region_index; ++preceding) {
+            duplicate_name =
+                duplicate_name ||
+                result->regions[preceding].name == region.name;
+        }
         if (std::string_view(levelSetPhaseRegionKindName(region.kind)) ==
                 "unknown" ||
-            !names.insert(region.name).second ||
+            duplicate_name ||
             !std::is_sorted(region.member_nodes.begin(),
                             region.member_nodes.end()) ||
             std::adjacent_find(region.member_nodes.begin(),
@@ -352,7 +593,13 @@ template <typename... Values>
         }
         std::size_t expected_internal_edges = 0u;
         std::size_t expected_crossing_edges = 0u;
+        std::size_t crossing_edge_index = 0u;
         for (const auto& edge : correction.edges) {
+            if (edge.first_node < 0 ||
+                edge.second_node <= edge.first_node ||
+                static_cast<std::size_t>(edge.second_node) >= node_count) {
+                return false;
+            }
             const bool first_inside = std::binary_search(
                 region.member_nodes.begin(),
                 region.member_nodes.end(), edge.first_node);
@@ -361,31 +608,23 @@ template <typename... Values>
                 region.member_nodes.end(), edge.second_node);
             expected_internal_edges += first_inside && second_inside ? 1u : 0u;
             expected_crossing_edges += first_inside != second_inside ? 1u : 0u;
+            if (first_inside == second_inside) {
+                continue;
+            }
+            if (crossing_edge_index >= region.crossing_edges.size()) {
+                return false;
+            }
+            const auto& recorded =
+                region.crossing_edges[crossing_edge_index++];
+            if (recorded.first_node != edge.first_node ||
+                recorded.second_node != edge.second_node) {
+                return false;
+            }
         }
         if (region.internal_edges != expected_internal_edges ||
-            region.crossing_edges.size() != expected_crossing_edges) {
+            region.crossing_edges.size() != expected_crossing_edges ||
+            crossing_edge_index != region.crossing_edges.size()) {
             return false;
-        }
-        std::set<std::pair<GlobalIndex, GlobalIndex>> seen_crossing_edges;
-        for (const auto& edge : region.crossing_edges) {
-            if (edge.first_node < 0 ||
-                edge.second_node <= edge.first_node ||
-                static_cast<std::size_t>(edge.second_node) >= node_count ||
-                !correction_edges.contains(
-                    {edge.first_node, edge.second_node}) ||
-                !seen_crossing_edges.emplace(
-                    edge.first_node, edge.second_node).second) {
-                return false;
-            }
-            const bool first_inside = std::binary_search(
-                region.member_nodes.begin(),
-                region.member_nodes.end(), edge.first_node);
-            const bool second_inside = std::binary_search(
-                region.member_nodes.begin(),
-                region.member_nodes.end(), edge.second_node);
-            if (first_inside == second_inside) {
-                return false;
-            }
         }
     }
     return true;
@@ -515,6 +754,23 @@ void writeRegion(std::ostream& output,
            << region.maximum_internal_pair_cancellation_residual << '}';
 }
 
+void writeGraphIdentity(
+    std::ostream& output,
+    const LevelSetP1PhaseGraphIdentity& identity)
+{
+    output << "{\"dimension\":" << identity.dimension
+           << ",\"nodes\":" << identity.nodes
+           << ",\"edges\":" << identity.edges
+           << ",\"geometry_revision\":" << identity.geometry_revision
+           << ",\"topology_revision\":" << identity.topology_revision
+           << ",\"ownership_revision\":" << identity.ownership_revision
+           << ",\"numbering_revision\":" << identity.numbering_revision
+           << ",\"dof_layout_revision\":"
+           << identity.dof_layout_revision
+           << ",\"content_revision\":" << identity.content_revision
+           << '}';
+}
+
 void writeArtifact(
     std::ostream& output,
     const LevelSetConservativePhaseArtifactContext& context,
@@ -522,7 +778,8 @@ void writeArtifact(
 {
     const auto& correction = stage.correction;
     output << std::setprecision(std::numeric_limits<Real>::max_digits10);
-    output << "{\"artifact_schema_version\":2"
+    const auto& split_stage = *context.split_stage_provenance;
+    output << "{\"artifact_schema_version\":3"
            << ",\"artifact\":\"conservative_phase_flux_ledger\""
            << ",\"phase_field\":";
     writeJsonString(output, context.phase_field_name);
@@ -534,18 +791,77 @@ void writeArtifact(
            << ",\"accepted_time\":" << context.accepted_time
            << ",\"time_step\":" << context.time_step
            << ",\"state_revision\":" << context.state_revision
+           << ",\"split_stage_contract\":{\"scheme\":";
+    writeJsonString(
+        output, levelSetP1PhaseSplitSchemeName(split_stage.scheme));
+    output << ",\"transport_mesh_policy\":\"fixed_background\""
+           << ",\"indicator_update\":\"explicit_q_n\""
+           << ",\"indicator_bounds\":\"clamped_q_n_one_ring\""
+           << ",\"velocity_sample\":\"operator_endpoint_u_np1\""
+           << ",\"temporal_order\":" << split_stage.temporal_order
+           << ",\"prospective_step\":"
+           << split_stage.prospective_step
+           << ",\"attempt\":" << split_stage.attempt
+           << ",\"step_start_time\":"
+           << split_stage.step_start_time
+           << ",\"step_end_time\":" << split_stage.step_end_time
+           << ",\"q_input_time\":" << split_stage.q_input_time
+           << ",\"velocity_state_time\":"
+           << split_stage.velocity_state_time
+           << ",\"time_step\":" << split_stage.time_step
+           << ",\"stage_options\":{\"invariant_tolerance\":"
+           << split_stage.stage_options.invariant_tolerance
+           << ",\"component_activity_tolerance\":"
+           << split_stage.stage_options.component_activity_tolerance
+           << ",\"maximum_courant\":"
+           << split_stage.stage_options.maximum_courant
+           << ",\"enforce_courant_limit\":";
+    writeBool(output, split_stage.stage_options.enforce_courant_limit);
+    output << ",\"require_constant_preservation\":";
+    writeBool(
+        output, split_stage.stage_options.require_constant_preservation);
+    output << '}'
+           << ",\"operator_state_revision\":"
+           << split_stage.operator_state_revision
+           << ",\"accepted_state_revision\":"
+           << context.state_revision
+           << ",\"previous_q_revision\":"
+           << split_stage.previous_q_revision
+           << ",\"nodal_velocity_revision\":"
+           << split_stage.nodal_velocity_revision
+           << ",\"final_flux_ledger_digest\":"
+           << split_stage.final_flux_ledger_digest
+           << ",\"previous_graph_identity\":";
+    writeGraphIdentity(output, split_stage.previous_graph_identity);
+    output << ",\"operator_graph_identity\":";
+    writeGraphIdentity(output, split_stage.operator_graph_identity);
+    output << '}'
+           << ",\"boundary_flux_contract\":{\"scope\":";
+    writeJsonString(output, context.boundary_flux_scope);
+    output << ",\"maximum_nodal_boundary_mass_transfer\":"
+           << context.maximum_nodal_boundary_mass_transfer
+           << ",\"total_physical_boundary_mass_transfer\":"
+           << correction.total_physical_boundary_mass_transfer
+           << ",\"boundary_mass_tolerance\":"
+           << context.boundary_mass_tolerance
+           << ",\"limitation\":\"blind_to_velocity_normal_where_q_is_zero\""
+           << ",\"maximum_nodal_within_tolerance\":true"
+           << ",\"absolute_total_within_tolerance\":true}"
            << ",\"graph_revisions\":{\"geometry\":"
            << context.graph_geometry_revision
            << ",\"topology\":" << context.graph_topology_revision
            << ",\"ownership\":" << context.graph_ownership_revision
            << ",\"numbering\":" << context.graph_numbering_revision
            << ",\"dof_layout\":"
-           << context.graph_dof_layout_revision << '}'
+           << context.graph_dof_layout_revision
+           << ",\"content\":" << context.graph_content_revision << '}'
            << ",\"maintenance_ordering\":\"conservative_phase_transport_then_raw_geometry_rebuild_then_wall_aware_reinitialization_then_local_geometry_reconciliation_then_validation_then_commit\""
            << ",\"geometry_validated_before_commit\":";
     writeBool(output, context.geometry_validated_before_commit);
     output << ",\"transport_summary\":{\"success\":";
     writeBool(output, stage.success);
+    output << ",\"replicated_stage_inputs_satisfied\":";
+    writeBool(output, stage.replicated_stage_inputs_satisfied);
     output << ",\"courant_satisfied\":";
     writeBool(output, stage.courant_satisfied);
     output << ",\"maximum_courant\":" << stage.maximum_courant
@@ -728,6 +1044,10 @@ void writeArtifact(
     writeBool(output, reinitialization.wall_contact_constraints_satisfied);
     output << ",\"reinitialization_max_wall_contact_scale_residual\":"
            << reinitialization.max_wall_contact_scale_residual
+           << ",\"reinitialization_max_prescribed_contact_value_residual\":"
+           << reinitialization.max_prescribed_contact_value_residual
+           << ",\"reinitialization_max_prescribed_contact_angle_error_radians\":"
+           << reinitialization.max_prescribed_contact_angle_error_radians
            << ",\"reinitialization_max_contact_line_displacement\":"
            << reinitialization.max_contact_line_displacement
            << ",\"reinitialization_max_contact_angle_change_radians\":"
@@ -834,6 +1154,10 @@ void writeArtifact(
         }
         output << "]"
                << ",\"courant\":" << stage.nodal_courant[index]
+               << ",\"sampled_velocity\":["
+               << stage.sampled_nodal_velocity[index][0] << ','
+               << stage.sampled_nodal_velocity[index][1] << ','
+               << stage.sampled_nodal_velocity[index][2] << ']'
                << ",\"lumped_control_volume\":"
                << node.lumped_control_volume
                << ",\"previous_liquid_indicator\":"
@@ -952,6 +1276,8 @@ writeLevelSetConservativePhaseArtifact(
             return result;
         }
         if (!finiteContext(context) || !finiteStage(stage) ||
+            !validSplitStageBinding(context, stage) ||
+            !validBoundaryFluxEvidence(context, stage) ||
             !validRegionLedgerShape(
                 context.region_ledger, stage.correction) ||
             !context.geometry_validated_before_commit || !stage.success ||

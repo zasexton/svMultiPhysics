@@ -30,7 +30,12 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
+
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+#include <mpi.h>
+#endif
 
 namespace svmp {
 namespace FE {
@@ -80,6 +85,78 @@ private:
     std::function<void()> rollback_{};
     bool armed_{false};
 };
+
+[[nodiscard]] std::pair<int, int> candidateCallbackValueMinMax(
+    const systems::FESystem& system,
+    int local_value)
+{
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0) {
+        const auto communicator = system.dofHandler().mpiComm();
+        if (communicator != MPI_COMM_NULL) {
+            int communicator_size = 1;
+            MPI_Comm_size(communicator, &communicator_size);
+            if (communicator_size > 1) {
+                int minimum = 0;
+                int maximum = 0;
+                MPI_Allreduce(&local_value, &minimum, 1, MPI_INT, MPI_MIN,
+                              communicator);
+                MPI_Allreduce(&local_value, &maximum, 1, MPI_INT, MPI_MAX,
+                              communicator);
+                return {minimum, maximum};
+            }
+        }
+    }
+#else
+    static_cast<void>(system);
+#endif
+    return {local_value, local_value};
+}
+
+[[nodiscard]] std::pair<bool, bool> candidateStageBooleanMinMax(
+    const systems::FESystem& system,
+    bool local_value)
+{
+    const auto [minimum, maximum] = candidateCallbackValueMinMax(
+        system, local_value ? 1 : 0);
+    return {minimum != 0, maximum != 0};
+}
+
+[[nodiscard]] int candidateCallbackBitwiseOr(
+    const systems::FESystem& system,
+    int local_mask)
+{
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0) {
+        const auto communicator = system.dofHandler().mpiComm();
+        if (communicator != MPI_COMM_NULL) {
+            int communicator_size = 1;
+            MPI_Comm_size(communicator, &communicator_size);
+            if (communicator_size > 1) {
+                int global_mask = 0;
+                MPI_Allreduce(&local_mask, &global_mask, 1, MPI_INT,
+                              MPI_BOR, communicator);
+                return global_mask;
+            }
+        }
+    }
+#else
+    static_cast<void>(system);
+#endif
+    return local_mask;
+}
 
 void updateGhostsAndDistributeHistory(const constraints::AffineConstraints& constraints,
                                       TimeHistory& history)
@@ -771,6 +848,49 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     const auto n_dofs = transient.system().dofHandler().getNumDofs();
     FE_THROW_IF(n_dofs <= 0, systems::InvalidStateException, "TimeLoop: system has no DOFs");
 
+    const bool candidate_stage_observer_enabled =
+        static_cast<bool>(callbacks.on_candidate_stage);
+    const bool candidate_acceptance_gate_enabled =
+        static_cast<bool>(callbacks.on_step_candidate_ready);
+    const auto [candidate_stage_observer_minimum,
+                candidate_stage_observer_maximum] =
+        candidateStageBooleanMinMax(
+            transient.system(), candidate_stage_observer_enabled);
+    FE_THROW_IF(
+        candidate_stage_observer_minimum !=
+            candidate_stage_observer_maximum,
+        systems::InvalidStateException,
+        "TimeLoop: candidate-stage observer presence differs across the "
+        "active FE communicator");
+    const auto [candidate_acceptance_gate_minimum,
+                candidate_acceptance_gate_maximum] =
+        candidateStageBooleanMinMax(
+            transient.system(), candidate_acceptance_gate_enabled);
+    FE_THROW_IF(
+        candidate_acceptance_gate_minimum !=
+            candidate_acceptance_gate_maximum,
+        systems::InvalidStateException,
+        "TimeLoop: final candidate acceptance-gate presence differs across "
+        "the active FE communicator");
+
+    if (candidate_stage_observer_enabled) {
+        const bool endpoint_stage_scheme =
+            options_.scheme == SchemeKind::BackwardEuler ||
+            options_.scheme == SchemeKind::DG0;
+        const bool first_order_generalized_alpha =
+            options_.scheme == SchemeKind::GeneralizedAlpha &&
+            transient.system().temporalOrder() == 1;
+        FE_THROW_IF(
+            ((!endpoint_stage_scheme &&
+              !first_order_generalized_alpha) ||
+             transient.system().temporalOrder() != 1),
+            NotImplementedException,
+            "TimeLoop: candidate-stage observation currently supports "
+            "Backward Euler, the explicit DG0 route, and first-order "
+            "generalized-alpha only when the system temporal order is "
+            "exactly one");
+    }
+
     const double t0 = options_.t0;
     const double t_end = options_.t_end;
     history.setTime(t0);
@@ -837,11 +957,23 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     auto scratch_vec1 = factory.createVector(n_dofs);
     auto scratch_vec2 = factory.createVector(n_dofs);
     auto generalized_alpha_rate_n = factory.createVector(n_dofs);
+    std::unique_ptr<backends::GenericVector> candidate_stage_state{};
+    std::unique_ptr<backends::GenericVector> candidate_stage_rate{};
+    if (callbacks.on_candidate_stage) {
+        candidate_stage_state = factory.createVector(n_dofs);
+        candidate_stage_rate = factory.createVector(n_dofs);
+    }
     FE_CHECK_NOT_NULL(scratch_vec0.get(), "TimeLoop scratch_vec0");
     FE_CHECK_NOT_NULL(scratch_vec1.get(), "TimeLoop scratch_vec1");
     FE_CHECK_NOT_NULL(scratch_vec2.get(), "TimeLoop scratch_vec2");
     FE_CHECK_NOT_NULL(generalized_alpha_rate_n.get(),
                       "TimeLoop generalized-alpha rate_n scratch");
+    if (callbacks.on_candidate_stage) {
+        FE_CHECK_NOT_NULL(candidate_stage_state.get(),
+                          "TimeLoop candidate-stage state scratch");
+        FE_CHECK_NOT_NULL(candidate_stage_rate.get(),
+                          "TimeLoop candidate-stage rate scratch");
+    }
 
     auto dt12_nohistory = std::make_shared<const Dt12NoHistoryIntegrator>();
 
@@ -2153,12 +2285,142 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             std::optional<double> monolithic_aux_stage_alpha_f{};
             int collocation_stages_used = 0;
             bool generalized_alpha_first_order_rate_n_saved = false;
+            std::optional<CandidateStageObservation>
+                prepared_candidate_stage{};
+
+            auto prepareCandidateStageObservation = [
+                &](const systems::TimeIntegrator& stage_integrator,
+                    double state_time,
+                    double rate_time,
+                    std::optional<GeneralizedAlphaStageMetadata>
+                        generalized_alpha) {
+                if (!callbacks.on_candidate_stage) {
+                    return;
+                }
+                FE_CHECK_NOT_NULL(candidate_stage_state.get(),
+                                  "TimeLoop candidate-stage state scratch");
+                FE_CHECK_NOT_NULL(candidate_stage_rate.get(),
+                                  "TimeLoop candidate-stage rate scratch");
+
+                auto stage_view =
+                    makeAcceptedTimeStepStateView(history, state_time);
+                const double stage_dt = state_time - t;
+                stage_view.effective_dt =
+                    (std::isfinite(stage_dt) && stage_dt > 0.0)
+                        ? stage_dt
+                        : dt;
+                const auto time_context =
+                    stage_integrator.buildContext(/*max_time_derivative_order=*/1,
+                                                  stage_view);
+                FE_THROW_IF(
+                    !time_context.dt1.has_value(),
+                    systems::InvalidStateException,
+                    "TimeLoop: candidate-stage observation requested but "
+                    "the converged operator did not provide a first-derivative stencil");
+
+                const auto& stencil = *time_context.dt1;
+                FE_THROW_IF(
+                    stencil.a.empty(),
+                    systems::InvalidStateException,
+                    "TimeLoop: candidate-stage first-derivative stencil is empty");
+
+                auto state_copy = candidate_stage_state->localSpan();
+                auto rate_copy = candidate_stage_rate->localSpan();
+                const auto current = history.uSpan();
+                FE_CHECK_ARG(
+                    state_copy.size() == current.size() &&
+                        rate_copy.size() == current.size(),
+                    "TimeLoop: candidate-stage scratch size mismatch");
+                std::copy(current.begin(), current.end(), state_copy.begin());
+
+                const auto history_states = history.uHistorySpans();
+                FE_THROW_IF(
+                    stencil.a.size() > history_states.size() + 1u,
+                    systems::InvalidStateException,
+                    "TimeLoop: candidate-stage first-derivative stencil "
+                    "requires unavailable history state");
+                for (std::size_t i = 0; i < rate_copy.size(); ++i) {
+                    Real value = stencil.a[0] * current[i];
+                    for (std::size_t j = 1; j < stencil.a.size(); ++j) {
+                        const auto prior = history_states[j - 1u];
+                        FE_CHECK_ARG(
+                            prior.size() == current.size(),
+                            "TimeLoop: candidate-stage history size mismatch");
+                        value += stencil.a[j] * prior[i];
+                    }
+                    rate_copy[i] = value;
+                }
+
+                std::optional<CandidateStageMeshRevision>
+                    stage_mesh_revision;
+                try {
+                    const auto& mesh =
+                        transient.system().meshAccess();
+                    if (mesh.revisionTrackingAvailable()) {
+                        stage_mesh_revision =
+                            CandidateStageMeshRevision{
+                                .geometry_revision =
+                                    mesh.geometryRevision(),
+                                .topology_revision =
+                                    mesh.topologyRevision(),
+                                .ownership_revision =
+                                    mesh.ownershipRevision(),
+                                .numbering_revision =
+                                    mesh.numberingRevision(),
+                                .field_layout_revision =
+                                    mesh.fieldLayoutRevision(),
+                                .label_revision =
+                                    mesh.labelRevision(),
+                                .active_configuration_epoch =
+                                    mesh.activeConfigurationEpoch(),
+                                .coordinate_configuration_key =
+                                    mesh.coordinateConfigurationKey(),
+                            };
+                    }
+                } catch (const std::exception& error) {
+                    throw systems::InvalidStateException(
+                        "TimeLoop: candidate-stage mesh revision capture "
+                        "failed: " +
+                        std::string(error.what()));
+                } catch (...) {
+                    throw systems::InvalidStateException(
+                        "TimeLoop: candidate-stage mesh revision capture "
+                        "failed with an unknown exception");
+                }
+
+                prepared_candidate_stage = CandidateStageObservation{
+                    .scheme = options_.scheme,
+                    .temporal_order = transient.system().temporalOrder(),
+                    .step_index = history.stepIndex() + 1,
+                    .attempt_index = attempt,
+                    .step_start_time = t,
+                    .step_end_time = solve_time,
+                    .state_time = state_time,
+                    .rate_time = rate_time,
+                    .dt = dt,
+                    .generalized_alpha = std::move(generalized_alpha),
+                    .time_derivative_fields =
+                        transient.system().timeDerivativeFields(
+                            options_.newton.residual_op),
+                    .mesh_revision =
+                        std::move(stage_mesh_revision),
+                    .state_vector = candidate_stage_state.get(),
+                    .rate_vector = candidate_stage_rate.get(),
+                };
+            };
 
             bool threw = false;
             std::exception_ptr caught_exception{};
             try {
                 if (options_.scheme == SchemeKind::BackwardEuler || options_.scheme == SchemeKind::DG0) {
                     nr = newton.solveStep(transient, linear, solve_time, history, workspace);
+                    if (nr.converged) {
+                        prepareCandidateStageObservation(
+                            transient.integrator(),
+                            solve_time,
+                            solve_time,
+                            std::nullopt);
+                    }
                 } else if (options_.scheme == SchemeKind::BDF2) {
                     if (history.stepIndex() < 1) {
                         // Use a 2nd-order starter (Crank–Nicolson) so the global BDF2
@@ -2265,7 +2527,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
 	                        auto& sys = transient.system();
 	                        const auto& constraints = sys.constraints();
-                            const auto dt_fields = sys.timeDerivativeFields(options_.newton.jacobian_op);
+	                            const auto dt_fields = sys.timeDerivativeFields(options_.newton.residual_op);
                             const auto nondt_dofs = collectNonTimeDerivativeDofs(sys, dt_fields);
 
 	                        // Ensure uDot storage exists and is initialized before the stage solve.
@@ -2600,6 +2862,15 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
 	                        nr = newton.solveStep(transient_stage, linear, stage_time, history, workspace);
                         if (nr.converged) {
+                            prepareCandidateStageObservation(
+                                *generalized_alpha_fo,
+                                stage_time,
+                                t + ga1_params->alpha_m * dt,
+                                GeneralizedAlphaStageMetadata{
+                                    .alpha_f = ga1_params->alpha_f,
+                                    .alpha_m = ga1_params->alpha_m,
+                                    .gamma = ga1_params->gamma,
+                                });
                             const double inv_af = 1.0 / ga1_params->alpha_f;
                             const double c_prev = (ga1_params->alpha_f - 1.0) * inv_af;
 	                            if (!nondt_dofs.empty()) {
@@ -3129,6 +3400,127 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 nr.converged = false;
             }
 
+            bool callback_converged_on_all_ranks = nr.converged;
+            if (candidate_stage_observer_enabled ||
+                candidate_acceptance_gate_enabled) {
+                const auto [converged_minimum,
+                            converged_maximum] =
+                    candidateStageBooleanMinMax(
+                        transient.system(), nr.converged);
+                callback_converged_on_all_ranks =
+                    converged_minimum && converged_maximum;
+                if (converged_minimum != converged_maximum) {
+                    nr.converged = false;
+                    threw = true;
+                    if (!caught_exception) {
+                        caught_exception = std::make_exception_ptr(
+                            systems::InvalidStateException(
+                                "TimeLoop: candidate-callback convergence "
+                                "status differed across the active FE "
+                                "communicator"));
+                    }
+                }
+            }
+
+            if (candidate_stage_observer_enabled) {
+                const bool local_observation_ready =
+                    nr.converged && prepared_candidate_stage.has_value();
+                const auto [ready_minimum, ready_maximum] =
+                    candidateStageBooleanMinMax(
+                        transient.system(), local_observation_ready);
+                if (callback_converged_on_all_ranks &&
+                    (!ready_minimum || !ready_maximum)) {
+                    nr.converged = false;
+                    threw = true;
+                    if (!caught_exception) {
+                        caught_exception = std::make_exception_ptr(
+                            systems::InvalidStateException(
+                                "TimeLoop: candidate-stage preparation "
+                                "failed or differed across the active FE "
+                                "communicator"));
+                    }
+                } else if (callback_converged_on_all_ranks) {
+                    // Local snapshot construction above must finish on every
+                    // active rank before a backend ghost exchange begins.  A
+                    // rank-local construction failure must meet its peers in
+                    // the readiness reductions, not leave them blocked in a
+                    // PETSc/Trilinos overlap refresh.
+                    const bool local_scratch_ready =
+                        candidate_stage_state != nullptr &&
+                        candidate_stage_rate != nullptr;
+                    const auto [scratch_ready_minimum,
+                                scratch_ready_maximum] =
+                        candidateStageBooleanMinMax(
+                            transient.system(), local_scratch_ready);
+                    if (!scratch_ready_minimum || !scratch_ready_maximum) {
+                        nr.converged = false;
+                        threw = true;
+                        caught_exception = std::make_exception_ptr(
+                            systems::InvalidStateException(
+                                "TimeLoop: candidate-stage ghost refresh "
+                                "scratch readiness failed on an active FE "
+                                "communicator rank"));
+                    } else {
+                        std::exception_ptr local_state_refresh_failure;
+                        try {
+                            candidate_stage_state->updateGhosts();
+                        } catch (...) {
+                            local_state_refresh_failure =
+                                std::current_exception();
+                        }
+                        const auto [state_refresh_success_minimum,
+                                    state_refresh_success_maximum] =
+                            candidateStageBooleanMinMax(
+                                transient.system(),
+                                local_state_refresh_failure == nullptr);
+                        if (!state_refresh_success_minimum ||
+                            !state_refresh_success_maximum) {
+                            nr.converged = false;
+                            threw = true;
+                            caught_exception =
+                                local_state_refresh_failure
+                                    ? local_state_refresh_failure
+                                    : std::make_exception_ptr(
+                                          systems::InvalidStateException(
+                                              "TimeLoop: candidate-stage state "
+                                              "ghost refresh failed on another "
+                                              "active FE communicator rank"));
+                        } else {
+                            // State and rate refreshes are separate collective
+                            // phases.  The state-success fence above prevents a
+                            // rank that reports a state-refresh failure from
+                            // meeting peers in the rate backend collective.
+                            std::exception_ptr local_rate_refresh_failure;
+                            try {
+                                candidate_stage_rate->updateGhosts();
+                            } catch (...) {
+                                local_rate_refresh_failure =
+                                    std::current_exception();
+                            }
+                            const auto [rate_refresh_success_minimum,
+                                        rate_refresh_success_maximum] =
+                                candidateStageBooleanMinMax(
+                                    transient.system(),
+                                    local_rate_refresh_failure == nullptr);
+                            if (!rate_refresh_success_minimum ||
+                                !rate_refresh_success_maximum) {
+                                nr.converged = false;
+                                threw = true;
+                                caught_exception =
+                                    local_rate_refresh_failure
+                                        ? local_rate_refresh_failure
+                                        : std::make_exception_ptr(
+                                              systems::InvalidStateException(
+                                                  "TimeLoop: candidate-stage "
+                                                  "rate ghost refresh failed "
+                                                  "on another active FE "
+                                                  "communicator rank"));
+                            }
+                        }
+                    }
+                }
+            }
+
             if (callbacks.on_nonlinear_done) {
                 callbacks.on_nonlinear_done(history, nr);
             }
@@ -3159,8 +3551,12 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             });
             auto restoreAcceptedGeneratedState = [&]() {
                 candidate_rollback_guard.discard();
-                if (!options_.newton.synchronize_state) {
-                    return;
+                if (options_.newton.synchronize_state) {
+                    auto restored_state = makeRestoredTimeStepStateView(
+                        history, t, dt);
+                    options_.newton.synchronize_state(
+                        restored_state,
+                        StateSyncPoint::RestoredTimeStepState);
                 }
 
                 // A nonlinear stage, candidate callback, or adaptive decision
@@ -3169,12 +3565,6 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 // terminal rejection.  The first callback may reconstruct
                 // state-dependent constraints; project the already accepted
                 // state at its own time before regenerating dependent data.
-                auto restored_state = makeRestoredTimeStepStateView(
-                    history, t, dt);
-                options_.newton.synchronize_state(
-                    restored_state,
-                    StateSyncPoint::RestoredTimeStepState);
-
                 const double accepted_dt =
                     history.dtPrev() > 0.0 ? history.dtPrev() : dt;
                 transient.system().updateConstraints(t, accepted_dt);
@@ -3184,13 +3574,58 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     transient.system().constraints().updateGhostsAndDistribute(
                         history.uPrev());
                 }
+                // The rejected endpoint must not remain exposed through u()
+                // after a fixed-step failure or while rejection callbacks
+                // inspect the restored attempt. Recreate the current vector
+                // from the accepted history only after accepted-time
+                // constraints have been reimposed on uPrev().
+                history.resetCurrentToPrevious();
+                history.u().updateGhosts();
 
-                restored_state = makeRestoredTimeStepStateView(
-                    history, t, dt);
-                options_.newton.synchronize_state(
-                    restored_state,
-                    StateSyncPoint::RestoredProjectedTimeStepState);
+                if (options_.newton.synchronize_state) {
+                    const auto restored_state =
+                        makeRestoredTimeStepStateView(
+                            history, t, dt);
+                    options_.newton.synchronize_state(
+                        restored_state,
+                        StateSyncPoint::RestoredProjectedTimeStepState);
+                }
             };
+
+            if (nr.converged && candidate_stage_observer_enabled) {
+                candidate_rollback_guard.arm();
+                std::exception_ptr local_callback_failure;
+                try {
+                    FE_THROW_IF(
+                        !prepared_candidate_stage.has_value(),
+                        systems::InvalidStateException,
+                        "TimeLoop: converged candidate is missing its exact "
+                        "operator-stage observation");
+                    callbacks.on_candidate_stage(
+                        *prepared_candidate_stage);
+                } catch (...) {
+                    local_callback_failure =
+                        std::current_exception();
+                }
+                const auto [callback_success_minimum,
+                            callback_success_maximum] =
+                    candidateStageBooleanMinMax(
+                        transient.system(),
+                        local_callback_failure == nullptr);
+                if (!callback_success_minimum ||
+                    !callback_success_maximum) {
+                    const auto callback_failure =
+                        local_callback_failure
+                            ? local_callback_failure
+                            : std::make_exception_ptr(
+                                  systems::InvalidStateException(
+                                      "TimeLoop: candidate-stage observer "
+                                      "failed on another active FE "
+                                      "communicator rank"));
+                    restoreAcceptedGeneratedState();
+                    std::rethrow_exception(callback_failure);
+                }
+            }
 
             bool accept_step = nr.converged;
 
@@ -3258,66 +3693,6 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         order = decision.next_order;
                     }
                     continue;
-                }
-
-                if (adaptive) {
-                    const auto info = make_step_attempt_info(/*nonlinear_converged=*/true);
-
-                    const auto decision = options_.step_controller->onAccepted(info);
-                    if (!decision.accept) {
-                        restoreAcceptedGeneratedState();
-                        if (callbacks.on_step_rejected) {
-                            callbacks.on_step_rejected(
-                                history, StepRejectReason::ErrorTooLarge, nr);
-                        }
-                        if (!decision.retry) {
-                            report.success = false;
-                            report.steps_taken = step;
-                            report.final_time = history.time();
-                            const std::string base =
-                                decision.message.empty()
-                                    ? "TimeLoop: step rejected"
-                                    : decision.message;
-                            if (info.error_norm > 0.0 && std::isfinite(info.error_norm)) {
-                                report.message =
-                                    base + " (dt=" + std::to_string(info.dt) +
-                                    ", order=" +
-                                    std::to_string(info.scheme_order) +
-                                    ", error_norm=" +
-                                    std::to_string(info.error_norm) + ")";
-                            } else {
-                                report.message =
-                                    base + " (dt=" + std::to_string(info.dt) +
-                                    ", order=" +
-                                    std::to_string(info.scheme_order) + ")";
-                            }
-                            return report;
-                        }
-
-                        const double new_dt = decision.next_dt;
-                        FE_THROW_IF(!(new_dt > 0.0) || !std::isfinite(new_dt),
-                                    systems::InvalidStateException,
-                                    "TimeLoop: step controller returned invalid dt");
-                        if (callbacks.on_dt_updated) {
-                            callbacks.on_dt_updated(dt, new_dt, step, attempt);
-                        }
-                        dt = new_dt;
-                        if (decision.next_order > 0) {
-                            order = decision.next_order;
-                        }
-                        continue;
-                    }
-
-                    if (decision.next_dt > 0.0 && std::isfinite(decision.next_dt)) {
-                        const double old = dt_next;
-                        dt_next = decision.next_dt;
-                        if (callbacks.on_dt_updated && old != dt_next) {
-                            callbacks.on_dt_updated(old, dt_next, step, attempt);
-                        }
-                    }
-                    if (decision.next_order > 0) {
-                        order_next = decision.next_order;
-                    }
                 }
 
                 const int temporal_order = transient.system().temporalOrder();
@@ -3455,9 +3830,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     // state at an intermediate stage.  Refresh endpoint
                     // topology first, apply its constraints to u_{n+1},
                     // and only then regenerate curvature/extension data.
-                    // This occurs after all adaptive decisions and before
-                    // the first irreversible commit, so it executes once
-                    // for an accepted attempt and remains transactional.
+                    // This occurs before the final reversible candidate gate
+                    // and before the adaptive controller records acceptance,
+                    // so a topology-sensitive gate can still restore and
+                    // retry the projected endpoint transactionally.
                     if (options_.newton.synchronize_state) {
                         try {
                             const auto endpoint_state =
@@ -3513,7 +3889,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         }
                         const auto dt_fields =
                             transient.system().timeDerivativeFields(
-                                options_.newton.jacobian_op);
+                                options_.newton.residual_op);
                         const auto nondt_dofs =
                             collectNonTimeDerivativeDofs(
                                 transient.system(), dt_fields);
@@ -3538,6 +3914,221 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             restoreAcceptedGeneratedState();
                             std::rethrow_exception(endpoint_failure);
                         }
+                    }
+                }
+
+                std::optional<StepRejectReason>
+                    final_candidate_rejection{};
+                if (candidate_acceptance_gate_enabled) {
+                    candidate_rollback_guard.arm();
+                    std::exception_ptr local_gate_failure;
+                    try {
+                        final_candidate_rejection =
+                            callbacks.on_step_candidate_ready(history, nr);
+                    } catch (...) {
+                        local_gate_failure = std::current_exception();
+                    }
+
+                    const auto [gate_success_minimum,
+                                gate_success_maximum] =
+                        candidateStageBooleanMinMax(
+                            transient.system(),
+                            local_gate_failure == nullptr);
+                    if (!gate_success_minimum || !gate_success_maximum) {
+                        const auto gate_failure =
+                            local_gate_failure
+                                ? local_gate_failure
+                                : std::make_exception_ptr(
+                                      systems::InvalidStateException(
+                                          "TimeLoop: final candidate "
+                                          "acceptance gate failed on another "
+                                          "active FE communicator rank"));
+                        restoreAcceptedGeneratedState();
+                        std::rethrow_exception(gate_failure);
+                    }
+
+                    constexpr int maximum_known_reason =
+                        static_cast<int>(
+                            StepRejectReason::CutTopologyChanged);
+                    const int local_reason =
+                        final_candidate_rejection.has_value()
+                            ? static_cast<int>(
+                                  *final_candidate_rejection)
+                            : -1;
+                    const bool local_reason_valid =
+                        local_reason >= -1 &&
+                        local_reason <= maximum_known_reason;
+                    const auto [reason_valid_minimum,
+                                reason_valid_maximum] =
+                        candidateStageBooleanMinMax(
+                            transient.system(), local_reason_valid);
+                    if (!reason_valid_minimum ||
+                        !reason_valid_maximum) {
+                        restoreAcceptedGeneratedState();
+                        FE_THROW(
+                            systems::InvalidStateException,
+                            "TimeLoop: final candidate acceptance gate "
+                            "returned an invalid rejection reason on an "
+                            "active FE communicator rank");
+                    }
+
+                    const int local_reason_mask =
+                        local_reason >= 0
+                            ? (1 << local_reason)
+                            : 0;
+                    const int global_reason_mask =
+                        candidateCallbackBitwiseOr(
+                            transient.system(), local_reason_mask);
+                    if ((global_reason_mask &
+                         (global_reason_mask - 1)) != 0) {
+                        restoreAcceptedGeneratedState();
+                        FE_THROW(
+                            systems::InvalidStateException,
+                            "TimeLoop: final candidate acceptance gate "
+                            "returned conflicting rejection reasons across "
+                            "the active FE communicator");
+                    }
+                    if (global_reason_mask != 0) {
+                        int global_reason = 0;
+                        int remaining_mask = global_reason_mask;
+                        while ((remaining_mask >>= 1) != 0) {
+                            ++global_reason;
+                        }
+                        final_candidate_rejection =
+                            static_cast<StepRejectReason>(
+                                global_reason);
+                    } else {
+                        final_candidate_rejection.reset();
+                    }
+                }
+
+                if (final_candidate_rejection.has_value()) {
+                    const auto rejection_reason =
+                        *final_candidate_rejection;
+                    restoreAcceptedGeneratedState();
+                    if (callbacks.on_step_rejected) {
+                        callbacks.on_step_rejected(
+                            history, rejection_reason, nr);
+                    }
+                    if (!adaptive) {
+                        FE_THROW(
+                            FEException,
+                            "TimeLoop: projected candidate rejected by the "
+                            "final acceptance gate before commit");
+                    }
+
+                    const auto info = make_step_attempt_info(
+                        /*nonlinear_converged=*/true);
+                    const auto decision =
+                        options_.step_controller->onRejected(
+                            info, rejection_reason);
+                    if (!decision.retry) {
+                        report.success = false;
+                        report.steps_taken = step;
+                        report.final_time = history.time();
+                        const std::string base =
+                            decision.message.empty()
+                                ? "TimeLoop: projected candidate rejected by "
+                                  "the final acceptance gate"
+                                : decision.message;
+                        if (info.error_norm > 0.0 &&
+                            std::isfinite(info.error_norm)) {
+                            report.message =
+                                base + " (dt=" +
+                                std::to_string(info.dt) + ", order=" +
+                                std::to_string(info.scheme_order) +
+                                ", error_norm=" +
+                                std::to_string(info.error_norm) + ")";
+                        } else {
+                            report.message =
+                                base + " (dt=" +
+                                std::to_string(info.dt) + ", order=" +
+                                std::to_string(info.scheme_order) + ")";
+                        }
+                        return report;
+                    }
+
+                    const double new_dt = decision.next_dt;
+                    FE_THROW_IF(
+                        !(new_dt > 0.0) || !std::isfinite(new_dt),
+                        systems::InvalidStateException,
+                        "TimeLoop: step controller returned invalid dt");
+                    if (callbacks.on_dt_updated) {
+                        callbacks.on_dt_updated(
+                            dt, new_dt, step, attempt);
+                    }
+                    dt = new_dt;
+                    if (decision.next_order > 0) {
+                        order = decision.next_order;
+                    }
+                    continue;
+                }
+
+                if (adaptive) {
+                    const auto info = make_step_attempt_info(
+                        /*nonlinear_converged=*/true);
+                    const auto decision =
+                        options_.step_controller->onAccepted(info);
+                    if (!decision.accept) {
+                        restoreAcceptedGeneratedState();
+                        if (callbacks.on_step_rejected) {
+                            callbacks.on_step_rejected(
+                                history,
+                                StepRejectReason::ErrorTooLarge,
+                                nr);
+                        }
+                        if (!decision.retry) {
+                            report.success = false;
+                            report.steps_taken = step;
+                            report.final_time = history.time();
+                            const std::string base =
+                                decision.message.empty()
+                                    ? "TimeLoop: step rejected"
+                                    : decision.message;
+                            if (info.error_norm > 0.0 &&
+                                std::isfinite(info.error_norm)) {
+                                report.message =
+                                    base + " (dt=" +
+                                    std::to_string(info.dt) + ", order=" +
+                                    std::to_string(info.scheme_order) +
+                                    ", error_norm=" +
+                                    std::to_string(info.error_norm) + ")";
+                            } else {
+                                report.message =
+                                    base + " (dt=" +
+                                    std::to_string(info.dt) + ", order=" +
+                                    std::to_string(info.scheme_order) + ")";
+                            }
+                            return report;
+                        }
+
+                        const double new_dt = decision.next_dt;
+                        FE_THROW_IF(
+                            !(new_dt > 0.0) || !std::isfinite(new_dt),
+                            systems::InvalidStateException,
+                            "TimeLoop: step controller returned invalid dt");
+                        if (callbacks.on_dt_updated) {
+                            callbacks.on_dt_updated(
+                                dt, new_dt, step, attempt);
+                        }
+                        dt = new_dt;
+                        if (decision.next_order > 0) {
+                            order = decision.next_order;
+                        }
+                        continue;
+                    }
+
+                    if (decision.next_dt > 0.0 &&
+                        std::isfinite(decision.next_dt)) {
+                        const double old = dt_next;
+                        dt_next = decision.next_dt;
+                        if (callbacks.on_dt_updated && old != dt_next) {
+                            callbacks.on_dt_updated(
+                                old, dt_next, step, attempt);
+                        }
+                    }
+                    if (decision.next_order > 0) {
+                        order_next = decision.next_order;
                     }
                 }
 

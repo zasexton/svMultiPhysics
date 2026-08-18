@@ -373,6 +373,254 @@ TEST(FormsBoundaryConditions, RobinBCUsesGeneratedActiveBoundaryWhenProvided)
     EXPECT_EQ(whole_face_terms, 0);
 }
 
+TEST(FormsBoundaryConditions,
+     GenericNaturalAndRobinHelpersAcceptGeneratedActiveBoundaryMeasures)
+{
+    namespace forms = svmp::FE::forms;
+
+    auto space = svmp::FE::spaces::H1Space(
+        ElementType::Tetra4, /*order=*/1);
+    const auto u = forms::FormExpr::trialFunction(
+        space, "u");
+    const auto v = forms::FormExpr::testFunction(
+        space, "v");
+    constexpr int physical_marker = 8;
+    constexpr int active_marker = 108;
+
+    const std::array<NeumannBC, 1> neumann{{
+        NeumannBC{
+            .boundary_marker = physical_marker,
+            .flux = 2.0},
+    }};
+    const std::array<RobinBC, 1> robin{{
+        RobinBC{
+            .boundary_marker = physical_marker,
+            .alpha = 3.0,
+            .rhs = 4.0},
+    }};
+    const std::array<NeumannBCValue, 1>
+        neumann_value{{
+            NeumannBCValue{
+                .boundary_marker = physical_marker,
+                .flux = svmp::FE::Real{5.0}},
+        }};
+    const std::array<RobinBCValue, 1>
+        robin_value{{
+            RobinBCValue{
+                .boundary_marker = physical_marker,
+                .alpha = svmp::FE::Real{6.0},
+                .rhs = svmp::FE::Real{7.0}},
+        }};
+    const auto active_measure =
+        forms::ExteriorBoundaryMeasure::
+            generatedActiveSubset(
+                physical_marker, active_marker);
+
+    auto residual = (u * v).dx();
+    residual = forms::bc::applyNeumann(
+        std::move(residual),
+        v,
+        std::span<const NeumannBC>(neumann),
+        [](const NeumannBC& bc, std::size_t) {
+            return forms::FormExpr::constant(bc.flux);
+        },
+        [active_measure](const NeumannBC&, std::size_t) {
+            return active_measure;
+        });
+    residual = forms::bc::applyRobin(
+        std::move(residual),
+        u,
+        v,
+        std::span<const RobinBC>(robin),
+        [](const RobinBC& bc, std::size_t) {
+            return forms::FormExpr::constant(bc.alpha);
+        },
+        [](const RobinBC& bc, std::size_t) {
+            return forms::FormExpr::constant(bc.rhs);
+        },
+        [active_measure](const RobinBC&, std::size_t) {
+            return active_measure;
+        });
+    residual = forms::bc::applyNeumannValue(
+        std::move(residual),
+        v,
+        std::span<const NeumannBCValue>(
+            neumann_value),
+        &NeumannBCValue::flux,
+        "active_neumann",
+        [active_measure](
+            const NeumannBCValue&, std::size_t) {
+            return active_measure;
+        });
+    residual = forms::bc::applyRobinValue(
+        std::move(residual),
+        u,
+        v,
+        std::span<const RobinBCValue>(
+            robin_value),
+        &RobinBCValue::alpha,
+        "active_robin_alpha",
+        &RobinBCValue::rhs,
+        "active_robin_rhs",
+        [active_measure](
+            const RobinBCValue&, std::size_t) {
+            return active_measure;
+        });
+
+    const auto ir = forms::FormCompiler{}.compileResidual(
+        residual);
+    int active_terms = 0;
+    int whole_face_terms = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain ==
+                forms::IntegralDomain::InterfaceFace &&
+            term.interface_marker == active_marker &&
+            term.exterior_boundary_measure.has_value() &&
+            term.exterior_boundary_measure
+                    ->physicalBoundaryMarker() ==
+                physical_marker) {
+            ++active_terms;
+        }
+        if (term.domain ==
+                forms::IntegralDomain::Boundary &&
+            term.boundary_marker == physical_marker) {
+            ++whole_face_terms;
+        }
+    }
+
+    EXPECT_EQ(active_terms, 6);
+    EXPECT_EQ(whole_face_terms, 0);
+}
+
+TEST(FormsBoundaryConditions,
+     ExplicitBoundaryMeasureMustMatchGenericBoundaryConditionMarker)
+{
+    namespace forms = svmp::FE::forms;
+
+    auto space = svmp::FE::spaces::H1Space(
+        ElementType::Tetra4, /*order=*/1);
+    const auto v = forms::FormExpr::testFunction(
+        space, "v");
+    const std::array<NeumannBC, 1> neumann{{
+        NeumannBC{
+            .boundary_marker = 8,
+            .flux = 2.0},
+    }};
+
+    EXPECT_THROW(
+        (void)forms::bc::applyNeumann(
+            forms::FormExpr::constant(0.0).dx(),
+            v,
+            std::span<const NeumannBC>(neumann),
+            [](const NeumannBC& bc, std::size_t) {
+                return forms::FormExpr::constant(
+                    bc.flux);
+            },
+            [](const NeumannBC&, std::size_t) {
+                return forms::ExteriorBoundaryMeasure::
+                    generatedActiveSubset(
+                        /*physical_boundary_marker=*/9,
+                        /*generated_active_boundary_marker=*/109);
+            }),
+        std::invalid_argument);
+}
+
+TEST(FormsBoundaryConditions,
+     LegacyIntegerBoundaryRoutesRemainUnqualified)
+{
+    namespace forms = svmp::FE::forms;
+
+    auto space = svmp::FE::spaces::H1Space(
+        ElementType::Tetra4, /*order=*/1);
+    const auto u = forms::FormExpr::trialFunction(
+        space, "u");
+    const auto v = forms::FormExpr::testFunction(
+        space, "v");
+    const auto n = forms::FormExpr::normal();
+    constexpr int marker = 12;
+    const std::array<NeumannBC, 1> neumann{{
+        NeumannBC{
+            .boundary_marker = marker,
+            .flux = 2.0},
+    }};
+
+    auto legacy = (u * v).dx();
+    legacy = forms::bc::applyNeumann(
+        std::move(legacy),
+        v,
+        std::span<const NeumannBC>(neumann),
+        [](const NeumannBC& bc, std::size_t) {
+            return forms::FormExpr::constant(bc.flux);
+        });
+    forms::bc::NaturalBC natural(
+        marker, forms::FormExpr::constant(3.0));
+    natural.contributeToResidual(legacy, u, v);
+    forms::bc::TraceLoadBC trace_load(
+        marker,
+        forms::FormExpr::constant(4.0),
+        forms::bc::ScalarTraceOperator::Identity);
+    trace_load.contributeToResidual(legacy, u, v);
+    legacy = forms::bc::applyTraceNitsche(
+        std::move(legacy),
+        u,
+        v,
+        marker,
+        forms::FormExpr::constant(0.0),
+        inner(grad(u), n),
+        inner(grad(v), n),
+        forms::FormExpr::constant(1.0) /
+            forms::h(),
+        forms::bc::ScalarTraceOperator::Identity);
+
+    const auto legacy_ir =
+        forms::FormCompiler{}.compileResidual(legacy);
+    int raw_terms = 0;
+    for (const auto& term : legacy_ir.terms()) {
+        if (term.domain ==
+                forms::IntegralDomain::Boundary &&
+            term.boundary_marker == marker) {
+            ++raw_terms;
+            EXPECT_FALSE(
+                term.exterior_boundary_measure.has_value());
+        }
+    }
+    EXPECT_EQ(raw_terms, 6);
+
+    const auto full =
+        forms::ExteriorBoundaryMeasure::fullPhysical(
+            marker);
+    auto explicit_full = (u * v).dx();
+    forms::bc::NaturalBC full_natural(
+        full, forms::FormExpr::constant(3.0));
+    full_natural.contributeToResidual(
+        explicit_full, u, v);
+    forms::bc::TraceLoadBC full_trace_load(
+        full,
+        forms::FormExpr::constant(4.0),
+        forms::bc::ScalarTraceOperator::Identity);
+    full_trace_load.contributeToResidual(
+        explicit_full, u, v);
+
+    const auto full_ir =
+        forms::FormCompiler{}.compileResidual(
+            explicit_full);
+    int explicit_terms = 0;
+    for (const auto& term : full_ir.terms()) {
+        if (term.domain !=
+                forms::IntegralDomain::Boundary ||
+            term.boundary_marker != marker) {
+            continue;
+        }
+        ++explicit_terms;
+        ASSERT_TRUE(
+            term.exterior_boundary_measure.has_value());
+        EXPECT_TRUE(
+            term.exterior_boundary_measure
+                ->isFullPhysical());
+    }
+    EXPECT_EQ(explicit_terms, 2);
+}
+
 TEST(FormsBoundaryConditions, GeneratedActiveBoundaryMarkerMustBeNonnegative)
 {
     EXPECT_THROW(
@@ -444,6 +692,64 @@ TEST(FormsBoundaryConditions, TraceRobinBC_AddsTwoBoundaryTermsOnNormalTrace) {
     }
 
     EXPECT_EQ(count_marker_5, 2);
+}
+
+TEST(FormsBoundaryConditions,
+     TraceBoundaryWrappersUseGeneratedActiveBoundaryMeasures)
+{
+    namespace forms = svmp::FE::forms;
+
+    auto space = svmp::FE::spaces::HDivSpace(
+        ElementType::Tetra4, /*order=*/0);
+    const auto u = forms::FormExpr::trialFunction(
+        space, "u");
+    const auto v = forms::FormExpr::testFunction(
+        space, "v");
+    constexpr int physical_marker = 9;
+    constexpr int active_marker = 109;
+    const auto measure =
+        forms::ExteriorBoundaryMeasure::
+            generatedActiveSubset(
+                physical_marker, active_marker);
+
+    auto residual = forms::dot(u, v).dx();
+    auto load = forms::bc::makeTraceLoadBC(
+        measure, forms::FormExpr::constant(2.0));
+    auto robin = forms::bc::makeTraceRobinBC(
+        measure,
+        forms::FormExpr::constant(3.0),
+        forms::FormExpr::constant(4.0));
+    auto inequality = forms::bc::makeTraceInequalityBC(
+        measure,
+        forms::FormExpr::constant(0.0),
+        forms::FormExpr::constant(5.0));
+    load->contributeToResidual(residual, u, v);
+    robin->contributeToResidual(residual, u, v);
+    inequality->contributeToResidual(residual, u, v);
+
+    const auto ir = forms::FormCompiler{}.compileResidual(
+        residual);
+    int active_terms = 0;
+    int whole_face_terms = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain ==
+                forms::IntegralDomain::InterfaceFace &&
+            term.interface_marker == active_marker &&
+            term.exterior_boundary_measure.has_value() &&
+            term.exterior_boundary_measure
+                    ->physicalBoundaryMarker() ==
+                physical_marker) {
+            ++active_terms;
+        }
+        if (term.domain ==
+                forms::IntegralDomain::Boundary &&
+            term.boundary_marker == physical_marker) {
+            ++whole_face_terms;
+        }
+    }
+
+    EXPECT_EQ(active_terms, 4);
+    EXPECT_EQ(whole_face_terms, 0);
 }
 
 TEST(FormsBoundaryConditions, ApplyTraceInequality_AddsBoundaryTermOnNormalTrace) {
@@ -625,6 +931,99 @@ TEST(FormsBoundaryConditions, ApplyTraceNitsche_AddsThreeBoundaryTermsOnIdentity
     }
 
     EXPECT_EQ(count_marker_15, 3);
+}
+
+TEST(FormsBoundaryConditions,
+     TraceNitschePathsUseGeneratedActiveBoundaryMeasures)
+{
+    namespace forms = svmp::FE::forms;
+
+    auto space = svmp::FE::spaces::H1Space(
+        ElementType::Tetra4, /*order=*/2);
+    const auto u = forms::FormExpr::trialFunction(
+        space, "u");
+    const auto v = forms::FormExpr::testFunction(
+        space, "v");
+    const auto n = forms::FormExpr::normal();
+    constexpr int physical_marker = 19;
+    constexpr int active_marker = 119;
+    const auto measure =
+        forms::ExteriorBoundaryMeasure::
+            generatedActiveSubset(
+                physical_marker, active_marker);
+
+    auto residual = (u * v).dx();
+    residual = forms::bc::applyTraceNitsche(
+        std::move(residual),
+        u,
+        v,
+        measure,
+        forms::FormExpr::constant(1.0),
+        inner(grad(u), n),
+        inner(grad(v), n),
+        forms::FormExpr::constant(1.0) /
+            forms::h(),
+        forms::bc::ScalarTraceOperator::Identity);
+    forms::bc::ScalarNitscheBC scalar_bc(
+        measure,
+        forms::FormExpr::constant(0.0),
+        forms::FormExpr::constant(1.0),
+        /*penalty_gamma=*/10.0,
+        /*symmetric=*/false);
+    const auto scalar_metadata =
+        scalar_bc.analysisMetadata(
+            /*field_id=*/0, nullptr);
+    ASSERT_EQ(scalar_metadata.size(), 1u);
+    ASSERT_TRUE(
+        scalar_metadata.front().nitsche.has_value());
+    EXPECT_FALSE(
+        scalar_metadata.front()
+            .nitsche->penalty_scaling_verified);
+    scalar_bc.contributeToResidual(
+        residual, u, v);
+    forms::bc::TraceNitscheBC trace_bc(
+        measure,
+        forms::FormExpr::constant(0.0),
+        inner(grad(u), n),
+        inner(grad(v), n),
+        forms::FormExpr::constant(1.0) /
+            forms::h(),
+        forms::bc::ScalarTraceOperator::Identity);
+    const auto trace_metadata =
+        trace_bc.analysisMetadata(
+            /*field_id=*/0, nullptr);
+    ASSERT_EQ(trace_metadata.size(), 1u);
+    ASSERT_TRUE(
+        trace_metadata.front().nitsche.has_value());
+    EXPECT_FALSE(
+        trace_metadata.front()
+            .nitsche->penalty_scaling_verified);
+    trace_bc.contributeToResidual(
+        residual, u, v);
+
+    const auto ir = forms::FormCompiler{}.compileResidual(
+        residual);
+    int active_terms = 0;
+    int whole_face_terms = 0;
+    for (const auto& term : ir.terms()) {
+        if (term.domain ==
+                forms::IntegralDomain::InterfaceFace &&
+            term.interface_marker == active_marker &&
+            term.exterior_boundary_measure.has_value() &&
+            term.exterior_boundary_measure
+                    ->physicalBoundaryMarker() ==
+                physical_marker) {
+            ++active_terms;
+        }
+        if (term.domain ==
+                forms::IntegralDomain::Boundary &&
+            term.boundary_marker == physical_marker) {
+            ++whole_face_terms;
+        }
+    }
+
+    EXPECT_EQ(active_terms, 9);
+    EXPECT_EQ(whole_face_terms, 0);
 }
 
 TEST(FormsBoundaryConditions, ApplyInterfaceTraceNitsche_AddsThreeInterfaceTermsOnTraceJump)

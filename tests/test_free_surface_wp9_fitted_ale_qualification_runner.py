@@ -59,17 +59,30 @@ def test_wp9_matrix_bytes_are_exactly_frozen():
     assert matrix["status"] == "FROZEN_BEFORE_EXECUTION"
 
 
-def test_wp9_schema2_claims_only_prescribed_as_consumed_supported_path():
+def test_wp9_schema2_claims_all_three_distinct_consumed_supported_paths():
     runner = _load_runner()
     matrix = runner.load_matrix(_matrix_path())
     schema_2 = matrix["configuration_contract"]["schema_2"]
+    consumed = schema_2["accepted_consumed_paths"]
 
-    assert schema_2["accepted_consumed_path"]["tangential_policy"] == ("Prescribed")
-    assert schema_2["accepted_consumed_path"]["policy_consumed"] is True
-    assert "tangential_policy_Free" in (schema_2["rejected_before_system_mutation"])
-    assert (
-        "tangential_policy_SmoothingOnly"
-        in (schema_2["rejected_before_system_mutation"])
+    assert consumed["tangential_policy"] == [
+        "Free",
+        "SmoothingOnly",
+        "Prescribed",
+    ]
+    assert consumed["policy_state"] == {
+        "Free": "natural_no_tangential_boundary_row",
+        "SmoothingOnly": (
+            "current_geometry_tangential_surface_gradient_functional"
+        ),
+        "Prescribed": "weak_current_geometry_projected_velocity_penalty",
+    }
+    assert consumed["policy_consumed"] is True
+    assert "tangential_policy_Free" not in (
+        schema_2["rejected_before_system_mutation"]
+    )
+    assert "tangential_policy_SmoothingOnly" not in (
+        schema_2["rejected_before_system_mutation"]
     )
     assert (
         "fitted_DynamicRenE_contact_model"
@@ -125,6 +138,10 @@ def test_wp9_matrix_contains_exact_xml_and_provenance_regressions():
         ),
         (
             "MovingDomainPhysics."
+            "MeshTangentialPolicyConsumerBindingRequiresUniqueExactDescriptor"
+        ),
+        (
+            "MovingDomainPhysics."
             "FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy"
         ),
         (
@@ -133,7 +150,7 @@ def test_wp9_matrix_contains_exact_xml_and_provenance_regressions():
         ),
     } <= tests
     assert len(runner._tests_for_binary(matrix, "application")) == 4
-    assert len(runner._tests_for_binary(matrix, "physics")) == 26
+    assert len(runner._tests_for_binary(matrix, "physics")) == 28
     dynamic_contact_exit = next(
         entry
         for entry in matrix["unqualified_required_method_exits"]
@@ -267,9 +284,9 @@ def test_wp9_validate_only_reports_prerequisite_nonclosure():
 
     assert summary["outcome"] == "PASS_PREREQUISITE_NONCLOSURE"
     assert summary["requested_claim"] == "low_level_prerequisite"
-    assert summary["test_count"] == 30
+    assert summary["test_count"] == 32
     assert summary["application_test_count"] == 4
-    assert summary["physics_test_count"] == 26
+    assert summary["physics_test_count"] == 28
     assert summary["unqualified_method_exit_count"] == 9
     assert summary["unqualified_simulation_exit_count"] == 3
     assert summary["fsr10_closed"] is False

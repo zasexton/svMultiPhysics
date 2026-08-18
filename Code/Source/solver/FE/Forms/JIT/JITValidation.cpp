@@ -45,6 +45,26 @@ namespace {
     return found;
 }
 
+[[nodiscard]] bool containsGeneratedExteriorTwoSidedOperator(
+    const FormExprNode& node)
+{
+    switch (node.type()) {
+        case FormExprType::RestrictPlus:
+        case FormExprType::Jump:
+        case FormExprType::Average:
+            return true;
+        default:
+            break;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child &&
+            containsGeneratedExteriorTwoSidedOperator(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 [[nodiscard]] ValidationIssue issue(const FormExprNode& node, std::string message)
 {
     ValidationIssue out;
@@ -94,8 +114,24 @@ struct Shape {
 
 struct ShapeContext {
     const FormExprNode::SpaceSignature* trial_sig{nullptr};
+    std::optional<std::uint32_t> ambient_dimension{};
     std::unordered_map<const FormExprNode*, Shape> memo{};
 };
+
+[[nodiscard]] std::uint32_t contextDimension(
+    const ShapeContext& context) noexcept
+{
+    if (context.ambient_dimension.has_value()) {
+        return *context.ambient_dimension;
+    }
+    if (context.trial_sig != nullptr &&
+        context.trial_sig->topological_dimension >= 1 &&
+        context.trial_sig->topological_dimension <= 3) {
+        return static_cast<std::uint32_t>(
+            context.trial_sig->topological_dimension);
+    }
+    return 3u;
+}
 
 [[nodiscard]] std::optional<double> constantScalarValue(const FormExprNode& n)
 {
@@ -262,10 +298,7 @@ struct ConstantMatrix {
         case FormExprType::GeometryTrialVectorVariation:
         case FormExprType::MeshVelocityVariation:
         case FormExprType::CurrentNormalVariation: {
-            const std::uint32_t dim = ctx.trial_sig
-                                          ? static_cast<std::uint32_t>(
-                                                std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
-                                          : 3u;
+            const std::uint32_t dim = contextDimension(ctx);
             out = vectorShape(dim);
             break;
         }
@@ -277,10 +310,7 @@ struct ConstantMatrix {
         case FormExprType::SurfaceJacobian:
         case FormExprType::GeometryTrialJacobianVariation:
         case FormExprType::SurfaceJacobianVariation: {
-            const std::uint32_t dim = ctx.trial_sig
-                                          ? static_cast<std::uint32_t>(
-                                                std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
-                                          : 3u;
+            const std::uint32_t dim = contextDimension(ctx);
             out = matrixShape(dim, dim);
             break;
         }
@@ -295,7 +325,8 @@ struct ConstantMatrix {
         }
 
         case FormExprType::Identity: {
-            const int dim = node.identityDim().value_or(ctx.trial_sig ? ctx.trial_sig->topological_dimension : 3);
+            const int dim = node.identityDim().value_or(
+                static_cast<int>(contextDimension(ctx)));
             out = matrixShape(static_cast<std::uint32_t>(std::max(1, dim)),
                               static_cast<std::uint32_t>(std::max(1, dim)));
             break;
@@ -305,28 +336,16 @@ struct ConstantMatrix {
             if (node.scalarCoefficient() != nullptr || node.timeScalarCoefficient() != nullptr) {
                 out = scalarShape();
             } else if (node.vectorCoefficient() != nullptr) {
-                const std::uint32_t dim = ctx.trial_sig
-                                              ? static_cast<std::uint32_t>(
-                                                    std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
-                                              : 3u;
+                const std::uint32_t dim = contextDimension(ctx);
                 out = vectorShape(dim);
             } else if (node.matrixCoefficient() != nullptr) {
-                const std::uint32_t dim = ctx.trial_sig
-                                              ? static_cast<std::uint32_t>(
-                                                    std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
-                                              : 3u;
+                const std::uint32_t dim = contextDimension(ctx);
                 out = matrixShape(dim, dim);
             } else if (node.tensor3Coefficient() != nullptr) {
-                const std::uint32_t dim = ctx.trial_sig
-                                              ? static_cast<std::uint32_t>(
-                                                    std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
-                                              : 3u;
+                const std::uint32_t dim = contextDimension(ctx);
                 out = tensor3Shape(dim, dim, dim);
             } else if (node.tensor4Coefficient() != nullptr) {
-                const std::uint32_t dim = ctx.trial_sig
-                                              ? static_cast<std::uint32_t>(
-                                                    std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
-                                              : 3u;
+                const std::uint32_t dim = contextDimension(ctx);
                 out = tensor4Shape(dim, dim, dim, dim);
             }
             break;
@@ -440,6 +459,20 @@ struct ConstantMatrix {
             out = childShape(0);
             break;
 
+        case FormExprType::AbsoluteValue:
+        case FormExprType::Sign:
+        case FormExprType::Sqrt:
+        case FormExprType::Exp:
+        case FormExprType::Log:
+            if (isScalarShape(childShape(0))) {
+                out = scalarShape();
+            }
+            break;
+
+        case FormExprType::Normalize:
+            out = childShape(0);
+            break;
+
         case FormExprType::Transpose: {
             const auto a = childShape(0);
             if (a.kind == ShapeKind::Matrix) {
@@ -464,7 +497,12 @@ struct ConstantMatrix {
         case FormExprType::Gradient: {
             const auto a = childShape(0);
             const auto* sig = kids.size() > 0 && kids[0] ? kids[0]->spaceSignature() : nullptr;
-            const std::uint32_t dim = sig ? static_cast<std::uint32_t>(std::max(1, sig->topological_dimension)) : 3u;
+            const std::uint32_t dim =
+                sig != nullptr && sig->topological_dimension >= 1 &&
+                        sig->topological_dimension <= 3
+                    ? static_cast<std::uint32_t>(
+                          sig->topological_dimension)
+                    : contextDimension(ctx);
             if (a.kind == ShapeKind::Scalar) {
                 out = vectorShape(dim);
             } else if (a.kind == ShapeKind::Vector) {
@@ -493,7 +531,12 @@ struct ConstantMatrix {
         case FormExprType::Hessian: {
             const auto a = childShape(0);
             const auto* sig = kids.size() > 0 && kids[0] ? kids[0]->spaceSignature() : nullptr;
-            const std::uint32_t dim = sig ? static_cast<std::uint32_t>(std::max(1, sig->topological_dimension)) : 3u;
+            const std::uint32_t dim =
+                sig != nullptr && sig->topological_dimension >= 1 &&
+                        sig->topological_dimension <= 3
+                    ? static_cast<std::uint32_t>(
+                          sig->topological_dimension)
+                    : contextDimension(ctx);
             if (a.kind == ShapeKind::Scalar) {
                 out = matrixShape(dim, dim);
             }
@@ -635,7 +678,405 @@ struct ConstantMatrix {
     }
 }
 
+struct ShapeContextSeed {
+    std::optional<std::uint32_t> ambient_dimension{};
+    bool consistent{true};
+};
+
+void collectShapeContextSeed(const FormExprNode& node,
+                             ShapeContextSeed& seed)
+{
+    if (const auto* signature = node.spaceSignature();
+        signature != nullptr) {
+        const int dimension = signature->topological_dimension;
+        if (dimension < 1 || dimension > 3) {
+            seed.consistent = false;
+        } else if (!seed.ambient_dimension.has_value()) {
+            seed.ambient_dimension =
+                static_cast<std::uint32_t>(dimension);
+        } else if (*seed.ambient_dimension !=
+                   static_cast<std::uint32_t>(dimension)) {
+            seed.consistent = false;
+        }
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child != nullptr) {
+            collectShapeContextSeed(*child, seed);
+        }
+    }
+}
+
+[[nodiscard]] bool isKnownShape(const Shape& shape) noexcept
+{
+    return shape.kind != ShapeKind::Unknown;
+}
+
+[[nodiscard]] bool isSquareMatrixShape(const Shape& shape) noexcept
+{
+    return isMatrixShape(shape) && shape.d0 > 0u &&
+           shape.d0 == shape.d1;
+}
+
+[[nodiscard]] bool hasWellTypedShapeTree(const FormExprNode& node,
+                                         ShapeContext& context)
+{
+    const auto children = node.childrenShared();
+    for (const auto& child : children) {
+        if (child == nullptr ||
+            !hasWellTypedShapeTree(*child, context)) {
+            return false;
+        }
+    }
+
+    const auto shape = inferShape(node, context);
+    if (!isKnownShape(shape)) {
+        return false;
+    }
+    const auto childShape = [&](std::size_t index) -> Shape {
+        if (index >= children.size() || children[index] == nullptr) {
+            return Shape{};
+        }
+        return inferShape(*children[index], context);
+    };
+    const auto hasChildren = [&](std::size_t count) noexcept {
+        return children.size() == count;
+    };
+
+    switch (node.type()) {
+        case FormExprType::TypedZero:
+        case FormExprType::Time:
+        case FormExprType::TimeStep:
+        case FormExprType::EffectiveTimeStep:
+        case FormExprType::JacobianDeterminant:
+        case FormExprType::CurrentJacobianDeterminant:
+        case FormExprType::ReferenceJacobianDeterminant:
+        case FormExprType::CurrentMeanCurvature:
+        case FormExprType::CurrentMeasure:
+        case FormExprType::ReferenceMeasure:
+        case FormExprType::CurrentMeasureVariation:
+        case FormExprType::CellDiameter:
+        case FormExprType::CellVolume:
+        case FormExprType::FacetArea:
+        case FormExprType::CellDomainId:
+        case FormExprType::Coordinate:
+        case FormExprType::ReferenceCoordinate:
+        case FormExprType::Normal:
+        case FormExprType::MeshDisplacement:
+        case FormExprType::MeshVelocity:
+        case FormExprType::MeshAcceleration:
+        case FormExprType::CurrentCoordinate:
+        case FormExprType::PreviousCoordinate:
+        case FormExprType::ReferencePhysicalCoordinate:
+        case FormExprType::PreviousMeshVelocity:
+        case FormExprType::PredictedMeshVelocity:
+        case FormExprType::CurrentNormal:
+        case FormExprType::ReferenceNormal:
+        case FormExprType::GeometryTrialVectorVariation:
+        case FormExprType::MeshVelocityVariation:
+        case FormExprType::CurrentNormalVariation:
+        case FormExprType::Jacobian:
+        case FormExprType::JacobianInverse:
+        case FormExprType::CurrentJacobian:
+        case FormExprType::ReferenceJacobian:
+        case FormExprType::SurfaceJacobian:
+        case FormExprType::GeometryTrialJacobianVariation:
+        case FormExprType::SurfaceJacobianVariation:
+            return hasChildren(0u);
+
+        case FormExprType::Constant:
+            return hasChildren(0u) &&
+                   node.constantValue().has_value();
+
+        case FormExprType::ParameterSymbol: {
+            const auto name = node.symbolName();
+            return hasChildren(0u) && name.has_value() &&
+                   !name->empty();
+        }
+
+        case FormExprType::ParameterRef:
+            return hasChildren(0u) && node.slotIndex().has_value();
+
+        case FormExprType::Coefficient: {
+            const int callback_count =
+                static_cast<int>(node.scalarCoefficient() != nullptr) +
+                static_cast<int>(node.timeScalarCoefficient() != nullptr) +
+                static_cast<int>(node.vectorCoefficient() != nullptr) +
+                static_cast<int>(node.matrixCoefficient() != nullptr) +
+                static_cast<int>(node.tensor3Coefficient() != nullptr) +
+                static_cast<int>(node.tensor4Coefficient() != nullptr);
+            return hasChildren(0u) && callback_count == 1;
+        }
+
+        case FormExprType::Identity: {
+            const int dimension = node.identityDim().value_or(
+                static_cast<int>(contextDimension(context)));
+            return hasChildren(0u) && dimension >= 1 && dimension <= 3;
+        }
+
+        case FormExprType::TestFunction:
+        case FormExprType::TrialFunction:
+        case FormExprType::DiscreteField:
+        case FormExprType::StateField: {
+            const auto* signature = node.spaceSignature();
+            const bool field_id_valid =
+                node.type() != FormExprType::DiscreteField &&
+                        node.type() != FormExprType::StateField
+                    ? true
+                    : node.fieldId().has_value() &&
+                          *node.fieldId() != INVALID_FIELD_ID;
+            return hasChildren(0u) && signature != nullptr &&
+                   signature->topological_dimension >= 1 &&
+                   signature->topological_dimension <= 3 &&
+                   signature->value_dimension >= 1 && field_id_valid;
+        }
+
+        case FormExprType::AsVector: {
+            if (children.empty()) {
+                return false;
+            }
+            return std::all_of(
+                children.begin(),
+                children.end(),
+                [&](const auto& child) {
+                    return child != nullptr &&
+                           isScalarShape(inferShape(*child, context));
+                });
+        }
+
+        case FormExprType::AsTensor: {
+            const int rows = node.tensorRows().value_or(0);
+            const int columns = node.tensorCols().value_or(0);
+            if (rows <= 0 || columns <= 0 ||
+                children.size() !=
+                    static_cast<std::size_t>(rows * columns)) {
+                return false;
+            }
+            return std::all_of(
+                children.begin(),
+                children.end(),
+                [&](const auto& child) {
+                    return child != nullptr &&
+                           isScalarShape(inferShape(*child, context));
+                });
+        }
+
+        case FormExprType::Component: {
+            if (!hasChildren(1u)) {
+                return false;
+            }
+            const auto operand = childShape(0u);
+            const int row = node.componentIndex0().value_or(-1);
+            const auto column = node.componentIndex1();
+            if (isScalarShape(operand)) {
+                return row == 0 && !column.has_value();
+            }
+            if (isVectorShape(operand)) {
+                return !column.has_value() && row >= 0 &&
+                       static_cast<std::uint32_t>(row) < operand.d0;
+            }
+            if (isMatrixShape(operand) && column.has_value()) {
+                return row >= 0 && *column >= 0 &&
+                       static_cast<std::uint32_t>(row) < operand.d0 &&
+                       static_cast<std::uint32_t>(*column) < operand.d1;
+            }
+            return false;
+        }
+
+        case FormExprType::IndexedAccess:
+            // A raw indexed access can carry a free index. It is not a
+            // proven scalar until contraction lowering removes that index.
+            return false;
+
+        case FormExprType::Normalize:
+            return hasChildren(1u) && isVectorShape(childShape(0u));
+
+        case FormExprType::Negate:
+        case FormExprType::RestrictMinus:
+        case FormExprType::RestrictPlus:
+        case FormExprType::Jump:
+        case FormExprType::Average:
+        case FormExprType::Pullback:
+        case FormExprType::Pushforward:
+        case FormExprType::AbsoluteValue:
+        case FormExprType::Sign:
+        case FormExprType::Sqrt:
+        case FormExprType::Exp:
+        case FormExprType::Log:
+        case FormExprType::Transpose:
+        case FormExprType::Gradient:
+        case FormExprType::Divergence:
+        case FormExprType::Curl:
+        case FormExprType::Hessian:
+            return hasChildren(1u) && isKnownShape(shape);
+
+        case FormExprType::TimeDerivative:
+            return hasChildren(1u) &&
+                   node.timeDerivativeOrder().value_or(1) >= 1;
+
+        case FormExprType::Trace:
+            return hasChildren(1u) &&
+                   isSquareMatrixShape(childShape(0u));
+
+        case FormExprType::Determinant: {
+            const auto operand = childShape(0u);
+            return hasChildren(1u) && isSquareMatrixShape(operand) &&
+                   operand.d0 <= 3u;
+        }
+
+        case FormExprType::Norm:
+            return hasChildren(1u) && isKnownShape(childShape(0u));
+
+        case FormExprType::Inverse:
+        case FormExprType::Cofactor: {
+            const auto operand = childShape(0u);
+            return hasChildren(1u) && isSquareMatrixShape(operand) &&
+                   operand.d0 <= 3u;
+        }
+
+        case FormExprType::Deviator:
+        case FormExprType::SymmetricPart:
+        case FormExprType::SkewPart:
+            return hasChildren(1u) &&
+                   isSquareMatrixShape(childShape(0u)) &&
+                   childShape(0u).d0 <= 3u;
+
+        case FormExprType::Add:
+        case FormExprType::Subtract:
+        case FormExprType::Multiply:
+        case FormExprType::Divide:
+        case FormExprType::OuterProduct:
+            return hasChildren(2u) && isKnownShape(shape);
+
+        case FormExprType::InnerProduct:
+            return hasChildren(2u) && isKnownShape(childShape(0u)) &&
+                   sameShape(childShape(0u), childShape(1u));
+
+        case FormExprType::DoubleContraction: {
+            if (!hasChildren(2u) ||
+                !sameShape(childShape(0u), childShape(1u))) {
+                return false;
+            }
+            switch (childShape(0u).kind) {
+                case ShapeKind::Scalar:
+                case ShapeKind::Vector:
+                case ShapeKind::Matrix:
+                case ShapeKind::Tensor4:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        case FormExprType::Power:
+        case FormExprType::Minimum:
+        case FormExprType::Maximum:
+            return hasChildren(2u) && isScalarShape(childShape(0u)) &&
+                   isScalarShape(childShape(1u));
+
+        case FormExprType::SmoothHeaviside:
+        case FormExprType::SmoothAbsoluteValue:
+        case FormExprType::SmoothSign:
+            return hasChildren(2u) && isScalarShape(childShape(0u)) &&
+                   isScalarShape(childShape(1u));
+
+        case FormExprType::SmoothMin:
+        case FormExprType::SmoothMax:
+            return hasChildren(3u) && isScalarShape(childShape(0u)) &&
+                   isScalarShape(childShape(1u)) &&
+                   isScalarShape(childShape(2u));
+
+        case FormExprType::CrossProduct:
+            return hasChildren(2u) && isVectorShape(childShape(0u)) &&
+                   sameShape(childShape(0u), childShape(1u)) &&
+                   childShape(0u).d0 == 3u;
+
+        case FormExprType::Less:
+        case FormExprType::LessEqual:
+        case FormExprType::Greater:
+        case FormExprType::GreaterEqual:
+        case FormExprType::Equal:
+        case FormExprType::NotEqual:
+            return hasChildren(2u) && isScalarShape(childShape(0u)) &&
+                   isScalarShape(childShape(1u));
+
+        case FormExprType::Conditional:
+            return hasChildren(3u) && isScalarShape(childShape(0u)) &&
+                   isKnownShape(childShape(1u)) &&
+                   sameShape(childShape(1u), childShape(2u));
+
+        case FormExprType::MatrixExponential:
+        case FormExprType::MatrixLogarithm:
+        case FormExprType::MatrixSqrt:
+        case FormExprType::SpectralDecomposition:
+            return hasChildren(1u) && isSquare2or3(childShape(0u));
+
+        case FormExprType::MatrixPower:
+            return hasChildren(2u) && isSquare2or3(childShape(0u)) &&
+                   isScalarShape(childShape(1u));
+
+        case FormExprType::MatrixExponentialDirectionalDerivative:
+        case FormExprType::MatrixLogarithmDirectionalDerivative:
+        case FormExprType::MatrixSqrtDirectionalDerivative:
+        case FormExprType::SpectralDecompositionDirectionalDerivative:
+            return hasChildren(2u) && isSquare2or3(childShape(0u)) &&
+                   sameShape(childShape(0u), childShape(1u));
+
+        case FormExprType::MatrixPowerDirectionalDerivative:
+            return hasChildren(3u) && isSquare2or3(childShape(0u)) &&
+                   sameShape(childShape(0u), childShape(1u)) &&
+                   isScalarShape(childShape(2u));
+
+        case FormExprType::SymmetricEigenvalue:
+        case FormExprType::Eigenvalue:
+        case FormExprType::SymmetricEigenvector: {
+            const auto operand = childShape(0u);
+            return hasChildren(1u) && isSquare2or3(operand) &&
+                   eigenIndexInRange(node, operand.d0);
+        }
+
+        case FormExprType::SymmetricEigenvectorDirectionalDerivative: {
+            const auto operand = childShape(0u);
+            return hasChildren(2u) && isSquare2or3(operand) &&
+                   sameShape(operand, childShape(1u)) &&
+                   eigenIndexInRange(node, operand.d0);
+        }
+
+        case FormExprType::SymmetricEigenvalueDirectionalDerivative:
+        case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA:
+            // These specialized nodes carry additional derivative-domain
+            // contracts not represented by Shape alone.
+            return false;
+
+        default:
+            return false;
+    }
+}
+
 } // namespace
+
+bool hasScalarValueShape(const FormExpr& expression,
+                         int ambient_dimension)
+{
+    if (!expression.isValid() || expression.node() == nullptr) {
+        return false;
+    }
+    ShapeContextSeed seed;
+    if (ambient_dimension != 0) {
+        if (ambient_dimension < 1 || ambient_dimension > 3) {
+            return false;
+        }
+        seed.ambient_dimension =
+            static_cast<std::uint32_t>(ambient_dimension);
+    }
+    collectShapeContextSeed(*expression.node(), seed);
+    if (!seed.consistent) {
+        return false;
+    }
+    ShapeContext context;
+    context.ambient_dimension = seed.ambient_dimension;
+    return hasWellTypedShapeTree(*expression.node(), context) &&
+           isScalarShape(inferShape(*expression.node(), context));
+}
 
 ValidationResult canCompileImpl(const FormExpr& integrand,
                                 const ValidationOptions& options,
@@ -1095,6 +1536,47 @@ ValidationResult canCompile(const FormIR& ir, const ValidationOptions& options)
                 .subexpr = term.debug_string,
             };
             return out;
+        }
+
+        if (term.exterior_boundary_measure.has_value()) {
+            const auto& measure =
+                *term.exterior_boundary_measure;
+            const bool full_valid =
+                measure.isFullPhysical() &&
+                term.domain == IntegralDomain::Boundary &&
+                measure.physicalBoundaryMarker() >= 0 &&
+                measure.physicalBoundaryMarker() ==
+                    term.boundary_marker &&
+                measure.generatedActiveBoundaryMarker() == -1;
+            const bool generated_valid =
+                measure.isGeneratedActiveSubset() &&
+                term.domain == IntegralDomain::InterfaceFace &&
+                measure.physicalBoundaryMarker() >= 0 &&
+                measure.generatedActiveBoundaryMarker() >= 0 &&
+                measure.generatedActiveBoundaryMarker() ==
+                    term.interface_marker;
+            if (!full_valid && !generated_valid) {
+                out.ok = false;
+                out.first_issue = ValidationIssue{
+                    .type = term.integrand.node()->type(),
+                    .message =
+                        "forms::jit::canCompile(FormIR): exterior-boundary selection is inconsistent with the lowered domain or marker",
+                    .subexpr = term.debug_string,
+                };
+                return out;
+            }
+            if (generated_valid &&
+                containsGeneratedExteriorTwoSidedOperator(
+                    *term.integrand.node())) {
+                out.ok = false;
+                out.first_issue = ValidationIssue{
+                    .type = term.integrand.node()->type(),
+                    .message =
+                        "forms::jit::canCompile(FormIR): generated active exterior boundaries are one-sided and cannot use plus restriction, jump, or average",
+                    .subexpr = term.debug_string,
+                };
+                return out;
+            }
         }
 
         const auto& trial_opt = ir.trialSpace();

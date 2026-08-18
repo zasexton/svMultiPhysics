@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <mpi.h>
 #include <string>
 
@@ -330,7 +331,11 @@ void exchangeFsilsOwnedHalo(const FsilsShared& shared,
 
 class FsilsVectorView final : public assembly::GlobalSystemView {
 public:
-    explicit FsilsVectorView(FsilsVector& vec) : vec_(&vec) {}
+    explicit FsilsVectorView(FsilsVector& vec,
+                             bool locally_relevant_reads = false)
+        : vec_(&vec), locally_relevant_reads_(locally_relevant_reads)
+    {
+    }
 
     void addMatrixEntries(std::span<const GlobalIndex>, std::span<const Real>, assembly::AddMode) override {}
     void addMatrixEntries(std::span<const GlobalIndex>, std::span<const GlobalIndex>, std::span<const Real>, assembly::AddMode) override {}
@@ -430,11 +435,22 @@ public:
     [[nodiscard]] Real getVectorEntry(GlobalIndex dof) const override
     {
         FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
+        if (locally_relevant_reads_) {
+            FE_THROW_IF(dof < 0 || dof >= vec_->size(),
+                        InvalidArgumentException,
+                        "FsilsVectorView::getVectorEntry: global index out of range");
+        }
         GlobalIndex resolved = INVALID_GLOBAL_INDEX;
         vec_->resolveEntriesCached(std::span<const GlobalIndex>(&dof, 1),
                                    std::span<GlobalIndex>(&resolved, 1));
         const auto& data = static_cast<const FsilsVector*>(vec_)->data();
-        if (resolved < 0 || static_cast<std::size_t>(resolved) >= data.size()) {
+        if (resolved < 0 ||
+            static_cast<std::size_t>(resolved) >= data.size()) {
+            FE_THROW_IF(locally_relevant_reads_,
+                        FEException,
+                        "FsilsVectorView::getVectorEntry: global index " +
+                            std::to_string(dof) +
+                            " is outside the owned/ghost read layout");
             return 0.0;
         }
         return data[static_cast<std::size_t>(resolved)];
@@ -472,6 +488,16 @@ public:
                                   std::span<Real> out) const override
     {
         FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
+        if (locally_relevant_reads_) {
+            const auto data_size =
+                static_cast<const FsilsVector*>(vec_)->data().size();
+            for (const auto local : resolved) {
+                FE_THROW_IF(local < 0 ||
+                                static_cast<std::size_t>(local) >= data_size,
+                            FEException,
+                            "FsilsVectorView::getVectorEntriesResolved: entry is outside the owned/ghost read layout");
+            }
+        }
         gatherFsilsVectorEntries(*vec_, resolved, out);
     }
 
@@ -479,9 +505,28 @@ public:
                           std::span<Real> out) const override
     {
         FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
+        if (locally_relevant_reads_) {
+            for (const auto dof : dofs) {
+                FE_THROW_IF(dof < 0 || dof >= vec_->size(),
+                            InvalidArgumentException,
+                            "FsilsVectorView::getVectorEntries: global index out of range");
+            }
+        }
         thread_local std::vector<GlobalIndex> resolved;
         resolved.resize(dofs.size());
         vec_->resolveEntriesCached(dofs, resolved);
+        if (locally_relevant_reads_) {
+            const auto data_size =
+                static_cast<const FsilsVector*>(vec_)->data().size();
+            for (std::size_t i = 0; i < resolved.size(); ++i) {
+                FE_THROW_IF(resolved[i] < 0 ||
+                                static_cast<std::size_t>(resolved[i]) >= data_size,
+                            FEException,
+                            "FsilsVectorView::getVectorEntries: global index " +
+                                std::to_string(dofs[i]) +
+                                " is outside the owned/ghost read layout");
+            }
+        }
         gatherFsilsVectorEntries(*vec_, resolved, out);
 
     }
@@ -537,6 +582,7 @@ private:
     }
 
     FsilsVector* vec_{nullptr};
+    bool locally_relevant_reads_{false};
     assembly::AssemblyPhase phase_{assembly::AssemblyPhase::NotStarted};
     std::size_t vector_requested_{0};
     std::size_t vector_valid_{0};
@@ -741,6 +787,94 @@ bool FsilsVector::usesOwnedRowLayout() const noexcept
     return shared_ != nullptr && shared_->lhs.owned_row_operator;
 }
 
+std::vector<GlobalIndex> FsilsVector::ownedGlobalRows() const
+{
+    if (!shared_) {
+        std::vector<GlobalIndex> rows;
+        rows.reserve(static_cast<std::size_t>(
+            std::max<GlobalIndex>(global_size_, 0)));
+        for (GlobalIndex row = 0; row < global_size_; ++row) {
+            rows.push_back(row);
+        }
+        return rows;
+    }
+
+    FE_THROW_IF(
+        !shared_->lhs.owned_row_operator,
+        InvalidArgumentException,
+        "FsilsVector::ownedGlobalRows: shared layout has no certified owned-row operator");
+    FE_THROW_IF(
+        global_size_ < 0 || shared_->dof <= 0 ||
+            shared_->owned_node_count < 0 ||
+            shared_->owned_node_count > shared_->lhs.nNo ||
+            shared_->global_dofs != global_size_,
+        InvalidArgumentException,
+        "FsilsVector::ownedGlobalRows: shared layout metadata is invalid");
+
+    const auto component_count =
+        static_cast<std::size_t>(shared_->dof);
+    const auto owned_node_count =
+        static_cast<std::size_t>(shared_->owned_node_count);
+    FE_THROW_IF(
+        owned_node_count >
+            std::numeric_limits<std::size_t>::max() / component_count,
+        InvalidArgumentException,
+        "FsilsVector::ownedGlobalRows: owned row count overflows");
+    const auto expected_count = owned_node_count * component_count;
+
+    const auto* permutation = shared_->dof_permutation.get();
+    const bool permuted = permutation != nullptr && !permutation->empty();
+    if (permuted) {
+        FE_THROW_IF(
+            permutation->forward.size() !=
+                    static_cast<std::size_t>(global_size_) ||
+                permutation->inverse.size() !=
+                    static_cast<std::size_t>(global_size_),
+            InvalidArgumentException,
+            "FsilsVector::ownedGlobalRows: FE/backend permutation is incomplete");
+    }
+
+    std::vector<GlobalIndex> rows;
+    rows.reserve(expected_count);
+    for (int old = 0; old < shared_->owned_node_count; ++old) {
+        const int backend_node = shared_->oldToGlobalNode(old);
+        FE_THROW_IF(
+            backend_node < 0 || backend_node >= shared_->gnNo,
+            InvalidArgumentException,
+            "FsilsVector::ownedGlobalRows: owned node has no valid global mapping");
+        for (int component = 0; component < shared_->dof; ++component) {
+            const GlobalIndex backend_row =
+                static_cast<GlobalIndex>(backend_node) *
+                    static_cast<GlobalIndex>(shared_->dof) +
+                static_cast<GlobalIndex>(component);
+            FE_THROW_IF(
+                backend_row < 0 || backend_row >= global_size_,
+                InvalidArgumentException,
+                "FsilsVector::ownedGlobalRows: backend row is out of range");
+            GlobalIndex public_row = backend_row;
+            if (permuted) {
+                public_row = permutation->inverse[
+                    static_cast<std::size_t>(backend_row)];
+                FE_THROW_IF(
+                    public_row < 0 || public_row >= global_size_ ||
+                        permutation->forward[
+                            static_cast<std::size_t>(public_row)] !=
+                            backend_row,
+                    InvalidArgumentException,
+                    "FsilsVector::ownedGlobalRows: FE/backend permutation does not round-trip");
+            }
+            rows.push_back(public_row);
+        }
+    }
+    std::sort(rows.begin(), rows.end());
+    FE_THROW_IF(
+        rows.size() != expected_count ||
+            std::adjacent_find(rows.begin(), rows.end()) != rows.end(),
+        InvalidArgumentException,
+        "FsilsVector::ownedGlobalRows: owned FE rows are incomplete or duplicated");
+    return rows;
+}
+
 bool FsilsVector::ownsFeDof(GlobalIndex fe_dof) const noexcept
 {
     if (fe_dof < 0 || fe_dof >= global_size_) {
@@ -775,62 +909,19 @@ bool FsilsVector::ownsFeDof(GlobalIndex fe_dof) const noexcept
 
 std::vector<GlobalIndex> FsilsVector::ownedFeDofs() const
 {
-    if (!shared_) {
-        std::vector<GlobalIndex> out;
-        out.reserve(static_cast<std::size_t>(std::max<GlobalIndex>(global_size_, 0)));
-        for (GlobalIndex dof = 0; dof < global_size_; ++dof) {
-            out.push_back(dof);
-        }
-        return out;
-    }
-
-    const int dof = shared_->dof;
-    FE_THROW_IF(dof <= 0, InvalidArgumentException, "FsilsVector::ownedFeDofs: invalid dof");
-
-    const auto* perm = shared_->dof_permutation.get();
-    const bool has_inverse = perm != nullptr && !perm->inverse.empty();
-    const int owned_nodes = shared_->owned_node_count;
-
-    std::vector<GlobalIndex> out;
-    out.reserve(static_cast<std::size_t>(std::max(owned_nodes, 0)) *
-                static_cast<std::size_t>(dof));
-
-    for (int old = 0; old < shared_->lhs.nNo; ++old) {
-        if (old >= shared_->owned_node_count) {
-            continue;
-        }
-
-        const int backend_node = shared_->oldToGlobalNode(old);
-        if (backend_node < 0) {
-            continue;
-        }
-        for (int c = 0; c < dof; ++c) {
-            const GlobalIndex backend_dof =
-                static_cast<GlobalIndex>(backend_node) * static_cast<GlobalIndex>(dof) +
-                static_cast<GlobalIndex>(c);
-            if (backend_dof < 0 || backend_dof >= global_size_) {
-                continue;
-            }
-
-            GlobalIndex fe_dof = backend_dof;
-            if (has_inverse) {
-                if (static_cast<std::size_t>(backend_dof) >= perm->inverse.size()) {
-                    continue;
-                }
-                fe_dof = perm->inverse[static_cast<std::size_t>(backend_dof)];
-            }
-            if (fe_dof >= 0 && fe_dof < global_size_) {
-                out.push_back(fe_dof);
-            }
-        }
-    }
-
-    return out;
+    return ownedGlobalRows();
 }
 
 std::unique_ptr<assembly::GlobalSystemView> FsilsVector::createAssemblyView()
 {
     return std::make_unique<FsilsVectorView>(*this);
+}
+
+std::unique_ptr<assembly::GlobalSystemView>
+FsilsVector::createGhostedReadView()
+{
+    return std::make_unique<FsilsVectorView>(
+        *this, /*locally_relevant_reads=*/true);
 }
 
 std::span<Real> FsilsVector::localSpan()

@@ -1,0 +1,120 @@
+% =============================================================================
+% svmultiphysics.sty -- Common macros for the svMultiPhysics Book
+% =============================================================================
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{svmultiphysics}[2026/03/25 svMultiPhysics Book macros]
+
+% ---------------------------------------------------------------------------
+% General mathematical notation
+% ---------------------------------------------------------------------------
+
+% Vectors and matrices (bold)
+\newcommand{\vect}[1]{\bm{#1}}
+\newcommand{\mat}[1]{\bm{#1}}
+\newcommand{\tens}[1]{\bm{\mathcal{#1}}}
+
+% Common sets
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\Z}{\mathbb{Z}}
+
+% Differential operators
+\newcommand{\dd}{\,\mathrm{d}}                    % differential d
+\newcommand{\pp}[2]{\frac{\partial #1}{\partial #2}}  % partial derivative
+\newcommand{\grad}{\nabla}
+\renewcommand{\div}{\nabla \cdot}
+\newcommand{\curl}{\nabla \times}
+\newcommand{\lapl}{\Delta}
+
+% Inner products and norms
+\newcommand{\inner}[2]{\langle #1, #2 \rangle}
+\newcommand{\norm}[1]{\| #1 \|}
+\newcommand{\abs}[1]{| #1 |}
+
+% ---------------------------------------------------------------------------
+% Finite element notation
+% ---------------------------------------------------------------------------
+
+% Function spaces
+\newcommand{\Hone}{H^1}
+\newcommand{\Ltwo}{L^2}
+\newcommand{\Hdiv}{H(\mathrm{div})}
+\newcommand{\Hcurl}{H(\mathrm{curl})}
+
+% Mesh entities
+\newcommand{\mesh}{\mathcal{T}_h}
+\newcommand{\cell}{K}
+\newcommand{\face}{F}
+\newcommand{\edge}{E}
+\newcommand{\refcell}{\hat{K}}
+
+% Trial and test functions
+\newcommand{\trial}{u_h}
+\newcommand{\test}{v_h}
+\newcommand{\trialfun}{u}
+\newcommand{\testfun}{v}
+
+% Bilinear and linear forms
+\newcommand{\bilin}[2]{a(#1, #2)}
+\newcommand{\lform}[1]{L(#1)}
+
+% Basis functions
+\newcommand{\basis}{\varphi}
+\newcommand{\refbasis}{\hat{\varphi}}
+
+% Reference-to-physical map
+\newcommand{\refmap}{F_K}
+\newcommand{\jacobian}{J_K}
+\newcommand{\invjacobian}{J_K^{-1}}
+
+% ---------------------------------------------------------------------------
+% Navier--Stokes notation
+% ---------------------------------------------------------------------------
+\newcommand{\vel}{\vect{u}}                % velocity
+\newcommand{\pres}{p}                      % pressure
+\newcommand{\stress}{\bm{\sigma}}          % Cauchy stress
+\newcommand{\strain}{\bm{\varepsilon}}     % strain rate
+\newcommand{\reynolds}{\mathrm{Re}}        % Reynolds number
+
+% VMS stabilization
+\newcommand{\tauM}{\tau_{\mathrm{M}}}      % momentum stabilization
+\newcommand{\tauC}{\tau_{\mathrm{C}}}      % continuity stabilization
+
+% ---------------------------------------------------------------------------
+% Software-specific macros
+% ---------------------------------------------------------------------------
+
+% Code names (typeset consistently)
+\newcommand{\svmp}{\textsc{svMultiPhysics}}
+\newcommand{\svmesh}{\textsc{svMesh}}
+\newcommand{\fsils}{\textsc{FSILS}}
+
+% Inline code
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\class}[1]{\texttt{#1}}
+\newcommand{\func}[1]{\texttt{#1}}
+\newcommand{\file}[1]{\texttt{#1}}
+
+% Form language expressions
+\newcommand{\formexpr}[1]{\texttt{#1}}
+
+% Environment for noting software API
+\newenvironment{api}[1]{%
+  \par\medskip\noindent
+  \begin{minipage}{\linewidth}
+  \hrule\medskip
+  \textbf{API:} \code{#1}\par\smallskip
+}{%
+  \medskip\hrule
+  \end{minipage}
+  \par\medskip
+}
+
+% Environment for chapter author attribution
+\newcommand{\chapterauthor}[1]{%
+  \vspace{-1.5em}
+  {\large\itshape By #1}
+  \vspace{1em}
+}
+
+\endinput

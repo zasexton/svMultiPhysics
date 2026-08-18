@@ -1,0 +1,31 @@
+% =============================================================================
+\chapter{Architecture Overview}
+\label{ch:architecture}
+% =============================================================================
+
+\section{Design philosophy}
+\label{sec:arch:philosophy}
+
+% Separation of concerns: mesh, forms, assembly, solvers, physics
+% C++ with LLVM JIT, no Python dependency at runtime
+
+\section{Component architecture}
+\label{sec:arch:components}
+
+% FESystem, Mesh, Forms, Assembly, Linear Algebra, Physics modules
+
+\section{Data flow}
+\label{sec:arch:dataflow}
+
+% From input XML through mesh loading, system setup, time stepping, output
+% FormExpr -> FormIR -> KernelIR -> LLVM IR -> native code
+
+\section{Build system and dependencies}
+\label{sec:arch:build}
+
+% CMake superbuild, LLVM, MPI, VTK, linear algebra backends
+
+\section{Testing infrastructure}
+\label{sec:arch:testing}
+
+% Unit tests, integration tests, verification benchmarks

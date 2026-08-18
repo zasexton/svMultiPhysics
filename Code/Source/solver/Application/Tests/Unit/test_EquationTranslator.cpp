@@ -528,6 +528,74 @@ TEST(EquationTranslatorFreeSurface,
         std::string::npos)
         << alias;
   }
+
+  auto smoothing_params = parseEquationXml(R"xml(
+<Add_equation type="fluid">
+  <Enable_ALE>true</Enable_ALE>
+  <Mesh_velocity_source>coupled_displacement</Mesh_velocity_source>
+  <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>
+  <Density>1.0</Density>
+  <Viscosity model="Constant">
+    <Value>0.01</Value>
+  </Viscosity>
+  <Add_BC name="free_surface">
+    <Type>Free_surface</Type>
+    <Implementation>FittedALE</Implementation>
+    <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
+    <Kinematic_enforcement>Penalty</Kinematic_enforcement>
+    <Kinematic_penalty>11.0</Kinematic_penalty>
+    <Tangential_mesh_policy>SmoothingOnly</Tangential_mesh_policy>
+    <Tangential_mesh_penalty>5.0</Tangential_mesh_penalty>
+  </Add_BC>
+</Add_equation>
+)xml");
+  svmp::FE::systems::FESystem smoothing_system(mesh);
+  auto smoothing_module =
+      application::translators::EquationTranslator::createModule(
+          *smoothing_params, smoothing_system, meshes);
+  ASSERT_TRUE(smoothing_module);
+  const auto smoothing_artifact =
+      smoothing_module->effectiveConfigurationArtifact();
+  ASSERT_TRUE(smoothing_artifact.has_value());
+  EXPECT_NE(
+      smoothing_artifact->json.find(
+          "\"tangential_mesh_penalty\":5"),
+      std::string::npos);
+  EXPECT_NE(
+      smoothing_artifact->json.find(
+          "\"operator_source\":"
+          "\"Fitted free-surface tangential surface smoothing on "
+          "marker 81\""),
+      std::string::npos);
+
+  auto free_with_weight_params = parseEquationXml(R"xml(
+<Add_equation type="fluid">
+  <Enable_ALE>true</Enable_ALE>
+  <Mesh_velocity_source>coupled_displacement</Mesh_velocity_source>
+  <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>
+  <Density>1.0</Density>
+  <Viscosity model="Constant">
+    <Value>0.01</Value>
+  </Viscosity>
+  <Add_BC name="free_surface">
+    <Type>Free_surface</Type>
+    <Implementation>FittedALE</Implementation>
+    <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
+    <Kinematic_enforcement>Penalty</Kinematic_enforcement>
+    <Kinematic_penalty>11.0</Kinematic_penalty>
+    <Tangential_mesh_policy>Free</Tangential_mesh_policy>
+    <Tangential_mesh_penalty>5.0</Tangential_mesh_penalty>
+  </Add_BC>
+</Add_equation>
+)xml");
+  svmp::FE::systems::FESystem free_with_weight_system(mesh);
+  EXPECT_THROW(
+      application::translators::EquationTranslator::createModule(
+          *free_with_weight_params, free_with_weight_system, meshes),
+      std::runtime_error);
+  EXPECT_EQ(free_with_weight_system.fieldMap().numFields(), 0u);
+  EXPECT_TRUE(
+      free_with_weight_system.meshTangentialBoundaryPolicies().empty());
 }
 
 TEST(EquationTranslatorFreeSurface,
@@ -880,7 +948,7 @@ TEST(EquationTranslatorFreeSurface,
     ASSERT_TRUE(artifact.has_value());
     EXPECT_NE(
         artifact->json.find(
-            "\"artifact_schema_version\":2"),
+            "\"artifact_schema_version\":3"),
         std::string::npos);
     EXPECT_NE(
         artifact->json.find(

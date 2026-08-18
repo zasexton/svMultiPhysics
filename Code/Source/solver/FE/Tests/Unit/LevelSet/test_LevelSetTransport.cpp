@@ -1218,6 +1218,11 @@ TEST(LevelSetTransport,
         options.conservative_phase.flux_artifact_cadence_steps = 0;
     });
     expect_rejected_without_fields([](auto& options) {
+        options.conservative_phase
+            .pointwise_impermeable_velocity_tolerance_explicitly_requested =
+            true;
+    });
+    expect_rejected_without_fields([](auto& options) {
         options.conservative_phase.fixed_flux_regions.push_back(
             level_set::LevelSetPhaseRegionBox{});
     });
@@ -2738,6 +2743,12 @@ TEST(LevelSetTransport, InflowBoundaryAddsUpwindPenalty)
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Normal));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::AbsoluteValue));
+    const auto policies = system.exteriorBoundaryMeasurePolicies();
+    ASSERT_EQ(policies.size(), 1u);
+    EXPECT_EQ(
+        policies.front().intent,
+        FE::systems::ExteriorBoundaryMeasureIntent::FullPhysical);
+    EXPECT_EQ(policies.front().physical_boundary_marker, 4);
 }
 
 TEST(LevelSetTransport, OutflowBoundaryIsNatural)

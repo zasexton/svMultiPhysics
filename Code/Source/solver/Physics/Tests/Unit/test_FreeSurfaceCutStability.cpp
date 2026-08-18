@@ -36,6 +36,7 @@
 #include "FE/Forms/Vocabulary.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
+#include "FE/LevelSet/LevelSetCellEvaluator.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "FE/Math/DenseLinearAlgebra.h"
 #include "FE/Spaces/SpaceFactory.h"
@@ -62,6 +63,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -180,6 +182,40 @@ struct KrylovTelemetry {
         std::numeric_limits<FE::Real>::infinity()};
 };
 
+struct AggregationTopologyTransitionMetrics {
+    bool available{false};
+    bool topology_changed{false};
+    bool generated_publication_source_before{false};
+    bool generated_publication_source_after{false};
+    bool geometry_consensus_validated_before{false};
+    bool geometry_consensus_validated_after{false};
+    bool same_source_binding{false};
+    std::uint64_t publication_ordinal_before{0u};
+    std::uint64_t publication_ordinal_after{0u};
+    std::uint64_t source_value_revision_before{0u};
+    std::uint64_t source_value_revision_after{0u};
+    std::uint64_t feature_class_fingerprint_before{0u};
+    std::uint64_t feature_class_fingerprint_after{0u};
+    std::uint64_t slave_set_fingerprint_before{0u};
+    std::uint64_t slave_set_fingerprint_after{0u};
+    std::size_t active_features_before{0u};
+    std::size_t active_features_after{0u};
+    std::size_t features_entered{0u};
+    std::size_t features_exited{0u};
+    std::size_t features_persisted{0u};
+    std::size_t feature_classification_changes{0u};
+    std::size_t features_became_rooted{0u};
+    std::size_t features_became_rootless{0u};
+    std::size_t aggregate_slaves_before{0u};
+    std::size_t aggregate_slaves_after{0u};
+    std::size_t aggregate_slaves_entered{0u};
+    std::size_t aggregate_slaves_left{0u};
+    std::size_t feature_transition_records{0u};
+    FE::Real rootless_volume_before{0.0};
+    FE::Real rootless_volume_after{0.0};
+    FE::Real rootless_volume_delta{0.0};
+};
+
 struct StabilitySample {
     std::string label;
     FE::Real minimum_active_cut_fraction{1.0};
@@ -198,6 +234,8 @@ struct StabilitySample {
     FieldConstraintCounts velocity_constraints{};
     FieldConstraintCounts pressure_constraints{};
     AggregationConstraintMetrics pressure_aggregation{};
+    AggregationTopologyTransitionMetrics velocity_topology_transition{};
+    AggregationTopologyTransitionMetrics pressure_topology_transition{};
     PressureControlMetrics pressure_control{};
     int mesh_cells_per_axis{0};
     FE::Real mesh_spacing{0.0};
@@ -1726,6 +1764,120 @@ struct TargetStructuredCut {
             static_cast<FE::Real>(weight_l1));
     }
     return metrics;
+}
+
+[[nodiscard]] AggregationTopologyTransitionMetrics
+aggregationTopologyTransitionMetrics(
+    const FE::systems::FESystem& system,
+    FE::FieldId field,
+    int interface_marker,
+    FE::geometry::CutIntegrationSide active_side)
+{
+    const auto reports =
+        system.completedSmallCutAggregationRefreshReports();
+    const auto report = std::find_if(
+        reports.begin(), reports.end(), [&](const auto& candidate) {
+            return candidate.field == field &&
+                   candidate.interface_marker == interface_marker &&
+                   candidate.active_side == active_side;
+        });
+    if (report == reports.end() ||
+        std::find_if(
+            std::next(report),
+            reports.end(),
+            [&](const auto& candidate) {
+                return candidate.field == field &&
+                       candidate.interface_marker == interface_marker &&
+                       candidate.active_side == active_side;
+            }) != reports.end()) {
+        throw std::runtime_error(
+            "aggregation topology-transition report is not unique");
+    }
+    if (!report->canonical_topology_transition.has_value()) {
+        return {};
+    }
+
+    const auto& transition =
+        *report->canonical_topology_transition;
+    return AggregationTopologyTransitionMetrics{
+        .available = true,
+        .topology_changed =
+            transition.canonical_topology_changed,
+        .generated_publication_source_before =
+            transition.geometry_identity_before.kind ==
+            FE::constraints::SmallCutAggregationGeometryIdentityKind::
+                GeneratedPublicationSource,
+        .generated_publication_source_after =
+            transition.geometry_identity_after.kind ==
+            FE::constraints::SmallCutAggregationGeometryIdentityKind::
+                GeneratedPublicationSource,
+        .geometry_consensus_validated_before =
+            transition.geometry_identity_before
+                .communicator_fingerprint_consensus_validated,
+        .geometry_consensus_validated_after =
+            transition.geometry_identity_after
+                .communicator_fingerprint_consensus_validated,
+        .same_source_binding =
+            transition.geometry_identity_before.source_id ==
+                transition.geometry_identity_after.source_id &&
+            transition.geometry_identity_before.domain_id ==
+                transition.geometry_identity_after.domain_id &&
+            transition.geometry_identity_before.interface_marker ==
+                transition.geometry_identity_after.interface_marker,
+        .publication_ordinal_before =
+            transition.local_lineage_before
+                .successful_publication_ordinal,
+        .publication_ordinal_after =
+            transition.local_lineage_after
+                .successful_publication_ordinal,
+        .source_value_revision_before =
+            transition.geometry_identity_before.source_value_revision,
+        .source_value_revision_after =
+            transition.geometry_identity_after.source_value_revision,
+        .feature_class_fingerprint_before =
+            transition.canonical_feature_class_fingerprint_before,
+        .feature_class_fingerprint_after =
+            transition.canonical_feature_class_fingerprint_after,
+        .slave_set_fingerprint_before =
+            transition.canonical_slave_set_fingerprint_before,
+        .slave_set_fingerprint_after =
+            transition.canonical_slave_set_fingerprint_after,
+        .active_features_before =
+            transition.canonical_active_feature_count_before,
+        .active_features_after =
+            transition.canonical_active_feature_count_after,
+        .features_entered =
+            transition.canonical_features_entered,
+        .features_exited =
+            transition.canonical_features_exited,
+        .features_persisted =
+            transition.canonical_features_persisted,
+        .feature_classification_changes =
+            transition.canonical_feature_classification_changes,
+        .features_became_rooted =
+            transition.canonical_features_became_rooted,
+        .features_became_rootless =
+            transition.canonical_features_became_rootless,
+        .aggregate_slaves_before =
+            transition.canonical_aggregate_slaves_before,
+        .aggregate_slaves_after =
+            transition.canonical_aggregate_slaves_after,
+        .aggregate_slaves_entered =
+            transition.canonical_aggregate_slaves_entered,
+        .aggregate_slaves_left =
+            transition.canonical_aggregate_slaves_left,
+        .feature_transition_records =
+            transition.canonical_feature_transitions.size(),
+        .rootless_volume_before =
+            transition
+                .canonical_rootless_active_physical_volume_before,
+        .rootless_volume_after =
+            transition
+                .canonical_rootless_active_physical_volume_after,
+        .rootless_volume_delta =
+            transition
+                .canonical_rootless_active_physical_volume_delta,
+    };
 }
 
 [[nodiscard]] std::vector<FE::GlobalIndex> freeFieldDofs(
@@ -3844,6 +3996,18 @@ public:
         system_.setCutIntegrationContext(context);
         system_.rebuildConstraintState();
         const auto pressure_anchor = pressureAnchorState(system_, pressure_);
+        const auto velocity_topology_transition =
+            aggregationTopologyTransitionMetrics(
+                system_,
+                velocity_,
+                interface_marker,
+                FE::geometry::CutIntegrationSide::Negative);
+        const auto pressure_topology_transition =
+            aggregationTopologyTransitionMetrics(
+                system_,
+                pressure_,
+                interface_marker,
+                FE::geometry::CutIntegrationSide::Negative);
 
         FE::systems::SystemStateView state;
         state.dt = regime_.dt;
@@ -3958,6 +4122,10 @@ public:
         sample.pressure_constraints = countFieldConstraints(system_, pressure_);
         sample.pressure_aggregation = aggregationConstraintMetrics(
             system_, pressure_, mesh_spacing_);
+        sample.velocity_topology_transition =
+            velocity_topology_transition;
+        sample.pressure_topology_transition =
+            pressure_topology_transition;
         sample.pressure_control = pressure_control;
         sample.mesh_cells_per_axis = cells_per_axis_;
         sample.mesh_spacing = mesh_spacing_;
@@ -4257,7 +4425,7 @@ makeNitscheEnergyGeneratedContext(
         interface_request.quadrature_policy_key;
     contact_request.source_value_revision =
         generated.value_revision;
-    const auto contact_domain =
+    auto contact_domain =
         FE::interfaces::
             buildGeneratedInterfaceBoundaryIntersectionDomain(
                 std::move(contact_request),
@@ -4306,7 +4474,7 @@ makeNitscheEnergyGeneratedContext(
             }
             return solution[static_cast<std::size_t>(global_dof)];
         };
-    const auto negative_active =
+    auto negative_active =
         FE::interfaces::buildGeneratedActiveBoundaryDomain(
             active_request(
                 FE::geometry::CutIntegrationSide::Negative),
@@ -4314,7 +4482,7 @@ makeNitscheEnergyGeneratedContext(
             contact_domain,
             system.meshAccess(),
             scalar_field);
-    const auto positive_active =
+    auto positive_active =
         FE::interfaces::buildGeneratedActiveBoundaryDomain(
             active_request(
                 FE::geometry::CutIntegrationSide::Positive),
@@ -4363,16 +4531,70 @@ makeNitscheEnergyGeneratedContext(
 
     result.context =
         std::make_shared<FE::assembly::CutIntegrationContext>();
+    auto cell_evaluator =
+        std::make_shared<FE::level_set::LevelSetCellEvaluator>(
+            FE::level_set::makeLevelSetCellEvaluator(
+                system, level_set, solution));
+    FE::interfaces::FreeSurfaceGeometryScalarEvaluator
+        snapshot_scalar;
+    snapshot_scalar.value =
+        [cell_evaluator](
+            FE::GlobalIndex cell,
+            const std::array<FE::Real, 3>& parent_coordinate,
+            const FE::geometry::CutQuadratureProvenance& provenance) {
+            const auto evaluation =
+                provenance.selected_implicit_quadrature_backend ==
+                        "LinearCorner"
+                    ? cell_evaluator->evaluateLinearCorner(
+                          cell, parent_coordinate)
+                    : cell_evaluator->evaluate(
+                          cell, parent_coordinate);
+            return evaluation.value;
+        };
+    snapshot_scalar.reference_gradient =
+        [cell_evaluator](
+            FE::GlobalIndex cell,
+            const std::array<FE::Real, 3>& parent_coordinate,
+            const FE::geometry::CutQuadratureProvenance& provenance) {
+            const auto evaluation =
+                provenance.selected_implicit_quadrature_backend ==
+                        "LinearCorner"
+                    ? cell_evaluator->evaluateLinearCorner(
+                          cell, parent_coordinate)
+                    : cell_evaluator->evaluate(
+                          cell, parent_coordinate);
+            return evaluation.reference_gradient;
+        };
+    std::vector<
+        FE::interfaces::
+            GeneratedInterfaceBoundaryIntersectionDomain>
+        contact_domains;
+    contact_domains.push_back(std::move(contact_domain));
+    std::vector<FE::interfaces::GeneratedActiveBoundaryDomain>
+        active_domains;
+    active_domains.push_back(std::move(negative_active));
+    active_domains.push_back(std::move(positive_active));
+    FE::interfaces::FreeSurfaceGeometrySnapshotPolicy
+        snapshot_policy;
+    snapshot_policy.tolerance = interface_request.tolerance;
+    snapshot_policy.minimum_retained_volume_fraction =
+        FE::assembly::CutIntegrationContext::
+            minGeneratedCutVolumeFraction();
+    snapshot_policy.require_complete_exterior_boundary_partition =
+        false;
+    auto snapshot =
+        FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+            generated.domain,
+            std::move(contact_domains),
+            std::move(active_domains),
+            system.meshAccess(),
+            snapshot_policy,
+            std::move(snapshot_scalar),
+            std::string(domain_id));
     // Aggregation requires the complete two-sided cell classification even
     // though each form later selects one configured active side.
-    result.context->addGeneratedInterfaceDomain(generated.domain);
-    result.context
-        ->addGeneratedInterfaceBoundaryIntersectionDomain(
-            contact_domain);
-    result.context->addGeneratedActiveBoundaryDomain(
-        negative_active);
-    result.context->addGeneratedActiveBoundaryDomain(
-        positive_active);
+    result.context->addFreeSurfaceGeometrySnapshot(
+        std::move(snapshot));
     return result;
 }
 
@@ -4396,6 +4618,24 @@ struct NitscheEnergySample {
     bool generated_active_boundary_marker_registered{false};
     FE::constraints::SmallCutAggregationRefreshReport
         aggregation_report{};
+    std::size_t trace_certificate_count{0u};
+    std::size_t trace_certificate_patch_count{0u};
+    std::size_t trace_certificate_boundary_rule_count{0u};
+    std::uint64_t trace_certificate_digest{0u};
+    std::uint64_t trace_certificate_aggregation_digest{0u};
+    std::uint64_t trace_certificate_cut_context_revision{0u};
+    std::uint64_t trace_certificate_snapshot_revision{0u};
+    std::uint64_t trace_certificate_source_value_revision{0u};
+    std::uint64_t trace_form_binding_digest{0u};
+    std::size_t trace_source_formulation_record_index{0u};
+    FE::Real trace_certificate_upper_bound{0.0};
+    FE::Real trace_effective_penalty_multiplier{0.0};
+    FE::Real trace_to_penalty_ratio{0.0};
+    FE::Real trace_grouped_symmetric_ratio{0.0};
+    FE::Real trace_finite_sample_energy_lower_bound{0.0};
+    bool trace_certificate_deterministic{false};
+    bool trace_certificate_revision_match{false};
+    bool trace_form_binding_source_match{false};
     FE::Real symmetric_operator_relative_skew{0.0};
     FE::Real energy_norm_relative_skew{0.0};
     FE::Real production_reconstruction_relative_error{0.0};
@@ -4660,6 +4900,88 @@ public:
         system_.setCutIntegrationContext(
             generated_context.context);
         system_.rebuildConstraintState();
+        const auto trace_records =
+            system_
+                .generatedBoundaryNitscheTraceCertificates();
+        if (trace_records.size() != 1u) {
+            throw std::runtime_error(
+                "Nitsche energy fixture requires exactly one eager "
+                "generated-boundary trace certificate");
+        }
+        const auto& trace_record = trace_records.front();
+        if (trace_record.policy.op != "equations" ||
+            trace_record.policy.velocity_field != velocity_ ||
+            trace_record.policy.physical_boundary_marker !=
+                wall_marker ||
+            trace_record.policy.volume_interface_marker !=
+                interface_marker ||
+            trace_record.policy
+                    .generated_active_boundary_marker !=
+                generated_context.selected_boundary_marker ||
+            !trace_record.policy.symmetric ||
+            !trace_record
+                 .symmetric_energy_ratio_lower_bound
+                 .has_value()) {
+            throw std::runtime_error(
+                "Nitsche energy eager trace certificate is bound to "
+                "the wrong production route");
+        }
+        bool trace_certificate_deterministic = false;
+        const auto* trace_evidence =
+            std::getenv(
+                "SVMP_NS_GENERATED_BOUNDARY_TRACE_EVIDENCE");
+        if (trace_evidence != nullptr &&
+            std::string_view(trace_evidence) == "1") {
+            const auto repeated_trace_certificate =
+                FE::analysis::
+                    certifyGeneratedBoundaryAggregateTrace(
+                        system_,
+                        FE::analysis::
+                            GeneratedBoundaryAggregateTraceCertificationOptions{
+                                .field = velocity_,
+                                .physical_boundary_marker =
+                                    wall_marker,
+                                .volume_interface_marker =
+                                    interface_marker,
+                                .generated_active_boundary_marker =
+                                    generated_context
+                                        .selected_boundary_marker,
+                                .dynamic_viscosity = viscosity,
+                            });
+            trace_certificate_deterministic =
+                repeated_trace_certificate
+                        .canonical_certificate_digest ==
+                    trace_record.certificate
+                        .canonical_certificate_digest &&
+                repeated_trace_certificate
+                        .global_conservative_upper_bound ==
+                    trace_record.certificate
+                        .global_conservative_upper_bound &&
+                repeated_trace_certificate
+                        .aggregation_content_digest ==
+                    trace_record.certificate
+                        .aggregation_content_digest &&
+                repeated_trace_certificate
+                        .cut_context_content_revision ==
+                    trace_record.certificate
+                        .cut_context_content_revision &&
+                repeated_trace_certificate
+                        .free_surface_snapshot_revision ==
+                    trace_record.certificate
+                        .free_surface_snapshot_revision &&
+                repeated_trace_certificate
+                        .source_value_revision ==
+                    trace_record.certificate
+                        .source_value_revision &&
+                repeated_trace_certificate
+                        .certified_patch_count ==
+                    trace_record.certificate
+                        .certified_patch_count &&
+                repeated_trace_certificate
+                        .generated_boundary_rule_count ==
+                    trace_record.certificate
+                        .generated_boundary_rule_count;
+        }
 
         constexpr std::array<std::string_view, 4>
             diagnostic_operator_tags = {{
@@ -4802,6 +5124,88 @@ public:
             generated_context.context
                 ->hasGeneratedActiveBoundaryMarker(
                     generated_context.selected_boundary_marker);
+        sample.trace_certificate_count =
+            trace_records.size();
+        sample.trace_certificate_patch_count =
+            trace_record.certificate.certified_patch_count;
+        sample.trace_certificate_boundary_rule_count =
+            trace_record.certificate
+                .generated_boundary_rule_count;
+        sample.trace_certificate_digest =
+            trace_record.certificate
+                .canonical_certificate_digest;
+        sample.trace_certificate_aggregation_digest =
+            trace_record.certificate
+                .aggregation_content_digest;
+        sample.trace_certificate_cut_context_revision =
+            trace_record.certificate
+                .cut_context_content_revision;
+        sample.trace_certificate_snapshot_revision =
+            trace_record.certificate
+                .free_surface_snapshot_revision;
+        sample.trace_certificate_source_value_revision =
+            trace_record.certificate
+                .source_value_revision;
+        sample.trace_form_binding_digest =
+            trace_record.policy.form_binding_digest;
+        sample.trace_source_formulation_record_index =
+            trace_record.policy
+                .source_formulation_record_index;
+        sample.trace_form_binding_source_match =
+            sample.trace_source_formulation_record_index <
+                system_.formulationRecords().size() &&
+            system_.formulationRecords()[
+                sample
+                    .trace_source_formulation_record_index]
+                    .operator_tag ==
+                trace_record.policy.op &&
+            std::find(
+                system_.formulationRecords()[
+                    sample
+                        .trace_source_formulation_record_index]
+                    .active_fields.begin(),
+                system_.formulationRecords()[
+                    sample
+                        .trace_source_formulation_record_index]
+                    .active_fields.end(),
+                trace_record.policy.velocity_field) !=
+                system_.formulationRecords()[
+                    sample
+                        .trace_source_formulation_record_index]
+                    .active_fields.end();
+        sample.trace_certificate_upper_bound =
+            trace_record.certificate
+                .global_conservative_upper_bound;
+        sample.trace_effective_penalty_multiplier =
+            trace_record.effective_penalty_multiplier;
+        sample.trace_to_penalty_ratio =
+            trace_record.trace_to_penalty_ratio;
+        sample.trace_grouped_symmetric_ratio =
+            trace_record
+                .grouped_symmetric_trace_to_penalty_ratio;
+        sample.trace_finite_sample_energy_lower_bound =
+            *trace_record
+                 .symmetric_energy_ratio_lower_bound;
+        sample.trace_certificate_deterministic =
+            trace_certificate_deterministic;
+        sample.trace_certificate_revision_match =
+            trace_record.aggregation_report &&
+            trace_record.aggregation_report
+                    ->canonical_content_digest ==
+                trace_record.certificate
+                    .aggregation_content_digest &&
+            trace_record.certificate
+                    .cut_context_content_revision ==
+                generated_context.context
+                    ->contentRevision() &&
+            trace_record.certificate
+                    .source_value_revision ==
+                generated.value_revision &&
+            generated_context.context
+                    ->freeSurfaceGeometrySnapshotRevisionForMarker(
+                        interface_marker) ==
+                trace_record.certificate
+                    .free_surface_snapshot_revision;
         sample.production_reconstruction_relative_error =
             relativeMatrixDifference(
                 reduced_production,
@@ -6849,6 +7253,12 @@ TEST(FreeSurfaceCutStability,
                 EXPECT_EQ(
                     observed.canonical_cell_gid_digest,
                     feature.digest);
+                EXPECT_NE(
+                    observed.canonical_full_active_cell_gid_digest, 0u);
+                EXPECT_NE(observed.canonical_cut_cell_gid_digest, 0u);
+                EXPECT_NE(
+                    observed.canonical_full_active_cell_gid_digest,
+                    observed.canonical_cut_cell_gid_digest);
                 EXPECT_EQ(
                     observed.disposition,
                     feature.disposition);
@@ -6912,6 +7322,12 @@ TEST(FreeSurfaceCutStability,
         EXPECT_NE(
             sample.velocity,
             sample.pressure);
+        EXPECT_NE(
+            sample.velocity_report.canonical_feature_class_fingerprint,
+            0u);
+        EXPECT_EQ(
+            sample.velocity_report.canonical_feature_class_fingerprint,
+            sample.pressure_report.canonical_feature_class_fingerprint);
         EXPECT_NEAR(
             sample.assembled_active_physical_volume,
             expected.active_physical_volume,
@@ -6965,6 +7381,12 @@ TEST(FreeSurfaceCutStability,
                 velocity_feature.canonical_cell_gid_digest,
                 pressure_feature.canonical_cell_gid_digest);
             EXPECT_EQ(
+                velocity_feature.canonical_full_active_cell_gid_digest,
+                pressure_feature.canonical_full_active_cell_gid_digest);
+            EXPECT_EQ(
+                velocity_feature.canonical_cut_cell_gid_digest,
+                pressure_feature.canonical_cut_cell_gid_digest);
+            EXPECT_EQ(
                 velocity_feature.disposition,
                 pressure_feature.disposition);
             EXPECT_EQ(
@@ -6988,6 +7410,11 @@ TEST(FreeSurfaceCutStability,
                 velocity_pressure_match &&
                 velocity_feature.canonical_cell_gid_digest ==
                     pressure_feature.canonical_cell_gid_digest &&
+                velocity_feature.canonical_full_active_cell_gid_digest ==
+                    pressure_feature
+                        .canonical_full_active_cell_gid_digest &&
+                velocity_feature.canonical_cut_cell_gid_digest ==
+                    pressure_feature.canonical_cut_cell_gid_digest &&
                 velocity_feature.disposition ==
                     pressure_feature.disposition &&
                 velocity_feature.canonical_cell_count ==
@@ -8270,6 +8697,256 @@ TEST(FreeSurfaceCutStability,
 }
 
 TEST(FreeSurfaceCutStability,
+     ContinuousNodeCrossingReportsCanonicalAggregationTopologyTransitions)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP()
+        << "Aggregation topology transitions require native mesh support.";
+#else
+    const ScopedEnvVar pressure_diagnostics(
+        "SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC", "1");
+
+    // On the three-cell-per-axis mesh, x=4/3 is an interior node plane.
+    // Consecutive samples on either side move geometry without changing the
+    // active-cell classification; the middle pair crosses the node plane and
+    // changes both full/cut membership and aggregate support. No sample lies
+    // exactly on the node, so this is a deterministic transition-reporting
+    // prerequisite rather than a zero-level degeneracy convention test.
+    constexpr FE::Real node_x = FE::Real{4.0} / FE::Real{3.0};
+    const std::array<PlaneCutPosition, 4> positions = {{
+        {"node_left_0", {{1.0, 0.0, 0.0}}, node_x - FE::Real{0.08}},
+        {"node_left_1", {{1.0, 0.0, 0.0}}, node_x - FE::Real{0.04}},
+        {"node_right_0", {{1.0, 0.0, 0.0}}, node_x + FE::Real{0.04}},
+        {"node_right_1", {{1.0, 0.0, 0.0}}, node_x + FE::Real{0.08}},
+    }};
+
+    PersistentStabilityProblem problem(
+        positions.front(), /*cells_per_axis=*/3);
+    std::array<StabilitySample, 4> samples;
+    for (std::size_t index = 0u; index < positions.size(); ++index) {
+        SCOPED_TRACE(positions[index].label);
+        samples[index] = problem.evaluate(positions[index]);
+    }
+
+    EXPECT_FALSE(
+        samples.front().velocity_topology_transition.available);
+    EXPECT_FALSE(
+        samples.front().pressure_topology_transition.available);
+
+    std::size_t reported_transition_count = 0u;
+    std::size_t reported_changed_transition_count = 0u;
+    for (std::size_t index = 1u; index < samples.size(); ++index) {
+        SCOPED_TRACE(positions[index].label);
+        const auto& velocity =
+            samples[index].velocity_topology_transition;
+        const auto& pressure =
+            samples[index].pressure_topology_transition;
+        ASSERT_TRUE(velocity.available);
+        ASSERT_TRUE(pressure.available);
+
+        for (const auto* transition : {&velocity, &pressure}) {
+            EXPECT_TRUE(
+                transition->generated_publication_source_before);
+            EXPECT_TRUE(
+                transition->generated_publication_source_after);
+            EXPECT_TRUE(
+                transition->geometry_consensus_validated_before);
+            EXPECT_TRUE(
+                transition->geometry_consensus_validated_after);
+            EXPECT_TRUE(transition->same_source_binding);
+            EXPECT_EQ(
+                transition->publication_ordinal_before,
+                static_cast<std::uint64_t>(index));
+            EXPECT_EQ(
+                transition->publication_ordinal_after,
+                static_cast<std::uint64_t>(index + 1u));
+            EXPECT_NE(transition->source_value_revision_before,
+                      transition->source_value_revision_after);
+            EXPECT_NE(transition->feature_class_fingerprint_before, 0u);
+            EXPECT_NE(transition->feature_class_fingerprint_after, 0u);
+            EXPECT_NE(transition->slave_set_fingerprint_before, 0u);
+            EXPECT_NE(transition->slave_set_fingerprint_after, 0u);
+        }
+        if (index > 1u) {
+            EXPECT_EQ(
+                velocity.feature_class_fingerprint_before,
+                samples[index - 1u]
+                    .velocity_topology_transition
+                    .feature_class_fingerprint_after);
+            EXPECT_EQ(
+                pressure.feature_class_fingerprint_before,
+                samples[index - 1u]
+                    .pressure_topology_transition
+                    .feature_class_fingerprint_after);
+            EXPECT_EQ(
+                velocity.slave_set_fingerprint_before,
+                samples[index - 1u]
+                    .velocity_topology_transition
+                    .slave_set_fingerprint_after);
+            EXPECT_EQ(
+                pressure.slave_set_fingerprint_before,
+                samples[index - 1u]
+                    .pressure_topology_transition
+                    .slave_set_fingerprint_after);
+        }
+
+        // Active features are geometry-owned and must therefore agree across
+        // the velocity and pressure instances of the combined P1 method.
+        EXPECT_EQ(velocity.topology_changed, pressure.topology_changed);
+        EXPECT_EQ(
+            velocity.active_features_before,
+            pressure.active_features_before);
+        EXPECT_EQ(
+            velocity.active_features_after,
+            pressure.active_features_after);
+        EXPECT_EQ(velocity.features_entered, pressure.features_entered);
+        EXPECT_EQ(velocity.features_exited, pressure.features_exited);
+        EXPECT_EQ(velocity.features_persisted, pressure.features_persisted);
+        EXPECT_EQ(
+            velocity.feature_classification_changes,
+            pressure.feature_classification_changes);
+        EXPECT_EQ(
+            velocity.features_became_rooted,
+            pressure.features_became_rooted);
+        EXPECT_EQ(
+            velocity.features_became_rootless,
+            pressure.features_became_rootless);
+        EXPECT_EQ(
+            velocity.feature_transition_records,
+            pressure.feature_transition_records);
+        EXPECT_EQ(
+            velocity.feature_class_fingerprint_before,
+            pressure.feature_class_fingerprint_before);
+        EXPECT_EQ(
+            velocity.feature_class_fingerprint_after,
+            pressure.feature_class_fingerprint_after);
+        EXPECT_EQ(velocity.source_value_revision_before,
+                  pressure.source_value_revision_before);
+        EXPECT_EQ(velocity.source_value_revision_after,
+                  pressure.source_value_revision_after);
+        EXPECT_NEAR(
+            velocity.rootless_volume_before,
+            pressure.rootless_volume_before,
+            FE::Real{1.0e-14});
+        EXPECT_NEAR(
+            velocity.rootless_volume_after,
+            pressure.rootless_volume_after,
+            FE::Real{1.0e-14});
+        EXPECT_NEAR(
+            velocity.rootless_volume_delta,
+            pressure.rootless_volume_delta,
+            FE::Real{1.0e-14});
+
+        const auto check_canonical_ledger = [&](const auto& transition) {
+            EXPECT_EQ(
+                transition.active_features_before,
+                transition.features_persisted +
+                    transition.features_exited);
+            EXPECT_EQ(
+                transition.active_features_after,
+                transition.features_persisted +
+                    transition.features_entered);
+            EXPECT_EQ(
+                transition.feature_transition_records,
+                transition.features_persisted +
+                    transition.features_entered +
+                    transition.features_exited);
+            EXPECT_EQ(
+                transition.aggregate_slaves_before +
+                    transition.aggregate_slaves_entered,
+                transition.aggregate_slaves_after +
+                    transition.aggregate_slaves_left);
+            EXPECT_NEAR(
+                transition.rootless_volume_delta,
+                transition.rootless_volume_after -
+                    transition.rootless_volume_before,
+                FE::Real{1.0e-14});
+            const bool any_reported_topology_change =
+                transition.features_entered > 0u ||
+                transition.features_exited > 0u ||
+                transition.feature_classification_changes > 0u ||
+                transition.features_became_rooted > 0u ||
+                transition.features_became_rootless > 0u ||
+                transition.aggregate_slaves_entered > 0u ||
+                transition.aggregate_slaves_left > 0u;
+            EXPECT_EQ(
+                transition.topology_changed,
+                any_reported_topology_change);
+        };
+        check_canonical_ledger(velocity);
+        check_canonical_ledger(pressure);
+
+        // The vector P1 constraint has three component rows for each scalar
+        // pressure row, while both use the same aggregate topology.
+        EXPECT_EQ(
+            velocity.aggregate_slaves_before,
+            3u * pressure.aggregate_slaves_before);
+        EXPECT_EQ(
+            velocity.aggregate_slaves_after,
+            3u * pressure.aggregate_slaves_after);
+        EXPECT_EQ(
+            velocity.aggregate_slaves_entered,
+            3u * pressure.aggregate_slaves_entered);
+        EXPECT_EQ(
+            velocity.aggregate_slaves_left,
+            3u * pressure.aggregate_slaves_left);
+
+        ++reported_transition_count;
+        if (pressure.topology_changed) {
+            ++reported_changed_transition_count;
+        }
+    }
+
+    // Geometry moves within one cell layer on transitions 0->1 and 2->3;
+    // only transition 1->2 crosses the interior node plane.
+    EXPECT_FALSE(samples[1].pressure_topology_transition.topology_changed);
+    EXPECT_EQ(
+        samples[1]
+            .pressure_topology_transition
+            .feature_class_fingerprint_before,
+        samples[1]
+            .pressure_topology_transition
+            .feature_class_fingerprint_after);
+    EXPECT_TRUE(samples[2].pressure_topology_transition.topology_changed);
+    EXPECT_NE(
+        samples[2]
+            .pressure_topology_transition
+            .feature_class_fingerprint_before,
+        samples[2]
+            .pressure_topology_transition
+            .feature_class_fingerprint_after);
+    EXPECT_GT(
+        samples[2]
+            .pressure_topology_transition
+            .feature_classification_changes,
+        0u);
+    EXPECT_FALSE(samples[3].pressure_topology_transition.topology_changed);
+    EXPECT_EQ(
+        samples[3]
+            .pressure_topology_transition
+            .feature_class_fingerprint_before,
+        samples[3]
+            .pressure_topology_transition
+            .feature_class_fingerprint_after);
+    EXPECT_EQ(reported_transition_count, positions.size() - 1u);
+    EXPECT_EQ(reported_changed_transition_count, 1u);
+
+    RecordProperty(
+        "wp7_node_crossing_reported_transition_count",
+        reported_transition_count);
+    RecordProperty(
+        "wp7_node_crossing_reported_changed_transition_count",
+        reported_changed_transition_count);
+    RecordProperty(
+        "wp7_node_crossing_transition_claim",
+        "canonical_topology_reporting_prerequisite_not_operator_or_solution_continuity");
+    RecordProperty(
+        "wp7_node_crossing_same_count_membership_identity",
+        "probabilistic_64_bit_class_tagged_cell_gid_digests");
+#endif
+}
+
+TEST(FreeSurfaceCutStability,
      SymmetricNitscheFiniteSampleEnergySpectrumUsesSharpBoundaryAndAggregation)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -9341,6 +10018,358 @@ TEST(FreeSurfaceCutStability,
         << maximum_active_side_eigenvalue_difference << ","
         << "\"maximum_affine_scale_eigenvalue_spread\":"
         << maximum_affine_scale_eigenvalue_spread << ","
+        << "\"method_coercivity_lower_bound\":null,"
+        << "\"uniform_bound_status\":"
+        << "\"UNFROZEN_NO_BOUND_INVENTED\","
+        << "\"accepted_claim\":"
+        << "\"joint_low_level_prerequisite\"}"
+        << '\n';
+#endif
+}
+
+TEST(FreeSurfaceCutStability,
+     DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Generated-boundary trace evidence requires native mesh support.";
+#else
+    const ScopedEnvVar energy_diagnostic(
+        "SVMP_NS_SYMMETRIC_NITSCHE_ENERGY_DIAGNOSTIC", "1");
+    const ScopedEnvVar trace_evidence(
+        "SVMP_NS_GENERATED_BOUNDARY_TRACE_EVIDENCE", "1");
+    const std::array<FE::Real, 9> fractions = {{
+        FE::Real{0.0},
+        FE::Real{1.0e-8},
+        FE::Real{1.0e-6},
+        FE::Real{1.0e-4},
+        FE::Real{1.0e-2},
+        FE::Real{0.1},
+        FE::Real{0.25},
+        FE::Real{0.49},
+        FE::Real{1.0},
+    }};
+    const std::array<FE::Real, 3> mesh_scales = {{
+        FE::Real{0.5},
+        FE::Real{1.0} / FE::Real{3.0},
+        FE::Real{0.25},
+    }};
+    const std::array<NitscheEnergyOrientation, 2>
+        orientations = {{
+            {"axis", {{1.0, 0.0, 0.0}}},
+            {"oblique", {{1.0, 0.73, 0.41}}},
+        }};
+
+    constexpr std::size_t expected_case_count{108u};
+    constexpr std::size_t expected_wet_case_count{96u};
+    constexpr std::size_t expected_dry_case_count{12u};
+    constexpr FE::Real configured_penalty{12.0};
+    constexpr FE::Real comparison_tolerance{1.0e-11};
+    std::size_t case_count = 0u;
+    std::size_t wet_case_count = 0u;
+    std::size_t dry_case_count = 0u;
+    std::size_t deterministic_case_count = 0u;
+    std::size_t revision_match_case_count = 0u;
+    FE::Real maximum_trace_upper_bound{0.0};
+    FE::Real minimum_finite_sample_energy_lower_bound{
+        std::numeric_limits<FE::Real>::infinity()};
+    FE::Real minimum_sampled_eigenvalue_gap{
+        std::numeric_limits<FE::Real>::infinity()};
+
+    for (const auto& orientation : orientations) {
+        for (const auto mesh_scale : mesh_scales) {
+            PersistentNitscheEnergyProblem negative_problem(
+                mesh_scale,
+                orientation,
+                FE::geometry::CutIntegrationSide::Negative);
+            PersistentNitscheEnergyProblem positive_problem(
+                mesh_scale,
+                orientation,
+                FE::geometry::CutIntegrationSide::Positive);
+            for (const auto fraction : fractions) {
+                for (std::size_t side_index = 0u;
+                     side_index < 2u;
+                     ++side_index) {
+                    SCOPED_TRACE(
+                        std::string(orientation.id) + "_h_" +
+                        realPropertyValue(mesh_scale) + "_fraction_" +
+                        realPropertyValue(fraction) + "_side_" +
+                        std::to_string(side_index));
+                    auto sample =
+                        side_index == 0u
+                            ? negative_problem.evaluate(fraction)
+                            : positive_problem.evaluate(fraction);
+                    const bool dry =
+                        fraction == FE::Real{0.0};
+                    ++case_count;
+                    if (dry) {
+                        ++dry_case_count;
+                    } else {
+                        ++wet_case_count;
+                    }
+                    if (sample.trace_certificate_deterministic) {
+                        ++deterministic_case_count;
+                    }
+                    if (sample.trace_certificate_revision_match) {
+                        ++revision_match_case_count;
+                    }
+
+                    EXPECT_EQ(
+                        sample.trace_certificate_count, 1u);
+                    EXPECT_NE(
+                        sample.trace_certificate_digest, 0u);
+                    EXPECT_NE(
+                        sample
+                            .trace_certificate_aggregation_digest,
+                        0u);
+                    EXPECT_NE(
+                        sample
+                            .trace_certificate_snapshot_revision,
+                        0u);
+                    EXPECT_NE(
+                        sample
+                            .trace_certificate_source_value_revision,
+                        0u);
+                    EXPECT_NE(
+                        sample.trace_form_binding_digest,
+                        0u);
+                    EXPECT_TRUE(
+                        sample.trace_form_binding_source_match);
+                    EXPECT_TRUE(
+                        sample.trace_certificate_deterministic);
+                    EXPECT_TRUE(
+                        sample.trace_certificate_revision_match);
+                    EXPECT_TRUE(std::isfinite(
+                        sample.trace_certificate_upper_bound));
+                    EXPECT_GE(
+                        sample.trace_certificate_upper_bound,
+                        FE::Real{0.0});
+                    EXPECT_LT(
+                        sample.trace_certificate_upper_bound,
+                        configured_penalty);
+                    EXPECT_EQ(
+                        sample.trace_effective_penalty_multiplier,
+                        configured_penalty);
+                    EXPECT_GE(
+                        sample.trace_to_penalty_ratio,
+                        FE::Real{0.0});
+                    EXPECT_LT(
+                        sample.trace_grouped_symmetric_ratio,
+                        FE::Real{1.0});
+                    EXPECT_EQ(
+                        sample.trace_grouped_symmetric_ratio,
+                        sample.trace_to_penalty_ratio);
+                    EXPECT_GT(
+                        sample
+                            .trace_finite_sample_energy_lower_bound,
+                        FE::Real{0.0});
+
+                    FE::Real sampled_eigenvalue_gap =
+                        std::numeric_limits<FE::Real>::quiet_NaN();
+                    if (dry) {
+                        EXPECT_EQ(
+                            sample
+                                .trace_certificate_boundary_rule_count,
+                            0u);
+                        EXPECT_EQ(
+                            sample
+                                .trace_certificate_patch_count,
+                            0u);
+                        EXPECT_EQ(
+                            sample.trace_certificate_upper_bound,
+                            FE::Real{0.0});
+                        EXPECT_EQ(
+                            sample
+                                .trace_finite_sample_energy_lower_bound,
+                            FE::Real{1.0});
+                    } else {
+                        EXPECT_GT(
+                            sample
+                                .trace_certificate_boundary_rule_count,
+                            0u);
+                        EXPECT_GT(
+                            sample
+                                .trace_certificate_patch_count,
+                            0u);
+                        EXPECT_GT(
+                            sample.trace_certificate_upper_bound,
+                            FE::Real{0.0});
+                        sampled_eigenvalue_gap =
+                            sample.minimum_generalized_eigenvalue -
+                            sample.eigensolver_tolerance -
+                            sample
+                                .trace_finite_sample_energy_lower_bound;
+                        EXPECT_GE(
+                            sampled_eigenvalue_gap,
+                            -comparison_tolerance);
+                        minimum_sampled_eigenvalue_gap =
+                            std::min(
+                                minimum_sampled_eigenvalue_gap,
+                                sampled_eigenvalue_gap);
+                    }
+
+                    maximum_trace_upper_bound =
+                        std::max(
+                            maximum_trace_upper_bound,
+                            sample.trace_certificate_upper_bound);
+                    minimum_finite_sample_energy_lower_bound =
+                        std::min(
+                            minimum_finite_sample_energy_lower_bound,
+                            sample
+                                .trace_finite_sample_energy_lower_bound);
+
+                    std::cout
+                        << std::setprecision(17)
+                        << "WP3_WP7_NITSCHE_TRACE_V2_CASE {"
+                        << "\"case_id\":\""
+                        << sample.case_id << "_h_"
+                        << realPropertyValue(mesh_scale) << "\","
+                        << "\"orientation\":\""
+                        << orientation.id << "\","
+                        << "\"active_side\":\""
+                        << (side_index == 0u
+                                ? "negative"
+                                : "positive")
+                        << "\","
+                        << "\"mesh_scale\":" << mesh_scale << ","
+                        << "\"target_wall_fraction\":"
+                        << fraction << ","
+                        << "\"certificate_digest\":"
+                        << sample.trace_certificate_digest << ","
+                        << "\"aggregation_digest\":"
+                        << sample
+                               .trace_certificate_aggregation_digest
+                        << ","
+                        << "\"cut_context_revision\":"
+                        << sample
+                               .trace_certificate_cut_context_revision
+                        << ","
+                        << "\"snapshot_revision\":"
+                        << sample
+                               .trace_certificate_snapshot_revision
+                        << ","
+                        << "\"source_value_revision\":"
+                        << sample
+                               .trace_certificate_source_value_revision
+                        << ","
+                        << "\"form_binding_digest\":"
+                        << sample.trace_form_binding_digest << ","
+                        << "\"source_formulation_record_index\":"
+                        << sample
+                               .trace_source_formulation_record_index
+                        << ","
+                        << "\"form_binding_source_match\":"
+                        << (sample.trace_form_binding_source_match
+                                ? "true"
+                                : "false")
+                        << ","
+                        << "\"boundary_rule_count\":"
+                        << sample
+                               .trace_certificate_boundary_rule_count
+                        << ","
+                        << "\"patch_count\":"
+                        << sample.trace_certificate_patch_count << ","
+                        << "\"trace_upper_bound\":"
+                        << sample.trace_certificate_upper_bound << ","
+                        << "\"effective_penalty_multiplier\":"
+                        << sample.trace_effective_penalty_multiplier
+                        << ","
+                        << "\"trace_to_penalty_ratio\":"
+                        << sample.trace_to_penalty_ratio << ","
+                        << "\"grouped_symmetric_ratio\":"
+                        << sample.trace_grouped_symmetric_ratio << ","
+                        << "\"finite_sample_energy_lower_bound\":"
+                        << sample
+                               .trace_finite_sample_energy_lower_bound
+                        << ","
+                        << "\"minimum_generalized_eigenvalue\":";
+                    if (dry) {
+                        std::cout << "null";
+                    } else {
+                        std::cout
+                            << sample.minimum_generalized_eigenvalue;
+                    }
+                    std::cout << ",\"eigensolver_tolerance\":";
+                    if (dry) {
+                        std::cout << "null";
+                    } else {
+                        std::cout << sample.eigensolver_tolerance;
+                    }
+                    std::cout << ",\"sampled_eigenvalue_gap\":";
+                    if (dry) {
+                        std::cout << "null";
+                    } else {
+                        std::cout << sampled_eigenvalue_gap;
+                    }
+                    std::cout
+                        << ",\"deterministic\":"
+                        << (sample.trace_certificate_deterministic
+                                ? "true"
+                                : "false")
+                        << ",\"revision_match\":"
+                        << (sample.trace_certificate_revision_match
+                                ? "true"
+                                : "false")
+                        << "}" << '\n';
+                }
+            }
+        }
+    }
+
+    EXPECT_EQ(case_count, expected_case_count);
+    EXPECT_EQ(wet_case_count, expected_wet_case_count);
+    EXPECT_EQ(dry_case_count, expected_dry_case_count);
+    EXPECT_EQ(
+        deterministic_case_count, expected_case_count);
+    EXPECT_EQ(
+        revision_match_case_count, expected_case_count);
+    EXPECT_LT(
+        maximum_trace_upper_bound, configured_penalty);
+    EXPECT_GT(
+        minimum_finite_sample_energy_lower_bound,
+        FE::Real{0.0});
+    EXPECT_GE(
+        minimum_sampled_eigenvalue_gap,
+        -comparison_tolerance);
+
+    RecordProperty(
+        "wp3_wp7_nitsche_trace_v2_case_count",
+        case_count);
+    RecordProperty(
+        "wp3_wp7_nitsche_trace_v2_maximum_upper_bound",
+        realPropertyValue(maximum_trace_upper_bound));
+    RecordProperty(
+        "wp3_wp7_nitsche_trace_v2_minimum_finite_sample_lower_bound",
+        realPropertyValue(
+            minimum_finite_sample_energy_lower_bound));
+    RecordProperty(
+        "wp3_wp7_nitsche_trace_v2_minimum_sampled_eigenvalue_gap",
+        realPropertyValue(minimum_sampled_eigenvalue_gap));
+    RecordProperty(
+        "wp3_wp7_nitsche_trace_v2_method_coercivity_lower_bound",
+        "null");
+    RecordProperty(
+        "wp3_wp7_nitsche_trace_v2_uniform_bound_status",
+        "UNFROZEN_NO_BOUND_INVENTED");
+    RecordProperty(
+        "wp3_wp7_nitsche_trace_v2_accepted_claim",
+        "joint_low_level_prerequisite");
+
+    std::cout
+        << std::setprecision(17)
+        << "WP3_WP7_NITSCHE_TRACE_V2_SUMMARY {"
+        << "\"case_count\":" << case_count << ","
+        << "\"wet_case_count\":" << wet_case_count << ","
+        << "\"dry_case_count\":" << dry_case_count << ","
+        << "\"deterministic_case_count\":"
+        << deterministic_case_count << ","
+        << "\"revision_match_case_count\":"
+        << revision_match_case_count << ","
+        << "\"maximum_trace_upper_bound\":"
+        << maximum_trace_upper_bound << ","
+        << "\"minimum_finite_sample_energy_lower_bound\":"
+        << minimum_finite_sample_energy_lower_bound << ","
+        << "\"minimum_sampled_eigenvalue_gap\":"
+        << minimum_sampled_eigenvalue_gap << ","
         << "\"method_coercivity_lower_bound\":null,"
         << "\"uniform_bound_status\":"
         << "\"UNFROZEN_NO_BOUND_INVENTED\","

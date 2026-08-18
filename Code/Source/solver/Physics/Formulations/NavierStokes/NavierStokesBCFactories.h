@@ -19,6 +19,7 @@
 #include "FE/Auxiliary/AuxiliaryModelDSL.h"
 #include "FE/Systems/FESystem.h"
 
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -409,13 +410,19 @@ inline void applyVelocityNitscheBCs(
     const FE::forms::FormExpr& mu,
     const std::function<std::optional<int>(int)>&
         generated_active_boundary_marker = {},
-    VelocityNitscheEnergyForms* energy_forms = nullptr)
+    VelocityNitscheEnergyForms* energy_forms = nullptr,
+    std::vector<
+        FE::forms::bc::
+            GeneratedBoundaryNitscheTraceFormBinding>*
+        generated_trace_bindings = nullptr)
 {
     if (options.velocity_dirichlet_weak.empty()) {
         return;
     }
-    if (!(options.nitsche_gamma > 0.0)) {
-        throw std::invalid_argument("applyVelocityNitscheBCs: nitsche_gamma must be > 0");
+    if (!(options.nitsche_gamma > 0.0) ||
+        !std::isfinite(options.nitsche_gamma)) {
+        throw std::invalid_argument(
+            "applyVelocityNitscheBCs: nitsche_gamma must be finite and > 0");
     }
 
     const auto n = FE::forms::FormExpr::normal();
@@ -435,9 +442,14 @@ inline void applyVelocityNitscheBCs(
         [](const FE::forms::FormExpr& integrand,
            int marker,
            std::optional<int> generated_marker) {
-            return generated_marker.has_value()
-                       ? integrand.dI(*generated_marker)
-                       : integrand.ds(marker);
+            const auto measure =
+                generated_marker.has_value()
+                    ? FE::forms::ExteriorBoundaryMeasure::
+                          generatedActiveSubset(
+                              marker, *generated_marker)
+                    : FE::forms::ExteriorBoundaryMeasure::
+                          fullPhysical(marker);
+            return integrand.dExteriorBoundary(measure);
         };
 
     for (const auto& bc : options.velocity_dirichlet_weak) {
@@ -460,25 +472,84 @@ inline void applyVelocityNitscheBCs(
         const auto uD = FE::forms::FormExpr::asVector(std::move(uD_comp));
         const auto diff = u - uD;
 
-        // Consistency: add the missing stress boundary term -<σ(u,p)n, v>.
+        // Pressure consistency remains outside the form-bound viscous route.
         momentum_form =
             momentum_form +
             integrate(
                 p * FE::forms::inner(n, v),
                 marker,
-                generated_marker) -
+                generated_marker);
+
+        if (generated_marker.has_value() &&
+            generated_trace_bindings != nullptr) {
+            auto bound_terms =
+                FE::forms::bc::
+                    buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+                        u,
+                        v,
+                        uD,
+                        mu,
+                        marker,
+                        *generated_marker,
+                        FE::forms::bc::TraceNitscheOptions{
+                            .gamma = options.nitsche_gamma,
+                            .variant = options.nitsche_symmetric
+                                ? FE::forms::bc::
+                                      NitscheVariant::Symmetric
+                                : FE::forms::bc::
+                                      NitscheVariant::Unsymmetric,
+                            .scale_with_p =
+                                options.nitsche_scale_with_p});
+            momentum_form =
+                momentum_form +
+                bound_terms.route_contribution;
+            if (options.nitsche_symmetric) {
+                continuity_form = continuity_form +
+                                  integrate(
+                                      q * FE::forms::inner(n, diff),
+                                      marker,
+                                      generated_marker);
+                if (energy_forms != nullptr) {
+                    appendDiagnosticForm(
+                        energy_forms->symmetric_consistency,
+                        bound_terms
+                            .homogeneous_symmetric_consistency);
+                    appendDiagnosticForm(
+                        energy_forms->penalty,
+                        bound_terms.homogeneous_penalty);
+                    energy_forms->symmetric_boundaries.push_back(
+                        {
+                            .physical_boundary_marker = marker,
+                            .generated_active_boundary_marker =
+                                generated_marker,
+                        });
+                }
+            } else {
+                continuity_form = continuity_form -
+                                  integrate(
+                                      q * FE::forms::inner(n, diff),
+                                      marker,
+                                      generated_marker);
+            }
+            generated_trace_bindings->push_back(
+                std::move(bound_terms.binding));
+            continue;
+        }
+
+        // Ordinary fitted or uncertified routes retain the generic lowering.
+        momentum_form =
+            momentum_form -
             integrate(
                 FE::forms::inner(stress_u * n, v),
                 marker,
                 generated_marker);
-
-        // Adjoint consistency (variant-dependent) + penalty.
         if (options.nitsche_symmetric) {
-            momentum_form = momentum_form -
-                            integrate(
-                                FE::forms::inner(stress_v * n, diff),
-                                marker,
-                                generated_marker);
+            momentum_form =
+                momentum_form -
+                integrate(
+                    FE::forms::inner(stress_v * n, diff),
+                    marker,
+                    generated_marker);
             continuity_form = continuity_form +
                               integrate(
                                   q * FE::forms::inner(n, diff),
@@ -510,11 +581,12 @@ inline void applyVelocityNitscheBCs(
                     });
             }
         } else {
-            momentum_form = momentum_form +
-                            integrate(
-                                FE::forms::inner(stress_v * n, diff),
-                                marker,
-                                generated_marker);
+            momentum_form =
+                momentum_form +
+                integrate(
+                    FE::forms::inner(stress_v * n, diff),
+                    marker,
+                    generated_marker);
             continuity_form = continuity_form -
                               integrate(
                                   q * FE::forms::inner(n, diff),

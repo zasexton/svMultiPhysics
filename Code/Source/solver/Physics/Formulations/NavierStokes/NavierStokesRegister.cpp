@@ -3552,10 +3552,13 @@ void append_free_surface_bc(
   if (tangential_mesh_penalty.has_value() &&
       fs.tangential_mesh_policy !=
           FreeSurfaceTangentialMeshPolicy::Prescribed &&
+      fs.tangential_mesh_policy !=
+          FreeSurfaceTangentialMeshPolicy::SmoothingOnly &&
       !explicit_legacy_configuration) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Tangential_mesh_penalty requires "
-        "Tangential_mesh_policy=Prescribed; unused tangential settings are "
+        "Tangential_mesh_policy=Prescribed or SmoothingOnly; Free has no "
+        "tangential boundary row, and unused tangential settings are "
         "accepted only by the explicit schema-1 legacy mode.");
   }
 
@@ -3827,6 +3830,84 @@ void append_free_surface_bc(
 
   append_free_surface_contact_line(bc.params, fs);
   options.free_surface.push_back(std::move(fs));
+}
+
+svmp::Physics::formulations::navier_stokes::
+    IncompressibleNavierStokesVMSOptions
+translate_fitted_surface_contact_capability(
+    const svmp::Physics::EquationModuleInput& input)
+{
+  using svmp::Physics::formulations::navier_stokes::
+      IncompressibleNavierStokesVMSOptions;
+
+  IncompressibleNavierStokesVMSOptions options{};
+  apply_free_surface_schema_options(input.equation_params, options);
+  for (const auto& bc : input.boundary_conditions) {
+    const auto* bc_type = find_param(bc.params, "Type");
+    if (bc_type == nullptr || !bc_type->defined ||
+        !is_free_surface_type(bc_type->value)) {
+      continue;
+    }
+
+    const auto* time_dependence =
+        find_param(bc.params, "Time_dependence");
+    const auto time_value =
+        time_dependence != nullptr && time_dependence->defined
+            ? lower_copy(trim_copy(time_dependence->value))
+            : std::string{"steady"};
+    const bool is_steady = time_value.empty() || time_value == "steady";
+    const bool has_temporal_spatial_file = has_nonempty_defined(
+        bc.params, "Temporal_and_spatial_values_file_path");
+    const bool has_other_files =
+        has_nonempty_defined(bc.params, "Temporal_values_file_path") ||
+        has_nonempty_defined(bc.params, "Spatial_values_file_path") ||
+        has_nonempty_defined(bc.params, "Bct_file_path") ||
+        has_nonempty_defined(bc.params, "Traction_values_file_path") ||
+        has_nonempty_defined(bc.params, "Fourier_coefficients_file_path") ||
+        has_nonempty_defined(bc.params, "Spatial_profile_file_path");
+    append_free_surface_bc(
+        bc,
+        is_steady,
+        has_temporal_spatial_file,
+        has_other_files,
+        options);
+  }
+  return options;
+}
+
+void validate_fitted_surface_contact_capability(
+    const svmp::Physics::formulations::navier_stokes::
+        IncompressibleNavierStokesVMSOptions& options)
+{
+  using svmp::Physics::formulations::navier_stokes::
+      FreeSurfaceImplementation;
+  using svmp::Physics::formulations::navier_stokes::
+      FreeSurfaceSurfaceTensionForm;
+  using ContactLine = svmp::Physics::formulations::navier_stokes::
+      IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine;
+
+  for (const auto& boundary : options.free_surface) {
+    if (boundary.implementation != FreeSurfaceImplementation::FittedALE) {
+      continue;
+    }
+    if (boundary.surface_tension_form ==
+        FreeSurfaceSurfaceTensionForm::SurfaceStress) {
+      throw std::invalid_argument(
+          "IncompressibleNavierStokesVMSModule: fitted-ALE SurfaceStress is not yet qualified for current-frame test-function gradients; use Automatic/CurvatureTraction for fitted boundaries");
+    }
+    for (const auto& contact_line : boundary.contact_lines) {
+      if (std::holds_alternative<ContactLine::PrescribedAngle>(
+              contact_line.configuration)) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: prescribed fitted contact angles are unsupported until a true fitted contact-line (codimension-two) integration entity is available; the condition must not be integrated over the complete free-surface boundary");
+      }
+      if (std::holds_alternative<ContactLine::DynamicRenE>(
+              contact_line.configuration)) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: DynamicContactAngle is currently supported only for sharp unfitted level-set free surfaces");
+      }
+    }
+  }
 }
 
 void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
@@ -4434,6 +4515,8 @@ std::unique_ptr<svmp::Physics::PhysicsModule>
 create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
                                 svmp::FE::systems::FESystem& system)
 {
+  svmp::Physics::formulations::navier_stokes::
+      preflightFittedSurfaceContactCapability(input);
   const auto free_surface_physical_model =
       validate_and_resolve_free_surface_physical_model(input);
   if (!input.mesh) {
@@ -4495,11 +4578,23 @@ SVMP_REGISTER_EQUATION("stokes", &create_navier_stokes_from_input);
 
 namespace svmp::Physics::formulations::navier_stokes {
 
+void preflightFittedSurfaceContactCapability(
+    const svmp::Physics::EquationModuleInput& input)
+{
+  if (input.equation_type != "fluid" && input.equation_type != "stokes") {
+    throw std::invalid_argument(
+        "preflightFittedSurfaceContactCapability requires a fluid or stokes equation input");
+  }
+  (void)validate_and_resolve_free_surface_physical_model(input);
+  validate_fitted_surface_contact_capability(
+      translate_fitted_surface_contact_capability(input));
+}
+
 FE::FieldId preRegisterPrimaryVelocityField(
     const svmp::Physics::EquationModuleInput& input,
     FE::systems::FESystem& system)
 {
-  (void)validate_and_resolve_free_surface_physical_model(input);
+  preflightFittedSurfaceContactCapability(input);
   if (input.equation_type != "fluid" && input.equation_type != "stokes") {
     throw std::invalid_argument(
         "preRegisterPrimaryVelocityField requires a fluid or stokes equation input");

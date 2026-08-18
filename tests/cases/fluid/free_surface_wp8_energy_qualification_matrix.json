@@ -1,15 +1,26 @@
 {
   "schema_version": 1,
-  "matrix_id": "free_surface_wp8_energy_prerequisite_v2",
+  "matrix_id": "free_surface_wp8_energy_prerequisite_v3",
   "status": "FROZEN_BEFORE_EXECUTION",
   "work_package": "WP-8",
   "findings": [
     "FSR-09"
   ],
   "model_envelope": "one_phase_unfitted_geometry_coupling_and_energy_low_level_prerequisite",
-  "freeze_scope": "This matrix freezes prerequisite evidence for explicit production selection between generalized-alpha and backward Euler, the backward-Euler endpoint transaction, the selected generated-state outer fixed point, transactional rollback, discrete surface/wall/volume functional evaluation, a fixed-topology first variation, extension refresh behavior, topology-event diagnostics, and the accepted/rejected level-set maintenance ledger. The ledger evidence covers ordered transport, limiting, reinitialization, geometry-reconciliation, and global-correction potential-change rows with explicit revision provenance; it does not establish a backward-Euler energy balance, an energy-stable split, a complete physical and numerical energy identity, outer contraction, topology-event acceptance, or any WP-8 simulation exit.",
+  "freeze_scope": "This matrix freezes prerequisite evidence for explicit production selection between generalized-alpha and backward Euler, the backward-Euler endpoint transaction, the selected generated-state outer fixed point, transactional rollback, discrete surface/wall/volume functional evaluation, a fixed-topology first variation, extension refresh behavior, topology-event diagnostics, the accepted/rejected level-set maintenance ledger, and the prospective complete-channel ledger validation/publication contract. The maintenance evidence covers ordered transport, limiting, reinitialization, geometry-reconciliation, and global-correction potential-change rows with explicit revision provenance. The prospective ledger tests validate completeness, ownership, endpoint continuity, attempt sequencing, fixed-topology acceptance, and zero accepted contribution for rejection; they do not establish production channel assembly, a backward-Euler energy balance, an energy-stable split, a complete physical and numerical energy identity, outer contraction, topology-event acceptance, or any WP-8 simulation exit.",
   "prospective_tests": [],
   "architecture_record": "Documentation/free_surface_wp8_geometry_energy_architecture.md",
+  "source_test_files": {
+    "FreeSurfaceGeometrySnapshot": "Code/Source/solver/FE/Tests/Unit/Geometry/test_GeneratedActiveBoundaryDomain.cpp",
+    "NewtonSolverExternalStateFixedPoint": "Code/Source/solver/FE/Tests/Unit/TimeStepping/test_NewtonSolver.cpp",
+    "TimeLoopConvergence": "Code/Source/solver/FE/Tests/Unit/TimeStepping/test_TimeLoopConvergence.cpp",
+    "GeneralSimulationParameters": "Code/Source/solver/Application/Tests/Unit/test_OpenVesselExamples.cpp",
+    "ApplicationDriverLevelSetWorkflows": "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp",
+    "ApplicationDriverConservativePhaseCandidatesTest": "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp",
+    "ApplicationDriverLevelSetVolumeCorrection": "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflows.cpp",
+    "FreeSurfaceEnergyLedger": "Code/Source/solver/Application/Tests/Unit/test_FreeSurfaceEnergyLedger.cpp",
+    "ApplicationDriverLevelSetWorkflowsMPI": "Code/Source/solver/Application/Tests/Unit/test_ApplicationDriverLevelSetWorkflowsMPI.cpp"
+  },
   "selected_ad5_strategy": {
     "strategy": "energy_stable_partitioned_outer_iteration_target",
     "implemented_solver_form": "regenerate_generated_state_then_solve_frozen_inner_newton_problem",
@@ -53,7 +64,8 @@
       "maintenance_geometry_reconciliation_surface_wall_volume_potential_change",
       "maintenance_global_correction_surface_wall_volume_potential_change",
       "maintenance_rejected_attempt_zero_accepted_contribution",
-      "maintenance_zero_row_accepted_and_rejected_attempt_outcomes"
+      "maintenance_zero_row_accepted_and_rejected_attempt_outcomes",
+      "prospective_complete_channel_ledger_validation_and_publication_contract"
     ],
     "not_yet_complete_channels": [
       "kinetic_energy",
@@ -131,6 +143,29 @@
         "wall_time_seconds": 1200,
         "memory_mib": 4096,
         "output_mib": 128
+      }
+    },
+    {
+      "id": "complete_energy_ledger_contract_serial",
+      "binary": "application",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "FreeSurfaceEnergyLedger.CommitsOneCompleteBackwardEulerFixedTopologyBalance",
+        "FreeSurfaceEnergyLedger.AcceptedHistoryRequiresContinuousEndpointAndOwnerProvenance",
+        "FreeSurfaceEnergyLedger.RejectedHistoryAlsoLocksChannelOwnerProvenance",
+        "FreeSurfaceEnergyLedger.UnstagedRejectionPreservesReasonWithoutInventingBalanceValues",
+        "FreeSurfaceEnergyLedger.PartialEndpointProvenanceCannotStageOrClaimTopologyChange",
+        "FreeSurfaceEnergyLedger.TopologyChangeCannotCommitAndRejectedAttemptContributesZero",
+        "FreeSurfaceEnergyLedger.MissingChannelsAndNegativeDissipationFailClosed",
+        "FreeSurfaceEnergyLedger.EveryChannelRequiresOneNamedApplicableOwner",
+        "FreeSurfaceEnergyLedger.RequiresOneEndpointIntervalAndIncreasingTransactionIdentifiers",
+        "FreeSurfaceEnergyLedger.GasApplicabilityMustBeExplicitAndStableAcrossTheStep"
+      ],
+      "execution": {
+        "wall_time_seconds": 300,
+        "memory_mib": 1024,
+        "output_mib": 64
       }
     },
     {
@@ -248,8 +283,8 @@
     }
   ],
   "gates": {
-    "expected_group_count": 4,
-    "expected_distinct_test_count": 31,
+    "expected_group_count": 5,
+    "expected_distinct_test_count": 41,
     "expected_quantitative_evidence_count": 9,
     "expected_failures": 0,
     "expected_errors": 0,
@@ -336,6 +371,21 @@
         "ApplicationDriverLevelSetWorkflows.AcceptedFunctionalUsesAuthoritativeSnapshotAndRecordsGlobalState",
         "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerRejectsDiscontinuousRows",
         "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerRequiresExplicitCutTopologyProvenance"
+      ]
+    },
+    {
+      "claim": "prerequisite_complete_channel_ledger_contract_fails_closed_without_claiming_production_assembly_or_an_energy_identity",
+      "evidence": [
+        "FreeSurfaceEnergyLedger.CommitsOneCompleteBackwardEulerFixedTopologyBalance",
+        "FreeSurfaceEnergyLedger.AcceptedHistoryRequiresContinuousEndpointAndOwnerProvenance",
+        "FreeSurfaceEnergyLedger.RejectedHistoryAlsoLocksChannelOwnerProvenance",
+        "FreeSurfaceEnergyLedger.UnstagedRejectionPreservesReasonWithoutInventingBalanceValues",
+        "FreeSurfaceEnergyLedger.PartialEndpointProvenanceCannotStageOrClaimTopologyChange",
+        "FreeSurfaceEnergyLedger.TopologyChangeCannotCommitAndRejectedAttemptContributesZero",
+        "FreeSurfaceEnergyLedger.MissingChannelsAndNegativeDissipationFailClosed",
+        "FreeSurfaceEnergyLedger.EveryChannelRequiresOneNamedApplicableOwner",
+        "FreeSurfaceEnergyLedger.RequiresOneEndpointIntervalAndIncreasingTransactionIdentifiers",
+        "FreeSurfaceEnergyLedger.GasApplicabilityMustBeExplicitAndStableAcrossTheStep"
       ]
     },
     {

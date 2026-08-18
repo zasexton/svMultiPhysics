@@ -17,7 +17,7 @@ namespace FE {
 namespace forms {
 namespace test {
 
-class SingleTetraMeshAccess final : public assembly::IMeshAccess {
+class SingleTetraMeshAccess : public assembly::IMeshAccess {
 public:
     SingleTetraMeshAccess()
     {

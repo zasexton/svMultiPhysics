@@ -146,6 +146,7 @@ std::shared_ptr<svmp::Mesh> makeTranslatorQuadMesh()
   base->register_label("wall_left", 1);
   base->register_label("wall_right", 2);
   base->register_label("wall_bottom", 3);
+  base->register_label("free_surface", 4);
 
   return svmp::create_mesh(std::move(base));
 }
@@ -322,7 +323,9 @@ fs::path writeBuilderRegressionXml(const fs::path& case_dir)
 }
 
 fs::path writeWetExtensionOrderRegressionXml(const fs::path& case_dir,
-                                              bool include_fluid_owner)
+                                              bool include_fluid_owner,
+                                              std::string_view fitted_exclusion =
+                                                  {})
 {
   tinyxml2::XMLDocument doc;
   loadXml(case_dir / "solver.xml", doc);
@@ -365,11 +368,46 @@ fs::path writeWetExtensionOrderRegressionXml(const fs::path& case_dir,
                   "Projected_curvature_field",
                   "kappa_projected");
 
+  if (!fitted_exclusion.empty()) {
+    auto& free_surface =
+        mutableChildWithAttribute(fluid, "Add_BC", "name", "free_surface");
+    setOrAppendText(doc, free_surface, "Implementation", "FittedALE");
+    if (fitted_exclusion == "SurfaceStress") {
+      setOrAppendText(
+          doc, free_surface, "Surface_tension_form", "SurfaceStress");
+    } else if (fitted_exclusion == "PrescribedAngle" ||
+               fitted_exclusion == "DynamicRenE") {
+      setOrAppendText(doc,
+                      free_surface,
+                      "Contact_line_model",
+                      std::string(fitted_exclusion).c_str());
+      setOrAppendText(
+          doc, free_surface, "Contact_angle_degrees", "60.0");
+      setOrAppendText(
+          doc, free_surface, "Contact_line_wall_marker", "1");
+      setOrAppendText(
+          doc, free_surface, "Contact_line_wall_normal", "1.0 0.0 0.0");
+      if (fitted_exclusion == "DynamicRenE") {
+        setOrAppendText(
+            doc, free_surface, "Contact_line_mobility", "0.5");
+        setOrAppendText(doc, free_surface, "Wall_slip_model", "Navier");
+        setOrAppendText(doc, free_surface, "Wall_slip_length", "0.2");
+      }
+    } else {
+      throw std::invalid_argument(
+          "unknown fitted capability exclusion requested by test");
+    }
+  }
+
   if (!include_fluid_owner) {
     root->DeleteChild(&fluid);
   }
 
-  const auto suffix = include_fluid_owner ? "future_fluid" : "missing_fluid";
+  const auto suffix = !fitted_exclusion.empty()
+                          ? ("rejected_fitted_" +
+                             std::string(fitted_exclusion))
+                          : (include_fluid_owner ? "future_fluid"
+                                                 : "missing_fluid");
   const auto xml_path =
       fs::temp_directory_path() /
       (std::string{"svmp_wet_extension_equation_order_"} + suffix + ".xml");
@@ -970,6 +1008,72 @@ TEST(OpenVesselExamples,
 
   std::error_code ec;
   fs::remove(xml_path, ec);
+#endif
+}
+
+TEST(OpenVesselExamples,
+     SimulationBuilderPreflightsFittedCapabilityBeforeWetExtensionMutation)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+
+  const auto case_dir = openVesselCaseDir("unfitted_level_set");
+  const std::vector<std::pair<std::string_view, std::string_view>> exclusions{
+      {"SurfaceStress", "fitted-ALE SurfaceStress is not yet qualified"},
+      {"PrescribedAngle", "prescribed fitted contact angles are unsupported"},
+      {"DynamicRenE", "supported only for sharp unfitted level-set"},
+  };
+  for (const auto& [request, diagnostic] : exclusions) {
+    SCOPED_TRACE(request);
+    const auto xml_path = writeWetExtensionOrderRegressionXml(
+        case_dir,
+        /*include_fluid_owner=*/true,
+        request);
+
+    Parameters params;
+    {
+      const ScopedCurrentPath cwd(case_dir);
+      ASSERT_NO_THROW(params.read_xml(xml_path.string()));
+    }
+
+    auto mesh = makeTranslatorQuadMesh();
+    application::core::SimulationComponents components;
+    components.meshes.emplace("tank", mesh);
+    components.fe_system =
+        std::make_unique<svmp::FE::systems::FESystem>(mesh);
+
+    try {
+      application::core::detail::
+          preflightAndPreRegisterPhysicsModuleDependencies(params, components);
+      FAIL() << "Expected excluded fitted request to fail preflight";
+    } catch (const std::invalid_argument& error) {
+      EXPECT_NE(std::string(error.what()).find(diagnostic),
+                std::string::npos)
+          << error.what();
+    }
+
+    ASSERT_TRUE(components.fe_system);
+    EXPECT_EQ(components.fe_system->fieldMap().numFields(), 0u);
+    EXPECT_TRUE(components.fe_system->formulationRecords().empty());
+    EXPECT_TRUE(
+        components.fe_system->boundaryConditionDescriptors().empty());
+    EXPECT_TRUE(
+        components.fe_system->meshNormalBoundaryConstraints().empty());
+    EXPECT_TRUE(
+        components.fe_system->meshTangentialBoundaryPolicies().empty());
+    EXPECT_TRUE(
+        components.fe_system->meshNormalBoundaryConstraintHistory().empty());
+    EXPECT_TRUE(
+        components.fe_system->meshTangentialBoundaryPolicyHistory().empty());
+    EXPECT_FALSE(components.fe_system->hasOperator("equations"));
+    EXPECT_FALSE(components.fe_system->hasOperator("level_set"));
+    EXPECT_TRUE(components.physics_modules.empty());
+
+    std::error_code ec;
+    fs::remove(xml_path, ec);
+  }
 #endif
 }
 

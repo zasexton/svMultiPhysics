@@ -78,6 +78,20 @@ TEST(PetscBackend, SolveCG2x2)
 #endif
 }
 
+TEST(PetscBackend, VectorReportsPrimaryOwnedRows)
+{
+#if !defined(FE_HAS_PETSC)
+    GTEST_SKIP() << "FE_HAS_PETSC not enabled";
+#else
+    PetscFactory factory;
+    const auto vector = factory.createVector(4);
+    ASSERT_NE(vector, nullptr);
+    EXPECT_EQ(
+        vector->ownedGlobalRows(),
+        (std::vector<GlobalIndex>{0, 1, 2, 3}));
+#endif
+}
+
 TEST(PetscBackend, SolveGMRES2x2)
 {
 #if !defined(FE_HAS_PETSC)

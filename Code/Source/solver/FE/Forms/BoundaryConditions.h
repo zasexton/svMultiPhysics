@@ -15,8 +15,12 @@
 
 #include "Forms/FormExpr.h"
 
+#include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -142,6 +146,116 @@ template <class BC>
         return default_order;
     }
     return sig->polynomial_order;
+}
+
+[[nodiscard]] inline bool spaceSignaturesMatch(
+    const SpaceSignature& left,
+    const SpaceSignature& right) noexcept
+{
+    return left.space_type == right.space_type &&
+           left.field_type == right.field_type &&
+           left.continuity == right.continuity &&
+           left.value_dimension == right.value_dimension &&
+           left.topological_dimension == right.topological_dimension &&
+           left.polynomial_order == right.polynomial_order &&
+           left.element_type == right.element_type;
+}
+
+[[nodiscard]] inline bool hasForbiddenPrescribedValueDependency(
+    const FormExprNode& node)
+{
+    if (node.hasTrial() || node.hasTest()) {
+        return true;
+    }
+    switch (node.type()) {
+    case FormExprType::DiscreteField:
+    case FormExprType::StateField:
+    case FormExprType::PreviousSolutionRef:
+    case FormExprType::BoundaryFunctionalSymbol:
+    case FormExprType::BoundaryIntegralSymbol:
+    case FormExprType::BoundaryIntegralRef:
+    case FormExprType::AuxiliaryStateSymbol:
+    case FormExprType::AuxiliaryStateRef:
+    case FormExprType::AuxiliaryInputSymbol:
+    case FormExprType::AuxiliaryInputRef:
+    case FormExprType::AuxiliaryOutputSymbol:
+    case FormExprType::AuxiliaryOutputRef:
+    case FormExprType::MaterialStateOldRef:
+    case FormExprType::MaterialStateWorkRef:
+    case FormExprType::MeshDisplacement:
+    case FormExprType::MeshVelocity:
+    case FormExprType::MeshAcceleration:
+    case FormExprType::CurrentCoordinate:
+    case FormExprType::CurrentJacobian:
+    case FormExprType::CurrentJacobianDeterminant:
+    case FormExprType::CurrentNormal:
+    case FormExprType::CurrentMeanCurvature:
+    case FormExprType::CurrentMeasure:
+    case FormExprType::SurfaceJacobian:
+    case FormExprType::GeometryTrialVectorVariation:
+    case FormExprType::GeometryTrialJacobianVariation:
+    case FormExprType::MeshVelocityVariation:
+    case FormExprType::CurrentMeasureVariation:
+    case FormExprType::CurrentNormalVariation:
+    case FormExprType::SurfaceJacobianVariation:
+    case FormExprType::Constitutive:
+    case FormExprType::ConstitutiveOutput:
+    case FormExprType::CellIntegral:
+    case FormExprType::BoundaryIntegral:
+    case FormExprType::InteriorFaceIntegral:
+    case FormExprType::InterfaceIntegral:
+    case FormExprType::CutVolumeIntegral:
+        return true;
+    default:
+        break;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child != nullptr &&
+            hasForbiddenPrescribedValueDependency(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool isCompatiblePrescribedVector(
+    const FormExprNode& node,
+    const SpaceSignature& expected)
+{
+    if (expected.field_type != FieldType::Vector ||
+        expected.value_dimension < 1) {
+        return false;
+    }
+
+    if (node.type() == FormExprType::AsVector) {
+        const auto components = node.childrenShared();
+        if (components.size() !=
+            static_cast<std::size_t>(expected.value_dimension)) {
+            return false;
+        }
+        for (const auto& component : components) {
+            if (component == nullptr) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (const auto* signature = node.spaceSignature();
+        signature != nullptr) {
+        return signature->field_type == FieldType::Vector &&
+               signature->value_dimension ==
+                   expected.value_dimension;
+    }
+
+    if (node.vectorCoefficient() != nullptr) {
+        return expected.topological_dimension >= 1 &&
+               expected.topological_dimension <= 3 &&
+               expected.value_dimension ==
+                   expected.topological_dimension;
+    }
+
+    return false;
 }
 
 } // namespace detail
@@ -398,6 +512,38 @@ template <class NeumannBC, class FluxExprFn>
 }
 
 /**
+ * @brief Apply scalar natural boundary data on explicitly selected exterior
+ * domains
+ *
+ * `measureExpr(bc, i)` must return an ExteriorBoundaryMeasure whose physical
+ * marker matches `bc.boundary_marker`. This overload is the cut-boundary path:
+ * callers can select a generated active subset without changing the flux
+ * expression.
+ */
+template <class NeumannBC, class FluxExprFn, class MeasureExprFn>
+[[nodiscard]] inline FormExpr applyNeumann(FormExpr residual,
+                                           const FormExpr& v,
+                                           std::span<const NeumannBC> bcs,
+                                           FluxExprFn&& fluxExpr,
+                                           MeasureExprFn&& measureExpr)
+{
+    for (std::size_t i = 0; i < bcs.size(); ++i) {
+        const auto& bc = bcs[i];
+        const int marker = detail::boundaryMarkerOrThrow(
+            bc, "forms::bc::applyNeumann");
+        const auto measure = measureExpr(bc, i);
+        if (measure.physicalBoundaryMarker() != marker) {
+            throw std::invalid_argument(
+                "forms::bc::applyNeumann: exterior-boundary measure physical marker does not match the boundary condition");
+        }
+        residual =
+            residual -
+            (fluxExpr(bc, i) * v).dExteriorBoundary(measure);
+    }
+    return residual;
+}
+
+/**
  * @brief Apply Neumann BCs where the flux is stored directly in the BC struct
  *
  * This overload avoids per-formulation boilerplate for turning common scalar
@@ -419,6 +565,31 @@ template <class NeumannBC, class FluxValue>
         const int marker = detail::boundaryMarkerOrThrow(bc, "forms::bc::applyNeumannValue");
         const auto g = toScalarExpr(bc.*flux, detail::makeValueName(name_prefix, marker, i));
         residual = residual - (g * v).ds(marker);
+    }
+    return residual;
+}
+
+template <class NeumannBC, class FluxValue, class MeasureExprFn>
+[[nodiscard]] inline FormExpr applyNeumannValue(FormExpr residual,
+                                                const FormExpr& v,
+                                                std::span<const NeumannBC> bcs,
+                                                FluxValue NeumannBC::*flux,
+                                                std::string_view name_prefix,
+                                                MeasureExprFn&& measureExpr)
+{
+    for (std::size_t i = 0; i < bcs.size(); ++i) {
+        const auto& bc = bcs[i];
+        const int marker = detail::boundaryMarkerOrThrow(
+            bc, "forms::bc::applyNeumannValue");
+        const auto measure = measureExpr(bc, i);
+        if (measure.physicalBoundaryMarker() != marker) {
+            throw std::invalid_argument(
+                "forms::bc::applyNeumannValue: exterior-boundary measure physical marker does not match the boundary condition");
+        }
+        const auto g = toScalarExpr(
+            bc.*flux,
+            detail::makeValueName(name_prefix, marker, i));
+        residual = residual - (g * v).dExteriorBoundary(measure);
     }
     return residual;
 }
@@ -448,7 +619,39 @@ template <class RobinBC, class AlphaExprFn, class RhsExprFn>
         const int marker = detail::boundaryMarkerOrThrow(bc, "forms::bc::applyRobin");
         const auto a = alphaExpr(bc, i);
         const auto r = rhsExpr(bc, i);
-        residual = residual + (a * u * v).ds(marker) - (r * v).ds(marker);
+        residual =
+            residual + (a * u * v).ds(marker) -
+            (r * v).ds(marker);
+    }
+    return residual;
+}
+
+template <class RobinBC,
+          class AlphaExprFn,
+          class RhsExprFn,
+          class MeasureExprFn>
+[[nodiscard]] inline FormExpr applyRobin(FormExpr residual,
+                                         const FormExpr& u,
+                                         const FormExpr& v,
+                                         std::span<const RobinBC> bcs,
+                                         AlphaExprFn&& alphaExpr,
+                                         RhsExprFn&& rhsExpr,
+                                         MeasureExprFn&& measureExpr)
+{
+    for (std::size_t i = 0; i < bcs.size(); ++i) {
+        const auto& bc = bcs[i];
+        const int marker = detail::boundaryMarkerOrThrow(
+            bc, "forms::bc::applyRobin");
+        const auto measure = measureExpr(bc, i);
+        if (measure.physicalBoundaryMarker() != marker) {
+            throw std::invalid_argument(
+                "forms::bc::applyRobin: exterior-boundary measure physical marker does not match the boundary condition");
+        }
+        const auto a = alphaExpr(bc, i);
+        const auto r = rhsExpr(bc, i);
+        residual =
+            residual + (a * u * v).dExteriorBoundary(measure) -
+            (r * v).dExteriorBoundary(measure);
     }
     return residual;
 }
@@ -475,7 +678,48 @@ template <class RobinBC, class AlphaValue, class RhsValue>
         const int marker = detail::boundaryMarkerOrThrow(bc, "forms::bc::applyRobinValue");
         const auto a = toScalarExpr(bc.*alpha, detail::makeValueName(alpha_name_prefix, marker, i));
         const auto r = toScalarExpr(bc.*rhs, detail::makeValueName(rhs_name_prefix, marker, i));
-        residual = residual + (a * u * v).ds(marker) - (r * v).ds(marker);
+        residual =
+            residual + (a * u * v).ds(marker) -
+            (r * v).ds(marker);
+    }
+    return residual;
+}
+
+template <class RobinBC,
+          class AlphaValue,
+          class RhsValue,
+          class MeasureExprFn>
+[[nodiscard]] inline FormExpr applyRobinValue(
+    FormExpr residual,
+    const FormExpr& u,
+    const FormExpr& v,
+    std::span<const RobinBC> bcs,
+    AlphaValue RobinBC::*alpha,
+    std::string_view alpha_name_prefix,
+    RhsValue RobinBC::*rhs,
+    std::string_view rhs_name_prefix,
+    MeasureExprFn&& measureExpr)
+{
+    for (std::size_t i = 0; i < bcs.size(); ++i) {
+        const auto& bc = bcs[i];
+        const int marker = detail::boundaryMarkerOrThrow(
+            bc, "forms::bc::applyRobinValue");
+        const auto measure = measureExpr(bc, i);
+        if (measure.physicalBoundaryMarker() != marker) {
+            throw std::invalid_argument(
+                "forms::bc::applyRobinValue: exterior-boundary measure physical marker does not match the boundary condition");
+        }
+        const auto a = toScalarExpr(
+            bc.*alpha,
+            detail::makeValueName(
+                alpha_name_prefix, marker, i));
+        const auto r = toScalarExpr(
+            bc.*rhs,
+            detail::makeValueName(
+                rhs_name_prefix, marker, i));
+        residual =
+            residual + (a * u * v).dExteriorBoundary(measure) -
+            (r * v).dExteriorBoundary(measure);
     }
     return residual;
 }
@@ -495,6 +739,371 @@ struct NitscheDirichletOptions {
 };
 
 using TraceNitscheOptions = NitscheDirichletOptions;
+
+class GeneratedBoundaryNitscheTraceFormBinding;
+struct GeneratedBoundaryNitscheTraceTerms;
+
+[[nodiscard]] GeneratedBoundaryNitscheTraceTerms
+buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+    const FormExpr& u,
+    const FormExpr& v,
+    const FormExpr& prescribed_value,
+    const FormExpr& dynamic_viscosity,
+    int physical_boundary_marker,
+    int generated_active_boundary_marker,
+    const TraceNitscheOptions& opts = {});
+
+/**
+ * Immutable proof that a generated-interface symmetric-gradient Nitsche
+ * contribution was constructed from canonical state/test terminals with a
+ * matching complete function-space signature by the canonical FE form
+ * helper.
+ *
+ * Callers can copy a valid binding but cannot manufacture or edit one. The
+ * formulation installer additionally requires the exact immutable route
+ * anchor to occur once as an unscaled top-level additive summand in the
+ * original residual being installed before it derives a generated-boundary
+ * trace-certificate policy.
+ */
+class GeneratedBoundaryNitscheTraceFormBinding {
+public:
+    GeneratedBoundaryNitscheTraceFormBinding(
+        const GeneratedBoundaryNitscheTraceFormBinding&) = default;
+    GeneratedBoundaryNitscheTraceFormBinding&
+    operator=(const GeneratedBoundaryNitscheTraceFormBinding&) = default;
+    GeneratedBoundaryNitscheTraceFormBinding(
+        GeneratedBoundaryNitscheTraceFormBinding&&) noexcept = default;
+    GeneratedBoundaryNitscheTraceFormBinding&
+    operator=(GeneratedBoundaryNitscheTraceFormBinding&&) noexcept = default;
+
+    [[nodiscard]] FieldId velocityField() const noexcept
+    {
+        return velocity_field_;
+    }
+    [[nodiscard]] const SpaceSignature&
+    velocitySpaceSignature() const noexcept
+    {
+        return velocity_space_signature_;
+    }
+    [[nodiscard]] int physicalBoundaryMarker() const noexcept
+    {
+        return physical_boundary_marker_;
+    }
+    [[nodiscard]] int generatedActiveBoundaryMarker() const noexcept
+    {
+        return generated_active_boundary_marker_;
+    }
+    [[nodiscard]] Real dynamicViscosity() const noexcept
+    {
+        return dynamic_viscosity_;
+    }
+    [[nodiscard]] Real penaltyGamma() const noexcept
+    {
+        return penalty_gamma_;
+    }
+    [[nodiscard]] bool scaleWithPolynomialOrder() const noexcept
+    {
+        return scale_with_polynomial_order_;
+    }
+    [[nodiscard]] int penaltyPolynomialOrder() const noexcept
+    {
+        return penalty_polynomial_order_;
+    }
+    [[nodiscard]] Real effectivePenaltyMultiplier() const noexcept
+    {
+        return effective_penalty_multiplier_;
+    }
+    [[nodiscard]] bool symmetric() const noexcept
+    {
+        return symmetric_;
+    }
+    [[nodiscard]] std::uint64_t metadataDigest() const noexcept
+    {
+        return metadata_digest_;
+    }
+    [[nodiscard]] const FormExpr& routeAnchor() const noexcept
+    {
+        return route_anchor_;
+    }
+
+private:
+    GeneratedBoundaryNitscheTraceFormBinding(
+        FieldId velocity_field,
+        SpaceSignature velocity_space_signature,
+        int physical_boundary_marker,
+        int generated_active_boundary_marker,
+        Real dynamic_viscosity,
+        Real penalty_gamma,
+        bool scale_with_polynomial_order,
+        int penalty_polynomial_order,
+        Real effective_penalty_multiplier,
+        bool symmetric,
+        std::uint64_t metadata_digest,
+        FormExpr route_anchor)
+        : velocity_field_(velocity_field)
+        , velocity_space_signature_(
+              std::move(velocity_space_signature))
+        , physical_boundary_marker_(physical_boundary_marker)
+        , generated_active_boundary_marker_(
+              generated_active_boundary_marker)
+        , dynamic_viscosity_(dynamic_viscosity)
+        , penalty_gamma_(penalty_gamma)
+        , scale_with_polynomial_order_(scale_with_polynomial_order)
+        , penalty_polynomial_order_(penalty_polynomial_order)
+        , effective_penalty_multiplier_(
+              effective_penalty_multiplier)
+        , symmetric_(symmetric)
+        , metadata_digest_(metadata_digest)
+        , route_anchor_(std::move(route_anchor))
+    {
+    }
+
+    friend GeneratedBoundaryNitscheTraceTerms
+    buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+        const FormExpr&,
+        const FormExpr&,
+        const FormExpr&,
+        const FormExpr&,
+        int,
+        int,
+        const TraceNitscheOptions&);
+
+    FieldId velocity_field_{INVALID_FIELD_ID};
+    SpaceSignature velocity_space_signature_{};
+    int physical_boundary_marker_{-1};
+    int generated_active_boundary_marker_{-1};
+    Real dynamic_viscosity_{0.0};
+    Real penalty_gamma_{0.0};
+    bool scale_with_polynomial_order_{true};
+    int penalty_polynomial_order_{0};
+    Real effective_penalty_multiplier_{0.0};
+    bool symmetric_{true};
+    std::uint64_t metadata_digest_{0u};
+    FormExpr route_anchor_{};
+};
+
+struct GeneratedBoundaryNitscheTraceTerms {
+    FormExpr route_contribution{};
+    FormExpr homogeneous_symmetric_consistency{};
+    FormExpr homogeneous_penalty{};
+    GeneratedBoundaryNitscheTraceFormBinding binding;
+};
+
+[[nodiscard]] inline GeneratedBoundaryNitscheTraceTerms
+buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+    const FormExpr& u,
+    const FormExpr& v,
+    const FormExpr& prescribed_value,
+    const FormExpr& dynamic_viscosity,
+    int physical_boundary_marker,
+    int generated_active_boundary_marker,
+    const TraceNitscheOptions& opts)
+{
+    if (!u.isValid() || !v.isValid() ||
+        !prescribed_value.isValid() ||
+        !dynamic_viscosity.isValid()) {
+        throw std::invalid_argument(
+            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: invalid form input");
+    }
+    if (physical_boundary_marker < 0 ||
+        generated_active_boundary_marker < 0) {
+        throw std::invalid_argument(
+            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: markers must be nonnegative");
+    }
+    if (!(opts.gamma > Real{0.0}) ||
+        !std::isfinite(opts.gamma)) {
+        throw std::invalid_argument(
+            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: gamma must be finite and > 0");
+    }
+    if (opts.variant != NitscheVariant::Symmetric &&
+        opts.variant != NitscheVariant::Unsymmetric) {
+        throw std::invalid_argument(
+            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: Nitsche variant is invalid");
+    }
+    const auto* u_node = u.node();
+    const auto* v_node = v.node();
+    const auto u_field =
+        u_node == nullptr ? std::optional<FieldId>{}
+                          : u_node->fieldId();
+    const auto v_field =
+        v_node == nullptr ? std::optional<FieldId>{}
+                          : v_node->fieldId();
+    if (!u_field.has_value() || !v_field.has_value() ||
+        *u_field == INVALID_FIELD_ID || *u_field != *v_field) {
+        throw std::invalid_argument(
+            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: u and v must be bound to the same valid field");
+    }
+    if (u_node->type() != FormExprType::StateField ||
+        v_node->type() != FormExprType::TestFunction) {
+        throw std::invalid_argument(
+            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: u must be a state-field terminal and v must be a test-function terminal");
+    }
+    const auto* u_space = u_node->spaceSignature();
+    const auto* v_space = v_node->spaceSignature();
+    if (u_space == nullptr || v_space == nullptr ||
+        !detail::spaceSignaturesMatch(*u_space, *v_space)) {
+        throw std::invalid_argument(
+            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: u and v must use the same complete function-space signature");
+    }
+    const auto* prescribed_value_node =
+        prescribed_value.node();
+    if (prescribed_value_node == nullptr ||
+        detail::hasForbiddenPrescribedValueDependency(
+            *prescribed_value_node)) {
+        throw std::invalid_argument(
+            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: prescribed value must be independent of FE state, coupled data, and variational geometry");
+    }
+    if (!detail::isCompatiblePrescribedVector(
+            *prescribed_value_node,
+            *u_space)) {
+        throw std::invalid_argument(
+            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: prescribed value must be a vector compatible with u");
+    }
+    const auto viscosity =
+        dynamic_viscosity.node() == nullptr
+            ? std::optional<Real>{}
+            : dynamic_viscosity.node()->constantValue();
+    if (!viscosity.has_value() ||
+        !(*viscosity > Real{0.0}) ||
+        !std::isfinite(*viscosity)) {
+        throw std::invalid_argument(
+            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: dynamic viscosity must be a finite positive constant");
+    }
+
+    const int penalty_polynomial_order =
+        u_space->polynomial_order;
+    if (penalty_polynomial_order < 1) {
+        throw std::invalid_argument(
+            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: polynomial order must be at least one");
+    }
+    const Real order_scale =
+        opts.scale_with_p
+            ? static_cast<Real>(penalty_polynomial_order) *
+                  static_cast<Real>(penalty_polynomial_order)
+            : Real{1.0};
+    const Real effective_penalty_multiplier =
+        opts.gamma * order_scale;
+    if (!(effective_penalty_multiplier > Real{0.0}) ||
+        !std::isfinite(effective_penalty_multiplier)) {
+        throw std::invalid_argument(
+            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: effective penalty multiplier is invalid");
+    }
+
+    const auto n = FormExpr::normal();
+    const auto diff = u - prescribed_value;
+    const auto stress_u =
+        FormExpr::constant(Real{2.0}) *
+        dynamic_viscosity * sym(grad(u));
+    const auto stress_v =
+        FormExpr::constant(Real{2.0}) *
+        dynamic_viscosity * sym(grad(v));
+    const auto h_normal =
+        (FormExpr::constant(Real{2.0}) *
+         FormExpr::cellVolume()) /
+        FormExpr::facetArea();
+    const auto penalty =
+        FormExpr::constant(effective_penalty_multiplier) *
+        dynamic_viscosity / h_normal;
+    const auto measure =
+        ExteriorBoundaryMeasure::generatedActiveSubset(
+            physical_boundary_marker,
+            generated_active_boundary_marker);
+    const auto primal_consistency =
+        inner(stress_u * n, v)
+            .dExteriorBoundary(measure);
+    const auto adjoint_consistency =
+        inner(stress_v * n, diff)
+            .dExteriorBoundary(measure);
+    const auto penalty_term =
+        (penalty * inner(diff, v))
+            .dExteriorBoundary(measure);
+    const auto route_contribution =
+        opts.variant == NitscheVariant::Symmetric
+            ? (-primal_consistency -
+               adjoint_consistency +
+               penalty_term)
+            : (-primal_consistency +
+               adjoint_consistency +
+               penalty_term);
+
+    const auto homogeneous_symmetric_consistency =
+        -primal_consistency -
+        inner(stress_v * n, u)
+            .dExteriorBoundary(measure);
+    const auto homogeneous_penalty =
+        (penalty * inner(u, v))
+            .dExteriorBoundary(measure);
+
+    constexpr std::uint64_t offset = 1469598103934665603ULL;
+    constexpr std::uint64_t prime = 1099511628211ULL;
+    auto metadata_digest = offset;
+    const auto mix = [&](std::uint64_t value) {
+        metadata_digest ^= value;
+        metadata_digest *= prime;
+    };
+    static_assert(sizeof(Real) == sizeof(std::uint64_t));
+    mix(1u);
+    mix(static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(*u_field)));
+    mix(static_cast<std::uint64_t>(
+        u_space->space_type));
+    mix(static_cast<std::uint64_t>(
+        u_space->field_type));
+    mix(static_cast<std::uint64_t>(
+        u_space->continuity));
+    mix(static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(
+            u_space->value_dimension)));
+    mix(static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(
+            u_space->topological_dimension)));
+    mix(static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(
+            u_space->polynomial_order)));
+    mix(static_cast<std::uint64_t>(
+        u_space->element_type));
+    mix(static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(
+            physical_boundary_marker)));
+    mix(static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(
+            generated_active_boundary_marker)));
+    mix(std::bit_cast<std::uint64_t>(*viscosity));
+    mix(std::bit_cast<std::uint64_t>(opts.gamma));
+    mix(opts.scale_with_p ? 1u : 0u);
+    mix(static_cast<std::uint64_t>(
+        penalty_polynomial_order));
+    mix(std::bit_cast<std::uint64_t>(
+        effective_penalty_multiplier));
+    mix(opts.variant == NitscheVariant::Symmetric
+            ? 1u
+            : 0u);
+    if (metadata_digest == 0u) {
+        metadata_digest = 1u;
+    }
+
+    auto binding =
+        GeneratedBoundaryNitscheTraceFormBinding(
+            *u_field,
+            *u_space,
+            physical_boundary_marker,
+            generated_active_boundary_marker,
+            *viscosity,
+            opts.gamma,
+            opts.scale_with_p,
+            penalty_polynomial_order,
+            effective_penalty_multiplier,
+            opts.variant == NitscheVariant::Symmetric,
+            metadata_digest,
+            route_contribution);
+    return GeneratedBoundaryNitscheTraceTerms{
+        .route_contribution = route_contribution,
+        .homogeneous_symmetric_consistency =
+            homogeneous_symmetric_consistency,
+        .homogeneous_penalty = homogeneous_penalty,
+        .binding = std::move(binding),
+    };
+}
 
 enum class TraceInequalitySense : std::uint8_t {
     LessEqual,
@@ -538,14 +1147,11 @@ struct TraceInequalityOptions {
     FormExpr residual,
     const FormExpr& u,
     const FormExpr& v,
-    int boundary_marker,
+    const ExteriorBoundaryMeasure& measure,
     const FormExpr& bound,
     const FormExpr& penalty_weight,
     const TraceInequalityOptions& opts = {})
 {
-    if (boundary_marker < 0) {
-        throw std::invalid_argument("forms::bc::applyTraceInequality: boundary_marker must be >= 0");
-    }
     if (!bound.isValid()) {
         throw std::invalid_argument("forms::bc::applyTraceInequality: invalid bound expression");
     }
@@ -560,8 +1166,44 @@ struct TraceInequalityOptions {
 
     residual = residual +
                (FormExpr::constant(direction) * penalty_weight * violation * tau_v)
-                   .ds(boundary_marker);
+                   .dExteriorBoundary(measure);
     return residual;
+}
+
+[[nodiscard]] inline FormExpr applyTraceInequality(
+    FormExpr residual,
+    const FormExpr& u,
+    const FormExpr& v,
+    int boundary_marker,
+    const FormExpr& bound,
+    const FormExpr& penalty_weight,
+    const TraceInequalityOptions& opts = {})
+{
+    if (boundary_marker < 0) {
+        throw std::invalid_argument(
+            "forms::bc::applyTraceInequality: boundary_marker must be >= 0");
+    }
+    if (!bound.isValid()) {
+        throw std::invalid_argument(
+            "forms::bc::applyTraceInequality: invalid bound expression");
+    }
+    if (!penalty_weight.isValid()) {
+        throw std::invalid_argument(
+            "forms::bc::applyTraceInequality: invalid penalty_weight expression");
+    }
+
+    const auto tau_u = applyScalarTrace(u, opts.trace_operator);
+    const auto tau_v = applyScalarTrace(v, opts.trace_operator);
+    const auto violation =
+        traceInequalityViolation(tau_u, bound, opts);
+    const Real direction =
+        opts.sense == TraceInequalitySense::LessEqual
+            ? Real(1.0)
+            : Real(-1.0);
+    return residual +
+           (FormExpr::constant(direction) * penalty_weight *
+            violation * tau_v)
+               .ds(boundary_marker);
 }
 
 [[nodiscard]] inline FormExpr buildTraceNitschePenalty(const FormExpr& penalty_weight,
@@ -587,6 +1229,41 @@ struct TraceInequalityOptions {
 [[nodiscard]] inline FormExpr applyTraceNitsche(FormExpr residual,
                                                 const FormExpr& u,
                                                 const FormExpr& v,
+                                                const ExteriorBoundaryMeasure& measure,
+                                                const FormExpr& value,
+                                                const FormExpr& consistency_flux_u,
+                                                const FormExpr& adjoint_flux_v,
+                                                const FormExpr& penalty_weight,
+                                                ScalarTraceOperator trace_operator =
+                                                    ScalarTraceOperator::NormalComponent,
+                                                const TraceNitscheOptions& opts = {})
+{
+    const auto tau_u = applyScalarTrace(u, trace_operator);
+    const auto tau_v = applyScalarTrace(v, trace_operator);
+    const auto diff = tau_u - value;
+    const auto penalty = buildTraceNitschePenalty(penalty_weight, u, opts);
+
+    residual =
+        residual -
+        (consistency_flux_u * tau_v).dExteriorBoundary(measure);
+    if (opts.variant == NitscheVariant::Symmetric) {
+        residual =
+            residual -
+            (adjoint_flux_v * diff).dExteriorBoundary(measure);
+    } else {
+        residual =
+            residual +
+            (adjoint_flux_v * diff).dExteriorBoundary(measure);
+    }
+    residual =
+        residual +
+        (penalty * diff * tau_v).dExteriorBoundary(measure);
+    return residual;
+}
+
+[[nodiscard]] inline FormExpr applyTraceNitsche(FormExpr residual,
+                                                const FormExpr& u,
+                                                const FormExpr& v,
                                                 int boundary_marker,
                                                 const FormExpr& value,
                                                 const FormExpr& consistency_flux_u,
@@ -597,22 +1274,29 @@ struct TraceInequalityOptions {
                                                 const TraceNitscheOptions& opts = {})
 {
     if (boundary_marker < 0) {
-        throw std::invalid_argument("forms::bc::applyTraceNitsche: boundary_marker must be >= 0");
+        throw std::invalid_argument(
+            "forms::bc::applyTraceNitsche: boundary_marker must be >= 0");
     }
-
     const auto tau_u = applyScalarTrace(u, trace_operator);
     const auto tau_v = applyScalarTrace(v, trace_operator);
     const auto diff = tau_u - value;
-    const auto penalty = buildTraceNitschePenalty(penalty_weight, u, opts);
+    const auto penalty =
+        buildTraceNitschePenalty(penalty_weight, u, opts);
 
-    residual = residual - (consistency_flux_u * tau_v).ds(boundary_marker);
+    residual =
+        residual -
+        (consistency_flux_u * tau_v).ds(boundary_marker);
     if (opts.variant == NitscheVariant::Symmetric) {
-        residual = residual - (adjoint_flux_v * diff).ds(boundary_marker);
+        residual =
+            residual -
+            (adjoint_flux_v * diff).ds(boundary_marker);
     } else {
-        residual = residual + (adjoint_flux_v * diff).ds(boundary_marker);
+        residual =
+            residual +
+            (adjoint_flux_v * diff).ds(boundary_marker);
     }
-    residual = residual + (penalty * diff * tau_v).ds(boundary_marker);
-    return residual;
+    return residual +
+           (penalty * diff * tau_v).ds(boundary_marker);
 }
 
 [[nodiscard]] inline FormExpr applyInterfaceTraceNitsche(

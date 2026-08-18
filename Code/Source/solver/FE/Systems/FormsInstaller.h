@@ -26,6 +26,7 @@
 #include "Systems/MixedKernelPlan.h"
 #include "Systems/OperatorRegistry.h"
 
+#include <cstddef>
 #include <initializer_list>
 #include <memory>
 #include <span>
@@ -48,6 +49,12 @@ namespace systems {
 
 class FESystem;
 
+struct GeneratedBoundaryNitscheTraceInstallRequest {
+    forms::bc::GeneratedBoundaryNitscheTraceFormBinding binding;
+    int volume_interface_marker{-1};
+    std::size_t maximum_reduced_dimension{128u};
+};
+
 struct FormInstallOptions {
     forms::ADMode ad_mode{forms::ADMode::Forward};
     forms::SymbolicOptions compiler_options{};
@@ -66,6 +73,17 @@ struct FormInstallOptions {
     /// Optional subterm/source label preserved through cut-volume assembly
     /// diagnostics. Empty means the whole installed operator/component.
     std::string source_component_tag{};
+
+    /**
+     * Form-bound generated-interface Nitsche certification requests.
+     *
+     * Each opaque binding is produced by the canonical FE form helper.
+     * installFormulation() accepts it only when its exact immutable route
+     * anchor occurs once as an unscaled top-level additive summand in the
+     * original residual supplied to the same call.
+     */
+    std::vector<GeneratedBoundaryNitscheTraceInstallRequest>
+        generated_boundary_nitsche_trace_requests{};
 
     FormInstallOptions& recordDynamicViscosity(
         FieldId velocity_field,

@@ -2070,8 +2070,11 @@ TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainByMark
     request.source = LevelSetInterfaceSource::fromField(/*field_id=*/4,
                                                         /*layout_revision=*/1,
                                                         /*value_revision=*/3);
+    request.generated_domain_id =
+        "cut-context-interface";
     request.interface_marker = 51;
     request.quadrature_policy_key = 19;
+    request.keep_degenerate_fragments = true;
 
     LevelSetInterfaceDomain domain(request);
     const LevelSetCellCutInput input{
@@ -2092,6 +2095,49 @@ TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainByMark
     EXPECT_EQ(context.generatedInterfaceMarkers().front(), 51);
     ASSERT_EQ(context.interfaceRules().size(), 1u);
     ASSERT_EQ(context.volumeRules().size(), 2u);
+    const auto* publication_provenance =
+        context
+            .findGeneratedLevelSetInterfacePublicationProvenance(
+                51);
+    ASSERT_NE(publication_provenance, nullptr);
+    EXPECT_EQ(
+        publication_provenance
+            ->generated_interface_marker,
+        51);
+    EXPECT_EQ(
+        publication_provenance
+            ->request
+            .generated_domain_id,
+        request.generated_domain_id);
+    EXPECT_EQ(
+        publication_provenance
+            ->request
+            .source
+            .layout_revision,
+        request.source.layout_revision);
+    EXPECT_EQ(
+        publication_provenance
+            ->request
+            .source
+            .value_revision,
+        request.source.value_revision);
+    EXPECT_EQ(
+        publication_provenance
+            ->request
+            .quadrature_policy_key,
+        request.quadrature_policy_key);
+    EXPECT_TRUE(
+        publication_provenance
+            ->request
+            .keep_degenerate_fragments);
+    EXPECT_FALSE(
+        publication_provenance
+            ->volume_side_filter
+            .has_value());
+    EXPECT_EQ(
+        publication_provenance
+            ->publication_domain_id,
+        request.generated_domain_id);
 
     const auto marker_rules = context.interfaceRulesForMarker(51);
     ASSERT_EQ(marker_rules.size(), 1u);
@@ -2143,6 +2189,11 @@ TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainByMark
     EXPECT_TRUE(context.generatedVolumeMarkers().empty());
     EXPECT_TRUE(context.interfaceRules().empty());
     EXPECT_TRUE(context.volumeRules().empty());
+    EXPECT_EQ(
+        context
+            .findGeneratedLevelSetInterfacePublicationProvenance(
+                51),
+        nullptr);
 }
 
 TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainForRequestedVolumeSide)
@@ -2170,6 +2221,19 @@ TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainForReq
 
     EXPECT_TRUE(context.hasGeneratedInterfaceMarker(51));
     EXPECT_TRUE(context.hasGeneratedVolumeMarker(51));
+    const auto* publication_provenance =
+        context
+            .findGeneratedLevelSetInterfacePublicationProvenance(
+                51);
+    ASSERT_NE(publication_provenance, nullptr);
+    ASSERT_TRUE(
+        publication_provenance
+            ->volume_side_filter
+            .has_value());
+    EXPECT_EQ(
+        *publication_provenance
+             ->volume_side_filter,
+        CutIntegrationSide::Negative);
     ASSERT_EQ(context.interfaceRulesForMarker(51).size(), 1u);
     ASSERT_EQ(context.volumeRules().size(), 1u);
 

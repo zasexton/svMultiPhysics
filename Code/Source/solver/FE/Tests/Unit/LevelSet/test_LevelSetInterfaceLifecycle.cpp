@@ -2738,6 +2738,9 @@ TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
     EXPECT_EQ(result.max_corner_node_count, 4u);
     EXPECT_EQ(result.domain.marker(), interface_marker);
     EXPECT_EQ(result.domain.request().source.field_id, phi);
+    EXPECT_EQ(
+        result.domain.request().generated_domain_id,
+        options.domain_id);
     EXPECT_EQ(result.domain.request().source.layout_revision,
               system.fieldDofHandler(phi).getDofStateRevision());
     EXPECT_EQ(result.domain.request().source.value_revision, result.value_revision);

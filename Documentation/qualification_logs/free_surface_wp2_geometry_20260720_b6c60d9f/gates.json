@@ -1,0 +1,78 @@
+{
+  "closure_contract": [
+    {
+      "claim": "all_retained_rule_families_share_one_complete_revision_and_pointwise_mapping",
+      "evidence": [
+        "FreeSurfaceGeometrySnapshot.OwnsOneRevisionAndPointwisePhysicalMappingForEveryRuleFamily",
+        "ApplicationDriverLevelSetWorkflows.AcceptedFunctionalUsesAuthoritativeSnapshotAndRecordsGlobalState"
+      ]
+    },
+    {
+      "claim": "contact_and_wet_boundary_rules_derive_from_authoritative_surface_fragments",
+      "evidence": [
+        "GeneratedActiveBoundaryDomain.HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly",
+        "GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventContactWithoutSourceSurfaceFragment",
+        "FreeSurfaceGeometrySnapshot.RejectsMissingExpectedContactTrace"
+      ]
+    },
+    {
+      "claim": "retained_physical_volume_matches_pointwise_assembly_mapping",
+      "evidence": [
+        "LevelSetVolume.GeneratedCutVolumeUsesPointwiseJacobianOnWarpedTensorProductCell",
+        "CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesConstantsAcrossPaths",
+        "ActiveDomainOutput.CollectsPhysicalFullCellMeasureOnDistortedQuad"
+      ]
+    },
+    {
+      "claim": "high_order_samples_pair_value_and_coordinate_at_one_reference_point",
+      "evidence": [
+        "LevelSetCurvatureSamples.MapsWarpedHighOrderValueAndCoordinateAtIdenticalReferencePoint",
+        "LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSameSignCornerInteriorIsland"
+      ]
+    },
+    {
+      "claim": "every_retained_rule_is_validated_for_geometry_phase_moments_order_and_ownership",
+      "evidence": [
+        "FreeSurfaceGeometrySnapshot.CertifiesQuadraticVolumeRulesFromSourceSubcells",
+        "FreeSurfaceGeometrySnapshot.RejectsInterfaceMomentDefectWithValidRootsAndMeasure",
+        "FreeSurfaceGeometrySnapshot.CollectiveValidatorRejectsDuplicateAndMissingRuleOwners",
+        "LevelSetInterfaceLifecycle.BackendIndependentValidationFixturesCheckRuleInvariants"
+      ]
+    },
+    {
+      "claim": "curved_and_small_feature_rules_have_independent_convergence_and_defect_evidence",
+      "evidence": [
+        "LevelSetInterfaceLifecycle.CurvedInterfaceMomentsUseIndependentBackendReferenceRules",
+        "LevelSetInterfaceLifecycle.GeneratedRulesConserveParentMeasureAndUsePositiveWeights",
+        "LevelSetInterfaceLifecycle.SayeHyperrectangleSphereAndEllipsoidErrorsDecreaseUnderHRefinement",
+        "LevelSetInterfaceLifecycle.SmallVolumeCutsReturnFinitePositiveRules"
+      ]
+    },
+    {
+      "claim": "cache_lifetime_and_content_revision_are_bounded_and_explicit",
+      "evidence": [
+        "FreeSurfaceGeometrySnapshotCache.HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease",
+        "FreeSurfaceGeometrySnapshotCache.RevisionKeyIncludesAuthoritativeQuadratureContent",
+        "CutIntegrationInfrastructure.ContentRevisionTracksGeneratedRuleMutations"
+      ]
+    },
+    {
+      "claim": "serial_and_distributed_ownership_are_unique_and_deterministic",
+      "evidence": [
+        "GeneratedContactMeasureMPI.SerialAndGhostedPartitionHaveExactRankIndependentMultiplicity",
+        "LevelSetInterfaceBuilderMPI.HighOrderImplicitRulesAreDeterministicAcrossRanks",
+        "ApplicationDriverLevelSetWorkflowsMPI.ActiveCutRefreshUsesCommunicatorWideSortedBoundaryMarkerUnion"
+      ]
+    }
+  ],
+  "gates": {
+    "expected_disabled": 0,
+    "expected_distinct_test_count": 155,
+    "expected_errors": 0,
+    "expected_failures": 0,
+    "expected_group_count": 6,
+    "expected_skipped": 0
+  },
+  "matrix_status_at_execution": "FROZEN_BEFORE_EXECUTION",
+  "qualification_scope": "WP-2 closure only; later force-balance, wetting, transport, stability, and release matrices remain separate gates"
+}

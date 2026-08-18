@@ -1,0 +1,11 @@
+case,category,mode,threads,bench_threads,iterations,seconds,ns_per_call,min_ns_per_call,max_ns_per_call,allocations_per_call,model_lower_bound_ns,measured_to_model_bound,modeled_flops_per_call,estimated_bytes_per_call
+lagrange_parallel_hex_order4_schedule_only_threads1,lagrange_parallel_schedule,schedule_only,1,1,200,6.9399e-05,346.995,327.855,443.87,0.0,0,0,0,0
+lagrange_parallel_hex_order4_strided_all_threads1,lagrange_parallel_eval,strided_all,1,1,200,0.001694853,8474.265,8260.22,9193.145,0.0,0,0,27440,117000
+lagrange_parallel_hex_order4_schedule_only_threads2,lagrange_parallel_schedule,schedule_only,2,2,400,5.5193e-05,137.9825,38.8275,148.4,0.0,0,0,0,0
+lagrange_parallel_hex_order4_strided_all_threads2,lagrange_parallel_eval,strided_all,2,2,400,0.001748571,4371.4275,4215.4,4536.9225,0.0,0,0,27440,117000
+lagrange_parallel_hex_order4_schedule_only_threads4,lagrange_parallel_schedule,schedule_only,4,4,800,2.5206e-05,31.5075,28.1275,34.13125,0.0,0,0,0,0
+lagrange_parallel_hex_order4_strided_all_threads4,lagrange_parallel_eval,strided_all,4,4,800,0.003462005,4327.50625,4325.12875,4353.15875,0.0,0,0,27440,117000
+lagrange_parallel_hex_order4_schedule_only_threads8,lagrange_parallel_schedule,schedule_only,8,8,1600,6.5948e-05,41.2175,36.313125,50.756875,0.0,0,0,0,0
+lagrange_parallel_hex_order4_strided_all_threads8,lagrange_parallel_eval,strided_all,8,8,1600,0.005629083,3518.176875,3446.55875,4082.9025,0.0,0,0,27440,117000
+lagrange_parallel_hex_order4_schedule_only_threads16,lagrange_parallel_schedule,schedule_only,16,16,3200,0.000239901,74.9690625,53.5403125,324.2421875,0.0,0,0,0,0
+lagrange_parallel_hex_order4_strided_all_threads16,lagrange_parallel_eval,strided_all,16,16,3200,0.010501504,3281.72,3013.6890625,3447.196875,0.0,0,0,27440,117000

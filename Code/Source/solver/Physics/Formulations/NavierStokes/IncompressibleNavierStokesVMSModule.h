@@ -290,8 +290,10 @@ struct IncompressibleNavierStokesVMSOptions {
     struct FreeSurfaceCutCellStabilization {
         bool enabled{false};
         // The velocity gradient-jump ghost penalty was retired: small-cut
-        // aggregation (SmallCutAggregationConstraint) replaces it for
-        // conditioning, parameter-free. Pressure jump stabilization remains.
+        // aggregation now constrains both velocity and pressure cut-space
+        // rows. Pressure jump stabilization and VMS/PSPG remain separate
+        // assembled terms; aggregation is not a standalone stability proof
+        // for that combined mixed method.
         ScalarValue pressure_gradient_penalty{1.0};
         FreeSurfacePressureStabilizationPolicy pressure_policy{
             FreeSurfacePressureStabilizationPolicy::Enabled};
@@ -390,9 +392,10 @@ struct IncompressibleNavierStokesVMSOptions {
             FreeSurfaceTangentialMeshPolicy::SmoothingOnly};
         std::array<ScalarValue, 3> prescribed_tangential_mesh_velocity{
             ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
-        // Weak penalty applied to the tangential mesh-velocity trace when
-        // tangential_mesh_policy is Prescribed.  Free and SmoothingOnly add
-        // no tangential boundary row.
+        // Boundary-local tangential weight. Prescribed uses it for the
+        // projected mesh-velocity penalty; SmoothingOnly uses it for the
+        // tangential surface-gradient functional. Free intentionally adds no
+        // tangential boundary row.
         ScalarValue tangential_mesh_penalty{1.0};
         FreeSurfaceKinematicEnforcement kinematic_enforcement{
             FreeSurfaceKinematicEnforcement::None};
@@ -408,10 +411,13 @@ struct IncompressibleNavierStokesVMSOptions {
         std::vector<FreeSurfaceContactLine> contact_lines{};
 
         // AgFEM-style small-cut aggregation: slave ill-posed cut-cell
-        // velocity DOFs to the polynomial extension of nearby full-active
-        // cells (parameter-free conditioning control). When enabled the
-        // velocity ghost-penalty terms are skipped — aggregation replaces
-        // their job. Requires an order-1 (vertex-DOF) velocity space.
+        // velocity and pressure DOFs to polynomial extensions from nearby
+        // full-active cells. The row-construction guards bound path length,
+        // extrapolation distance, coefficient magnitude, and row norm; no
+        // penalty coefficient is tuned by this constraint. Pressure
+        // stabilization and VMS/PSPG remain part of the effective mixed
+        // method and require joint qualification. Requires order-1
+        // vertex-DOF velocity and pressure spaces.
         // Default ON: with the velocity ghost penalty retired, small-cut
         // aggregation is the conditioning mechanism for unfitted cut bands.
         bool small_cut_aggregation{true};

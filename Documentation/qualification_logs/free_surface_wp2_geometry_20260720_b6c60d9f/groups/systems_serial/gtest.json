@@ -1,0 +1,201 @@
+{
+  "tests": 21,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-07-22T09:24:56Z",
+  "time": "0.13s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "CutIntegrationInfrastructure",
+      "tests": 19,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T09:24:56Z",
+      "time": "0.127s",
+      "testsuite": [
+        {
+          "name": "ContentRevisionTracksGeneratedRuleMutations",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "ImportsGeneratedLevelSetInterfaceDomainByMarker",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "ImportsGeneratedLevelSetInterfaceDomainForRequestedVolumeSide",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "GeneratedCutVolumesRejectStaleSourceRevision",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "GeneratedInterfaceRulesRejectStaleSourceRevision",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "FullCellGeneratedRulesCarryDiagnosticMetadata",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "IndexesGeneratedLevelSetVolumeRulesByMarkerAndSide",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "GeneratedLevelSetInterfaceIntegratesConstantsAcrossPaths",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "FixedGeometryDiagnosticsCountHighOrderRules",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "GeneratedLevelSetInterfaceIntegratesLinearFieldsAcrossPaths",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "AssemblyContextCarriesQuadratureMetadataAndHooks",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "InvalidationSeparatesGeometryAndFELayoutChanges",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "ImportsClosedCutTopologyIntoAllAssemblyPathBindings",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "ImportsCurvedIsoparametricTopologyQuadrature",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "QuadraticCurvedPlaneCutDataIsIdenticalAcrossAllExecutionPaths",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:56Z",
+          "time": "0.114s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "ImportsLinearizedCutQuadratureForEveryAdvertisedFamily",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0.003s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "LinearizedPlaneCutDataIsIdenticalAcrossAllExecutionPaths",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0.002s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "LinearizedCutDataIsIdenticalAcrossAllExecutionPaths",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0.006s",
+          "classname": "CutIntegrationInfrastructure"
+        },
+        {
+          "name": "ProductionCutScalarOperatorsMatchAnalyticHalfCubePlaneCut",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "CutIntegrationInfrastructure"
+        }
+      ]
+    },
+    {
+      "name": "FormsInstaller",
+      "tests": 2,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-07-22T09:24:57Z",
+      "time": "0.002s",
+      "testsuite": [
+        {
+          "name": "FormsInstaller_RevisionBoundFullSideCutVolumeUsesSnapshotRulePoints",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0.002s",
+          "classname": "FormsInstaller"
+        },
+        {
+          "name": "FormsInstaller_UnflaggedFullMeasureCutVolumeUsesRulePoints",
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-07-22T09:24:57Z",
+          "time": "0s",
+          "classname": "FormsInstaller"
+        }
+      ]
+    }
+  ]
+}

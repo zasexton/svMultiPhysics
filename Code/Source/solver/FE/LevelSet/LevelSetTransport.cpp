@@ -693,6 +693,11 @@ void validateConservativePhaseOptions(
         throw std::invalid_argument(
             "installLevelSetTransport: conservative phase wall-normal velocity tolerance must be finite and nonnegative");
     }
+    if (phase
+            .pointwise_impermeable_velocity_tolerance_explicitly_requested) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: conservative phase pointwise velocity-normal wall enforcement is unsupported; the available closed-domain contract checks only discrete q-flux at invariant_tolerance and can be blind where q=0");
+    }
     if (!std::isfinite(phase.geometry_measure_tolerance) ||
         !(phase.geometry_measure_tolerance > Real{0.0})) {
         throw std::invalid_argument(
@@ -1804,7 +1809,12 @@ systems::CoupledResidualKernels installLevelSetTransport(
             bc.value,
             forms::bc::markerValueName("level_set_inflow", marker));
         const auto penalty = FormExpr::constant(bc.penalty_scale) * inflow_speed;
-        residual = residual + (penalty * (phi - target) * eta).ds(marker);
+        const auto boundary_measure =
+            forms::ExteriorBoundaryMeasure::fullPhysical(marker);
+        residual =
+            residual +
+            (penalty * (phi - target) * eta)
+                .dExteriorBoundary(boundary_measure);
     }
 
     if (!system.hasOperator(options.operator_tag)) {

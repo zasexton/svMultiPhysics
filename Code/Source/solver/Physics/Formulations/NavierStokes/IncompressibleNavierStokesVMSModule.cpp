@@ -46,12 +46,14 @@
 #include <cstdlib>
 #include <array>
 #include <cmath>
+#include <exception>
 #include <initializer_list>
 #include <iomanip>
 #include <limits>
 #include <locale>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -85,6 +87,59 @@ using FreeSurfaceBoundary = IncompressibleNavierStokesVMSOptions::FreeSurfaceBou
 using FreeSurfaceContactLine =
     IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine;
 
+[[nodiscard]] bool coordinateCutContextCallbackLocalPhase(
+    const FE::systems::FESystem& system,
+    const std::exception_ptr& local_exception,
+    bool local_available,
+    std::string_view phase)
+{
+    bool any_failed = local_exception != nullptr;
+    bool all_available = local_available && !any_failed;
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    int mpi_finalized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized != 0) {
+        MPI_Finalized(&mpi_finalized);
+    }
+    if (mpi_initialized != 0 && mpi_finalized == 0) {
+        const auto communicator = system.activeMpiCommunicator();
+        if (communicator != MPI_COMM_NULL) {
+            int communicator_size = 1;
+            MPI_Comm_size(communicator, &communicator_size);
+            if (communicator_size > 1) {
+                // 0 = failed, 1 = unavailable, 2 = available. MPI_MIN makes
+                // every rank take the same route after this local phase.
+                const int local_state =
+                    any_failed ? 0 : (local_available ? 2 : 1);
+                int global_state = 0;
+                MPI_Allreduce(
+                    &local_state,
+                    &global_state,
+                    1,
+                    MPI_INT,
+                    MPI_MIN,
+                    communicator);
+                any_failed = global_state == 0;
+                all_available = global_state == 2;
+            }
+        }
+    }
+#else
+    (void)system;
+#endif
+    if (any_failed) {
+        if (local_exception != nullptr) {
+            std::rethrow_exception(local_exception);
+        }
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: another communicator "
+            "rank rejected cut-context callback phase '" +
+            std::string(phase) + "'");
+    }
+    return all_available;
+}
+
 struct EmbeddedFreeSurfaceMeasureEvidence {
     FE::Real stored_measure{0.0};
     FE::Real quadrature_weight_measure{0.0};
@@ -99,28 +154,37 @@ embeddedFreeSurfaceMeasureEvidence(
     const FE::assembly::CutIntegrationContext& context,
     int interface_marker)
 {
-    context.assertAllFreeSurfaceGeometrySnapshotsCurrent(
-        system.meshAccess());
     EmbeddedFreeSurfaceMeasureEvidence local;
-    for (const auto* rule : context.interfaceRulesForMarker(interface_marker)) {
-        if (rule == nullptr) {
-            local.invalid_measure = true;
-            continue;
-        }
-        ++local.rule_count;
-        if (!std::isfinite(rule->measure)) {
-            local.invalid_measure = true;
-        } else {
-            local.stored_measure += rule->measure;
-        }
-        for (const auto& point : rule->points) {
-            ++local.quadrature_point_count;
-            if (!std::isfinite(point.weight)) {
+    std::exception_ptr local_preflight_exception;
+    try {
+        context.assertAllFreeSurfaceGeometrySnapshotsCurrent(
+            system.meshAccess());
+        for (const auto* rule :
+             context.interfaceRulesForMarker(
+                 interface_marker)) {
+            if (rule == nullptr) {
+                local.invalid_measure = true;
+                continue;
+            }
+            ++local.rule_count;
+            if (!std::isfinite(rule->measure)) {
                 local.invalid_measure = true;
             } else {
-                local.quadrature_weight_measure += point.weight;
+                local.stored_measure += rule->measure;
+            }
+            for (const auto& point : rule->points) {
+                ++local.quadrature_point_count;
+                if (!std::isfinite(point.weight)) {
+                    local.invalid_measure = true;
+                } else {
+                    local.quadrature_weight_measure +=
+                        point.weight;
+                }
             }
         }
+    } catch (...) {
+        local_preflight_exception =
+            std::current_exception();
     }
 
 #if FE_HAS_MPI
@@ -130,12 +194,38 @@ embeddedFreeSurfaceMeasureEvidence(
     if (mpi_initialized != 0) {
         MPI_Finalized(&mpi_finalized);
     }
-    const auto communicator = system.dofHandler().mpiComm();
-    if (mpi_initialized != 0 && mpi_finalized == 0 &&
-        communicator != MPI_COMM_NULL) {
+    MPI_Comm communicator = MPI_COMM_NULL;
+    if (mpi_initialized != 0 &&
+        mpi_finalized == 0) {
+        communicator =
+            system.activeMpiCommunicator();
+    }
+    if (communicator != MPI_COMM_NULL) {
         int communicator_size = 1;
         MPI_Comm_size(communicator, &communicator_size);
         if (communicator_size > 1) {
+            const int local_ok =
+                local_preflight_exception == nullptr
+                    ? 1
+                    : 0;
+            int all_ok = 0;
+            MPI_Allreduce(
+                &local_ok,
+                &all_ok,
+                1,
+                MPI_INT,
+                MPI_MIN,
+                communicator);
+            if (all_ok == 0) {
+                if (local_preflight_exception != nullptr) {
+                    std::rethrow_exception(
+                        local_preflight_exception);
+                }
+                throw std::runtime_error(
+                    "IncompressibleNavierStokesVMSModule: "
+                    "another communicator rank rejected "
+                    "embedded free-surface measure preflight");
+            }
             const std::array<double, 2> local_measures{
                 static_cast<double>(local.stored_measure),
                 static_cast<double>(local.quadrature_weight_measure)};
@@ -171,6 +261,10 @@ embeddedFreeSurfaceMeasureEvidence(
 #else
     (void)system;
 #endif
+    if (local_preflight_exception != nullptr) {
+        std::rethrow_exception(
+            local_preflight_exception);
+    }
     return local;
 }
 
@@ -630,6 +724,26 @@ bool unfittedLevelSetShapeTangentsDisabled()
            lhs.topological_dimension() == rhs.topological_dimension() &&
            lhs.polynomial_order() == rhs.polynomial_order() &&
            lhs.element_type() == rhs.element_type();
+}
+
+[[nodiscard]] bool
+isSupportedGeneratedBoundaryTraceSpace(
+    const FE::spaces::FunctionSpace& space,
+    int dimension) noexcept
+{
+    const auto element_type = space.element_type();
+    return space.space_type() ==
+               FE::spaces::SpaceType::Product &&
+           space.continuity() == FE::Continuity::C0 &&
+           space.polynomial_order() == 1 &&
+           space.value_dimension() == dimension &&
+           !space.element().basis().is_vector_valued() &&
+           space.element().basis().size() ==
+               static_cast<std::size_t>(dimension + 1) &&
+           ((dimension == 2 &&
+             element_type == FE::ElementType::Triangle3) ||
+            (dimension == 3 &&
+             element_type == FE::ElementType::Tetra4));
 }
 
 void validateCompatibleField(const FE::systems::FESystem& system,
@@ -2202,7 +2316,10 @@ void declareFreeSurfaceDiscreteFunctionals(
     const std::vector<FreeSurfaceBoundary>& free_surfaces,
     FE::systems::FESystem& system,
     FE::FieldId velocity_field,
-    FE::Real dynamic_viscosity)
+    FE::Real density,
+    const std::array<FE::Real, 3>& gravitational_acceleration,
+    FE::Real dynamic_viscosity,
+    bool has_constant_dynamic_viscosity)
 {
     for (const auto& bc : free_surfaces) {
         if (!shouldDeclareFreeSurfaceDiscreteFunctional(bc)) {
@@ -2258,16 +2375,76 @@ void declareFreeSurfaceDiscreteFunctionals(
                     });
             }
         }
+        std::optional<
+            FE::interfaces::FreeSurfaceActiveVolumeDissipationParameters>
+            active_volume_dissipation_parameters;
+        if (has_constant_dynamic_viscosity) {
+            active_volume_dissipation_parameters =
+                FE::interfaces::
+                    FreeSurfaceActiveVolumeDissipationParameters{
+                        .liquid_side = parameters.liquid_side,
+                        .dynamic_viscosity = dynamic_viscosity,
+                    };
+        }
+        std::optional<
+            FE::interfaces::FreeSurfaceExternalPressurePowerParameters>
+            external_pressure_power_parameters;
+        if (const auto* external_pressure =
+                std::get_if<FE::Real>(&bc.external_pressure);
+            external_pressure != nullptr) {
+            external_pressure_power_parameters =
+                FE::interfaces::
+                    FreeSurfaceExternalPressurePowerParameters{
+                        .liquid_side = parameters.liquid_side,
+                        .external_pressure = *external_pressure,
+                    };
+        }
         system.declareFreeSurfaceDiscreteFunctional(
             FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
                 .interface_marker = bc.interface_marker,
                 .level_set_field = resolveLevelSetFieldId(bc, system),
-                .velocity_field =
-                    parameters.dynamic_contact_coefficients.empty()
-                        ? FE::INVALID_FIELD_ID
-                        : velocity_field,
+                .velocity_field = velocity_field,
                 .geometry_domain_id = bc.generated_interface_domain_id,
                 .parameters = std::move(parameters),
+                .active_volume_energy_parameters =
+                    FE::interfaces::
+                        FreeSurfaceActiveVolumeEnergyParameters{
+                            .liquid_side =
+                                bc.active_domain ==
+                                        FreeSurfaceActiveDomain::
+                                            LevelSetPositive
+                                    ? FE::geometry::CutIntegrationSide::
+                                          Positive
+                                    : FE::geometry::CutIntegrationSide::
+                                          Negative,
+                            .density = density,
+                            .gravitational_acceleration =
+                                gravitational_acceleration,
+                            .gravitational_reference_point =
+                                {{FE::Real{0.0},
+                                  FE::Real{0.0},
+                                  FE::Real{0.0}}},
+                        },
+                .active_volume_dissipation_parameters =
+                    active_volume_dissipation_parameters,
+                .external_pressure_power_parameters =
+                    external_pressure_power_parameters,
+                .endpoint_functional_power_enabled =
+                    usesSurfaceStress(bc),
+                .capillary_balance_method =
+                    usesSurfaceStress(bc)
+                        ? FE::systems::FreeSurfaceCapillaryBalanceMethod::
+                              DiscreteEnergyVolumeStationarity
+                        : FE::systems::FreeSurfaceCapillaryBalanceMethod::
+                              Unselected,
+                .capillary_balance_qualification =
+                    usesSurfaceStress(bc)
+                        ? FE::systems::
+                              FreeSurfaceCapillaryBalanceQualification::
+                                  PrerequisiteOnly
+                        : FE::systems::
+                              FreeSurfaceCapillaryBalanceQualification::
+                                  Unselected,
                 .owner_component =
                     "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary",
             });
@@ -2934,6 +3111,28 @@ void validateUnfittedContactWallNormal(
         " diagnostic=unfitted_contact_wall_normal_validation");
 }
 
+[[nodiscard]] bool validateContactWallNormalCallbackPreflight(
+    const FE::systems::FESystem& system,
+    const FE::assembly::CutIntegrationContext* context,
+    const FreeSurfaceContactLine& contact_line,
+    int contact_marker,
+    bool local_followup_available,
+    std::string_view phase)
+{
+    std::exception_ptr local_exception;
+    try {
+        validateUnfittedContactWallNormal(
+            system, context, contact_line, contact_marker);
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+    return coordinateCutContextCallbackLocalPhase(
+        system,
+        local_exception,
+        local_followup_available,
+        phase);
+}
+
 void validateFreeSurfaceContactGeometryPreflight(
     std::span<const FreeSurfaceBoundary> free_surfaces,
     const FE::systems::FESystem& system)
@@ -2952,12 +3151,15 @@ void validateFreeSurfaceContactGeometryPreflight(
                 kind != ContactLineKind::DynamicRenE) {
                 continue;
             }
-            validateUnfittedContactWallNormal(
-                system,
-                context,
-                contact_line,
-                generatedUnfittedContactLineMarker(
-                    contact_line, boundary, system));
+            static_cast<void>(
+                validateContactWallNormalCallbackPreflight(
+                    system,
+                    context,
+                    contact_line,
+                    generatedUnfittedContactLineMarker(
+                        contact_line, boundary, system),
+                    true,
+                    "free_surface_contact_geometry_preflight"));
         }
     }
 }
@@ -2987,13 +3189,11 @@ void logDynamicContactOperatorAngle(
     const FreeSurfaceContactLine& contact_line,
     int contact_marker)
 {
-    if (context == nullptr || !system.isSetup() ||
-        !context->hasGeneratedInterfaceMarker(contact_marker)) {
+    // Candidate presence is communicator-certified before update callbacks.
+    // Before setup there is no distributed diagnostic to reduce.
+    if (context == nullptr || !system.isSetup()) {
         return;
     }
-    context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
-        system.meshAccess());
-
     const auto log_unavailable = [&](std::string_view reason) {
         FE_LOG_INFO(
             std::string("IncompressibleNavierStokesVMSModule: DynamicContactAngle operator-consistent contact geometry") +
@@ -3011,87 +3211,116 @@ void logDynamicContactOperatorAngle(
             " evaluation_location=generated_contact_root");
     };
 
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-    (void)bc;
-    (void)contact_line;
-    log_unavailable("native_mesh_support_disabled");
-    return;
-#else
-    const auto* native_mesh = system.mesh();
-    if (native_mesh == nullptr) {
-        log_unavailable("native_mesh_unavailable");
-        return;
-    }
-    const auto phi_id = system.findFieldByName(bc.level_set_field_name);
-    if (phi_id == FE::INVALID_FIELD_ID) {
-        log_unavailable("level_set_field_unavailable");
-        return;
-    }
-    const auto& phi_record = system.fieldRecord(phi_id);
-    if (phi_record.components != 1 || !phi_record.space) {
-        log_unavailable("level_set_space_not_scalar");
-        return;
-    }
-
-    const auto& local_mesh = native_mesh->local_mesh();
-    if (!MeshFields::has_field(
-            local_mesh, EntityKind::Vertex, bc.level_set_field_name)) {
-        log_unavailable("synchronized_vertex_field_unavailable");
-        return;
-    }
-    const auto handle = MeshFields::get_field_handle(
-        local_mesh, EntityKind::Vertex, bc.level_set_field_name);
-    if (MeshFields::field_type(local_mesh, handle) !=
-            FieldScalarType::Float64 ||
-        MeshFields::field_components(local_mesh, handle) < 1u) {
-        log_unavailable("synchronized_vertex_field_not_scalar_float64");
-        return;
-    }
-    const auto entity_count =
-        MeshFields::field_entity_count(local_mesh, handle);
-    const auto mesh_components =
-        MeshFields::field_components(local_mesh, handle);
-    const auto* mesh_values =
-        MeshFields::field_data_as<FE::Real>(local_mesh, handle);
-    if (mesh_values == nullptr || entity_count < native_mesh->n_vertices()) {
-        log_unavailable("synchronized_vertex_field_incomplete");
-        return;
-    }
-
-    const auto& phi_dofs = system.fieldDofHandler(phi_id);
-    const auto n_phi_dofs =
-        static_cast<std::size_t>(phi_dofs.getNumDofs());
-    std::vector<FE::Real> coefficients(n_phi_dofs, FE::Real{0.0});
-    std::vector<std::uint8_t> assigned(n_phi_dofs, 0u);
+    std::exception_ptr local_preflight_exception;
+    std::string_view local_unavailable_reason;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const svmp::Mesh* native_mesh = nullptr;
+    FE::FieldId phi_id = FE::INVALID_FIELD_ID;
+    std::vector<FE::Real> coefficients;
+    std::vector<std::uint8_t> assigned;
+#endif
     try {
-        const auto projection =
-            system.projectMeshVertexValuesToFieldCoefficients(
-                phi_id,
-                std::span<const FE::Real>(
-                    mesh_values, entity_count * mesh_components),
-                mesh_components,
-                std::span<FE::Real>(coefficients.data(), coefficients.size()),
-                std::span<std::uint8_t>(assigned.data(), assigned.size()),
-                "DynamicContactAngle operator-consistent contact diagnostic");
-        if (projection.unassigned_dofs != 0u) {
-            log_unavailable("synchronized_vertex_projection_incomplete");
-            return;
+        const auto prepare_local_state = [&]() -> std::string_view {
+            if (!context->hasGeneratedInterfaceMarker(contact_marker)) {
+                return "generated_contact_marker_unavailable";
+            }
+            context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+                system.meshAccess());
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+            return "native_mesh_support_disabled";
+#else
+            native_mesh = system.mesh();
+            if (native_mesh == nullptr) {
+                return "native_mesh_unavailable";
+            }
+            phi_id = system.findFieldByName(bc.level_set_field_name);
+            if (phi_id == FE::INVALID_FIELD_ID) {
+                return "level_set_field_unavailable";
+            }
+            const auto& phi_record = system.fieldRecord(phi_id);
+            if (phi_record.components != 1 || !phi_record.space) {
+                return "level_set_space_not_scalar";
+            }
+
+            const auto& local_mesh = native_mesh->local_mesh();
+            if (!MeshFields::has_field(
+                    local_mesh,
+                    EntityKind::Vertex,
+                    bc.level_set_field_name)) {
+                return "synchronized_vertex_field_unavailable";
+            }
+            const auto handle = MeshFields::get_field_handle(
+                local_mesh, EntityKind::Vertex, bc.level_set_field_name);
+            if (MeshFields::field_type(local_mesh, handle) !=
+                    FieldScalarType::Float64 ||
+                MeshFields::field_components(local_mesh, handle) < 1u) {
+                return "synchronized_vertex_field_not_scalar_float64";
+            }
+            const auto entity_count =
+                MeshFields::field_entity_count(local_mesh, handle);
+            const auto mesh_components =
+                MeshFields::field_components(local_mesh, handle);
+            const auto* mesh_values =
+                MeshFields::field_data_as<FE::Real>(local_mesh, handle);
+            if (mesh_values == nullptr ||
+                entity_count < native_mesh->n_vertices()) {
+                return "synchronized_vertex_field_incomplete";
+            }
+
+            const auto& phi_dofs = system.fieldDofHandler(phi_id);
+            const auto n_phi_dofs =
+                static_cast<std::size_t>(phi_dofs.getNumDofs());
+            coefficients.assign(n_phi_dofs, FE::Real{0.0});
+            assigned.assign(n_phi_dofs, 0u);
+            try {
+                const auto projection =
+                    system.projectMeshVertexValuesToFieldCoefficients(
+                        phi_id,
+                        std::span<const FE::Real>(
+                            mesh_values,
+                            entity_count * mesh_components),
+                        mesh_components,
+                        std::span<FE::Real>(
+                            coefficients.data(), coefficients.size()),
+                        std::span<std::uint8_t>(
+                            assigned.data(), assigned.size()),
+                        "DynamicContactAngle operator-consistent contact diagnostic");
+                if (projection.unassigned_dofs != 0u) {
+                    return "synchronized_vertex_projection_incomplete";
+                }
+            } catch (const std::exception&) {
+                return "synchronized_vertex_projection_failed";
+            }
+            return {};
+#endif
+        };
+        local_unavailable_reason = prepare_local_state();
+    } catch (...) {
+        local_preflight_exception = std::current_exception();
+    }
+
+    const bool globally_available =
+        coordinateCutContextCallbackLocalPhase(
+            system,
+            local_preflight_exception,
+            local_unavailable_reason.empty(),
+            "operator_angle_preflight");
+    if (!globally_available) {
+        const bool silent_local_state =
+            local_unavailable_reason ==
+                "generated_contact_marker_unavailable";
+        if (!local_unavailable_reason.empty() &&
+            !silent_local_state) {
+            log_unavailable(local_unavailable_reason);
+        } else if (local_unavailable_reason.empty()) {
+            log_unavailable("peer_rank_preflight_unavailable");
         }
-    } catch (const std::exception&) {
-        log_unavailable("synchronized_vertex_projection_failed");
         return;
     }
 
-    FE::level_set::LevelSetCellEvaluator evaluator(
-        *phi_record.space,
-        phi_dofs,
-        std::span<const FE::Real>(coefficients.data(), coefficients.size()));
-    const auto wall_n = normalizedWallNormal(contact_line);
-    const auto target_angle = constantScalarValueOrThrow(
-        contactLineAngleRadians(contact_line),
-        "DynamicContactAngle equilibrium contact_angle_radians");
-    const auto target_cos = std::cos(target_angle);
-
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    FE::Real target_angle = 0.0;
+    FE::Real target_cos = 0.0;
     std::uint64_t samples = 0u;
     std::uint64_t reference_rules = 0u;
     std::uint64_t current_rules = 0u;
@@ -3109,112 +3338,155 @@ void logDynamicContactOperatorAngle(
     FE::Real min_gradient_norm = std::numeric_limits<FE::Real>::infinity();
     FE::Real max_gradient_norm = -std::numeric_limits<FE::Real>::infinity();
 
-    const auto& mesh_access = system.meshAccess();
-    for (const auto* rule : context->interfaceRulesForMarker(contact_marker)) {
-        if (rule == nullptr) {
-            continue;
-        }
-        const auto cell = static_cast<FE::GlobalIndex>(
-            rule->provenance.parent_entity);
-        // Generated contexts may retain ghost-parent rules on more than one
-        // rank.  Count and integrate only the owning rank so that the MPI
-        // reduction describes the physical contact set exactly once.
-        if (cell < 0 || cell >= mesh_access.numCells() ||
-            !mesh_access.isOwnedCell(cell)) {
-            continue;
-        }
-        if (rule->frame == FE::geometry::CutGeometryFrame::Reference) {
-            ++reference_rules;
-        } else {
-            ++current_rules;
-            // DynamicContactAngle currently admits only LinearCorner contact
-            // geometry, whose production generated-contact contract is a
-            // parent-reference rule.  A current-frame point does not carry
-            // enough inverse-location data to reproduce the form evaluator.
-            continue;
-        }
-        for (const auto& point : rule->points) {
-            const auto weight = std::abs(point.weight);
-            if (!(weight > FE::Real{0.0}) || !std::isfinite(weight)) {
-                continue;
-            }
-            std::array<FE::Real, 3> physical_gradient;
-            try {
-                if (usesSurfaceStress(bc)) {
-                    // StandardAssembler maps FormExpr::normal() as a
-                    // reference covector.  Reproduce that exact generated
-                    // geometry here so the diagnostic observes the same
-                    // normal as the surface-stress/contact residual.
-                    physical_gradient = physicalContactCovector(
-                        mesh_access,
-                        *rule,
-                        point,
-                        point.normal,
-                        "generated interface-rule normal");
-                } else {
-                    // The legacy curvature-traction contact law evaluates
-                    // unitNormalFromLevelSet(phi) at the contact root.
-                    const auto evaluation =
-                        evaluator.evaluate(cell, point.point);
-                    physical_gradient = physicalContactCovector(
-                        mesh_access,
-                        *rule,
-                        point,
-                        evaluation.reference_gradient,
-                        "operator level-set gradient");
-                }
-            } catch (const std::exception&) {
-                continue;
-            }
-            const auto gradient_norm = norm3(physical_gradient);
-            // This is the literal safeNormalize denominator used by
-            // unitNormalFromLevelSet(phi), including its default eps=1e-12.
-            const auto safe_gradient_norm = std::sqrt(
-                gradient_norm * gradient_norm + FE::Real{1.0e-24});
-            if (!(safe_gradient_norm > FE::Real{0.0}) ||
-                !std::isfinite(safe_gradient_norm)) {
-                continue;
-            }
-            std::array<FE::Real, 3> active_normal{{
-                physical_gradient[0] / safe_gradient_norm,
-                physical_gradient[1] / safe_gradient_norm,
-                physical_gradient[2] / safe_gradient_norm}};
-            if (bc.active_domain ==
-                FreeSurfaceActiveDomain::LevelSetPositive) {
-                for (auto& component : active_normal) {
-                    component = -component;
-                }
-            }
-            const auto normal_dot_wall = dot3(active_normal, wall_n);
-            const auto dynamic_cos = -normal_dot_wall;
-            const auto young_gap = target_cos - dynamic_cos;
-            const std::array<FE::Real, 3> tangent{{
-                active_normal[0] - normal_dot_wall * wall_n[0],
-                active_normal[1] - normal_dot_wall * wall_n[1],
-                active_normal[2] - normal_dot_wall * wall_n[2]}};
-            const auto tangent_norm = norm3(tangent);
-            const auto angle = std::acos(clampUnit(dynamic_cos));
-            if (!std::isfinite(dynamic_cos) || !std::isfinite(young_gap) ||
-                !std::isfinite(tangent_norm) || !std::isfinite(angle)) {
-                continue;
-            }
+    const auto accumulate_local_state = [&]() {
+        const auto& phi_record = system.fieldRecord(phi_id);
+        const auto& phi_dofs = system.fieldDofHandler(phi_id);
+        FE::level_set::LevelSetCellEvaluator evaluator(
+            *phi_record.space,
+            phi_dofs,
+            std::span<const FE::Real>(
+                coefficients.data(), coefficients.size()));
+        const auto wall_n = normalizedWallNormal(contact_line);
+        target_angle = constantScalarValueOrThrow(
+            contactLineAngleRadians(contact_line),
+            "DynamicContactAngle equilibrium contact_angle_radians");
+        target_cos = std::cos(target_angle);
 
-            ++samples;
-            weight_sum += weight;
-            weighted_cos_sum += weight * dynamic_cos;
-            weighted_gap_sum += weight * young_gap;
-            weighted_angle_sum += weight * angle;
-            weighted_tangent_norm_sum += weight * tangent_norm;
-            min_cos = std::min(min_cos, dynamic_cos);
-            max_cos = std::max(max_cos, dynamic_cos);
-            min_gap = std::min(min_gap, young_gap);
-            max_gap = std::max(max_gap, young_gap);
-            min_tangent_norm = std::min(min_tangent_norm, tangent_norm);
-            max_tangent_norm = std::max(max_tangent_norm, tangent_norm);
-            min_gradient_norm = std::min(min_gradient_norm, gradient_norm);
-            max_gradient_norm = std::max(max_gradient_norm, gradient_norm);
+        const auto& mesh_access = system.meshAccess();
+        for (const auto* rule :
+             context->interfaceRulesForMarker(contact_marker)) {
+            if (rule == nullptr) {
+                continue;
+            }
+            const auto cell = static_cast<FE::GlobalIndex>(
+                rule->provenance.parent_entity);
+            // Generated contexts may retain ghost-parent rules on more than
+            // one rank. Count and integrate only the owning rank so that the
+            // MPI reduction describes the physical contact set exactly once.
+            if (cell < 0 || cell >= mesh_access.numCells() ||
+                !mesh_access.isOwnedCell(cell)) {
+                continue;
+            }
+            if (rule->frame ==
+                FE::geometry::CutGeometryFrame::Reference) {
+                ++reference_rules;
+            } else {
+                ++current_rules;
+                // DynamicContactAngle currently admits only LinearCorner
+                // contact geometry, whose production generated-contact
+                // contract is a parent-reference rule. A current-frame point
+                // does not carry enough inverse-location data to reproduce
+                // the form evaluator.
+                continue;
+            }
+            for (const auto& point : rule->points) {
+                const auto weight = std::abs(point.weight);
+                if (!(weight > FE::Real{0.0}) ||
+                    !std::isfinite(weight)) {
+                    continue;
+                }
+                std::array<FE::Real, 3> physical_gradient;
+                try {
+                    if (usesSurfaceStress(bc)) {
+                        // StandardAssembler maps FormExpr::normal() as a
+                        // reference covector. Reproduce that exact generated
+                        // geometry here so the diagnostic observes the same
+                        // normal as the surface-stress/contact residual.
+                        physical_gradient = physicalContactCovector(
+                            mesh_access,
+                            *rule,
+                            point,
+                            point.normal,
+                            "generated interface-rule normal");
+                    } else {
+                        // The legacy curvature-traction contact law evaluates
+                        // unitNormalFromLevelSet(phi) at the contact root.
+                        const auto evaluation =
+                            evaluator.evaluate(cell, point.point);
+                        physical_gradient = physicalContactCovector(
+                            mesh_access,
+                            *rule,
+                            point,
+                            evaluation.reference_gradient,
+                            "operator level-set gradient");
+                    }
+                } catch (const std::exception&) {
+                    continue;
+                }
+                const auto gradient_norm = norm3(physical_gradient);
+                // This is the literal safeNormalize denominator used by
+                // unitNormalFromLevelSet(phi), including its default
+                // eps=1e-12.
+                const auto safe_gradient_norm = std::sqrt(
+                    gradient_norm * gradient_norm + FE::Real{1.0e-24});
+                if (!(safe_gradient_norm > FE::Real{0.0}) ||
+                    !std::isfinite(safe_gradient_norm)) {
+                    continue;
+                }
+                std::array<FE::Real, 3> active_normal{{
+                    physical_gradient[0] / safe_gradient_norm,
+                    physical_gradient[1] / safe_gradient_norm,
+                    physical_gradient[2] / safe_gradient_norm}};
+                if (bc.active_domain ==
+                    FreeSurfaceActiveDomain::LevelSetPositive) {
+                    for (auto& component : active_normal) {
+                        component = -component;
+                    }
+                }
+                const auto normal_dot_wall =
+                    dot3(active_normal, wall_n);
+                const auto dynamic_cos = -normal_dot_wall;
+                const auto young_gap = target_cos - dynamic_cos;
+                const std::array<FE::Real, 3> tangent{{
+                    active_normal[0] -
+                        normal_dot_wall * wall_n[0],
+                    active_normal[1] -
+                        normal_dot_wall * wall_n[1],
+                    active_normal[2] -
+                        normal_dot_wall * wall_n[2]}};
+                const auto tangent_norm = norm3(tangent);
+                const auto angle =
+                    std::acos(clampUnit(dynamic_cos));
+                if (!std::isfinite(dynamic_cos) ||
+                    !std::isfinite(young_gap) ||
+                    !std::isfinite(tangent_norm) ||
+                    !std::isfinite(angle)) {
+                    continue;
+                }
+
+                ++samples;
+                weight_sum += weight;
+                weighted_cos_sum += weight * dynamic_cos;
+                weighted_gap_sum += weight * young_gap;
+                weighted_angle_sum += weight * angle;
+                weighted_tangent_norm_sum += weight * tangent_norm;
+                min_cos = std::min(min_cos, dynamic_cos);
+                max_cos = std::max(max_cos, dynamic_cos);
+                min_gap = std::min(min_gap, young_gap);
+                max_gap = std::max(max_gap, young_gap);
+                min_tangent_norm =
+                    std::min(min_tangent_norm, tangent_norm);
+                max_tangent_norm =
+                    std::max(max_tangent_norm, tangent_norm);
+                min_gradient_norm =
+                    std::min(min_gradient_norm, gradient_norm);
+                max_gradient_norm =
+                    std::max(max_gradient_norm, gradient_norm);
+            }
         }
+    };
+
+    std::exception_ptr local_accumulation_exception;
+    try {
+        accumulate_local_state();
+    } catch (...) {
+        local_accumulation_exception = std::current_exception();
     }
+    static_cast<void>(coordinateCutContextCallbackLocalPhase(
+        system,
+        local_accumulation_exception,
+        true,
+        "operator_angle_local_accumulation"));
 
 #if FE_HAS_MPI
     int mpi_initialized = 0;
@@ -3597,6 +3869,60 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                                  const FE::systems::FESystem& system,
                                  int dim)
 {
+    if (bc.implementation != FreeSurfaceImplementation::FittedALE &&
+        bc.implementation !=
+            FreeSurfaceImplementation::UnfittedLevelSet) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: unsupported "
+            "free-surface implementation");
+    }
+    const bool supported_boundary_policies =
+        (bc.active_domain == FreeSurfaceActiveDomain::None ||
+         bc.active_domain ==
+             FreeSurfaceActiveDomain::LevelSetNegative ||
+         bc.active_domain ==
+             FreeSurfaceActiveDomain::LevelSetPositive) &&
+        (bc.active_domain_method ==
+             FreeSurfaceActiveDomainMethod::CutVolume ||
+         bc.active_domain_method ==
+             FreeSurfaceActiveDomainMethod::SmoothedIndicator) &&
+        (bc.kinematic_enforcement ==
+             FreeSurfaceKinematicEnforcement::None ||
+         bc.kinematic_enforcement ==
+             FreeSurfaceKinematicEnforcement::Penalty ||
+         bc.kinematic_enforcement ==
+             FreeSurfaceKinematicEnforcement::Nitsche) &&
+        (bc.normal_kinematic_policy ==
+             FreeSurfaceNormalKinematicPolicy::None ||
+         bc.normal_kinematic_policy ==
+             FreeSurfaceNormalKinematicPolicy::
+                 MatchFluidNormalVelocity) &&
+        (bc.tangential_mesh_policy ==
+             FreeSurfaceTangentialMeshPolicy::Free ||
+         bc.tangential_mesh_policy ==
+             FreeSurfaceTangentialMeshPolicy::SmoothingOnly ||
+         bc.tangential_mesh_policy ==
+             FreeSurfaceTangentialMeshPolicy::Prescribed) &&
+        (bc.cut_cell_stabilization.pressure_policy ==
+             FreeSurfacePressureStabilizationPolicy::Enabled ||
+         bc.cut_cell_stabilization.pressure_policy ==
+             FreeSurfacePressureStabilizationPolicy::Incremental ||
+         bc.cut_cell_stabilization.pressure_policy ==
+             FreeSurfacePressureStabilizationPolicy::Disabled ||
+         bc.cut_cell_stabilization.pressure_policy ==
+             FreeSurfacePressureStabilizationPolicy::
+                 DisabledForRefreshedFrozenHighOrder) &&
+        (bc.surface_tension_form ==
+             FreeSurfaceSurfaceTensionForm::Automatic ||
+         bc.surface_tension_form ==
+             FreeSurfaceSurfaceTensionForm::CurvatureTraction ||
+         bc.surface_tension_form ==
+             FreeSurfaceSurfaceTensionForm::SurfaceStress);
+    if (!supported_boundary_policies) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: unsupported "
+            "free-surface boundary policy");
+    }
     if (!std::isfinite(bc.level_set_isovalue)) {
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule: free-surface level_set_isovalue must be finite");
@@ -3785,15 +4111,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                     "IncompressibleNavierStokesVMSModule: the qualified "
                     "fitted-ALE free-surface contract requires explicit "
                     "Penalty or Nitsche normal enforcement");
-            }
-            if (bc.tangential_mesh_policy !=
-                FreeSurfaceTangentialMeshPolicy::Prescribed) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: Free and "
-                    "SmoothingOnly fitted tangential policies do not yet "
-                    "have a consumed mesh-motion operator in the current "
-                    "capability; use Prescribed or the explicitly "
-                    "unqualified schema-1 legacy mode");
             }
         }
         if (bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
@@ -4071,7 +4388,8 @@ void validateNavierStokesBoundaryConfiguration(
     const FE::systems::FESystem& system,
     const FE::spaces::FunctionSpace& velocity_space,
     const FE::spaces::FunctionSpace& pressure_space,
-    int dim)
+    int dim,
+    bool pspg_boundary_weak_form_enabled)
 {
     using FE::forms::FormExpr;
 
@@ -4097,6 +4415,12 @@ void validateNavierStokesBoundaryConfiguration(
     inspect_boundary_markers(options.coupled_outflow_rcr);
     inspect_boundary_markers(options.coupled_outflow_rcrcr);
     inspect_boundary_markers(options.velocity_dirichlet_weak);
+    if (pspg_boundary_weak_form_enabled) {
+        // PSPG boundary diagnostics are weak boundary forms even when their
+        // marker originates from a strong velocity condition. They therefore
+        // share the same generated-active quadrature qualification envelope.
+        inspect_boundary_markers(options.velocity_dirichlet);
+    }
     for (const auto& free_surface : free_surfaces) {
         if (!isUnfittedLevelSet(free_surface) ||
             free_surface.active_domain == FreeSurfaceActiveDomain::None) {
@@ -4269,6 +4593,10 @@ void validateNavierStokesBoundaryConfiguration(
 
     FormExpr momentum_preflight;
     FormExpr continuity_preflight;
+    std::vector<
+        FE::forms::bc::
+            GeneratedBoundaryNitscheTraceFormBinding>
+        generated_nitsche_trace_binding_preflight;
     Factories::applyVelocityNitscheBCs(
         momentum_preflight,
         continuity_preflight,
@@ -4279,7 +4607,27 @@ void validateNavierStokesBoundaryConfiguration(
         v,
         q,
         FormExpr::constant(options.viscosity),
-        generated_active_boundary_for);
+        generated_active_boundary_for,
+        nullptr,
+        &generated_nitsche_trace_binding_preflight);
+    std::size_t expected_generated_nitsche_trace_bindings = 0u;
+    for (const auto& bc : options.velocity_dirichlet_weak) {
+        const int marker =
+            FE::forms::bc::detail::boundaryMarkerOrThrow(
+                bc,
+                "IncompressibleNavierStokesVMSModule generated-boundary "
+                "Nitsche binding preflight");
+        if (generated_active_boundary_for(marker).has_value()) {
+            ++expected_generated_nitsche_trace_bindings;
+        }
+    }
+    if (generated_nitsche_trace_binding_preflight.size() !=
+        expected_generated_nitsche_trace_bindings) {
+        throw std::logic_error(
+            "IncompressibleNavierStokesVMSModule: generated-boundary "
+            "Nitsche binding preflight count differs from the configured "
+            "production routes");
+    }
 }
 
 void warnUnfittedRawCurvatureIfNeeded(const FreeSurfaceBoundary& bc)
@@ -4314,6 +4662,8 @@ void warnUnfittedRawCurvatureIfNeeded(const FreeSurfaceBoundary& bc)
 
 void logUnfittedContactLineMeasure(
     const FE::systems::FESystem& system,
+    const FE::assembly::CutIntegrationContext*
+        cut_context,
     const FreeSurfaceBoundary& bc,
     const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine&
         contact_line,
@@ -4344,7 +4694,6 @@ void logUnfittedContactLineMeasure(
         contactLineAngleRadians(contact_line),
         "contact-line contact_angle_radians");
     const auto desired_cos = std::cos(target_angle);
-    const auto* cut_context = system.cutIntegrationContext();
     const bool context_present = cut_context != nullptr;
     const bool marker_available =
         cut_context != nullptr &&
@@ -4698,7 +5047,9 @@ void applyFreeSurfaceCutCellStabilization(
         useFittedCurrentGeometry(bc, ale_enabled)
             ? integrand * FE::forms::currentMeasure()
             : integrand;
-    return weighted_integrand.ds(bc.boundary_marker);
+    return weighted_integrand.dExteriorBoundary(
+        FE::forms::ExteriorBoundaryMeasure::fullPhysical(
+            bc.boundary_marker));
 }
 
 struct ActiveVolumeDomain {
@@ -5012,11 +5363,16 @@ void applyDynamicContactAngleResidual(
                     [&system, bc, contact_line, contact_marker](
                         const FE::assembly::CutIntegrationContext*
                             cut_context) {
-                        validateUnfittedContactWallNormal(
-                            system,
-                            cut_context,
-                            contact_line,
-                            contact_marker);
+                        if (!validateContactWallNormalCallbackPreflight(
+                                system,
+                                cut_context,
+                                contact_line,
+                                contact_marker,
+                                cut_context != nullptr &&
+                                    system.isSetup(),
+                                "dynamic_contact_operator_angle")) {
+                            return;
+                        }
                         logDynamicContactOperatorAngle(
                             system,
                             cut_context,
@@ -5024,17 +5380,23 @@ void applyDynamicContactAngleResidual(
                             contact_line,
                             contact_marker);
                     }});
-        validateUnfittedContactWallNormal(
-            system,
-            system.cutIntegrationContext(),
-            contact_line,
-            contact_marker);
-        logDynamicContactOperatorAngle(
-            system,
-            system.cutIntegrationContext(),
-            bc,
-            contact_line,
-            contact_marker);
+        const auto* current_cut_context =
+            system.cutIntegrationContext();
+        if (validateContactWallNormalCallbackPreflight(
+                system,
+                current_cut_context,
+                contact_line,
+                contact_marker,
+                current_cut_context != nullptr &&
+                    system.isSetup(),
+                "dynamic_contact_operator_angle_initial")) {
+            logDynamicContactOperatorAngle(
+                system,
+                current_cut_context,
+                bc,
+                contact_line,
+                contact_marker);
+        }
         momentum_form = momentum_form + dInterfaceBoundary(
             contact_force * contact_test,
             contact_marker);
@@ -5064,7 +5426,12 @@ void applyDynamicContactAngleResidual(
         system.registerGeneratedEmbeddedInterfaceMarker(active_wall_marker);
         momentum_form = momentum_form +
             (mu / slip_length * dot(u_tangent, v_tangent))
-                .dI(active_wall_marker);
+                .dExteriorBoundary(
+                    FE::forms::ExteriorBoundaryMeasure::
+                        generatedActiveSubset(
+                            contactLineWallBoundaryMarker(
+                                contact_line),
+                            active_wall_marker));
 
         FE_LOG_INFO(
             std::string("IncompressibleNavierStokesVMSModule: installed coupled dissipative Ren--E DynamicContactAngle") +
@@ -5754,30 +6121,38 @@ void registerFreeSurfacePrescribedAngleGeometry(
                         [&system, bc, contact_line, contact_marker](
                             const FE::assembly::CutIntegrationContext*
                                 cut_context) {
-                            if (cut_context == nullptr) {
+                            if (!validateContactWallNormalCallbackPreflight(
+                                    system,
+                                    cut_context,
+                                    contact_line,
+                                    contact_marker,
+                                    cut_context != nullptr,
+                                    "prescribed_contact_geometry")) {
                                 return;
                             }
-                            validateUnfittedContactWallNormal(
-                                system,
-                                cut_context,
-                                contact_line,
-                                contact_marker);
                             logUnfittedContactLineMeasure(
                                 system,
+                                cut_context,
                                 bc,
                                 contact_line,
                                 contact_marker);
                         }});
-            validateUnfittedContactWallNormal(
-                system,
-                system.cutIntegrationContext(),
-                contact_line,
-                contact_marker);
-            logUnfittedContactLineMeasure(
-                system,
-                bc,
-                contact_line,
-                contact_marker);
+            const auto* current_cut_context =
+                system.cutIntegrationContext();
+            if (validateContactWallNormalCallbackPreflight(
+                    system,
+                    current_cut_context,
+                    contact_line,
+                    contact_marker,
+                    true,
+                    "prescribed_contact_geometry_initial")) {
+                logUnfittedContactLineMeasure(
+                    system,
+                    current_cut_context,
+                    bc,
+                    contact_line,
+                    contact_marker);
+            }
             FE_LOG_INFO(
                 std::string("IncompressibleNavierStokesVMSModule: registered prescribed-angle contact geometry without a level-set residual") +
                 " interface_marker=" +
@@ -5989,6 +6364,10 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
                     " surface_tension_form=SurfaceStress" +
                     " normal_source=integration_rule_geometry" +
                     " form=gamma_I_minus_n_outer_n_colon_grad_v" +
+                    " capillary_balance_method=discrete_energy_volume_stationarity" +
+                    " capillary_balance_qualification=prerequisite_only" +
+                    " force_projection_applied=0" +
+                    " static_geometry_stationarity_required=1" +
                     " diagnostic=free_surface_variational_surface_stress");
             }
         } else {
@@ -6135,11 +6514,41 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
 [[nodiscard]] const char* tangentialMeshPolicyName(
     FreeSurfaceTangentialMeshPolicy policy) noexcept;
 
-[[nodiscard]] std::string fittedTangentialOperatorSource(int boundary_marker)
+[[nodiscard]] FE::systems::MeshTangentialBoundaryPolicy
+systemTangentialMeshPolicy(FreeSurfaceTangentialMeshPolicy policy)
 {
-    return "Fitted free-surface prescribed tangential mesh velocity on "
-           "marker " +
-           std::to_string(boundary_marker);
+    switch (policy) {
+    case FreeSurfaceTangentialMeshPolicy::Free:
+        return FE::systems::MeshTangentialBoundaryPolicy::Free;
+    case FreeSurfaceTangentialMeshPolicy::SmoothingOnly:
+        return FE::systems::MeshTangentialBoundaryPolicy::SmoothingOnly;
+    case FreeSurfaceTangentialMeshPolicy::Prescribed:
+        return FE::systems::MeshTangentialBoundaryPolicy::Prescribed;
+    }
+    throw std::invalid_argument(
+        "IncompressibleNavierStokesVMSModule: unknown fitted "
+        "free-surface tangential mesh policy");
+}
+
+[[nodiscard]] std::string fittedTangentialOperatorSource(
+    int boundary_marker,
+    FreeSurfaceTangentialMeshPolicy policy)
+{
+    switch (policy) {
+    case FreeSurfaceTangentialMeshPolicy::Free:
+        return "Fitted free-surface natural tangential state on marker " +
+               std::to_string(boundary_marker);
+    case FreeSurfaceTangentialMeshPolicy::SmoothingOnly:
+        return "Fitted free-surface tangential surface smoothing on marker " +
+               std::to_string(boundary_marker);
+    case FreeSurfaceTangentialMeshPolicy::Prescribed:
+        return "Fitted free-surface prescribed tangential mesh velocity on "
+               "marker " +
+               std::to_string(boundary_marker);
+    }
+    throw std::invalid_argument(
+        "IncompressibleNavierStokesVMSModule: unknown fitted tangential "
+        "mesh policy source");
 }
 
 void installFittedFreeSurfaceMeshKinematics(
@@ -6160,7 +6569,10 @@ void installFittedFreeSurfaceMeshKinematics(
         bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
         bc.normal_kinematic_policy ==
             FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity;
-    const bool install_tangential_relation =
+    const bool install_tangential_smoothing =
+        bc.tangential_mesh_policy ==
+        FreeSurfaceTangentialMeshPolicy::SmoothingOnly;
+    const bool install_tangential_prescription =
         bc.tangential_mesh_policy ==
         FreeSurfaceTangentialMeshPolicy::Prescribed;
     if (!ale_binding.coupled()) {
@@ -6177,24 +6589,12 @@ void installFittedFreeSurfaceMeshKinematics(
             "IncompressibleNavierStokesVMSModule: fitted free-surface mesh displacement field has no function space");
     }
 
-    const auto system_policy = [&]() {
-        switch (bc.tangential_mesh_policy) {
-        case FreeSurfaceTangentialMeshPolicy::Free:
-            return FE::systems::MeshTangentialBoundaryPolicy::Free;
-        case FreeSurfaceTangentialMeshPolicy::SmoothingOnly:
-            return FE::systems::MeshTangentialBoundaryPolicy::SmoothingOnly;
-        case FreeSurfaceTangentialMeshPolicy::Prescribed:
-            return FE::systems::MeshTangentialBoundaryPolicy::Prescribed;
-        }
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: unknown fitted "
-            "free-surface tangential mesh policy");
-    }();
     system.declareMeshTangentialBoundaryPolicy(
         FE::systems::MeshTangentialBoundaryPolicyDeclaration{
             .mesh_displacement_field = ale_binding.mesh_displacement_field,
             .boundary_marker = bc.boundary_marker,
-            .policy = system_policy,
+            .policy =
+                systemTangentialMeshPolicy(bc.tangential_mesh_policy),
             .owner_component =
                 "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary",
         });
@@ -6207,10 +6607,35 @@ void installFittedFreeSurfaceMeshKinematics(
         tangentialMeshPolicyName(bc.tangential_mesh_policy) +
         " tangential_owner=free_surface_boundary" +
         " tangential_enforcement=" +
-        (install_tangential_relation ? "weak_velocity_penalty" : "none") +
+        (install_tangential_prescription
+             ? "weak_velocity_penalty"
+             : install_tangential_smoothing
+                   ? "surface_smoothing_functional"
+                   : "natural_no_tangential_constraint") +
         " diagnostic=fitted_free_surface_mesh_policy");
 
-    if (!install_normal_relation && !install_tangential_relation) {
+    if (!install_normal_relation && !install_tangential_smoothing &&
+        !install_tangential_prescription) {
+        FE::analysis::BoundaryConditionDescriptor descriptor;
+        descriptor.primary_variable =
+            FE::analysis::VariableKey::field(
+                ale_binding.mesh_displacement_field);
+        descriptor.boundary_marker = bc.boundary_marker;
+        descriptor.trace_kind =
+            FE::analysis::TraceKind::TangentialComponent;
+        descriptor.enforcement_kind =
+            FE::analysis::EnforcementKind::WeakConsistent;
+        const auto consumer_source = fittedTangentialOperatorSource(
+            bc.boundary_marker, bc.tangential_mesh_policy);
+        descriptor.source = consumer_source;
+        system.addBoundaryConditionDescriptor(
+            std::move(descriptor), options.operator_tag);
+        system.bindMeshTangentialBoundaryPolicyConsumer(
+            ale_binding.mesh_displacement_field,
+            bc.boundary_marker,
+            systemTangentialMeshPolicy(bc.tangential_mesh_policy),
+            options.operator_tag,
+            consumer_source);
         return;
     }
 
@@ -6247,7 +6672,30 @@ void installFittedFreeSurfaceMeshKinematics(
             /*ale_enabled=*/true);
     }
 
-    if (install_tangential_relation) {
+    if (install_tangential_smoothing) {
+        const auto projector =
+            FormExpr::identity(rec.components) - outer(n, n);
+        const auto tangential_gradient =
+            projector * grad(d_mesh) * projector;
+        const auto tangential_test_gradient =
+            projector * grad(psi) * projector;
+        const auto smoothing_weight = bc::toScalarExpr(
+            bc.tangential_mesh_penalty,
+            freeSurfaceValueName(
+                "ns_free_surface_tangential_mesh_smoothing_weight", bc));
+        const auto tangential_smoothing_residual =
+            integrateOnFreeSurface(
+                smoothing_weight *
+                    inner(tangential_gradient,
+                          tangential_test_gradient),
+                bc,
+                /*ale_enabled=*/true);
+        residual = residual.isValid()
+                       ? residual + tangential_smoothing_residual
+                       : tangential_smoothing_residual;
+    }
+
+    if (install_tangential_prescription) {
         auto target_components = bc::toVectorExpr(
             bc.prescribed_tangential_mesh_velocity,
             rec.components,
@@ -6288,20 +6736,74 @@ void installFittedFreeSurfaceMeshKinematics(
         residual,
         install);
 
-    if (install_tangential_relation) {
-        FE::analysis::BoundaryConditionDescriptor descriptor;
-        descriptor.primary_variable =
+    if (install_normal_relation) {
+        if (velocity_field == FE::INVALID_FIELD_ID) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: fitted normal "
+                "kinematics require a related fluid velocity field");
+        }
+        const auto mesh_source =
+            "Fitted free-surface mesh normal kinematic row on marker " +
+            std::to_string(bc.boundary_marker);
+        FE::analysis::BoundaryConditionDescriptor mesh_descriptor;
+        mesh_descriptor.primary_variable =
             FE::analysis::VariableKey::field(
                 ale_binding.mesh_displacement_field);
-        descriptor.boundary_marker = bc.boundary_marker;
-        descriptor.trace_kind =
-            FE::analysis::TraceKind::TangentialComponent;
-        descriptor.enforcement_kind =
+        mesh_descriptor.related_variables.push_back(
+            FE::analysis::VariableKey::field(velocity_field));
+        mesh_descriptor.boundary_marker = bc.boundary_marker;
+        mesh_descriptor.trace_kind =
+            FE::analysis::TraceKind::NormalComponent;
+        mesh_descriptor.enforcement_kind =
             FE::analysis::EnforcementKind::WeakPenalty;
-        descriptor.source =
-            fittedTangentialOperatorSource(bc.boundary_marker);
-        system.addBoundaryConditionDescriptor(std::move(descriptor));
+        mesh_descriptor.source = mesh_source;
+        system.addBoundaryConditionDescriptor(
+            std::move(mesh_descriptor), options.operator_tag);
+
+        const auto fluid_source =
+            "Fitted free-surface fluid normal kinematic row on marker " +
+            std::to_string(bc.boundary_marker);
+        FE::analysis::BoundaryConditionDescriptor fluid_descriptor;
+        fluid_descriptor.primary_variable =
+            FE::analysis::VariableKey::field(velocity_field);
+        fluid_descriptor.related_variables.push_back(
+            FE::analysis::VariableKey::field(
+                ale_binding.mesh_displacement_field));
+        fluid_descriptor.boundary_marker = bc.boundary_marker;
+        fluid_descriptor.trace_kind =
+            FE::analysis::TraceKind::NormalComponent;
+        fluid_descriptor.enforcement_kind =
+            bc.kinematic_enforcement ==
+                    FreeSurfaceKinematicEnforcement::Nitsche
+                ? FE::analysis::EnforcementKind::WeakNitsche
+                : FE::analysis::EnforcementKind::WeakPenalty;
+        fluid_descriptor.source = fluid_source;
+        system.addBoundaryConditionDescriptor(
+            std::move(fluid_descriptor), options.operator_tag);
     }
+
+    FE::analysis::BoundaryConditionDescriptor descriptor;
+    descriptor.primary_variable =
+        FE::analysis::VariableKey::field(
+            ale_binding.mesh_displacement_field);
+    descriptor.boundary_marker = bc.boundary_marker;
+    descriptor.trace_kind =
+        FE::analysis::TraceKind::TangentialComponent;
+    descriptor.enforcement_kind =
+        install_tangential_prescription
+            ? FE::analysis::EnforcementKind::WeakPenalty
+            : FE::analysis::EnforcementKind::WeakConsistent;
+    const auto consumer_source = fittedTangentialOperatorSource(
+        bc.boundary_marker, bc.tangential_mesh_policy);
+    descriptor.source = consumer_source;
+    system.addBoundaryConditionDescriptor(
+        std::move(descriptor), options.operator_tag);
+    system.bindMeshTangentialBoundaryPolicyConsumer(
+        ale_binding.mesh_displacement_field,
+        bc.boundary_marker,
+        systemTangentialMeshPolicy(bc.tangential_mesh_policy),
+        options.operator_tag,
+        consumer_source);
 }
 
 [[nodiscard]] std::string jsonString(std::string_view value)
@@ -6575,34 +7077,53 @@ tangentialPolicyProvenance(
         [&](const auto& candidate) {
             return candidate.mesh_displacement_field == *displacement &&
                    candidate.boundary_marker ==
-                       boundary.boundary_marker;
+                       boundary.boundary_marker &&
+                   candidate.policy == systemTangentialMeshPolicy(
+                                           boundary.tangential_mesh_policy);
         });
     if (declaration == declarations.end()) {
         return {};
     }
+    if (!declaration->consumer_bound ||
+        !system.hasOperator(declaration->consumer_operator_tag) ||
+        declaration->consumer_source != fittedTangentialOperatorSource(
+            boundary.boundary_marker,
+            boundary.tangential_mesh_policy)) {
+        return TangentialPolicyProvenance{
+            .declaration = &*declaration,
+        };
+    }
 
     const auto& descriptors =
         system.boundaryConditionDescriptors();
+    const auto matches_consumer = [&](const auto& candidate) {
+        return candidate.primary_variable ==
+                   FE::analysis::VariableKey::field(
+                       declaration->mesh_displacement_field) &&
+               candidate.boundary_marker ==
+                   declaration->boundary_marker &&
+               candidate.trace_kind ==
+                   FE::analysis::TraceKind::TangentialComponent &&
+               candidate.enforcement_kind ==
+                   (boundary.tangential_mesh_policy ==
+                            FreeSurfaceTangentialMeshPolicy::Prescribed
+                        ? FE::analysis::EnforcementKind::WeakPenalty
+                        : FE::analysis::EnforcementKind::
+                              WeakConsistent) &&
+               candidate.source == declaration->consumer_source;
+    };
     const auto consumed = std::find_if(
         descriptors.begin(),
         descriptors.end(),
-        [&](const auto& candidate) {
-            return candidate.primary_variable.field_id ==
-                       declaration->mesh_displacement_field &&
-                   candidate.boundary_marker ==
-                       declaration->boundary_marker &&
-                   candidate.trace_kind ==
-                       FE::analysis::TraceKind::TangentialComponent &&
-                   candidate.enforcement_kind ==
-                       FE::analysis::EnforcementKind::WeakPenalty &&
-                   candidate.source ==
-                       fittedTangentialOperatorSource(
-                           boundary.boundary_marker);
-        });
+        matches_consumer);
+    const auto consumed_count = std::count_if(
+        descriptors.begin(),
+        descriptors.end(),
+        matches_consumer);
     return TangentialPolicyProvenance{
         .declaration = &*declaration,
         .consumed_operator =
-            consumed == descriptors.end() ? nullptr : &*consumed,
+            consumed_count == 1u ? &*consumed : nullptr,
     };
 }
 
@@ -6618,7 +7139,7 @@ tangentialPolicyProvenance(
 
     std::ostringstream out;
     out.imbue(std::locale::classic());
-    out << "{\"artifact_schema_version\":2"
+    out << "{\"artifact_schema_version\":3"
         << ",\"component\":\"incompressible_navier_stokes_free_surface\""
         << ",\"configuration_schema\":{\"input_version\":"
         << options.input_configuration_schema_version
@@ -6741,8 +7262,37 @@ tangentialPolicyProvenance(
             break;
         }
         out << ",\"surface_tension_form_effective\":"
-            << jsonString(surfaceTensionFormName(boundary))
-            << ",\"curvature_policy\":"
+            << jsonString(surfaceTensionFormName(boundary));
+        if (boundary.implementation ==
+            FreeSurfaceImplementation::FittedALE) {
+            out << ",\"fitted_surface_contact_capability\":{"
+                << "\"qualification\":"
+                << jsonString(
+                       options.explicit_legacy_configuration
+                           ? "unqualified_explicit_legacy"
+                           : "supported_configuration_envelope")
+                << ",\"supported_requests\":{"
+                << "\"surface_tension_form\":["
+                << "\"Automatic\",\"CurvatureTraction\"],"
+                << "\"contact_line_model\":[\"None\",\"Pinned\"]}"
+                << ",\"exclusion_disposition\":"
+                << "\"fail_closed_before_system_mutation\""
+                << ",\"exclusions\":[{"
+                << "\"feature\":\"surface_tension_form\","
+                << "\"value\":\"SurfaceStress\","
+                << "\"reason_code\":"
+                << "\"fitted_surface_stress_current_frame_gradient_unqualified\""
+                << "},{\"feature\":\"contact_line_model\","
+                << "\"value\":\"PrescribedAngle\","
+                << "\"reason_code\":"
+                << "\"fitted_contact_line_codimension_two_unavailable\""
+                << "},{\"feature\":\"contact_line_model\","
+                << "\"value\":\"DynamicRenE\","
+                << "\"reason_code\":"
+                << "\"dynamic_contact_requires_sharp_unfitted_level_set\""
+                << "}]}";
+        }
+        out << ",\"curvature_policy\":"
             << jsonString(freeSurfaceCurvaturePolicyName(boundary))
             << ",\"curvature_tangent_policy\":"
             << jsonString(
@@ -6777,7 +7327,9 @@ tangentialPolicyProvenance(
                    tangential_provenance.consumed_operator != nullptr)
             << ",\"operator_tag\":";
         if (tangential_provenance.consumed_operator != nullptr) {
-            out << jsonString(options.operator_tag);
+            out << jsonString(
+                tangential_provenance.declaration
+                    ->consumer_operator_tag);
         } else {
             out << "null";
         }
@@ -6872,6 +7424,14 @@ tangentialPolicyProvenance(
 
 void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& system) const
 {
+    if (options_.mesh_velocity_source !=
+            ALEMeshVelocitySource::PrescribedData &&
+        options_.mesh_velocity_source !=
+            ALEMeshVelocitySource::CoupledDisplacement) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule::registerOn: "
+            "unsupported ALE mesh-velocity source");
+    }
     if (freeSurfacePhysicalModelName(options_.free_surface_physical_model) ==
         nullptr) {
         throw std::invalid_argument(
@@ -7132,6 +7692,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     // unchanged.
     std::vector<FreeSurfaceBoundary> effective_free_surfaces;
     effective_free_surfaces.reserve(options_.free_surface.size());
+    std::set<int> prospective_fitted_normal_markers;
     for (const auto& bc : options_.free_surface) {
         auto effective_bc = withResolvedInterfaceMarker(bc, system);
         if (effective_bc.active_domain_method ==
@@ -7165,6 +7726,70 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                     displacement_field = named;
                 }
             }
+            const bool installs_normal_relation =
+                effective_bc.kinematic_enforcement !=
+                    FreeSurfaceKinematicEnforcement::None &&
+                effective_bc.normal_kinematic_policy ==
+                    FreeSurfaceNormalKinematicPolicy::
+                        MatchFluidNormalVelocity;
+            if (installs_normal_relation &&
+                !system.meshNormalBoundaryConstraintHistory().empty()) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: fitted "
+                    "free-surface normal relations cannot be installed "
+                    "after accepted normal-constraint history has begun");
+            }
+            if (installs_normal_relation &&
+                !prospective_fitted_normal_markers
+                     .insert(effective_bc.boundary_marker)
+                     .second) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: duplicate fitted "
+                    "free-surface normal relation on marker " +
+                    std::to_string(effective_bc.boundary_marker));
+            }
+            if (installs_normal_relation &&
+                displacement_field.has_value()) {
+                const auto& displacement_record =
+                    system.fieldRecord(*displacement_field);
+                if (displacement_record.space == nullptr ||
+                    velocity_space_->polynomial_order() >
+                        displacement_record.space->polynomial_order()) {
+                    throw std::invalid_argument(
+                        "IncompressibleNavierStokesVMSModule: fitted-ALE "
+                        "normal measurement quadrature requires velocity "
+                        "order " +
+                        std::to_string(
+                            velocity_space_->polynomial_order()) +
+                        " <= displacement-primary order " +
+                        (displacement_record.space != nullptr
+                             ? std::to_string(
+                                   displacement_record.space
+                                       ->polynomial_order())
+                             : std::string("unavailable")) +
+                        " on marker " +
+                        std::to_string(
+                            effective_bc.boundary_marker));
+                }
+                const auto normal_conflict = std::find_if(
+                    system.meshNormalBoundaryConstraints().begin(),
+                    system.meshNormalBoundaryConstraints().end(),
+                    [&](const auto& declaration) {
+                        return declaration.boundary_marker ==
+                                   effective_bc.boundary_marker &&
+                               declaration.mesh_displacement_field ==
+                                   *displacement_field;
+                    });
+                if (normal_conflict !=
+                    system.meshNormalBoundaryConstraints().end()) {
+                    throw std::invalid_argument(
+                        "IncompressibleNavierStokesVMSModule: fitted "
+                        "free-surface normal relation on marker " +
+                        std::to_string(effective_bc.boundary_marker) +
+                        " conflicts with existing mesh-motion owner '" +
+                        normal_conflict->owner_component + "'");
+                }
+            }
             const auto conflict = std::find_if(
                 system.meshTangentialBoundaryPolicies().begin(),
                 system.meshTangentialBoundaryPolicies().end(),
@@ -7195,6 +7820,37 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         effective_free_surfaces);
     const auto active_pressure_domain =
         activePressureDomainFor(effective_free_surfaces);
+    if (!options_.velocity_dirichlet_weak.empty() &&
+        (!(options_.nitsche_gamma > FE::Real{0.0}) ||
+         !std::isfinite(options_.nitsche_gamma))) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule::registerOn: "
+            "nitsche_gamma must be finite and > 0 when weak velocity "
+            "Dirichlet conditions are configured");
+    }
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const bool native_mesh_available_for_trace_certificate =
+        system.mesh() != nullptr;
+#else
+    const bool native_mesh_available_for_trace_certificate =
+        false;
+#endif
+    const bool has_generated_boundary_nitsche_route =
+        std::any_of(
+            options_.velocity_dirichlet_weak.begin(),
+            options_.velocity_dirichlet_weak.end(),
+            [&](const auto& bc) {
+                return sharpActiveBoundaryMarkerFor(
+                           FE::forms::bc::detail::
+                               boundaryMarkerOrThrow(
+                                   bc,
+                                   "IncompressibleNavierStokesVMSModule::"
+                                   "registerOn generated-boundary "
+                                   "Nitsche trace preflight"),
+                           effective_free_surfaces,
+                           system)
+                    .has_value();
+            });
 
     requireDistinctFieldNames({
         {"velocity", u_spec.name},
@@ -7251,7 +7907,70 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         system,
         *velocity_space_,
         *pressure_space_,
-        dim);
+        dim,
+        pspg_boundary_pressure_gradient_scale > FE::Real{0.0} ||
+            pspg_boundary_pressure_flux_scale > FE::Real{0.0} ||
+            pspg_boundary_tangential_pressure_gradient_scale >
+                FE::Real{0.0} ||
+            pspg_boundary_tangential_momentum_residual_scale >
+                FE::Real{0.0});
+    if (has_generated_boundary_nitsche_route) {
+        if (!active_pressure_domain.has_value() ||
+            active_pressure_domain->boundary
+                    ->active_domain_method !=
+                FreeSurfaceActiveDomainMethod::CutVolume ||
+            !active_pressure_domain->boundary
+                 ->small_cut_aggregation) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule::registerOn: "
+                "generated-boundary Nitsche routes require CutVolume "
+                "small-cut aggregation and aggregate-trace certification");
+        }
+        if (!native_mesh_available_for_trace_certificate) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule::registerOn: "
+                "generated-boundary Nitsche routes require a native mesh "
+                "for aggregate-trace certification");
+        }
+        if (options_.viscosity_model != nullptr ||
+            !(options_.viscosity > FE::Real{0.0}) ||
+            !std::isfinite(options_.viscosity)) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule::registerOn: "
+                "certified generated-boundary Nitsche routes require "
+                "finite positive constant Newtonian viscosity");
+        }
+        const bool supported_trace_space =
+            isSupportedGeneratedBoundaryTraceSpace(
+                *velocity_space_, dim);
+        const auto existing_velocity =
+            system.findFieldByName(
+                options_.velocity_field_name);
+        bool supported_existing_velocity = true;
+        if (existing_velocity != FE::INVALID_FIELD_ID) {
+            const auto& record =
+                system.fieldRecord(existing_velocity);
+            supported_existing_velocity =
+                record.space &&
+                record.components == dim &&
+                isSupportedGeneratedBoundaryTraceSpace(
+                    *record.space, dim);
+        }
+        if (!supported_trace_space) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule::registerOn: "
+                "certified generated-boundary Nitsche routes require "
+                "an affine P1 Product H1 velocity space on Triangle3 "
+                "or Tetra4 cells");
+        }
+        if (!supported_existing_velocity) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule::registerOn: "
+                "the existing velocity field is outside the affine P1 "
+                "Product H1 Triangle3/Tetra4 generated-boundary trace "
+                "certificate envelope");
+        }
+    }
     validateFreeSurfaceContactGeometryPreflight(
         effective_free_surfaces, system);
     validateFreeSurfaceDiscreteFunctionalPreflight(
@@ -7277,7 +7996,13 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     }
 
     declareFreeSurfaceDiscreteFunctionals(
-        effective_free_surfaces, system, u_id, options_.viscosity);
+        effective_free_surfaces,
+        system,
+        u_id,
+        options_.density,
+        options_.body_force,
+        options_.viscosity,
+        options_.viscosity_model == nullptr);
 
     const auto generated_active_boundary_for =
         [&system, &effective_free_surfaces](int physical_boundary_marker)
@@ -7296,8 +8021,16 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                                          int physical_boundary_marker) {
             const auto marker = generated_active_boundary_for(
                 physical_boundary_marker);
-            return marker.has_value() ? integrand.dI(*marker)
-                                      : integrand.ds(physical_boundary_marker);
+            const auto measure =
+                marker.has_value()
+                    ? FE::forms::ExteriorBoundaryMeasure::
+                          generatedActiveSubset(
+                              physical_boundary_marker,
+                              *marker)
+                    : FE::forms::ExteriorBoundaryMeasure::
+                          fullPhysical(
+                              physical_boundary_marker);
+            return integrand.dExteriorBoundary(measure);
         };
     struct PendingSmallCutAggregation {
         FE::geometry::CutIntegrationSide side{
@@ -7349,6 +8082,21 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                 .callback =
                     [&system, pressure_anchor_measure_guard](
                         const FE::assembly::CutIntegrationContext* context) {
+                        if (!coordinateCutContextCallbackLocalPhase(
+                                system,
+                                std::exception_ptr{},
+                                context != nullptr,
+                                "cut_volume_pressure_anchor_context")) {
+                            // Use the same null-candidate diagnostic on every
+                            // rank without letting a rank-local non-null
+                            // candidate enter the measure reductions.
+                            pressure_anchor_measure_guard
+                                ->validateContextUpdate(system, nullptr);
+                            throw std::runtime_error(
+                                "IncompressibleNavierStokesVMSModule: "
+                                "CutVolume pressure-anchor null context was "
+                                "unexpectedly accepted");
+                        }
                         pressure_anchor_measure_guard->validateContextUpdate(
                             system, context);
                     },
@@ -7467,13 +8215,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             std::make_unique<FE::constraints::VertexDirichletConstraint>(p_id, std::move(values), mode));
     }
 
-    const auto ale_binding =
-        FE::systems::resolveALEBinding(system, ale_options);
-
-    if (!system.hasOperator(options_.operator_tag)) {
-        system.addOperator(options_.operator_tag);
-    }
-
     using namespace svmp::FE::forms;
 
     const auto u = StateField(u_id, *velocity_space_, options_.velocity_field_name);
@@ -7481,6 +8222,51 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
 
     const auto v = TestField(u_id, *velocity_space_, "v");
     const auto q = TestField(p_id, *pressure_space_, "q");
+
+    const auto ale_binding =
+        FE::systems::resolveALEBinding(system, ale_options);
+
+    std::vector<FE::systems::MeshNormalBoundaryConstraintDeclaration>
+        normal_declarations;
+    if (ale_binding.coupled()) {
+        normal_declarations.reserve(effective_free_surfaces.size());
+        for (const auto& boundary : effective_free_surfaces) {
+            const bool installs_normal_relation =
+                boundary.implementation ==
+                    FreeSurfaceImplementation::FittedALE &&
+                boundary.kinematic_enforcement !=
+                    FreeSurfaceKinematicEnforcement::None &&
+                boundary.normal_kinematic_policy ==
+                    FreeSurfaceNormalKinematicPolicy::
+                        MatchFluidNormalVelocity;
+            if (!installs_normal_relation) {
+                continue;
+            }
+            normal_declarations.push_back(
+                FE::systems::MeshNormalBoundaryConstraintDeclaration{
+                    .mesh_displacement_field =
+                        ale_binding.mesh_displacement_field,
+                    .boundary_marker = boundary.boundary_marker,
+                    .quantity = FE::systems::MeshNormalBoundaryQuantity::
+                        MeshVelocityTrace,
+                    .target_kind =
+                        FE::systems::MeshNormalBoundaryTargetKind::
+                            FluidNormalVelocity,
+                    .target_expression =
+                        normalTrace(u, currentNormal()),
+                    .enforcement_kind =
+                        FE::analysis::EnforcementKind::WeakPenalty,
+                    .related_velocity_field = u_id,
+                    .owner_component =
+                        "IncompressibleNavierStokesVMSModule."
+                        "FreeSurfaceBoundary",
+                });
+        }
+    }
+
+    if (!system.hasOperator(options_.operator_tag)) {
+        system.addOperator(options_.operator_tag);
+    }
 
     const auto active_volume_domain =
         activeVolumeDomainFor(effective_free_surfaces, system);
@@ -8049,7 +8835,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         conservative_balance_all_surface_stress;
     if (conservative_balance_diagnostic_supported) {
         // The pressure part is the weak pressure work on the active liquid.
-        // External-gas pressure work is appended below on each free surface.
+        // Prescribed exterior-pressure work is appended on each free surface.
         free_surface_conservative_pressure_form =
             integrateOnActiveVolume(pressure, active_volume_domain);
     } else if (conservative_balance_diagnostic_requested) {
@@ -8254,6 +9040,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     }
 
     Factories::VelocityNitscheEnergyForms nitsche_energy_forms;
+    std::vector<
+        FE::forms::bc::
+            GeneratedBoundaryNitscheTraceFormBinding>
+        generated_nitsche_trace_bindings;
     Factories::applyVelocityNitscheBCs(
         momentum_form,
         continuity_form,
@@ -8267,7 +9057,43 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         generated_active_boundary_for,
         nitsche_energy_diagnostic_requested
             ? &nitsche_energy_forms
+            : nullptr,
+        pending_small_cut_aggregation.has_value()
+            ? &generated_nitsche_trace_bindings
             : nullptr);
+    std::size_t expected_generated_nitsche_trace_bindings = 0u;
+    for (const auto& bc : options_.velocity_dirichlet_weak) {
+        const int physical_marker =
+            FE::forms::bc::detail::boundaryMarkerOrThrow(
+                bc,
+                "IncompressibleNavierStokesVMSModule::registerOn "
+                "generated-boundary Nitsche trace policy");
+        const auto generated_marker =
+            generated_active_boundary_for(physical_marker);
+        if (!generated_marker.has_value()) {
+            continue;
+        }
+        if (!pending_small_cut_aggregation.has_value()) {
+            throw std::logic_error(
+                "IncompressibleNavierStokesVMSModule::registerOn: "
+                "generated-boundary Nitsche route reached installation "
+                "without its preflighted small-cut aggregation policy");
+        }
+        ++expected_generated_nitsche_trace_bindings;
+        if (options_.viscosity_model != nullptr) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule::registerOn: "
+                    "certified generated-boundary Nitsche routes require "
+                    "constant Newtonian viscosity");
+        }
+    }
+    if (generated_nitsche_trace_bindings.size() !=
+        expected_generated_nitsche_trace_bindings) {
+        throw std::logic_error(
+            "IncompressibleNavierStokesVMSModule::registerOn: "
+            "generated-boundary Nitsche form binding count differs "
+            "from the certified production routes");
+    }
 
     // Install the complete residual (momentum + continuity) via the unified
     // installFormulation() entry point.  It auto-detects the two-field mixed
@@ -8278,6 +9104,21 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     install.compiler_options.use_symbolic_tangent = true;
     if (!options_.viscosity_model) {
         install.recordDynamicViscosity(u_id, options_.viscosity);
+    }
+    if (pending_small_cut_aggregation.has_value()) {
+        install.generated_boundary_nitsche_trace_requests.reserve(
+            generated_nitsche_trace_bindings.size());
+        for (auto& binding :
+             generated_nitsche_trace_bindings) {
+            install.generated_boundary_nitsche_trace_requests.push_back(
+                FE::systems::
+                    GeneratedBoundaryNitscheTraceInstallRequest{
+                        .binding = std::move(binding),
+                        .volume_interface_marker =
+                            pending_small_cut_aggregation
+                                ->interface_marker,
+                    });
+        }
     }
     appendUnfittedFreeSurfaceLevelSetTrialFields(
         effective_free_surfaces, system, install);
@@ -8306,6 +9147,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                 diagnostic_install.source_component_tag =
                     std::string(operator_tag);
                 diagnostic_install.extra_trial_fields.clear();
+                diagnostic_install
+                    .generated_boundary_nitsche_trace_requests
+                    .clear();
                 (void)FE::systems::installFormulation(
                     system,
                     std::string(operator_tag),
@@ -8388,6 +9232,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
 
     if (vms_pspg_pressure_gradient_form.isValid()) {
         auto direct_pspg_install = install;
+        direct_pspg_install
+            .generated_boundary_nitsche_trace_requests
+            .clear();
         direct_pspg_install.source_component_tag =
             "navier_stokes_vms_pspg_pressure_gradient";
         if (std::find(direct_pspg_install.extra_trial_fields.begin(),
@@ -8427,6 +9274,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             [&](std::string_view operator_tag,
                 const FormExpr& diagnostic_form) {
                 auto diagnostic_install = install;
+                diagnostic_install
+                    .generated_boundary_nitsche_trace_requests
+                    .clear();
                 diagnostic_install.source_component_tag =
                     std::string(operator_tag);
                 (void)FE::systems::installFormulation(
@@ -8451,6 +9301,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
 
         {
             auto diagnostic_install = install;
+            diagnostic_install
+                .generated_boundary_nitsche_trace_requests
+                .clear();
             diagnostic_install.source_component_tag = std::string(
                 FreeSurfaceConservativeBalanceDiagnosticOperators::
                     pressure_representability_pair);
@@ -8499,6 +9352,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
 
     if (pressureRowContributionDiagnosticEnabled()) {
         auto diagnostic_install = install;
+        diagnostic_install
+            .generated_boundary_nitsche_trace_requests
+            .clear();
         if (std::find(diagnostic_install.extra_trial_fields.begin(),
                       diagnostic_install.extra_trial_fields.end(),
                       u_id) == diagnostic_install.extra_trial_fields.end()) {
@@ -8644,6 +9500,24 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                 level_set_shape_tangent_form,
                 install);
         }
+    }
+
+    for (auto& declaration : normal_declarations) {
+        const auto marker = declaration.boundary_marker;
+        const auto displacement_field =
+            declaration.mesh_displacement_field;
+        system.declareMeshNormalBoundaryConstraint(
+            std::move(declaration));
+        system.bindMeshNormalBoundaryConstraintConsumer(
+            displacement_field,
+            marker,
+            options_.operator_tag,
+            "Fitted free-surface mesh normal kinematic row on marker " +
+                std::to_string(marker),
+            "Fitted free-surface fluid normal kinematic row on marker " +
+                std::to_string(marker));
+        system.registerFittedALENormalOperatorStageMeasurement(
+            displacement_field, marker);
     }
 
     effective_configuration_artifact_ = makeEffectiveConfigurationArtifact(

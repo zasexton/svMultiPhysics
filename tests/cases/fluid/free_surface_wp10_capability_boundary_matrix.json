@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "matrix_id": "free_surface_wp10_capability_boundary_v2",
+  "matrix_id": "free_surface_wp10_capability_boundary_v3",
   "status": "FROZEN_CAPABILITY_BOUNDARY",
   "work_package": "WP-10",
   "finding": "FSR-08",
@@ -8,7 +8,7 @@
   "architecture_record": "Documentation/free_surface_wp10_physical_capability_boundary.md",
   "model_envelope": "one_phase_incompressible_liquid_with_prescribed_exterior_pressure",
   "current_capability_boundary": {
-    "artifact_schema_version": 2,
+    "artifact_schema_version": 3,
     "momentum_capability_label": "one_phase_liquid_sharp_interface",
     "physical_model_name": "one_phase_liquid_prescribed_exterior_pressure",
     "legacy_physical_model": null,
@@ -56,7 +56,13 @@
       "id": "explicit_one_phase_momentum_artifact",
       "path": "Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp",
       "required_fragments": [
-        "out << \"{\\\"artifact_schema_version\\\":2\"",
+        "out << \"{\\\"artifact_schema_version\\\":3\"",
+        "fitted_surface_contact_capability",
+        "supported_configuration_envelope",
+        "fail_closed_before_system_mutation",
+        "fitted_surface_stress_current_frame_gradient_unqualified",
+        "fitted_contact_line_codimension_two_unavailable",
+        "dynamic_contact_requires_sharp_unfitted_level_set",
         "\",\\\"physical_model\\\":\"",
         "\"one_phase_liquid_prescribed_exterior_pressure\"",
         "prescribed_scalar_traction_reference",
@@ -86,7 +92,19 @@
         "\"FreeSurfacePhysicalModel\"",
         "validate_and_resolve_free_surface_physical_model(",
         "create_navier_stokes_from_input(",
+        "preflightFittedSurfaceContactCapability(",
         "preRegisterPrimaryVelocityField("
+      ],
+      "forbidden_fragments": []
+    },
+    {
+      "id": "application_fitted_capability_preflight",
+      "path": "Code/Source/solver/Application/Core/SimulationBuilder.cpp",
+      "required_fragments": [
+        "preflightNavierStokesFittedSurfaceContactCapabilities(",
+        "preflightFittedSurfaceContactCapability(",
+        "preflightAndPreRegisterPhysicsModuleDependencies(",
+        "preRegisterFutureWetExtensionVelocity("
       ],
       "forbidden_fragments": []
     },
@@ -336,7 +354,8 @@
       "tests": [
         "LevelSetEquationTranslator.TranslatesFieldsAndBoundaries",
         "LevelSetEquationTranslator.TranslatesConservativePhaseControls",
-        "EquationTranslatorFreeSurface.XmlPhysicalModelIsExplicitAndUnsupportedScopeFailsClosed"
+        "EquationTranslatorFreeSurface.XmlPhysicalModelIsExplicitAndUnsupportedScopeFailsClosed",
+        "OpenVesselExamples.SimulationBuilderPreflightsFittedCapabilityBeforeWetExtensionMutation"
       ],
       "execution": {
         "wall_time_seconds": 300,

@@ -207,6 +207,61 @@ GeneratedInterfaceBoundaryIntersectionRequest intersectionRequest(
 
 } // namespace
 
+TEST(GeneratedInterfaceBoundaryIntersectionDomain,
+     StableMarkerKeysAreCanonicalAndUnambiguous)
+{
+    GeneratedInterfaceBoundaryIntersectionMarkerKey field_key;
+    field_key.source =
+        LevelSetInterfaceSource::fromField(
+            /*field_id=*/8);
+    field_key.domain_id = "contact";
+    field_key.interface_marker = 10;
+    field_key.boundary_marker = 20;
+
+    GeneratedInterfaceBoundaryIntersectionMarkerKey evaluator_key =
+        field_key;
+    evaluator_key.source =
+        LevelSetInterfaceSource::fromEvaluator(
+            "field:8");
+    EXPECT_NE(
+        field_key.stableKey(),
+        evaluator_key.stableKey());
+
+    GeneratedInterfaceBoundaryIntersectionMarkerKey delimiter_left =
+        field_key;
+    delimiter_left.source =
+        LevelSetInterfaceSource::fromEvaluator(
+            "source|part");
+    delimiter_left.domain_id = "domain";
+    GeneratedInterfaceBoundaryIntersectionMarkerKey delimiter_right =
+        delimiter_left;
+    delimiter_right.source =
+        LevelSetInterfaceSource::fromEvaluator(
+            "source");
+    delimiter_right.domain_id = "part|domain";
+    EXPECT_NE(
+        delimiter_left.stableKey(),
+        delimiter_right.stableKey());
+
+    GeneratedInterfaceBoundaryIntersectionMarkerKey fine_isovalue =
+        field_key;
+    fine_isovalue.isovalue = Real{1.0e-7};
+    GeneratedInterfaceBoundaryIntersectionMarkerKey other_fine_isovalue =
+        fine_isovalue;
+    other_fine_isovalue.isovalue =
+        Real{2.0e-7};
+    EXPECT_NE(
+        fine_isovalue.stableKey(),
+        other_fine_isovalue.stableKey());
+
+    GeneratedInterfaceBoundaryIntersectionMarkerKey negative_zero =
+        field_key;
+    negative_zero.isovalue = -Real{0.0};
+    EXPECT_EQ(
+        field_key.stableKey(),
+        negative_zero.stableKey());
+}
+
 TEST(GeneratedInterfaceBoundaryIntersectionDomain, Builds2DPointOnMarkedBoundaryEdge)
 {
     constexpr int interface_marker = 101;
@@ -513,6 +568,67 @@ TEST(GeneratedInterfaceBoundaryIntersectionDomain, ImportsRulesIntoCutContextByG
     EXPECT_TRUE(context.hasGeneratedInterfaceMarker(domain.marker()));
     EXPECT_EQ(context.interfaceRulesForMarker(domain.marker()).size(), 1u);
     EXPECT_TRUE(context.interfaceRulesForMarker(interface_marker).empty());
+    const auto* stable_key =
+        context.findGeneratedInterfaceBoundaryMarkerKey(
+            domain.marker());
+    ASSERT_NE(stable_key, nullptr);
+    GeneratedInterfaceBoundaryIntersectionMarkerKey expected_key;
+    expected_key.source = domain.request().source;
+    expected_key.domain_id =
+        domain.request().generated_domain_id;
+    expected_key.isovalue =
+        domain.request().isovalue;
+    expected_key.interface_marker =
+        domain.request().interface_marker;
+    expected_key.boundary_marker =
+        domain.request().boundary_marker;
+    EXPECT_EQ(
+        *stable_key,
+        expected_key.stableKey());
+    EXPECT_EQ(
+        context.findGeneratedInterfaceBoundaryMarkerKey(
+            interface_marker),
+        nullptr);
+    const auto* publication_provenance =
+        context
+            .findGeneratedInterfaceBoundaryPublicationProvenance(
+                domain.marker());
+    ASSERT_NE(publication_provenance, nullptr);
+    EXPECT_EQ(
+        publication_provenance
+            ->generated_interface_boundary_marker,
+        domain.marker());
+    EXPECT_EQ(
+        publication_provenance
+            ->stable_owner_key,
+        expected_key.stableKey());
+    EXPECT_EQ(
+        publication_provenance
+            ->request
+            .generated_domain_id,
+        domain.request().generated_domain_id);
+    EXPECT_EQ(
+        publication_provenance
+            ->request
+            .source
+            .layout_revision,
+        domain.request().source.layout_revision);
+    EXPECT_EQ(
+        publication_provenance
+            ->request
+            .source_value_revision,
+        domain.request().source_value_revision);
+    EXPECT_EQ(
+        publication_provenance
+            ->request
+            .quadrature_order,
+        domain.request().quadrature_order);
+    context.clear();
+    EXPECT_EQ(
+        context
+            .findGeneratedInterfaceBoundaryPublicationProvenance(
+                domain.marker()),
+        nullptr);
 }
 
 TEST(GeneratedInterfaceBoundaryIntersectionDomain,

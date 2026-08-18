@@ -54,8 +54,44 @@ def test_canonical_boundary_is_strict_and_explicitly_open(tmp_path):
     guard = runner.validate_scope_guard_contract(matrix, ROOT)
 
     assert matrix["status"] == "FROZEN_CAPABILITY_BOUNDARY"
+    assert matrix["matrix_id"] == "free_surface_wp10_capability_boundary_v3"
+    assert matrix["current_capability_boundary"]["artifact_schema_version"] == 3
     assert matrix["current_capability_boundary"]["wp10_closure_claimed"] is False
     assert matrix["current_capability_boundary"]["q7_closure_claimed"] is False
+    momentum_check = next(
+        check
+        for check in matrix["source_checks"]
+        if check["id"] == "explicit_one_phase_momentum_artifact"
+    )
+    for fragment in (
+        "fitted_surface_contact_capability",
+        "supported_configuration_envelope",
+        "fail_closed_before_system_mutation",
+        "fitted_surface_stress_current_frame_gradient_unqualified",
+        "fitted_contact_line_codimension_two_unavailable",
+        "dynamic_contact_requires_sharp_unfitted_level_set",
+    ):
+        assert fragment in momentum_check["required_fragments"]
+    application_preflight = next(
+        check
+        for check in matrix["source_checks"]
+        if check["id"] == "application_fitted_capability_preflight"
+    )
+    assert application_preflight["path"] == (
+        "Code/Source/solver/Application/Core/SimulationBuilder.cpp"
+    )
+    assert "preflightFittedSurfaceContactCapability(" in (
+        application_preflight["required_fragments"]
+    )
+    application_group = next(
+        group
+        for group in matrix["groups"]
+        if group["id"] == "application_physical_model_boundary_serial"
+    )
+    assert (
+        "OpenVesselExamples."
+        "SimulationBuilderPreflightsFittedCapabilityBeforeWetExtensionMutation"
+    ) in application_group["tests"]
     assert all(
         entry["status"] == "REQUIRED_NOT_IMPLEMENTED"
         for entry in matrix["unimplemented_wp10_requirements"]
@@ -83,6 +119,26 @@ def test_canonical_boundary_is_strict_and_explicitly_open(tmp_path):
             runner,
             tmp_path,
             lambda document: document.__setitem__("wp10_closed", True),
+        )
+    with pytest.raises(ValueError, match="current capability boundary changed"):
+        validate_mutated_matrix(
+            runner,
+            tmp_path,
+            lambda document: document["current_capability_boundary"].__setitem__(
+                "artifact_schema_version", 2
+            ),
+        )
+    with pytest.raises(ValueError, match="source checks changed after freeze"):
+        validate_mutated_matrix(
+            runner,
+            tmp_path,
+            lambda document: next(
+                check
+                for check in document["source_checks"]
+                if check["id"] == "explicit_one_phase_momentum_artifact"
+            )["required_fragments"].remove(
+                "fitted_surface_contact_capability"
+            ),
         )
 
     duplicate_path = tmp_path / "duplicate.json"

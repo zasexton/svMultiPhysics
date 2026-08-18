@@ -139,3 +139,32 @@ TEST(OperatorRegistry, OperatorRegistry_Get_ConstAndNonConstVersionsConsistent)
     EXPECT_EQ(def_const.cells[0].trial_field, def.cells[0].trial_field);
 }
 
+TEST(OperatorRegistry,
+     RollbackTruncatesTermsAndRemovesNewOperators)
+{
+    OperatorRegistry reg;
+    reg.addOperator("op");
+    reg.get("op").cells.push_back(
+        {/*test_field=*/FieldId{0},
+         /*trial_field=*/FieldId{0},
+         std::make_shared<MassKernel>(1.0)});
+    const auto snapshot = reg.snapshot();
+
+    reg.get("op").boundary.push_back(
+        {/*marker=*/7,
+         /*test_field=*/FieldId{0},
+         /*trial_field=*/FieldId{0},
+         std::make_shared<MassKernel>(2.0)});
+    reg.addOperator("temporary");
+    reg.get("temporary").cells.push_back(
+        {/*test_field=*/FieldId{1},
+         /*trial_field=*/FieldId{1},
+         std::make_shared<MassKernel>(3.0)});
+
+    reg.rollback(snapshot);
+
+    EXPECT_FALSE(reg.has("temporary"));
+    ASSERT_TRUE(reg.has("op"));
+    EXPECT_EQ(reg.get("op").cells.size(), 1u);
+    EXPECT_TRUE(reg.get("op").boundary.empty());
+}

@@ -13,6 +13,7 @@
 #include "TimeStepping/VSVO_BDF_Controller.h"
 
 #include <cmath>
+#include <string>
 
 TEST(SimpleStepController, ValidatesOptions)
 {
@@ -149,6 +150,30 @@ TEST(SimpleStepController, RejectedLargerStepCanRetryAtMinDt)
     EXPECT_FALSE(d.accept);
     EXPECT_TRUE(d.retry);
     EXPECT_NEAR(d.next_dt, 0.1, 1e-15);
+}
+
+TEST(SimpleStepController, CutTopologyRejectionReducesStepSize)
+{
+    using svmp::FE::timestepping::SimpleStepController;
+    using svmp::FE::timestepping::SimpleStepControllerOptions;
+    using svmp::FE::timestepping::StepAttemptInfo;
+    using svmp::FE::timestepping::StepRejectReason;
+
+    SimpleStepControllerOptions options;
+    options.decrease_factor = 0.25;
+    options.max_retries = 3;
+    SimpleStepController controller(options);
+
+    StepAttemptInfo info;
+    info.dt = 0.4;
+    info.attempt_index = 0;
+    const auto decision = controller.onRejected(
+        info, StepRejectReason::CutTopologyChanged);
+
+    EXPECT_FALSE(decision.accept);
+    EXPECT_TRUE(decision.retry);
+    EXPECT_NEAR(decision.next_dt, 0.1, 1e-15);
+    EXPECT_NE(decision.message.find("cut topology"), std::string::npos);
 }
 
 TEST(VSVO_BDF_Controller, ValidatesOptions)
@@ -391,6 +416,35 @@ TEST(VSVO_BDF_Controller, RejectedNonlinearFailureUsesNonlinearDecreaseFactor)
     EXPECT_TRUE(d.retry);
     EXPECT_EQ(d.next_order, 1);
     EXPECT_NEAR(d.next_dt, 0.2, 1e-15);
+}
+
+TEST(VSVO_BDF_Controller,
+     CutTopologyRejectionIgnoresSubunitErrorAndReducesStepSize)
+{
+    using svmp::FE::timestepping::StepAttemptInfo;
+    using svmp::FE::timestepping::StepRejectReason;
+    using svmp::FE::timestepping::VSVO_BDF_Controller;
+    using svmp::FE::timestepping::VSVO_BDF_ControllerOptions;
+
+    VSVO_BDF_ControllerOptions options;
+    options.initial_order = 2;
+    options.nonlinear_decrease_factor = 0.4;
+    options.max_retries = 3;
+    VSVO_BDF_Controller controller(options);
+
+    StepAttemptInfo info;
+    info.dt = 0.5;
+    info.scheme_order = 2;
+    info.attempt_index = 0;
+    info.error_norm = 0.01;
+    const auto decision = controller.onRejected(
+        info, StepRejectReason::CutTopologyChanged);
+
+    EXPECT_FALSE(decision.accept);
+    EXPECT_TRUE(decision.retry);
+    EXPECT_EQ(decision.next_order, 1);
+    EXPECT_NEAR(decision.next_dt, 0.2, 1e-15);
+    EXPECT_NE(decision.message.find("cut topology"), std::string::npos);
 }
 
 TEST(VSVO_BDF_Controller, InvalidDtAfterUpdateStopsRetrying)

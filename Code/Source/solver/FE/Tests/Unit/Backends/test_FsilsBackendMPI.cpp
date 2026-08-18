@@ -293,6 +293,17 @@ TEST(FsilsBackendMPI, SolveCGOverlap1DChain)
     auto b = factory.createVector(n_global);
     auto x = factory.createVector(n_global);
 
+    // A valid global row outside this rank's owned/ghost overlap must fail
+    // closed instead of being sampled as a physical zero.
+    x->updateGhosts();
+    auto read_view = x->createGhostedReadView();
+    const GlobalIndex missing_read_row =
+        rank == 0 ? GlobalIndex{2} : GlobalIndex{0};
+    EXPECT_THROW(
+        static_cast<void>(
+            read_view->getVectorEntry(missing_read_row)),
+        FEException);
+
     // Assemble matrix (local contributions only).
     auto viewA = A->createAssemblyView();
     viewA->beginAssemblyPhase();

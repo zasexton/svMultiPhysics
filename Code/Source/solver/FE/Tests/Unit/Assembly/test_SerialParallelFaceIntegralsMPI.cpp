@@ -16,6 +16,9 @@
 #include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/L2Space.h"
+#include "Systems/BoundaryReductionService.h"
+#include "Systems/FESystem.h"
+#include "Tests/Unit/Systems/BoundaryReductionSparseReadVector.h"
 
 #include <mpi.h>
 
@@ -24,9 +27,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <span>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 namespace svmp {
@@ -95,9 +100,11 @@ std::vector<int> neighborRanks(int my_rank, int world_size)
 class TwoTetraFaceMeshAccess final : public IMeshAccess {
 public:
     TwoTetraFaceMeshAccess(std::vector<int> cell_owner_ranks,
-                           int my_rank)
+                           int my_rank,
+                           bool rank_local_revisions = false)
         : cell_owner_ranks_(std::move(cell_owner_ranks)),
-          my_rank_(my_rank)
+          my_rank_(my_rank),
+          rank_local_revisions_(rank_local_revisions)
     {
         // Two tetrahedra sharing face {1,2,3}.
         nodes_ = {
@@ -126,6 +133,46 @@ public:
     [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 2; }
     [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 1; }
     [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool revisionTrackingAvailable() const override
+    {
+        return rank_local_revisions_ &&
+               (!rank_local_revision_availability_ ||
+                my_rank_ % 2 == 0);
+    }
+
+    void setRankLocalRevisionAvailability(bool enabled) noexcept
+    {
+        rank_local_revision_availability_ = enabled;
+    }
+    [[nodiscard]] std::uint64_t geometryRevision() const override
+    {
+        return localRevision(1u);
+    }
+    [[nodiscard]] std::uint64_t topologyRevision() const override
+    {
+        return localRevision(2u);
+    }
+    [[nodiscard]] std::uint64_t ownershipRevision() const override
+    {
+        return localRevision(3u);
+    }
+    [[nodiscard]] std::uint64_t numberingRevision() const override
+    {
+        return localRevision(4u);
+    }
+    [[nodiscard]] std::uint64_t labelRevision() const override
+    {
+        return localRevision(5u);
+    }
+    [[nodiscard]] std::uint64_t activeConfigurationEpoch() const override
+    {
+        return localRevision(6u);
+    }
+    [[nodiscard]] std::uint64_t coordinateConfigurationKey() const override
+    {
+        return localRevision(7u);
+    }
 
     [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override
     {
@@ -221,10 +268,19 @@ public:
     }
 
 private:
+    [[nodiscard]] std::uint64_t localRevision(
+        std::uint64_t domain) const noexcept
+    {
+        return domain * std::uint64_t{1000u} +
+               static_cast<std::uint64_t>(my_rank_ + 1);
+    }
+
     std::vector<std::array<Real, 3>> nodes_{};
     std::vector<std::array<GlobalIndex, 4>> cells_{};
     std::vector<int> cell_owner_ranks_{};
     int my_rank_{0};
+    bool rank_local_revisions_{false};
+    bool rank_local_revision_availability_{false};
     std::vector<GlobalIndex> owned_cells_{};
 };
 
@@ -615,6 +671,171 @@ TEST(SerialParallelFaceIntegralsMPI, BoundaryAssemblyMatchesSerialAndGhostPolici
         EXPECT_LT(maxAbsDiff(owned_rows.matrix, reverse_scatter.matrix), tol);
         EXPECT_LT(maxAbsDiff(owned_rows.vector, reverse_scatter.vector), tol);
     }
+}
+
+TEST(SerialParallelFaceIntegralsMPI,
+     BoundaryReductionUsesOwnedFacesAndSparseBackendReads)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size < 2) {
+        GTEST_SKIP() << "Run with 2+ MPI ranks to enable this test";
+    }
+
+    const auto cell_owners = partitionTwoCells(size);
+    auto mesh = std::make_shared<TwoTetraFaceMeshAccess>(
+        cell_owners,
+        rank,
+        /*rank_local_revisions=*/true);
+    const auto topo = buildTwoTetraTopology(cell_owners, rank, size);
+    auto space = std::make_shared<spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto field = system.addField(
+        systems::FieldSpec{
+            .name = "u",
+            .space = space,
+            .components = 1});
+
+    forms::BoundaryFunctional functional;
+    functional.name = "partitioned_sparse_read";
+    functional.integrand =
+        forms::FormExpr::discreteField(field, *space, "u");
+    functional.boundary_marker = 2;
+    forms::BoundaryFunctional rate_functional;
+    rate_functional.name = "partitioned_sparse_exact_rate";
+    rate_functional.integrand =
+        forms::FormExpr::discreteField(field, *space, "u").dt();
+    rate_functional.boundary_marker = 2;
+    auto& service = system.boundaryReductionService(field);
+    service.addBoundaryFunctional(functional);
+    service.addBoundaryFunctional(rate_functional);
+
+    systems::SetupOptions setup_options;
+    setup_options.dof_options.numbering =
+        dofs::DofNumberingStrategy::Sequential;
+    setup_options.dof_options.global_numbering =
+        dofs::GlobalNumberingMode::GlobalIds;
+    setup_options.dof_options.ownership =
+        dofs::OwnershipStrategy::VertexGID;
+    setup_options.dof_options.my_rank = rank;
+    setup_options.dof_options.world_size = size;
+    setup_options.dof_options.mpi_comm = comm;
+    systems::SetupInputs setup_inputs;
+    setup_inputs.topology_override = topo;
+    system.setup(setup_options, setup_inputs);
+
+    std::unordered_map<GlobalIndex, Real> local_values;
+    mesh->forEachOwnedCell([&](GlobalIndex cell_id) {
+        for (const auto dof :
+             system.dofHandler().getDofMap().getCellDofs(cell_id)) {
+            local_values.emplace(dof, Real{1.0});
+        }
+    });
+    auto local_rate_values = local_values;
+    for (auto& [dof, value] : local_rate_values) {
+        static_cast<void>(dof);
+        value = Real{2.0};
+    }
+
+    const auto deliberately_large_global_size =
+        static_cast<GlobalIndex>(std::numeric_limits<int>::max()) +
+        GlobalIndex{17};
+    systems::testing::BoundaryReductionSparseReadVector vector(
+        deliberately_large_global_size,
+        std::move(local_values));
+    systems::testing::BoundaryReductionSparseReadVector rate_vector(
+        deliberately_large_global_size,
+        std::move(local_rate_values));
+    systems::SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u_vector = &vector;
+
+    const Real value = service.evaluateFunctional(functional.name, state);
+    const Real expected =
+        (Real{1.0} + std::sqrt(Real{3.0})) / Real{2.0};
+    EXPECT_NEAR(value, expected, 1e-12);
+    EXPECT_NEAR(service.boundaryMeasure(functional, state),
+                expected,
+                1e-12);
+    EXPECT_NEAR(service.boundaryMeasure(functional, state),
+                expected,
+                1e-12);
+    mesh->setRankLocalRevisionAvailability(true);
+    EXPECT_NEAR(service.boundaryMeasure(functional, state),
+                expected,
+                1e-12);
+    EXPECT_LE(vector.locallyRelevantCount(), 4u);
+    EXPECT_GT(vector.ghostRefreshCount(), 0u);
+
+    // Candidate-stage boundary measurements alias the exact copied rate as
+    // the first history vector and use {0, 1} so dt(field) samples that rate.
+    // The complete time-integration payload is part of the collective request:
+    // a rank-local coefficient drift must reject before ghost refresh or
+    // quadrature of the derivative-bearing probe.
+    assembly::TimeIntegrationContext stage_alias_context;
+    stage_alias_context.integrator_name =
+        "candidate-stage-rate-alias";
+    stage_alias_context.dt1 =
+        assembly::TimeDerivativeStencil{
+            .order = 1,
+            .a = {Real{0.0}, Real{1.0}},
+        };
+    state.time_integration = &stage_alias_context;
+    state.u_prev_vector = &rate_vector;
+    EXPECT_NEAR(
+        service.evaluateFunctional(functional.name, state),
+        expected,
+        1e-12);
+    EXPECT_NEAR(
+        service.evaluateFunctional(rate_functional.name, state),
+        Real{2.0} * expected,
+        1e-12);
+    stage_alias_context.dt1->a[1] =
+        rank == 0 ? Real{1.0} : Real{2.0};
+    const auto refresh_count_before_stencil_drift =
+        vector.ghostRefreshCount();
+    const auto rate_refresh_count_before_stencil_drift =
+        rate_vector.ghostRefreshCount();
+    EXPECT_THROW(
+        static_cast<void>(
+            service.evaluateFunctional(
+                rate_functional.name, state)),
+        InvalidArgumentException);
+    EXPECT_EQ(
+        vector.ghostRefreshCount(),
+        refresh_count_before_stencil_drift);
+    EXPECT_EQ(
+        rate_vector.ghostRefreshCount(),
+        rate_refresh_count_before_stencil_drift);
+    state.time_integration = nullptr;
+    state.u_prev_vector = nullptr;
+
+    const std::uint64_t local_read_count = vector.readCount();
+    std::uint64_t global_read_count = 0u;
+    MPI_Allreduce(&local_read_count,
+                  &global_read_count,
+                  1,
+                  MPI_UINT64_T,
+                  MPI_SUM,
+                  comm);
+    EXPECT_GT(global_read_count, 0u);
+
+    // A rank-local difference in whether ghost refresh enters backend
+    // communication must be rejected before refresh begins.
+    vector.setCollectiveGhostRefreshRequirement(rank == 0);
+    const auto refresh_count_before_schedule_drift =
+        vector.ghostRefreshCount();
+    EXPECT_THROW(
+        static_cast<void>(
+            service.evaluateFunctional(functional.name, state)),
+        InvalidArgumentException);
+    EXPECT_EQ(
+        vector.ghostRefreshCount(),
+        refresh_count_before_schedule_drift);
 }
 
 TEST(SerialParallelFaceIntegralsMPI, CombinedCellAndNitscheBoundaryAssemblyMatchesSerialAndGhostPoliciesAgree)

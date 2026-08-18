@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -127,6 +128,24 @@ TEST(LevelSetInterfaceDomain, RequestCarriesFieldSourceAndMarker)
     EXPECT_EQ(summary.interface_marker, 42);
     EXPECT_EQ(summary.fragment_count, 0u);
     EXPECT_DOUBLE_EQ(summary.measure, 0.0);
+}
+
+TEST(LevelSetInterfaceDomain, RequestRejectsNonfiniteScalars)
+{
+    CutInterfaceDomainRequest request;
+    request.source =
+        LevelSetInterfaceSource::fromEvaluator(
+            "nonfinite-request");
+    request.interface_marker = 42;
+
+    request.isovalue =
+        std::numeric_limits<Real>::quiet_NaN();
+    EXPECT_FALSE(request.valid());
+
+    request.isovalue = Real{0.0};
+    request.tolerance =
+        std::numeric_limits<Real>::infinity();
+    EXPECT_FALSE(request.valid());
 }
 
 TEST(LevelSetInterfaceDomain, AccumulatesFragmentsAndExportsCutQuadrature)
@@ -318,6 +337,59 @@ TEST(LevelSetInterfaceDomain, GeneratedInterfaceMarkersAreStable)
     const int other_marker = registry.assign(other_domain);
     EXPECT_NE(other_marker, marker);
     EXPECT_EQ(registry.size(), 2u);
+}
+
+TEST(LevelSetInterfaceDomain,
+     GeneratedInterfaceStableKeysAreCanonicalAndUnambiguous)
+{
+    GeneratedInterfaceMarkerKey field_key;
+    field_key.source =
+        LevelSetInterfaceSource::fromField(
+            /*field_id=*/8);
+    field_key.domain_id = "interface";
+
+    GeneratedInterfaceMarkerKey evaluator_key =
+        field_key;
+    evaluator_key.source =
+        LevelSetInterfaceSource::fromEvaluator(
+            "field:8");
+    EXPECT_NE(
+        field_key.stableKey(),
+        evaluator_key.stableKey());
+
+    GeneratedInterfaceMarkerKey delimiter_left =
+        field_key;
+    delimiter_left.source =
+        LevelSetInterfaceSource::fromEvaluator(
+            "source|part");
+    delimiter_left.domain_id = "domain";
+    GeneratedInterfaceMarkerKey delimiter_right =
+        delimiter_left;
+    delimiter_right.source =
+        LevelSetInterfaceSource::fromEvaluator(
+            "source");
+    delimiter_right.domain_id = "part|domain";
+    EXPECT_NE(
+        delimiter_left.stableKey(),
+        delimiter_right.stableKey());
+
+    GeneratedInterfaceMarkerKey fine_isovalue =
+        field_key;
+    fine_isovalue.isovalue = Real{1.0e-7};
+    GeneratedInterfaceMarkerKey other_fine_isovalue =
+        fine_isovalue;
+    other_fine_isovalue.isovalue =
+        Real{2.0e-7};
+    EXPECT_NE(
+        fine_isovalue.stableKey(),
+        other_fine_isovalue.stableKey());
+
+    GeneratedInterfaceMarkerKey negative_zero =
+        field_key;
+    negative_zero.isovalue = -Real{0.0};
+    EXPECT_EQ(
+        field_key.stableKey(),
+        negative_zero.stableKey());
 }
 
 TEST(LevelSetInterfaceDomain, GeneratedInterfaceMarkerRegistryHonorsExplicitMarkers)

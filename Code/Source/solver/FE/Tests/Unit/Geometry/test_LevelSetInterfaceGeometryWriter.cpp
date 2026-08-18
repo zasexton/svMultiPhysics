@@ -178,6 +178,8 @@ TEST(LevelSetInterfaceGeometryWriter,
      WritesCurvedPatchQuadraturePointsAsVtpVerts)
 {
     auto request = writer_request();
+    request.generated_domain_id =
+        "writer-interface";
     request.interface_quadrature_order = 3;
     request.implicit_fallback_status = "None";
     LevelSetInterfaceDomain domain(request);
@@ -302,6 +304,10 @@ TEST(LevelSetInterfaceGeometryWriter, DumpsSingleCellQuadratureDebugJson)
         levelSetInterfaceQuadratureDebugJsonString(domain, /*parent_cell=*/11);
 
     EXPECT_NE(json.find("\"parent_cell\": 11"), std::string::npos);
+    EXPECT_NE(
+        json.find(
+            "\"generated_domain_id\": \"writer-interface\""),
+        std::string::npos);
     EXPECT_NE(json.find("\"implicit_geometry_mode\": \"high-order-level-set\""),
               std::string::npos);
     EXPECT_NE(json.find("\"implicit_quadrature_backend\": \"saye-hyperrectangle\""),

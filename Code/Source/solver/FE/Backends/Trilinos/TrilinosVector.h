@@ -47,11 +47,19 @@ public:
     [[nodiscard]] Real norm() const override;
 
     void updateGhosts() override;
+    [[nodiscard]] bool ghostUpdateRequiresCollectiveParticipation()
+        const noexcept override
+    {
+        return !importer_.is_null();
+    }
 
     [[nodiscard]] std::unique_ptr<assembly::GlobalSystemView> createAssemblyView() override;
+    [[nodiscard]] std::unique_ptr<assembly::GlobalSystemView>
+    createGhostedReadView() override;
 
     [[nodiscard]] std::span<Real> localSpan() override;
     [[nodiscard]] std::span<const Real> localSpan() const override;
+    [[nodiscard]] std::vector<GlobalIndex> ownedGlobalRows() const override;
 
     [[nodiscard]] Teuchos::RCP<trilinos::Vector> tpetra() const
     {
@@ -59,6 +67,16 @@ public:
         return vec_;
     }
     [[nodiscard]] Teuchos::RCP<const trilinos::Map> map() const { return map_; }
+
+    /**
+     * @brief Read owned or refreshed overlap entries by public global index.
+     *
+     * Call updateGhosts() collectively before reading overlap entries. A
+     * valid global index outside this vector's owned/overlap layout is rejected
+     * rather than being sampled as zero.
+     */
+    void readGlobalEntries(std::span<const GlobalIndex> dofs,
+                           std::span<Real> values) const;
 
     void invalidateLocalCache() const noexcept;
 
@@ -75,6 +93,7 @@ private:
     mutable std::vector<Real> local_cache_{};
     mutable bool local_cache_valid_{false};
     mutable bool local_cache_dirty_{false};
+    bool primary_map_is_one_to_one_{false};
     std::uint64_t value_revision_{0};
 };
 

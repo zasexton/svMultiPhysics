@@ -504,6 +504,40 @@ void AuxiliaryStateManager::syncGhosts(std::string_view block_name)
     }
 }
 
+std::array<std::uint64_t, 2>
+AuxiliaryStateManager::ghostSyncRouteSignature() const noexcept
+{
+    constexpr std::uint64_t offset = 14695981039346656037ull;
+    constexpr std::uint64_t prime = 1099511628211ull;
+    std::uint64_t route_count = 0u;
+    std::uint64_t digest = offset;
+    const auto mix_byte = [&](std::uint8_t value) {
+        digest ^= value;
+        digest *= prime;
+    };
+    const auto mix_u64 = [&](std::uint64_t value) {
+        for (unsigned int byte = 0u; byte < 8u; ++byte) {
+            mix_byte(static_cast<std::uint8_t>(
+                (value >> (byte * 8u)) & std::uint64_t{0xffu}));
+        }
+    };
+
+    for (const auto& meta : block_meta_) {
+        if (meta.spec.sync_policy !=
+            AuxiliarySyncPolicy::OwnedAndGhost) {
+            continue;
+        }
+        ++route_count;
+        mix_u64(static_cast<std::uint64_t>(meta.spec.name.size()));
+        for (const unsigned char character : meta.spec.name) {
+            mix_byte(character);
+        }
+        mix_byte(meta.ghost_sync_hook ? std::uint8_t{1u}
+                                      : std::uint8_t{0u});
+    }
+    return {{route_count, digest}};
+}
+
 // ---------------------------------------------------------------------------
 //  Lifecycle
 // ---------------------------------------------------------------------------

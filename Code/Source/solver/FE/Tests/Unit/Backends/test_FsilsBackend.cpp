@@ -3687,6 +3687,9 @@ TEST(FsilsBackend, VectorMutationAndCopyBehaveAsExpectedForStandaloneAndSharedLa
 
     const auto owned_dofs = shared_dst_fsils->ownedFeDofs();
     EXPECT_EQ(owned_dofs, (std::vector<GlobalIndex>{0, 1, 2, 3}));
+    EXPECT_EQ(
+        shared_dst_fsils->ownedGlobalRows(),
+        (std::vector<GlobalIndex>{0, 1, 2, 3}));
 }
 
 TEST(FsilsBackend, MatrixGetEntryRespectsPermutationAndSparseStructure)

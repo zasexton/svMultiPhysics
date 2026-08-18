@@ -63,6 +63,21 @@ struct SimulationComponents {
   SimulationComponents& operator=(const SimulationComponents&) = delete;
 };
 
+namespace detail {
+
+/**
+ * Validate cross-equation Physics dependencies before predeclaring fields.
+ *
+ * Kept as one testable ordering boundary: every Navier--Stokes fitted
+ * surface/contact capability is checked before future wet-extension velocity
+ * ownership is allowed to mutate the FE system.
+ */
+void preflightAndPreRegisterPhysicsModuleDependencies(
+    const Parameters& params,
+    SimulationComponents& components);
+
+} // namespace detail
+
 class SimulationBuilder {
 public:
   explicit SimulationBuilder(const Parameters& params);

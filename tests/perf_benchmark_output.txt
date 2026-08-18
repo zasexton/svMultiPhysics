@@ -1,0 +1,308 @@
+=== Performance Benchmark Suite ===
+Date: Mon Mar 23 10:49:47 AM PDT 2026
+Binary: /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics
+OMP_NUM_THREADS=1
+SVMP_FSILS_GMRES_REORTH=off
+Results dir: /home/zack/Downloads/svMultiPhysics/tests/perf_results_20260323_104947
+
+
+==========================================
+  TEST CASE: Channel2D
+==========================================
+--- Running Channel2D (legacy) with solver_perf_legacy.xml ---
+  Wall time: 37.220271756s | Task: 35227.46ms | IPC: 1.41
+  Instructions: 176481610409 | L1d misses: 7837879938 | L1i misses: 236681052
+  Cache miss: 35.99%
+55.59% | Branch miss: 0.13%
+44.41%
+  --- Convergence ---
+
+--- Running Channel2D (oop_cold) with solver_perf_oop.xml ---
+  Wall time: 42.530620925s | Task: 40497.70ms | IPC: 1.74
+  Instructions: 242944256256 | L1d misses: 8104383707 | L1i misses: 1120231285
+  Cache miss: 18.25%
+55.53% | Branch miss: 1.37%
+44.42%
+  --- Convergence ---
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=gmres preconditioner=diagonal rel_tol=9.9999999999999995e-07 abs_tol=1.0000000000000000e-10 max_iter=51000 block_layout=[Velocity(0:2), Pressure(2:1)]
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=10 Time_step_size=5.0000000000000003e-02
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0000000000000000e+00 converged=1 iters=6 ||r||=3.9505541507248210e-05 (linear: converged=1 iters=1079 rel=3.4823864903579733e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=1 time=5.0000000000000003e-02 converged=1 iters=4 ||r||=2.7735842425321350e-07 (linear: converged=1 iters=1237 rel=3.2406733186438828e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=2 time=1.0000000000000001e-01 converged=1 iters=3 ||r||=1.1391455856643642e-05 (linear: converged=1 iters=968 rel=2.9618671464323379e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=3 time=1.5000000000000002e-01 converged=1 iters=3 ||r||=1.6215447407450401e-09 (linear: converged=1 iters=1245 rel=3.5018080422199425e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=4 time=2.0000000000000001e-01 converged=1 iters=3 ||r||=8.0103174108434561e-11 (linear: converged=1 iters=852 rel=3.4469623571139733e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=5 time=2.5000000000000000e-01 converged=1 iters=2 ||r||=1.4380457222584872e-06 (linear: converged=1 iters=1250 rel=4.7366698568373097e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=6 time=2.9999999999999999e-01 converged=1 iters=2 ||r||=2.0901775885423688e-07 (linear: converged=1 iters=1271 rel=4.7648932713071703e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=7 time=3.4999999999999998e-01 converged=1 iters=2 ||r||=3.8254603242124014e-08 (linear: converged=1 iters=1263 rel=4.7295180792699496e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=8 time=3.9999999999999997e-01 converged=1 iters=2 ||r||=3.6084381299325245e-09 (linear: converged=1 iters=1279 rel=4.4836513089639209e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=9 time=4.4999999999999996e-01 converged=1 iters=1 ||r||=5.4747043907351724e-06 (linear: converged=1 iters=1067 rel=3.7728594379508326e-06)
+
+--- Running Channel2D (oop_warm) with solver_perf_oop.xml ---
+  Wall time: 34.395862346s | Task: 32395.19ms | IPC: 1.78
+  Instructions: 192218908454 | L1d misses: 7599008045 | L1i misses: 240384333
+  Cache miss: 19.16%
+55.51% | Branch miss: 0.64%
+44.50%
+  --- Convergence ---
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=gmres preconditioner=diagonal rel_tol=9.9999999999999995e-07 abs_tol=1.0000000000000000e-10 max_iter=51000 block_layout=[Velocity(0:2), Pressure(2:1)]
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=10 Time_step_size=5.0000000000000003e-02
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0000000000000000e+00 converged=1 iters=6 ||r||=3.9505541507248210e-05 (linear: converged=1 iters=1079 rel=3.4823864903579733e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=1 time=5.0000000000000003e-02 converged=1 iters=4 ||r||=2.7735842425321350e-07 (linear: converged=1 iters=1237 rel=3.2406733186438828e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=2 time=1.0000000000000001e-01 converged=1 iters=3 ||r||=1.1391455856643642e-05 (linear: converged=1 iters=968 rel=2.9618671464323379e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=3 time=1.5000000000000002e-01 converged=1 iters=3 ||r||=1.6215447407450401e-09 (linear: converged=1 iters=1245 rel=3.5018080422199425e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=4 time=2.0000000000000001e-01 converged=1 iters=3 ||r||=8.0103174108434561e-11 (linear: converged=1 iters=852 rel=3.4469623571139733e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=5 time=2.5000000000000000e-01 converged=1 iters=2 ||r||=1.4380457222584872e-06 (linear: converged=1 iters=1250 rel=4.7366698568373097e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=6 time=2.9999999999999999e-01 converged=1 iters=2 ||r||=2.0901775885423688e-07 (linear: converged=1 iters=1271 rel=4.7648932713071703e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=7 time=3.4999999999999998e-01 converged=1 iters=2 ||r||=3.8254603242124014e-08 (linear: converged=1 iters=1263 rel=4.7295180792699496e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=8 time=3.9999999999999997e-01 converged=1 iters=2 ||r||=3.6084381299325245e-09 (linear: converged=1 iters=1279 rel=4.4836513089639209e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=9 time=4.4999999999999996e-01 converged=1 iters=1 ||r||=5.4747043907351724e-06 (linear: converged=1 iters=1067 rel=3.7728594379508326e-06)
+
+
+==========================================
+  TEST CASE: Channel2D_Simple
+==========================================
+--- Running Channel2D_Simple (legacy) with solver_perf_legacy.xml ---
+  Wall time: 2.605182697s | Task: 621.83ms | IPC: 1.77
+  Instructions: 3269673114 | L1d misses: 112628303 | L1i misses: 20763025
+  Cache miss: 3.49%
+54.01% | Branch miss: 0.98%
+42.97%
+  --- Convergence ---
+
+--- Running Channel2D_Simple (oop_cold) with solver_perf_oop.xml ---
+  Wall time: 10.377431152s | Task: 10106.73ms | IPC: 1.59
+  Instructions: 56265133353 | L1d misses: 662388990 | L1i misses: 951657981
+  Cache miss: 6.52%
+55.54% | Branch miss: 2.23%
+44.47%
+  --- Convergence ---
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=gmres preconditioner=diagonal rel_tol=9.9999999999999995e-07 abs_tol=1.0000000000000000e-10 max_iter=51000 block_layout=[Velocity(0:2), Pressure(2:1)]
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=10 Time_step_size=5.0000000000000003e-02
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0000000000000000e+00 converged=1 iters=3 ||r||=4.2850866540160665e-06 (linear: converged=1 iters=105 rel=2.2160147561286247e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=1 time=5.0000000000000003e-02 converged=1 iters=3 ||r||=8.9863799117285764e-07 (linear: converged=1 iters=105 rel=3.2252733522199996e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=2 time=1.0000000000000001e-01 converged=1 iters=3 ||r||=1.1826918019954449e-07 (linear: converged=1 iters=102 rel=7.3191397818756755e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=3 time=1.5000000000000002e-01 converged=1 iters=2 ||r||=4.6901517453255598e-06 (linear: converged=1 iters=107 rel=2.4336386566860543e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=4 time=2.0000000000000001e-01 converged=1 iters=2 ||r||=2.6904004172420624e-06 (linear: converged=1 iters=108 rel=3.5049851544631272e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=5 time=2.5000000000000000e-01 converged=1 iters=2 ||r||=1.9657254775404130e-06 (linear: converged=1 iters=108 rel=4.8117736496580852e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=6 time=2.9999999999999999e-01 converged=1 iters=2 ||r||=1.2063779132254431e-06 (linear: converged=1 iters=104 rel=6.0458757720576319e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=7 time=3.4999999999999998e-01 converged=1 iters=2 ||r||=8.3821400810113898e-07 (linear: converged=1 iters=104 rel=5.7433403505361149e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=8 time=3.9999999999999997e-01 converged=1 iters=2 ||r||=4.9234172077895688e-07 (linear: converged=1 iters=64 rel=6.3038280558575602e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=9 time=4.4999999999999996e-01 converged=1 iters=2 ||r||=2.9693427824775593e-07 (linear: converged=1 iters=101 rel=4.9960414131664372e-06)
+
+--- Running Channel2D_Simple (oop_warm) with solver_perf_oop.xml ---
+  Wall time: 1.141961469s | Task: 890.84ms | IPC: 1.57
+  Instructions: 4586856003 | L1d misses: 150948237 | L1i misses: 24758960
+  Cache miss: 5.30%
+55.59% | Branch miss: 1.09%
+44.30%
+  --- Convergence ---
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=gmres preconditioner=diagonal rel_tol=9.9999999999999995e-07 abs_tol=1.0000000000000000e-10 max_iter=51000 block_layout=[Velocity(0:2), Pressure(2:1)]
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=10 Time_step_size=5.0000000000000003e-02
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0000000000000000e+00 converged=1 iters=3 ||r||=4.2850866540160665e-06 (linear: converged=1 iters=105 rel=2.2160147561286247e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=1 time=5.0000000000000003e-02 converged=1 iters=3 ||r||=8.9863799117285764e-07 (linear: converged=1 iters=105 rel=3.2252733522199996e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=2 time=1.0000000000000001e-01 converged=1 iters=3 ||r||=1.1826918019954449e-07 (linear: converged=1 iters=102 rel=7.3191397818756755e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=3 time=1.5000000000000002e-01 converged=1 iters=2 ||r||=4.6901517453255598e-06 (linear: converged=1 iters=107 rel=2.4336386566860543e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=4 time=2.0000000000000001e-01 converged=1 iters=2 ||r||=2.6904004172420624e-06 (linear: converged=1 iters=108 rel=3.5049851544631272e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=5 time=2.5000000000000000e-01 converged=1 iters=2 ||r||=1.9657254775404130e-06 (linear: converged=1 iters=108 rel=4.8117736496580852e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=6 time=2.9999999999999999e-01 converged=1 iters=2 ||r||=1.2063779132254431e-06 (linear: converged=1 iters=104 rel=6.0458757720576319e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=7 time=3.4999999999999998e-01 converged=1 iters=2 ||r||=8.3821400810113898e-07 (linear: converged=1 iters=104 rel=5.7433403505361149e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=8 time=3.9999999999999997e-01 converged=1 iters=2 ||r||=4.9234172077895688e-07 (linear: converged=1 iters=64 rel=6.3038280558575602e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=9 time=4.4999999999999996e-01 converged=1 iters=2 ||r||=2.9693427824775593e-07 (linear: converged=1 iters=101 rel=4.9960414131664372e-06)
+
+
+==========================================
+  TEST CASE: vortex_shedding
+==========================================
+--- Running vortex_shedding (legacy) with solver_perf_legacy.xml ---
+  Wall time: 62.713912844s | Task: 62452.70ms | IPC: 1.42
+  Instructions: 318935251835 | L1d misses: 16465376649 | L1i misses: 110500823
+  Cache miss: 37.44%
+55.55% | Branch miss: 0.27%
+44.45%
+  --- Convergence ---
+
+--- Running vortex_shedding (oop_cold) with solver_perf_oop.xml ---
+  Wall time: 32.376443903s | Task: 30387.89ms | IPC: 1.54
+  Instructions: 142407549021 | L1d misses: 4658697613 | L1i misses: 890835377
+  Cache miss: 33.88%
+55.59% | Branch miss: 1.65%
+44.41%
+  --- Convergence ---
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=gmres preconditioner=diagonal rel_tol=9.9999999999999995e-07 abs_tol=1.0000000000000000e-10 max_iter=251000 block_layout=[Velocity(0:2), Pressure(2:1)]
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=2 Time_step_size=5.0000000000000003e-02
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0000000000000000e+00 converged=1 iters=4 ||r||=2.1503896752986515e-07 (linear: converged=1 iters=890 rel=3.6694982878355497e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=1 time=5.0000000000000003e-02 converged=1 iters=5 ||r||=8.3768414104678454e-10 (linear: converged=1 iters=914 rel=8.4388684343188158e-06)
+
+--- Running vortex_shedding (oop_warm) with solver_perf_oop.xml ---
+  Wall time: 23.182068018s | Task: 21199.39ms | IPC: 1.41
+  Instructions: 84076945460 | L1d misses: 4202677513 | L1i misses: 93430537
+  Cache miss: 38.87%
+55.52% | Branch miss: 1.27%
+44.47%
+  --- Convergence ---
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=gmres preconditioner=diagonal rel_tol=9.9999999999999995e-07 abs_tol=1.0000000000000000e-10 max_iter=251000 block_layout=[Velocity(0:2), Pressure(2:1)]
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=2 Time_step_size=5.0000000000000003e-02
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0000000000000000e+00 converged=1 iters=4 ||r||=2.1503896752986515e-07 (linear: converged=1 iters=890 rel=3.6694982878355497e-06)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=1 time=5.0000000000000003e-02 converged=1 iters=5 ||r||=8.3768414104678454e-10 (linear: converged=1 iters=914 rel=8.4388684343188158e-06)
+
+
+==========================================
+  TEST CASE: pipe_RCR_3d
+==========================================
+--- Running pipe_RCR_3d (legacy) with solver_perf_legacy.xml ---
+  Wall time: 4.701706994s | Task: 2715.54ms | IPC: 2.05
+  Instructions: 19098983657 | L1d misses: 563596849 | L1i misses: 91018807
+  Cache miss: 10.30%
+55.96% | Branch miss: 2.16%
+44.05%
+  --- Convergence ---
+
+--- Running pipe_RCR_3d (oop_cold) with solver_perf_oop.xml ---
+  Wall time: 16.756650801s | Task: 16497.03ms | IPC: 1.83
+  Instructions: 104628249525 | L1d misses: 1172217455 | L1i misses: 1173451218
+  Cache miss: 7.95%
+55.58% | Branch miss: 1.65%
+44.43%
+  --- Convergence ---
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application]   Face 'lumen_wall': file_path='mesh/mesh-surfaces/lumen_wall.vtp'
+[svMultiPhysics::Application]   Face 'lumen_wall': format='vtp' cells=3926 -> label=3
+[svMultiPhysics::Application]   BC 'lumen_wall': boundary_marker=3
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=block-schur preconditioner=diagonal rel_tol=1.0000000000000000e-03 abs_tol=1.0000000000000001e-17 max_iter=15 block_layout=[Velocity(0:3), Pressure(3:1)] saddle_point=(0,1)
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=2 Time_step_size=5.0000000000000001e-03
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0000000000000000e+00 converged=1 iters=3 ||r||=4.3700689214034514e-12 (linear: converged=1 iters=4 rel=1.0640491711870592e-03)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=1 time=5.0000000000000001e-03 converged=1 iters=3 ||r||=2.1156149272770285e-11 (linear: converged=1 iters=3 rel=5.1881743226562236e-04)
+
+--- Running pipe_RCR_3d (oop_warm) with solver_perf_oop.xml ---
+  Wall time: 8.209490026s | Task: 6230.31ms | IPC: 2.17
+  Instructions: 46063368901 | L1d misses: 604977200 | L1i misses: 146220786
+  Cache miss: 8.46%
+55.71% | Branch miss: 0.88%
+44.35%
+  --- Convergence ---
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application]   Face 'lumen_wall': file_path='mesh/mesh-surfaces/lumen_wall.vtp'
+[svMultiPhysics::Application]   Face 'lumen_wall': format='vtp' cells=3926 -> label=3
+[svMultiPhysics::Application]   BC 'lumen_wall': boundary_marker=3
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=block-schur preconditioner=diagonal rel_tol=1.0000000000000000e-03 abs_tol=1.0000000000000001e-17 max_iter=15 block_layout=[Velocity(0:3), Pressure(3:1)] saddle_point=(0,1)
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=2 Time_step_size=5.0000000000000001e-03
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0000000000000000e+00 converged=1 iters=3 ||r||=4.3700689214034514e-12 (linear: converged=1 iters=4 rel=1.0640491711870592e-03)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=1 time=5.0000000000000001e-03 converged=1 iters=3 ||r||=2.1156149272770285e-11 (linear: converged=1 iters=3 rel=5.1881743226562236e-04)
+
+
+==========================================
+  TEST CASE: pipe_simple
+==========================================
+--- Running pipe_simple (legacy) with solver_perf_legacy.xml ---
+  Wall time: 3.141677201s | Task: 2883.70ms | IPC: 2.01
+  Instructions: 19703324453 | L1d misses: 654785566 | L1i misses: 85887051
+  Cache miss: 11.17%
+55.54% | Branch miss: 2.67%
+44.48%
+  --- Convergence ---
+
+--- Running pipe_simple (oop_cold) with solver_perf_oop.xml ---
+  Wall time: 18.921192827s | Task: 18644.85ms | IPC: 1.87
+  Instructions: 120859872516 | L1d misses: 1403979807 | L1i misses: 1217212591
+  Cache miss: 7.80%
+55.54% | Branch miss: 1.63%
+44.45%
+  --- Convergence ---
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application]   Face 'lumen_wall': file_path='mesh/mesh-surfaces/lumen_wall.vtp'
+[svMultiPhysics::Application]   Face 'lumen_wall': format='vtp' cells=3926 -> label=3
+[svMultiPhysics::Application]   BC 'lumen_wall': boundary_marker=3
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=block-schur preconditioner=diagonal rel_tol=1.0000000000000000e-03 abs_tol=1.0000000000000001e-17 max_iter=15 block_layout=[Velocity(0:3), Pressure(3:1)] saddle_point=(0,1)
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=2 Time_step_size=5.0000000000000001e-03
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0000000000000000e+00 converged=1 iters=5 ||r||=1.2066111491109959e-09 (linear: converged=1 iters=3 rel=4.4050011552298758e-04)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=1 time=5.0000000000000001e-03 converged=1 iters=5 ||r||=1.7352356831026648e-08 (linear: converged=1 iters=3 rel=5.4753791676498485e-04)
+
+--- Running pipe_simple (oop_warm) with solver_perf_oop.xml ---
+  Wall time: 10.289801797s | Task: 8311.08ms | IPC: 2.20
+  Instructions: 62465337885 | L1d misses: 832697590 | L1i misses: 196667988
+  Cache miss: 8.19%
+55.40% | Branch miss: 0.94%
+44.58%
+  --- Convergence ---
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application]   Face 'lumen_wall': file_path='mesh/mesh-surfaces/lumen_wall.vtp'
+[svMultiPhysics::Application]   Face 'lumen_wall': format='vtp' cells=3926 -> label=3
+[svMultiPhysics::Application]   BC 'lumen_wall': boundary_marker=3
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=block-schur preconditioner=diagonal rel_tol=1.0000000000000000e-03 abs_tol=1.0000000000000001e-17 max_iter=15 block_layout=[Velocity(0:3), Pressure(3:1)] saddle_point=(0,1)
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=2 Time_step_size=5.0000000000000001e-03
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0000000000000000e+00 converged=1 iters=5 ||r||=1.2066111491109959e-09 (linear: converged=1 iters=3 rel=4.4050011552298758e-04)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=1 time=5.0000000000000001e-03 converged=1 iters=5 ||r||=1.7352356831026648e-08 (linear: converged=1 iters=3 rel=5.4753791676498485e-04)
+
+
+==========================================
+  TEST CASE: iliac_artery
+==========================================
+--- Running iliac_artery (legacy) with solver_perf_legacy.xml ---
+  Wall time: 86.098179434s | Task: 85805.69ms | IPC: 1.68
+  Instructions: 505807669149 | L1d misses: 30898104388 | L1i misses: 1166608851
+  Cache miss: 24.14%
+55.55% | Branch miss: 3.73%
+44.45%
+  --- Convergence ---
+
+--- Running iliac_artery (oop_cold) with solver_perf_oop.xml ---
+  Wall time: 93.965871666s | Task: 93667.16ms | IPC: 1.93
+  Instructions: 602190422317 | L1d misses: 11663118907 | L1i misses: 2444173531
+  Cache miss: 32.95%
+55.56% | Branch miss: 1.80%
+44.44%
+  --- Convergence ---
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application]   Face 'aorta_wall': file_path='mesh/mesh-surfaces/wall_aorta.vtp'
+[svMultiPhysics::Application]   Face 'aorta_wall': format='vtp' cells=8942 -> label=4
+[svMultiPhysics::Application]   Face 'right_iliac_wall': file_path='mesh/mesh-surfaces/wall_right_iliac.vtp'
+[svMultiPhysics::Application]   Face 'right_iliac_wall': format='vtp' cells=3392 -> label=5
+[svMultiPhysics::Application]   BC 'aorta_wall': boundary_marker=4
+[svMultiPhysics::Application]   BC 'right_iliac_wall': boundary_marker=5
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=block-schur preconditioner=diagonal rel_tol=1.0000000000000000e-03 abs_tol=1.0000000000000001e-17 max_iter=15 block_layout=[Velocity(0:3), Pressure(3:1)] saddle_point=(0,1)
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=2 Time_step_size=1.0000000000000000e-03
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0000000000000000e+00 converged=1 iters=5 ||r||=4.7478994394710677e-09 (linear: converged=1 iters=8 rel=1.6589332189950777e-03)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=1 time=1.0000000000000000e-03 converged=1 iters=5 ||r||=4.6309944947324511e-09 (linear: converged=1 iters=4 rel=1.5863662107647805e-03)
+
+--- Running iliac_artery (oop_warm) with solver_perf_oop.xml ---
+  Wall time: 81.583170227s | Task: 79557.06ms | IPC: 2.00
+  Instructions: 525422054083 | L1d misses: 10840793201 | L1i misses: 1142440562
+  Cache miss: 35.01%
+55.57% | Branch miss: 1.67%
+44.43%
+  --- Convergence ---
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application]   Face 'aorta_wall': file_path='mesh/mesh-surfaces/wall_aorta.vtp'
+[svMultiPhysics::Application]   Face 'aorta_wall': format='vtp' cells=8942 -> label=4
+[svMultiPhysics::Application]   Face 'right_iliac_wall': file_path='mesh/mesh-surfaces/wall_right_iliac.vtp'
+[svMultiPhysics::Application]   Face 'right_iliac_wall': format='vtp' cells=3392 -> label=5
+[svMultiPhysics::Application]   BC 'aorta_wall': boundary_marker=4
+[svMultiPhysics::Application]   BC 'right_iliac_wall': boundary_marker=5
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=block-schur preconditioner=diagonal rel_tol=1.0000000000000000e-03 abs_tol=1.0000000000000001e-17 max_iter=15 block_layout=[Velocity(0:3), Pressure(3:1)] saddle_point=(0,1)
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=2 Time_step_size=1.0000000000000000e-03
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0000000000000000e+00 converged=1 iters=5 ||r||=4.7478994394710677e-09 (linear: converged=1 iters=8 rel=1.6589332189950777e-03)
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=1 time=1.0000000000000000e-03 converged=1 iters=5 ||r||=4.6309944947324511e-09 (linear: converged=1 iters=4 rel=1.5863662107647805e-03)
+
+
+==========================================
+  BENCHMARK COMPLETE
+==========================================
+Results saved to: /home/zack/Downloads/svMultiPhysics/tests/perf_results_20260323_104947

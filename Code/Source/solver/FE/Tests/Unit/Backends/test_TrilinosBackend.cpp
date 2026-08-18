@@ -75,6 +75,20 @@ TEST(TrilinosBackend, SolveCG2x2)
 #endif
 }
 
+TEST(TrilinosBackend, VectorReportsPrimaryOwnedRows)
+{
+#if !defined(FE_HAS_TRILINOS)
+    GTEST_SKIP() << "FE_HAS_TRILINOS not enabled";
+#else
+    TrilinosFactory factory;
+    const auto vector = factory.createVector(4);
+    ASSERT_NE(vector, nullptr);
+    EXPECT_EQ(
+        vector->ownedGlobalRows(),
+        (std::vector<GlobalIndex>{0, 1, 2, 3}));
+#endif
+}
+
 TEST(TrilinosBackend, SolveGMRES2x2)
 {
 #if !defined(FE_HAS_TRILINOS)

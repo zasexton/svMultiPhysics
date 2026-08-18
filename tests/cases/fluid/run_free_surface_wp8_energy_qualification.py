@@ -60,7 +60,7 @@ DEFAULT_REGISTRY = SCRIPT_PATH.with_name(
     "free_surface_wp8_energy_qualification_matrix.json"
 )
 EXPECTED_REGISTRY_SHA256 = (
-    "9007fb06e64cf092d2d57e6ea49fda5fe99798e1b52b185e9d1e3fba0bb9e9b6"
+    "3fc4094579f1d209525972aa9b1fe449e03f4b82df050d062804d732b86114f1"
 )
 SHARED_RUNNER_PATH = Path(strict_runner.__file__).resolve()
 SHARED_RUNNER_SHA256 = strict_runner.sha256_file(SHARED_RUNNER_PATH)
@@ -68,16 +68,56 @@ SHARED_RUNNER_SHA256 = strict_runner.sha256_file(SHARED_RUNNER_PATH)
 EXPECTED_ARCHITECTURE_RECORD = (
     "Documentation/free_surface_wp8_geometry_energy_architecture.md"
 )
+EXPECTED_SOURCE_TEST_FILES = {
+    "FreeSurfaceGeometrySnapshot": (
+        "Code/Source/solver/FE/Tests/Unit/Geometry/"
+        "test_GeneratedActiveBoundaryDomain.cpp"
+    ),
+    "NewtonSolverExternalStateFixedPoint": (
+        "Code/Source/solver/FE/Tests/Unit/TimeStepping/test_NewtonSolver.cpp"
+    ),
+    "TimeLoopConvergence": (
+        "Code/Source/solver/FE/Tests/Unit/TimeStepping/"
+        "test_TimeLoopConvergence.cpp"
+    ),
+    "GeneralSimulationParameters": (
+        "Code/Source/solver/Application/Tests/Unit/test_OpenVesselExamples.cpp"
+    ),
+    "ApplicationDriverLevelSetWorkflows": (
+        "Code/Source/solver/Application/Tests/Unit/"
+        "test_ApplicationDriverLevelSetWorkflows.cpp"
+    ),
+    "ApplicationDriverConservativePhaseCandidatesTest": (
+        "Code/Source/solver/Application/Tests/Unit/"
+        "test_ApplicationDriverLevelSetWorkflows.cpp"
+    ),
+    "ApplicationDriverLevelSetVolumeCorrection": (
+        "Code/Source/solver/Application/Tests/Unit/"
+        "test_ApplicationDriverLevelSetWorkflows.cpp"
+    ),
+    "FreeSurfaceEnergyLedger": (
+        "Code/Source/solver/Application/Tests/Unit/"
+        "test_FreeSurfaceEnergyLedger.cpp"
+    ),
+    "ApplicationDriverLevelSetWorkflowsMPI": (
+        "Code/Source/solver/Application/Tests/Unit/"
+        "test_ApplicationDriverLevelSetWorkflowsMPI.cpp"
+    ),
+}
 EXPECTED_FREEZE_SCOPE = (
     "This matrix freezes prerequisite evidence for explicit production selection "
     "between generalized-alpha and backward Euler, the backward-Euler endpoint "
     "transaction, the selected generated-state outer fixed point, transactional "
     "rollback, discrete surface/wall/volume functional evaluation, a "
     "fixed-topology first variation, extension refresh behavior, topology-event "
-    "diagnostics, and the accepted/rejected level-set maintenance ledger. The "
-    "ledger evidence covers ordered transport, limiting, reinitialization, "
+    "diagnostics, the accepted/rejected level-set maintenance ledger, and the "
+    "prospective complete-channel ledger validation/publication contract. The "
+    "maintenance evidence covers ordered transport, limiting, reinitialization, "
     "geometry-reconciliation, and global-correction potential-change rows with "
-    "explicit revision provenance; it does not establish a backward-Euler energy "
+    "explicit revision provenance. The prospective ledger tests validate "
+    "completeness, ownership, endpoint continuity, attempt sequencing, "
+    "fixed-topology acceptance, and zero accepted contribution for rejection; "
+    "they do not establish production channel assembly, a backward-Euler energy "
     "balance, an energy-stable split, a complete physical and numerical energy "
     "identity, outer contraction, topology-event acceptance, or any WP-8 "
     "simulation exit."
@@ -133,6 +173,7 @@ EXPECTED_IMPLEMENTED_ENERGY_CHANNELS = [
     "maintenance_global_correction_surface_wall_volume_potential_change",
     "maintenance_rejected_attempt_zero_accepted_contribution",
     "maintenance_zero_row_accepted_and_rejected_attempt_outcomes",
+    "prospective_complete_channel_ledger_validation_and_publication_contract",
 ]
 EXPECTED_MISSING_ENERGY_CHANNELS = [
     "kinetic_energy",
@@ -176,6 +217,23 @@ EXPECTED_GROUP_TESTS = {
             "NewtonSolverExternalStateFixedPoint.ReallocatesJacobianAfterOuterConstraintSparsityChange",
             "NewtonSolverExternalStateFixedPoint.FirstGeneratedConstraintRefreshDefinesCanonicalRollbackEntry",
             "TimeLoopConvergence.BackwardEulerExternalStateFixedPointPreservesEndpointTransaction",
+        ],
+    ),
+    "complete_energy_ledger_contract_serial": (
+        "application",
+        1,
+        1,
+        [
+            "FreeSurfaceEnergyLedger.CommitsOneCompleteBackwardEulerFixedTopologyBalance",
+            "FreeSurfaceEnergyLedger.AcceptedHistoryRequiresContinuousEndpointAndOwnerProvenance",
+            "FreeSurfaceEnergyLedger.RejectedHistoryAlsoLocksChannelOwnerProvenance",
+            "FreeSurfaceEnergyLedger.UnstagedRejectionPreservesReasonWithoutInventingBalanceValues",
+            "FreeSurfaceEnergyLedger.PartialEndpointProvenanceCannotStageOrClaimTopologyChange",
+            "FreeSurfaceEnergyLedger.TopologyChangeCannotCommitAndRejectedAttemptContributesZero",
+            "FreeSurfaceEnergyLedger.MissingChannelsAndNegativeDissipationFailClosed",
+            "FreeSurfaceEnergyLedger.EveryChannelRequiresOneNamedApplicableOwner",
+            "FreeSurfaceEnergyLedger.RequiresOneEndpointIntervalAndIncreasingTransactionIdentifiers",
+            "FreeSurfaceEnergyLedger.GasApplicabilityMustBeExplicitAndStableAcrossTheStep",
         ],
     ),
     "application_geometry_energy_prerequisites_serial": (
@@ -504,6 +562,39 @@ def _validate_unqualified_exits(value: Any, expected: set[str], label: str) -> N
         raise ValueError(f"WP-8 {label} list changed after freeze")
 
 
+def _validate_source_definitions(registry: dict[str, Any]) -> None:
+    if registry.get("source_test_files") != EXPECTED_SOURCE_TEST_FILES:
+        raise ValueError("WP-8 source-test mapping changed after freeze")
+    source_text: dict[str, str] = {}
+    for suite, relative_path in EXPECTED_SOURCE_TEST_FILES.items():
+        path = REPOSITORY_ROOT / relative_path
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"WP-8 source-test file is unavailable: {path}")
+        source_text[suite] = path.read_text(encoding="utf-8")
+
+    for group in registry.get("groups", []):
+        for full_name in group.get("tests", []):
+            suite, test = full_name.split(".", 1)
+            if suite not in source_text:
+                raise ValueError(
+                    f"WP-8 test suite has no frozen source: {suite}"
+                )
+            pattern = re.compile(
+                r"\bTEST(?:_F|_P)?\(\s*"
+                + re.escape(suite)
+                + r"\s*,\s*"
+                + re.escape(test)
+                + r"\s*\)",
+                re.MULTILINE,
+            )
+            occurrences = len(pattern.findall(source_text[suite]))
+            if occurrences != 1:
+                raise ValueError(
+                    f"WP-8 source definition count for {full_name} is "
+                    f"{occurrences}, expected 1"
+                )
+
+
 def validate_wp8_contract(registry: dict[str, Any]) -> dict[str, Any]:
     if registry.get("prospective_tests") != []:
         raise ValueError("WP-8 cannot freeze with prospective tests")
@@ -580,6 +671,7 @@ def validate_wp8_contract(registry: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("WP-8 distributed recorded-property gates are not frozen")
     if actual_groups != EXPECTED_GROUP_TESTS:
         raise ValueError("WP-8 execution groups changed after freeze")
+    _validate_source_definitions(registry)
 
     quantitative = registry.get("quantitative_evidence")
     if not isinstance(quantitative, list):
@@ -640,7 +732,7 @@ def validate_wp8_contract(registry: dict[str, Any]) -> dict[str, Any]:
 
 strict_runner.SCRIPT_PATH = SCRIPT_PATH
 strict_runner.DEFAULT_REGISTRY = DEFAULT_REGISTRY
-strict_runner.EXPECTED_MATRIX_ID = "free_surface_wp8_energy_prerequisite_v2"
+strict_runner.EXPECTED_MATRIX_ID = "free_surface_wp8_energy_prerequisite_v3"
 strict_runner.EXPECTED_MATRIX_STATUS = "FROZEN_BEFORE_EXECUTION"
 strict_runner.EXPECTED_WORK_PACKAGE = "WP-8"
 strict_runner.__doc__ = __doc__

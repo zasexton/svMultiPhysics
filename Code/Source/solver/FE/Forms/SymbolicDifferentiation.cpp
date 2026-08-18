@@ -34,6 +34,22 @@ namespace {
     return out;
 }
 
+[[nodiscard]] FormExpr wrapExteriorIntegral(const FormExpr& integrand,
+                                            const FormExprNode& integral_node)
+{
+    if (const auto* measure = integral_node.exteriorBoundaryMeasure()) {
+        return integrand.dExteriorBoundary(*measure);
+    }
+    if (integral_node.type() == FormExprType::BoundaryIntegral) {
+        return integrand.ds(integral_node.boundaryMarker().value_or(-1));
+    }
+    if (integral_node.type() == FormExprType::InterfaceIntegral) {
+        return integrand.dI(integral_node.interfaceMarker().value_or(-1));
+    }
+    throw std::invalid_argument(
+        "wrapExteriorIntegral: node is not an exterior-boundary integral");
+}
+
 [[nodiscard]] bool isScalarConstantValue(const FormExprNode& node, Real value)
 {
     if (node.type() != FormExprType::Constant) return false;
@@ -1753,15 +1769,14 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 break;
             }
             case FormExprType::BoundaryIntegral: {
-                const int marker = node->boundaryMarker().value_or(-1);
                 const auto a = diff1(0);
-                out.primal = a.primal.ds(marker);
+                out.primal = wrapExteriorIntegral(a.primal, *node);
                 auto deriv_integrand = a.deriv;
                 if (differentiatesMeshGeometry(cfg)) {
                     deriv_integrand = deriv_integrand +
                         a.primal * (FormExpr::currentMeasureVariation() / FormExpr::currentMeasure());
                 }
-                out.deriv = deriv_integrand.ds(marker);
+                out.deriv = wrapExteriorIntegral(deriv_integrand, *node);
                 break;
             }
             case FormExprType::InteriorFaceIntegral: {
@@ -1777,15 +1792,14 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 break;
             }
             case FormExprType::InterfaceIntegral: {
-                const int marker = node->interfaceMarker().value_or(-1);
                 const auto a = diff1(0);
-                out.primal = a.primal.dI(marker);
+                out.primal = wrapExteriorIntegral(a.primal, *node);
                 auto deriv_integrand = a.deriv;
                 if (differentiatesMeshGeometry(cfg)) {
                     deriv_integrand = deriv_integrand +
                         a.primal * (FormExpr::currentMeasureVariation() / FormExpr::currentMeasure());
                 }
-                out.deriv = deriv_integrand.dI(marker);
+                out.deriv = wrapExteriorIntegral(deriv_integrand, *node);
                 break;
             }
             case FormExprType::CutVolumeIntegral: {
@@ -2637,10 +2651,9 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                 break;
             }
             case FormExprType::BoundaryIntegral: {
-                const int marker = node->boundaryMarker().value_or(-1);
                 const auto a = diff1(0);
-                out.primal = a.primal.ds(marker);
-                out.deriv = a.deriv.ds(marker);
+                out.primal = wrapExteriorIntegral(a.primal, *node);
+                out.deriv = wrapExteriorIntegral(a.deriv, *node);
                 break;
             }
             case FormExprType::InteriorFaceIntegral: {
@@ -2651,10 +2664,9 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                 break;
             }
             case FormExprType::InterfaceIntegral: {
-                const int marker = node->interfaceMarker().value_or(-1);
                 const auto a = diff1(0);
-                out.primal = a.primal.dI(marker);
-                out.deriv = a.deriv.dI(marker);
+                out.primal = wrapExteriorIntegral(a.primal, *node);
+                out.deriv = wrapExteriorIntegral(a.deriv, *node);
                 break;
             }
             case FormExprType::CutVolumeIntegral: {

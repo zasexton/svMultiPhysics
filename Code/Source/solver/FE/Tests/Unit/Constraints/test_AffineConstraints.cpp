@@ -74,6 +74,43 @@ TEST(AffineConstraintsTest, ConstraintLayoutRevisionTracksStructuralChanges) {
     EXPECT_EQ(constraints.constraintLayoutRevision(), after_close);
 }
 
+TEST(AffineConstraintsTest, SemanticFingerprintTracksEveryConstraintValue) {
+    const auto make_constraints = [](GlobalIndex slave,
+                                     GlobalIndex master,
+                                     double weight,
+                                     double inhomogeneity) {
+        AffineConstraints constraints;
+        constraints.addLine(slave);
+        constraints.addEntry(slave, master, weight);
+        constraints.setInhomogeneity(slave, inhomogeneity);
+        constraints.close();
+        return constraints;
+    };
+
+    const auto reference = make_constraints(5, 10, 2.0, 0.5);
+    const auto identical = make_constraints(5, 10, 2.0, 0.5);
+    EXPECT_EQ(
+        constraintSemanticFingerprint(reference),
+        constraintSemanticFingerprint(identical));
+
+    EXPECT_NE(
+        constraintSemanticFingerprint(reference),
+        constraintSemanticFingerprint(
+            make_constraints(6, 10, 2.0, 0.5)));
+    EXPECT_NE(
+        constraintSemanticFingerprint(reference),
+        constraintSemanticFingerprint(
+            make_constraints(5, 11, 2.0, 0.5)));
+    EXPECT_NE(
+        constraintSemanticFingerprint(reference),
+        constraintSemanticFingerprint(
+            make_constraints(5, 10, 3.0, 0.5)));
+    EXPECT_NE(
+        constraintSemanticFingerprint(reference),
+        constraintSemanticFingerprint(
+            make_constraints(5, 10, 2.0, 0.75)));
+}
+
 TEST(AffineConstraintsTest, AddDirichletDuplicateSameValueIsIdempotent) {
     AffineConstraints constraints;
 

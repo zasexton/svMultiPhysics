@@ -145,6 +145,20 @@ TEST(EigenBackend, VectorViewAndOps)
 #endif
 }
 
+TEST(EigenBackend, VectorReportsCertifiedOwnedRows)
+{
+#if !defined(FE_HAS_EIGEN)
+    GTEST_SKIP() << "FE_HAS_EIGEN not enabled";
+#else
+    EigenFactory factory;
+    const auto vector = factory.createVector(4);
+    ASSERT_NE(vector, nullptr);
+    EXPECT_EQ(
+        vector->ownedGlobalRows(),
+        (std::vector<GlobalIndex>{0, 1, 2, 3}));
+#endif
+}
+
 TEST(EigenBackend, VectorValueRevisionTracksMutations)
 {
 #if !defined(FE_HAS_EIGEN)

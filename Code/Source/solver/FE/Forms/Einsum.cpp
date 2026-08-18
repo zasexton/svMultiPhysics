@@ -196,9 +196,17 @@ FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
     if (isIntegralNode(t)) {
         const auto integrand = rebuildUnary(node, assignment);
         if (t == FormExprType::CellIntegral) return integrand.dx();
-        if (t == FormExprType::BoundaryIntegral) return integrand.ds(node->boundaryMarker().value_or(-1));
+        if (t == FormExprType::BoundaryIntegral) {
+            if (const auto* measure = node->exteriorBoundaryMeasure()) {
+                return integrand.dExteriorBoundary(*measure);
+            }
+            return integrand.ds(node->boundaryMarker().value_or(-1));
+        }
         if (t == FormExprType::InteriorFaceIntegral) {
             return integrand.dS(node->interfaceMarker().value_or(-1));
+        }
+        if (const auto* measure = node->exteriorBoundaryMeasure()) {
+            return integrand.dExteriorBoundary(*measure);
         }
         return integrand.dI(node->interfaceMarker().value_or(-1));
     }

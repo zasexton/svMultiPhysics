@@ -18,17 +18,22 @@ namespace forms {
 
 namespace {
 
-FormExpr wrapIntegral(const FormExpr& integrand, IntegralDomain domain, int boundary_marker)
+FormExpr wrapIntegral(const FormExpr& integrand, const IntegralTerm& term)
 {
-    switch (domain) {
+    if (term.exterior_boundary_measure.has_value()) {
+        return integrand.dExteriorBoundary(*term.exterior_boundary_measure);
+    }
+    switch (term.domain) {
         case IntegralDomain::Cell:
             return integrand.dx();
         case IntegralDomain::Boundary:
-            return integrand.ds(boundary_marker);
+            return integrand.ds(term.boundary_marker);
         case IntegralDomain::InteriorFace:
-            return integrand.dS();
+            return integrand.dS(term.interface_marker);
         case IntegralDomain::InterfaceFace:
-            return integrand.dI(boundary_marker);
+            return integrand.dI(term.interface_marker);
+        case IntegralDomain::CutVolume:
+            return integrand.dCutVolume(term.interface_marker, term.cut_volume_side);
     }
     return {};
 }
@@ -420,14 +425,14 @@ std::optional<AffineResidualSplit> trySplitAffineResidual(
 
         // Bilinear portion: must contain both test+trial functions.
         if (d.linear.isValid() && d.linear.hasTest() && d.linear.hasTrial()) {
-            const auto wrapped = wrapIntegral(d.linear, term.domain, term.boundary_marker);
+            const auto wrapped = wrapIntegral(d.linear, term);
             bilinear_sum = have_bilinear ? (bilinear_sum + wrapped) : wrapped;
             have_bilinear = true;
         }
 
         // Linear portion: test-only.
         if (d.constant.isValid() && d.constant.hasTest() && !d.constant.hasTrial()) {
-            const auto wrapped = wrapIntegral(d.constant, term.domain, term.boundary_marker);
+            const auto wrapped = wrapIntegral(d.constant, term);
             linear_sum = have_linear ? (linear_sum + wrapped) : wrapped;
             have_linear = true;
         }

@@ -34,15 +34,18 @@
 
 #include "TimeStepping/TimeHistory.h"
 #include "TimeStepping/TimeLoop.h"
+#include "TimeStepping/TimeSteppingUtils.h"
 #include "TimeStepping/VSVO_BDF_Controller.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <numeric>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 using svmp::FE::ElementType;
@@ -59,6 +62,61 @@ using ts_test::getVectorByDof;
 using ts_test::relativeL2Error;
 using ts_test::setVectorByDof;
 using ts_test::singleTetraTopology;
+
+class RevisionTrackingSingleTetraMeshAccess final
+    : public svmp::FE::forms::test::SingleTetraMeshAccess {
+public:
+    explicit RevisionTrackingSingleTetraMeshAccess(
+        std::array<std::uint64_t, 8> revisions)
+        : revisions_(revisions)
+    {
+    }
+
+    [[nodiscard]] bool revisionTrackingAvailable() const override
+    {
+        return true;
+    }
+    [[nodiscard]] std::uint64_t geometryRevision() const override
+    {
+        return revisions_[0];
+    }
+    [[nodiscard]] std::uint64_t topologyRevision() const override
+    {
+        return revisions_[1];
+    }
+    [[nodiscard]] std::uint64_t ownershipRevision() const override
+    {
+        return revisions_[2];
+    }
+    [[nodiscard]] std::uint64_t numberingRevision() const override
+    {
+        return revisions_[3];
+    }
+    [[nodiscard]] std::uint64_t fieldLayoutRevision() const override
+    {
+        return revisions_[4];
+    }
+    [[nodiscard]] std::uint64_t labelRevision() const override
+    {
+        return revisions_[5];
+    }
+    [[nodiscard]] std::uint64_t activeConfigurationEpoch() const override
+    {
+        return revisions_[6];
+    }
+    [[nodiscard]] std::uint64_t coordinateConfigurationKey() const override
+    {
+        return revisions_[7];
+    }
+
+    void setGeometryRevision(std::uint64_t revision) noexcept
+    {
+        revisions_[0] = revision;
+    }
+
+private:
+    std::array<std::uint64_t, 8> revisions_{};
+};
 
 [[nodiscard]] svmp::FE::dofs::MeshTopologyInfo twoTetraSharedFaceTopology()
 {
@@ -315,6 +373,51 @@ private:
     RateInitializationTimeObservations& observations_;
 };
 
+// Test-only wrapper that preserves assembly behavior and temporal order while
+// deliberately hiding the delegate's form IR from FESystem's operator-local
+// derivative-field discovery. This permits residual and Jacobian operator tags
+// to be numerically identical but semantically distinguishable in metadata.
+class OpaqueDerivativeFieldMetadataKernel final
+    : public svmp::FE::assembly::AssemblyKernel {
+public:
+    explicit OpaqueDerivativeFieldMetadataKernel(
+        std::shared_ptr<svmp::FE::assembly::AssemblyKernel> delegate)
+        : delegate_(std::move(delegate))
+    {
+    }
+
+    [[nodiscard]] svmp::FE::assembly::RequiredData getRequiredData()
+        const override
+    {
+        return delegate_->getRequiredData();
+    }
+
+    void computeCell(
+        const svmp::FE::assembly::AssemblyContext& context,
+        svmp::FE::assembly::KernelOutput& output) override
+    {
+        delegate_->computeCell(context, output);
+    }
+
+    [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override
+    {
+        return delegate_->maxTemporalDerivativeOrder();
+    }
+
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override
+    {
+        return delegate_->hasExplicitTimeDependency();
+    }
+
+    [[nodiscard]] std::string name() const override
+    {
+        return "OpaqueDerivativeFieldMetadataKernel";
+    }
+
+private:
+    std::shared_ptr<svmp::FE::assembly::AssemblyKernel> delegate_;
+};
+
 [[nodiscard]] std::pair<double, double> coupledReactionExact2x2(double t,
                                                                 double u0,
                                                                 double w0,
@@ -381,9 +484,16 @@ std::vector<Real> runReactionProblem(svmp::FE::timestepping::SchemeKind scheme,
                                      std::function<void(
                                          svmp::FE::systems::FESystem&,
                                          svmp::FE::FieldId)>
-                                         configure_system = {})
+                                         configure_system = {},
+                                     std::shared_ptr<
+                                         svmp::FE::forms::test::
+                                             SingleTetraMeshAccess>
+                                         mesh_override = {})
 {
-    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto mesh = mesh_override
+        ? std::move(mesh_override)
+        : std::make_shared<
+              svmp::FE::forms::test::SingleTetraMeshAccess>();
     auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
 
     svmp::FE::systems::FESystem sys(mesh);
@@ -697,6 +807,53 @@ public:
     {
         return svmp::FE::timestepping::VSVO_BDF_Controller::onRejected(info, reason);
     }
+};
+
+class RecordingAcceptanceGateController final
+    : public svmp::FE::timestepping::StepController {
+public:
+    explicit RecordingAcceptanceGateController(int max_retries = 3)
+        : max_retries_(max_retries)
+    {
+    }
+
+    [[nodiscard]] int maxRetries() const noexcept override
+    {
+        return max_retries_;
+    }
+
+    [[nodiscard]] svmp::FE::timestepping::StepDecision onAccepted(
+        const svmp::FE::timestepping::StepAttemptInfo& info) override
+    {
+        accepted.push_back(info);
+        return svmp::FE::timestepping::StepDecision{
+            .accept = true,
+            .retry = false,
+            .next_dt = info.dt,
+            .next_order = info.scheme_order,
+            .message = "accepted"};
+    }
+
+    [[nodiscard]] svmp::FE::timestepping::StepDecision onRejected(
+        const svmp::FE::timestepping::StepAttemptInfo& info,
+        svmp::FE::timestepping::StepRejectReason reason) override
+    {
+        rejected.emplace_back(info, reason);
+        return svmp::FE::timestepping::StepDecision{
+            .accept = false,
+            .retry = info.attempt_index < max_retries_,
+            .next_dt = 0.5 * info.dt,
+            .next_order = info.scheme_order,
+            .message = "rejected by final candidate gate"};
+    }
+
+    std::vector<svmp::FE::timestepping::StepAttemptInfo> accepted{};
+    std::vector<std::pair<
+        svmp::FE::timestepping::StepAttemptInfo,
+        svmp::FE::timestepping::StepRejectReason>> rejected{};
+
+private:
+    int max_retries_{3};
 };
 
 std::vector<Real> runLogisticProblem(svmp::FE::timestepping::SchemeKind scheme,
@@ -1814,6 +1971,516 @@ TEST(TimeLoopSanity, BackwardEuler_SingleStep_AdvancesSolution)
     }
 }
 
+TEST(TimeLoopCallbacks,
+     BackwardEulerCandidateStageCarriesExactEndpointStateAndRate)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr double dt = 0.2;
+    constexpr double lambda = 1.25;
+    const std::vector<Real> initial = {1.0, -0.5, 0.25, 2.0};
+
+    std::vector<Real> observed_state;
+    std::vector<Real> observed_rate;
+    std::vector<std::string> events;
+    const auto final_values = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::BackwardEuler,
+        dt,
+        dt,
+        lambda,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1.0e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_candidate_stage =
+                [&](const svmp::FE::timestepping::
+                        CandidateStageObservation& observation) {
+                    events.emplace_back("stage");
+                    EXPECT_EQ(observation.scheme,
+                              svmp::FE::timestepping::SchemeKind::
+                                  BackwardEuler);
+                    EXPECT_EQ(observation.temporal_order, 1);
+                    EXPECT_EQ(observation.step_index, 1);
+                    EXPECT_EQ(observation.attempt_index, 0);
+                    EXPECT_NEAR(observation.step_start_time, 0.0, 1.0e-15);
+                    EXPECT_NEAR(observation.step_end_time, dt, 1.0e-15);
+                    EXPECT_NEAR(observation.state_time, dt, 1.0e-15);
+                    EXPECT_NEAR(observation.rate_time, dt, 1.0e-15);
+                    EXPECT_NEAR(observation.dt, dt, 1.0e-15);
+                    EXPECT_FALSE(observation.generalized_alpha.has_value());
+                    ASSERT_NE(observation.state_vector, nullptr);
+                    ASSERT_NE(observation.rate_vector, nullptr);
+                    EXPECT_FALSE(
+                        observation.time_derivative_fields.empty());
+                    const auto state =
+                        observation.state_vector->localSpan();
+                    const auto rate =
+                        observation.rate_vector->localSpan();
+                    observed_state.assign(state.begin(), state.end());
+                    observed_rate.assign(rate.begin(), rate.end());
+                };
+            callbacks.on_before_step_accept =
+                [&](svmp::FE::timestepping::TimeHistory&,
+                    const svmp::FE::timestepping::NewtonReport&) {
+                    events.emplace_back("candidate");
+                    return true;
+                };
+            callbacks.on_step_commit_ready =
+                [&](svmp::FE::timestepping::TimeHistory&) {
+                    events.emplace_back("commit");
+                };
+            callbacks.on_step_accepted =
+                [&](svmp::FE::timestepping::TimeHistory&) {
+                    events.emplace_back("accepted");
+                };
+        });
+
+    ASSERT_EQ(events,
+              (std::vector<std::string>{
+                  "stage", "candidate", "commit", "accepted"}));
+    ASSERT_EQ(observed_state.size(), initial.size());
+    ASSERT_EQ(observed_rate.size(), initial.size());
+    ASSERT_EQ(final_values.size(), initial.size());
+    for (std::size_t i = 0; i < initial.size(); ++i) {
+        EXPECT_NEAR(observed_state[i], final_values[i], 1.0e-12);
+        EXPECT_NEAR(observed_rate[i],
+                    (observed_state[i] - initial[i]) /
+                        static_cast<Real>(dt),
+                    1.0e-12);
+        EXPECT_NEAR(observed_rate[i],
+                    -static_cast<Real>(lambda) * observed_state[i],
+                    1.0e-12);
+    }
+}
+
+TEST(TimeLoopCallbacks,
+     CandidateStageCarriesPreNonlinearDoneMeshRevisions)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr double dt = 0.2;
+    constexpr std::array<std::uint64_t, 8> revisions{{
+        11u, 22u, 33u, 44u, 55u, 66u, 77u, 88u}};
+    constexpr std::uint64_t mutated_geometry_revision = 111u;
+    auto mesh = std::make_shared<
+        RevisionTrackingSingleTetraMeshAccess>(revisions);
+
+    bool nonlinear_done_called = false;
+    bool candidate_called = false;
+    const auto final_values = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::BackwardEuler,
+        dt,
+        dt,
+        /*lambda=*/1.25,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1.0e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_nonlinear_done =
+                [&](const svmp::FE::timestepping::TimeHistory&,
+                    const svmp::FE::timestepping::NewtonReport& report) {
+                    EXPECT_TRUE(report.converged);
+                    nonlinear_done_called = true;
+                    mesh->setGeometryRevision(
+                        mutated_geometry_revision);
+                };
+            callbacks.on_candidate_stage =
+                [&](const svmp::FE::timestepping::
+                        CandidateStageObservation& observation) {
+                    candidate_called = true;
+                    EXPECT_TRUE(nonlinear_done_called);
+                    ASSERT_TRUE(observation.mesh_revision.has_value());
+                    const auto& captured = *observation.mesh_revision;
+                    EXPECT_EQ(captured.geometry_revision, revisions[0]);
+                    EXPECT_EQ(captured.topology_revision, revisions[1]);
+                    EXPECT_EQ(captured.ownership_revision, revisions[2]);
+                    EXPECT_EQ(captured.numbering_revision, revisions[3]);
+                    EXPECT_EQ(captured.field_layout_revision, revisions[4]);
+                    EXPECT_EQ(captured.label_revision, revisions[5]);
+                    EXPECT_EQ(captured.active_configuration_epoch,
+                              revisions[6]);
+                    EXPECT_EQ(captured.coordinate_configuration_key,
+                              revisions[7]);
+                    EXPECT_EQ(mesh->geometryRevision(),
+                              mutated_geometry_revision);
+                };
+        },
+        /*inspect_expected_exception=*/{},
+        /*configure_options=*/{},
+        /*configure_system=*/{},
+        mesh);
+
+    EXPECT_TRUE(nonlinear_done_called);
+    EXPECT_TRUE(candidate_called);
+    EXPECT_EQ(final_values.size(), 4u);
+}
+
+TEST(TimeLoopCallbacks,
+     CandidateStageDerivativeFieldsFollowResidualOperatorTag)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr double dt = 0.2;
+    constexpr double lambda = 1.25;
+    constexpr double rho_inf = 0.5;
+    const auto ga_parameters =
+        svmp::FE::timestepping::utils::
+            generalizedAlphaFirstOrderFromRhoInf(rho_inf);
+    bool split_tags_configured = false;
+    bool candidate_observed = false;
+    bool endpoint_rate_observed = false;
+    svmp::FE::FieldId observed_field = svmp::FE::INVALID_FIELD_ID;
+
+    const auto final_values = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        dt,
+        dt,
+        lambda,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/rho_inf,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1.0e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_candidate_stage =
+                [&](const svmp::FE::timestepping::
+                        CandidateStageObservation& observation) {
+                    candidate_observed = true;
+                    ASSERT_EQ(observation.time_derivative_fields.size(), 1u);
+                    EXPECT_EQ(observation.time_derivative_fields.front(),
+                              observed_field);
+                };
+            callbacks.on_step_candidate_ready =
+                [&](svmp::FE::timestepping::TimeHistory& history,
+                    const svmp::FE::timestepping::NewtonReport&)
+                    -> std::optional<svmp::FE::timestepping::
+                                         StepRejectReason> {
+                    endpoint_rate_observed = true;
+                    const auto endpoint = history.uSpan();
+                    const auto endpoint_rate = history.uDotSpan();
+                    EXPECT_EQ(endpoint.size(), endpoint_rate.size());
+                    if (endpoint.size() != endpoint_rate.size()) {
+                        return std::nullopt;
+                    }
+                    const auto previous = history.uPrevSpan();
+                    EXPECT_EQ(endpoint.size(), previous.size());
+                    if (endpoint.size() != previous.size()) {
+                        return std::nullopt;
+                    }
+                    for (std::size_t index = 0u; index < endpoint.size();
+                         ++index) {
+                        const auto prior_rate =
+                            -static_cast<Real>(lambda) * previous[index];
+                        const auto expected_endpoint_rate =
+                            (endpoint[index] - previous[index]) /
+                                static_cast<Real>(ga_parameters.gamma * dt) -
+                            static_cast<Real>(
+                                (1.0 - ga_parameters.gamma) /
+                                ga_parameters.gamma) *
+                                prior_rate;
+                        EXPECT_NEAR(endpoint_rate[index],
+                                    expected_endpoint_rate,
+                                    1.0e-10);
+                        EXPECT_NE(endpoint_rate[index], Real{0.0});
+                    }
+                    return std::nullopt;
+                };
+        },
+        /*inspect_expected_exception=*/{},
+        [&](svmp::FE::timestepping::TimeLoopOptions& options,
+            svmp::FE::FieldId field) {
+            observed_field = field;
+            options.newton.jacobian_op = "opaque_jacobian";
+        },
+        [&](svmp::FE::systems::FESystem& system,
+            svmp::FE::FieldId field) {
+            const auto& space = *system.fieldRecord(field).space;
+            const auto u = svmp::FE::forms::FormExpr::trialFunction(
+                space, "opaque_jacobian_u");
+            const auto v = svmp::FE::forms::FormExpr::testFunction(
+                space, "opaque_jacobian_v");
+            const auto form =
+                (svmp::FE::forms::dt(u) * v +
+                 (u * v) * static_cast<Real>(lambda))
+                    .dx();
+            svmp::FE::forms::FormCompiler compiler;
+            auto ir = compiler.compileResidual(form);
+            auto delegate =
+                std::make_shared<svmp::FE::forms::NonlinearFormKernel>(
+                    std::move(ir), svmp::FE::forms::ADMode::Forward);
+            system.addOperator("opaque_jacobian");
+            system.addCellKernel(
+                "opaque_jacobian",
+                field,
+                field,
+                std::make_shared<OpaqueDerivativeFieldMetadataKernel>(
+                    std::move(delegate)));
+            EXPECT_EQ(system.timeDerivativeFields("op"),
+                      (std::vector<svmp::FE::FieldId>{field}));
+            EXPECT_TRUE(
+                system.timeDerivativeFields("opaque_jacobian").empty());
+            split_tags_configured = true;
+        });
+
+    EXPECT_TRUE(split_tags_configured);
+    EXPECT_TRUE(candidate_observed);
+    EXPECT_TRUE(endpoint_rate_observed);
+    EXPECT_EQ(final_values.size(), 4u);
+}
+
+TEST(TimeLoopCallbacks,
+     GeneralizedAlphaCandidateStageCarriesOperatorStateRateAndCoordinates)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr double dt = 0.2;
+    constexpr double lambda = 1.25;
+    constexpr double rho_inf = 0.5;
+    const auto parameters =
+        svmp::FE::timestepping::utils::
+            generalizedAlphaFirstOrderFromRhoInf(rho_inf);
+    const std::vector<Real> initial = {1.0, -0.5, 0.25, 2.0};
+
+    std::vector<Real> observed_stage_state;
+    std::vector<Real> observed_stage_rate;
+    std::vector<Real> endpoint_candidate;
+    std::vector<std::string> events;
+    const auto final_values = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        dt,
+        dt,
+        lambda,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        rho_inf,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1.0e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_candidate_stage =
+                [&](const svmp::FE::timestepping::
+                        CandidateStageObservation& observation) {
+                    events.emplace_back("stage");
+                    EXPECT_EQ(observation.scheme,
+                              svmp::FE::timestepping::SchemeKind::
+                                  GeneralizedAlpha);
+                    ASSERT_TRUE(
+                        observation.generalized_alpha.has_value());
+                    EXPECT_NEAR(
+                        observation.generalized_alpha->alpha_f,
+                        parameters.alpha_f,
+                        1.0e-15);
+                    EXPECT_NEAR(
+                        observation.generalized_alpha->alpha_m,
+                        parameters.alpha_m,
+                        1.0e-15);
+                    EXPECT_NEAR(
+                        observation.generalized_alpha->gamma,
+                        parameters.gamma,
+                        1.0e-15);
+                    EXPECT_NEAR(observation.state_time,
+                                parameters.alpha_f * dt,
+                                1.0e-15);
+                    EXPECT_NEAR(observation.rate_time,
+                                parameters.alpha_m * dt,
+                                1.0e-15);
+                    EXPECT_NEAR(observation.step_end_time, dt, 1.0e-15);
+                    ASSERT_NE(observation.state_vector, nullptr);
+                    ASSERT_NE(observation.rate_vector, nullptr);
+                    EXPECT_FALSE(
+                        observation.time_derivative_fields.empty());
+                    const auto state =
+                        observation.state_vector->localSpan();
+                    const auto rate =
+                        observation.rate_vector->localSpan();
+                    observed_stage_state.assign(state.begin(), state.end());
+                    observed_stage_rate.assign(rate.begin(), rate.end());
+                };
+            callbacks.on_before_step_accept =
+                [&](svmp::FE::timestepping::TimeHistory& history,
+                    const svmp::FE::timestepping::NewtonReport&) {
+                    events.emplace_back("candidate");
+                    const auto endpoint = history.uSpan();
+                    endpoint_candidate.assign(endpoint.begin(),
+                                              endpoint.end());
+                    return true;
+                };
+            callbacks.on_step_commit_ready =
+                [&](svmp::FE::timestepping::TimeHistory&) {
+                    events.emplace_back("commit");
+                };
+            callbacks.on_step_accepted =
+                [&](svmp::FE::timestepping::TimeHistory&) {
+                    events.emplace_back("accepted");
+                };
+        });
+
+    ASSERT_EQ(events,
+              (std::vector<std::string>{
+                  "stage", "candidate", "commit", "accepted"}));
+    ASSERT_EQ(observed_stage_state.size(), initial.size());
+    ASSERT_EQ(observed_stage_rate.size(), initial.size());
+    ASSERT_EQ(endpoint_candidate.size(), initial.size());
+    ASSERT_EQ(final_values.size(), initial.size());
+    for (std::size_t i = 0; i < initial.size(); ++i) {
+        const Real expected_stage =
+            static_cast<Real>(parameters.alpha_f) *
+                endpoint_candidate[i] +
+            static_cast<Real>(1.0 - parameters.alpha_f) * initial[i];
+        EXPECT_NEAR(observed_stage_state[i], expected_stage, 1.0e-12);
+        EXPECT_NEAR(observed_stage_rate[i],
+                    -static_cast<Real>(lambda) *
+                        observed_stage_state[i],
+                    1.0e-11);
+        EXPECT_NEAR(endpoint_candidate[i], final_values[i], 1.0e-12);
+    }
+    EXPECT_NE(observed_stage_state, endpoint_candidate);
+}
+
+TEST(TimeLoopCallbacks,
+     GeneralizedAlphaCandidateAttemptTracksPrecedingNonlinearRetry)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using svmp::FE::timestepping::SimpleStepController;
+    using svmp::FE::timestepping::SimpleStepControllerOptions;
+    using svmp::FE::timestepping::StepRejectReason;
+
+    SimpleStepControllerOptions controller_options;
+    controller_options.decrease_factor = 0.5;
+    controller_options.increase_factor = 1.0;
+    controller_options.max_retries = 2;
+    auto controller =
+        std::make_shared<SimpleStepController>(controller_options);
+    auto fail_first_nonlinear_sync = std::make_shared<bool>(true);
+    std::optional<int> tracked_step;
+    int tracked_attempt = -1;
+    int nonlinear_rejections = 0;
+    std::vector<std::pair<int, int>> observed_step_attempts;
+
+    const auto final_values = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        /*dt=*/0.2,
+        /*t_end=*/0.2,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        controller,
+        /*generalized_alpha_rho_inf=*/0.2,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1.0e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_step_start =
+                [&](const svmp::FE::timestepping::TimeHistory& history) {
+                    if (!tracked_step.has_value() ||
+                        *tracked_step != history.stepIndex()) {
+                        tracked_step = history.stepIndex();
+                        tracked_attempt = 0;
+                    } else {
+                        ++tracked_attempt;
+                    }
+                };
+            callbacks.on_candidate_stage =
+                [&](const svmp::FE::timestepping::
+                        CandidateStageObservation& observation) {
+                    EXPECT_EQ(observation.attempt_index, tracked_attempt);
+                    observed_step_attempts.emplace_back(
+                        observation.step_index, observation.attempt_index);
+                };
+            callbacks.on_step_rejected =
+                [&](const svmp::FE::timestepping::TimeHistory&,
+                    StepRejectReason reason,
+                    const svmp::FE::timestepping::NewtonReport& report) {
+                    EXPECT_EQ(reason, StepRejectReason::NonlinearSolveFailed);
+                    EXPECT_FALSE(report.converged);
+                    ++nonlinear_rejections;
+                };
+        },
+        /*inspect_expected_exception=*/{},
+        [fail_first_nonlinear_sync](
+            svmp::FE::timestepping::TimeLoopOptions& options,
+            svmp::FE::FieldId) {
+            options.initialize_first_order_rate_from_pde = false;
+            options.newton.synchronize_state =
+                [fail_first_nonlinear_sync](
+                    const svmp::FE::systems::SystemStateView&,
+                    svmp::FE::timestepping::NewtonOptions::
+                        StateSynchronizationPoint) {
+                    if (*fail_first_nonlinear_sync) {
+                        *fail_first_nonlinear_sync = false;
+                        throw svmp::FE::systems::InvalidStateException(
+                            "forced first-attempt nonlinear synchronization "
+                            "failure");
+                    }
+                };
+        });
+
+    ASSERT_EQ(final_values.size(), 4u);
+    EXPECT_EQ(nonlinear_rejections, 1);
+    ASSERT_FALSE(observed_step_attempts.empty());
+    EXPECT_EQ(observed_step_attempts.front(), (std::pair<int, int>{1, 1}));
+    for (std::size_t i = 1u; i < observed_step_attempts.size(); ++i) {
+        EXPECT_EQ(observed_step_attempts[i].second, 0);
+    }
+}
+
 TEST(TimeLoopCallbacks, BeforeStepAcceptRejectsConvergedCandidateAndRetries)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
@@ -1831,12 +2498,14 @@ TEST(TimeLoopCallbacks, BeforeStepAcceptRejectsConvergedCandidateAndRetries)
         std::make_shared<SimpleStepController>(controller_options);
 
     int candidate_calls = 0;
+    int stage_observation_calls = 0;
     int discarded_candidate_calls = 0;
     int commit_ready_calls = 0;
     int rejected_calls = 0;
     int accepted_calls = 0;
     std::vector<double> accepted_times;
     std::vector<double> retry_dt_updates;
+    bool stage_observation_pending = false;
 
     const auto final_values = runReactionProblem(
         svmp::FE::timestepping::SchemeKind::BackwardEuler,
@@ -1858,10 +2527,18 @@ TEST(TimeLoopCallbacks, BeforeStepAcceptRejectsConvergedCandidateAndRetries)
         /*newton_rel_tolerance=*/0.0,
         [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
             svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_candidate_stage =
+                [&](const svmp::FE::timestepping::
+                        CandidateStageObservation&) {
+                    ++stage_observation_calls;
+                    EXPECT_FALSE(stage_observation_pending);
+                    stage_observation_pending = true;
+                };
             callbacks.on_before_step_accept =
                 [&](svmp::FE::timestepping::TimeHistory& h,
                     const svmp::FE::timestepping::NewtonReport& nr) {
                     ++candidate_calls;
+                    EXPECT_TRUE(stage_observation_pending);
                     EXPECT_TRUE(nr.converged);
                     if (candidate_calls == 1) {
                         EXPECT_EQ(h.stepIndex(), 0);
@@ -1874,12 +2551,16 @@ TEST(TimeLoopCallbacks, BeforeStepAcceptRejectsConvergedCandidateAndRetries)
             callbacks.on_step_candidate_discarded =
                 [&](svmp::FE::timestepping::TimeHistory& h) {
                     ++discarded_candidate_calls;
+                    EXPECT_TRUE(stage_observation_pending);
+                    stage_observation_pending = false;
                     EXPECT_EQ(candidate_calls, 1);
                     EXPECT_EQ(h.stepIndex(), 0);
                 };
             callbacks.on_step_commit_ready =
                 [&](svmp::FE::timestepping::TimeHistory& h) {
                     ++commit_ready_calls;
+                    EXPECT_TRUE(stage_observation_pending);
+                    stage_observation_pending = false;
                     EXPECT_EQ(h.stepIndex(), accepted_calls);
                 };
             callbacks.on_step_rejected =
@@ -1908,11 +2589,13 @@ TEST(TimeLoopCallbacks, BeforeStepAcceptRejectsConvergedCandidateAndRetries)
         });
 
     ASSERT_EQ(final_values.size(), 4u);
+    EXPECT_EQ(stage_observation_calls, 3);
     EXPECT_EQ(candidate_calls, 3);
     EXPECT_EQ(discarded_candidate_calls, 1);
     EXPECT_EQ(commit_ready_calls, 2);
     EXPECT_EQ(rejected_calls, 1);
     EXPECT_EQ(accepted_calls, 2);
+    EXPECT_FALSE(stage_observation_pending);
     ASSERT_EQ(accepted_times.size(), 2u);
     EXPECT_NEAR(accepted_times[0], 0.1, 1e-15);
     EXPECT_NEAR(accepted_times[1], 0.2, 1e-15);
@@ -2046,6 +2729,228 @@ TEST(TimeLoopCallbacks, GeneralizedAlphaRejectedCandidateRestoresExistingRateSta
     EXPECT_EQ(projected_endpoint_state_callbacks, 2);
 }
 
+TEST(TimeLoopCallbacks,
+     FinalCandidateGateRejectsProjectedEndpointBeforeControllerAcceptance)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using svmp::FE::timestepping::StepRejectReason;
+    using StateSyncPoint = svmp::FE::timestepping::NewtonOptions::
+        StateSynchronizationPoint;
+
+    auto controller =
+        std::make_shared<RecordingAcceptanceGateController>();
+    int projected_endpoint_callbacks = 0;
+    int restored_state_callbacks = 0;
+    int restored_projected_callbacks = 0;
+    int gate_calls = 0;
+    int discard_calls = 0;
+    int rejected_calls = 0;
+    int commit_ready_calls = 0;
+    int accepted_calls = 0;
+    bool pending_candidate = false;
+
+    const auto final_values = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
+        /*dt=*/0.2,
+        /*t_end=*/0.2,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        controller,
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_step_candidate_ready =
+                [&](svmp::FE::timestepping::TimeHistory& history,
+                    const svmp::FE::timestepping::NewtonReport& report)
+                    -> std::optional<StepRejectReason> {
+                    ++gate_calls;
+                    EXPECT_TRUE(report.converged);
+                    EXPECT_EQ(projected_endpoint_callbacks, gate_calls);
+                    EXPECT_FALSE(pending_candidate);
+                    pending_candidate = true;
+                    EXPECT_EQ(history.stepIndex(), accepted_calls);
+                    if (gate_calls == 1) {
+                        return StepRejectReason::CutTopologyChanged;
+                    }
+                    return std::nullopt;
+                };
+            callbacks.on_step_candidate_discarded =
+                [&](svmp::FE::timestepping::TimeHistory&) {
+                    ++discard_calls;
+                    EXPECT_TRUE(pending_candidate);
+                    pending_candidate = false;
+                };
+            callbacks.on_step_rejected =
+                [&](const svmp::FE::timestepping::TimeHistory& history,
+                    StepRejectReason reason,
+                    const svmp::FE::timestepping::NewtonReport& report) {
+                    ++rejected_calls;
+                    EXPECT_EQ(reason,
+                              StepRejectReason::CutTopologyChanged);
+                    EXPECT_TRUE(report.converged);
+                    EXPECT_EQ(history.stepIndex(), 0);
+                    EXPECT_EQ(discard_calls, 1);
+                    EXPECT_EQ(restored_state_callbacks, 1);
+                    EXPECT_EQ(restored_projected_callbacks, 1);
+                };
+            callbacks.on_step_commit_ready =
+                [&](svmp::FE::timestepping::TimeHistory&) {
+                    ++commit_ready_calls;
+                    EXPECT_TRUE(pending_candidate);
+                    pending_candidate = false;
+                };
+            callbacks.on_step_accepted =
+                [&](svmp::FE::timestepping::TimeHistory&) {
+                    ++accepted_calls;
+                };
+        },
+        /*inspect_expected_exception=*/{},
+        [&](svmp::FE::timestepping::TimeLoopOptions& options,
+            svmp::FE::FieldId) {
+            options.newton.synchronize_state =
+                [&](const svmp::FE::systems::SystemStateView&,
+                    StateSyncPoint point) {
+                    if (point ==
+                        StateSyncPoint::ProjectedEndpointCandidateState) {
+                        ++projected_endpoint_callbacks;
+                    } else if (point ==
+                               StateSyncPoint::RestoredTimeStepState) {
+                        ++restored_state_callbacks;
+                    } else if (
+                        point ==
+                        StateSyncPoint::RestoredProjectedTimeStepState) {
+                        ++restored_projected_callbacks;
+                    }
+                };
+        });
+
+    ASSERT_EQ(final_values.size(), 4u);
+    EXPECT_EQ(gate_calls, 3);
+    EXPECT_EQ(projected_endpoint_callbacks, 3);
+    EXPECT_EQ(discard_calls, 1);
+    EXPECT_EQ(rejected_calls, 1);
+    EXPECT_EQ(restored_state_callbacks, 1);
+    EXPECT_EQ(restored_projected_callbacks, 1);
+    EXPECT_EQ(commit_ready_calls, 2);
+    EXPECT_EQ(accepted_calls, 2);
+    EXPECT_FALSE(pending_candidate);
+    ASSERT_EQ(controller->rejected.size(), 1u);
+    EXPECT_EQ(controller->rejected.front().second,
+              StepRejectReason::CutTopologyChanged);
+    EXPECT_EQ(controller->accepted.size(), 2u)
+        << "The rejected projected candidate must not be recorded as an "
+           "accepted controller attempt";
+}
+
+TEST(TimeLoopCallbacks,
+     FixedStepFinalCandidateGateRejectsWithoutCommit)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP()
+        << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using svmp::FE::timestepping::StepRejectReason;
+
+    int gate_calls = 0;
+    int discard_calls = 0;
+    int rejected_calls = 0;
+    int commit_ready_calls = 0;
+    int accepted_calls = 0;
+    bool pending_candidate = false;
+
+    const auto final_values = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::BackwardEuler,
+        /*dt=*/0.1,
+        /*t_end=*/0.1,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_step_candidate_ready =
+                [&](svmp::FE::timestepping::TimeHistory& history,
+                    const svmp::FE::timestepping::NewtonReport& report)
+                    -> std::optional<StepRejectReason> {
+                    ++gate_calls;
+                    EXPECT_TRUE(report.converged);
+                    EXPECT_EQ(history.stepIndex(), 0);
+                    pending_candidate = true;
+                    return StepRejectReason::CutTopologyChanged;
+                };
+            callbacks.on_step_candidate_discarded =
+                [&](svmp::FE::timestepping::TimeHistory&) {
+                    ++discard_calls;
+                    EXPECT_TRUE(pending_candidate);
+                    pending_candidate = false;
+                };
+            callbacks.on_step_rejected =
+                [&](const svmp::FE::timestepping::TimeHistory& history,
+                    StepRejectReason reason,
+                    const svmp::FE::timestepping::NewtonReport&) {
+                    ++rejected_calls;
+                    EXPECT_EQ(reason,
+                              StepRejectReason::CutTopologyChanged);
+                    EXPECT_EQ(history.stepIndex(), 0);
+                    EXPECT_NEAR(history.time(), 0.0, 1e-15);
+                };
+            callbacks.on_step_commit_ready =
+                [&](svmp::FE::timestepping::TimeHistory&) {
+                    ++commit_ready_calls;
+                };
+            callbacks.on_step_accepted =
+                [&](svmp::FE::timestepping::TimeHistory&) {
+                    ++accepted_calls;
+                };
+        },
+        [&](const svmp::FE::timestepping::TimeHistory& history,
+            const svmp::FE::FEException& error) {
+            EXPECT_NE(
+                std::string(error.what()).find(
+                    "final acceptance gate before commit"),
+                std::string::npos);
+            EXPECT_EQ(history.stepIndex(), 0);
+            EXPECT_NEAR(history.time(), 0.0, 1e-15);
+            ASSERT_EQ(history.uSpan().size(),
+                      history.uPrevSpan().size());
+            EXPECT_TRUE(std::equal(
+                history.uSpan().begin(),
+                history.uSpan().end(),
+                history.uPrevSpan().begin()));
+        });
+
+    EXPECT_TRUE(final_values.empty());
+    EXPECT_EQ(gate_calls, 1);
+    EXPECT_EQ(discard_calls, 1);
+    EXPECT_EQ(rejected_calls, 1);
+    EXPECT_EQ(commit_ready_calls, 0);
+    EXPECT_EQ(accepted_calls, 0);
+    EXPECT_FALSE(pending_candidate);
+}
+
 TEST(TimeLoopCallbacks, GeneralizedAlphaRetryMatchesDirectAttemptAndRestoresMissingRateState)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
@@ -2139,7 +3044,7 @@ TEST(TimeLoopCallbacks,
         /*lambda=*/1.0,
         /*history_depth=*/2,
         /*controller=*/{},
-        /*generalized_alpha_rho_inf=*/0.5,
+        /*generalized_alpha_rho_inf=*/rho_inf,
         /*dg_degree=*/1,
         /*cg_degree=*/2,
         svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
@@ -4051,7 +4956,7 @@ TEST(TimeLoopConvergence,
         /*lambda=*/1.0,
         /*history_depth=*/2,
         /*controller=*/{},
-        /*generalized_alpha_rho_inf=*/0.5,
+        /*generalized_alpha_rho_inf=*/rho_inf,
         /*dg_degree=*/1,
         /*cg_degree=*/2,
         svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,

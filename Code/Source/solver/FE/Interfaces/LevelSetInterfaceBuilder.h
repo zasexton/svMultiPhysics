@@ -82,6 +82,18 @@ private:
 
 [[nodiscard]] bool isLevelSetCellCutExtensionElement(ElementType element_type) noexcept;
 
+/**
+ * Partition-independent, epoch-free classification of the canonical parent
+ * corner signs used by generated cut topology descriptors.
+ *
+ * The key includes only the element type and the negative/interface/positive
+ * class of each canonical reference corner.  It excludes raw values,
+ * coordinates, source revisions, and parent-cell/rank-local identities.
+ */
+[[nodiscard]] std::uint64_t levelSetParentCornerTopologyKey(
+    const CutInterfaceDomainRequest& request,
+    const LevelSetCellCutInput& input);
+
 [[nodiscard]] LevelSetCellCutResult cutLinearLevelSetCell2D(
     const CutInterfaceDomainRequest& request,
     const LevelSetCellCutInput& input);

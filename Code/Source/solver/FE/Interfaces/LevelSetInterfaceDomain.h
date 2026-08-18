@@ -18,9 +18,15 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
+#include <iomanip>
+#include <limits>
+#include <locale>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -136,6 +142,10 @@ struct LevelSetInterfaceSource {
 
 struct CutInterfaceDomainRequest {
     LevelSetInterfaceSource source{};
+    // Durable logical identity for generated domains. Legacy and low-level
+    // callers may leave this empty; the generated-interface lifecycle always
+    // publishes its configured domain id.
+    std::string generated_domain_id{};
     int interface_marker{-1};
     Real isovalue{0.0};
     Real tolerance{1.0e-12};
@@ -172,7 +182,10 @@ struct CutInterfaceDomainRequest {
     }
 
     [[nodiscard]] bool valid() const noexcept {
-        return interface_marker >= 0 && source.valid() && tolerance > Real{0.0} &&
+        return interface_marker >= 0 && source.valid() &&
+               std::isfinite(isovalue) &&
+               std::isfinite(tolerance) &&
+               tolerance > Real{0.0} &&
                quadrature_order >= 0 &&
                resolvedInterfaceQuadratureOrder() >= 0 &&
                resolvedVolumeQuadratureOrder() >= 0;
@@ -186,7 +199,45 @@ struct GeneratedInterfaceMarkerKey {
     int requested_marker{-1};
 
     [[nodiscard]] std::string stableKey() const {
-        return source.identifier() + "|" + domain_id + "|" + std::to_string(isovalue);
+        const Real canonical_isovalue =
+            isovalue == Real{0.0}
+                ? Real{0.0}
+                : isovalue;
+        std::ostringstream encoded_isovalue;
+        encoded_isovalue.imbue(
+            std::locale::classic());
+        encoded_isovalue
+            << std::scientific
+            << std::setprecision(
+                   std::numeric_limits<
+                       Real>::max_digits10)
+            << canonical_isovalue;
+
+        std::string key;
+        const auto append_component =
+            [&](std::string_view value) {
+                key += std::to_string(
+                    value.size());
+                key.push_back(':');
+                key.append(value);
+            };
+        append_component(
+            std::to_string(
+                static_cast<int>(
+                    source.kind)));
+        if (source.kind ==
+            CutInterfaceSourceKind::Field) {
+            append_component(
+                std::to_string(
+                    source.field_id));
+        } else {
+            append_component(
+                source.evaluator_id);
+        }
+        append_component(domain_id);
+        append_component(
+            encoded_isovalue.str());
+        return key;
     }
 };
 
@@ -328,6 +379,12 @@ struct CutInterfaceVolumeRegion {
     Real min_level_set_value{0.0};
     Real max_level_set_value{0.0};
     std::string topology_id{};
+    // Epoch-free classification of the parent cell's corner signs.  This is
+    // deliberately independent of source revisions, rank-local addressing,
+    // and level-set magnitudes, and may be used as one component of a bounded
+    // LinearCorner structural fingerprint.  It is not an arbitrary
+    // high-order connectivity certificate.
+    std::uint64_t parent_corner_topology_key{0};
     std::string implicit_quadrature_backend{};
     std::string implicit_fallback_status{};
     bool full_cell_equivalent{false};
@@ -469,6 +526,8 @@ struct CutInterfaceFragment {
     Real min_level_set_value{0.0};
     Real max_level_set_value{0.0};
     std::string topology_id{};
+    // See CutInterfaceVolumeRegion::parent_corner_topology_key.
+    std::uint64_t parent_corner_topology_key{0};
     std::string implicit_quadrature_backend{};
     std::string implicit_fallback_status{};
     std::string branch_id{};

@@ -402,6 +402,27 @@ struct CompilationPlan {
             cacheable = cacheable && term_cacheable;
             hashMix(combined_ir_hash, term_hash);
             hashMix(combined_ir_hash, static_cast<std::uint64_t>(static_cast<std::int64_t>(term.time_derivative_order)));
+            hashMix(
+                combined_ir_hash,
+                term.exterior_boundary_measure.has_value() ? 1u : 0u);
+            if (term.exterior_boundary_measure.has_value()) {
+                const auto& measure =
+                    *term.exterior_boundary_measure;
+                hashMix(
+                    combined_ir_hash,
+                    static_cast<std::uint64_t>(measure.scope()));
+                hashMix(
+                    combined_ir_hash,
+                    static_cast<std::uint64_t>(
+                        static_cast<std::int64_t>(
+                            measure.physicalBoundaryMarker())));
+                hashMix(
+                    combined_ir_hash,
+                    static_cast<std::uint64_t>(
+                        static_cast<std::int64_t>(
+                            measure
+                                .generatedActiveBoundaryMarker())));
+            }
         }
 
         group.cacheable = cacheable;
@@ -826,6 +847,26 @@ JITCompileResult JITCompiler::Impl::compileFormIR(const FormIR& ir,
             out.message += toString(group.key.domain);
             out.message += "\nBoundary marker: " + std::to_string(group.key.boundary_marker);
             out.message += "\nInterface marker: " + std::to_string(group.key.interface_marker);
+            for (const auto term_index : group.term_indices) {
+                const auto& term = ir.terms()[term_index];
+                if (!term.exterior_boundary_measure.has_value()) {
+                    continue;
+                }
+                const auto& measure =
+                    *term.exterior_boundary_measure;
+                out.message +=
+                    "\nExterior boundary selection: " +
+                    std::string(
+                        measure.isFullPhysical()
+                            ? "FullPhysical"
+                            : "GeneratedActiveSubset") +
+                    " physical=" +
+                    std::to_string(
+                        measure.physicalBoundaryMarker()) +
+                    " generated=" +
+                    std::to_string(
+                        measure.generatedActiveBoundaryMarker());
+            }
             out.message += "\nCache key: 0x" + cacheKeyToHex(group.cache_key);
             out.message += "\n\nFormIR dump:\n" + ir.dump();
             out.cacheable = false;

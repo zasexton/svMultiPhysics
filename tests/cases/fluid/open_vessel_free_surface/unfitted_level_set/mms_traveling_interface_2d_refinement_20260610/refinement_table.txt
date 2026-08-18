@@ -1,0 +1,16 @@
+metric                                                                  nx16_dt01             nx16_dt02             nx24_dt02              nx8_dt02
+---------------------------------------------------------------------------------------------------------------------------------------------------
+time                                                                 5.000000e-01          5.000000e-01          5.000000e-01          5.000000e-01
+passed                                                                       True                  True                  True                  True
+velocity_relative_l2_error                                           8.161640e-02          8.838274e-02          6.758007e-02          1.223991e-01
+velocity_l2_error                                                    8.161640e-03          8.838274e-03          6.758007e-03          1.223991e-02
+velocity_mean_x_error                                                7.197783e-04          8.210453e-04          6.022833e-04          1.283716e-03
+pressure_relative_rms_error                                          3.070102e-04          3.369569e-04          1.765480e-04          1.159442e-03
+pressure_relative_rms_error_after_constant_offset_removal            3.049577e-04          3.287065e-04          1.641862e-04          1.158861e-03
+pressure_constant_offset                                            -1.735269e-01         -3.628459e-01          3.177643e-01          1.797313e-01
+phi_rms_error                                                        2.243608e-04          2.472618e-04          2.142247e-04          4.248250e-04
+interface_l2_height_error                                            9.277120e-05          1.035316e-04          1.224073e-04          1.852696e-04
+interface_max_height_error                                           2.219229e-04          2.197154e-04          3.845547e-04          3.033800e-04
+interface_shift_error                                                6.900904e-04          5.617975e-04          3.166072e-06          1.318114e-03
+area_relative_error                                                  5.120810e-05          9.606260e-05          1.764206e-05          2.427941e-06
+interface_pressure_rms                                               5.463627e+00          5.528257e+00          2.472688e+00          2.169762e+01

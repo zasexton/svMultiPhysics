@@ -4,10 +4,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <limits>
+#include <locale>
 #include <map>
 #include <set>
+#include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -498,11 +502,52 @@ struct RepresentedImplicitProvenance {
 
 std::string GeneratedActiveBoundaryMarkerKey::stableKey() const
 {
-    return source.identifier() + "|" + domain_id + "|" +
-           std::to_string(isovalue) + "|" +
-           std::to_string(interface_marker) + "|" +
-           std::to_string(boundary_marker) + "|" +
-           std::to_string(static_cast<int>(side));
+    const Real canonical_isovalue =
+        isovalue == Real{0.0}
+            ? Real{0.0}
+            : isovalue;
+    std::ostringstream encoded_isovalue;
+    encoded_isovalue.imbue(
+        std::locale::classic());
+    encoded_isovalue
+        << std::scientific
+        << std::setprecision(
+               std::numeric_limits<
+                   Real>::max_digits10)
+        << canonical_isovalue;
+
+    std::string key;
+    const auto append_component =
+        [&](std::string_view value) {
+            key += std::to_string(
+                value.size());
+            key.push_back(':');
+            key.append(value);
+        };
+    append_component(
+        std::to_string(
+            static_cast<int>(
+                source.kind)));
+    if (source.kind ==
+        CutInterfaceSourceKind::Field) {
+        append_component(
+            std::to_string(
+                source.field_id));
+    } else {
+        append_component(
+            source.evaluator_id);
+    }
+    append_component(domain_id);
+    append_component(
+        encoded_isovalue.str());
+    append_component(
+        std::to_string(interface_marker));
+    append_component(
+        std::to_string(boundary_marker));
+    append_component(
+        std::to_string(
+            static_cast<int>(side)));
+    return key;
 }
 
 std::uint64_t stableGeneratedActiveBoundaryMarkerHash(
@@ -541,8 +586,13 @@ bool GeneratedActiveBoundaryRequest::valid() const noexcept
     return source.valid() && !generated_domain_id.empty() &&
            interface_marker >= 0 && boundary_marker >= 0 &&
            side != geometry::CutIntegrationSide::Interface &&
+           std::isfinite(isovalue) &&
+           std::isfinite(tolerance) &&
            tolerance > Real{0.0} && quadrature_order >= 0 &&
-           frame == geometry::CutGeometryFrame::Reference;
+           frame == geometry::CutGeometryFrame::Reference &&
+           (source.value_revision == 0u ||
+            source_value_revision == 0u ||
+            source.value_revision == source_value_revision);
 }
 
 int GeneratedActiveBoundaryRequest::resolvedActiveBoundaryMarker() const

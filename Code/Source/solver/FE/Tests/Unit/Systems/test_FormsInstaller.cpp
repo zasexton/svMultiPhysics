@@ -30,6 +30,7 @@
 #include "Forms/WeakForm.h"
 
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 
 #include "Quadrature/QuadratureFactory.h"
@@ -47,6 +48,7 @@
 #include <array>
 #include <cmath>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -719,7 +721,673 @@ MovingMeshAssemblySnapshot assembleMovingMeshResidualWithPath(
     return snapshot;
 }
 
+std::shared_ptr<svmp::FE::assembly::CutIntegrationContext>
+makeGeneratedExteriorContext(FieldId source_field,
+                             int physical_marker,
+                             int active_marker,
+                             svmp::FE::Real isovalue =
+                                 svmp::FE::Real{0.0})
+{
+    namespace geometry = svmp::FE::geometry;
+    namespace interfaces = svmp::FE::interfaces;
+
+    interfaces::GeneratedActiveBoundaryRequest request;
+    request.source =
+        interfaces::LevelSetInterfaceSource::fromField(
+            source_field,
+            /*layout_revision=*/1u,
+            /*value_revision=*/1u);
+    request.generated_domain_id =
+        "forms-installer-generated-exterior";
+    request.isovalue = isovalue;
+    request.interface_marker = 901;
+    request.boundary_marker = physical_marker;
+    request.active_boundary_marker = active_marker;
+    request.side =
+        geometry::CutIntegrationSide::Negative;
+    request.quadrature_order = 1;
+    request.source_value_revision = 1u;
+
+    interfaces::GeneratedActiveBoundaryDomain domain(
+        std::move(request));
+    auto context = std::make_shared<
+        svmp::FE::assembly::CutIntegrationContext>();
+    context->addGeneratedActiveBoundaryDomain(
+        domain);
+    return context;
+}
+
 } // namespace
+
+TEST(FormsInstaller,
+     GeneratedExteriorSelectorSetupFailsPendingContextAndRetries)
+{
+    namespace forms = svmp::FE::forms;
+    namespace systems = svmp::FE::systems;
+
+    constexpr int physical_marker = 5;
+    constexpr int active_marker = 51;
+    auto mesh = std::make_shared<
+        forms::test::SingleTetraOneBoundaryFaceMeshAccess>(
+        physical_marker);
+    auto space = std::make_shared<
+        svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, 1);
+
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        systems::FieldSpec{
+            .name = "u",
+            .space = space,
+            .components = 1});
+    sys.addOperator("op");
+
+    const auto u = forms::FormExpr::stateField(
+        u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(
+        *space, "v");
+    const auto measure =
+        forms::ExteriorBoundaryMeasure::
+            generatedActiveSubset(
+                physical_marker,
+                active_marker);
+    (void)systems::installFormulation(
+        sys,
+        "op",
+        {u_field},
+        (u * v).dExteriorBoundary(measure));
+
+    const auto policies =
+        sys.exteriorBoundaryMeasurePolicies();
+    ASSERT_EQ(policies.size(), 1u);
+    EXPECT_EQ(
+        policies.front().intent,
+        systems::ExteriorBoundaryMeasureIntent::
+            GeneratedActiveSubset);
+    EXPECT_EQ(
+        policies.front().physical_boundary_marker,
+        physical_marker);
+    EXPECT_EQ(
+        policies.front()
+            .generated_active_boundary_marker,
+        active_marker);
+
+    systems::SetupInputs inputs;
+    inputs.topology_override =
+        singleTetraTopology();
+    EXPECT_THROW(
+        sys.setup({}, inputs),
+        systems::InvalidStateException);
+    EXPECT_FALSE(sys.isSetup());
+
+    sys.setCutIntegrationContext(
+        makeGeneratedExteriorContext(
+            u_field,
+            physical_marker,
+            active_marker));
+    EXPECT_NO_THROW(sys.setup({}, inputs));
+    EXPECT_TRUE(sys.isSetup());
+}
+
+TEST(FormsInstaller,
+     GeneratedExteriorSelectorRejectsWrongOwnerContextAtomically)
+{
+    namespace forms = svmp::FE::forms;
+    namespace systems = svmp::FE::systems;
+
+    constexpr int physical_marker = 5;
+    constexpr int active_marker = 51;
+    auto mesh = std::make_shared<
+        forms::test::SingleTetraOneBoundaryFaceMeshAccess>(
+        physical_marker);
+    auto space = std::make_shared<
+        svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, 1);
+
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        systems::FieldSpec{
+            .name = "u",
+            .space = space,
+            .components = 1});
+    sys.addOperator("op");
+    const auto u = forms::FormExpr::stateField(
+        u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(
+        *space, "v");
+    (void)systems::installFormulation(
+        sys,
+        "op",
+        {u_field},
+        (u * v).dExteriorBoundary(
+            forms::ExteriorBoundaryMeasure::
+                generatedActiveSubset(
+                    physical_marker,
+                    active_marker)));
+
+    int callback_count = 0;
+    bool reject_next_candidate = false;
+    std::shared_ptr<
+        svmp::FE::assembly::CutIntegrationContext>
+        candidate_to_mutate;
+    const svmp::FE::assembly::
+        CutIntegrationContext*
+        last_callback_context = nullptr;
+    sys.addCutIntegrationContextUpdateCallback(
+        systems::CutIntegrationContextUpdateCallback{
+            .name =
+                "forms-installer-context-atomicity",
+            .callback =
+                [&](const svmp::FE::assembly::
+                        CutIntegrationContext*
+                            candidate) {
+                    ++callback_count;
+                    last_callback_context =
+                        candidate;
+                    if (candidate_to_mutate &&
+                        candidate ==
+                            candidate_to_mutate.get()) {
+                        candidate_to_mutate->clear();
+                    }
+                    if (reject_next_candidate) {
+                        reject_next_candidate =
+                            false;
+                        throw std::runtime_error(
+                            "candidate rejected");
+                    }
+                },
+        });
+    auto accepted =
+        makeGeneratedExteriorContext(
+            u_field,
+            physical_marker,
+            active_marker);
+    sys.setCutIntegrationContext(accepted);
+    ASSERT_EQ(callback_count, 1);
+    EXPECT_EQ(
+        last_callback_context,
+        accepted.get());
+    const auto revision_before_rejection =
+        sys.constraintLayoutRevision();
+    const int callbacks_before_rejection =
+        callback_count;
+
+    EXPECT_THROW(
+        sys.setCutIntegrationContext(
+            makeGeneratedExteriorContext(
+                u_field,
+                physical_marker + 1,
+                active_marker)),
+        svmp::FE::InvalidArgumentException);
+    EXPECT_EQ(
+        sys.cutIntegrationContext(),
+        accepted.get());
+    EXPECT_EQ(
+        sys.constraintLayoutRevision(),
+        revision_before_rejection);
+    EXPECT_EQ(
+        callback_count,
+        callbacks_before_rejection);
+
+    EXPECT_THROW(
+        sys.setCutIntegrationContext(
+            makeGeneratedExteriorContext(
+                u_field,
+                physical_marker,
+                active_marker,
+                svmp::FE::Real{1.0e-7})),
+        svmp::FE::InvalidArgumentException);
+    EXPECT_EQ(
+        sys.cutIntegrationContext(),
+        accepted.get());
+    EXPECT_EQ(
+        sys.constraintLayoutRevision(),
+        revision_before_rejection);
+    EXPECT_EQ(
+        callback_count,
+        callbacks_before_rejection);
+
+    auto callback_rejected =
+        makeGeneratedExteriorContext(
+            u_field,
+            physical_marker,
+            active_marker);
+    reject_next_candidate = true;
+    EXPECT_THROW(
+        sys.setCutIntegrationContext(
+            callback_rejected),
+        std::runtime_error);
+    EXPECT_EQ(
+        sys.cutIntegrationContext(),
+        accepted.get());
+    EXPECT_EQ(
+        sys.constraintLayoutRevision(),
+        revision_before_rejection);
+    EXPECT_EQ(
+        last_callback_context,
+        callback_rejected.get());
+    EXPECT_EQ(
+        callback_count,
+        callbacks_before_rejection + 1);
+
+    EXPECT_NO_THROW(
+        sys.setCutIntegrationContext(
+            callback_rejected));
+    EXPECT_EQ(
+        sys.cutIntegrationContext(),
+        callback_rejected.get());
+    EXPECT_EQ(
+        sys.constraintLayoutRevision(),
+        revision_before_rejection + 1u);
+    EXPECT_EQ(
+        callback_count,
+        callbacks_before_rejection + 2);
+
+    const auto accepted_after_retry =
+        sys.cutIntegrationContext();
+    const auto revision_before_mutation =
+        sys.constraintLayoutRevision();
+    const int callbacks_before_mutation =
+        callback_count;
+    const auto content_revision_before_mutation =
+        callback_rejected->contentRevision();
+    candidate_to_mutate = callback_rejected;
+    EXPECT_THROW(
+        sys.setCutIntegrationContext(
+            candidate_to_mutate),
+        systems::InvalidStateException);
+    ASSERT_NE(
+        sys.cutIntegrationContext(),
+        accepted_after_retry);
+    EXPECT_EQ(
+        sys.cutIntegrationContext()
+            ->contentRevision(),
+        content_revision_before_mutation);
+    EXPECT_TRUE(
+        sys.cutIntegrationContext()
+            ->hasGeneratedActiveBoundaryMarker(
+                active_marker));
+    EXPECT_EQ(
+        sys.constraintLayoutRevision(),
+        revision_before_mutation);
+    EXPECT_EQ(
+        callback_count,
+        callbacks_before_mutation + 1);
+}
+
+TEST(FormsInstaller,
+     ExplicitFullAndGeneratedExteriorSelectorsCoexist)
+{
+    namespace forms = svmp::FE::forms;
+    namespace systems = svmp::FE::systems;
+
+    constexpr int physical_marker = 5;
+    constexpr int active_marker = 51;
+    auto mesh = std::make_shared<
+        forms::test::SingleTetraOneBoundaryFaceMeshAccess>(
+        physical_marker);
+    auto space = std::make_shared<
+        svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, 1);
+
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        systems::FieldSpec{
+            .name = "u",
+            .space = space,
+            .components = 1});
+    sys.addOperator("op");
+    const auto u = forms::FormExpr::stateField(
+        u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(
+        *space, "v");
+    const auto full =
+        forms::ExteriorBoundaryMeasure::
+            fullPhysical(physical_marker);
+    const auto active =
+        forms::ExteriorBoundaryMeasure::
+            generatedActiveSubset(
+                physical_marker,
+                active_marker);
+    const auto residual =
+        (u * v).dExteriorBoundary(full) +
+        (forms::FormExpr::constant(2.0) * u * v)
+            .dExteriorBoundary(active);
+    (void)systems::installFormulation(
+        sys,
+        "op",
+        {u_field},
+        residual);
+
+    const auto policies =
+        sys.exteriorBoundaryMeasurePolicies();
+    ASSERT_EQ(policies.size(), 2u);
+    EXPECT_EQ(
+        std::count_if(
+            policies.begin(),
+            policies.end(),
+            [](const auto& policy) {
+                return policy.intent ==
+                       systems::
+                           ExteriorBoundaryMeasureIntent::
+                               FullPhysical;
+            }),
+        1);
+    EXPECT_EQ(
+        std::count_if(
+            policies.begin(),
+            policies.end(),
+            [](const auto& policy) {
+                return policy.intent ==
+                       systems::
+                           ExteriorBoundaryMeasureIntent::
+                               GeneratedActiveSubset;
+            }),
+        1);
+    for (const auto& policy : policies) {
+        EXPECT_EQ(
+            policy.physical_boundary_marker,
+            physical_marker);
+    }
+
+    const auto& definition =
+        sys.operatorDefinition("op");
+    EXPECT_EQ(definition.boundary.size(), 1u);
+    EXPECT_EQ(
+        definition.interface_faces.size(),
+        1u);
+
+    sys.setCutIntegrationContext(
+        makeGeneratedExteriorContext(
+            u_field,
+            physical_marker,
+            active_marker));
+    systems::SetupInputs inputs;
+    inputs.topology_override =
+        singleTetraTopology();
+    EXPECT_NO_THROW(sys.setup({}, inputs));
+}
+
+TEST(FormsInstaller,
+     RawExteriorMeasuresRejectAmbiguousGeneratedProvenance)
+{
+    namespace forms = svmp::FE::forms;
+    namespace systems = svmp::FE::systems;
+
+    constexpr int physical_marker = 5;
+    constexpr int active_marker = 51;
+    const auto expect_rejected =
+        [&](const auto& make_residual) {
+            auto mesh = std::make_shared<
+                forms::test::
+                    SingleTetraOneBoundaryFaceMeshAccess>(
+                    physical_marker);
+            auto space = std::make_shared<
+                svmp::FE::spaces::H1Space>(
+                ElementType::Tetra4, 1);
+            systems::FESystem sys(mesh);
+            const auto u_field =
+                sys.addField(
+                    systems::FieldSpec{
+                        .name = "u",
+                        .space = space,
+                        .components = 1});
+            sys.addOperator("op");
+            const auto u =
+                forms::FormExpr::stateField(
+                    u_field, *space, "u");
+            const auto v =
+                forms::FormExpr::testFunction(
+                    *space, "v");
+            (void)systems::installFormulation(
+                sys,
+                "op",
+                {u_field},
+                make_residual(u * v));
+            const auto revision_before =
+                sys.constraintLayoutRevision();
+            EXPECT_THROW(
+                sys.setCutIntegrationContext(
+                    makeGeneratedExteriorContext(
+                        u_field,
+                        physical_marker,
+                        active_marker)),
+                svmp::FE::InvalidArgumentException);
+            EXPECT_EQ(
+                sys.cutIntegrationContext(),
+                nullptr);
+            EXPECT_EQ(
+                sys.constraintLayoutRevision(),
+                revision_before);
+        };
+
+    expect_rejected(
+        [](const forms::FormExpr& integrand) {
+            return integrand.ds(physical_marker);
+        });
+    expect_rejected(
+        [](const forms::FormExpr& integrand) {
+            return integrand.ds();
+        });
+    expect_rejected(
+        [](const forms::FormExpr& integrand) {
+            return integrand.dI(active_marker);
+        });
+    expect_rejected(
+        [](const forms::FormExpr& integrand) {
+            return integrand.dI();
+        });
+
+    auto mesh = std::make_shared<
+        forms::test::SingleTetraOneBoundaryFaceMeshAccess>(
+        physical_marker);
+    auto space = std::make_shared<
+        svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, 1);
+    systems::FESystem control(mesh);
+    const auto u_field = control.addField(
+        systems::FieldSpec{
+            .name = "u",
+            .space = space,
+            .components = 1});
+    control.addOperator("op");
+    const auto u = forms::FormExpr::stateField(
+        u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(
+        *space, "v");
+    (void)systems::installFormulation(
+        control,
+        "op",
+        {u_field},
+        (u * v).ds(physical_marker + 1) +
+            (u * v).dI(active_marker + 1));
+    EXPECT_NO_THROW(
+        control.setCutIntegrationContext(
+            makeGeneratedExteriorContext(
+                u_field,
+                physical_marker,
+                active_marker)));
+}
+
+TEST(FormsInstaller,
+     DuplicateExteriorRoutesAcrossFormulationsAreRetained)
+{
+    namespace forms = svmp::FE::forms;
+    namespace systems = svmp::FE::systems;
+
+    constexpr int physical_marker = 5;
+    auto mesh = std::make_shared<
+        forms::test::SingleTetraOneBoundaryFaceMeshAccess>(
+        physical_marker);
+    auto space = std::make_shared<
+        svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, 1);
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        systems::FieldSpec{
+            .name = "u",
+            .space = space,
+            .components = 1});
+    sys.addOperator("op");
+
+    const auto u = forms::FormExpr::stateField(
+        u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(
+        *space, "v");
+    const auto residual =
+        (u * v).dExteriorBoundary(
+            forms::ExteriorBoundaryMeasure::
+                fullPhysical(physical_marker));
+    (void)systems::installFormulation(
+        sys, "op", {u_field}, residual);
+    (void)systems::installFormulation(
+        sys, "op", {u_field}, residual);
+
+    ASSERT_EQ(
+        sys.formulationRecords().size(),
+        2u);
+    const auto policies =
+        sys.exteriorBoundaryMeasurePolicies();
+    ASSERT_EQ(policies.size(), 2u);
+    EXPECT_NE(
+        policies[0].id,
+        systems::
+            INVALID_EXTERIOR_BOUNDARY_MEASURE_POLICY_ID);
+    EXPECT_NE(
+        policies[1].id,
+        systems::
+            INVALID_EXTERIOR_BOUNDARY_MEASURE_POLICY_ID);
+    EXPECT_NE(policies[0].id, policies[1].id);
+    EXPECT_EQ(
+        policies[0]
+            .source_formulation_record_index,
+        0u);
+    EXPECT_EQ(
+        policies[1]
+            .source_formulation_record_index,
+        1u);
+    EXPECT_EQ(
+        policies[0].intent,
+        policies[1].intent);
+    EXPECT_EQ(
+        policies[0].physical_boundary_marker,
+        policies[1].physical_boundary_marker);
+    EXPECT_EQ(
+        policies[0]
+            .generated_active_boundary_marker,
+        policies[1]
+            .generated_active_boundary_marker);
+    EXPECT_EQ(
+        sys.operatorDefinition("op")
+            .boundary.size(),
+        2u);
+}
+
+TEST(FormsInstaller,
+     InstallMixedFormIRUsesSentinelAndRollsBackPartialRegistration)
+{
+    namespace forms = svmp::FE::forms;
+    namespace systems = svmp::FE::systems;
+
+    constexpr int physical_marker = 5;
+    auto mesh = std::make_shared<
+        forms::test::SingleTetraOneBoundaryFaceMeshAccess>(
+        physical_marker);
+    auto space = std::make_shared<
+        svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, 1);
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        systems::FieldSpec{
+            .name = "u",
+            .space = space,
+            .components = 1});
+    const auto p_field = sys.addField(
+        systems::FieldSpec{
+            .name = "p",
+            .space = space,
+            .components = 1});
+    sys.addOperator("op");
+
+    const auto u = forms::FormExpr::trialFunction(
+        *space, "u");
+    const auto v = forms::FormExpr::testFunction(
+        *space, "v");
+    const auto p = forms::FormExpr::trialFunction(
+        *space, "p");
+    const auto q = forms::FormExpr::testFunction(
+        *space, "q");
+    const auto form =
+        (u * v).dx() +
+        (p * q).dExteriorBoundary(
+            forms::ExteriorBoundaryMeasure::
+                fullPhysical(physical_marker));
+    const auto mir =
+        forms::FormCompiler{}.compileMixed(
+            form,
+            forms::FormKind::Bilinear);
+    ASSERT_EQ(mir.numTestFields(), 2u);
+    ASSERT_EQ(mir.numTrialFields(), 2u);
+
+    const std::array<FieldId, 2> bad_tests{{
+        u_field,
+        INVALID_FIELD_ID,
+    }};
+    const std::array<FieldId, 2> trials{{
+        u_field,
+        p_field,
+    }};
+    EXPECT_THROW(
+        systems::installMixedFormIR(
+            sys,
+            "op",
+            std::span<const FieldId>(
+                bad_tests),
+            std::span<const FieldId>(
+                trials),
+            mir),
+        svmp::FE::InvalidArgumentException);
+    const auto& rolled_back =
+        sys.operatorDefinition("op");
+    EXPECT_TRUE(rolled_back.cells.empty());
+    EXPECT_TRUE(rolled_back.boundary.empty());
+    EXPECT_TRUE(rolled_back.interior.empty());
+    EXPECT_TRUE(
+        rolled_back.interface_faces.empty());
+    EXPECT_TRUE(
+        rolled_back.cut_volumes.empty());
+    EXPECT_TRUE(
+        sys.exteriorBoundaryMeasurePolicies()
+            .empty());
+
+    const std::array<FieldId, 2> valid_tests{{
+        u_field,
+        p_field,
+    }};
+    EXPECT_NO_THROW(
+        systems::installMixedFormIR(
+            sys,
+            "op",
+            std::span<const FieldId>(
+                valid_tests),
+            std::span<const FieldId>(
+                trials),
+            mir));
+    const auto& installed =
+        sys.operatorDefinition("op");
+    EXPECT_EQ(installed.cells.size(), 1u);
+    EXPECT_EQ(installed.boundary.size(), 1u);
+    const auto policies =
+        sys.exteriorBoundaryMeasurePolicies();
+    ASSERT_EQ(policies.size(), 1u);
+    EXPECT_EQ(
+        policies.front()
+            .source_formulation_record_index,
+        systems::
+            NO_EXTERIOR_BOUNDARY_MEASURE_FORMULATION_RECORD);
+    EXPECT_TRUE(
+        sys.formulationRecords().empty());
+}
 
 TEST(FormsInstaller, FormsInstaller_InstallFormulation_RegistersKernel)
 {

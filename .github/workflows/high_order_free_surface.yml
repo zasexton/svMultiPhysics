@@ -1,0 +1,120 @@
+name: High-Order Free-Surface Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_full_profiles:
+        description: Run full D18/D38 MPI2 first-profile benchmark qualifications
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+  schedule:
+    # Nightly UTC run. This is intentionally separate from required PR checks
+    # because the 3D high-order benchmarks are heavier than normal unit tests.
+    - cron: '17 9 * * *'
+
+jobs:
+  high-order-qualification:
+    name: Linux
+    runs-on: ubuntu-latest
+    container: simvascular/libraries:ubuntu22
+    timeout-minutes: 360
+    env:
+      OMPI_ALLOW_RUN_AS_ROOT: '1'
+      OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: '1'
+      HIGH_ORDER_QUALIFICATION_STAMP: ci
+      HIGH_ORDER_QUALIFICATION_OUT_DIR: ${{ github.workspace }}/Documentation/qualification_logs/high_order_ci
+      HIGH_ORDER_QUALIFICATION_PRESERVE_RUN_DIR: '1'
+      HIGH_ORDER_QUALIFICATION_INCLUDE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.include_full_profiles == 'true' && '1' || '0' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Pull LFS objects
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git lfs pull
+
+      - name: Install LLVM
+        shell: bash
+        run: |
+          apt-get update
+          apt-get install -y llvm-dev
+
+      - name: Build solver and focused high-order tests
+        shell: bash
+        run: |
+          source /conda/etc/profile.d/conda.sh
+          conda activate svmultiphysics
+          mkdir -p build
+          cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DENABLE_UNIT_TEST=ON \
+                -DSV_USE_TRILINOS:BOOL=OFF \
+                -DFE_ENABLE_LLVM_JIT:BOOL=ON \
+                ..
+          cmake --build . --target \
+                svmultiphysics \
+                test_application \
+                test_fe_constraints \
+                test_fe_forms \
+                test_fe_levelset \
+                test_fe_levelset_mpi \
+                test_fe_systems \
+                test_fe_timestepping \
+                test_physics \
+                -j2
+
+      - name: Run focused high-order unit checks
+        shell: bash
+        run: |
+          source /conda/etc/profile.d/conda.sh
+          conda activate svmultiphysics
+          build/svMultiPhysics-build/bin/test_application \
+            --gtest_filter='OpenVesselExamples.*:LevelSetCutConfiguration.*:LevelSetEquationTranslator.*'
+          build/svMultiPhysics-build/bin/test_fe_constraints \
+            --gtest_filter='LevelSetActiveSideVertexDirichletConstraint.*:DirichletConstraint.*'
+          build/svMultiPhysics-build/bin/test_fe_levelset \
+            --gtest_filter='LevelSetInterfaceLifecycle.*:LevelSetCellEvaluator.*:LevelSetTransport.*:LevelSetRestart.*:LevelSetReinitialization.*:LevelSetVolume.*'
+          mpiexec -n 2 build/svMultiPhysics-build/bin/test_fe_levelset_mpi \
+            --gtest_filter='LevelSetCellEvaluatorMPI.*'
+          build/svMultiPhysics-build/bin/test_fe_forms \
+            --gtest_filter='CutCellForms.*:SymbolicDifferentiation*.*'
+          build/svMultiPhysics-build/bin/test_fe_systems \
+            --gtest_filter='CutIntegrationInfrastructure.*:FESystem.*:FormsInstaller.*'
+          build/svMultiPhysics-build/bin/test_fe_timestepping \
+            --gtest_filter='NewtonSolverLineSearch.*:NewtonSolver.RefreshedGeometryJacobianCheckReportsQuasiNewtonMismatch:NewtonSolverSanity.*'
+          build/svMultiPhysics-build/bin/test_physics \
+            --gtest_filter='PoissonModule.LevelSetCutDomainRestriction*:MovingDomainPhysics.PrescribedBodyForceFieldSyncsFromMeshPointData:MovingDomainPhysics.NavierStokesActiveDomainUnknownLevelSetAddsMatrixOnlyShapeTangent:MovingDomainPhysics.NavierStokesUnfittedSurfaceTensionCouplesUnknownCurvatureField:MovingDomainPhysics.NavierStokesActiveDomainSurfaceTensionInstallsInterfaceTraction'
+
+      - name: Run high-order free-surface qualification gates
+        shell: bash
+        run: |
+          source /conda/etc/profile.d/conda.sh
+          conda activate svmultiphysics
+          PYTHON_BIN="$(command -v python)" \
+          SVMULTIPHYSICS_EXECUTABLE="$GITHUB_WORKSPACE/build/svMultiPhysics-build/bin/svmultiphysics" \
+          tools/run_high_order_free_surface_qualification.sh
+
+      - name: Collect preserved run directories
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$HIGH_ORDER_QUALIFICATION_OUT_DIR/preserved_runs"
+          shopt -s nullglob
+          for run_dir in /tmp/dam_break_*; do
+            cp -a "$run_dir" "$HIGH_ORDER_QUALIFICATION_OUT_DIR/preserved_runs/"
+          done
+
+      - name: Upload qualification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: high-order-free-surface-qualification
+          path: Documentation/qualification_logs/high_order_ci/

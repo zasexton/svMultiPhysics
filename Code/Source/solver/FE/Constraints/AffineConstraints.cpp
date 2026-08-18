@@ -10,6 +10,7 @@
 #include "Backends/Interfaces/GenericVector.h"
 
 #include <algorithm>
+#include <bit>
 #include <numeric>
 #include <cmath>
 #include <sstream>
@@ -1146,6 +1147,43 @@ const ConstraintLine* AffineConstraints::findLine(GlobalIndex slave_dof) const {
         return &it->second;
     }
     return nullptr;
+}
+
+ConstraintSemanticFingerprint constraintSemanticFingerprint(
+    const AffineConstraints& affine_constraints)
+{
+    ConstraintSemanticFingerprint fingerprint;
+    auto mix_word = [&fingerprint](std::uint64_t word) noexcept {
+        fingerprint.hash_a ^= word;
+        fingerprint.hash_a *= 1099511628211ULL;
+
+        word ^= word >> 30;
+        word *= 0xbf58476d1ce4e5b9ULL;
+        word ^= word >> 27;
+        word *= 0x94d049bb133111ebULL;
+        word ^= word >> 31;
+        fingerprint.hash_b =
+            std::rotl(fingerprint.hash_b ^ word, 27) *
+                0x9e3779b185ebca87ULL +
+            0x632be59bd9b4e019ULL;
+    };
+
+    affine_constraints.forEach(
+        [&](const AffineConstraints::ConstraintView& line) {
+            mix_word(0xa0761d6478bd642fULL);
+            mix_word(static_cast<std::uint64_t>(line.slave_dof));
+            mix_word(std::bit_cast<std::uint64_t>(line.inhomogeneity));
+            mix_word(static_cast<std::uint64_t>(line.entries.size()));
+            ++fingerprint.line_count;
+            for (const auto& entry : line.entries) {
+                mix_word(static_cast<std::uint64_t>(entry.master_dof));
+                mix_word(std::bit_cast<std::uint64_t>(entry.weight));
+                ++fingerprint.entry_count;
+            }
+        });
+    mix_word(fingerprint.line_count);
+    mix_word(fingerprint.entry_count);
+    return fingerprint;
 }
 
 } // namespace constraints

@@ -8,11 +8,19 @@
 #include "Auxiliary/AuxiliaryInputRegistry.h"
 
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 using svmp::FE::Real;
 using namespace svmp::FE::systems;
+
+static_assert(!std::is_copy_constructible_v<AuxiliaryInputRegistry>);
+static_assert(!std::is_copy_assignable_v<AuxiliaryInputRegistry>);
+static_assert(!std::is_move_constructible_v<AuxiliaryInputRegistry>);
+static_assert(!std::is_move_assignable_v<AuxiliaryInputRegistry>);
 
 // ---------------------------------------------------------------------------
 //  Helper: make a simple scalar input spec
@@ -92,6 +100,53 @@ TEST(AuxiliaryInputRegistry, DuplicateNameThrows)
                  svmp::FE::InvalidArgumentException);
 }
 
+TEST(AuxiliaryInputRegistry, RegistrationRejectsFlatStorageOverflow)
+{
+    AuxiliaryInputRegistry reg;
+
+    AuxiliaryInputSpec bulk;
+    bulk.name = "bulk";
+    bulk.size = 2;
+    bulk.entity_count =
+        std::numeric_limits<std::size_t>::max();
+    EXPECT_THROW(
+        reg.registerInput(bulk),
+        svmp::FE::InvalidArgumentException);
+
+    AuxiliaryInputSpec entity = bulk;
+    entity.name = "entity";
+    EXPECT_THROW(
+        reg.registerEntityInput(
+            entity,
+            [](Real, Real, std::size_t, std::span<Real>) {}),
+        svmp::FE::InvalidArgumentException);
+
+    EXPECT_EQ(reg.inputCount(), 0u);
+    EXPECT_EQ(reg.totalSize(), 0u);
+}
+
+TEST(AuxiliaryInputRegistry, BulkCallbackUsesEntireEntityStorage)
+{
+    AuxiliaryInputRegistry reg;
+
+    AuxiliaryInputSpec spec;
+    spec.name = "bulk";
+    spec.size = 2;
+    spec.entity_count = 3;
+    reg.registerInput(
+        spec,
+        [](Real, Real, std::span<Real> out) {
+            EXPECT_EQ(out.size(), 6u);
+            for (std::size_t i = 0; i < out.size(); ++i) {
+                out[i] = static_cast<Real>(i + 1u);
+            }
+        });
+
+    reg.evaluate(0.0, 0.1);
+    EXPECT_EQ(reg.valuesOf("bulk").size(), 6u);
+    EXPECT_DOUBLE_EQ(reg.valuesOf("bulk", 2)[1], 6.0);
+}
+
 TEST(AuxiliaryInputRegistry, GetSetScalar)
 {
     AuxiliaryInputRegistry reg;
@@ -160,6 +215,7 @@ TEST(AuxiliaryInputRegistry, SpecRetrieval)
     spec.producer = AuxiliaryInputProducer::BoundaryReduction;
     spec.boundary_marker = 3;
     spec.requires_mpi_reduction = true;
+    spec.collective_route_key = "boundary:value:Q";
     reg.registerInput(spec);
 
     const auto& retrieved = reg.specOf("Q");
@@ -167,6 +223,31 @@ TEST(AuxiliaryInputRegistry, SpecRetrieval)
     EXPECT_EQ(retrieved.producer, AuxiliaryInputProducer::BoundaryReduction);
     EXPECT_EQ(retrieved.boundary_marker, 3);
     EXPECT_TRUE(retrieved.requires_mpi_reduction);
+    EXPECT_EQ(retrieved.collective_route_key, "boundary:value:Q");
+}
+
+TEST(AuxiliaryInputRegistry, CollectiveReductionRequiresStableRouteKey)
+{
+    AuxiliaryInputRegistry reg;
+    EXPECT_FALSE(reg.hasCollectiveInput());
+
+    auto spec = makeScalarInput(
+        "collective", AuxiliaryInputProducer::BoundaryReduction);
+    spec.requires_mpi_reduction = true;
+
+    EXPECT_THROW(reg.registerInput(spec), svmp::FE::InvalidArgumentException);
+    EXPECT_FALSE(reg.hasCollectiveInput());
+
+    spec.entity_count = 2;
+    EXPECT_THROW(
+        reg.registerEntityInput(
+            spec, [](Real, Real, std::size_t, std::span<Real>) {}),
+        svmp::FE::InvalidArgumentException);
+
+    spec.collective_route_key = "boundary:value:collective";
+    EXPECT_NO_THROW(reg.registerEntityInput(
+        spec, [](Real, Real, std::size_t, std::span<Real>) {}));
+    EXPECT_TRUE(reg.hasCollectiveInput());
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +446,338 @@ TEST(AuxiliaryInputRegistry, DependencyOrderingAffectsEvaluation)
     EXPECT_EQ(eval_order[1], "C");
 }
 
+TEST(AuxiliaryInputRegistry, NamePriorityOrderIsRegistrationIndependent)
+{
+    const auto ordered_names = [](const std::vector<std::string>& registration_order) {
+        AuxiliaryInputRegistry reg;
+        for (const auto& name : registration_order) {
+            reg.registerInput(makeScalarInput(name));
+        }
+        reg.addDependency("z", "b");
+        reg.addDependency("m", "a");
+
+        const auto names = reg.inputNames();
+        std::vector<std::string> result;
+        for (const auto index : reg.evaluationOrder()) {
+            result.push_back(names[index]);
+        }
+        return result;
+    };
+
+    const auto forward = ordered_names({"z", "b", "a", "m"});
+    const auto reverse = ordered_names({"m", "a", "b", "z"});
+
+    const std::vector<std::string> expected{"a", "b", "m", "z"};
+    EXPECT_EQ(forward, expected);
+    EXPECT_EQ(reverse, expected);
+}
+
+// ---------------------------------------------------------------------------
+//  Frozen evaluation plans
+// ---------------------------------------------------------------------------
+
+TEST(AuxiliaryInputRegistry, FrozenPlanDescribesAndExecutesExactSchedule)
+{
+    AuxiliaryInputRegistry reg;
+    std::vector<std::string> callback_order;
+    int entity_calls = 0;
+    int collective_calls = 0;
+
+    auto collective = makeScalarInput(
+        "z_collective", AuxiliaryInputProducer::BoundaryReduction);
+    collective.requires_mpi_reduction = true;
+    collective.collective_route_key = "boundary:value:z_collective";
+    reg.registerInput(
+        collective,
+        [&](Real time, Real dt, std::span<Real> out) {
+            callback_order.push_back("z_collective");
+            EXPECT_DOUBLE_EQ(time, 3.5);
+            EXPECT_DOUBLE_EQ(dt, 0.25);
+            out[0] = 9.0;
+            ++collective_calls;
+        });
+
+    AuxiliaryInputSpec local;
+    local.name = "a_local";
+    local.size = 2;
+    local.entity_count = 3;
+    reg.registerEntityInput(
+        local,
+        [&](Real time, Real dt, std::size_t entity, std::span<Real> out) {
+            callback_order.push_back("a_local:" + std::to_string(entity));
+            EXPECT_DOUBLE_EQ(time, 3.5);
+            EXPECT_DOUBLE_EQ(dt, 0.25);
+            out[0] = static_cast<Real>(entity);
+            out[1] = static_cast<Real>(entity + 10);
+            ++entity_calls;
+        });
+
+    reg.registerInput(makeScalarInput("no_callback"));
+
+    auto plan = reg.prepareEvaluation(3.5, 0.25);
+    EXPECT_DOUBLE_EQ(plan.time(), 3.5);
+    EXPECT_DOUBLE_EQ(plan.dt(), 0.25);
+    EXPECT_FALSE(plan.isNonlinearIteration());
+    EXPECT_FALSE(plan.consumed());
+
+    const auto due = plan.dueInputIndices();
+    const auto invocations = plan.invocations();
+    ASSERT_EQ(due.size(), 2u);
+    ASSERT_EQ(invocations.size(), 2u);
+    EXPECT_EQ(due[0], invocations[0].input_index);
+    EXPECT_EQ(due[1], invocations[1].input_index);
+
+    EXPECT_EQ(invocations[0].input_name, "a_local");
+    EXPECT_EQ(invocations[0].callback_invocation_count, 3u);
+    EXPECT_EQ(invocations[0].value_count, 6u);
+    EXPECT_TRUE(invocations[0].entity_callback);
+    EXPECT_FALSE(invocations[0].requires_mpi_reduction);
+
+    EXPECT_EQ(invocations[1].input_name, "z_collective");
+    EXPECT_EQ(invocations[1].callback_invocation_count, 1u);
+    EXPECT_EQ(invocations[1].value_count, 1u);
+    EXPECT_FALSE(invocations[1].entity_callback);
+    EXPECT_TRUE(invocations[1].requires_mpi_reduction);
+    EXPECT_EQ(invocations[1].collective_route_key,
+              "boundary:value:z_collective");
+
+    EXPECT_TRUE(reg.executeNextEvaluation(plan));
+    EXPECT_EQ(entity_calls, 3);
+    EXPECT_EQ(collective_calls, 0);
+    EXPECT_FALSE(plan.consumed());
+
+    EXPECT_TRUE(reg.executeNextEvaluation(plan));
+
+    EXPECT_TRUE(plan.consumed());
+    EXPECT_EQ(entity_calls, 3);
+    EXPECT_EQ(collective_calls, 1);
+    const std::vector<std::string> expected_order{
+        "a_local:0", "a_local:1", "a_local:2", "z_collective"};
+    EXPECT_EQ(callback_order, expected_order);
+    EXPECT_DOUBLE_EQ(reg.valuesOf("a_local", 2)[1], 12.0);
+    EXPECT_DOUBLE_EQ(reg.get("z_collective"), 9.0);
+
+    auto clean_plan = reg.prepareEvaluation(4.0, 0.5);
+    EXPECT_TRUE(clean_plan.dueInputIndices().empty());
+    EXPECT_TRUE(clean_plan.invocations().empty());
+}
+
+TEST(AuxiliaryInputRegistry, FrozenPlanRejectsStaleForeignAndRepeatedUse)
+{
+    AuxiliaryInputRegistry first;
+    int calls = 0;
+    first.registerInput(
+        makeScalarInput("value"),
+        [&](Real, Real, std::span<Real> out) {
+            out[0] = 1.0;
+            ++calls;
+        });
+
+    auto stale = first.prepareEvaluation(0.0, 0.1);
+    first.markDirty("value");
+    EXPECT_THROW(first.executeEvaluationPlan(stale),
+                 svmp::FE::InvalidStateException);
+    EXPECT_EQ(calls, 0);
+
+    auto foreign = first.prepareEvaluation(0.0, 0.1);
+    AuxiliaryInputRegistry second;
+    second.registerInput(makeScalarInput("value"));
+    EXPECT_THROW(second.executeEvaluationPlan(foreign),
+                 svmp::FE::InvalidArgumentException);
+    EXPECT_EQ(calls, 0);
+
+    auto executable = first.prepareEvaluation(0.0, 0.1);
+    first.executeEvaluationPlan(executable);
+    EXPECT_EQ(calls, 1);
+    EXPECT_THROW(first.executeEvaluationPlan(executable),
+                 svmp::FE::InvalidStateException);
+    EXPECT_EQ(calls, 1);
+}
+
+TEST(AuxiliaryInputRegistry, FrozenPlanPublishesOnlyAfterExplicitCommit)
+{
+    AuxiliaryInputRegistry reg;
+    reg.registerInput(
+        makeScalarInput("staged"),
+        [](Real, Real, std::span<Real> out) { out[0] = 19.0; });
+    reg.set("staged", 7.0);
+
+    auto plan = reg.prepareEvaluation(0.0, 0.1);
+    ASSERT_TRUE(reg.stageNextEvaluation(plan));
+    EXPECT_TRUE(plan.hasStagedEvaluation());
+    EXPECT_FALSE(plan.consumed());
+    EXPECT_DOUBLE_EQ(reg.get("staged"), 7.0);
+
+    EXPECT_THROW(
+        reg.stageNextEvaluation(plan),
+        svmp::FE::InvalidStateException);
+    EXPECT_TRUE(reg.canCommitStagedEvaluation(plan));
+    reg.commitStagedEvaluation(plan);
+    EXPECT_FALSE(plan.hasStagedEvaluation());
+    EXPECT_TRUE(plan.consumed());
+    EXPECT_DOUBLE_EQ(reg.get("staged"), 19.0);
+    EXPECT_THROW(
+        reg.commitStagedEvaluation(plan),
+        svmp::FE::InvalidStateException);
+}
+
+TEST(AuxiliaryInputRegistry, AbandonedStagedResultRemainsDue)
+{
+    AuxiliaryInputRegistry reg;
+    reg.registerInput(
+        makeScalarInput("staged"),
+        [](Real, Real, std::span<Real> out) { out[0] = 31.0; });
+    reg.set("staged", 11.0);
+
+    {
+        auto abandoned = reg.prepareEvaluation(0.0, 0.1);
+        ASSERT_TRUE(reg.stageNextEvaluation(abandoned));
+        EXPECT_DOUBLE_EQ(reg.get("staged"), 11.0);
+    }
+
+    auto retry = reg.prepareEvaluation(0.0, 0.1);
+    ASSERT_EQ(retry.invocations().size(), 1u);
+    EXPECT_EQ(retry.invocations()[0].input_name, "staged");
+}
+
+TEST(AuxiliaryInputRegistry, DirectWriteInvalidatesStagedPublication)
+{
+    AuxiliaryInputRegistry reg;
+    reg.registerInput(
+        makeScalarInput("staged"),
+        [](Real, Real, std::span<Real> out) { out[0] = 41.0; });
+
+    auto plan = reg.prepareEvaluation(0.0, 0.1);
+    ASSERT_TRUE(reg.stageNextEvaluation(plan));
+    ASSERT_TRUE(reg.canCommitStagedEvaluation(plan));
+
+    reg.set("staged", 13.0);
+    EXPECT_FALSE(reg.canCommitStagedEvaluation(plan));
+    EXPECT_THROW(
+        reg.commitStagedEvaluation(plan),
+        svmp::FE::InvalidStateException);
+    EXPECT_DOUBLE_EQ(reg.get("staged"), 13.0);
+}
+
+TEST(AuxiliaryInputRegistry, MutableAccessInvalidatesStagedPublication)
+{
+    AuxiliaryInputRegistry reg;
+    reg.registerInput(
+        makeScalarInput("staged"),
+        [](Real, Real, std::span<Real> out) { out[0] = 43.0; });
+
+    auto plan = reg.prepareEvaluation(0.0, 0.1);
+    ASSERT_TRUE(reg.stageNextEvaluation(plan));
+    ASSERT_TRUE(reg.canCommitStagedEvaluation(plan));
+
+    auto direct_values = reg.mutableValuesOf("staged");
+    direct_values[0] = 17.0;
+    EXPECT_FALSE(reg.canCommitStagedEvaluation(plan));
+    EXPECT_THROW(
+        reg.commitStagedEvaluation(plan),
+        svmp::FE::InvalidStateException);
+    EXPECT_DOUBLE_EQ(reg.get("staged"), 17.0);
+}
+
+TEST(AuxiliaryInputRegistry, FailedStagedCallbackDoesNotPublishPartialOutput)
+{
+    AuxiliaryInputRegistry reg;
+    reg.registerInput(
+        makeScalarInput("staged"),
+        [](Real, Real, std::span<Real> out) {
+            out[0] = 23.0;
+            throw std::runtime_error("provider failure");
+        });
+    reg.set("staged", 5.0);
+
+    auto plan = reg.prepareEvaluation(0.0, 0.1);
+    EXPECT_THROW(reg.stageNextEvaluation(plan), std::runtime_error);
+    EXPECT_TRUE(plan.consumed());
+    EXPECT_FALSE(plan.hasStagedEvaluation());
+    EXPECT_DOUBLE_EQ(reg.get("staged"), 5.0);
+
+    auto retry = reg.prepareEvaluation(0.0, 0.1);
+    ASSERT_EQ(retry.invocations().size(), 1u);
+    EXPECT_EQ(retry.invocations()[0].input_name, "staged");
+}
+
+TEST(AuxiliaryInputRegistry, FrozenPlanRejectsCallbackLifecycleMutation)
+{
+    AuxiliaryInputRegistry reg;
+    int calls = 0;
+    reg.registerInput(
+        makeScalarInput("self_mutating"),
+        [&](Real, Real, std::span<Real>) {
+            ++calls;
+            reg.clear();
+        });
+
+    auto plan = reg.prepareEvaluation(0.0, 0.1);
+    EXPECT_THROW(reg.executeEvaluationPlan(plan),
+                 svmp::FE::InvalidStateException);
+    EXPECT_TRUE(plan.consumed());
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(reg.inputCount(), 1u);
+    EXPECT_TRUE(reg.hasInput("self_mutating"));
+}
+
+TEST(AuxiliaryInputRegistry, LaterPlanIsStaleAfterInterleavedStep)
+{
+    AuxiliaryInputRegistry reg;
+    int a_calls = 0;
+    int b_calls = 0;
+    reg.registerInput(
+        makeScalarInput("a"),
+        [&](Real, Real, std::span<Real>) { ++a_calls; });
+    reg.registerInput(
+        makeScalarInput("b"),
+        [&](Real, Real, std::span<Real>) { ++b_calls; });
+
+    auto first = reg.prepareEvaluation(0.0, 0.1);
+    ASSERT_TRUE(reg.executeNextEvaluation(first));
+    EXPECT_EQ(a_calls, 1);
+    EXPECT_EQ(b_calls, 0);
+
+    auto interleaved = reg.prepareEvaluation(0.0, 0.1);
+    ASSERT_EQ(interleaved.invocations().size(), 1u);
+    EXPECT_EQ(interleaved.invocations()[0].input_name, "b");
+
+    ASSERT_TRUE(reg.executeNextEvaluation(first));
+    EXPECT_EQ(a_calls, 1);
+    EXPECT_EQ(b_calls, 1);
+
+    EXPECT_THROW(reg.executeEvaluationPlan(interleaved),
+                 svmp::FE::InvalidStateException);
+    EXPECT_EQ(b_calls, 1);
+}
+
+TEST(AuxiliaryInputRegistry, FrozenPlanCapturesNonlinearEligibility)
+{
+    AuxiliaryInputRegistry reg;
+    auto spec = makeScalarInput("iteration_value");
+    spec.update_schedule =
+        AuxiliaryInputUpdateSchedule::EachNonlinearIteration;
+
+    int calls = 0;
+    reg.registerInput(spec, [&](Real, Real, std::span<Real>) { ++calls; });
+    reg.evaluate(0.0, 0.1);
+    ASSERT_EQ(calls, 1);
+
+    auto ordinary = reg.prepareEvaluation(0.0, 0.1, false);
+    EXPECT_TRUE(ordinary.invocations().empty());
+
+    auto nonlinear = reg.prepareEvaluation(0.0, 0.1, true);
+    ASSERT_EQ(nonlinear.invocations().size(), 1u);
+    EXPECT_EQ(nonlinear.invocations()[0].input_name, "iteration_value");
+    EXPECT_TRUE(nonlinear.isNonlinearIteration());
+
+    reg.executeEvaluationPlan(ordinary);
+    EXPECT_TRUE(ordinary.consumed());
+
+    reg.executeEvaluationPlan(nonlinear);
+    EXPECT_EQ(calls, 2);
+}
+
 // ---------------------------------------------------------------------------
 //  AuxiliaryOutput producer (input from another model's output)
 // ---------------------------------------------------------------------------
@@ -452,6 +865,7 @@ TEST(AuxiliaryInputRegistry, BoundaryReductionInput)
     spec.producer = AuxiliaryInputProducer::BoundaryReduction;
     spec.boundary_marker = 5;
     spec.requires_mpi_reduction = true;
+    spec.collective_route_key = "boundary:value:flow_rate";
     spec.update_schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep;
 
     reg.registerInput(spec, [](Real, Real, std::span<Real> out) {
@@ -613,6 +1027,29 @@ TEST(AuxiliaryInputRegistry, EntityLocalMultiComponent)
 
     // Total storage
     EXPECT_EQ(reg.totalSize(), 6u);
+}
+
+TEST(AuxiliaryInputRegistry, EntityLocalMutableViewCoversFlatStorage)
+{
+    AuxiliaryInputRegistry reg;
+
+    AuxiliaryInputSpec spec;
+    spec.name = "state";
+    spec.size = 2;
+    spec.entity_count = 3;
+    reg.registerEntityInput(
+        spec,
+        [](Real, Real, std::size_t, std::span<Real>) {});
+
+    auto mutable_values = reg.mutableValuesOf("state");
+    ASSERT_EQ(mutable_values.size(), 6u);
+    for (std::size_t i = 0; i < mutable_values.size(); ++i) {
+        mutable_values[i] = static_cast<Real>(i + 1u);
+    }
+
+    const auto all_values = reg.valuesOf("state");
+    EXPECT_EQ(all_values.size(), 6u);
+    EXPECT_DOUBLE_EQ(reg.valuesOf("state", 2)[1], 6.0);
 }
 
 TEST(AuxiliaryInputRegistry, EntityLocalOutOfRangeThrows)

@@ -16,6 +16,7 @@
 #include "FE/Basis/BasisCache.h"
 #include "FE/Basis/NodeOrderingConventions.h"
 #include "FE/Backends/Interfaces/GenericVector.h"
+#include "FE/Constraints/AffineConstraints.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/LevelSet/LevelSetCurvatureProjection.h"
 #include "FE/LevelSet/LevelSetCellEvaluator.h"
@@ -26,6 +27,7 @@
 #include "FE/LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "FE/LevelSet/LevelSetReinitialization.h"
+#include "FE/LevelSet/LevelSetStaticCapillaryEquilibrium.h"
 #include "FE/LevelSet/LevelSetTransport.h"
 #include "FE/LevelSet/LevelSetVelocityExtensionConstraint.h"
 #include "FE/LevelSet/LevelSetVolume.h"
@@ -63,6 +65,7 @@
 #include <exception>
 #include <fstream>
 #include <filesystem>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <initializer_list>
@@ -79,6 +82,7 @@
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <sstream>
 #include <stdexcept>
@@ -141,6 +145,7 @@ void validateMaintenanceFunctionalValues(
     const std::vector<LevelSetAuthoritativeFunctionalValue>& values)
 {
   int previous_marker = -1;
+  std::size_t active_volume_owner_count = 0u;
   for (const auto& value : values) {
     const std::array<double, 8> scalars{
         value.liquid_volume,
@@ -155,15 +160,126 @@ void validateMaintenanceFunctionalValues(
         value.interface_marker <= previous_marker ||
         value.snapshot_revision == 0u ||
         value.cut_topology_revision == 0u ||
+        value.liquid_volume < 0.0 ||
+        value.liquid_gas_area < 0.0 ||
+        value.wetted_wall_area < 0.0 ||
+        value.contact_measure < 0.0 ||
+        value.surface_energy < 0.0 ||
         !std::all_of(scalars.begin(), scalars.end(), [](double scalar) {
           return std::isfinite(scalar);
         })) {
       throw std::invalid_argument(
-          "Level-set maintenance work values require unique ordered markers, "
-          "complete snapshot and cut-topology revisions, and finite scalars.");
+        "Level-set maintenance work values require unique ordered markers, "
+        "complete snapshot and cut-topology revisions, "
+        "nonnegative measures and surface energy, and finite scalars.");
+    }
+    const double expected_total_potential =
+        value.surface_energy + value.young_wall_energy +
+        value.volume_constraint_potential;
+    const double potential_scale = std::max(
+        {1.0,
+         std::abs(value.total_potential),
+         std::abs(expected_total_potential)});
+    if (std::abs(
+            value.total_potential - expected_total_potential) >
+        64.0 * std::numeric_limits<double>::epsilon() *
+            potential_scale) {
+      throw std::invalid_argument(
+          "Level-set maintenance total potential must equal the surface, "
+          "Young-wall, and volume-constraint contributions.");
+    }
+    const bool has_active_energy =
+        value.kinetic_energy.has_value();
+    if (value.gravitational_energy.has_value() != has_active_energy ||
+        value.gravitational_potential_power.has_value() !=
+            has_active_energy ||
+        value.modeled_stored_energy.has_value() != has_active_energy) {
+      throw std::invalid_argument(
+          "Level-set maintenance active-volume energy channels must be supplied together.");
+    }
+    if (has_active_energy) {
+      ++active_volume_owner_count;
+      const double modeled_sum =
+          *value.kinetic_energy +
+          *value.gravitational_energy +
+          value.surface_energy +
+          value.young_wall_energy;
+      const double scale = std::max(
+          {1.0,
+           std::abs(modeled_sum),
+           std::abs(*value.modeled_stored_energy)});
+      if (!std::isfinite(*value.kinetic_energy) ||
+          *value.kinetic_energy < 0.0 ||
+          !std::isfinite(*value.gravitational_energy) ||
+          !std::isfinite(
+              *value.gravitational_potential_power) ||
+          !std::isfinite(*value.modeled_stored_energy) ||
+          std::abs(
+              *value.modeled_stored_energy - modeled_sum) >
+              64.0 * std::numeric_limits<double>::epsilon() *
+                  scale) {
+        throw std::invalid_argument(
+            "Level-set maintenance modeled stored-energy channels are invalid or inconsistent.");
+      }
+    }
+    if (value.surface_wall_potential_power.has_value() !=
+        value.volume_constraint_potential_power.has_value()) {
+      throw std::invalid_argument(
+          "Level-set maintenance endpoint functional-power channels must be supplied together.");
+    }
+    if ((value.surface_wall_potential_power.has_value() &&
+         (!std::isfinite(*value.surface_wall_potential_power) ||
+          !std::isfinite(
+              *value.volume_constraint_potential_power))) ||
+        (value.bulk_viscous_dissipation_rate.has_value() &&
+         (!std::isfinite(
+              *value.bulk_viscous_dissipation_rate) ||
+          *value.bulk_viscous_dissipation_rate < 0.0)) ||
+        (value.external_pressure_power.has_value() &&
+         !std::isfinite(*value.external_pressure_power))) {
+      throw std::invalid_argument(
+          "Level-set maintenance endpoint power or dissipation channels are invalid.");
     }
     previous_marker = value.interface_marker;
   }
+  if (active_volume_owner_count > 1u) {
+    throw std::invalid_argument(
+        "Level-set maintenance modeled energy requires at most one "
+        "active-volume owner across all interface functionals.");
+  }
+}
+
+std::optional<double> maintenanceModeledStoredEnergy(
+    const std::vector<LevelSetAuthoritativeFunctionalValue>& values)
+{
+  const LevelSetAuthoritativeFunctionalValue* active_volume_owner =
+      nullptr;
+  double surface_and_wall_energy = 0.0;
+  for (const auto& value : values) {
+    surface_and_wall_energy +=
+        value.surface_energy + value.young_wall_energy;
+    if (!value.modeled_stored_energy.has_value()) {
+      continue;
+    }
+    if (active_volume_owner != nullptr) {
+      throw std::invalid_argument(
+          "Level-set maintenance modeled energy has multiple "
+          "active-volume owners.");
+    }
+    active_volume_owner = &value;
+  }
+  if (active_volume_owner == nullptr) {
+    return std::nullopt;
+  }
+  const double total =
+      *active_volume_owner->kinetic_energy +
+      *active_volume_owner->gravitational_energy +
+      surface_and_wall_energy;
+  if (!std::isfinite(total)) {
+    throw std::invalid_argument(
+        "Level-set maintenance total modeled stored energy is not finite.");
+  }
+  return total;
 }
 
 LevelSetMaintenanceWorkAttempt makeMaintenanceWorkAttempt(
@@ -171,10 +287,87 @@ LevelSetMaintenanceWorkAttempt makeMaintenanceWorkAttempt(
     LevelSetMaintenanceWorkStatus status,
     const std::vector<LevelSetMaintenanceWorkRow>& rows) noexcept
 {
+  struct ModeledEnergyAccumulator {
+    std::size_t row_count{0u};
+    bool complete{true};
+    double change{0.0};
+  };
+  std::array<ModeledEnergyAccumulator, 5> substage_accumulators{};
+  const auto substage_index =
+      [](LevelSetMaintenanceWorkSubstage substage) noexcept {
+        switch (substage) {
+          case LevelSetMaintenanceWorkSubstage::Transport:
+            return std::size_t{0u};
+          case LevelSetMaintenanceWorkSubstage::Limiting:
+            return std::size_t{1u};
+          case LevelSetMaintenanceWorkSubstage::Reinitialization:
+            return std::size_t{2u};
+          case LevelSetMaintenanceWorkSubstage::GeometryReconciliation:
+            return std::size_t{3u};
+          case LevelSetMaintenanceWorkSubstage::GlobalCorrection:
+            return std::size_t{4u};
+        }
+        return std::size_t{5u};
+  };
   double numerical_work = 0.0;
+  std::optional<double> modeled_energy_numerical_work =
+      rows.empty() ? std::nullopt : std::optional<double>{0.0};
   for (const auto& row : rows) {
     numerical_work += row.numerical_work;
+    const auto index = substage_index(row.substage);
+    if (index < substage_accumulators.size()) {
+      auto& accumulator = substage_accumulators[index];
+      ++accumulator.row_count;
+      if (!row.modeled_energy_numerical_work.has_value()) {
+        accumulator.complete = false;
+      } else {
+        accumulator.change +=
+            *row.modeled_energy_numerical_work;
+      }
+    }
+    if (!row.modeled_energy_numerical_work.has_value()) {
+      modeled_energy_numerical_work.reset();
+    } else if (modeled_energy_numerical_work.has_value()) {
+      *modeled_energy_numerical_work +=
+          *row.modeled_energy_numerical_work;
+    }
   }
+  const auto publish_substage =
+      [status](const ModeledEnergyAccumulator& accumulator) {
+        LevelSetMaintenanceModeledEnergySubstage result;
+        result.row_count = accumulator.row_count;
+        if (accumulator.row_count == 0u || !accumulator.complete) {
+          return result;
+        }
+        result.modeled_energy_change = accumulator.change;
+        result.accepted_modeled_energy_change =
+            status == LevelSetMaintenanceWorkStatus::Accepted
+                ? accumulator.change
+                : 0.0;
+        return result;
+      };
+  ModeledEnergyAccumulator numerical_maintenance;
+  for (std::size_t index = 1u;
+       index < substage_accumulators.size();
+       ++index) {
+    const auto& accumulator = substage_accumulators[index];
+    numerical_maintenance.row_count += accumulator.row_count;
+    numerical_maintenance.complete =
+        numerical_maintenance.complete && accumulator.complete;
+    numerical_maintenance.change += accumulator.change;
+  }
+  const LevelSetMaintenanceModeledEnergyBreakdown breakdown{
+      .transport = publish_substage(substage_accumulators[0]),
+      .limiting = publish_substage(substage_accumulators[1]),
+      .reinitialization =
+          publish_substage(substage_accumulators[2]),
+      .geometry_reconciliation =
+          publish_substage(substage_accumulators[3]),
+      .global_correction =
+          publish_substage(substage_accumulators[4]),
+      .numerical_maintenance_total =
+          publish_substage(numerical_maintenance),
+  };
   return LevelSetMaintenanceWorkAttempt{
       .transaction_id = transaction.transaction_id,
       .status = status,
@@ -190,10 +383,696 @@ LevelSetMaintenanceWorkAttempt makeMaintenanceWorkAttempt(
           status == LevelSetMaintenanceWorkStatus::Accepted
               ? numerical_work
               : 0.0,
+      .modeled_energy_numerical_work =
+          modeled_energy_numerical_work,
+      .accepted_modeled_energy_numerical_work =
+          modeled_energy_numerical_work.has_value()
+              ? std::optional<double>{
+                    status ==
+                            LevelSetMaintenanceWorkStatus::Accepted
+                        ? *modeled_energy_numerical_work
+                        : 0.0}
+              : std::nullopt,
+      .modeled_energy_breakdown = breakdown,
   };
 }
 
 } // namespace
+
+std::optional<LevelSetMaintenanceAcceptedStepEnergyAccount>
+aggregateLevelSetMaintenanceAcceptedStepEnergy(
+    std::span<const LevelSetMaintenanceWorkAttempt> attempts,
+    std::span<const LevelSetMaintenanceWorkRow> rows)
+{
+  if (attempts.empty()) {
+    if (!rows.empty()) {
+      throw std::invalid_argument(
+          "Accepted-step maintenance rows require an accepted attempt.");
+    }
+    return std::nullopt;
+  }
+
+  struct Accumulator {
+    std::size_t row_count{0u};
+    bool complete{true};
+    double change{0.0};
+  };
+  const auto checked_row_count_sum =
+      [](std::size_t left, std::size_t right) {
+        if (right >
+            std::numeric_limits<std::size_t>::max() - left) {
+          throw std::overflow_error(
+              "Accepted-step maintenance row count overflowed.");
+        }
+        return left + right;
+      };
+  const auto validate_substage =
+      [](const LevelSetMaintenanceModeledEnergySubstage& substage) {
+        const bool diagnostic_available =
+            substage.modeled_energy_change.has_value();
+        const bool accepted_available =
+            substage.accepted_modeled_energy_change.has_value();
+        if (substage.row_count == 0u) {
+          if (diagnostic_available || accepted_available) {
+            throw std::invalid_argument(
+                "A zero-row accepted-step maintenance substage cannot publish modeled-energy values.");
+          }
+          return;
+        }
+        if (diagnostic_available != accepted_available) {
+          throw std::invalid_argument(
+              "An accepted-step maintenance substage must publish matching diagnostic and accepted modeled-energy availability.");
+        }
+        if (diagnostic_available &&
+            (!std::isfinite(*substage.modeled_energy_change) ||
+             !std::isfinite(
+                 *substage.accepted_modeled_energy_change) ||
+             *substage.modeled_energy_change !=
+                 *substage.accepted_modeled_energy_change)) {
+          throw std::invalid_argument(
+              "An accepted-step maintenance substage has inconsistent modeled-energy values.");
+        }
+      };
+  const auto merge_substage =
+      [&](Accumulator& accumulator,
+          const LevelSetMaintenanceModeledEnergySubstage& substage) {
+        validate_substage(substage);
+        accumulator.row_count = checked_row_count_sum(
+            accumulator.row_count, substage.row_count);
+        if (substage.row_count == 0u) {
+          return;
+        }
+        if (!substage.accepted_modeled_energy_change.has_value()) {
+          accumulator.complete = false;
+          return;
+        }
+        accumulator.change +=
+            *substage.accepted_modeled_energy_change;
+        if (!std::isfinite(accumulator.change)) {
+          throw std::overflow_error(
+              "Accepted-step maintenance modeled-energy sum is not finite.");
+        }
+      };
+  const auto publish_substage =
+      [](const Accumulator& accumulator) {
+        LevelSetMaintenanceModeledEnergySubstage result;
+        result.row_count = accumulator.row_count;
+        if (accumulator.row_count != 0u && accumulator.complete) {
+          result.modeled_energy_change = accumulator.change;
+          result.accepted_modeled_energy_change =
+              accumulator.change;
+        }
+        return result;
+      };
+  const auto require_attempt_breakdown =
+      [&](const LevelSetMaintenanceWorkAttempt& attempt) {
+        const auto& breakdown = attempt.modeled_energy_breakdown;
+        validate_substage(breakdown.transport);
+        validate_substage(breakdown.limiting);
+        validate_substage(breakdown.reinitialization);
+        validate_substage(breakdown.geometry_reconciliation);
+        validate_substage(breakdown.global_correction);
+        validate_substage(breakdown.numerical_maintenance_total);
+
+        std::size_t numerical_row_count = 0u;
+        numerical_row_count = checked_row_count_sum(
+            numerical_row_count, breakdown.limiting.row_count);
+        numerical_row_count = checked_row_count_sum(
+            numerical_row_count,
+            breakdown.reinitialization.row_count);
+        numerical_row_count = checked_row_count_sum(
+            numerical_row_count,
+            breakdown.geometry_reconciliation.row_count);
+        numerical_row_count = checked_row_count_sum(
+            numerical_row_count,
+            breakdown.global_correction.row_count);
+        if (numerical_row_count !=
+            breakdown.numerical_maintenance_total.row_count) {
+          throw std::invalid_argument(
+              "An accepted-step maintenance attempt has inconsistent numerical-maintenance row coverage.");
+        }
+        const std::array<
+            const LevelSetMaintenanceModeledEnergySubstage*,
+            4>
+            numerical_substages{{
+                &breakdown.limiting,
+                &breakdown.reinitialization,
+                &breakdown.geometry_reconciliation,
+                &breakdown.global_correction,
+            }};
+        bool numerical_complete = numerical_row_count != 0u;
+        double numerical_change = 0.0;
+        for (const auto* substage : numerical_substages) {
+          if (substage->row_count == 0u) {
+            continue;
+          }
+          numerical_complete =
+              numerical_complete &&
+              substage->modeled_energy_change.has_value();
+          if (substage->modeled_energy_change.has_value()) {
+            numerical_change += *substage->modeled_energy_change;
+          }
+        }
+        const bool numerical_total_available =
+            breakdown.numerical_maintenance_total
+                .modeled_energy_change.has_value();
+        if (numerical_complete != numerical_total_available ||
+            (numerical_complete &&
+             numerical_change !=
+                 *breakdown.numerical_maintenance_total
+                      .modeled_energy_change)) {
+          throw std::invalid_argument(
+              "An accepted-step maintenance attempt has an inconsistent numerical-maintenance modeled-energy total.");
+        }
+
+        const auto covered_row_count = checked_row_count_sum(
+            breakdown.transport.row_count, numerical_row_count);
+        if (covered_row_count != attempt.row_count) {
+          throw std::invalid_argument(
+              "An accepted-step maintenance attempt has inconsistent total row coverage.");
+        }
+        const bool all_rows_complete =
+            attempt.row_count != 0u &&
+            (breakdown.transport.row_count == 0u ||
+             breakdown.transport.modeled_energy_change.has_value()) &&
+            (numerical_row_count == 0u || numerical_complete);
+        const bool aggregate_available =
+            attempt.modeled_energy_numerical_work.has_value();
+        const bool accepted_aggregate_available =
+            attempt.accepted_modeled_energy_numerical_work.has_value();
+        if (aggregate_available != accepted_aggregate_available ||
+            aggregate_available != all_rows_complete) {
+          throw std::invalid_argument(
+              "An accepted-step maintenance attempt has inconsistent aggregate modeled-energy availability.");
+        }
+        if (aggregate_available) {
+          if (!std::isfinite(
+                  *attempt.modeled_energy_numerical_work) ||
+              !std::isfinite(
+                  *attempt
+                       .accepted_modeled_energy_numerical_work) ||
+              *attempt.accepted_modeled_energy_numerical_work !=
+                  *attempt.modeled_energy_numerical_work) {
+            throw std::invalid_argument(
+                "An accepted-step maintenance attempt has inconsistent aggregate modeled-energy values.");
+          }
+        }
+      };
+
+  const auto& first = attempts.front();
+  if (first.status != LevelSetMaintenanceWorkStatus::Accepted ||
+      first.transaction_id == 0u || first.step == 0u ||
+      first.attempt == 0u || !std::isfinite(first.time) ||
+      !std::isfinite(first.dt) || first.dt < 0.0 ||
+      (first.extension_map_revision.has_value() &&
+       *first.extension_map_revision == 0u)) {
+    throw std::invalid_argument(
+        "Accepted-step maintenance aggregation requires complete accepted-attempt metadata.");
+  }
+  LevelSetMaintenanceAcceptedStepEnergyAccount account{
+      .step = first.step,
+      .attempt = first.attempt,
+      .time = first.time,
+      .dt = first.dt,
+      .transaction_count = attempts.size(),
+  };
+  Accumulator transport;
+  Accumulator limiting;
+  Accumulator reinitialization;
+  Accumulator geometry_reconciliation;
+  Accumulator global_correction;
+  Accumulator numerical_maintenance_total;
+  std::uint64_t previous_transaction_id{0u};
+  for (const auto& attempt : attempts) {
+    if (attempt.status != LevelSetMaintenanceWorkStatus::Accepted ||
+        attempt.transaction_id == 0u ||
+        attempt.transaction_id <= previous_transaction_id ||
+        attempt.step != account.step ||
+        attempt.attempt != account.attempt ||
+        attempt.time != account.time || attempt.dt != account.dt ||
+        (attempt.extension_map_revision.has_value() &&
+         *attempt.extension_map_revision == 0u) ||
+        !std::isfinite(attempt.numerical_work) ||
+        !std::isfinite(attempt.accepted_numerical_work) ||
+        attempt.numerical_work != attempt.accepted_numerical_work) {
+      throw std::invalid_argument(
+          "Accepted-step maintenance attempts must form one metadata-consistent accepted transaction sequence.");
+    }
+    require_attempt_breakdown(attempt);
+    previous_transaction_id = attempt.transaction_id;
+    account.row_count = checked_row_count_sum(
+        account.row_count, attempt.row_count);
+    const auto& breakdown = attempt.modeled_energy_breakdown;
+    merge_substage(transport, breakdown.transport);
+    merge_substage(limiting, breakdown.limiting);
+    merge_substage(
+        reinitialization, breakdown.reinitialization);
+    merge_substage(
+        geometry_reconciliation,
+        breakdown.geometry_reconciliation);
+    merge_substage(
+        global_correction, breakdown.global_correction);
+    merge_substage(
+        numerical_maintenance_total,
+        breakdown.numerical_maintenance_total);
+  }
+  account.modeled_energy_breakdown =
+      LevelSetMaintenanceModeledEnergyBreakdown{
+          .transport = publish_substage(transport),
+          .limiting = publish_substage(limiting),
+          .reinitialization =
+              publish_substage(reinitialization),
+          .geometry_reconciliation =
+              publish_substage(geometry_reconciliation),
+          .global_correction =
+              publish_substage(global_correction),
+          .numerical_maintenance_total =
+              publish_substage(numerical_maintenance_total),
+      };
+  if (rows.size() != account.row_count) {
+    throw std::invalid_argument(
+        "Accepted-step maintenance row history does not match the published attempt coverage.");
+  }
+  if (rows.empty()) {
+    bool poststep_stage_seen = false;
+    const auto extension_map_revision =
+        attempts.front().extension_map_revision;
+    for (const auto& attempt : attempts) {
+      const bool prospective =
+          attempt.declared_stage ==
+          LevelSetMaintenanceDeclaredStage::
+              ProspectiveAcceptedEndpoint;
+      const bool poststep =
+          attempt.declared_stage ==
+          LevelSetMaintenanceDeclaredStage::
+              AcceptedEndpointPostStep;
+      if ((!prospective && !poststep) ||
+          (prospective && poststep_stage_seen) ||
+          attempt.extension_map_revision !=
+              extension_map_revision) {
+        throw std::invalid_argument(
+            "Zero-row accepted-step maintenance transactions have invalid stage ordering or inconsistent extension provenance.");
+      }
+      poststep_stage_seen = poststep_stage_seen || poststep;
+    }
+    return account;
+  }
+
+  const auto make_endpoint =
+      [&](const LevelSetMaintenanceWorkRow& row, bool use_after) {
+        const auto& values = use_after ? row.after : row.before;
+        validateMaintenanceFunctionalValues(values);
+        LevelSetMaintenanceAcceptedStepEnergyAccount::Endpoint
+            endpoint{
+                .algebraic_state_revision =
+                    use_after
+                        ? row.algebraic_state_revision_after
+                        : row.algebraic_state_revision_before,
+                .snapshot_set_revision =
+                    use_after ? row.snapshot_set_revision_after
+                              : row.snapshot_set_revision_before,
+                .mesh_topology_set_revision =
+                    use_after
+                        ? row.mesh_topology_set_revision_after
+                        : row.mesh_topology_set_revision_before,
+                .cut_topology_set_revision =
+                    use_after ? row.cut_topology_set_revision_after
+                              : row.cut_topology_set_revision_before,
+                .extension_map_revision =
+                    use_after ? row.extension_map_revision_after
+                              : row.extension_map_revision_before,
+            };
+        const LevelSetAuthoritativeFunctionalValue*
+            active_volume_owner = nullptr;
+        const LevelSetAuthoritativeFunctionalValue*
+            bulk_dissipation_owner = nullptr;
+        bool surface_power_complete = true;
+        bool external_pressure_power_complete = true;
+        double surface_wall_power = 0.0;
+        double volume_constraint_power = 0.0;
+        double external_pressure_power = 0.0;
+        for (const auto& value : values) {
+          endpoint.liquid_gas_surface_energy +=
+              value.surface_energy;
+          endpoint.solid_liquid_wall_energy +=
+              value.young_wall_energy;
+          if (value.kinetic_energy.has_value()) {
+            if (active_volume_owner != nullptr) {
+              throw std::invalid_argument(
+                  "An accepted-step maintenance endpoint has more than one active-volume energy owner.");
+            }
+            active_volume_owner = &value;
+          }
+          if (!value.surface_wall_potential_power.has_value()) {
+            surface_power_complete = false;
+          } else {
+            surface_wall_power +=
+                *value.surface_wall_potential_power;
+            volume_constraint_power +=
+                *value.volume_constraint_potential_power;
+          }
+          if (!value.external_pressure_power.has_value()) {
+            external_pressure_power_complete = false;
+          } else {
+            external_pressure_power +=
+                *value.external_pressure_power;
+          }
+          if (value.bulk_viscous_dissipation_rate.has_value()) {
+            if (bulk_dissipation_owner != nullptr) {
+              throw std::invalid_argument(
+                  "An accepted-step maintenance endpoint has more than one bulk-dissipation owner.");
+            }
+            bulk_dissipation_owner = &value;
+          }
+        }
+        if (!std::isfinite(
+                endpoint.liquid_gas_surface_energy) ||
+            !std::isfinite(
+                endpoint.solid_liquid_wall_energy) ||
+            !std::isfinite(surface_wall_power) ||
+            !std::isfinite(volume_constraint_power) ||
+            !std::isfinite(external_pressure_power)) {
+          throw std::overflow_error(
+              "Accepted-step maintenance endpoint energy sums are not finite.");
+        }
+        if (active_volume_owner != nullptr) {
+          endpoint.kinetic_energy =
+              active_volume_owner->kinetic_energy;
+          endpoint.gravitational_energy =
+              active_volume_owner->gravitational_energy;
+          endpoint.gravitational_potential_power =
+              active_volume_owner->gravitational_potential_power;
+        }
+        if (surface_power_complete) {
+          endpoint.surface_wall_potential_power =
+              surface_wall_power;
+          endpoint.volume_constraint_potential_power =
+              volume_constraint_power;
+        }
+        if (bulk_dissipation_owner != nullptr) {
+          endpoint.bulk_viscous_dissipation_rate =
+              bulk_dissipation_owner
+                  ->bulk_viscous_dissipation_rate;
+        }
+        if (external_pressure_power_complete) {
+          endpoint.external_pressure_power =
+              external_pressure_power;
+        }
+        endpoint.modeled_stored_energy =
+            maintenanceModeledStoredEnergy(values);
+        return endpoint;
+      };
+  const auto substage_index =
+      [](LevelSetMaintenanceWorkSubstage substage) {
+        switch (substage) {
+          case LevelSetMaintenanceWorkSubstage::Transport:
+            return std::size_t{0u};
+          case LevelSetMaintenanceWorkSubstage::Limiting:
+            return std::size_t{1u};
+          case LevelSetMaintenanceWorkSubstage::Reinitialization:
+            return std::size_t{2u};
+          case LevelSetMaintenanceWorkSubstage::GeometryReconciliation:
+            return std::size_t{3u};
+          case LevelSetMaintenanceWorkSubstage::GlobalCorrection:
+            return std::size_t{4u};
+        }
+        return std::size_t{5u};
+      };
+  const LevelSetMaintenanceWorkRow* previous_row = nullptr;
+  bool nontransport_seen = false;
+  bool poststep_stage_seen = false;
+  bool expected_extension_initialized = false;
+  std::optional<std::uint64_t> expected_extension_revision;
+  std::size_t row_index = 0u;
+  for (const auto& attempt : attempts) {
+    const bool prospective =
+        attempt.declared_stage ==
+        LevelSetMaintenanceDeclaredStage::
+            ProspectiveAcceptedEndpoint;
+    const bool poststep =
+        attempt.declared_stage ==
+        LevelSetMaintenanceDeclaredStage::
+            AcceptedEndpointPostStep;
+    if ((!prospective && !poststep) ||
+        (prospective && poststep_stage_seen)) {
+      throw std::invalid_argument(
+          "Accepted-step maintenance transaction stages are invalid or out of order.");
+    }
+    poststep_stage_seen = poststep_stage_seen || poststep;
+    if (expected_extension_initialized &&
+        attempt.extension_map_revision !=
+            expected_extension_revision) {
+      throw std::invalid_argument(
+          "Accepted-step maintenance transactions do not form one extension-map revision chain.");
+    }
+    expected_extension_initialized = true;
+    expected_extension_revision =
+        attempt.extension_map_revision;
+
+    std::array<Accumulator, 5> row_substages{};
+    for (std::size_t transaction_row = 0u;
+         transaction_row < attempt.row_count;
+         ++transaction_row, ++row_index) {
+      const auto& row = rows[row_index];
+      const auto index = substage_index(row.substage);
+      if (index >= row_substages.size() ||
+          row.before.empty() || row.after.empty() ||
+          row.status != LevelSetMaintenanceWorkStatus::Accepted ||
+          row.transaction_id != attempt.transaction_id ||
+          row.step != account.step ||
+          row.attempt != account.attempt ||
+          row.time != account.time || row.dt != account.dt ||
+          row.declared_stage != attempt.declared_stage ||
+          !std::isfinite(row.numerical_work) ||
+          !std::isfinite(row.accepted_numerical_work) ||
+          row.numerical_work != row.accepted_numerical_work ||
+          row.modeled_energy_numerical_work.has_value() !=
+              row.accepted_modeled_energy_numerical_work
+                  .has_value() ||
+          (row.modeled_energy_numerical_work.has_value() &&
+           (!std::isfinite(
+                *row.modeled_energy_numerical_work) ||
+            !std::isfinite(
+                *row.accepted_modeled_energy_numerical_work) ||
+            *row.modeled_energy_numerical_work !=
+                *row.accepted_modeled_energy_numerical_work))) {
+        throw std::invalid_argument(
+            "Accepted-step maintenance row metadata or accepted work is inconsistent with its transaction.");
+      }
+      if (transaction_row == 0u &&
+          row.extension_map_revision_before !=
+              attempt.extension_map_revision) {
+        throw std::invalid_argument(
+            "An accepted-step maintenance transaction starts from the wrong extension-map revision.");
+      }
+      if (previous_row != nullptr &&
+          (previous_row->algebraic_state_revision_after !=
+                   row.algebraic_state_revision_before ||
+           previous_row->snapshot_set_revision_after !=
+                   row.snapshot_set_revision_before ||
+           previous_row->mesh_topology_set_revision_after !=
+                   row.mesh_topology_set_revision_before ||
+           previous_row->cut_topology_set_revision_after !=
+                   row.cut_topology_set_revision_before ||
+           previous_row->extension_map_revision_after !=
+                   row.extension_map_revision_before ||
+           previous_row->after != row.before)) {
+        throw std::invalid_argument(
+            "Accepted-step maintenance rows do not form one exact algebraic, functional, geometry, topology, and extension chain.");
+      }
+      if (previous_row == nullptr) {
+        account.maintenance_start = make_endpoint(row, false);
+        account.post_transport = account.maintenance_start;
+      }
+      if (row.substage ==
+          LevelSetMaintenanceWorkSubstage::Transport) {
+        if (nontransport_seen) {
+          throw std::invalid_argument(
+              "Accepted-step physical Transport rows must precede every numerical-maintenance row.");
+        }
+        account.post_transport = make_endpoint(row, true);
+      } else {
+        nontransport_seen = true;
+      }
+      auto& row_accumulator = row_substages[index];
+      ++row_accumulator.row_count;
+      if (!row.accepted_modeled_energy_numerical_work
+               .has_value()) {
+        row_accumulator.complete = false;
+      } else {
+        row_accumulator.change +=
+            *row.accepted_modeled_energy_numerical_work;
+        if (!std::isfinite(row_accumulator.change)) {
+          throw std::overflow_error(
+              "Accepted-step maintenance row energy sum is not finite.");
+        }
+      }
+      expected_extension_revision =
+          row.extension_map_revision_after;
+      previous_row = &row;
+    }
+
+    Accumulator row_numerical_maintenance;
+    for (std::size_t index = 1u;
+         index < row_substages.size();
+         ++index) {
+      const auto& row_substage = row_substages[index];
+      row_numerical_maintenance.row_count =
+          checked_row_count_sum(
+              row_numerical_maintenance.row_count,
+              row_substage.row_count);
+      row_numerical_maintenance.complete =
+          row_numerical_maintenance.complete &&
+          row_substage.complete;
+      row_numerical_maintenance.change +=
+          row_substage.change;
+    }
+    const LevelSetMaintenanceModeledEnergyBreakdown
+        row_breakdown{
+            .transport = publish_substage(row_substages[0]),
+            .limiting = publish_substage(row_substages[1]),
+            .reinitialization =
+                publish_substage(row_substages[2]),
+            .geometry_reconciliation =
+                publish_substage(row_substages[3]),
+            .global_correction =
+                publish_substage(row_substages[4]),
+            .numerical_maintenance_total =
+                publish_substage(row_numerical_maintenance),
+        };
+    if (row_breakdown != attempt.modeled_energy_breakdown) {
+      throw std::invalid_argument(
+          "Accepted-step maintenance rows do not reproduce their published attempt breakdown.");
+    }
+  }
+  if (row_index != rows.size() || previous_row == nullptr) {
+    throw std::logic_error(
+        "Accepted-step maintenance row traversal is incomplete.");
+  }
+  account.maintenance_end = make_endpoint(*previous_row, true);
+  const auto endpoint_residual =
+      [](const LevelSetMaintenanceAcceptedStepEnergyAccount::Endpoint&
+             before,
+          const LevelSetMaintenanceAcceptedStepEnergyAccount::Endpoint&
+              after,
+          const LevelSetMaintenanceModeledEnergySubstage& work,
+          bool physical_transport) -> std::optional<double> {
+        if (work.row_count == 0u ||
+            !work.accepted_modeled_energy_change.has_value()) {
+          return std::nullopt;
+        }
+        if (!before.modeled_stored_energy.has_value() ||
+            !after.modeled_stored_energy.has_value()) {
+          throw std::invalid_argument(
+              "An accepted-step maintenance row sum is available without both modeled-energy endpoints.");
+        }
+        const double endpoint_change =
+            *after.modeled_stored_energy -
+            *before.modeled_stored_energy;
+        const double residual =
+            endpoint_change -
+            *work.accepted_modeled_energy_change;
+        const double scale = std::max(
+            {1.0,
+             std::abs(endpoint_change),
+             std::abs(
+                 *work.accepted_modeled_energy_change)});
+        if (!std::isfinite(residual) ||
+            std::abs(residual) >
+                64.0 * std::numeric_limits<double>::epsilon() *
+                    scale) {
+          if (physical_transport) {
+            throw std::invalid_argument(
+                "Accepted-step physical Transport work does not telescope to its modeled-energy endpoints.");
+          }
+          throw std::invalid_argument(
+              "Accepted-step numerical-maintenance work does not telescope to its modeled-energy endpoints.");
+        }
+        return residual;
+      };
+  account.physical_transport_endpoint_residual =
+      endpoint_residual(
+          *account.maintenance_start,
+          *account.post_transport,
+          account.modeled_energy_breakdown.transport,
+          true);
+  account.numerical_maintenance_endpoint_residual =
+      endpoint_residual(
+          *account.post_transport,
+          *account.maintenance_end,
+          account.modeled_energy_breakdown
+              .numerical_maintenance_total,
+          false);
+  return account;
+}
+
+LevelSetMaintenancePhysicalEndpointChannels
+evaluateLevelSetMaintenancePhysicalEndpointChannels(
+    const LevelSetMaintenanceAcceptedStepEnergyAccount& account,
+    std::optional<double> preceding_gravitational_energy,
+    std::optional<double> preceding_surface_wall_energy)
+{
+  if (!account.post_transport.has_value() ||
+      !std::isfinite(account.dt) || !(account.dt > 0.0) ||
+      (preceding_gravitational_energy.has_value() &&
+       !std::isfinite(*preceding_gravitational_energy)) ||
+      (preceding_surface_wall_energy.has_value() &&
+       !std::isfinite(*preceding_surface_wall_energy))) {
+    throw std::invalid_argument(
+        "Physical endpoint energy channels require a complete post-Transport endpoint, positive duration, and finite preceding energies.");
+  }
+  const auto& endpoint = *account.post_transport;
+  LevelSetMaintenancePhysicalEndpointChannels channels;
+  if (preceding_surface_wall_energy.has_value()) {
+    channels.surface_wall_energy_change =
+        endpoint.liquid_gas_surface_energy +
+        endpoint.solid_liquid_wall_energy -
+        *preceding_surface_wall_energy;
+    if (endpoint.surface_wall_potential_power.has_value()) {
+      channels.surface_transport_coupling_work =
+          *channels.surface_wall_energy_change -
+          account.dt *
+              *endpoint.surface_wall_potential_power;
+    }
+  }
+  if (preceding_gravitational_energy.has_value() &&
+      endpoint.gravitational_energy.has_value()) {
+    channels.gravitational_energy_change =
+        *endpoint.gravitational_energy -
+        *preceding_gravitational_energy;
+    if (endpoint.gravitational_potential_power.has_value()) {
+      channels.gravitational_transport_coupling_work =
+          *channels.gravitational_energy_change -
+          account.dt *
+              *endpoint.gravitational_potential_power;
+    }
+  }
+  channels.bulk_viscous_dissipation_rate =
+      endpoint.bulk_viscous_dissipation_rate;
+  if (endpoint.external_pressure_power.has_value()) {
+    channels.external_pressure_work =
+        account.dt * *endpoint.external_pressure_power;
+  }
+  const std::array<std::optional<double>, 6> values{{
+      channels.surface_wall_energy_change,
+      channels.surface_transport_coupling_work,
+      channels.gravitational_energy_change,
+      channels.gravitational_transport_coupling_work,
+      channels.bulk_viscous_dissipation_rate,
+      channels.external_pressure_work,
+  }};
+  if (std::any_of(
+          values.begin(), values.end(), [](const auto& value) {
+            return value.has_value() &&
+                !std::isfinite(*value);
+          }) ||
+      (channels.bulk_viscous_dissipation_rate.has_value() &&
+       *channels.bulk_viscous_dissipation_rate < 0.0)) {
+    throw std::overflow_error(
+        "Physical endpoint energy-channel evaluation is not finite or has negative dissipation.");
+  }
+  return channels;
+}
 
 void LevelSetMaintenanceWorkLedger::beginTransaction(
     LevelSetMaintenanceWorkTransaction transaction)
@@ -239,6 +1118,17 @@ void LevelSetMaintenanceWorkLedger::stageRow(
     throw std::logic_error(
         "Level-set maintenance work rows require an active transaction.");
   }
+  const bool recognized_substage =
+      substage == LevelSetMaintenanceWorkSubstage::Transport ||
+      substage == LevelSetMaintenanceWorkSubstage::Limiting ||
+      substage == LevelSetMaintenanceWorkSubstage::Reinitialization ||
+      substage ==
+          LevelSetMaintenanceWorkSubstage::GeometryReconciliation ||
+      substage == LevelSetMaintenanceWorkSubstage::GlobalCorrection;
+  if (!recognized_substage) {
+    throw std::invalid_argument(
+        "Level-set maintenance work rows require a recognized substage.");
+  }
   if (algebraic_state_revision_before == 0u ||
       algebraic_state_revision_after == 0u) {
     throw std::invalid_argument(
@@ -267,12 +1157,42 @@ void LevelSetMaintenanceWorkLedger::stageRow(
       throw std::invalid_argument(
           "Level-set maintenance work rows require matching functional markers.");
     }
+    if (before[index].modeled_stored_energy.has_value() !=
+            after[index].modeled_stored_energy.has_value() ||
+        before[index].surface_wall_potential_power.has_value() !=
+            after[index].surface_wall_potential_power.has_value() ||
+        before[index].bulk_viscous_dissipation_rate.has_value() !=
+            after[index].bulk_viscous_dissipation_rate.has_value() ||
+        before[index].external_pressure_power.has_value() !=
+            after[index].external_pressure_power.has_value()) {
+      throw std::invalid_argument(
+          "Level-set maintenance modeled-energy, endpoint-power, dissipation, and exterior-work ownership cannot change within a row.");
+    }
     numerical_work +=
         after[index].total_potential - before[index].total_potential;
   }
   if (!std::isfinite(numerical_work)) {
     throw std::invalid_argument(
         "Level-set maintenance numerical work is not finite.");
+  }
+  const auto modeled_energy_before =
+      maintenanceModeledStoredEnergy(before);
+  const auto modeled_energy_after =
+      maintenanceModeledStoredEnergy(after);
+  if (modeled_energy_before.has_value() !=
+      modeled_energy_after.has_value()) {
+    throw std::invalid_argument(
+        "Level-set maintenance active-volume ownership cannot change "
+        "within a row.");
+  }
+  std::optional<double> modeled_energy_numerical_work;
+  if (modeled_energy_before.has_value()) {
+    modeled_energy_numerical_work =
+        *modeled_energy_after - *modeled_energy_before;
+    if (!std::isfinite(*modeled_energy_numerical_work)) {
+      throw std::invalid_argument(
+          "Level-set maintenance modeled-energy numerical work is not finite.");
+    }
   }
 
   const auto& transaction = *active_transaction_;
@@ -345,6 +1265,12 @@ void LevelSetMaintenanceWorkLedger::stageRow(
       // account. This channel is a maintenance term only, not a complete
       // time-discrete energy identity.
       .accepted_numerical_work = 0.0,
+      .modeled_energy_numerical_work =
+          modeled_energy_numerical_work,
+      .accepted_modeled_energy_numerical_work =
+          modeled_energy_numerical_work.has_value()
+              ? std::optional<double>{0.0}
+              : std::nullopt,
   });
 }
 
@@ -367,6 +1293,8 @@ void LevelSetMaintenanceWorkLedger::commitTransaction()
   for (auto& row : trial_rows_) {
     row.status = LevelSetMaintenanceWorkStatus::Accepted;
     row.accepted_numerical_work = row.numerical_work;
+    row.accepted_modeled_energy_numerical_work =
+        row.modeled_energy_numerical_work;
     accepted_rows_.push_back(std::move(row));
   }
   accepted_attempts_.push_back(attempt);
@@ -393,6 +1321,10 @@ void LevelSetMaintenanceWorkLedger::rejectTransaction()
   for (auto& row : trial_rows_) {
     row.status = LevelSetMaintenanceWorkStatus::Rejected;
     row.accepted_numerical_work = 0.0;
+    row.accepted_modeled_energy_numerical_work =
+        row.modeled_energy_numerical_work.has_value()
+            ? std::optional<double>{0.0}
+            : std::nullopt;
     rejected_rows_.push_back(std::move(row));
   }
   rejected_attempts_.push_back(attempt);
@@ -1483,6 +2415,8 @@ std::string step_reject_reason_to_string(svmp::FE::timestepping::StepRejectReaso
       return "NonlinearSolveFailed";
     case StepRejectReason::ErrorTooLarge:
       return "ErrorTooLarge";
+    case StepRejectReason::CutTopologyChanged:
+      return "CutTopologyChanged";
   }
   return std::to_string(static_cast<int>(r));
 }
@@ -1615,6 +2549,10 @@ struct LevelSetMaintenanceRequest {
   svmp::FE::level_set::LevelSetReinitializationOptions reinitialization{};
   svmp::FE::level_set::LevelSetVolumeCorrectionOptions volume_correction{};
   std::optional<ActiveCutVolumeRequest> volume_cut_request{};
+  bool static_capillary_equilibrium_enabled{false};
+  svmp::FE::level_set::LevelSetStaticCapillaryEquilibriumOptions
+      static_capillary_equilibrium{};
+  bool static_capillary_equilibrium_initialized{false};
   bool curvature_projection_enabled{false};
   std::string curvature_field_name{};
   int curvature_projection_cadence_steps{1};
@@ -1625,10 +2563,24 @@ struct LevelSetMaintenanceRequest {
   svmp::FE::Real cumulative_volume_correction_interface_displacement{0.0};
   svmp::FE::Real cumulative_volume_correction_contact_line_displacement{0.0};
   bool conservative_phase_initialized{false};
+  bool
+      pointwise_impermeable_velocity_tolerance_explicitly_requested{
+          false};
   std::optional<
       svmp::FE::level_set::LevelSetP1PhaseTransportGraph>
       conservative_phase_graph{};
 };
+
+bool hasExplicitUnsupportedConservativePhasePointwiseWallContract(
+    std::span<const LevelSetMaintenanceRequest> requests) noexcept
+{
+  return std::any_of(
+      requests.begin(), requests.end(), [](const auto& request) {
+        return request.conservative_phase.enabled &&
+               request
+                   .pointwise_impermeable_velocity_tolerance_explicitly_requested;
+      });
+}
 
 enum class LevelSetMaintenanceScheduleStage : std::uint64_t {
   SteadyInitialization = 1u,
@@ -1883,6 +2835,9 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
   bits |= request.conservative_phase.reconcile_geometry
               ? (1ull << 10u)
               : 0u;
+  bits |= request.static_capillary_equilibrium_enabled
+              ? (1ull << 11u)
+              : 0u;
   return bits;
 }
 
@@ -1894,8 +2849,8 @@ canonicalLevelSetMaintenanceRequestSchedule(
 {
   CanonicalLevelSetMaintenanceSchedule schedule;
   auto& words = schedule.words;
-  words.reserve(32u + 192u * requests.size());
-  appendMaintenanceScheduleWord(words, 1u);
+  words.reserve(32u + 224u * requests.size());
+  appendMaintenanceScheduleWord(words, 2u);
   appendMaintenanceScheduleEnum(words, stage);
   appendMaintenanceScheduleSigned(words, completed_step);
   appendMaintenanceScheduleWord(
@@ -2015,6 +2970,10 @@ canonicalLevelSetMaintenanceRequestSchedule(
         request.conservative_phase
             .impermeable_normal_velocity_tolerance);
     appendMaintenanceScheduleBool(
+        words,
+        request
+            .pointwise_impermeable_velocity_tolerance_explicitly_requested);
+    appendMaintenanceScheduleBool(
         words, request.conservative_phase.reconcile_geometry);
     appendMaintenanceScheduleReal(
         words,
@@ -2090,6 +3049,73 @@ canonicalLevelSetMaintenanceRequestSchedule(
             .maximum_cumulative_interface_displacement_fraction);
     appendMaintenanceScheduleActiveCutRequest(
         words, request.volume_cut_request);
+
+    appendMaintenanceScheduleBool(
+        words, request.static_capillary_equilibrium_enabled);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium.target_liquid_volume);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium.volume_tolerance);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium
+            .projected_gradient_tolerance);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium
+            .constant_pressure_kkt_max_residual_norm);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium
+            .constant_pressure_kkt_max_relative_distance);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium
+            .finite_difference_reference_coefficient_scale);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium
+            .finite_difference_relative_step);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium
+            .minimum_finite_difference_step);
+    appendMaintenanceScheduleSigned(
+        words,
+        request.static_capillary_equilibrium
+            .finite_difference_max_shrinks);
+    appendMaintenanceScheduleSigned(
+        words,
+        request.static_capillary_equilibrium.max_iterations);
+    appendMaintenanceScheduleSigned(
+        words,
+        request.static_capillary_equilibrium
+            .max_line_search_iterations);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium
+            .projected_gradient_inverse_stiffness);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium.tangent_trust_radius);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium
+            .maximum_coefficient_update_linf);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium.line_search_shrink);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium.armijo_fraction);
+    appendMaintenanceScheduleReal(
+        words,
+        request.static_capillary_equilibrium
+            .minimum_volume_merit_penalty);
+    appendMaintenanceScheduleBool(
+        words, request.static_capillary_equilibrium_initialized);
 
     appendMaintenanceScheduleBool(
         words, request.curvature_projection_enabled);
@@ -2566,6 +3592,158 @@ struct ActiveCutContextRefreshReport {
   svmp::FE::Real positive_physical_volume{0.0};
 };
 
+class TransientCutTopologyAttemptTracker {
+public:
+  void beginAttempt() noexcept
+  {
+    attempt_active_ = true;
+    attempt_tainted_ = false;
+    final_candidate_observed_ = false;
+    last_observed_topology_key_.reset();
+    first_mismatched_topology_key_.reset();
+    first_mismatch_provenance_size_ = 0u;
+  }
+
+  void discardAttempt() noexcept
+  {
+    attempt_active_ = false;
+  }
+
+  void observe(
+      const ActiveCutContextRefreshReport& report,
+      std::string_view provenance) noexcept
+  {
+    if (!attempt_active_) {
+      return;
+    }
+
+    const auto normalized_provenance =
+        provenance.empty() ? std::string_view{"unknown"} : provenance;
+    last_observed_topology_key_ = report.topology_key;
+    if (normalized_provenance == "final_candidate_topology_gate") {
+      final_candidate_observed_ = true;
+    }
+
+    if (!accepted_topology_key_.has_value()) {
+      if (normalized_provenance == "before_physics_solve" &&
+          report.topology_key != 0u) {
+        accepted_topology_key_ = report.topology_key;
+        return;
+      }
+      taint(report.topology_key, normalized_provenance);
+      return;
+    }
+
+    if (report.topology_key == 0u ||
+        report.topology_key != *accepted_topology_key_) {
+      taint(report.topology_key, normalized_provenance);
+    }
+  }
+
+  void requireAcceptedBaseline() const
+  {
+    if (!accepted_topology_key_.has_value() ||
+        *accepted_topology_key_ == 0u) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] The transient cut-topology acceptance baseline was not seeded by before_physics_solve.");
+    }
+  }
+
+  [[nodiscard]] bool candidateMustReject(
+      const std::optional<std::uint64_t>& cached_topology_key) const noexcept
+  {
+    return !attempt_active_ || !accepted_topology_key_.has_value() ||
+           *accepted_topology_key_ == 0u || attempt_tainted_ ||
+           !final_candidate_observed_ ||
+           !last_observed_topology_key_.has_value() ||
+           !cached_topology_key.has_value() ||
+           *cached_topology_key == 0u ||
+           *last_observed_topology_key_ != *cached_topology_key ||
+           *cached_topology_key != *accepted_topology_key_;
+  }
+
+  void completeAttempt(
+      const std::optional<std::uint64_t>& cached_topology_key)
+  {
+    if (candidateMustReject(cached_topology_key)) {
+      throw std::logic_error(
+          "[svMultiPhysics::Application] A transient cut-topology candidate reached commit-ready without a fixed accepted topology.");
+    }
+    attempt_active_ = false;
+  }
+
+  [[nodiscard]] bool attemptActive() const noexcept
+  {
+    return attempt_active_;
+  }
+
+  [[nodiscard]] bool attemptTainted() const noexcept
+  {
+    return attempt_tainted_;
+  }
+
+  [[nodiscard]] const std::optional<std::uint64_t>&
+  acceptedTopologyKey() const noexcept
+  {
+    return accepted_topology_key_;
+  }
+
+  [[nodiscard]] const std::optional<std::uint64_t>&
+  lastObservedTopologyKey() const noexcept
+  {
+    return last_observed_topology_key_;
+  }
+
+  [[nodiscard]] const std::optional<std::uint64_t>&
+  firstMismatchedTopologyKey() const noexcept
+  {
+    return first_mismatched_topology_key_;
+  }
+
+  [[nodiscard]] std::string_view firstMismatchProvenance() const noexcept
+  {
+    return std::string_view{
+        first_mismatch_provenance_.data(),
+        first_mismatch_provenance_size_};
+  }
+
+  void completeVerifiedAttempt() noexcept
+  {
+    attempt_active_ = false;
+  }
+
+private:
+  void taint(
+      std::uint64_t topology_key,
+      std::string_view provenance) noexcept
+  {
+    attempt_tainted_ = true;
+    if (!first_mismatched_topology_key_.has_value()) {
+      first_mismatched_topology_key_ = topology_key;
+      // Provenance is diagnostic only. Production callers use static tokens,
+      // but copying into fixed storage also makes arbitrary caller-owned views
+      // safe without allocating inside a communicator-collective refresh.
+      first_mismatch_provenance_size_ = std::min(
+          provenance.size(), first_mismatch_provenance_.size());
+      if (first_mismatch_provenance_size_ != 0u) {
+        std::copy_n(
+            provenance.data(),
+            first_mismatch_provenance_size_,
+            first_mismatch_provenance_.data());
+      }
+    }
+  }
+
+  std::optional<std::uint64_t> accepted_topology_key_{};
+  std::optional<std::uint64_t> last_observed_topology_key_{};
+  std::optional<std::uint64_t> first_mismatched_topology_key_{};
+  std::array<char, 128u> first_mismatch_provenance_{};
+  std::size_t first_mismatch_provenance_size_{0u};
+  bool attempt_active_{false};
+  bool attempt_tainted_{false};
+  bool final_candidate_observed_{false};
+};
+
 struct WetVolumeDiagnostic {
   std::string level_set_field_name{};
   std::string domain_id{};
@@ -2615,6 +3793,10 @@ std::pair<std::uint64_t, std::uint64_t> globalMinMaxUint64(
     std::uint64_t local,
     const svmp::MeshComm& comm);
 bool globalAnyBool(bool local, const svmp::MeshComm& comm);
+void requireCollectivePhasePreparation(
+    const std::exception_ptr& local_failure,
+    const svmp::MeshComm& comm,
+    std::string_view phase);
 
 struct CutAdjacentFacetScaleSummary {
   std::size_t metadata_count{0};
@@ -3579,6 +4761,292 @@ std::uint64_t cutContextTopologyKey(
   return h;
 }
 
+std::uint64_t avalancheCutTopologyFingerprint(
+    std::uint64_t value) noexcept
+{
+  value ^= value >> 30u;
+  value *= 0xbf58476d1ce4e5b9ull;
+  value ^= value >> 27u;
+  value *= 0x94d049bb133111ebull;
+  value ^= value >> 31u;
+  return value;
+}
+
+struct CutTopologyFingerprintMultiset {
+  // This is a bounded probabilistic fingerprint, not an exact set-equality
+  // certificate.  Count plus two independently mixed sums and xors makes the
+  // reduction insensitive to rule/rank order while retaining multiplicity.
+  std::array<std::uint64_t, 3> sums{{0u, 0u, 0u}};
+  std::array<std::uint64_t, 2> xors{{0u, 0u}};
+
+  void insert(std::uint64_t fingerprint) noexcept
+  {
+    fingerprint = fingerprint == 0u ? 1u : fingerprint;
+    const auto mixed = avalancheCutTopologyFingerprint(fingerprint);
+    ++sums[0];
+    sums[1] += fingerprint;
+    sums[2] += mixed;
+    xors[0] ^= fingerprint;
+    xors[1] ^= mixed;
+  }
+
+  void merge(const CutTopologyFingerprintMultiset& other) noexcept
+  {
+    for (std::size_t i = 0u; i < sums.size(); ++i) {
+      sums[i] += other.sums[i];
+    }
+    for (std::size_t i = 0u; i < xors.size(); ++i) {
+      xors[i] ^= other.xors[i];
+    }
+  }
+};
+
+std::uint64_t finalizeCutTopologyFingerprintMultiset(
+    const CutTopologyFingerprintMultiset& digest,
+    std::uint64_t contract_tag) noexcept
+{
+  std::uint64_t fingerprint = kCutContextHashOffset;
+  mixCutContextHash(fingerprint, contract_tag);
+  for (const auto word : digest.sums) {
+    mixCutContextHash(fingerprint, word);
+  }
+  for (const auto word : digest.xors) {
+    mixCutContextHash(fingerprint, word);
+  }
+  return fingerprint == 0u ? 1u : fingerprint;
+}
+
+CutTopologyFingerprintMultiset collectiveCutTopologyFingerprintMultiset(
+    const CutTopologyFingerprintMultiset& local,
+    const svmp::MeshComm& comm)
+{
+  auto global = local;
+#ifdef MESH_HAS_MPI
+  if (comm.is_parallel()) {
+#ifdef MPI_UINT64_T
+    const MPI_Datatype fingerprint_type = MPI_UINT64_T;
+#else
+    const MPI_Datatype fingerprint_type = MPI_UNSIGNED_LONG_LONG;
+#endif
+    MPI_Allreduce(local.sums.data(),
+                  global.sums.data(),
+                  static_cast<int>(local.sums.size()),
+                  fingerprint_type,
+                  MPI_SUM,
+                  comm.native());
+    MPI_Allreduce(local.xors.data(),
+                  global.xors.data(),
+                  static_cast<int>(local.xors.size()),
+                  fingerprint_type,
+                  MPI_BXOR,
+                  comm.native());
+  }
+#else
+  if (comm.is_parallel()) {
+    throw std::runtime_error(
+        "Cut-topology multiset fingerprinting requires MPI in a parallel run.");
+  }
+#endif
+  return global;
+}
+
+std::uint64_t collectivePartitionIndependentCutTopologyFingerprint(
+    std::span<const std::uint64_t> request_identities,
+    std::span<const std::uint64_t> local_owned_rule_fingerprints,
+    const svmp::MeshComm& comm)
+{
+  CutTopologyFingerprintMultiset request_digest;
+  for (const auto identity : request_identities) {
+    request_digest.insert(identity);
+  }
+  constexpr std::uint64_t request_contract_tag =
+      0x4355545245515331ull; // "CUTREQS1"
+  const auto request_set_fingerprint =
+      finalizeCutTopologyFingerprintMultiset(
+          request_digest, request_contract_tag);
+  const auto [minimum_request_set, maximum_request_set] =
+      globalMinMaxUint64(request_set_fingerprint, comm);
+  if (minimum_request_set != maximum_request_set) {
+    throw std::runtime_error(
+        "Active-cut topology request identities differ across the FE communicator.");
+  }
+
+  CutTopologyFingerprintMultiset local_rule_digest;
+  for (const auto fingerprint : local_owned_rule_fingerprints) {
+    local_rule_digest.insert(fingerprint);
+  }
+  const auto global_rule_digest =
+      collectiveCutTopologyFingerprintMultiset(local_rule_digest, comm);
+
+  std::uint64_t fingerprint = kCutContextHashOffset;
+  constexpr std::uint64_t topology_contract_tag =
+      0x41435443544f5031ull; // "ACTCTOP1"
+  mixCutContextHash(fingerprint, topology_contract_tag);
+  mixCutContextHash(fingerprint, request_set_fingerprint);
+  for (const auto word : global_rule_digest.sums) {
+    mixCutContextHash(fingerprint, word);
+  }
+  for (const auto word : global_rule_digest.xors) {
+    mixCutContextHash(fingerprint, word);
+  }
+  return fingerprint == 0u ? 1u : fingerprint;
+}
+
+std::uint64_t activeCutTopologyRequestIdentity(
+    const ActiveCutVolumeRequest& request,
+    const svmp::FE::interfaces::FreeSurfaceGeometryRevision& revision)
+{
+  if (revision.interface_marker < 0 ||
+      revision.domain_id != request.domain_id ||
+      revision.isovalue != static_cast<svmp::FE::Real>(request.isovalue) ||
+      (request.requested_interface_marker >= 0 &&
+       revision.interface_marker != request.requested_interface_marker)) {
+    throw std::runtime_error(
+        "Active-cut topology fingerprint received a snapshot that does not match its request domain.");
+  }
+
+  std::uint64_t identity = kCutContextHashOffset;
+  constexpr std::uint64_t request_identity_tag =
+      0x4355545245514931ull; // "CUTREQI1"
+  mixCutContextHash(identity, request_identity_tag);
+  const std::vector<ActiveCutVolumeRequest> single_request{request};
+  mixCutContextHash(
+      identity,
+      application::core::activeCutVolumeRequestPolicyKey(single_request));
+  mixCutContextHash(identity, request.level_set_field_name);
+  mixCutContextHash(identity, request.domain_id);
+  mixCutContextHash(identity, revision.source_id);
+  mixCutContextHash(identity, revision.domain_id);
+  mixCutContextHash(
+      identity,
+      static_cast<std::uint64_t>(
+          static_cast<std::int64_t>(revision.interface_marker)));
+  mixCutContextHash(identity, revision.quadrature_policy_key);
+  return identity == 0u ? 1u : identity;
+}
+
+std::uint64_t freeSurfaceRuleSemanticTopologyFingerprint(
+    const svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord& rule,
+    std::uint64_t request_identity)
+{
+  const auto& reference = rule.reference_rule;
+  const auto& provenance = reference.provenance;
+  if (provenance.parent_entity_global_id ==
+          svmp::FE::INVALID_GLOBAL_INDEX ||
+      rule.source_topology_key == 0u) {
+    throw std::runtime_error(
+        "Active-cut topology fingerprint requires canonical global rule identities and an authoritative epoch-free source topology key.");
+  }
+
+  std::uint64_t fingerprint = kCutContextHashOffset;
+  constexpr std::uint64_t rule_identity_tag =
+      0x43555452554c4531ull; // "CUTRULE1"
+  mixCutContextHash(fingerprint, rule_identity_tag);
+  mixCutContextHash(fingerprint, request_identity);
+  mixCutContextHash(
+      fingerprint, static_cast<std::uint64_t>(rule.role));
+  mixCutContextHash(
+      fingerprint, static_cast<std::uint64_t>(rule.retention));
+  mixCutContextHash(
+      fingerprint,
+      static_cast<std::uint64_t>(
+          static_cast<std::int64_t>(rule.physical_boundary_marker)));
+  mixCutContextHash(
+      fingerprint,
+      static_cast<std::uint64_t>(
+          static_cast<std::int64_t>(provenance.marker)));
+  mixCutContextHash(
+      fingerprint,
+      static_cast<std::uint64_t>(provenance.parent_entity_global_id));
+  mixCutContextHash(
+      fingerprint,
+      static_cast<std::uint64_t>(
+          provenance.parent_boundary_entity_global_id));
+  mixCutContextHash(
+      fingerprint, static_cast<std::uint64_t>(reference.kind));
+  mixCutContextHash(
+      fingerprint, static_cast<std::uint64_t>(reference.side));
+  mixCutContextHash(
+      fingerprint,
+      static_cast<std::uint64_t>(
+          static_cast<std::int64_t>(reference.geometric_dimension)));
+  mixCutContextHash(
+      fingerprint, reference.full_cell_equivalent ? 1u : 0u);
+  mixCutContextHash(fingerprint, rule.source_topology_key);
+
+  // Deliberately exclude rank/local addressing, point coordinates and
+  // measures, snapshot/source/mesh epochs, and generated stable IDs.  Despite
+  // their names, cut_topology_revision, source_fragment_stable_ids, and
+  // component_id all incorporate the source value revision.  Generated
+  // topology_id/branch labels are also excluded: high-order backends derive
+  // them from traversal counters and local fragment ordering rather than a
+  // canonical connectivity identity.
+  return fingerprint == 0u ? 1u : fingerprint;
+}
+
+struct ActiveCutTopologySnapshotBinding {
+  const ActiveCutVolumeRequest* request{nullptr};
+  const svmp::FE::interfaces::FreeSurfaceGeometrySnapshot* snapshot{nullptr};
+};
+
+std::uint64_t activeCutContextTopologyFingerprint(
+    std::span<const ActiveCutTopologySnapshotBinding> bindings,
+    const svmp::MeshComm& comm)
+{
+  std::vector<std::uint64_t> request_identities;
+  std::vector<std::uint64_t> local_owned_rule_fingerprints;
+  std::exception_ptr local_preparation_failure;
+  try {
+    request_identities.reserve(bindings.size());
+    for (const auto& binding : bindings) {
+      if (binding.request == nullptr || binding.snapshot == nullptr) {
+        throw std::runtime_error(
+            "Active-cut topology fingerprint received an incomplete request/snapshot binding.");
+      }
+      const auto request_identity = activeCutTopologyRequestIdentity(
+          *binding.request, binding.snapshot->revision());
+      if (request_identity == 0u) {
+        throw std::runtime_error(
+            "Active-cut topology fingerprint produced a zero request identity.");
+      }
+      request_identities.push_back(request_identity);
+      for (const auto& rule : binding.snapshot->rules()) {
+        if (!rule.locally_owned) {
+          continue;
+        }
+        const auto rule_fingerprint =
+            freeSurfaceRuleSemanticTopologyFingerprint(
+                rule, request_identity);
+        if (rule_fingerprint == 0u) {
+          throw std::runtime_error(
+              "Active-cut topology fingerprint produced a zero owned-rule identity.");
+        }
+        local_owned_rule_fingerprints.push_back(rule_fingerprint);
+      }
+    }
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_preparation_failure,
+      comm,
+      "active_cut_topology_fingerprint");
+
+  return collectivePartitionIndependentCutTopologyFingerprint(
+      request_identities, local_owned_rule_fingerprints, comm);
+}
+
+bool transientCutTopologyFingerprintSupportsRequests(
+    std::span<const ActiveCutVolumeRequest> requests) noexcept
+{
+  using Mode =
+      svmp::FE::level_set::GeneratedInterfaceGeometryMode;
+  return std::all_of(
+      requests.begin(), requests.end(), [](const auto& request) {
+        return request.geometry_mode == Mode::LinearCorner;
+      });
+}
+
 const char* stateSyncPointName(
     svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint point) noexcept
 {
@@ -3616,6 +5084,26 @@ const char* stateSyncPointName(
     return "final_residual";
   }
   return "unknown";
+}
+
+bool restoresAcceptedTimeStepGeneratedState(
+    svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint point)
+    noexcept
+{
+  using Point =
+      svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+  return point == Point::RestoredTimeStepState ||
+         point == Point::RestoredProjectedTimeStepState;
+}
+
+bool refreshesFrozenLevelSetExtensionAtStateSync(
+    svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint point,
+    bool use_external_state_fixed_point) noexcept
+{
+  using Point =
+      svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+  return use_external_state_fixed_point ||
+         point == Point::RestoredProjectedTimeStepState;
 }
 
 bool allowCachedCurvatureAfterProjectionFailure(
@@ -3695,6 +5183,26 @@ void applyJacobianCheckGeometryProvenance(
     options.jacobian_check_geometry_tangent_policy =
         "fixed-topology algebraic wet-extension solve";
   }
+}
+
+void requireFittedALEOperatorStageSchemeCoverage(
+    std::uint64_t declaration_count,
+    bool scheme_supported,
+    std::string_view scheme_name,
+    int temporal_order)
+{
+  if (declaration_count == 0u || scheme_supported) {
+    return;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Registered fitted-ALE operator-stage "
+      "normal measurements require a supported temporal-order-one scheme "
+      "before the transient TimeLoop starts; scheme='" +
+      std::string(scheme_name) + "' temporal_order=" +
+      std::to_string(temporal_order) + " declaration_count=" +
+      std::to_string(declaration_count) +
+      ". Supported schemes are BackwardEuler, DG0, and first-order "
+      "GeneralizedAlpha.");
 }
 
 void logCutTopologyChange(
@@ -4502,6 +6010,9 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
              "ConservativePhaseImpermeableNormalVelocityTolerance"})) {
       request.conservative_phase.impermeable_normal_velocity_tolerance =
           static_cast<svmp::FE::Real>(*tolerance);
+      request
+          .pointwise_impermeable_velocity_tolerance_explicitly_requested =
+          true;
     }
     if (const auto reconcile = first_defined_bool_parameter(
             eq_params,
@@ -4736,6 +6247,138 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
               *cumulative_displacement_fraction);
     }
 
+    if (const auto enabled = first_defined_bool_parameter(
+            eq_params,
+            {"Enable_static_capillary_equilibrium_initialization",
+             "EnableStaticCapillaryEquilibriumInitialization",
+             "Initialize_discrete_static_capillary_equilibrium",
+             "InitializeDiscreteStaticCapillaryEquilibrium"})) {
+      request.static_capillary_equilibrium_enabled = *enabled;
+    }
+    if (const auto tolerance = first_defined_double_parameter(
+            eq_params,
+            {"Static_capillary_volume_tolerance",
+             "StaticCapillaryVolumeTolerance"})) {
+      request.static_capillary_equilibrium.volume_tolerance =
+          static_cast<svmp::FE::Real>(*tolerance);
+    }
+    if (const auto tolerance = first_defined_double_parameter(
+            eq_params,
+            {"Static_capillary_projected_gradient_tolerance",
+             "StaticCapillaryProjectedGradientTolerance"})) {
+      request.static_capillary_equilibrium
+          .projected_gradient_tolerance =
+          static_cast<svmp::FE::Real>(*tolerance);
+    }
+    if (const auto tolerance = first_defined_double_parameter(
+            eq_params,
+            {"Static_capillary_constant_pressure_kkt_max_residual_norm",
+             "StaticCapillaryConstantPressureKktMaxResidualNorm"})) {
+      request.static_capillary_equilibrium
+          .constant_pressure_kkt_max_residual_norm =
+          static_cast<svmp::FE::Real>(*tolerance);
+    }
+    if (const auto tolerance = first_defined_double_parameter(
+            eq_params,
+            {"Static_capillary_constant_pressure_kkt_max_relative_distance",
+             "StaticCapillaryConstantPressureKktMaxRelativeDistance"})) {
+      request.static_capillary_equilibrium
+          .constant_pressure_kkt_max_relative_distance =
+          static_cast<svmp::FE::Real>(*tolerance);
+    }
+    if (const auto scale = first_defined_double_parameter(
+            eq_params,
+            {"Static_capillary_finite_difference_reference_coefficient_scale",
+             "StaticCapillaryFiniteDifferenceReferenceCoefficientScale"})) {
+      request.static_capillary_equilibrium
+          .finite_difference_reference_coefficient_scale =
+          static_cast<svmp::FE::Real>(*scale);
+    }
+    if (const auto step = first_defined_double_parameter(
+            eq_params,
+            {"Static_capillary_finite_difference_relative_step",
+             "StaticCapillaryFiniteDifferenceRelativeStep"})) {
+      request.static_capillary_equilibrium
+          .finite_difference_relative_step =
+          static_cast<svmp::FE::Real>(*step);
+    }
+    if (const auto step = first_defined_double_parameter(
+            eq_params,
+            {"Static_capillary_minimum_finite_difference_step",
+             "StaticCapillaryMinimumFiniteDifferenceStep"})) {
+      request.static_capillary_equilibrium
+          .minimum_finite_difference_step =
+          static_cast<svmp::FE::Real>(*step);
+    }
+    if (const auto shrinks = first_defined_int_parameter(
+            eq_params,
+            {"Static_capillary_finite_difference_max_shrinks",
+             "StaticCapillaryFiniteDifferenceMaxShrinks"})) {
+      request.static_capillary_equilibrium
+          .finite_difference_max_shrinks = *shrinks;
+    }
+    if (const auto iterations = first_defined_int_parameter(
+            eq_params,
+            {"Static_capillary_max_iterations",
+             "StaticCapillaryMaxIterations"})) {
+      request.static_capillary_equilibrium.max_iterations =
+          *iterations;
+    }
+    if (const auto iterations = first_defined_int_parameter(
+            eq_params,
+            {"Static_capillary_max_line_search_iterations",
+             "StaticCapillaryMaxLineSearchIterations"})) {
+      request.static_capillary_equilibrium
+          .max_line_search_iterations = *iterations;
+    }
+    if (const auto inverse_stiffness =
+            first_defined_double_parameter(
+                eq_params,
+                {"Static_capillary_projected_gradient_inverse_stiffness",
+                 "StaticCapillaryProjectedGradientInverseStiffness"})) {
+      request.static_capillary_equilibrium
+          .projected_gradient_inverse_stiffness =
+          static_cast<svmp::FE::Real>(*inverse_stiffness);
+    }
+    if (const auto radius = first_defined_double_parameter(
+            eq_params,
+            {"Static_capillary_tangent_trust_radius",
+             "StaticCapillaryTangentTrustRadius"})) {
+      request.static_capillary_equilibrium.tangent_trust_radius =
+          static_cast<svmp::FE::Real>(*radius);
+    }
+    if (const auto maximum_update =
+            first_defined_double_parameter(
+                eq_params,
+                {"Static_capillary_maximum_coefficient_update_linf",
+                 "StaticCapillaryMaximumCoefficientUpdateLinf"})) {
+      request.static_capillary_equilibrium
+          .maximum_coefficient_update_linf =
+          static_cast<svmp::FE::Real>(*maximum_update);
+    }
+    if (const auto shrink = first_defined_double_parameter(
+            eq_params,
+            {"Static_capillary_line_search_shrink",
+             "StaticCapillaryLineSearchShrink"})) {
+      request.static_capillary_equilibrium.line_search_shrink =
+          static_cast<svmp::FE::Real>(*shrink);
+    }
+    if (const auto fraction = first_defined_double_parameter(
+            eq_params,
+            {"Static_capillary_armijo_fraction",
+             "StaticCapillaryArmijoFraction"})) {
+      request.static_capillary_equilibrium.armijo_fraction =
+          static_cast<svmp::FE::Real>(*fraction);
+    }
+    if (const auto penalty = first_defined_double_parameter(
+            eq_params,
+            {"Static_capillary_minimum_volume_merit_penalty",
+             "StaticCapillaryMinimumVolumeMeritPenalty"})) {
+      request.static_capillary_equilibrium
+          .minimum_volume_merit_penalty =
+          static_cast<svmp::FE::Real>(*penalty);
+    }
+
     if (const auto enabled =
             first_defined_bool_parameter(
                 eq_params,
@@ -4889,6 +6532,7 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
         request.conservative_phase.enabled ||
         request.reinitialization.enabled ||
         request.volume_correction.enabled ||
+        request.static_capillary_equilibrium_enabled ||
         request.curvature_projection_enabled) {
       requests.push_back(std::move(request));
     }
@@ -5524,6 +7168,38 @@ std::pair<std::uint64_t, std::uint64_t> globalMinMaxUint64(
   return {local, local};
 }
 
+std::uint64_t requireActiveCutRequestConsensus(
+    const svmp::FE::systems::FESystem& system,
+    const std::vector<ActiveCutVolumeRequest>& requests)
+{
+  if (requests.size() >
+      static_cast<std::size_t>(std::numeric_limits<std::uint64_t>::max())) {
+    throw std::runtime_error(
+        "Active-cut request count exceeds the collective contract range.");
+  }
+  const auto comm = activeFESystemCommunicator(system);
+  const auto local_count = static_cast<std::uint64_t>(requests.size());
+  const auto local_policy_fingerprint =
+      activeCutVolumeRequestPolicyKey(requests);
+
+  // Always execute both fixed-order reductions before diagnosing either
+  // mismatch.  The count is exact; the 64-bit policy key is a bounded
+  // fingerprint of request semantics, not a collision-proof proof.
+  const auto [minimum_count, maximum_count] =
+      globalMinMaxUint64(local_count, comm);
+  const auto [minimum_policy, maximum_policy] =
+      globalMinMaxUint64(local_policy_fingerprint, comm);
+  if (minimum_count != maximum_count) {
+    throw std::runtime_error(
+        "Active-cut request counts differ across the FE communicator before refresh collective entry.");
+  }
+  if (minimum_policy != maximum_policy) {
+    throw std::runtime_error(
+        "Active-cut request policy fingerprints differ across the FE communicator before refresh collective entry.");
+  }
+  return local_policy_fingerprint;
+}
+
 std::size_t globalSumSize(std::size_t local, const svmp::MeshComm& comm)
 {
   auto local_count = static_cast<long long>(local);
@@ -5561,13 +7237,781 @@ bool globalAnyBool(bool local, const svmp::MeshComm& comm)
   return local;
 }
 
+void requireCollectivePhasePreparation(
+    const std::exception_ptr& local_failure,
+    const svmp::MeshComm& comm,
+    std::string_view phase)
+{
+  if (!globalAnyBool(local_failure != nullptr, comm)) {
+    return;
+  }
+  if (local_failure != nullptr) {
+    std::rethrow_exception(local_failure);
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Another active FE communicator rank "
+      "failed local preparation for collective phase '" +
+      std::string(phase) + "'.");
+}
+
+bool firstOrderGeneralizedAlphaContactProvenanceValid(
+    const svmp::FE::systems::
+        FreeSurfaceFirstOrderGeneralizedAlphaProvenance& provenance) noexcept
+{
+  if (!std::isfinite(provenance.alpha_m) ||
+      !std::isfinite(provenance.alpha_f) ||
+      !std::isfinite(provenance.gamma) ||
+      !std::isfinite(provenance.dt) ||
+      provenance.alpha_f < svmp::FE::Real{0.5} ||
+      provenance.alpha_f > svmp::FE::Real{1.0} ||
+      provenance.alpha_m < svmp::FE::Real{0.5} ||
+      provenance.alpha_m > svmp::FE::Real{1.5} ||
+      !(provenance.gamma > svmp::FE::Real{0.0}) ||
+      !(provenance.dt > svmp::FE::Real{0.0})) {
+    return false;
+  }
+  // This tuple records the exact Jansen--Whiting--Hulbert rho-infinity family
+  // produced by TimeLoop, not arbitrary generalized-alpha coefficients.
+  // alpha_m is not a convex weight: it exceeds one for rho_inf < 1/3.
+  const auto expected_alpha_m =
+      svmp::FE::Real{2.0} * provenance.alpha_f - svmp::FE::Real{0.5};
+  const auto expected_gamma = provenance.alpha_f;
+  const auto scale = std::max(
+      {svmp::FE::Real{1.0},
+       std::abs(provenance.alpha_m),
+       std::abs(provenance.alpha_f),
+       std::abs(provenance.gamma),
+       std::abs(expected_alpha_m),
+       std::abs(expected_gamma)});
+  const auto tolerance = svmp::FE::Real{512.0} *
+                         std::numeric_limits<svmp::FE::Real>::epsilon() *
+                         scale;
+  return std::abs(provenance.alpha_m - expected_alpha_m) <= tolerance &&
+         std::abs(provenance.gamma - expected_gamma) <= tolerance;
+}
+
+bool contactStageRealValuesMatch(
+    svmp::FE::Real left, svmp::FE::Real right) noexcept
+{
+  if (!std::isfinite(left) || !std::isfinite(right)) {
+    return false;
+  }
+  const auto scale = std::max(
+      {svmp::FE::Real{1.0}, std::abs(left), std::abs(right)});
+  return std::abs(left - right) <=
+         svmp::FE::Real{512.0} *
+             std::numeric_limits<svmp::FE::Real>::epsilon() * scale;
+}
+
+struct DynamicContactOperatorStageFieldSlice {
+  svmp::FE::FieldId field{svmp::FE::INVALID_FIELD_ID};
+  svmp::FE::GlobalIndex offset{0};
+  svmp::FE::GlobalIndex count{0};
+  std::vector<svmp::FE::Real> values{};
+};
+
+struct DynamicContactOperatorStageState {
+  svmp::FE::GlobalIndex full_state_size{0};
+  std::vector<DynamicContactOperatorStageFieldSlice> fields{};
+};
+
+struct DynamicContactFirstOrderGeneralizedAlphaObservation {
+  int step_index{0};
+  int attempt_index{0};
+  svmp::FE::Real step_start_time{0.0};
+  svmp::FE::Real step_end_time{0.0};
+  svmp::FE::Real state_time{0.0};
+  svmp::FE::Real rate_time{0.0};
+  svmp::FE::timestepping::CandidateStageMeshRevision mesh_revision{};
+  svmp::FE::systems::FreeSurfaceFirstOrderGeneralizedAlphaProvenance
+      provenance{};
+  DynamicContactOperatorStageState operator_stage_state{};
+};
+
+bool dynamicContactStageMeshRevisionMatches(
+    const svmp::FE::timestepping::CandidateStageMeshRevision& captured,
+    const svmp::FE::assembly::IMeshAccess& live_mesh)
+{
+  return live_mesh.revisionTrackingAvailable() &&
+         captured.geometry_revision == live_mesh.geometryRevision() &&
+         captured.topology_revision == live_mesh.topologyRevision() &&
+         captured.ownership_revision == live_mesh.ownershipRevision() &&
+         captured.numbering_revision == live_mesh.numberingRevision() &&
+         captured.field_layout_revision == live_mesh.fieldLayoutRevision() &&
+         captured.label_revision == live_mesh.labelRevision() &&
+         captured.active_configuration_epoch ==
+             live_mesh.activeConfigurationEpoch() &&
+         captured.coordinate_configuration_key ==
+             live_mesh.coordinateConfigurationKey();
+}
+
+DynamicContactFirstOrderGeneralizedAlphaObservation
+makeDynamicContactFirstOrderGeneralizedAlphaObservation(
+    const svmp::FE::timestepping::CandidateStageObservation& observation)
+{
+  if (observation.scheme !=
+          svmp::FE::timestepping::SchemeKind::GeneralizedAlpha ||
+      observation.temporal_order != 1 || observation.step_index <= 0 ||
+      observation.attempt_index < 0 ||
+      observation.state_vector == nullptr ||
+      observation.rate_vector == nullptr ||
+      !observation.generalized_alpha.has_value() ||
+      !observation.mesh_revision.has_value() ||
+      !std::isfinite(observation.step_start_time) ||
+      !std::isfinite(observation.step_end_time) ||
+      !std::isfinite(observation.state_time) ||
+      !std::isfinite(observation.rate_time) ||
+      !std::isfinite(observation.dt) || !(observation.dt > 0.0)) {
+    throw std::invalid_argument(
+        "Dynamic-contact generalized-alpha provenance requires one complete "
+        "temporal-order-one candidate-stage observation.");
+  }
+
+  const auto& generalized_alpha = *observation.generalized_alpha;
+  DynamicContactFirstOrderGeneralizedAlphaObservation captured{
+      .step_index = observation.step_index,
+      .attempt_index = observation.attempt_index,
+      .step_start_time =
+          static_cast<svmp::FE::Real>(observation.step_start_time),
+      .step_end_time =
+          static_cast<svmp::FE::Real>(observation.step_end_time),
+      .state_time = static_cast<svmp::FE::Real>(observation.state_time),
+      .rate_time = static_cast<svmp::FE::Real>(observation.rate_time),
+      .mesh_revision = *observation.mesh_revision,
+      .provenance = {
+          .alpha_m = static_cast<svmp::FE::Real>(generalized_alpha.alpha_m),
+          .alpha_f = static_cast<svmp::FE::Real>(generalized_alpha.alpha_f),
+          .gamma = static_cast<svmp::FE::Real>(generalized_alpha.gamma),
+          .dt = static_cast<svmp::FE::Real>(observation.dt),
+      },
+  };
+  const auto& provenance = captured.provenance;
+  if (!firstOrderGeneralizedAlphaContactProvenanceValid(provenance) ||
+      !contactStageRealValuesMatch(
+          captured.step_end_time,
+          captured.step_start_time + provenance.dt) ||
+      !contactStageRealValuesMatch(
+          captured.state_time,
+          captured.step_start_time + provenance.alpha_f * provenance.dt) ||
+      !contactStageRealValuesMatch(
+          captured.rate_time,
+          captured.step_start_time + provenance.alpha_m * provenance.dt)) {
+    throw std::invalid_argument(
+        "Dynamic-contact generalized-alpha provenance has inconsistent "
+        "scheme parameters or stage times.");
+  }
+  return captured;
+}
+
+std::uint64_t dynamicContactFirstOrderGeneralizedAlphaObservationRevision(
+    const DynamicContactFirstOrderGeneralizedAlphaObservation& observation)
+{
+  constexpr std::uint64_t offset = 1469598103934665603ull;
+  constexpr std::uint64_t prime = 1099511628211ull;
+  std::uint64_t hash = offset;
+  const auto mix = [&hash](std::uint64_t value) {
+    hash ^= value;
+    hash *= prime;
+  };
+  const auto mix_real = [&](svmp::FE::Real value) {
+    std::uint64_t bits = 0u;
+    static_assert(sizeof(value) <= sizeof(bits));
+    std::memcpy(&bits, &value, sizeof(value));
+    mix(bits);
+  };
+  mix(static_cast<std::uint64_t>(observation.step_index));
+  mix(static_cast<std::uint64_t>(observation.attempt_index));
+  mix_real(observation.step_start_time);
+  mix_real(observation.step_end_time);
+  mix_real(observation.state_time);
+  mix_real(observation.rate_time);
+  mix_real(observation.provenance.alpha_m);
+  mix_real(observation.provenance.alpha_f);
+  mix_real(observation.provenance.gamma);
+  mix_real(observation.provenance.dt);
+  mix(static_cast<std::uint64_t>(
+      observation.operator_stage_state.full_state_size));
+  mix(static_cast<std::uint64_t>(
+      observation.operator_stage_state.fields.size()));
+  for (const auto& field : observation.operator_stage_state.fields) {
+    mix(static_cast<std::uint64_t>(field.field));
+    mix(static_cast<std::uint64_t>(field.offset));
+    mix(static_cast<std::uint64_t>(field.count));
+    mix(static_cast<std::uint64_t>(field.values.size()));
+    for (const auto value : field.values) {
+      mix_real(value);
+    }
+  }
+  // Mesh revision stamps are deliberately excluded: they are rank-local and
+  // are checked against each rank's live mesh instead of compared across ranks.
+  return hash == 0u ? 1u : hash;
+}
+
+std::vector<DynamicContactOperatorStageFieldSlice>
+canonicalDynamicContactOperatorStageFieldSlices(
+    const svmp::FE::systems::FESystem& system,
+    std::span<const svmp::FE::systems::
+                        FreeSurfaceDiscreteFunctionalDeclaration>
+        declarations,
+    svmp::FE::GlobalIndex full_state_size)
+{
+  if (full_state_size < 0 ||
+      full_state_size != system.dofHandler().getNumDofs()) {
+    throw std::invalid_argument(
+        "Dynamic-contact operator-stage retention requires the current full "
+        "FE state layout.");
+  }
+
+  std::vector<svmp::FE::FieldId> fields;
+  fields.reserve(declarations.size() * 2u);
+  for (const auto& declaration : declarations) {
+    if (declaration.parameters.dynamic_contact_coefficients.empty()) {
+      continue;
+    }
+    fields.push_back(declaration.level_set_field);
+    fields.push_back(declaration.velocity_field);
+  }
+  std::sort(fields.begin(), fields.end());
+  fields.erase(std::unique(fields.begin(), fields.end()), fields.end());
+  if (fields.empty()) {
+    throw std::invalid_argument(
+        "Dynamic-contact operator-stage retention requires at least one "
+        "declared level-set/velocity field pair.");
+  }
+
+  std::vector<DynamicContactOperatorStageFieldSlice> slices;
+  slices.reserve(fields.size());
+  for (const auto field : fields) {
+    if (field == svmp::FE::INVALID_FIELD_ID) {
+      throw std::invalid_argument(
+          "Dynamic-contact operator-stage retention found an invalid field.");
+    }
+    const auto offset = system.fieldDofOffset(field);
+    const auto count = system.fieldDofHandler(field).getNumDofs();
+    if (offset < 0 || count <= 0 || offset > full_state_size ||
+        count > full_state_size - offset) {
+      throw std::invalid_argument(
+          "Dynamic-contact operator-stage field slice exceeds the current FE "
+          "state layout.");
+    }
+    slices.push_back(DynamicContactOperatorStageFieldSlice{
+        .field = field,
+        .offset = offset,
+        .count = count,
+    });
+  }
+  auto by_offset = slices;
+  std::sort(
+      by_offset.begin(), by_offset.end(), [](const auto& left, const auto& right) {
+        return std::tie(left.offset, left.count, left.field) <
+               std::tie(right.offset, right.count, right.field);
+      });
+  for (std::size_t index = 1u; index < by_offset.size(); ++index) {
+    const auto& previous = by_offset[index - 1u];
+    const auto& current = by_offset[index];
+    if (current.offset < previous.offset + previous.count) {
+      throw std::invalid_argument(
+          "Dynamic-contact operator-stage field slices overlap in the current "
+          "FE state layout.");
+    }
+  }
+  return slices;
+}
+
+std::uint64_t dynamicContactOperatorStageLayoutRevision(
+    const DynamicContactOperatorStageState& state) noexcept
+{
+  constexpr std::uint64_t offset = 1469598103934665603ull;
+  constexpr std::uint64_t prime = 1099511628211ull;
+  std::uint64_t hash = offset;
+  const auto mix = [&hash](std::uint64_t value) {
+    hash ^= value;
+    hash *= prime;
+  };
+  mix(static_cast<std::uint64_t>(state.full_state_size));
+  mix(static_cast<std::uint64_t>(state.fields.size()));
+  for (const auto& field : state.fields) {
+    mix(static_cast<std::uint64_t>(field.field));
+    mix(static_cast<std::uint64_t>(field.offset));
+    mix(static_cast<std::uint64_t>(field.count));
+  }
+  return hash == 0u ? 1u : hash;
+}
+
+DynamicContactOperatorStageState captureDynamicContactOperatorStageState(
+    const svmp::FE::systems::FESystem& system,
+    std::span<const svmp::FE::systems::
+                        FreeSurfaceDiscreteFunctionalDeclaration>
+        declarations,
+    const svmp::FE::backends::GenericVector& state,
+    const svmp::MeshComm& comm)
+{
+  DynamicContactOperatorStageState captured;
+  std::exception_ptr local_layout_failure;
+  try {
+    captured.full_state_size = state.size();
+    captured.fields = canonicalDynamicContactOperatorStageFieldSlices(
+        system, declarations, captured.full_state_size);
+  } catch (...) {
+    local_layout_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_layout_failure,
+      comm,
+      "dynamic_contact_operator_stage_layout");
+  const auto [minimum_full_state_size, maximum_full_state_size] =
+      globalMinMaxUint64(
+          static_cast<std::uint64_t>(captured.full_state_size), comm);
+  const auto [minimum_field_count, maximum_field_count] =
+      globalMinMaxUint64(
+          static_cast<std::uint64_t>(captured.fields.size()), comm);
+  bool exact_layout_agrees =
+      minimum_full_state_size == maximum_full_state_size &&
+      minimum_field_count == maximum_field_count;
+  if (minimum_field_count == maximum_field_count) {
+    // Field count is authoritative for the following collective schedule.
+    // Finish every fixed per-index metadata comparison before diagnosing a
+    // mismatch so all ranks enter the same reductions in the same order.
+    for (std::size_t index = 0u; index < captured.fields.size(); ++index) {
+      const auto& field = captured.fields[index];
+      const auto [minimum_field, maximum_field] = globalMinMaxUint64(
+          static_cast<std::uint64_t>(field.field), comm);
+      const auto [minimum_offset, maximum_offset] = globalMinMaxUint64(
+          static_cast<std::uint64_t>(field.offset), comm);
+      const auto [minimum_count, maximum_count] = globalMinMaxUint64(
+          static_cast<std::uint64_t>(field.count), comm);
+      exact_layout_agrees =
+          minimum_field == maximum_field &&
+          minimum_offset == maximum_offset &&
+          minimum_count == maximum_count && exact_layout_agrees;
+    }
+  }
+  if (!exact_layout_agrees) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Dynamic-contact operator-stage field "
+        "layout differs across the active FE communicator.");
+  }
+  const auto layout_revision =
+      dynamicContactOperatorStageLayoutRevision(captured);
+  const auto [minimum_layout_revision, maximum_layout_revision] =
+      globalMinMaxUint64(layout_revision, comm);
+  if (minimum_layout_revision != maximum_layout_revision) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Dynamic-contact operator-stage field "
+        "layout digest differs after exact metadata consensus.");
+  }
+
+  std::vector<svmp::FE::GlobalIndex> owned_rows;
+  std::unique_ptr<svmp::FE::assembly::GlobalSystemView> read_view;
+  std::exception_ptr local_read_preparation_failure;
+  try {
+    owned_rows = state.ownedGlobalRows();
+    if (std::adjacent_find(
+            owned_rows.begin(),
+            owned_rows.end(),
+            [](svmp::FE::GlobalIndex left, svmp::FE::GlobalIndex right) {
+              return left >= right;
+            }) != owned_rows.end() ||
+        !std::all_of(
+            owned_rows.begin(),
+            owned_rows.end(),
+            [&](svmp::FE::GlobalIndex row) {
+              return row >= 0 && row < state.size();
+            })) {
+      throw std::runtime_error(
+          "Dynamic-contact operator-stage retention requires strictly "
+          "ordered, unique, in-range backend-owned rows.");
+    }
+    read_view =
+        const_cast<svmp::FE::backends::GenericVector&>(state)
+            .createGhostedReadView();
+    if (!read_view) {
+      throw std::runtime_error(
+          "Dynamic-contact operator-stage retention requires an owned-row "
+          "read view.");
+    }
+    for (auto& field : captured.fields) {
+      field.values.resize(
+          static_cast<std::size_t>(field.count), svmp::FE::Real{0.0});
+    }
+  } catch (...) {
+    local_read_preparation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_read_preparation_failure,
+      comm,
+      "dynamic_contact_operator_stage_owned_read_preparation");
+
+  constexpr std::size_t chunk_capacity = 4096u;
+  static_assert(
+      sizeof(svmp::FE::Real) == sizeof(std::uint64_t),
+      "Exact dynamic-contact operator-stage retention requires a 64-bit FE scalar.");
+  std::array<std::uint64_t, chunk_capacity> local_value_bits{};
+  std::array<std::uint64_t, chunk_capacity> global_value_bits{};
+  std::array<svmp::FE::Real, chunk_capacity> owned_values{};
+  std::array<std::uint32_t, chunk_capacity> local_counts{};
+  std::array<std::uint32_t, chunk_capacity> global_counts{};
+  for (auto& field : captured.fields) {
+    for (svmp::FE::GlobalIndex relative_begin = 0;
+         relative_begin < field.count;
+         relative_begin += static_cast<svmp::FE::GlobalIndex>(chunk_capacity)) {
+      const auto chunk_size = static_cast<std::size_t>(
+          std::min<svmp::FE::GlobalIndex>(
+              static_cast<svmp::FE::GlobalIndex>(chunk_capacity),
+              field.count - relative_begin));
+      std::fill_n(local_value_bits.begin(), chunk_size, std::uint64_t{0u});
+      std::fill_n(global_value_bits.begin(), chunk_size, std::uint64_t{0u});
+      std::fill_n(local_counts.begin(), chunk_size, std::uint32_t{0u});
+      std::fill_n(global_counts.begin(), chunk_size, std::uint32_t{0u});
+
+      const auto global_begin = field.offset + relative_begin;
+      const auto global_end =
+          global_begin + static_cast<svmp::FE::GlobalIndex>(chunk_size);
+      const auto first =
+          std::lower_bound(owned_rows.begin(), owned_rows.end(), global_begin);
+      const auto last =
+          std::lower_bound(first, owned_rows.end(), global_end);
+      const auto first_index = static_cast<std::size_t>(
+          std::distance(owned_rows.begin(), first));
+      const auto owned_count =
+          static_cast<std::size_t>(std::distance(first, last));
+
+      std::exception_ptr local_read_failure;
+      try {
+        if (owned_count != 0u) {
+          read_view->getVectorEntries(
+              std::span<const svmp::FE::GlobalIndex>(
+                  owned_rows.data() +
+                      static_cast<std::ptrdiff_t>(first_index),
+                  owned_count),
+              std::span<svmp::FE::Real>(owned_values.data(), owned_count));
+        }
+        for (std::size_t index = 0u; index < owned_count; ++index) {
+          const auto row = owned_rows[first_index + index];
+          const auto relative = static_cast<std::size_t>(row - global_begin);
+          if (relative >= chunk_size) {
+            throw std::runtime_error(
+                "Dynamic-contact operator-stage owned read returned an "
+                "out-of-range value.");
+          }
+          local_value_bits[relative] =
+              std::bit_cast<std::uint64_t>(owned_values[index]);
+          local_counts[relative] = 1u;
+        }
+      } catch (...) {
+        local_read_failure = std::current_exception();
+      }
+      requireCollectivePhasePreparation(
+          local_read_failure,
+          comm,
+          "dynamic_contact_operator_stage_owned_read");
+
+#ifdef MESH_HAS_MPI
+      if (comm.is_parallel()) {
+#ifdef MPI_UINT32_T
+        const MPI_Datatype count_type = MPI_UINT32_T;
+#else
+        static_assert(sizeof(std::uint32_t) == sizeof(unsigned));
+        const MPI_Datatype count_type = MPI_UNSIGNED;
+#endif
+#ifdef MPI_UINT64_T
+        const MPI_Datatype value_bits_type = MPI_UINT64_T;
+#else
+        static_assert(sizeof(std::uint64_t) == sizeof(unsigned long long));
+        const MPI_Datatype value_bits_type = MPI_UNSIGNED_LONG_LONG;
+#endif
+        MPI_Allreduce(
+            local_counts.data(),
+            global_counts.data(),
+            static_cast<int>(chunk_size),
+            count_type,
+            MPI_SUM,
+            comm.native());
+        MPI_Allreduce(
+            local_value_bits.data(),
+            global_value_bits.data(),
+            static_cast<int>(chunk_size),
+            value_bits_type,
+            MPI_BOR,
+            comm.native());
+      } else {
+        std::copy_n(local_counts.begin(), chunk_size, global_counts.begin());
+        std::copy_n(
+            local_value_bits.begin(), chunk_size, global_value_bits.begin());
+      }
+#else
+      if (comm.is_parallel()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Distributed dynamic-contact "
+            "operator-stage retention requires MPI.");
+      }
+      std::copy_n(local_counts.begin(), chunk_size, global_counts.begin());
+      std::copy_n(
+          local_value_bits.begin(), chunk_size, global_value_bits.begin());
+#endif
+      if (std::any_of(
+              global_counts.begin(),
+              global_counts.begin() +
+                  static_cast<std::ptrdiff_t>(chunk_size),
+              [](std::uint32_t count) { return count != 1u; })) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Dynamic-contact operator-stage "
+            "retention requires every requested FE row to have exactly one "
+            "backend owner.");
+      }
+      for (std::size_t index = 0u; index < chunk_size; ++index) {
+        const auto value =
+            std::bit_cast<svmp::FE::Real>(global_value_bits[index]);
+        if (!std::isfinite(value)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Dynamic-contact operator-stage "
+              "retention reconstructed a non-finite owned value.");
+        }
+        field.values[static_cast<std::size_t>(relative_begin) + index] = value;
+      }
+    }
+  }
+  return captured;
+}
+
+void overlayDynamicContactOperatorStageState(
+    const svmp::FE::systems::FESystem& system,
+    std::span<const svmp::FE::systems::
+                        FreeSurfaceDiscreteFunctionalDeclaration>
+        declarations,
+    const DynamicContactOperatorStageState& exact_state,
+    std::span<svmp::FE::Real> stage_solution)
+{
+  if (exact_state.full_state_size < 0 ||
+      static_cast<std::size_t>(exact_state.full_state_size) !=
+          stage_solution.size()) {
+    throw std::invalid_argument(
+        "Dynamic-contact operator-stage snapshot does not match the current "
+        "full FE state size.");
+  }
+  const auto expected = canonicalDynamicContactOperatorStageFieldSlices(
+      system, declarations, exact_state.full_state_size);
+  if (expected.size() != exact_state.fields.size()) {
+    throw std::invalid_argument(
+        "Dynamic-contact operator-stage snapshot has stale field coverage.");
+  }
+  for (std::size_t index = 0u; index < expected.size(); ++index) {
+    const auto& expected_field = expected[index];
+    const auto& captured_field = exact_state.fields[index];
+    if (captured_field.field != expected_field.field ||
+        captured_field.offset != expected_field.offset ||
+        captured_field.count != expected_field.count ||
+        captured_field.values.size() !=
+            static_cast<std::size_t>(captured_field.count) ||
+        !std::all_of(
+            captured_field.values.begin(),
+            captured_field.values.end(),
+            [](svmp::FE::Real value) { return std::isfinite(value); })) {
+      throw std::invalid_argument(
+          "Dynamic-contact operator-stage snapshot has stale field layout or "
+          "invalid retained values.");
+    }
+    std::copy(
+        captured_field.values.begin(),
+        captured_field.values.end(),
+        stage_solution.begin() +
+            static_cast<std::ptrdiff_t>(captured_field.offset));
+  }
+}
+
+void requireDynamicContactOperatorStageObservationConsensus(
+    const DynamicContactFirstOrderGeneralizedAlphaObservation& observation,
+    const svmp::MeshComm& comm)
+{
+  static_assert(sizeof(svmp::FE::Real) == sizeof(std::uint64_t));
+  bool exact_metadata_agrees = true;
+  const auto compare_word = [&](std::uint64_t word) {
+    const auto [minimum, maximum] = globalMinMaxUint64(word, comm);
+    exact_metadata_agrees = minimum == maximum && exact_metadata_agrees;
+  };
+  const auto real_word = [](svmp::FE::Real value) {
+    return std::bit_cast<std::uint64_t>(value);
+  };
+  compare_word(static_cast<std::uint64_t>(observation.step_index));
+  compare_word(static_cast<std::uint64_t>(observation.attempt_index));
+  compare_word(real_word(observation.step_start_time));
+  compare_word(real_word(observation.step_end_time));
+  compare_word(real_word(observation.state_time));
+  compare_word(real_word(observation.rate_time));
+  compare_word(real_word(observation.provenance.alpha_m));
+  compare_word(real_word(observation.provenance.alpha_f));
+  compare_word(real_word(observation.provenance.gamma));
+  compare_word(real_word(observation.provenance.dt));
+  compare_word(static_cast<std::uint64_t>(
+      observation.operator_stage_state.full_state_size));
+
+  const auto local_field_count = static_cast<std::uint64_t>(
+      observation.operator_stage_state.fields.size());
+  const auto [minimum_field_count, maximum_field_count] =
+      globalMinMaxUint64(local_field_count, comm);
+  exact_metadata_agrees =
+      minimum_field_count == maximum_field_count && exact_metadata_agrees;
+  if (minimum_field_count == maximum_field_count) {
+    for (const auto& field : observation.operator_stage_state.fields) {
+      compare_word(static_cast<std::uint64_t>(field.field));
+      compare_word(static_cast<std::uint64_t>(field.offset));
+      compare_word(static_cast<std::uint64_t>(field.count));
+      compare_word(static_cast<std::uint64_t>(field.values.size()));
+      exact_metadata_agrees =
+          field.count >= 0 &&
+          static_cast<std::uint64_t>(field.count) == field.values.size() &&
+          exact_metadata_agrees;
+    }
+  }
+  if (!exact_metadata_agrees) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Dynamic-contact generalized-alpha "
+        "operator-stage metadata differs across the active FE communicator.");
+  }
+
+  constexpr std::size_t chunk_capacity = 4096u;
+  std::array<std::uint64_t, chunk_capacity> local_bits{};
+  std::array<std::uint64_t, chunk_capacity> minimum_bits{};
+  std::array<std::uint64_t, chunk_capacity> maximum_bits{};
+  bool exact_values_agree = true;
+  for (const auto& field : observation.operator_stage_state.fields) {
+    for (std::size_t offset = 0u; offset < field.values.size();
+         offset += chunk_capacity) {
+      const auto count =
+          std::min(chunk_capacity, field.values.size() - offset);
+      for (std::size_t index = 0u; index < count; ++index) {
+        local_bits[index] = real_word(field.values[offset + index]);
+      }
+#ifdef MESH_HAS_MPI
+      if (comm.is_parallel()) {
+#ifdef MPI_UINT64_T
+        const MPI_Datatype datatype = MPI_UINT64_T;
+#else
+        static_assert(sizeof(std::uint64_t) == sizeof(unsigned long long));
+        const MPI_Datatype datatype = MPI_UNSIGNED_LONG_LONG;
+#endif
+        MPI_Allreduce(
+            local_bits.data(),
+            minimum_bits.data(),
+            static_cast<int>(count),
+            datatype,
+            MPI_MIN,
+            comm.native());
+        MPI_Allreduce(
+            local_bits.data(),
+            maximum_bits.data(),
+            static_cast<int>(count),
+            datatype,
+            MPI_MAX,
+            comm.native());
+      } else {
+        std::copy_n(local_bits.begin(), count, minimum_bits.begin());
+        std::copy_n(local_bits.begin(), count, maximum_bits.begin());
+      }
+#else
+      if (comm.is_parallel()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Distributed dynamic-contact "
+            "operator-stage consensus requires MPI.");
+      }
+      std::copy_n(local_bits.begin(), count, minimum_bits.begin());
+      std::copy_n(local_bits.begin(), count, maximum_bits.begin());
+#endif
+      exact_values_agree =
+          std::equal(
+              minimum_bits.begin(),
+              minimum_bits.begin() + static_cast<std::ptrdiff_t>(count),
+              maximum_bits.begin()) &&
+          exact_values_agree;
+    }
+  }
+  if (!exact_values_agree) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Dynamic-contact generalized-alpha "
+        "operator-stage values differ across the active FE communicator.");
+  }
+
+  const auto local_revision =
+      dynamicContactFirstOrderGeneralizedAlphaObservationRevision(observation);
+  const auto [minimum_revision, maximum_revision] =
+      globalMinMaxUint64(local_revision, comm);
+  if (minimum_revision != maximum_revision) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Dynamic-contact generalized-alpha "
+        "operator-stage digest differs after exact consensus.");
+  }
+}
+
+struct FreeSurfaceContactStageTemporalCoordinates {
+  svmp::FE::Real stage_time{0.0};
+  svmp::FE::Real stage_alpha_f{1.0};
+  std::optional<svmp::FE::systems::
+                    FreeSurfaceFirstOrderGeneralizedAlphaProvenance>
+      first_order_generalized_alpha{};
+};
+
+FreeSurfaceContactStageTemporalCoordinates
+resolveFreeSurfaceContactStageTemporalCoordinates(
+    svmp::FE::timestepping::SchemeKind scheme,
+    const svmp::FE::timestepping::TimeHistory& history,
+    int expected_attempt_index,
+    const std::optional<DynamicContactFirstOrderGeneralizedAlphaObservation>&
+        generalized_alpha_observation)
+{
+  const bool endpoint_stage_scheme =
+      scheme == svmp::FE::timestepping::SchemeKind::BackwardEuler ||
+      scheme == svmp::FE::timestepping::SchemeKind::BDF2 ||
+      scheme == svmp::FE::timestepping::SchemeKind::VSVO_BDF;
+  if (endpoint_stage_scheme) {
+    if (generalized_alpha_observation.has_value()) {
+      throw std::logic_error(
+          "Endpoint contact-stage construction received generalized-alpha "
+          "provenance.");
+    }
+    return FreeSurfaceContactStageTemporalCoordinates{
+        .stage_time = static_cast<svmp::FE::Real>(
+            history.time() + history.dt()),
+        .stage_alpha_f = svmp::FE::Real{1.0},
+    };
+  }
+  if (scheme != svmp::FE::timestepping::SchemeKind::GeneralizedAlpha ||
+      !generalized_alpha_observation.has_value()) {
+    throw std::logic_error(
+        "Dynamic-contact generalized-alpha stage construction is missing its "
+        "authentic candidate-stage provenance.");
+  }
+  const auto& observation = *generalized_alpha_observation;
+  const auto expected_step = history.stepIndex() + 1;
+  const auto expected_start = static_cast<svmp::FE::Real>(history.time());
+  const auto expected_dt = static_cast<svmp::FE::Real>(history.dt());
+  if (observation.step_index != expected_step ||
+      observation.attempt_index != expected_attempt_index ||
+      !contactStageRealValuesMatch(
+          observation.step_start_time, expected_start) ||
+      !contactStageRealValuesMatch(observation.provenance.dt, expected_dt) ||
+      !contactStageRealValuesMatch(
+          observation.step_end_time, expected_start + expected_dt)) {
+    throw std::logic_error(
+        "Dynamic-contact generalized-alpha stage provenance is stale for the "
+        "current candidate step.");
+  }
+  return FreeSurfaceContactStageTemporalCoordinates{
+      .stage_time = observation.state_time,
+      .stage_alpha_f = observation.provenance.alpha_f,
+      .first_order_generalized_alpha = observation.provenance,
+  };
+}
+
 std::uint64_t acceptedContactStageRevision(
     std::uint64_t previous_state_revision,
     std::uint64_t endpoint_state_revision,
     std::uint64_t snapshot_revision,
     svmp::FE::Real stage_time,
     svmp::FE::Real stage_alpha_f,
-    std::span<const svmp::FE::Real> stage_solution)
+    std::span<const svmp::FE::Real> stage_solution,
+    const std::optional<svmp::FE::systems::
+                            FreeSurfaceFirstOrderGeneralizedAlphaProvenance>&
+        first_order_generalized_alpha = std::nullopt)
 {
   constexpr std::uint64_t offset = 1469598103934665603ull;
   constexpr std::uint64_t prime = 1099511628211ull;
@@ -5590,11 +8034,173 @@ std::uint64_t acceptedContactStageRevision(
   mix(snapshot_revision);
   mix(real_bits(stage_time));
   mix(real_bits(stage_alpha_f));
+  mix(first_order_generalized_alpha.has_value() ? 1u : 0u);
+  if (first_order_generalized_alpha.has_value()) {
+    mix(real_bits(first_order_generalized_alpha->alpha_m));
+    mix(real_bits(first_order_generalized_alpha->alpha_f));
+    mix(real_bits(first_order_generalized_alpha->gamma));
+    mix(real_bits(first_order_generalized_alpha->dt));
+  }
   mix(static_cast<std::uint64_t>(stage_solution.size()));
   for (const auto value : stage_solution) {
     mix(real_bits(value));
   }
   return hash == 0u ? 1u : hash;
+}
+
+std::shared_ptr<svmp::FE::geometry::GeometryMapping>
+createCellGeometryMapping(
+    const svmp::FE::assembly::IMeshAccess& mesh,
+    svmp::FE::GlobalIndex cell);
+
+std::uint64_t collectiveLevelSetMaintenanceAlgebraicRevision(
+    std::span<const svmp::FE::Real> state,
+    const svmp::MeshComm& comm);
+
+svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
+makeFreeSurfaceVelocityEvaluator(
+    application::core::SimulationComponents& sim,
+    svmp::FE::FieldId velocity_field,
+    std::span<const svmp::FE::Real> solution,
+    std::string_view diagnostic_context)
+{
+  const auto& velocity_record =
+      sim.fe_system->fieldRecord(velocity_field);
+  const auto velocity_offset =
+      sim.fe_system->fieldDofOffset(velocity_field);
+  const int dimension = sim.fe_system->meshAccess().dimension();
+  if (!velocity_record.space || velocity_offset < 0 ||
+      velocity_record.components < dimension ||
+      velocity_record.space->value_dimension() < dimension) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] " +
+        std::string(diagnostic_context) +
+        " velocity field is incompatible with its free-surface declaration.");
+  }
+
+  auto* const fe_system = sim.fe_system.get();
+  auto* const mesh_access = &sim.fe_system->meshAccess();
+  const auto velocity_space = velocity_record.space;
+  const auto context = std::string(diagnostic_context);
+  auto mapping_cache = std::make_shared<
+      std::map<
+          svmp::FE::GlobalIndex,
+          std::shared_ptr<svmp::FE::geometry::GeometryMapping>>>();
+  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
+      velocity;
+  velocity.value =
+      [fe_system,
+       velocity_space,
+       velocity_offset,
+       velocity_field,
+       solution,
+       context](
+          svmp::FE::GlobalIndex cell,
+          const std::array<svmp::FE::Real, 3>& reference_point,
+          const svmp::FE::geometry::CutQuadratureProvenance&) {
+        const auto cell_dofs =
+            fe_system->fieldDofHandler(velocity_field).getCellDofs(cell);
+        std::vector<svmp::FE::Real> coefficients;
+        coefficients.reserve(cell_dofs.size());
+        for (const auto dof : cell_dofs) {
+          if (dof < 0) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] " + context +
+                " velocity cell has a negative DOF.");
+          }
+          const auto index =
+              static_cast<std::size_t>(velocity_offset + dof);
+          if (index >= solution.size()) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] " + context +
+                " solution is too small for the velocity field.");
+          }
+          coefficients.push_back(solution[index]);
+        }
+        const svmp::FE::spaces::FunctionSpace::Value reference_value{
+            reference_point[0], reference_point[1], reference_point[2]};
+        const auto value =
+            velocity_space->evaluate(reference_value, coefficients);
+        return std::array<svmp::FE::Real, 3>{
+            value[0], value[1], value[2]};
+      };
+  velocity.physical_gradient =
+      [fe_system,
+       mesh_access,
+       velocity_space,
+       velocity_offset,
+       velocity_field,
+       solution,
+       context,
+       mapping_cache](
+          svmp::FE::GlobalIndex cell,
+          const std::array<svmp::FE::Real, 3>& reference_point,
+          const svmp::FE::geometry::CutQuadratureProvenance&) {
+        const auto cell_dofs =
+            fe_system->fieldDofHandler(velocity_field).getCellDofs(cell);
+        std::vector<svmp::FE::Real> coefficients;
+        coefficients.reserve(cell_dofs.size());
+        for (const auto dof : cell_dofs) {
+          if (dof < 0) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] " + context +
+                " velocity-gradient cell has a negative DOF.");
+          }
+          const auto index =
+              static_cast<std::size_t>(velocity_offset + dof);
+          if (index >= solution.size()) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] " + context +
+                " solution is too small for the velocity gradient.");
+          }
+          coefficients.push_back(solution[index]);
+        }
+        const svmp::FE::spaces::FunctionSpace::Value reference_value{
+            reference_point[0], reference_point[1], reference_point[2]};
+        const auto reference_jacobian =
+            velocity_space->evaluate_jacobian(
+                reference_value, coefficients);
+        auto mapping = mapping_cache->find(cell);
+        if (mapping == mapping_cache->end()) {
+          mapping = mapping_cache
+                        ->emplace(
+                            cell,
+                            createCellGeometryMapping(
+                                *mesh_access, cell))
+                        .first;
+        }
+        if (!mapping->second) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] " + context +
+              " could not construct the velocity-gradient geometry mapping.");
+        }
+        svmp::FE::math::Vector<svmp::FE::Real, 3> xi{};
+        xi[0] = reference_point[0];
+        xi[1] = reference_point[1];
+        xi[2] = reference_point[2];
+        const auto inverse_jacobian =
+            mapping->second->jacobian_inverse(xi);
+        svmp::FE::interfaces::
+            FreeSurfaceDiscreteFunctionalPhysicalGradient
+                physical_gradient{};
+        for (std::size_t component = 0u; component < 3u;
+             ++component) {
+          for (std::size_t physical_direction = 0u;
+               physical_direction < 3u; ++physical_direction) {
+            for (std::size_t reference_direction = 0u;
+                 reference_direction < 3u;
+                 ++reference_direction) {
+              physical_gradient[component][physical_direction] +=
+                  reference_jacobian(
+                      component, reference_direction) *
+                  inverse_jacobian(
+                      reference_direction, physical_direction);
+            }
+          }
+        }
+        return physical_gradient;
+      };
+  return velocity;
 }
 
 std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
@@ -5604,15 +8210,32 @@ evaluateAcceptedFreeSurfaceContactStages(
     svmp::FE::Real stage_alpha_f,
     std::uint64_t previous_state_revision,
     std::uint64_t endpoint_state_revision,
-    std::span<const svmp::FE::Real> stage_solution)
+    std::span<const svmp::FE::Real> stage_solution,
+    const std::optional<svmp::FE::systems::
+                            FreeSurfaceFirstOrderGeneralizedAlphaProvenance>&
+        first_order_generalized_alpha = std::nullopt)
 {
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto declarations =
       sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
-  const auto dynamic_count = std::count_if(
-      declarations.begin(), declarations.end(), [](const auto& declaration) {
+  const auto dynamic_count = static_cast<std::size_t>(std::count_if(
+      declarations.begin(),
+      declarations.end(),
+      [](const auto& declaration) {
         return !declaration.parameters.dynamic_contact_coefficients.empty();
-      });
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+      }));
+  std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+      stages;
+  std::exception_ptr local_preparation_failure;
+  try {
+    stages.reserve(dynamic_count);
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_preparation_failure,
+      comm,
+      "accepted_contact_stage_evaluation");
   const double local_dynamic_count =
       static_cast<double>(dynamic_count);
   if (globalMinDouble(local_dynamic_count, comm) !=
@@ -5623,10 +8246,18 @@ evaluateAcceptedFreeSurfaceContactStages(
   if (dynamic_count == 0) {
     return {};
   }
-  if (!std::isfinite(stage_time) || !std::isfinite(stage_alpha_f) ||
+  const bool local_provenance_incomplete =
+      !std::isfinite(stage_time) || !std::isfinite(stage_alpha_f) ||
       !(stage_alpha_f > svmp::FE::Real{0.0}) ||
       stage_alpha_f > svmp::FE::Real{1.0} ||
-      previous_state_revision == 0u || endpoint_state_revision == 0u) {
+      previous_state_revision == 0u || endpoint_state_revision == 0u ||
+      (first_order_generalized_alpha.has_value() &&
+       (!firstOrderGeneralizedAlphaContactProvenanceValid(
+            *first_order_generalized_alpha) ||
+        !contactStageRealValuesMatch(
+            stage_alpha_f,
+            first_order_generalized_alpha->alpha_f)));
+  if (globalAnyBool(local_provenance_incomplete, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted contact-stage provenance is incomplete.");
   }
@@ -5643,9 +8274,6 @@ evaluateAcceptedFreeSurfaceContactStages(
         "[svMultiPhysics::Application] Accepted contact-stage recording requires an authoritative geometry snapshot on every rank.");
   }
 
-  std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
-      stages;
-  stages.reserve(static_cast<std::size_t>(dynamic_count));
   for (const auto& declaration : declarations) {
     if (declaration.parameters.dynamic_contact_coefficients.empty()) {
       continue;
@@ -5737,55 +8365,15 @@ evaluateAcceptedFreeSurfaceContactStages(
           std::to_string(declaration.interface_marker) + ".");
     }
     const auto& snapshot = **found;
-    const auto& velocity_record =
-        sim.fe_system->fieldRecord(declaration.velocity_field);
-    const auto velocity_offset =
-        sim.fe_system->fieldDofOffset(declaration.velocity_field);
-    const int dimension = sim.fe_system->meshAccess().dimension();
-    if (!velocity_record.space || velocity_offset < 0 ||
-        velocity_record.components < dimension) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Accepted contact-stage velocity field is incompatible with the free-surface declaration.");
-    }
-    svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
-        velocity;
-    velocity.value =
-        [&sim,
-         &velocity_record,
-         velocity_offset,
-         velocity_field = declaration.velocity_field,
-         stage_solution](
-            svmp::FE::GlobalIndex cell,
-            const std::array<svmp::FE::Real, 3>& reference_point,
-            const svmp::FE::geometry::CutQuadratureProvenance&) {
-          const auto cell_dofs =
-              sim.fe_system->fieldDofHandler(velocity_field).getCellDofs(cell);
-          std::vector<svmp::FE::Real> coefficients;
-          coefficients.reserve(cell_dofs.size());
-          for (const auto dof : cell_dofs) {
-            if (dof < 0) {
-              throw std::runtime_error(
-                  "[svMultiPhysics::Application] Accepted contact-stage velocity cell has a negative DOF.");
-            }
-            const auto index = static_cast<std::size_t>(
-                velocity_offset + dof);
-            if (index >= stage_solution.size()) {
-              throw std::runtime_error(
-                  "[svMultiPhysics::Application] Accepted contact-stage solution is too small for the velocity field.");
-            }
-            coefficients.push_back(stage_solution[index]);
-          }
-          const svmp::FE::spaces::FunctionSpace::Value reference_value{
-              reference_point[0], reference_point[1], reference_point[2]};
-          const auto value = velocity_record.space->evaluate(
-              reference_value, coefficients);
-          return std::array<svmp::FE::Real, 3>{
-              value[0], value[1], value[2]};
-        };
     std::optional<
         svmp::FE::interfaces::FreeSurfaceDynamicContactState>
         local_state;
     try {
+      const auto velocity = makeFreeSurfaceVelocityEvaluator(
+          sim,
+          declaration.velocity_field,
+          stage_solution,
+          "Accepted contact-stage");
       local_state =
           svmp::FE::interfaces::evaluateFreeSurfaceDynamicContactState(
               snapshot, declaration.parameters, velocity);
@@ -5860,25 +8448,123 @@ evaluateAcceptedFreeSurfaceContactStages(
             global_sum(wall.contact_line_tangent_integral[component]);
       }
     }
-    svmp::FE::interfaces::finalizeFreeSurfaceDynamicContactState(state);
-    stages.push_back(
-        svmp::FE::systems::FreeSurfaceAcceptedContactStageState{
-            .stage_time = stage_time,
-            .stage_alpha_f = stage_alpha_f,
-            .previous_state_revision = previous_state_revision,
-            .endpoint_state_revision = endpoint_state_revision,
-            .stage_state_revision = acceptedContactStageRevision(
-                previous_state_revision,
-                endpoint_state_revision,
-                snapshot_revision,
-                stage_time,
-                stage_alpha_f,
-                stage_solution),
-            .geometry_revision = snapshot.revision(),
-            .state = std::move(state),
-        });
+    std::exception_ptr local_completion_failure;
+    try {
+      svmp::FE::interfaces::finalizeFreeSurfaceDynamicContactState(state);
+      stages.push_back(
+          svmp::FE::systems::FreeSurfaceAcceptedContactStageState{
+              .stage_time = stage_time,
+              .stage_alpha_f = stage_alpha_f,
+              .first_order_generalized_alpha =
+                  first_order_generalized_alpha,
+              .previous_state_revision = previous_state_revision,
+              .endpoint_state_revision = endpoint_state_revision,
+              .stage_state_revision = acceptedContactStageRevision(
+                  previous_state_revision,
+                  endpoint_state_revision,
+                  snapshot_revision,
+                  stage_time,
+                  stage_alpha_f,
+                  stage_solution,
+                  first_order_generalized_alpha),
+              .geometry_revision = snapshot.revision(),
+              .state = std::move(state),
+          });
+    } catch (...) {
+      local_completion_failure = std::current_exception();
+    }
+    requireCollectivePhasePreparation(
+        local_completion_failure,
+        comm,
+        "accepted_contact_stage_evaluation_completion");
   }
   return stages;
+}
+
+std::uint64_t freeSurfaceDiscreteFunctionalDeclarationContentKey(
+    const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration&
+        declaration) noexcept
+{
+  std::uint64_t key = kCutContextHashOffset;
+  const auto mix_signed = [&key](auto value) {
+    mixCutContextHash(
+        key,
+        static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(value)));
+  };
+  const auto mix_real = [&key](svmp::FE::Real value) {
+    if (value == svmp::FE::Real{0.0}) {
+      value = svmp::FE::Real{0.0};
+    }
+    std::uint64_t bits = 0u;
+    static_assert(sizeof(value) <= sizeof(bits));
+    std::memcpy(&bits, &value, sizeof(value));
+    mixCutContextHash(key, bits);
+  };
+
+  mix_signed(declaration.interface_marker);
+  mix_signed(declaration.level_set_field);
+  mix_signed(declaration.velocity_field);
+  mixCutContextHash(key, declaration.geometry_domain_id);
+  mix_signed(declaration.parameters.liquid_side);
+  mix_real(declaration.parameters.surface_tension);
+  mix_real(declaration.parameters.volume_multiplier);
+  mixCutContextHash(
+      key,
+      static_cast<std::uint64_t>(
+          declaration.parameters.young_wall_coefficients.size()));
+  for (const auto& coefficient :
+       declaration.parameters.young_wall_coefficients) {
+    mix_signed(coefficient.boundary_marker);
+    mix_real(coefficient.equilibrium_contact_angle_radians);
+  }
+  mixCutContextHash(
+      key,
+      static_cast<std::uint64_t>(
+          declaration.parameters.dynamic_contact_coefficients.size()));
+  for (const auto& coefficient :
+       declaration.parameters.dynamic_contact_coefficients) {
+    mix_signed(coefficient.boundary_marker);
+    mix_real(coefficient.equilibrium_contact_angle_radians);
+    mix_real(coefficient.mobility);
+    mix_real(coefficient.slip_length);
+    mix_real(coefficient.dynamic_viscosity);
+  }
+
+  const auto& energy =
+      declaration.active_volume_energy_parameters;
+  mixCutContextHash(key, energy.has_value() ? 1u : 0u);
+  if (energy.has_value()) {
+    mix_signed(energy->liquid_side);
+    mix_real(energy->density);
+    for (const auto value : energy->gravitational_acceleration) {
+      mix_real(value);
+    }
+    for (const auto value : energy->gravitational_reference_point) {
+      mix_real(value);
+    }
+  }
+  const auto& dissipation =
+      declaration.active_volume_dissipation_parameters;
+  mixCutContextHash(key, dissipation.has_value() ? 1u : 0u);
+  if (dissipation.has_value()) {
+    mix_signed(dissipation->liquid_side);
+    mix_real(dissipation->dynamic_viscosity);
+  }
+  const auto& pressure =
+      declaration.external_pressure_power_parameters;
+  mixCutContextHash(key, pressure.has_value() ? 1u : 0u);
+  if (pressure.has_value()) {
+    mix_signed(pressure->liquid_side);
+    mix_real(pressure->external_pressure);
+  }
+  mixCutContextHash(
+      key,
+      declaration.endpoint_functional_power_enabled ? 1u : 0u);
+  mix_signed(declaration.capillary_balance_method);
+  mix_signed(declaration.capillary_balance_qualification);
+  mixCutContextHash(key, declaration.owner_component);
+  return key == 0u ? 1u : key;
 }
 
 std::vector<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
@@ -5909,13 +8595,73 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
       states;
   states.reserve(declarations.size());
   for (const auto& declaration : declarations) {
-    const std::array<double, 6> declaration_metadata{
+    const auto declaration_content_key =
+        freeSurfaceDiscreteFunctionalDeclarationContentKey(
+            declaration);
+    const auto [minimum_declaration_content_key,
+                maximum_declaration_content_key] =
+        globalMinMaxUint64(declaration_content_key, comm);
+    if (minimum_declaration_content_key !=
+        maximum_declaration_content_key) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Free-surface functional declaration content differs across the FE communicator.");
+    }
+    const auto& active_energy =
+        declaration.active_volume_energy_parameters;
+    const auto& active_dissipation =
+        declaration.active_volume_dissipation_parameters;
+    const std::array<double, 21> declaration_metadata{
         static_cast<double>(declaration.interface_marker),
         static_cast<double>(declaration.level_set_field),
         static_cast<double>(declaration.velocity_field),
         static_cast<double>(declaration.parameters.liquid_side),
         static_cast<double>(declaration.parameters.surface_tension),
-        static_cast<double>(declaration.parameters.volume_multiplier)};
+        static_cast<double>(declaration.parameters.volume_multiplier),
+        active_energy.has_value() ? 1.0 : 0.0,
+        active_energy.has_value()
+            ? static_cast<double>(active_energy->density)
+            : 0.0,
+        active_energy.has_value()
+            ? static_cast<double>(
+                  active_energy->gravitational_acceleration[0])
+            : 0.0,
+        active_energy.has_value()
+            ? static_cast<double>(
+                  active_energy->gravitational_acceleration[1])
+            : 0.0,
+        active_energy.has_value()
+            ? static_cast<double>(
+                  active_energy->gravitational_acceleration[2])
+            : 0.0,
+        active_energy.has_value()
+            ? static_cast<double>(
+                  active_energy->gravitational_reference_point[0])
+            : 0.0,
+        active_energy.has_value()
+            ? static_cast<double>(
+                  active_energy->gravitational_reference_point[1])
+            : 0.0,
+        active_energy.has_value()
+            ? static_cast<double>(
+                  active_energy->gravitational_reference_point[2])
+            : 0.0,
+        active_dissipation.has_value() ? 1.0 : 0.0,
+        active_dissipation.has_value()
+            ? static_cast<double>(
+                  active_dissipation->dynamic_viscosity)
+            : 0.0,
+        declaration.external_pressure_power_parameters.has_value()
+            ? 1.0
+            : 0.0,
+        declaration.external_pressure_power_parameters.has_value()
+            ? static_cast<double>(
+                  declaration.external_pressure_power_parameters
+                      ->external_pressure)
+            : 0.0,
+        declaration.endpoint_functional_power_enabled ? 1.0 : 0.0,
+        static_cast<double>(declaration.capillary_balance_method),
+        static_cast<double>(
+            declaration.capillary_balance_qualification)};
     bool declaration_metadata_consistent = true;
     for (const auto value : declaration_metadata) {
       const bool local_finite = std::isfinite(value);
@@ -6058,12 +8804,768 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
   return states;
 }
 
+void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
+    application::core::SimulationComponents& sim,
+    std::span<const svmp::FE::Real> accepted_solution,
+    std::span<
+        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+        accepted_states)
+{
+  const auto declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto declared_count = std::count_if(
+      declarations.begin(), declarations.end(), [](const auto& declaration) {
+        return declaration.endpoint_functional_power_enabled;
+      });
+  if (declared_count == 0) {
+    for (const auto& state : accepted_states) {
+      if (state.endpoint_functional_power.has_value()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Endpoint functional power was supplied without a discrete-energy capillary declaration.");
+      }
+    }
+    return;
+  }
+  const auto local_coverage =
+      accepted_states.size() == declarations.size() &&
+              !accepted_solution.empty()
+          ? 1.0
+          : 0.0;
+  const auto local_solution_size =
+      static_cast<double>(accepted_solution.size());
+  if (globalMinDouble(local_coverage, comm) != 1.0 ||
+      globalMinDouble(local_solution_size, comm) !=
+          globalMaxDouble(local_solution_size, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Endpoint functional power requires a communicator-consistent endpoint solution and complete accepted-state coverage.");
+  }
+  const auto* context = sim.fe_system->cutIntegrationContext();
+  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Endpoint functional power requires an authoritative geometry snapshot on every rank.");
+  }
+
+  for (std::size_t index = 0u; index < declarations.size(); ++index) {
+    const auto& declaration = declarations[index];
+    auto& accepted = accepted_states[index];
+    const bool declared =
+        declaration.endpoint_functional_power_enabled;
+    if (!declared) {
+      if (accepted.endpoint_functional_power.has_value()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Endpoint functional power was supplied for an undeclared interface.");
+      }
+      continue;
+    }
+    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto found = std::find_if(
+        snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+          return candidate &&
+                 candidate->revision().snapshot_revision_key ==
+                     accepted.geometry_revision.snapshot_revision_key;
+        });
+    if (globalMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
+        1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Endpoint functional-power snapshot storage is incomplete across the FE communicator for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    std::optional<
+        svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalVariationState>
+        local_power;
+    std::exception_ptr local_failure;
+    try {
+      const auto velocity = makeFreeSurfaceVelocityEvaluator(
+          sim,
+          declaration.velocity_field,
+          accepted_solution,
+          "Accepted endpoint functional power");
+      svmp::FE::interfaces::
+          FreeSurfaceDiscreteFunctionalDeformationEvaluator
+              deformation;
+      deformation.value = velocity.value;
+      deformation.physical_gradient =
+          velocity.physical_gradient;
+      local_power =
+          svmp::FE::interfaces::
+              evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
+                  **found,
+                  declaration.parameters,
+                  deformation);
+    } catch (...) {
+      local_failure = std::current_exception();
+    }
+    if (globalMinDouble(local_power.has_value() ? 1.0 : 0.0, comm) !=
+        1.0) {
+      if (local_failure) {
+        std::rethrow_exception(local_failure);
+      }
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Endpoint functional-power evaluation failed on another FE communicator rank for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    auto power = std::move(*local_power);
+    const auto global_sum = [&comm](svmp::FE::Real value) {
+      return static_cast<svmp::FE::Real>(
+          globalSumDouble(static_cast<double>(value), comm));
+    };
+    power.owned_liquid_volume_variation =
+        global_sum(power.owned_liquid_volume_variation);
+    power.owned_liquid_gas_area_variation =
+        global_sum(power.owned_liquid_gas_area_variation);
+    power.owned_wetted_wall_area_variation =
+        global_sum(power.owned_wetted_wall_area_variation);
+    power.liquid_gas_surface_energy_variation =
+        global_sum(
+            power.liquid_gas_surface_energy_variation);
+    power.young_wall_energy_variation =
+        global_sum(power.young_wall_energy_variation);
+    power.volume_constraint_potential_variation =
+        global_sum(
+            power.volume_constraint_potential_variation);
+    power.total_potential_variation =
+        global_sum(power.total_potential_variation);
+    for (auto& wall : power.walls) {
+      wall.owned_wetted_wall_area_variation =
+          global_sum(
+              wall.owned_wetted_wall_area_variation);
+      wall.young_wall_energy_variation =
+          global_sum(wall.young_wall_energy_variation);
+    }
+    accepted.endpoint_functional_power = std::move(power);
+  }
+}
+
+void attachAcceptedFreeSurfaceActiveVolumeEnergies(
+    application::core::SimulationComponents& sim,
+    std::span<const svmp::FE::Real> accepted_solution,
+    std::span<
+        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+        accepted_states)
+{
+  const auto declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto local_state_coverage =
+      accepted_states.size() == declarations.size() ? 1.0 : 0.0;
+  const auto local_declaration_count =
+      static_cast<double>(declarations.size());
+  if (globalMinDouble(local_state_coverage, comm) != 1.0 ||
+      globalMinDouble(local_declaration_count, comm) !=
+          globalMaxDouble(local_declaration_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Active-volume energy evaluation requires exactly one accepted state per free-surface declaration.");
+  }
+  const auto active_count = std::count_if(
+      declarations.begin(), declarations.end(), [](const auto& declaration) {
+        return declaration.active_volume_energy_parameters.has_value();
+      });
+  const auto local_active_count = static_cast<double>(active_count);
+  if (globalMinDouble(local_active_count, comm) !=
+      globalMaxDouble(local_active_count, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Active-volume energy declaration coverage differs across the FE communicator.");
+  }
+  if (active_count == 0) {
+    return;
+  }
+  const auto local_solution_size =
+      static_cast<double>(accepted_solution.size());
+  const auto all_solutions_nonempty =
+      globalMinDouble(
+          accepted_solution.empty() ? 0.0 : 1.0, comm) == 1.0;
+  const auto minimum_solution_size =
+      globalMinDouble(local_solution_size, comm);
+  const auto maximum_solution_size =
+      globalMaxDouble(local_solution_size, comm);
+  if (!all_solutions_nonempty ||
+      minimum_solution_size != maximum_solution_size) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Active-volume energy evaluation requires a nonempty communicator-consistent accepted solution.");
+  }
+  const auto* context = sim.fe_system->cutIntegrationContext();
+  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Active-volume energy evaluation requires an authoritative geometry snapshot on every rank.");
+  }
+
+  for (std::size_t index = 0; index < declarations.size(); ++index) {
+    const auto& declaration = declarations[index];
+    auto& accepted = accepted_states[index];
+    const auto local_energy_declared =
+        declaration.active_volume_energy_parameters.has_value() ? 1.0 : 0.0;
+    if (globalMinDouble(local_energy_declared, comm) !=
+        globalMaxDouble(local_energy_declared, comm)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Active-volume energy declaration ordering differs across the FE communicator.");
+    }
+    if (!declaration.active_volume_energy_parameters.has_value()) {
+      const auto no_undeclared_state =
+          accepted.active_volume_energy.has_value() ? 0.0 : 1.0;
+      if (globalMinDouble(no_undeclared_state, comm) != 1.0) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] An undeclared active-volume energy state was supplied.");
+      }
+      continue;
+    }
+    const auto& parameters =
+        *declaration.active_volume_energy_parameters;
+    const std::array<double, 10> metadata{
+        static_cast<double>(declaration.interface_marker),
+        static_cast<double>(declaration.velocity_field),
+        static_cast<double>(parameters.liquid_side),
+        static_cast<double>(parameters.density),
+        static_cast<double>(parameters.gravitational_acceleration[0]),
+        static_cast<double>(parameters.gravitational_acceleration[1]),
+        static_cast<double>(parameters.gravitational_acceleration[2]),
+        static_cast<double>(parameters.gravitational_reference_point[0]),
+        static_cast<double>(parameters.gravitational_reference_point[1]),
+        static_cast<double>(parameters.gravitational_reference_point[2])};
+    bool metadata_consistent = true;
+    for (const auto value : metadata) {
+      const auto finite = std::isfinite(value) ? 1.0 : 0.0;
+      if (globalMinDouble(finite, comm) != 1.0) {
+        metadata_consistent = false;
+        continue;
+      }
+      metadata_consistent =
+          globalMinDouble(value, comm) == globalMaxDouble(value, comm) &&
+          metadata_consistent;
+    }
+    if (!metadata_consistent) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Active-volume energy parameters differ across the FE communicator.");
+    }
+    const auto local_order_matches =
+        accepted.interface_marker == declaration.interface_marker &&
+                accepted.geometry_revision.interface_marker ==
+                    declaration.interface_marker
+            ? 1.0
+            : 0.0;
+    if (globalMinDouble(local_order_matches, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Active-volume energy state ordering does not match its free-surface declaration.");
+    }
+    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto found = std::find_if(
+        snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+          return candidate &&
+                 candidate->revision().snapshot_revision_key ==
+                     accepted.geometry_revision.snapshot_revision_key;
+        });
+    if (globalMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
+        1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Active-volume energy snapshot storage is incomplete across the FE communicator for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    std::optional<
+        svmp::FE::interfaces::FreeSurfaceActiveVolumeEnergyState>
+        local_energy;
+    std::exception_ptr local_failure;
+    try {
+      const auto velocity = makeFreeSurfaceVelocityEvaluator(
+          sim,
+          declaration.velocity_field,
+          accepted_solution,
+          "Accepted active-volume energy");
+      local_energy =
+          svmp::FE::interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
+              **found, parameters, velocity);
+    } catch (...) {
+      local_failure = std::current_exception();
+    }
+    if (globalMinDouble(local_energy.has_value() ? 1.0 : 0.0, comm) !=
+        1.0) {
+      if (local_failure) {
+        std::rethrow_exception(local_failure);
+      }
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Active-volume energy evaluation failed on another FE communicator rank for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    auto energy = std::move(*local_energy);
+    energy.owned_quadrature_point_count =
+        globalSumSize(energy.owned_quadrature_point_count, comm);
+    energy.owned_liquid_volume = static_cast<svmp::FE::Real>(
+        globalSumDouble(
+            static_cast<double>(energy.owned_liquid_volume), comm));
+    energy.kinetic_energy = static_cast<svmp::FE::Real>(
+        globalSumDouble(
+            static_cast<double>(energy.kinetic_energy), comm));
+    energy.gravitational_energy = static_cast<svmp::FE::Real>(
+        globalSumDouble(
+            static_cast<double>(energy.gravitational_energy), comm));
+    energy.gravitational_potential_power =
+        static_cast<svmp::FE::Real>(
+            globalSumDouble(
+                static_cast<double>(
+                    energy.gravitational_potential_power),
+                comm));
+    energy.total_energy =
+        energy.kinetic_energy + energy.gravitational_energy;
+    accepted.active_volume_energy = std::move(energy);
+  }
+}
+
+void attachAcceptedFreeSurfaceActiveVolumeDissipation(
+    application::core::SimulationComponents& sim,
+    std::span<const svmp::FE::Real> accepted_solution,
+    std::span<
+        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+        accepted_states)
+{
+  const auto declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto declared_count = std::count_if(
+      declarations.begin(), declarations.end(), [](const auto& declaration) {
+        return declaration.active_volume_dissipation_parameters.has_value();
+      });
+  if (declared_count == 0) {
+    for (const auto& state : accepted_states) {
+      if (state.active_volume_dissipation.has_value()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Active-volume dissipation was supplied without a declaration.");
+      }
+    }
+    return;
+  }
+  const auto local_coverage =
+      accepted_states.size() == declarations.size() &&
+              !accepted_solution.empty()
+          ? 1.0
+          : 0.0;
+  const auto local_solution_size =
+      static_cast<double>(accepted_solution.size());
+  if (globalMinDouble(local_coverage, comm) != 1.0 ||
+      globalMinDouble(local_solution_size, comm) !=
+          globalMaxDouble(local_solution_size, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Active-volume dissipation requires a communicator-consistent endpoint solution and complete accepted-state coverage.");
+  }
+  const auto* context = sim.fe_system->cutIntegrationContext();
+  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Active-volume dissipation requires an authoritative geometry snapshot on every rank.");
+  }
+
+  for (std::size_t index = 0; index < declarations.size(); ++index) {
+    const auto& declaration = declarations[index];
+    auto& accepted = accepted_states[index];
+    if (!declaration.active_volume_dissipation_parameters.has_value()) {
+      if (accepted.active_volume_dissipation.has_value()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Active-volume dissipation was supplied for an undeclared interface.");
+      }
+      continue;
+    }
+    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto found = std::find_if(
+        snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+          return candidate &&
+                 candidate->revision().snapshot_revision_key ==
+                     accepted.geometry_revision.snapshot_revision_key;
+        });
+    if (globalMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
+        1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Active-volume dissipation snapshot storage is incomplete across the FE communicator for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    std::optional<
+        svmp::FE::interfaces::FreeSurfaceActiveVolumeDissipationState>
+        local_dissipation;
+    std::exception_ptr local_failure;
+    try {
+      const auto velocity = makeFreeSurfaceVelocityEvaluator(
+          sim,
+          declaration.velocity_field,
+          accepted_solution,
+          "Accepted active-volume dissipation");
+      local_dissipation =
+          svmp::FE::interfaces::
+              evaluateFreeSurfaceActiveVolumeDissipation(
+                  **found,
+                  *declaration.active_volume_dissipation_parameters,
+                  velocity);
+    } catch (...) {
+      local_failure = std::current_exception();
+    }
+    if (globalMinDouble(
+            local_dissipation.has_value() ? 1.0 : 0.0,
+            comm) != 1.0) {
+      if (local_failure) {
+        std::rethrow_exception(local_failure);
+      }
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Active-volume dissipation evaluation failed on another FE communicator rank for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    auto dissipation = std::move(*local_dissipation);
+    dissipation.owned_quadrature_point_count =
+        globalSumSize(
+            dissipation.owned_quadrature_point_count, comm);
+    dissipation.owned_liquid_volume =
+        static_cast<svmp::FE::Real>(
+            globalSumDouble(
+                static_cast<double>(
+                    dissipation.owned_liquid_volume),
+                comm));
+    dissipation.bulk_viscous_dissipation_rate =
+        static_cast<svmp::FE::Real>(
+            globalSumDouble(
+                static_cast<double>(
+                    dissipation.bulk_viscous_dissipation_rate),
+                comm));
+    accepted.active_volume_dissipation =
+        std::move(dissipation);
+  }
+}
+
+void attachAcceptedFreeSurfaceExternalPressurePowers(
+    application::core::SimulationComponents& sim,
+    std::span<const svmp::FE::Real> accepted_solution,
+    std::span<
+        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+        accepted_states)
+{
+  const auto declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto declared_count = std::count_if(
+      declarations.begin(), declarations.end(), [](const auto& declaration) {
+        return declaration.external_pressure_power_parameters.has_value();
+      });
+  if (declared_count == 0) {
+    for (const auto& state : accepted_states) {
+      if (state.external_pressure_power.has_value()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Exterior-pressure power was supplied without a declaration.");
+      }
+    }
+    return;
+  }
+  const auto local_coverage =
+      accepted_states.size() == declarations.size() &&
+              !accepted_solution.empty()
+          ? 1.0
+          : 0.0;
+  const auto local_solution_size =
+      static_cast<double>(accepted_solution.size());
+  if (globalMinDouble(local_coverage, comm) != 1.0 ||
+      globalMinDouble(local_solution_size, comm) !=
+          globalMaxDouble(local_solution_size, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Exterior-pressure power requires a communicator-consistent endpoint solution and complete accepted-state coverage.");
+  }
+  const auto* context = sim.fe_system->cutIntegrationContext();
+  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Exterior-pressure power requires an authoritative geometry snapshot on every rank.");
+  }
+
+  for (std::size_t index = 0u; index < declarations.size(); ++index) {
+    const auto& declaration = declarations[index];
+    auto& accepted = accepted_states[index];
+    if (!declaration.external_pressure_power_parameters.has_value()) {
+      if (accepted.external_pressure_power.has_value()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Exterior-pressure power was supplied for an undeclared interface.");
+      }
+      continue;
+    }
+    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto found = std::find_if(
+        snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+          return candidate &&
+                 candidate->revision().snapshot_revision_key ==
+                     accepted.geometry_revision.snapshot_revision_key;
+        });
+    if (globalMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
+        1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Exterior-pressure-power snapshot storage is incomplete across the FE communicator for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    std::optional<
+        svmp::FE::interfaces::FreeSurfaceExternalPressurePowerState>
+        local_power;
+    std::exception_ptr local_failure;
+    try {
+      const auto velocity = makeFreeSurfaceVelocityEvaluator(
+          sim,
+          declaration.velocity_field,
+          accepted_solution,
+          "Accepted exterior-pressure power");
+      local_power =
+          svmp::FE::interfaces::
+              evaluateFreeSurfaceExternalPressurePower(
+                  **found,
+                  *declaration.external_pressure_power_parameters,
+                  velocity);
+    } catch (...) {
+      local_failure = std::current_exception();
+    }
+    if (globalMinDouble(local_power.has_value() ? 1.0 : 0.0, comm) !=
+        1.0) {
+      if (local_failure) {
+        std::rethrow_exception(local_failure);
+      }
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Exterior-pressure-power evaluation failed on another FE communicator rank for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    auto power = std::move(*local_power);
+    power.owned_quadrature_point_count =
+        globalSumSize(
+            power.owned_quadrature_point_count, comm);
+    const auto global_sum = [&comm](svmp::FE::Real value) {
+      return static_cast<svmp::FE::Real>(
+          globalSumDouble(static_cast<double>(value), comm));
+    };
+    power.owned_liquid_gas_area =
+        global_sum(power.owned_liquid_gas_area);
+    power.outward_liquid_volume_flux_rate =
+        global_sum(
+            power.outward_liquid_volume_flux_rate);
+    power.external_pressure_power =
+        global_sum(power.external_pressure_power);
+    accepted.external_pressure_power = std::move(power);
+  }
+}
+
+std::uint64_t collectiveFreeSurfaceFieldRevision(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::FieldId field,
+    std::span<const svmp::FE::Real> solution,
+    const svmp::MeshComm& comm,
+    std::string_view diagnostic_context)
+{
+  const auto offset = system.fieldDofOffset(field);
+  const auto count = system.fieldDofHandler(field).getNumDofs();
+  if (offset < 0 || count < 0 ||
+      static_cast<std::size_t>(offset) > solution.size() ||
+      static_cast<std::size_t>(count) >
+          solution.size() - static_cast<std::size_t>(offset)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] " +
+        std::string(diagnostic_context) +
+        " field slice is outside the FE-ordered solution.");
+  }
+  auto revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          solution.subspan(
+              static_cast<std::size_t>(offset),
+              static_cast<std::size_t>(count)),
+          comm);
+  mixCutContextHash(
+      revision,
+      static_cast<std::uint64_t>(
+          static_cast<std::int64_t>(field)));
+  return revision == 0u ? 1u : revision;
+}
+
+void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
+    application::core::SimulationComponents& sim,
+    std::span<const svmp::FE::Real> previous_solution,
+    std::span<const svmp::FE::Real> accepted_solution,
+    std::span<
+        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+        accepted_states)
+{
+  const auto declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto local_previous_present =
+      previous_solution.empty() ? 0.0 : 1.0;
+  if (globalMinDouble(local_previous_present, comm) !=
+      globalMaxDouble(local_previous_present, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Backward-Euler kinetic-work endpoint coverage differs across the FE communicator.");
+  }
+  if (previous_solution.empty()) {
+    for (const auto& state : accepted_states) {
+      if (state.backward_euler_kinetic_work.has_value()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Backward-Euler kinetic work was supplied without a previous endpoint solution.");
+      }
+    }
+    return;
+  }
+  const auto local_coverage =
+      accepted_states.size() == declarations.size() &&
+              !accepted_solution.empty() &&
+              previous_solution.size() == accepted_solution.size()
+          ? 1.0
+          : 0.0;
+  const auto local_solution_size =
+      static_cast<double>(accepted_solution.size());
+  if (globalMinDouble(local_coverage, comm) != 1.0 ||
+      globalMinDouble(local_solution_size, comm) !=
+          globalMaxDouble(local_solution_size, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Backward-Euler kinetic work requires communicator-consistent previous and endpoint solutions with complete accepted-state coverage.");
+  }
+  const auto* context = sim.fe_system->cutIntegrationContext();
+  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Backward-Euler kinetic work requires an authoritative endpoint geometry snapshot on every rank.");
+  }
+
+  std::map<
+      svmp::FE::FieldId,
+      std::pair<std::uint64_t, std::uint64_t>>
+      velocity_revisions;
+  for (std::size_t index = 0; index < declarations.size(); ++index) {
+    const auto& declaration = declarations[index];
+    auto& accepted = accepted_states[index];
+    if (!declaration.active_volume_energy_parameters.has_value()) {
+      if (accepted.backward_euler_kinetic_work.has_value()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Backward-Euler kinetic work was supplied for a declaration without active-volume energy.");
+      }
+      continue;
+    }
+    if (!accepted.active_volume_energy.has_value()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Backward-Euler kinetic work requires the accepted active-volume stored energy.");
+    }
+    const auto [velocity_revisions_it, inserted] =
+        velocity_revisions.try_emplace(
+            declaration.velocity_field,
+            std::uint64_t{0u},
+            std::uint64_t{0u});
+    if (inserted) {
+      velocity_revisions_it->second.first =
+          collectiveFreeSurfaceFieldRevision(
+              *sim.fe_system,
+              declaration.velocity_field,
+              previous_solution,
+              comm,
+              "Backward-Euler previous velocity revision");
+      velocity_revisions_it->second.second =
+          collectiveFreeSurfaceFieldRevision(
+              *sim.fe_system,
+              declaration.velocity_field,
+              accepted_solution,
+              comm,
+              "Backward-Euler endpoint velocity revision");
+    }
+    const auto previous_velocity_revision =
+        velocity_revisions_it->second.first;
+    const auto endpoint_velocity_revision =
+        velocity_revisions_it->second.second;
+    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto found = std::find_if(
+        snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+          return candidate &&
+                 candidate->revision().snapshot_revision_key ==
+                     accepted.geometry_revision.snapshot_revision_key;
+        });
+    if (globalMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
+        1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Backward-Euler kinetic-work endpoint snapshot storage is incomplete across the FE communicator for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+
+    std::optional<
+        svmp::FE::interfaces::FreeSurfaceBackwardEulerKineticWorkState>
+        local_work;
+    std::exception_ptr local_failure;
+    try {
+      const auto previous_velocity = makeFreeSurfaceVelocityEvaluator(
+          sim,
+          declaration.velocity_field,
+          previous_solution,
+          "Backward-Euler previous-endpoint kinetic work");
+      const auto endpoint_velocity = makeFreeSurfaceVelocityEvaluator(
+          sim,
+          declaration.velocity_field,
+          accepted_solution,
+          "Backward-Euler accepted-endpoint kinetic work");
+      const auto& parameters =
+          *declaration.active_volume_energy_parameters;
+      local_work =
+          svmp::FE::interfaces::
+              evaluateFreeSurfaceBackwardEulerKineticWork(
+                  **found,
+                  parameters.liquid_side,
+                  parameters.density,
+                  previous_velocity_revision,
+                  endpoint_velocity_revision,
+                  previous_velocity,
+                  endpoint_velocity);
+    } catch (...) {
+      local_failure = std::current_exception();
+    }
+    if (globalMinDouble(local_work.has_value() ? 1.0 : 0.0, comm) !=
+        1.0) {
+      if (local_failure) {
+        std::rethrow_exception(local_failure);
+      }
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Backward-Euler kinetic-work evaluation failed on another FE communicator rank for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+
+    auto work = std::move(*local_work);
+    work.owned_quadrature_point_count =
+        globalSumSize(work.owned_quadrature_point_count, comm);
+    const auto global_sum = [&](svmp::FE::Real value) {
+      return static_cast<svmp::FE::Real>(
+          globalSumDouble(static_cast<double>(value), comm));
+    };
+    work.owned_liquid_volume =
+        global_sum(work.owned_liquid_volume);
+    work.kinetic_energy_before_on_endpoint_domain =
+        global_sum(
+            work.kinetic_energy_before_on_endpoint_domain);
+    work.kinetic_energy_after =
+        global_sum(work.kinetic_energy_after);
+    work.step_integrated_inertia_work =
+        global_sum(work.step_integrated_inertia_work);
+    work.time_discretization_loss =
+        global_sum(work.time_discretization_loss);
+    work.kinetic_energy_change_on_endpoint_domain =
+        work.kinetic_energy_after -
+        work.kinetic_energy_before_on_endpoint_domain;
+    work.identity_residual =
+        work.step_integrated_inertia_work -
+        work.kinetic_energy_change_on_endpoint_domain -
+        work.time_discretization_loss;
+
+    const auto& energy = *accepted.active_volume_energy;
+    const auto values_near = [](svmp::FE::Real left,
+                                svmp::FE::Real right) {
+      const auto scale = std::max(
+          {svmp::FE::Real{1.0}, std::abs(left), std::abs(right)});
+      return std::abs(left - right) <=
+          svmp::FE::Real{256.0} *
+              std::numeric_limits<svmp::FE::Real>::epsilon() * scale;
+    };
+    if (!values_near(
+            work.owned_liquid_volume,
+            energy.owned_liquid_volume) ||
+        !values_near(
+            work.kinetic_energy_after,
+            energy.kinetic_energy) ||
+        !values_near(work.identity_residual, svmp::FE::Real{0.0})) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Backward-Euler kinetic work is inconsistent with the accepted stored energy or its endpoint-domain identity for marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    accepted.backward_euler_kinetic_work = std::move(work);
+  }
+}
+
 std::uint64_t levelSetMaintenanceCutTopologyRevision(
     const svmp::FE::interfaces::FreeSurfaceGeometrySnapshot& snapshot,
     const svmp::MeshComm& comm)
 {
-  std::vector<std::uint64_t> local_rule_revisions;
-  local_rule_revisions.reserve(snapshot.rules().size());
+  CutTopologyFingerprintMultiset local_digest;
   for (const auto& rule : snapshot.rules()) {
     if (!rule.locally_owned) {
       continue;
@@ -6102,26 +9604,21 @@ std::uint64_t levelSetMaintenanceCutTopologyRevision(
     for (const auto stable_id : rule.source_fragment_stable_ids) {
       mixCutContextHash(revision, stable_id);
     }
-    local_rule_revisions.push_back(
-        revision == 0u ? 1u : revision);
+    local_digest.insert(revision);
   }
 
-  const auto collective = snapshotOwnershipCollective(comm);
-  auto global_rule_revisions =
-      collective.all_gather_owned_rule_identity_values(
-          local_rule_revisions);
-  std::sort(
-      global_rule_revisions.begin(), global_rule_revisions.end());
+  const auto global_digest =
+      collectiveCutTopologyFingerprintMultiset(local_digest, comm);
   std::uint64_t revision = kCutContextHashOffset;
   mixCutContextHash(
       revision,
       static_cast<std::uint64_t>(
           snapshot.revision().interface_marker));
-  mixCutContextHash(
-      revision,
-      static_cast<std::uint64_t>(global_rule_revisions.size()));
-  for (const auto rule_revision : global_rule_revisions) {
-    mixCutContextHash(revision, rule_revision);
+  for (const auto word : global_digest.sums) {
+    mixCutContextHash(revision, word);
+  }
+  for (const auto word : global_digest.xors) {
+    mixCutContextHash(revision, word);
   }
   return revision == 0u ? 1u : revision;
 }
@@ -6130,32 +9627,114 @@ std::vector<application::core::LevelSetAuthoritativeFunctionalValue>
 levelSetMaintenanceFunctionalValues(
     application::core::SimulationComponents& sim,
     std::span<const svmp::FE::systems::
-                        AcceptedFreeSurfaceDiscreteFunctionalState> states)
+                        AcceptedFreeSurfaceDiscreteFunctionalState> states,
+    std::span<const svmp::FE::Real> solution)
 {
   std::vector<application::core::LevelSetAuthoritativeFunctionalValue>
       values;
   values.reserve(states.size());
+  if (!sim.fe_system) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Level-set maintenance work provenance requires an FE system.");
+  }
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto local_state_count =
+      static_cast<std::uint64_t>(states.size());
+  const auto [minimum_state_count, maximum_state_count] =
+      globalMinMaxUint64(local_state_count, comm);
+  if (minimum_state_count != maximum_state_count) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Level-set maintenance functional coverage differs across the FE communicator.");
+  }
   if (states.empty()) {
     return values;
   }
-  if (!sim.fe_system || !sim.fe_system->cutIntegrationContext()) {
+  const auto* context = sim.fe_system->cutIntegrationContext();
+  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Level-set maintenance work provenance requires an authoritative cut-integration context.");
   }
-  const auto* context = sim.fe_system->cutIntegrationContext();
+  std::vector<
+      svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+      enriched_states(states.begin(), states.end());
+  const auto declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+  const bool solution_channel_declared = std::any_of(
+      declarations.begin(),
+      declarations.end(),
+      [](const auto& declaration) {
+        return declaration.active_volume_energy_parameters.has_value() ||
+            declaration.active_volume_dissipation_parameters.has_value() ||
+            declaration.external_pressure_power_parameters.has_value() ||
+            declaration.endpoint_functional_power_enabled;
+      });
+  const auto [minimum_solution_channel_declared,
+              maximum_solution_channel_declared] =
+      globalMinMaxUint64(
+          solution_channel_declared ? 1u : 0u, comm);
+  if (minimum_solution_channel_declared !=
+      maximum_solution_channel_declared) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Level-set maintenance endpoint-channel declarations differ across the FE communicator.");
+  }
+  if (solution_channel_declared) {
+    if (globalMinDouble(
+            solution.empty() ? 0.0 : 1.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set maintenance modeled-energy, endpoint-power, and dissipation work requires the complete FE-ordered candidate solution.");
+    }
+    attachAcceptedFreeSurfaceEndpointFunctionalPowers(
+        sim, solution, enriched_states);
+    attachAcceptedFreeSurfaceActiveVolumeEnergies(
+        sim, solution, enriched_states);
+    attachAcceptedFreeSurfaceActiveVolumeDissipation(
+        sim, solution, enriched_states);
+    attachAcceptedFreeSurfaceExternalPressurePowers(
+        sim, solution, enriched_states);
+  }
   const auto& snapshots = context->freeSurfaceGeometrySnapshots();
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
-  for (const auto& state : states) {
+  for (const auto& state : enriched_states) {
+    const auto marker = static_cast<double>(state.interface_marker);
+    if (globalMinDouble(marker, comm) !=
+        globalMaxDouble(marker, comm)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set maintenance functional ordering differs across the FE communicator.");
+    }
     const auto found = std::find_if(
         snapshots.begin(), snapshots.end(), [&](const auto& snapshot) {
           return snapshot &&
                  snapshot->revision().snapshot_revision_key ==
                      state.geometry_revision.snapshot_revision_key;
         });
-    if (found == snapshots.end()) {
+    if (globalMinDouble(
+            found != snapshots.end() ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set maintenance work could not resolve its authoritative geometry snapshot.");
     }
+    const auto* active_energy =
+        state.active_volume_energy.has_value()
+            ? &*state.active_volume_energy
+            : nullptr;
+    const auto* endpoint_power =
+        state.endpoint_functional_power.has_value()
+            ? &*state.endpoint_functional_power
+            : nullptr;
+    const auto* active_dissipation =
+        state.active_volume_dissipation.has_value()
+            ? &*state.active_volume_dissipation
+            : nullptr;
+    const auto* external_pressure =
+        state.external_pressure_power.has_value()
+            ? &*state.external_pressure_power
+            : nullptr;
+    const auto modeled_stored_energy =
+        active_energy != nullptr
+            ? std::optional<double>{
+                  static_cast<double>(active_energy->total_energy) +
+                  static_cast<double>(
+                      state.state.liquid_gas_surface_energy) +
+                  static_cast<double>(state.state.young_wall_energy)}
+            : std::nullopt;
     values.push_back(
         application::core::LevelSetAuthoritativeFunctionalValue{
             .interface_marker = state.interface_marker,
@@ -6175,6 +9754,56 @@ levelSetMaintenanceFunctionalValues(
             .volume_constraint_potential =
                 state.state.volume_constraint_potential,
             .total_potential = state.state.total_potential,
+            .kinetic_energy =
+                active_energy != nullptr
+                    ? std::optional<double>{
+                          static_cast<double>(
+                              active_energy->kinetic_energy)}
+                    : std::nullopt,
+            .gravitational_energy =
+                active_energy != nullptr
+                    ? std::optional<double>{
+                          static_cast<double>(
+                              active_energy->gravitational_energy)}
+                    : std::nullopt,
+            .gravitational_potential_power =
+                active_energy != nullptr
+                    ? std::optional<double>{
+                          static_cast<double>(
+                              active_energy
+                                  ->gravitational_potential_power)}
+                    : std::nullopt,
+            .surface_wall_potential_power =
+                endpoint_power != nullptr
+                    ? std::optional<double>{
+                          static_cast<double>(
+                              endpoint_power
+                                  ->liquid_gas_surface_energy_variation +
+                              endpoint_power
+                                  ->young_wall_energy_variation)}
+                    : std::nullopt,
+            .volume_constraint_potential_power =
+                endpoint_power != nullptr
+                    ? std::optional<double>{
+                          static_cast<double>(
+                              endpoint_power
+                                  ->volume_constraint_potential_variation)}
+                    : std::nullopt,
+            .bulk_viscous_dissipation_rate =
+                active_dissipation != nullptr
+                    ? std::optional<double>{
+                          static_cast<double>(
+                              active_dissipation
+                                  ->bulk_viscous_dissipation_rate)}
+                    : std::nullopt,
+            .external_pressure_power =
+                external_pressure != nullptr
+                    ? std::optional<double>{
+                          static_cast<double>(
+                              external_pressure
+                                  ->external_pressure_power)}
+                    : std::nullopt,
+            .modeled_stored_energy = modeled_stored_energy,
         });
   }
   std::sort(
@@ -6217,6 +9846,335 @@ std::uint64_t collectiveLevelSetMaintenanceAlgebraicRevision(
         "[svMultiPhysics::Application] Level-set maintenance algebraic state revision differs across the FE communicator.");
   }
   return revision;
+}
+
+std::uint64_t avalancheMeshBoundaryStateWord(
+    std::uint64_t value) noexcept
+{
+  value ^= value >> 30u;
+  value *= 0xbf58476d1ce4e5b9ull;
+  value ^= value >> 27u;
+  value *= 0x94d049bb133111ebull;
+  value ^= value >> 31u;
+  return value;
+}
+
+std::uint64_t meshBoundaryExpectedOwnedIndexSum(
+    std::uint64_t size) noexcept
+{
+  return size % 2u == 0u
+      ? (size / 2u) * (size - (size == 0u ? 0u : 1u))
+      : size * ((size - 1u) / 2u);
+}
+
+std::uint64_t meshBoundaryExpectedOwnedIndexXor(
+    std::uint64_t size) noexcept
+{
+  if (size == 0u) {
+    return 0u;
+  }
+  const auto last = size - 1u;
+  switch (last & 3u) {
+    case 0u:
+      return last;
+    case 1u:
+      return 1u;
+    case 2u:
+      return last + 1u;
+    default:
+      return 0u;
+  }
+}
+
+std::uint64_t collectiveMeshBoundaryStateFingerprint(
+    const svmp::FE::backends::GenericVector& state,
+    const svmp::MeshComm& comm)
+{
+  static_assert(
+      sizeof(svmp::FE::Real) == sizeof(std::uint64_t),
+      "Mesh-boundary state history requires a 64-bit FE scalar.");
+
+  std::array<std::uint64_t, 5> local_sums{{0u, 0u, 0u, 0u, 0u}};
+  std::array<std::uint64_t, 4> local_xors{{0u, 0u, 0u, 0u}};
+  std::vector<svmp::FE::GlobalIndex> owned_dofs;
+  std::exception_ptr local_fingerprint_failure;
+  try {
+    if (state.size() < 0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Mesh-boundary algebraic state has a negative global size.");
+    }
+    owned_dofs = state.ownedGlobalRows();
+    if (!std::is_sorted(owned_dofs.begin(), owned_dofs.end()) ||
+        std::adjacent_find(owned_dofs.begin(), owned_dofs.end()) !=
+            owned_dofs.end()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Mesh-boundary algebraic-state backend ownership is not strictly sorted and unique.");
+    }
+
+    // Backend read views may refresh internal caches but do not alter the
+    // represented algebraic values. Keep that logical mutation contained so
+    // candidate-stage snapshots remain const to every caller.
+    auto view = const_cast<svmp::FE::backends::GenericVector&>(state)
+                    .createAssemblyView();
+    if (!view) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Mesh-boundary algebraic state has no readable assembly view.");
+    }
+
+    constexpr std::size_t chunk_capacity = 4096u;
+    std::array<svmp::FE::Real, chunk_capacity> values{};
+    for (std::size_t offset = 0u; offset < owned_dofs.size();
+         offset += chunk_capacity) {
+      const auto count =
+          std::min(chunk_capacity, owned_dofs.size() - offset);
+      const auto dofs = std::span<const svmp::FE::GlobalIndex>(
+          owned_dofs.data() + static_cast<std::ptrdiff_t>(offset), count);
+      const auto chunk =
+          std::span<svmp::FE::Real>(values.data(), count);
+      for (const auto dof : dofs) {
+        if (dof < 0 || dof >= state.size()) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Mesh-boundary algebraic-state ownership contains an out-of-range row.");
+        }
+      }
+      view->getVectorEntries(dofs, chunk);
+      for (std::size_t i = 0u; i < count; ++i) {
+        const auto dof = static_cast<std::uint64_t>(dofs[i]);
+        const auto bits = std::bit_cast<std::uint64_t>(chunk[i]);
+        const auto first = avalancheMeshBoundaryStateWord(
+            bits ^ avalancheMeshBoundaryStateWord(
+                       dof ^ 0x243f6a8885a308d3ull));
+        const auto second = avalancheMeshBoundaryStateWord(
+            std::rotl(bits, 23) ^
+            avalancheMeshBoundaryStateWord(
+                dof ^ 0x13198a2e03707344ull));
+        const auto third = avalancheMeshBoundaryStateWord(
+            first + std::rotl(second, 31) +
+            0xa4093822299f31d0ull);
+        ++local_sums[0];
+        local_sums[1] += dof;
+        local_sums[2] += first;
+        local_sums[3] += second;
+        local_sums[4] += third;
+        local_xors[0] ^= dof;
+        local_xors[1] ^= first;
+        local_xors[2] ^= second;
+        local_xors[3] ^= third;
+      }
+    }
+  } catch (...) {
+    local_fingerprint_failure = std::current_exception();
+  }
+
+  if (globalAnyBool(local_fingerprint_failure != nullptr, comm)) {
+    if (local_fingerprint_failure != nullptr) {
+      std::rethrow_exception(local_fingerprint_failure);
+    }
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Another active FE communicator rank could not fingerprint its backend-owned mesh-boundary algebraic-state rows.");
+  }
+
+  const auto global_size = static_cast<std::uint64_t>(state.size());
+  const auto [minimum_global_size, maximum_global_size] =
+      globalMinMaxUint64(global_size, comm);
+  if (minimum_global_size != maximum_global_size) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Mesh-boundary algebraic-state size differs across the active FE communicator.");
+  }
+
+  constexpr std::size_t occupancy_capacity = 65536u;
+  std::vector<std::uint32_t> local_occupancy;
+  std::vector<std::uint32_t> global_occupancy;
+  std::exception_ptr local_occupancy_failure;
+  try {
+    const auto capacity = static_cast<std::size_t>(
+        std::min<std::uint64_t>(global_size, occupancy_capacity));
+    local_occupancy.resize(capacity, 0u);
+    global_occupancy.resize(capacity, 0u);
+  } catch (...) {
+    local_occupancy_failure = std::current_exception();
+  }
+  if (globalAnyBool(local_occupancy_failure != nullptr, comm)) {
+    if (local_occupancy_failure != nullptr) {
+      std::rethrow_exception(local_occupancy_failure);
+    }
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Another active FE communicator rank could not allocate bounded ownership-validation storage.");
+  }
+
+  std::size_t owned_cursor = 0u;
+  for (std::uint64_t chunk_begin = 0u; chunk_begin < global_size;
+       chunk_begin += occupancy_capacity) {
+    const auto chunk_size = static_cast<std::size_t>(
+        std::min<std::uint64_t>(
+            occupancy_capacity, global_size - chunk_begin));
+    std::fill_n(local_occupancy.begin(), chunk_size, 0u);
+    const auto chunk_end = chunk_begin + chunk_size;
+    while (owned_cursor < owned_dofs.size() &&
+           static_cast<std::uint64_t>(owned_dofs[owned_cursor]) <
+               chunk_end) {
+      const auto row =
+          static_cast<std::uint64_t>(owned_dofs[owned_cursor]);
+      local_occupancy[static_cast<std::size_t>(row - chunk_begin)] = 1u;
+      ++owned_cursor;
+    }
+    std::copy_n(
+        local_occupancy.begin(), chunk_size, global_occupancy.begin());
+#ifdef MESH_HAS_MPI
+    if (comm.is_parallel()) {
+#ifdef MPI_UINT32_T
+      const MPI_Datatype occupancy_type = MPI_UINT32_T;
+#else
+      const MPI_Datatype occupancy_type = MPI_UNSIGNED;
+#endif
+      MPI_Allreduce(
+          local_occupancy.data(),
+          global_occupancy.data(),
+          static_cast<int>(chunk_size),
+          occupancy_type,
+          MPI_SUM,
+          comm.native());
+    }
+#else
+    if (comm.is_parallel()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Distributed mesh-boundary algebraic-state ownership validation requires MPI.");
+    }
+#endif
+    if (std::any_of(
+            global_occupancy.begin(),
+            global_occupancy.begin() +
+                static_cast<std::ptrdiff_t>(chunk_size),
+            [](std::uint32_t count) { return count != 1u; })) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Mesh-boundary algebraic-state backend ownership does not cover every global row exactly once.");
+    }
+  }
+  const bool local_cursor_incomplete = owned_cursor != owned_dofs.size();
+  if (globalAnyBool(local_cursor_incomplete, comm)) {
+    if (local_cursor_incomplete) {
+      throw std::logic_error(
+          "[svMultiPhysics::Application] Mesh-boundary algebraic-state ownership validation did not consume every local row.");
+    }
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Another active FE communicator rank did not consume every backend-owned row.");
+  }
+
+  auto global_sums = local_sums;
+  auto global_xors = local_xors;
+#ifdef MESH_HAS_MPI
+  if (comm.is_parallel()) {
+#ifdef MPI_UINT64_T
+    const MPI_Datatype revision_type = MPI_UINT64_T;
+#else
+    const MPI_Datatype revision_type = MPI_UNSIGNED_LONG_LONG;
+#endif
+    MPI_Allreduce(
+        local_sums.data(),
+        global_sums.data(),
+        static_cast<int>(local_sums.size()),
+        revision_type,
+        MPI_SUM,
+        comm.native());
+    MPI_Allreduce(
+        local_xors.data(),
+        global_xors.data(),
+        static_cast<int>(local_xors.size()),
+        revision_type,
+        MPI_BXOR,
+        comm.native());
+  }
+#else
+  if (comm.is_parallel()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Distributed mesh-boundary algebraic-state fingerprinting requires MPI.");
+  }
+#endif
+
+  if (global_sums[0] != global_size ||
+      global_sums[1] != meshBoundaryExpectedOwnedIndexSum(global_size) ||
+      global_xors[0] != meshBoundaryExpectedOwnedIndexXor(global_size)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Mesh-boundary algebraic-state ownership fingerprint is inconsistent with the certified global row range.");
+  }
+
+  std::uint64_t revision = kCutContextHashOffset;
+  mixCutContextHash(revision, global_size);
+  for (const auto word : global_sums) {
+    mixCutContextHash(revision, word);
+  }
+  for (const auto word : global_xors) {
+    mixCutContextHash(revision, word);
+  }
+  return revision == 0u ? 1u : revision;
+}
+
+void recordAcceptedMeshBoundaryProvenanceAtEndpoint(
+    application::core::SimulationComponents& sim,
+    std::uint64_t accepted_step,
+    svmp::FE::Real accepted_time,
+    svmp::FE::Real dt)
+{
+  auto& system = *sim.fe_system;
+  const auto comm = activeFESystemCommunicator(system);
+  const auto normal_declarations =
+      system.meshNormalBoundaryConstraints();
+  const auto tangential_declarations =
+      system.meshTangentialBoundaryPolicies();
+  const auto [minimum_normal_count, maximum_normal_count] =
+      globalMinMaxUint64(
+          static_cast<std::uint64_t>(normal_declarations.size()),
+          comm);
+  const auto [minimum_tangential_count, maximum_tangential_count] =
+      globalMinMaxUint64(
+          static_cast<std::uint64_t>(tangential_declarations.size()),
+          comm);
+  if (minimum_normal_count != maximum_normal_count ||
+      minimum_tangential_count != maximum_tangential_count) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Mesh normal or tangential boundary "
+        "history declaration count differs across the active FE "
+        "communicator.");
+  }
+  if (maximum_normal_count == 0u &&
+      maximum_tangential_count == 0u) {
+    return;
+  }
+
+  const auto state_fingerprint =
+      collectiveMeshBoundaryStateFingerprint(
+          sim.time_history->u(), comm);
+  system.recordAcceptedMeshBoundaryProvenance(
+      accepted_step,
+      accepted_time,
+      dt,
+      state_fingerprint);
+}
+
+void reimposeAcceptedMasterBearingState(
+    svmp::FE::timestepping::TimeHistory& history,
+    const svmp::FE::systems::FESystem& system)
+{
+  // TimeLoop repeats this operation after on_step_accepted returns. Apply it
+  // here as soon as accepted maintenance has refreshed the constraint set so
+  // mesh-boundary provenance and all later endpoint artifacts observe the
+  // same constraint-consistent values. The repeated operation is idempotent.
+  if (parseBoolEnv("SVMP_NO_MPC_STATE_DISTRIBUTE", false)) {
+    return;
+  }
+  const auto& constraints = system.constraints();
+  if (constraints.empty() || !constraints.hasMasterBearingLines()) {
+    return;
+  }
+  history.updateGhosts();
+  constraints.distributeMasterBearing(history.u());
+  constraints.distributeMasterBearing(history.uPrev());
+  if (history.hasUDotState()) {
+    constraints.distributeMasterBearingHomogeneous(history.uDot());
+  }
+  if (history.hasUDDotState()) {
+    constraints.distributeMasterBearingHomogeneous(history.uDDot());
+  }
 }
 
 const char* levelSetMaintenanceWorkStatusName(
@@ -6309,7 +10267,22 @@ void logLevelSetMaintenanceWorkRows(
         << " numerical_work=" << row.numerical_work
         << " accepted_numerical_work="
         << row.accepted_numerical_work
-        << " account_scope=maintenance_surface_wall_volume_only"
+        << " modeled_energy_work_available="
+        << (row.modeled_energy_numerical_work.has_value()
+                ? "true"
+                : "false")
+        << " modeled_energy_numerical_work="
+        << row.modeled_energy_numerical_work.value_or(0.0)
+        << " accepted_modeled_energy_numerical_work="
+        << row.accepted_modeled_energy_numerical_work.value_or(0.0)
+        << " modeled_energy_classification="
+        << (row.substage ==
+                    application::core::
+                        LevelSetMaintenanceWorkSubstage::Transport
+                ? "physical_transport_change"
+                : "numerical_maintenance_change")
+        << " legacy_account_scope=maintenance_surface_wall_volume_potential"
+        << " modeled_account_scope=kinetic_gravitational_surface_young_wall"
         << " complete_time_discrete_energy_identity=false";
     for (std::size_t index = 0u; index < row.before.size(); ++index) {
       const auto& before = row.before[index];
@@ -6345,6 +10318,50 @@ void logLevelSetMaintenanceWorkRows(
           << after.volume_constraint_potential
           << " before_total_potential=" << before.total_potential
           << " after_total_potential=" << after.total_potential;
+      if (before.modeled_stored_energy.has_value() &&
+          after.modeled_stored_energy.has_value()) {
+        log << " before_kinetic_energy="
+            << *before.kinetic_energy
+            << " after_kinetic_energy="
+            << *after.kinetic_energy
+            << " before_gravitational_energy="
+            << *before.gravitational_energy
+            << " after_gravitational_energy="
+            << *after.gravitational_energy
+            << " before_gravitational_potential_power="
+            << *before.gravitational_potential_power
+            << " after_gravitational_potential_power="
+            << *after.gravitational_potential_power
+            << " before_modeled_stored_energy="
+            << *before.modeled_stored_energy
+            << " after_modeled_stored_energy="
+            << *after.modeled_stored_energy;
+      }
+      if (before.surface_wall_potential_power.has_value() &&
+          after.surface_wall_potential_power.has_value()) {
+        log << " before_surface_wall_potential_power="
+            << *before.surface_wall_potential_power
+            << " after_surface_wall_potential_power="
+            << *after.surface_wall_potential_power
+            << " before_volume_constraint_potential_power="
+            << *before.volume_constraint_potential_power
+            << " after_volume_constraint_potential_power="
+            << *after.volume_constraint_potential_power;
+      }
+      if (before.bulk_viscous_dissipation_rate.has_value() &&
+          after.bulk_viscous_dissipation_rate.has_value()) {
+        log << " before_bulk_viscous_dissipation_rate="
+            << *before.bulk_viscous_dissipation_rate
+            << " after_bulk_viscous_dissipation_rate="
+            << *after.bulk_viscous_dissipation_rate;
+      }
+      if (before.external_pressure_power.has_value() &&
+          after.external_pressure_power.has_value()) {
+        log << " before_external_pressure_power="
+            << *before.external_pressure_power
+            << " after_external_pressure_power="
+            << *after.external_pressure_power;
+      }
     }
     application::core::oopCout() << log.str() << std::endl;
   }
@@ -6356,6 +10373,24 @@ void logLevelSetMaintenanceWorkAttempts(
 {
   for (const auto& attempt : attempts) {
     std::ostringstream log;
+    const auto append_substage =
+        [&log](
+            std::string_view name,
+            const application::core::
+                LevelSetMaintenanceModeledEnergySubstage& substage) {
+          log << " " << name << "_row_count="
+              << substage.row_count
+              << " " << name << "_modeled_energy_available="
+              << (substage.modeled_energy_change.has_value()
+                      ? "true"
+                      : "false")
+              << " " << name << "_modeled_energy_change="
+              << substage.modeled_energy_change.value_or(0.0)
+              << " accepted_" << name
+              << "_modeled_energy_change="
+              << substage.accepted_modeled_energy_change
+                     .value_or(0.0);
+        };
     log << std::setprecision(17)
         << "[svMultiPhysics::Application] Level-set maintenance work attempt"
         << " diagnostic=level_set_maintenance_work_attempt"
@@ -6375,15 +10410,279 @@ void logLevelSetMaintenanceWorkAttempts(
         << " numerical_work=" << attempt.numerical_work
         << " accepted_numerical_work="
         << attempt.accepted_numerical_work
+        << " modeled_energy_work_available="
+        << (attempt.modeled_energy_numerical_work.has_value()
+                ? "true"
+                : "false")
+        << " modeled_energy_numerical_work="
+        << attempt.modeled_energy_numerical_work.value_or(0.0)
+        << " accepted_modeled_energy_numerical_work="
+        << attempt.accepted_modeled_energy_numerical_work
+               .value_or(0.0)
         << " accepted_account_publication="
         << (attempt.status ==
                     application::core::
                         LevelSetMaintenanceWorkStatus::Accepted
                 ? "accepted_rows"
                 : "zero_for_rejection")
-        << " complete_time_discrete_energy_identity=false";
+        << " physical_transport_excluded_from_numerical_maintenance=true";
+    const auto& breakdown = attempt.modeled_energy_breakdown;
+    append_substage("transport", breakdown.transport);
+    append_substage("limiting", breakdown.limiting);
+    append_substage(
+        "reinitialization", breakdown.reinitialization);
+    append_substage(
+        "geometry_reconciliation",
+        breakdown.geometry_reconciliation);
+    append_substage(
+        "global_correction", breakdown.global_correction);
+    append_substage(
+        "numerical_maintenance_total",
+        breakdown.numerical_maintenance_total);
+    log << " complete_time_discrete_energy_identity=false";
     application::core::oopCout() << log.str() << std::endl;
   }
+}
+
+void logLevelSetMaintenanceAcceptedStepEnergyAccount(
+    const application::core::
+        LevelSetMaintenanceAcceptedStepEnergyAccount& account)
+{
+  std::ostringstream log;
+  const auto append_substage =
+      [&log](
+          std::string_view name,
+          const application::core::
+              LevelSetMaintenanceModeledEnergySubstage& substage) {
+        log << " " << name << "_row_count=" << substage.row_count
+            << " " << name << "_modeled_energy_available="
+            << (substage.accepted_modeled_energy_change.has_value()
+                    ? "true"
+                    : "false")
+            << " accepted_" << name
+            << "_modeled_energy_change="
+            << substage.accepted_modeled_energy_change.value_or(0.0);
+      };
+  const auto append_endpoint =
+      [&log](
+          std::string_view name,
+          const std::optional<application::core::
+              LevelSetMaintenanceAcceptedStepEnergyAccount::
+                  Endpoint>& endpoint) {
+        log << " " << name << "_available="
+            << (endpoint.has_value() ? "true" : "false");
+        if (!endpoint.has_value()) {
+          return;
+        }
+        log << " " << name << "_algebraic_state_revision="
+            << endpoint->algebraic_state_revision
+            << " " << name << "_snapshot_set_revision="
+            << endpoint->snapshot_set_revision
+            << " " << name << "_mesh_topology_set_revision="
+            << endpoint->mesh_topology_set_revision
+            << " " << name << "_cut_topology_set_revision="
+            << endpoint->cut_topology_set_revision
+            << " " << name << "_extension_map_revision="
+            << endpoint->extension_map_revision.value_or(0u)
+            << " " << name << "_modeled_energy_available="
+            << (endpoint->modeled_stored_energy.has_value()
+                    ? "true"
+                    : "false")
+            << " " << name
+            << "_gravitational_potential_power_available="
+            << (endpoint->gravitational_potential_power.has_value()
+                    ? "true"
+                    : "false")
+            << " " << name
+            << "_surface_wall_potential_power_available="
+            << (endpoint->surface_wall_potential_power.has_value()
+                    ? "true"
+                    : "false")
+            << " " << name
+            << "_bulk_viscous_dissipation_available="
+            << (endpoint->bulk_viscous_dissipation_rate.has_value()
+                    ? "true"
+                    : "false")
+            << " " << name
+            << "_external_pressure_power_available="
+            << (endpoint->external_pressure_power.has_value()
+                    ? "true"
+                    : "false")
+            << " " << name << "_kinetic_energy="
+            << endpoint->kinetic_energy.value_or(0.0)
+            << " " << name << "_gravitational_energy="
+            << endpoint->gravitational_energy.value_or(0.0)
+            << " " << name
+            << "_gravitational_potential_power="
+            << endpoint->gravitational_potential_power
+                   .value_or(0.0)
+            << " " << name << "_liquid_gas_surface_energy="
+            << endpoint->liquid_gas_surface_energy
+            << " " << name << "_solid_liquid_wall_energy="
+            << endpoint->solid_liquid_wall_energy
+            << " " << name
+            << "_surface_wall_potential_power="
+            << endpoint->surface_wall_potential_power.value_or(0.0)
+            << " " << name
+            << "_volume_constraint_potential_power="
+            << endpoint->volume_constraint_potential_power
+                   .value_or(0.0)
+            << " " << name
+            << "_bulk_viscous_dissipation_rate="
+            << endpoint->bulk_viscous_dissipation_rate.value_or(0.0)
+            << " " << name << "_external_pressure_power="
+            << endpoint->external_pressure_power.value_or(0.0)
+            << " " << name << "_modeled_stored_energy="
+            << endpoint->modeled_stored_energy.value_or(0.0);
+      };
+  log << std::setprecision(17)
+      << "[svMultiPhysics::Application] Level-set accepted-step maintenance energy account"
+      << " diagnostic=level_set_maintenance_accepted_step_energy"
+      << " step=" << account.step
+      << " attempt=" << account.attempt
+      << " time=" << account.time
+      << " dt=" << account.dt
+      << " transaction_count=" << account.transaction_count
+      << " row_count=" << account.row_count
+      << " physical_transport_excluded_from_numerical_maintenance=true";
+  const auto& breakdown = account.modeled_energy_breakdown;
+  append_substage("transport", breakdown.transport);
+  append_substage("limiting", breakdown.limiting);
+  append_substage(
+      "reinitialization", breakdown.reinitialization);
+  append_substage(
+      "geometry_reconciliation",
+      breakdown.geometry_reconciliation);
+  append_substage(
+      "global_correction", breakdown.global_correction);
+  append_substage(
+      "numerical_maintenance_total",
+      breakdown.numerical_maintenance_total);
+  append_endpoint(
+      "maintenance_start", account.maintenance_start);
+  append_endpoint("post_transport", account.post_transport);
+  append_endpoint("maintenance_end", account.maintenance_end);
+  log << " physical_transport_endpoint_residual_available="
+      << (account.physical_transport_endpoint_residual.has_value()
+              ? "true"
+              : "false")
+      << " physical_transport_endpoint_residual="
+      << account.physical_transport_endpoint_residual.value_or(0.0)
+      << " numerical_maintenance_endpoint_residual_available="
+      << (account.numerical_maintenance_endpoint_residual
+                  .has_value()
+              ? "true"
+              : "false")
+      << " numerical_maintenance_endpoint_residual="
+      << account.numerical_maintenance_endpoint_residual
+             .value_or(0.0)
+      << " complete_time_discrete_energy_identity=false";
+  application::core::oopCout() << log.str() << std::endl;
+}
+
+void logLevelSetMaintenancePhysicalEndpointChannels(
+    const application::core::
+        LevelSetMaintenanceAcceptedStepEnergyAccount& account,
+    const application::core::
+        LevelSetMaintenancePhysicalEndpointChannels& channels,
+    std::uint64_t preceding_accepted_step,
+    double preceding_accepted_time,
+    std::uint64_t preceding_state_revision,
+    std::uint64_t preceding_snapshot_set_revision,
+    std::uint64_t preceding_mesh_topology_set_revision,
+    std::uint64_t preceding_cut_topology_set_revision,
+    std::optional<std::uint64_t>
+        preceding_extension_map_revision,
+    std::size_t preceding_functional_count,
+    double preceding_surface_wall_energy,
+    std::optional<double> preceding_gravitational_energy,
+    std::optional<int> active_volume_owner_interface_marker)
+{
+  if (!account.post_transport.has_value()) {
+    throw std::logic_error(
+        "[svMultiPhysics::Application] Physical endpoint channel logging requires a post-Transport endpoint.");
+  }
+  const auto append_channel =
+      [](std::ostringstream& log,
+         std::string_view name,
+         std::optional<double> value) {
+        log << " " << name << "_available="
+            << (value.has_value() ? "true" : "false")
+            << " " << name << "=" << value.value_or(0.0);
+      };
+  std::ostringstream log;
+  log << std::setprecision(17)
+      << "[svMultiPhysics::Application] Level-set maintenance physical endpoint channels"
+      << " diagnostic=level_set_maintenance_physical_endpoint_channels"
+      << " step=" << account.step
+      << " attempt=" << account.attempt
+      << " time=" << account.time
+      << " dt=" << account.dt
+      << " preceding_accepted_step=" << preceding_accepted_step
+      << " preceding_accepted_time=" << preceding_accepted_time
+      << " preceding_state_revision=" << preceding_state_revision
+      << " preceding_snapshot_set_revision="
+      << preceding_snapshot_set_revision
+      << " preceding_mesh_topology_set_revision="
+      << preceding_mesh_topology_set_revision
+      << " preceding_cut_topology_set_revision="
+      << preceding_cut_topology_set_revision
+      << " preceding_extension_map_revision_available="
+      << (preceding_extension_map_revision.has_value()
+              ? "true"
+              : "false")
+      << " preceding_extension_map_revision="
+      << preceding_extension_map_revision.value_or(0u)
+      << " preceding_functional_count="
+      << preceding_functional_count
+      << " preceding_surface_wall_energy="
+      << preceding_surface_wall_energy
+      << " post_transport_algebraic_state_revision="
+      << account.post_transport->algebraic_state_revision
+      << " post_transport_snapshot_set_revision="
+      << account.post_transport->snapshot_set_revision
+      << " post_transport_mesh_topology_set_revision="
+      << account.post_transport->mesh_topology_set_revision
+      << " post_transport_cut_topology_set_revision="
+      << account.post_transport->cut_topology_set_revision
+      << " post_transport_extension_map_revision="
+      << account.post_transport->extension_map_revision.value_or(0u)
+      << " active_volume_owner_available="
+      << (active_volume_owner_interface_marker.has_value()
+              ? "true"
+              : "false")
+      << " active_volume_owner_interface_marker="
+      << active_volume_owner_interface_marker.value_or(-1);
+  append_channel(
+      log,
+      "preceding_gravitational_energy",
+      preceding_gravitational_energy);
+  append_channel(
+      log,
+      "surface_wall_energy_change",
+      channels.surface_wall_energy_change);
+  append_channel(
+      log,
+      "surface_transport_coupling_work",
+      channels.surface_transport_coupling_work);
+  append_channel(
+      log,
+      "gravitational_energy_change",
+      channels.gravitational_energy_change);
+  append_channel(
+      log,
+      "gravitational_transport_coupling_work",
+      channels.gravitational_transport_coupling_work);
+  append_channel(
+      log,
+      "bulk_viscous_dissipation_rate",
+      channels.bulk_viscous_dissipation_rate);
+  append_channel(
+      log,
+      "external_pressure_work",
+      channels.external_pressure_work);
+  log << " complete_energy_record_connected=false";
+  application::core::oopCout() << log.str() << std::endl;
 }
 
 struct FreeSurfaceAcceptanceCoverage {
@@ -6405,6 +10704,29 @@ requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
     throw std::runtime_error(
         "[svMultiPhysics::Application] Free-surface functional declaration coverage differs across the FE communicator.");
   }
+  for (const auto& declaration : declarations) {
+    const auto declaration_content_key =
+        freeSurfaceDiscreteFunctionalDeclarationContentKey(
+            declaration);
+    const auto [minimum_content_key, maximum_content_key] =
+        globalMinMaxUint64(declaration_content_key, comm);
+    if (minimum_content_key != maximum_content_key) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Free-surface functional declaration content differs across the FE communicator.");
+    }
+    const std::array<double, 3> method_metadata{
+        static_cast<double>(declaration.interface_marker),
+        static_cast<double>(declaration.capillary_balance_method),
+        static_cast<double>(
+            declaration.capillary_balance_qualification)};
+    for (const auto value : method_metadata) {
+      if (globalMinDouble(value, comm) !=
+          globalMaxDouble(value, comm)) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Free-surface capillary-balance method declarations differ across the FE communicator.");
+      }
+    }
+  }
   const auto local_dynamic_contact_count =
       static_cast<double>(std::count_if(
           declarations.begin(),
@@ -6424,7 +10746,9 @@ requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
   };
 }
 
-void recordAcceptedFreeSurfaceDiscreteFunctionals(
+std::vector<
+    svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+recordAcceptedFreeSurfaceDiscreteFunctionals(
     application::core::SimulationComponents& sim,
     std::uint64_t accepted_step,
     svmp::FE::Real accepted_time,
@@ -6432,7 +10756,12 @@ void recordAcceptedFreeSurfaceDiscreteFunctionals(
     std::uint64_t pre_maintenance_endpoint_state_revision,
     std::uint64_t state_revision,
     std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
-        contact_stages = {})
+        contact_stages = {},
+    std::span<const svmp::FE::Real> accepted_solution = {},
+    std::span<const svmp::FE::Real>
+        backward_euler_previous_solution = {},
+    std::optional<std::uint64_t>
+        accepted_extension_map_revision = std::nullopt)
 {
   const auto declarations =
       sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
@@ -6445,7 +10774,7 @@ void recordAcceptedFreeSurfaceDiscreteFunctionals(
       throw std::runtime_error(
           "[svMultiPhysics::Application] Contact-stage states were supplied without free-surface functional declarations.");
     }
-    return;
+    return {};
   }
   const auto [minimum_pre_maintenance_revision,
               maximum_pre_maintenance_revision] =
@@ -6499,6 +10828,92 @@ void recordAcceptedFreeSurfaceDiscreteFunctionals(
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted free-surface functional evaluation returned incomplete declaration coverage.");
   }
+  attachAcceptedFreeSurfaceEndpointFunctionalPowers(
+      sim, accepted_solution, accepted_states);
+  attachAcceptedFreeSurfaceActiveVolumeEnergies(
+      sim, accepted_solution, accepted_states);
+  attachAcceptedFreeSurfaceActiveVolumeDissipation(
+      sim, accepted_solution, accepted_states);
+  attachAcceptedFreeSurfaceExternalPressurePowers(
+      sim, accepted_solution, accepted_states);
+  const auto existing_history =
+      sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+  attachAcceptedFreeSurfaceBackwardEulerKineticWork(
+      sim,
+      backward_euler_previous_solution,
+      accepted_solution,
+      accepted_states);
+  const bool has_backward_euler_work = std::any_of(
+      accepted_states.begin(),
+      accepted_states.end(),
+      [](const auto& state) {
+        return state.backward_euler_kinetic_work.has_value();
+      });
+  if (has_backward_euler_work) {
+    if (dt == svmp::FE::Real{0.0}) {
+      for (const auto& state : accepted_states) {
+        if (!state.backward_euler_kinetic_work.has_value()) {
+          continue;
+        }
+        const auto& work =
+            *state.backward_euler_kinetic_work;
+        if (work.previous_velocity_revision !=
+            work.endpoint_velocity_revision) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] A zero-duration backward-Euler kinetic baseline requires identical velocity endpoints.");
+        }
+      }
+    } else if (existing_history.empty()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Backward-Euler kinetic work requires a previously accepted free-surface endpoint.");
+    } else if (accepted_step >
+               existing_history.back().accepted_step) {
+      if (existing_history.size() < declarations.size()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Backward-Euler kinetic work cannot bind to incomplete accepted functional history.");
+      }
+      const auto previous_group_begin =
+          existing_history.size() - declarations.size();
+      const auto previous_group_step =
+          existing_history[previous_group_begin].accepted_step;
+      const auto previous_group_time =
+          existing_history[previous_group_begin].accepted_time;
+      for (std::size_t index = 0u;
+           index < accepted_states.size();
+           ++index) {
+        const auto& current =
+            accepted_states[index].backward_euler_kinetic_work;
+        if (!current.has_value()) {
+          continue;
+        }
+        const auto& previous =
+            existing_history[previous_group_begin + index];
+        if (previous.accepted_step != previous_group_step ||
+            previous.accepted_time != previous_group_time ||
+            freeSurfaceDiscreteFunctionalDeclarationContentKey(
+                previous.declaration) !=
+                freeSurfaceDiscreteFunctionalDeclarationContentKey(
+                    declarations[index]) ||
+            !previous.backward_euler_kinetic_work.has_value() ||
+            current->previous_velocity_revision !=
+                previous.backward_euler_kinetic_work
+                    ->endpoint_velocity_revision) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Backward-Euler kinetic work does not bind to one complete latest accepted declaration group and velocity endpoint.");
+        }
+      }
+    }
+  }
+  const auto* accepted_cut_context =
+      sim.fe_system->cutIntegrationContext();
+  if (globalMinDouble(
+          accepted_cut_context != nullptr ? 1.0 : 0.0,
+          comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted free-surface functional history requires the authoritative cut-integration context.");
+  }
+  const auto& accepted_snapshots =
+      accepted_cut_context->freeSurfaceGeometrySnapshots();
   for (std::size_t index = 0; index < declarations.size(); ++index) {
     const auto& declaration = declarations[index];
     auto& accepted_state = accepted_states[index];
@@ -6506,6 +10921,26 @@ void recordAcceptedFreeSurfaceDiscreteFunctionals(
       throw std::runtime_error(
           "[svMultiPhysics::Application] Accepted free-surface functional evaluation changed declaration order.");
     }
+    const auto accepted_snapshot = std::find_if(
+        accepted_snapshots.begin(),
+        accepted_snapshots.end(),
+        [&](const auto& candidate) {
+          return candidate &&
+              candidate->revision().snapshot_revision_key ==
+                  accepted_state.geometry_revision
+                      .snapshot_revision_key;
+        });
+    if (globalMinDouble(
+            accepted_snapshot != accepted_snapshots.end()
+                ? 1.0
+                : 0.0,
+            comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted free-surface functional history cannot resolve its authoritative geometry snapshot.");
+    }
+    accepted_state.cut_topology_revision =
+        levelSetMaintenanceCutTopologyRevision(
+            **accepted_snapshot, comm);
     const auto contact_stage =
         contact_stage_by_marker.find(declaration.interface_marker);
     const bool dynamic_contact_declared =
@@ -6531,13 +10966,142 @@ void recordAcceptedFreeSurfaceDiscreteFunctionals(
         "[svMultiPhysics::Application] Accepted contact-stage states include an undeclared interface marker.");
   }
 
+  if (!existing_history.empty()) {
+    bool local_latest_group_valid =
+        existing_history.size() >= declarations.size() &&
+        existing_history.size() % declarations.size() == 0u;
+    std::size_t previous_group_begin = 0u;
+    if (local_latest_group_valid) {
+      previous_group_begin =
+          existing_history.size() - declarations.size();
+      const auto& latest = existing_history[previous_group_begin];
+      for (std::size_t index = 0u;
+           index < declarations.size();
+           ++index) {
+        const auto& record =
+            existing_history[previous_group_begin + index];
+        local_latest_group_valid =
+            record.accepted_step == latest.accepted_step &&
+            record.accepted_time == latest.accepted_time &&
+            record.dt == latest.dt &&
+            record.pre_maintenance_endpoint_state_revision ==
+                latest.pre_maintenance_endpoint_state_revision &&
+            record.state_revision == latest.state_revision &&
+            record.extension_map_revision ==
+                latest.extension_map_revision &&
+            freeSurfaceDiscreteFunctionalDeclarationContentKey(
+                record.declaration) ==
+                freeSurfaceDiscreteFunctionalDeclarationContentKey(
+                    declarations[index]) &&
+            local_latest_group_valid;
+      }
+    }
+    if (globalMinDouble(
+            local_latest_group_valid ? 1.0 : 0.0,
+            comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Latest accepted free-surface history is not one complete declaration-aligned provenance group on every rank.");
+    }
+    const auto& latest = existing_history[previous_group_begin];
+    const auto [minimum_latest_step, maximum_latest_step] =
+        globalMinMaxUint64(latest.accepted_step, comm);
+    const auto [minimum_latest_pre_maintenance_revision,
+                maximum_latest_pre_maintenance_revision] =
+        globalMinMaxUint64(
+            latest.pre_maintenance_endpoint_state_revision,
+            comm);
+    const auto [minimum_latest_state_revision,
+                maximum_latest_state_revision] =
+        globalMinMaxUint64(latest.state_revision, comm);
+    const double extension_available =
+        latest.extension_map_revision.has_value() ? 1.0 : 0.0;
+    const auto [minimum_latest_extension_revision,
+                maximum_latest_extension_revision] =
+        globalMinMaxUint64(
+            latest.extension_map_revision.value_or(0u),
+            comm);
+    if (minimum_latest_step != maximum_latest_step ||
+        globalMinDouble(latest.accepted_time, comm) !=
+            globalMaxDouble(latest.accepted_time, comm) ||
+        globalMinDouble(latest.dt, comm) !=
+            globalMaxDouble(latest.dt, comm) ||
+        minimum_latest_pre_maintenance_revision !=
+            maximum_latest_pre_maintenance_revision ||
+        minimum_latest_state_revision !=
+            maximum_latest_state_revision ||
+        globalMinDouble(extension_available, comm) !=
+            globalMaxDouble(extension_available, comm) ||
+        minimum_latest_extension_revision !=
+            maximum_latest_extension_revision) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Latest accepted free-surface history provenance differs across the FE communicator.");
+    }
+    for (std::size_t index = 0u; index < accepted_states.size(); ++index) {
+      auto& accepted = accepted_states[index];
+      if (!accepted.contact_stage.has_value()) {
+        continue;
+      }
+      const auto& previous =
+          existing_history[previous_group_begin + index];
+      if (accepted_step == latest.accepted_step) {
+        accepted.contact_line_kinematics =
+            previous.contact_line_kinematics;
+      } else if (accepted_step > latest.accepted_step) {
+        accepted.contact_line_kinematics =
+            svmp::FE::systems::
+                deriveFreeSurfaceAcceptedContactLineKinematics(
+                    previous,
+                    accepted_step,
+                    *accepted.contact_stage);
+      }
+    }
+  }
+
   sim.fe_system->recordAcceptedFreeSurfaceDiscreteFunctionals(
       accepted_step,
       accepted_time,
       dt,
       pre_maintenance_endpoint_state_revision,
       state_revision,
-      accepted_states);
+      accepted_states,
+      accepted_extension_map_revision);
+  return accepted_states;
+}
+
+void recordInitialFreeSurfaceDiscreteFunctionalBaseline(
+    application::core::SimulationComponents& sim,
+    std::uint64_t initial_step,
+    svmp::FE::Real initial_time,
+    std::span<const svmp::FE::Real> initial_solution,
+    bool record_backward_euler_kinetic_baseline = false,
+    std::optional<std::uint64_t>
+        initial_extension_map_revision = std::nullopt)
+{
+  const auto initial_state_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          initial_solution,
+          activeFESystemCommunicator(*sim.fe_system));
+  const auto initial_contact_stages =
+      evaluateAcceptedFreeSurfaceContactStages(
+          sim,
+          initial_time,
+          svmp::FE::Real{1.0},
+          initial_state_revision,
+          initial_state_revision,
+          initial_solution);
+  (void)recordAcceptedFreeSurfaceDiscreteFunctionals(
+      sim,
+      initial_step,
+      initial_time,
+      svmp::FE::Real{0.0},
+      initial_state_revision,
+      initial_state_revision,
+      initial_contact_stages,
+      initial_solution,
+      record_backward_euler_kinetic_baseline
+          ? initial_solution
+          : std::span<const svmp::FE::Real>{},
+      initial_extension_map_revision);
 }
 
 std::string formatImplicitCutBackendCounts(
@@ -7667,6 +12231,9 @@ struct LevelSetWallAwareMaintenanceContext {
   std::size_t global_dynamic_contact_rules{0u};
   svmp::FE::Real stage_time{0.0};
   svmp::FE::Real stage_alpha_f{1.0};
+  std::optional<svmp::FE::systems::
+                    FreeSurfaceFirstOrderGeneralizedAlphaProvenance>
+      first_order_generalized_alpha{};
   std::uint64_t previous_state_revision{0u};
   std::uint64_t endpoint_state_revision{0u};
   std::uint64_t stage_state_revision{0u};
@@ -7707,6 +12274,10 @@ resolveLevelSetWallAwareMaintenanceContext(
         static_cast<std::int64_t>(declaration.interface_marker)));
     mix_declaration_value(static_cast<std::uint64_t>(
         declaration.parameters.liquid_side));
+    mix_declaration_value(static_cast<std::uint64_t>(
+        declaration.capillary_balance_method));
+    mix_declaration_value(static_cast<std::uint64_t>(
+        declaration.capillary_balance_qualification));
     mix_declaration_value(static_cast<std::uint64_t>(
         declaration.parameters.young_wall_coefficients.size()));
     for (const auto& coefficient :
@@ -7827,6 +12398,22 @@ resolveLevelSetWallAwareMaintenanceContext(
                accepted_dynamic_stage != nullptr
                    ? std::abs(accepted_dynamic_stage->stage_time)
                    : svmp::FE::Real{0.0}});
+      const bool local_temporal_provenance_valid =
+          accepted_dynamic_stage != nullptr &&
+          (!accepted_dynamic_stage->first_order_generalized_alpha.has_value()
+               ? accepted_dynamic_stage->stage_alpha_f ==
+                     svmp::FE::Real{1.0}
+               : firstOrderGeneralizedAlphaContactProvenanceValid(
+                     *accepted_dynamic_stage
+                          ->first_order_generalized_alpha) &&
+                     contactStageRealValuesMatch(
+                         accepted_dynamic_stage->stage_alpha_f,
+                         accepted_dynamic_stage
+                             ->first_order_generalized_alpha->alpha_f) &&
+                     contactStageRealValuesMatch(
+                         static_cast<svmp::FE::Real>(history.dt()),
+                         accepted_dynamic_stage
+                             ->first_order_generalized_alpha->dt));
       const bool local_stage_valid =
           accepted_dynamic_stage != nullptr &&
           std::isfinite(accepted_dynamic_stage->stage_time) &&
@@ -7842,6 +12429,7 @@ resolveLevelSetWallAwareMaintenanceContext(
           accepted_dynamic_stage->state.snapshot_revision_key ==
               accepted_dynamic_stage->geometry_revision
                   .snapshot_revision_key &&
+          local_temporal_provenance_valid &&
           std::abs(accepted_dynamic_stage->stage_time -
                    expected_stage_time) <= stage_time_tolerance;
       if (globalMinDouble(local_stage_valid ? 1.0 : 0.0, comm) != 1.0) {
@@ -7866,18 +12454,47 @@ resolveLevelSetWallAwareMaintenanceContext(
           static_cast<double>(accepted_dynamic_stage->stage_alpha_f), comm);
       const auto maximum_stage_alpha = globalMaxDouble(
           static_cast<double>(accepted_dynamic_stage->stage_alpha_f), comm);
+      const auto [minimum_generalized_alpha_present,
+                  maximum_generalized_alpha_present] =
+          globalMinMaxUint64(
+              accepted_dynamic_stage->first_order_generalized_alpha.has_value()
+                  ? 1u
+                  : 0u,
+              comm);
       if (minimum_stage_revision != maximum_stage_revision ||
           minimum_previous_revision != maximum_previous_revision ||
           minimum_endpoint_revision != maximum_endpoint_revision ||
           minimum_stage_time != maximum_stage_time ||
-          minimum_stage_alpha != maximum_stage_alpha) {
+          minimum_stage_alpha != maximum_stage_alpha ||
+          minimum_generalized_alpha_present !=
+              maximum_generalized_alpha_present) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Wall-aware level-set maintenance received different accepted dynamic stages across ranks for interface marker " +
             std::to_string(declaration.interface_marker) + ".");
       }
+      if (maximum_generalized_alpha_present != 0u) {
+        const auto& provenance =
+            *accepted_dynamic_stage->first_order_generalized_alpha;
+        const std::array<double, 4> local_parameters{{
+            static_cast<double>(provenance.alpha_m),
+            static_cast<double>(provenance.alpha_f),
+            static_cast<double>(provenance.gamma),
+            static_cast<double>(provenance.dt),
+        }};
+        for (const auto parameter : local_parameters) {
+          if (globalMinDouble(parameter, comm) !=
+              globalMaxDouble(parameter, comm)) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Wall-aware level-set maintenance received different generalized-alpha contact-stage parameters across ranks for interface marker " +
+                std::to_string(declaration.interface_marker) + ".");
+          }
+        }
+      }
       if (!dynamic_stage_initialized) {
         resolved.stage_time = accepted_dynamic_stage->stage_time;
         resolved.stage_alpha_f = accepted_dynamic_stage->stage_alpha_f;
+        resolved.first_order_generalized_alpha =
+            accepted_dynamic_stage->first_order_generalized_alpha;
         resolved.previous_state_revision =
             accepted_dynamic_stage->previous_state_revision;
         resolved.endpoint_state_revision =
@@ -7890,6 +12507,8 @@ resolveLevelSetWallAwareMaintenanceContext(
             resolved.stage_time == accepted_dynamic_stage->stage_time &&
             resolved.stage_alpha_f ==
                 accepted_dynamic_stage->stage_alpha_f &&
+            resolved.first_order_generalized_alpha ==
+                accepted_dynamic_stage->first_order_generalized_alpha &&
             resolved.previous_state_revision ==
                 accepted_dynamic_stage->previous_state_revision &&
             resolved.endpoint_state_revision ==
@@ -8170,6 +12789,788 @@ void assertCollectiveWallAwareRepairResult(
   }
 }
 
+void assignPostacceptMaintenanceVectorCollectively(
+    svmp::FE::backends::GenericVector& solution,
+    std::span<const svmp::FE::Real> values,
+    const svmp::MeshComm& comm);
+
+std::vector<svmp::FE::Real>
+capturePostacceptMaintenanceVectorCollectively(
+    svmp::FE::backends::GenericVector& solution,
+    const svmp::MeshComm& comm);
+
+/**
+ * Algebraic closure for planning a future first-order generalized-alpha
+ * level-set repair publication after TimeHistory::acceptStep().  Arbitrary
+ * non-endpoint repairs remain rejected by the production path below.
+ *
+ * Neither policy infers a past-rate change from two repaired state slices.
+ * The choice is explicit because the generalized-alpha state identities do
+ * not determine both rate corrections.
+ */
+enum class FirstOrderGeneralizedAlphaMaintenanceClosure : std::uint8_t {
+  /** Apply one representation delta to every stored state; rates are fixed. */
+  SameRepresentationDelta,
+  /** Keep the prior accepted state and rate fixed; update the endpoint rate. */
+  PreservePriorStateAndRate
+};
+
+enum class FirstOrderGeneralizedAlphaMaintenancePlanStatus : std::uint8_t {
+  AlgebraicallyComplete,
+  ClosureMismatch,
+  NearSingularStageInversion,
+  EndpointPolicyMismatch,
+  MissingRateParameters
+};
+
+struct FirstOrderGeneralizedAlphaMaintenanceScheme {
+  std::optional<svmp::FE::Real> alpha_m{};
+  svmp::FE::Real alpha_f{1.0};
+  std::optional<svmp::FE::Real> gamma{};
+  std::optional<svmp::FE::Real> dt{};
+};
+
+/**
+ * Explicit post-accept TimeHistory mapping for one maintained first-order
+ * field slice.  `u_prev2_and_deeper_delta` is applied to uPrevK(2) and every
+ * deeper stored solution state; u and uPrevK(1) are both endpoint copies
+ * after acceptStep().  uDDot is intentionally not a publication target for
+ * this first-order field policy.
+ */
+struct FirstOrderGeneralizedAlphaPostAcceptPublication {
+  std::vector<svmp::FE::Real> u_delta{};
+  std::vector<svmp::FE::Real> u_prev_delta{};
+  std::vector<svmp::FE::Real> u_prev2_and_deeper_delta{};
+  std::vector<svmp::FE::Real> prior_rate_delta{};
+  std::vector<svmp::FE::Real> u_dot_delta{};
+  std::vector<svmp::FE::Real> accepted_stage_rate_delta{};
+  bool maintained_first_order_u_ddot_unchanged{true};
+};
+
+struct FirstOrderGeneralizedAlphaMaintenancePublicationPlan {
+  FirstOrderGeneralizedAlphaMaintenanceScheme scheme{};
+  FirstOrderGeneralizedAlphaMaintenanceClosure closure{
+      FirstOrderGeneralizedAlphaMaintenanceClosure::SameRepresentationDelta};
+  FirstOrderGeneralizedAlphaMaintenancePlanStatus status{
+      FirstOrderGeneralizedAlphaMaintenancePlanStatus::ClosureMismatch};
+  std::vector<svmp::FE::Real> requested_stage_state_delta{};
+  std::vector<svmp::FE::Real> requested_endpoint_state_delta{};
+  std::optional<std::vector<svmp::FE::Real>>
+      implied_prior_state_delta{};
+  std::optional<FirstOrderGeneralizedAlphaPostAcceptPublication>
+      post_accept{};
+  svmp::FE::Real max_stage_state_identity_residual{0.0};
+  svmp::FE::Real max_endpoint_update_identity_residual{0.0};
+  svmp::FE::Real max_stage_rate_identity_residual{0.0};
+  svmp::FE::Real identity_tolerance{0.0};
+  bool requires_separate_geometric_motion_account{false};
+  std::string diagnostic{};
+};
+
+// The serial unit translation unit includes this implementation to exercise
+// the pure planner.  Production intentionally leaves it unwired until paired
+// endpoint geometry and work accounting exist.
+[[maybe_unused]] FirstOrderGeneralizedAlphaMaintenanceScheme
+makeFirstOrderGeneralizedAlphaMaintenanceScheme(
+    svmp::FE::Real alpha_m,
+    svmp::FE::Real alpha_f,
+    svmp::FE::Real gamma,
+    svmp::FE::Real dt)
+{
+  if (!std::isfinite(alpha_m) ||
+      !std::isfinite(alpha_f) ||
+      !std::isfinite(gamma) ||
+      !std::isfinite(dt) ||
+      !(alpha_f > svmp::FE::Real{0.0}) ||
+      alpha_f > svmp::FE::Real{1.0} ||
+      !(gamma > svmp::FE::Real{0.0}) ||
+      !(dt > svmp::FE::Real{0.0})) {
+    throw std::invalid_argument(
+        "First-order generalized-alpha maintenance requires finite explicit "
+        "parameters with alpha_f in (0,1], gamma > 0, and dt > 0.");
+  }
+  const auto expected_gamma =
+      svmp::FE::Real{0.5} + alpha_m - alpha_f;
+  const auto parameter_tolerance =
+      svmp::FE::Real{512.0} *
+      std::numeric_limits<svmp::FE::Real>::epsilon() *
+      std::max(
+          {svmp::FE::Real{1.0},
+           std::abs(alpha_m),
+           std::abs(alpha_f),
+           std::abs(gamma)});
+  if (std::abs(gamma - expected_gamma) > parameter_tolerance) {
+    throw std::invalid_argument(
+        "First-order generalized-alpha maintenance requires explicit gamma "
+        "consistent with 1/2 + alpha_m - alpha_f.");
+  }
+  return FirstOrderGeneralizedAlphaMaintenanceScheme{
+      .alpha_m = alpha_m,
+      .alpha_f = alpha_f,
+      .gamma = gamma,
+      .dt = dt,
+  };
+}
+
+[[maybe_unused]] FirstOrderGeneralizedAlphaMaintenancePublicationPlan
+planFirstOrderGeneralizedAlphaMaintenancePublication(
+    const FirstOrderGeneralizedAlphaMaintenanceScheme& scheme,
+    FirstOrderGeneralizedAlphaMaintenanceClosure closure,
+    std::span<const svmp::FE::Real> stage_state_delta,
+    std::span<const svmp::FE::Real> endpoint_state_delta)
+{
+  const bool has_any_rate_parameter =
+      scheme.alpha_m.has_value() || scheme.gamma.has_value() ||
+      scheme.dt.has_value();
+  const bool has_complete_rate_parameters =
+      scheme.alpha_m.has_value() && scheme.gamma.has_value() &&
+      scheme.dt.has_value();
+  const auto parameter_scale = std::max(
+      {svmp::FE::Real{1.0},
+       std::abs(scheme.alpha_f),
+       scheme.alpha_m.has_value() ? std::abs(*scheme.alpha_m)
+                                  : svmp::FE::Real{0.0},
+       scheme.gamma.has_value() ? std::abs(*scheme.gamma)
+                                : svmp::FE::Real{0.0}});
+  const auto parameter_tolerance =
+      svmp::FE::Real{512.0} *
+      std::numeric_limits<svmp::FE::Real>::epsilon() * parameter_scale;
+  const auto expected_gamma = has_complete_rate_parameters
+      ? svmp::FE::Real{0.5} + *scheme.alpha_m - scheme.alpha_f
+      : svmp::FE::Real{0.0};
+  if (!std::isfinite(scheme.alpha_f) ||
+      !(scheme.alpha_f > svmp::FE::Real{0.0}) ||
+      scheme.alpha_f > svmp::FE::Real{1.0} ||
+      (has_any_rate_parameter != has_complete_rate_parameters) ||
+      (has_complete_rate_parameters &&
+       (!std::isfinite(*scheme.alpha_m) ||
+        !std::isfinite(*scheme.gamma) ||
+        !std::isfinite(*scheme.dt) ||
+        !(*scheme.gamma > svmp::FE::Real{0.0}) ||
+        !(*scheme.dt > svmp::FE::Real{0.0}) ||
+        std::abs(*scheme.gamma - expected_gamma) >
+            parameter_tolerance))) {
+    throw std::invalid_argument(
+        "First-order generalized-alpha maintenance received inconsistent "
+        "scheme parameters.");
+  }
+  if (stage_state_delta.empty() ||
+      stage_state_delta.size() != endpoint_state_delta.size()) {
+    throw std::invalid_argument(
+        "First-order generalized-alpha maintenance repair deltas require "
+        "one nonempty common field layout.");
+  }
+  for (std::size_t i = 0u; i < stage_state_delta.size(); ++i) {
+    if (!std::isfinite(stage_state_delta[i]) ||
+        !std::isfinite(endpoint_state_delta[i])) {
+      throw std::invalid_argument(
+          "First-order generalized-alpha maintenance repair deltas must be "
+          "finite.");
+    }
+  }
+
+  FirstOrderGeneralizedAlphaMaintenancePublicationPlan plan;
+  plan.scheme = scheme;
+  plan.closure = closure;
+  plan.requested_stage_state_delta.assign(
+      stage_state_delta.begin(), stage_state_delta.end());
+  plan.requested_endpoint_state_delta.assign(
+      endpoint_state_delta.begin(), endpoint_state_delta.end());
+
+  const auto scaled_tolerance = [](svmp::FE::Real left,
+                                   svmp::FE::Real right) {
+    return svmp::FE::Real{1024.0} *
+           std::numeric_limits<svmp::FE::Real>::epsilon() *
+           std::max(
+               {svmp::FE::Real{1.0}, std::abs(left), std::abs(right)});
+  };
+  const auto deltas_match = [&](auto expected) {
+    bool match = true;
+    for (std::size_t i = 0u; i < stage_state_delta.size(); ++i) {
+      const auto expected_stage = expected(endpoint_state_delta[i]);
+      const auto tolerance =
+          scaled_tolerance(stage_state_delta[i], expected_stage);
+      plan.identity_tolerance = std::max(plan.identity_tolerance, tolerance);
+      plan.max_stage_state_identity_residual = std::max(
+          plan.max_stage_state_identity_residual,
+          std::abs(stage_state_delta[i] - expected_stage));
+      match =
+          std::abs(stage_state_delta[i] - expected_stage) <= tolerance &&
+          match;
+    }
+    return match;
+  };
+
+  const bool endpoint_stage =
+      scheme.alpha_f == svmp::FE::Real{1.0};
+  bool closure_satisfied = false;
+  if (closure == FirstOrderGeneralizedAlphaMaintenanceClosure::
+                     SameRepresentationDelta) {
+    closure_satisfied = deltas_match([](svmp::FE::Real endpoint_delta) {
+      return endpoint_delta;
+    });
+  } else if (!endpoint_stage) {
+    closure_satisfied = deltas_match([&](svmp::FE::Real endpoint_delta) {
+      return scheme.alpha_f * endpoint_delta;
+    });
+  }
+
+  if (endpoint_stage) {
+    if (closure != FirstOrderGeneralizedAlphaMaintenanceClosure::
+                       SameRepresentationDelta) {
+      plan.status =
+          FirstOrderGeneralizedAlphaMaintenancePlanStatus::
+              EndpointPolicyMismatch;
+      plan.diagnostic =
+          "alpha_f=1 intentionally remains on the supported common-"
+          "representation publication policy.";
+      return plan;
+    }
+    if (!closure_satisfied) {
+      plan.status =
+          FirstOrderGeneralizedAlphaMaintenancePlanStatus::
+              EndpointPolicyMismatch;
+      plan.diagnostic =
+          "An alpha_f=1 endpoint stage requires matching stage and endpoint "
+          "repair deltas for the supported common-representation policy.";
+      return plan;
+    }
+  }
+
+  if (closure == FirstOrderGeneralizedAlphaMaintenanceClosure::
+                     PreservePriorStateAndRate &&
+      !has_complete_rate_parameters) {
+    plan.status =
+        FirstOrderGeneralizedAlphaMaintenancePlanStatus::
+            MissingRateParameters;
+    plan.diagnostic =
+        "The fixed-prior-state/rate closure requires authentic alpha_m, "
+        "gamma, and dt metadata; alpha_f alone is insufficient.";
+    return plan;
+  }
+
+  if (!closure_satisfied) {
+    const auto stage_complement =
+        svmp::FE::Real{1.0} - scheme.alpha_f;
+    const auto minimum_bounded_complement =
+        std::sqrt(std::numeric_limits<svmp::FE::Real>::epsilon());
+    // Cap state-inversion coefficient amplification at 1/sqrt(epsilon).
+    if (!(stage_complement > minimum_bounded_complement)) {
+      plan.status =
+          FirstOrderGeneralizedAlphaMaintenancePlanStatus::
+              NearSingularStageInversion;
+      plan.requires_separate_geometric_motion_account = true;
+      plan.diagnostic =
+          "The requested closure failed and inferring a prior-state delta "
+          "would exceed the planner's bounded 1/(1-alpha_f) amplification.";
+      return plan;
+    }
+
+    std::vector<svmp::FE::Real> implied_prior(stage_state_delta.size());
+    for (std::size_t i = 0u; i < implied_prior.size(); ++i) {
+      implied_prior[i] =
+          (stage_state_delta[i] -
+           scheme.alpha_f * endpoint_state_delta[i]) /
+          stage_complement;
+      if (!std::isfinite(implied_prior[i])) {
+        throw std::overflow_error(
+            "First-order generalized-alpha maintenance prior-state "
+            "inference overflowed.");
+      }
+    }
+    plan.implied_prior_state_delta = std::move(implied_prior);
+    plan.status =
+        FirstOrderGeneralizedAlphaMaintenancePlanStatus::ClosureMismatch;
+    plan.requires_separate_geometric_motion_account = true;
+    plan.diagnostic =
+        "The repair pair does not satisfy the requested publication "
+        "closure. Its implied prior-state rewrite has no selected prior-rate "
+        "or geometric-motion accounting policy.";
+    return plan;
+  }
+
+  FirstOrderGeneralizedAlphaPostAcceptPublication publication;
+  publication.u_delta.assign(
+      endpoint_state_delta.begin(), endpoint_state_delta.end());
+  publication.u_prev_delta = publication.u_delta;
+  publication.u_prev2_and_deeper_delta.assign(
+      endpoint_state_delta.size(), svmp::FE::Real{0.0});
+  publication.prior_rate_delta.assign(
+      endpoint_state_delta.size(), svmp::FE::Real{0.0});
+  publication.u_dot_delta.assign(
+      endpoint_state_delta.size(), svmp::FE::Real{0.0});
+  publication.accepted_stage_rate_delta.assign(
+      endpoint_state_delta.size(), svmp::FE::Real{0.0});
+
+  if (closure == FirstOrderGeneralizedAlphaMaintenanceClosure::
+                     SameRepresentationDelta) {
+    publication.u_prev2_and_deeper_delta = publication.u_delta;
+    plan.implied_prior_state_delta = publication.u_delta;
+  } else {
+    plan.implied_prior_state_delta =
+        publication.u_prev2_and_deeper_delta;
+    plan.requires_separate_geometric_motion_account = true;
+    const auto rate_scale = *scheme.gamma * *scheme.dt;
+    for (std::size_t i = 0u; i < publication.u_dot_delta.size(); ++i) {
+      publication.u_dot_delta[i] =
+          endpoint_state_delta[i] / rate_scale;
+      publication.accepted_stage_rate_delta[i] =
+          *scheme.alpha_m * publication.u_dot_delta[i];
+      if (!std::isfinite(publication.u_dot_delta[i]) ||
+          !std::isfinite(publication.accepted_stage_rate_delta[i])) {
+        throw std::overflow_error(
+            "First-order generalized-alpha maintenance rate publication "
+            "overflowed.");
+      }
+    }
+  }
+
+  for (std::size_t i = 0u; i < stage_state_delta.size(); ++i) {
+    const auto reconstructed_stage =
+        (svmp::FE::Real{1.0} - scheme.alpha_f) *
+            publication.u_prev2_and_deeper_delta[i] +
+        scheme.alpha_f * publication.u_delta[i];
+    const auto reconstructed_endpoint_increment =
+        has_complete_rate_parameters
+            ? publication.u_prev2_and_deeper_delta[i] +
+                  *scheme.dt *
+                      ((svmp::FE::Real{1.0} - *scheme.gamma) *
+                           publication.prior_rate_delta[i] +
+                       *scheme.gamma * publication.u_dot_delta[i])
+            : publication.u_prev2_and_deeper_delta[i];
+    const auto reconstructed_stage_rate =
+        has_complete_rate_parameters
+            ? (svmp::FE::Real{1.0} - *scheme.alpha_m) *
+                      publication.prior_rate_delta[i] +
+                  *scheme.alpha_m * publication.u_dot_delta[i]
+            : svmp::FE::Real{0.0};
+    const auto stage_residual =
+        std::abs(stage_state_delta[i] - reconstructed_stage);
+    const auto endpoint_residual = std::abs(
+        endpoint_state_delta[i] - reconstructed_endpoint_increment);
+    const auto stage_rate_residual = std::abs(
+        publication.accepted_stage_rate_delta[i] -
+        reconstructed_stage_rate);
+    const auto stage_tolerance =
+        scaled_tolerance(stage_state_delta[i], reconstructed_stage);
+    const auto endpoint_tolerance = scaled_tolerance(
+        endpoint_state_delta[i], reconstructed_endpoint_increment);
+    const auto stage_rate_tolerance = scaled_tolerance(
+        publication.accepted_stage_rate_delta[i],
+        reconstructed_stage_rate);
+    plan.max_stage_state_identity_residual = std::max(
+        plan.max_stage_state_identity_residual, stage_residual);
+    plan.max_endpoint_update_identity_residual = std::max(
+        plan.max_endpoint_update_identity_residual, endpoint_residual);
+    plan.max_stage_rate_identity_residual = std::max(
+        plan.max_stage_rate_identity_residual, stage_rate_residual);
+    plan.identity_tolerance = std::max(
+        {plan.identity_tolerance,
+         stage_tolerance,
+         endpoint_tolerance,
+         stage_rate_tolerance});
+    if (stage_residual > stage_tolerance ||
+        endpoint_residual > endpoint_tolerance ||
+        stage_rate_residual > stage_rate_tolerance) {
+      throw std::logic_error(
+          "First-order generalized-alpha maintenance publication failed "
+          "its state/rate identity validation.");
+    }
+  }
+
+  plan.status =
+      FirstOrderGeneralizedAlphaMaintenancePlanStatus::
+          AlgebraicallyComplete;
+  plan.post_accept = std::move(publication);
+  plan.diagnostic =
+      closure == FirstOrderGeneralizedAlphaMaintenanceClosure::
+                     SameRepresentationDelta
+          ? "Common representation delta preserves every stored temporal "
+            "increment and rate."
+          : "Fixed prior accepted state/rate closure is algebraically "
+            "complete but requires separate maintenance/geometric-motion "
+            "accounting before production publication.";
+  return plan;
+}
+
+/**
+ * Non-owning field-slice mapping into an already accepted TimeHistory.  This
+ * layer performs no generalized-alpha policy selection: it can only stage the
+ * explicit deltas supplied by a validated planner (or the existing common
+ * representation shift used by endpoint schemes).
+ */
+struct MaintainedFieldPostAcceptPublicationView {
+  svmp::FE::FieldId field{svmp::FE::INVALID_FIELD_ID};
+  std::size_t field_offset{0u};
+  std::span<const svmp::FE::Real> u_delta{};
+  std::span<const svmp::FE::Real> u_prev_delta{};
+  std::span<const svmp::FE::Real> u_prev2_and_deeper_delta{};
+  std::optional<std::span<const svmp::FE::Real>> u_dot_delta{};
+  bool maintained_first_order_u_ddot_unchanged{true};
+};
+
+struct MaintainedFieldPostAcceptPublicationScheduleEntry {
+  svmp::FE::FieldId field{svmp::FE::INVALID_FIELD_ID};
+  std::size_t field_offset{0u};
+  std::size_t field_count{0u};
+  bool publishes_u_dot{false};
+};
+
+struct StagedPostacceptMaintenanceHistoryPublication {
+  std::vector<svmp::FE::Real> current{};
+  std::vector<std::vector<svmp::FE::Real>> history{};
+  std::optional<std::vector<svmp::FE::Real>> u_dot{};
+  std::vector<MaintainedFieldPostAcceptPublicationScheduleEntry> schedule{};
+};
+
+MaintainedFieldPostAcceptPublicationView
+makeCommonRepresentationMaintainedFieldPublication(
+    svmp::FE::FieldId field,
+    std::size_t field_offset,
+    std::span<const svmp::FE::Real> delta)
+{
+  return MaintainedFieldPostAcceptPublicationView{
+      .field = field,
+      .field_offset = field_offset,
+      .u_delta = delta,
+      .u_prev_delta = delta,
+      .u_prev2_and_deeper_delta = delta,
+      .u_dot_delta = std::nullopt,
+      .maintained_first_order_u_ddot_unchanged = true,
+  };
+}
+
+[[maybe_unused]] MaintainedFieldPostAcceptPublicationView
+makeFirstOrderGeneralizedAlphaMaintainedFieldPublication(
+    svmp::FE::FieldId field,
+    std::size_t field_offset,
+    const FirstOrderGeneralizedAlphaMaintenancePublicationPlan& plan,
+    bool publish_u_dot,
+    bool maintained_field_has_time_derivative)
+{
+  if (plan.status !=
+          FirstOrderGeneralizedAlphaMaintenancePlanStatus::
+              AlgebraicallyComplete ||
+      !plan.post_accept.has_value()) {
+    throw std::invalid_argument(
+        "First-order generalized-alpha maintained-field publication requires "
+        "an algebraically complete planner result.");
+  }
+  if (publish_u_dot && !maintained_field_has_time_derivative) {
+    throw std::invalid_argument(
+        "First-order generalized-alpha maintained-field rate publication "
+        "requires a time-derivative field target.");
+  }
+  const auto& publication = *plan.post_accept;
+  return MaintainedFieldPostAcceptPublicationView{
+      .field = field,
+      .field_offset = field_offset,
+      .u_delta = publication.u_delta,
+      .u_prev_delta = publication.u_prev_delta,
+      .u_prev2_and_deeper_delta =
+          publication.u_prev2_and_deeper_delta,
+      .u_dot_delta = publish_u_dot
+          ? std::optional<std::span<const svmp::FE::Real>>{
+                publication.u_dot_delta}
+          : std::nullopt,
+      .maintained_first_order_u_ddot_unchanged =
+          publication.maintained_first_order_u_ddot_unchanged,
+  };
+}
+
+StagedPostacceptMaintenanceHistoryPublication
+makeStagedPostacceptMaintenanceHistoryPublication(
+    std::vector<svmp::FE::Real> current,
+    std::vector<std::vector<svmp::FE::Real>> history,
+    std::optional<std::vector<svmp::FE::Real>> u_dot = std::nullopt)
+{
+  if (current.empty() || history.empty()) {
+    throw std::invalid_argument(
+        "Postaccept maintained-field publication requires a nonempty current "
+        "state and at least one stored history level.");
+  }
+  for (const auto& level : history) {
+    if (level.size() != current.size()) {
+      throw std::invalid_argument(
+          "Postaccept maintained-field publication history layouts differ.");
+    }
+  }
+  if (u_dot.has_value() && u_dot->size() != current.size()) {
+    throw std::invalid_argument(
+        "Postaccept maintained-field publication rate layout differs from "
+        "the solution layout.");
+  }
+  return StagedPostacceptMaintenanceHistoryPublication{
+      .current = std::move(current),
+      .history = std::move(history),
+      .u_dot = std::move(u_dot),
+  };
+}
+
+void stageMaintainedFieldPostAcceptPublication(
+    const MaintainedFieldPostAcceptPublicationView& publication,
+    StagedPostacceptMaintenanceHistoryPublication& staged)
+{
+  const auto field_count = publication.u_delta.size();
+  const bool common_delta_layout =
+      field_count != 0u &&
+      publication.u_prev_delta.size() == field_count &&
+      publication.u_prev2_and_deeper_delta.size() == field_count &&
+      (!publication.u_dot_delta.has_value() ||
+       publication.u_dot_delta->size() == field_count);
+  const bool field_slice_fits =
+      publication.field_offset <= staged.current.size() &&
+      field_count <= staged.current.size() - publication.field_offset;
+  const bool canonical_field_order =
+      staged.schedule.empty() ||
+      staged.schedule.back().field < publication.field;
+  if (publication.field == svmp::FE::INVALID_FIELD_ID ||
+      !common_delta_layout || !field_slice_fits ||
+      !canonical_field_order || staged.history.empty() ||
+      !publication.maintained_first_order_u_ddot_unchanged ||
+      (publication.u_dot_delta.has_value() && !staged.u_dot.has_value())) {
+    throw std::invalid_argument(
+        "Postaccept maintained-field publication received an invalid, "
+        "duplicate, unordered, or unsupported field mapping.");
+  }
+  for (const auto& level : staged.history) {
+    if (level.size() != staged.current.size()) {
+      throw std::invalid_argument(
+          "Postaccept maintained-field publication history layout changed "
+          "during staging.");
+    }
+  }
+  if (staged.u_dot.has_value() &&
+      staged.u_dot->size() != staged.current.size()) {
+    throw std::invalid_argument(
+        "Postaccept maintained-field publication rate layout changed during "
+        "staging.");
+  }
+
+  const auto finite = [](std::span<const svmp::FE::Real> values) {
+    return std::all_of(values.begin(), values.end(), [](svmp::FE::Real value) {
+      return std::isfinite(value);
+    });
+  };
+  if (!finite(publication.u_delta) ||
+      !finite(publication.u_prev_delta) ||
+      !finite(publication.u_prev2_and_deeper_delta) ||
+      (publication.u_dot_delta.has_value() &&
+       !finite(*publication.u_dot_delta))) {
+    throw std::invalid_argument(
+        "Postaccept maintained-field publication deltas must be finite.");
+  }
+
+  // Validation is complete before any staged coefficient is changed.
+  for (std::size_t i = 0u; i < field_count; ++i) {
+    const auto index = publication.field_offset + i;
+    staged.current[index] += publication.u_delta[i];
+    staged.history.front()[index] += publication.u_prev_delta[i];
+    for (std::size_t level = 1u; level < staged.history.size(); ++level) {
+      staged.history[level][index] +=
+          publication.u_prev2_and_deeper_delta[i];
+    }
+    if (publication.u_dot_delta.has_value()) {
+      (*staged.u_dot)[index] += (*publication.u_dot_delta)[i];
+    }
+  }
+  staged.schedule.push_back(
+      MaintainedFieldPostAcceptPublicationScheduleEntry{
+          .field = publication.field,
+          .field_offset = publication.field_offset,
+          .field_count = field_count,
+          .publishes_u_dot = publication.u_dot_delta.has_value(),
+      });
+}
+
+bool postacceptMaintenanceHistoryPublicationScheduleAgrees(
+    const StagedPostacceptMaintenanceHistoryPublication& staged,
+    const svmp::MeshComm& comm)
+{
+  bool agrees = true;
+  const std::array<std::uint64_t, 4> header{{
+      static_cast<std::uint64_t>(staged.current.size()),
+      static_cast<std::uint64_t>(staged.history.size()),
+      staged.u_dot.has_value() ? 1u : 0u,
+      static_cast<std::uint64_t>(staged.schedule.size()),
+  }};
+  for (const auto word : header) {
+    const auto [minimum_word, maximum_word] =
+        globalMinMaxUint64(word, comm);
+    agrees = minimum_word == maximum_word && agrees;
+  }
+  const auto [minimum_entry_count, maximum_entry_count] =
+      globalMinMaxUint64(
+          static_cast<std::uint64_t>(staged.schedule.size()), comm);
+  if (minimum_entry_count != maximum_entry_count) {
+    return false;
+  }
+  for (const auto& entry : staged.schedule) {
+    const std::array<std::uint64_t, 4> words{{
+        static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(entry.field)),
+        static_cast<std::uint64_t>(entry.field_offset),
+        static_cast<std::uint64_t>(entry.field_count),
+        entry.publishes_u_dot ? 1u : 0u,
+    }};
+    for (const auto word : words) {
+      const auto [minimum_word, maximum_word] =
+          globalMinMaxUint64(word, comm);
+      agrees = minimum_word == maximum_word && agrees;
+    }
+  }
+  return agrees;
+}
+
+bool postacceptMaintenanceHistoryPublicationContentAgrees(
+    const StagedPostacceptMaintenanceHistoryPublication& staged,
+    const svmp::MeshComm& comm)
+{
+  static_assert(
+      sizeof(svmp::FE::Real) == sizeof(std::uint64_t),
+      "Exact maintained-field publication consensus requires a 64-bit FE scalar.");
+  constexpr std::size_t chunk_capacity = 4096u;
+  std::array<std::uint64_t, chunk_capacity> local_bits{};
+  std::array<std::uint64_t, chunk_capacity> minimum_bits{};
+  std::array<std::uint64_t, chunk_capacity> maximum_bits{};
+  bool agrees = true;
+  const auto compare = [&](std::span<const svmp::FE::Real> values) {
+    for (std::size_t offset = 0u; offset < values.size();
+         offset += chunk_capacity) {
+      const auto count = std::min(chunk_capacity, values.size() - offset);
+      for (std::size_t i = 0u; i < count; ++i) {
+        local_bits[i] =
+            std::bit_cast<std::uint64_t>(values[offset + i]);
+      }
+#ifdef MESH_HAS_MPI
+      if (comm.is_parallel()) {
+#ifdef MPI_UINT64_T
+        const MPI_Datatype datatype = MPI_UINT64_T;
+#else
+        static_assert(sizeof(std::uint64_t) == sizeof(unsigned long long));
+        const MPI_Datatype datatype = MPI_UNSIGNED_LONG_LONG;
+#endif
+        MPI_Allreduce(
+            local_bits.data(),
+            minimum_bits.data(),
+            static_cast<int>(count),
+            datatype,
+            MPI_MIN,
+            comm.native());
+        MPI_Allreduce(
+            local_bits.data(),
+            maximum_bits.data(),
+            static_cast<int>(count),
+            datatype,
+            MPI_MAX,
+            comm.native());
+      } else {
+        std::copy_n(local_bits.begin(), count, minimum_bits.begin());
+        std::copy_n(local_bits.begin(), count, maximum_bits.begin());
+      }
+#else
+      if (comm.is_parallel()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Distributed maintained-field "
+            "publication consensus requires MPI.");
+      }
+      std::copy_n(local_bits.begin(), count, minimum_bits.begin());
+      std::copy_n(local_bits.begin(), count, maximum_bits.begin());
+#endif
+      for (std::size_t i = 0u; i < count; ++i) {
+        agrees = minimum_bits[i] == maximum_bits[i] && agrees;
+      }
+    }
+  };
+
+  compare(staged.current);
+  for (const auto& level : staged.history) {
+    compare(level);
+  }
+  if (staged.u_dot.has_value()) {
+    compare(*staged.u_dot);
+  }
+  return agrees;
+}
+
+void publishStagedPostacceptMaintenanceHistoryCollectively(
+    svmp::FE::timestepping::TimeHistory& history,
+    const StagedPostacceptMaintenanceHistoryPublication& staged,
+    const svmp::MeshComm& comm,
+    bool* rate_publication_started = nullptr)
+{
+  if (rate_publication_started != nullptr) {
+    *rate_publication_started = false;
+  }
+  const bool schedule_has_rate_target = std::any_of(
+      staged.schedule.begin(),
+      staged.schedule.end(),
+      [](const auto& entry) { return entry.publishes_u_dot; });
+  const bool schedule_layout_valid =
+      !staged.schedule.empty() &&
+      schedule_has_rate_target == staged.u_dot.has_value() &&
+      std::all_of(
+          staged.schedule.begin(), staged.schedule.end(),
+          [&](const auto& entry) {
+            return entry.field != svmp::FE::INVALID_FIELD_ID &&
+                   entry.field_count != 0u &&
+                   entry.field_offset <= staged.current.size() &&
+                   entry.field_count <=
+                       staged.current.size() - entry.field_offset;
+          }) &&
+      std::adjacent_find(
+          staged.schedule.begin(), staged.schedule.end(),
+          [](const auto& left, const auto& right) {
+            return left.field >= right.field;
+          }) == staged.schedule.end();
+  const bool local_layout_valid =
+      schedule_layout_valid && !staged.current.empty() &&
+      !staged.history.empty() &&
+      staged.history.size() ==
+          static_cast<std::size_t>(history.historyDepth()) &&
+      staged.current.size() == static_cast<std::size_t>(history.u().size()) &&
+      std::all_of(
+          staged.history.begin(), staged.history.end(), [&](const auto& level) {
+            return level.size() == staged.current.size();
+          }) &&
+      (!staged.u_dot.has_value() ||
+       (history.hasUDotState() &&
+        staged.u_dot->size() == staged.current.size()));
+  if (globalMinDouble(local_layout_valid ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Postaccept maintained-field "
+        "publication layouts are incomplete on at least one rank.");
+  }
+  if (!postacceptMaintenanceHistoryPublicationScheduleAgrees(staged, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Postaccept maintained-field "
+        "publication schedules differ across the FE communicator.");
+  }
+  if (!postacceptMaintenanceHistoryPublicationContentAgrees(staged, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Postaccept maintained-field "
+        "publication values differ across the FE communicator.");
+  }
+
+  assignPostacceptMaintenanceVectorCollectively(
+      history.u(), staged.current, comm);
+  for (int level = 1; level <= history.historyDepth(); ++level) {
+    assignPostacceptMaintenanceVectorCollectively(
+        history.uPrevK(level),
+        staged.history[static_cast<std::size_t>(level - 1)],
+        comm);
+  }
+  if (staged.u_dot.has_value()) {
+    // Set the explicit flag before the first operation that may mutate uDot.
+    // Recovery therefore never relies on backend valueRevision behavior.
+    if (rate_publication_started != nullptr) {
+      *rate_publication_started = true;
+    }
+    assignPostacceptMaintenanceVectorCollectively(
+        history.uDot(), *staged.u_dot, comm);
+  }
+}
+
 struct LevelSetProjectionReinitializationCandidate {
   bool applied{false};
   svmp::FE::level_set::LevelSetSignedDistanceRepairResult repair{};
@@ -8205,6 +13606,52 @@ stageLevelSetProjectionReinitialization(
       accepted_contact_stages,
       accepted_contact_stage_constraints);
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  svmp::FE::GlobalIndex raw_field_offset{-1};
+  svmp::FE::GlobalIndex raw_field_dof_count{-1};
+  bool local_field_layout_query_valid = true;
+  try {
+    raw_field_offset = sim.fe_system->fieldDofOffset(field);
+    raw_field_dof_count =
+        sim.fe_system->fieldDofHandler(field).getNumDofs();
+  } catch (...) {
+    local_field_layout_query_valid = false;
+  }
+  if (globalMinDouble(
+          local_field_layout_query_valid ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wall-aware level-set reinitialization could not resolve a finalized field layout on every rank.");
+  }
+  const bool local_field_layout_valid =
+      raw_field_offset >= 0 && raw_field_dof_count > 0;
+  if (globalMinDouble(local_field_layout_valid ? 1.0 : 0.0, comm) !=
+      1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wall-aware level-set reinitialization returned an invalid field layout.");
+  }
+  const auto [minimum_field_offset, maximum_field_offset] =
+      globalMinMaxUint64(
+          static_cast<std::uint64_t>(raw_field_offset), comm);
+  const auto [minimum_field_dof_count, maximum_field_dof_count] =
+      globalMinMaxUint64(
+          static_cast<std::uint64_t>(raw_field_dof_count), comm);
+  if (minimum_field_offset != maximum_field_offset ||
+      minimum_field_dof_count != maximum_field_dof_count) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wall-aware level-set reinitialization field layout differs across the FE communicator.");
+  }
+  const auto field_offset = static_cast<std::size_t>(raw_field_offset);
+  const auto field_dof_count =
+      static_cast<std::size_t>(raw_field_dof_count);
+  const auto slice_fits = [&](std::size_t extent) {
+    return field_offset <= extent &&
+           field_dof_count <= extent - field_offset;
+  };
+  if (globalMinDouble(slice_fits(candidate.size()) ? 1.0 : 0.0, comm) !=
+      1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wall-aware level-set reinitialization candidate does not contain the complete maintained field slice.");
+  }
+
   std::span<const svmp::FE::Real> reinitialization_input(candidate);
   if (staged.wall_context.requires_accepted_dynamic_stage) {
     const bool local_stage_layout_valid =
@@ -8220,6 +13667,43 @@ stageLevelSetProjectionReinitialization(
         globalMaxDouble(local_stage_solution_size, comm)) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance received inconsistent contact-stage solution layouts.");
+    }
+    const bool local_stage_slice_valid =
+        slice_fits(accepted_contact_stage_solution.size());
+    if (globalMinDouble(local_stage_slice_valid ? 1.0 : 0.0, comm) !=
+        1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance contact-stage solution does not contain the complete maintained field slice.");
+    }
+    bool local_stage_endpoint_slice_finite = true;
+    double local_stage_endpoint_max_difference = 0.0;
+    for (std::size_t i = 0u; i < field_dof_count; ++i) {
+      const auto index = field_offset + i;
+      const auto stage_value = accepted_contact_stage_solution[index];
+      const auto endpoint_value = candidate[index];
+      local_stage_endpoint_slice_finite =
+          std::isfinite(stage_value) && std::isfinite(endpoint_value) &&
+          local_stage_endpoint_slice_finite;
+      local_stage_endpoint_max_difference = std::max(
+          local_stage_endpoint_max_difference,
+          static_cast<double>(std::abs(stage_value - endpoint_value)));
+    }
+    if (globalMinDouble(
+            local_stage_endpoint_slice_finite ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance requires finite stage and endpoint level-set coefficients.");
+    }
+    const auto stage_endpoint_max_difference = globalMaxDouble(
+        local_stage_endpoint_max_difference, comm);
+    // This remains the production publication boundary.  The pure
+    // generalized-alpha planner above deliberately cannot manufacture the
+    // missing endpoint-frame repair or alpha_m/gamma provenance from
+    // alpha_f, and its non-common policy still requires a separately
+    // classified maintenance/geometric-motion account.
+    if (staged.wall_context.stage_alpha_f != svmp::FE::Real{1.0} &&
+        stage_endpoint_max_difference > 0.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance cannot apply a non-endpoint generalized-alpha stage repair to accepted endpoint history; use an endpoint stage with alpha_f=1 until paired stage-frame and endpoint-frame repairs, history/rate publication, and separate maintenance/geometric-motion accounting are implemented.");
     }
     reinitialization_input = accepted_contact_stage_solution;
   }
@@ -8250,22 +13734,11 @@ stageLevelSetProjectionReinitialization(
     return staged;
   }
 
-  const auto raw_field_offset = sim.fe_system->fieldDofOffset(field);
-  const auto raw_field_dof_count =
-      sim.fe_system->fieldDofHandler(field).getNumDofs();
-  if (raw_field_offset < 0 || raw_field_dof_count < 0) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Wall-aware level-set reinitialization returned an invalid field layout.");
-  }
-  const auto field_offset = static_cast<std::size_t>(raw_field_offset);
-  const auto field_dof_count =
-      static_cast<std::size_t>(raw_field_dof_count);
-  const auto slice_fits = [&](std::size_t extent) {
-    return field_offset <= extent &&
-           field_dof_count <= extent - field_offset;
-  };
-  if (!slice_fits(candidate.size()) || !slice_fits(repaired.size()) ||
-      !slice_fits(reinitialization_input.size())) {
+  const bool local_repaired_slices_valid =
+      slice_fits(repaired.size()) &&
+      slice_fits(reinitialization_input.size());
+  if (globalMinDouble(local_repaired_slices_valid ? 1.0 : 0.0, comm) !=
+      1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Wall-aware level-set reinitialization returned an incompatible field slice.");
   }
@@ -8302,8 +13775,12 @@ bool applyLevelSetMaintenance(
         applied_volume_corrections = nullptr,
     const LevelSetMaintenanceCandidateValidator& validate_candidate = {},
     const LevelSetMaintenanceStageObserver& observe_stage = {},
-    std::vector<std::string>* deferred_commit_logs = nullptr)
+    std::vector<std::string>* deferred_commit_logs = nullptr,
+    bool* rate_publication_started = nullptr)
 {
+  if (rate_publication_started != nullptr) {
+    *rate_publication_started = false;
+  }
   if (applied_volume_corrections != nullptr) {
     applied_volume_corrections->clear();
   }
@@ -8346,7 +13823,9 @@ bool applyLevelSetMaintenance(
 
     const auto field =
         sim.fe_system->findFieldByName(request.level_set_field_name);
-    if (field == svmp::FE::INVALID_FIELD_ID) {
+    if (globalMinDouble(
+            field != svmp::FE::INVALID_FIELD_ID ? 1.0 : 0.0,
+            activeFESystemCommunicator(*sim.fe_system)) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set maintenance could not find field '" +
           request.level_set_field_name + "'.");
@@ -8662,60 +14141,114 @@ bool applyLevelSetMaintenance(
     // field into uPrev (the former behavior) erased the accepted increment,
     // left older BDF history in another representation, and disagreed with
     // uDot.
-    const auto apply_representation_delta =
-        [&](std::vector<svmp::FE::Real>& target) {
-          if (target.size() != fe_solution.size() ||
-              accepted_solution_before_maintenance.size() !=
-                  fe_solution.size()) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] Level-set maintenance history "
-                "synchronization encountered incompatible FE vector sizes.");
-          }
-          std::size_t updated = 0u;
-          for (const auto field : modified_level_set_fields) {
-            const auto offset = static_cast<std::size_t>(
-                sim.fe_system->fieldDofOffset(field));
-            const auto count = static_cast<std::size_t>(
-                sim.fe_system->fieldDofHandler(field).getNumDofs());
-            if (offset + count > target.size()) {
-              throw std::runtime_error(
-                  "[svMultiPhysics::Application] Level-set maintenance field "
-                  "slice exceeds the FE history vector.");
-            }
-            for (std::size_t i = 0; i < count; ++i) {
-              const auto index = offset + i;
-              target[index] +=
-                  fe_solution[index] -
-                  accepted_solution_before_maintenance[index];
-            }
-            updated += count;
-          }
-          return updated;
-        };
-
-    auto current_solution = gatherFeOrderedSolution(history.u());
-    const auto synchronized_dofs =
-        apply_representation_delta(current_solution);
-    std::vector<std::vector<svmp::FE::Real>> synchronized_history;
-    synchronized_history.reserve(
-        static_cast<std::size_t>(history.historyDepth()));
-    for (int k = 1; k <= history.historyDepth(); ++k) {
-      auto previous_solution =
-          gatherFeOrderedSolution(history.uPrevK(k));
-      (void)apply_representation_delta(previous_solution);
-      synchronized_history.push_back(std::move(previous_solution));
-    }
-    if (synchronized_history.empty()) {
+    const auto comm = activeFESystemCommunicator(*sim.fe_system);
+    std::optional<StagedPostacceptMaintenanceHistoryPublication>
+        staged_history_publication;
+    std::size_t synchronized_dofs = 0u;
+    const auto local_history_depth = history.historyDepth();
+    if (globalAnyBool(local_history_depth <= 0, comm)) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Level-set maintenance requires at least one FE history level.");
+          "[svMultiPhysics::Application] Postaccept maintenance publication "
+          "requires a positive history depth on every FE communicator rank.");
+    }
+    const auto [minimum_history_depth, maximum_history_depth] =
+        globalMinMaxUint64(
+            static_cast<std::uint64_t>(local_history_depth), comm);
+    if (minimum_history_depth != maximum_history_depth) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Postaccept maintenance history "
+          "depth differs across the FE communicator.");
+    }
+    std::vector<svmp::FE::backends::GenericVector*> publication_targets;
+    std::vector<std::vector<svmp::FE::Real>> synchronized_history;
+    std::exception_ptr local_staging_failure;
+    try {
+      publication_targets.resize(
+          static_cast<std::size_t>(local_history_depth) + 1u);
+      publication_targets.front() = &history.u();
+      synchronized_history.resize(
+          static_cast<std::size_t>(local_history_depth));
+      for (int k = 1; k <= local_history_depth; ++k) {
+        publication_targets[static_cast<std::size_t>(k)] =
+            &history.uPrevK(k);
+      }
+    } catch (...) {
+      local_staging_failure = std::current_exception();
+    }
+    requireCollectivePhasePreparation(
+        local_staging_failure,
+        comm,
+        "postaccept_maintenance_history_capture_schedule");
+
+    std::vector<svmp::FE::Real> current_solution =
+        capturePostacceptMaintenanceVectorCollectively(
+            *publication_targets.front(), comm);
+    for (int k = 1; k <= local_history_depth; ++k) {
+      auto captured = capturePostacceptMaintenanceVectorCollectively(
+          *publication_targets[static_cast<std::size_t>(k)], comm);
+      synchronized_history[static_cast<std::size_t>(k - 1)].swap(captured);
+    }
+
+    local_staging_failure = nullptr;
+    try {
+      staged_history_publication.emplace(
+          makeStagedPostacceptMaintenanceHistoryPublication(
+              std::move(current_solution),
+              std::move(synchronized_history)));
+
+      for (const auto field : modified_level_set_fields) {
+        const auto raw_offset = sim.fe_system->fieldDofOffset(field);
+        const auto raw_count =
+            sim.fe_system->fieldDofHandler(field).getNumDofs();
+        if (raw_offset < 0 || raw_count <= 0) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Level-set maintenance found an "
+              "invalid maintained-field history layout.");
+        }
+        const auto offset = static_cast<std::size_t>(raw_offset);
+        const auto count = static_cast<std::size_t>(raw_count);
+        if (offset > fe_solution.size() ||
+            count > fe_solution.size() - offset ||
+            accepted_solution_before_maintenance.size() !=
+                fe_solution.size()) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Level-set maintenance field "
+              "slice exceeds the FE history vector.");
+        }
+        std::vector<svmp::FE::Real> representation_delta(count);
+        for (std::size_t i = 0u; i < count; ++i) {
+          const auto index = offset + i;
+          representation_delta[i] =
+              fe_solution[index] -
+              accepted_solution_before_maintenance[index];
+        }
+        stageMaintainedFieldPostAcceptPublication(
+            makeCommonRepresentationMaintainedFieldPublication(
+                field, offset, representation_delta),
+            *staged_history_publication);
+        synchronized_dofs += count;
+      }
+    } catch (...) {
+      local_staging_failure = std::current_exception();
+    }
+    requireCollectivePhasePreparation(
+        local_staging_failure,
+        comm,
+        "postaccept_maintenance_history_publication_staging");
+    if (!staged_history_publication.has_value()) {
+      throw std::logic_error(
+          "[svMultiPhysics::Application] Postaccept maintenance history "
+          "publication staging remained unavailable after collective "
+          "preparation.");
     }
     const auto current_previous_delta = globalMaxAbsDifference(
-        std::span<const svmp::FE::Real>(current_solution.data(),
-                                       current_solution.size()),
         std::span<const svmp::FE::Real>(
-            synchronized_history.front().data(),
-            synchronized_history.front().size()),
-        activeFESystemCommunicator(*sim.fe_system));
+            staged_history_publication->current.data(),
+            staged_history_publication->current.size()),
+        std::span<const svmp::FE::Real>(
+            staged_history_publication->history.front().data(),
+            staged_history_publication->history.front().size()),
+        comm);
     std::ostringstream log;
     log
         << "[svMultiPhysics::Application] Level-set maintenance synchronized"
@@ -8732,13 +14265,15 @@ bool applyLevelSetMaintenance(
     // Every size, field-slice, collective, and diagnostic invariant has now
     // passed.  Publish the staged coefficient arrays only after those checks
     // so a rejected candidate leaves every accepted history vector untouched.
-    scatterFeOrderedSolution(history.u(), current_solution);
-    for (int k = 1; k <= history.historyDepth(); ++k) {
-      scatterFeOrderedSolution(
-          history.uPrevK(k),
-          synchronized_history[static_cast<std::size_t>(k - 1)]);
-    }
-    history.updateGhosts();
+    publishStagedPostacceptMaintenanceHistoryCollectively(
+        history,
+        *staged_history_publication,
+        comm,
+        rate_publication_started);
+    // The common-shift view has no uDot target.  The rate vectors are therefore
+    // deliberately untouched, including their backend content revisions,
+    // because an identical representation delta on every stored solution level
+    // leaves the accepted temporal differences unchanged.
   }
   requests = std::move(staged_requests);
   if (deferred_commit_logs != nullptr) {
@@ -11749,79 +17284,140 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     std::span<const svmp::FE::Real> fe_solution,
     svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
     const char* provenance,
-    const char* solution_source = nullptr)
+    const char* solution_source = nullptr,
+    bool request_consensus_already_checked = false)
 {
   ActiveCutContextRefreshReport report{};
+  const auto requests = activeCutVolumeRequests(params);
   if (!sim.fe_system) {
+    if (!requests.empty()) {
+      throw std::runtime_error(
+          "Active-cut refresh has configured requests but no FE system; communicator consensus is unavailable.");
+    }
     return report;
   }
-
-  const auto requests = activeCutVolumeRequests(params);
+  report.request_policy_key =
+      request_consensus_already_checked
+          ? activeCutVolumeRequestPolicyKey(requests)
+          : requireActiveCutRequestConsensus(*sim.fe_system, requests);
   if (requests.empty()) {
     return report;
   }
-  report.request_policy_key = activeCutVolumeRequestPolicyKey(requests);
 
-  const auto synchronized_level_set_fields =
-      syncActiveLevelSetVertexFieldsFromSolution(sim, requests, fe_solution);
-
-  auto context =
-      std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
-  report.refreshed = true;
-  report.topology_key = kCutContextHashOffset;
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  std::size_t synchronized_level_set_fields{0u};
+  std::shared_ptr<svmp::FE::assembly::CutIntegrationContext> context;
+  std::vector<ActiveCutTopologySnapshotBinding> topology_bindings;
+  std::exception_ptr local_refresh_preparation_failure;
+  try {
+    synchronized_level_set_fields =
+        syncActiveLevelSetVertexFieldsFromSolution(
+            sim, requests, fe_solution);
+    context =
+        std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+    topology_bindings.reserve(requests.size());
+  } catch (...) {
+    local_refresh_preparation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_refresh_preparation_failure,
+      comm,
+      "active_cut_source_sync_before_snapshot_build");
+  report.refreshed = true;
   const auto& mesh_access = sim.fe_system->meshAccess();
 
   for (const auto& request : requests) {
-    svmp::FE::level_set::LevelSetGeneratedInterfaceOptions options{};
-    options.level_set_field_name = request.level_set_field_name;
-    options.domain_id = request.domain_id;
-    options.requested_interface_marker = request.requested_interface_marker;
-    options.isovalue = static_cast<svmp::FE::Real>(request.isovalue);
-    if (request.quadrature_order.has_value()) {
-      options.quadrature_order = *request.quadrature_order;
-    }
-    if (request.interface_quadrature_order.has_value()) {
-      options.interface_quadrature_order = *request.interface_quadrature_order;
-    }
-    if (request.volume_quadrature_order.has_value()) {
-      options.volume_quadrature_order = *request.volume_quadrature_order;
-    }
-    if (!request.interface_quadrature_order.has_value() &&
-        mesh_access.dimension() == 2 &&
-        options.interface_quadrature_order < 0) {
-      options.interface_quadrature_order = options.volume_quadrature_order;
-    }
-    options.geometry_mode = request.geometry_mode;
-    options.implicit_cut_quadrature_backend = request.implicit_cut_backend;
-    options.implicit_cut_fallback_policy =
-        request.implicit_cut_fallback_policy;
-    options.geometry_tangent_policy = request.geometry_tangent_policy;
-    options.implicit_cut_root_tolerance =
-        static_cast<svmp::FE::Real>(request.implicit_cut_root_tolerance);
-    options.implicit_cut_root_coordinate_tolerance =
-        static_cast<svmp::FE::Real>(
-            request.implicit_cut_root_coordinate_tolerance);
-    options.implicit_cut_root_max_iterations =
-        request.implicit_cut_root_max_iterations;
-    options.implicit_cut_max_subdivision_depth =
-        request.implicit_cut_max_subdivision_depth;
-    options.affected_cell_neighborhood_layers =
-        request.affected_cell_neighborhood_layers;
-    options.allow_corner_linearized_geometry =
-        request.allow_corner_linearized_geometry;
-    options.require_production_qualified_implicit_cut_backend =
-        request.require_production_qualified_implicit_cut_backend;
-
     const auto backend_start = Clock::now();
-    auto result = lifecycle.build(*sim.fe_system, options, fe_solution);
+    std::optional<
+        svmp::FE::level_set::LevelSetGeneratedInterfaceOptions>
+        options_storage;
+    std::optional<
+        svmp::FE::level_set::LevelSetGeneratedInterfaceResult>
+        result_storage;
+    std::exception_ptr local_build_failure;
+    try {
+      auto& options = options_storage.emplace();
+      options.level_set_field_name = request.level_set_field_name;
+      options.domain_id = request.domain_id;
+      options.requested_interface_marker =
+          request.requested_interface_marker;
+      options.isovalue = static_cast<svmp::FE::Real>(request.isovalue);
+      if (request.quadrature_order.has_value()) {
+        options.quadrature_order = *request.quadrature_order;
+      }
+      if (request.interface_quadrature_order.has_value()) {
+        options.interface_quadrature_order =
+            *request.interface_quadrature_order;
+      }
+      if (request.volume_quadrature_order.has_value()) {
+        options.volume_quadrature_order =
+            *request.volume_quadrature_order;
+      }
+      if (!request.interface_quadrature_order.has_value() &&
+          mesh_access.dimension() == 2 &&
+          options.interface_quadrature_order < 0) {
+        options.interface_quadrature_order =
+            options.volume_quadrature_order;
+      }
+      options.geometry_mode = request.geometry_mode;
+      options.implicit_cut_quadrature_backend =
+          request.implicit_cut_backend;
+      options.implicit_cut_fallback_policy =
+          request.implicit_cut_fallback_policy;
+      options.geometry_tangent_policy = request.geometry_tangent_policy;
+      options.implicit_cut_root_tolerance =
+          static_cast<svmp::FE::Real>(
+              request.implicit_cut_root_tolerance);
+      options.implicit_cut_root_coordinate_tolerance =
+          static_cast<svmp::FE::Real>(
+              request.implicit_cut_root_coordinate_tolerance);
+      options.implicit_cut_root_max_iterations =
+          request.implicit_cut_root_max_iterations;
+      options.implicit_cut_max_subdivision_depth =
+          request.implicit_cut_max_subdivision_depth;
+      options.affected_cell_neighborhood_layers =
+          request.affected_cell_neighborhood_layers;
+      options.allow_corner_linearized_geometry =
+          request.allow_corner_linearized_geometry;
+      options.require_production_qualified_implicit_cut_backend =
+          request.require_production_qualified_implicit_cut_backend;
+      result_storage.emplace(
+          lifecycle.build(*sim.fe_system, options, fe_solution));
+      if (!result_storage->success) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Generated active-domain "
+            "interface '" + request.domain_id +
+            "' for level-set field '" + request.level_set_field_name +
+            "' failed: " + result_storage->diagnostic);
+      }
+    } catch (...) {
+      local_build_failure = std::current_exception();
+    }
+    const auto local_backend_seconds = secondsSince(backend_start);
+    requireCollectivePhasePreparation(
+        local_build_failure,
+        comm,
+        "active_cut_lifecycle_build");
     const auto backend_timing =
-        reduceOutputTiming(secondsSince(backend_start), comm);
-    if (!result.success) {
+        reduceOutputTiming(local_backend_seconds, comm);
+    auto& options = *options_storage;
+    auto& result = *result_storage;
+    const bool local_missing_source_topology =
+        std::any_of(
+            result.domain.fragments().begin(),
+            result.domain.fragments().end(),
+            [](const auto& fragment) {
+              return fragment.parent_corner_topology_key == 0u;
+            }) ||
+        std::any_of(
+            result.domain.volumeRegions().begin(),
+            result.domain.volumeRegions().end(),
+            [](const auto& region) {
+              return region.parent_corner_topology_key == 0u;
+            });
+    if (globalAnyBool(local_missing_source_topology, comm)) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Generated active-domain interface '" +
-          request.domain_id + "' for level-set field '" +
-          request.level_set_field_name + "' failed: " + result.diagnostic);
+          "[svMultiPhysics::Application] Generated active-domain geometry is missing its epoch-free parent-corner topology descriptor.");
     }
     const auto [source_revision_it, source_revision_inserted] =
         report.evaluated_state_source_revisions.emplace(
@@ -11865,7 +17461,6 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     }
     const auto topology_key = cutContextTopologyKey(result.domain);
     const auto& domain_request = result.domain.request();
-    mixCutContextHash(report.topology_key, topology_key);
     report.value_revision = result.value_revision;
     const auto global_interface_fragments =
         globalSumSize(summary.fragment_count, comm);
@@ -12120,12 +17715,6 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             " contact_marker_consumed=" +
             (contact_marker_is_consumed ? "true" : "false"));
       }
-      mixCutContextHash(report.topology_key,
-                        static_cast<std::uint64_t>(
-                            std::max(0, intersection_domain.marker())));
-      mixCutContextHash(report.topology_key,
-                        static_cast<std::uint64_t>(
-                            intersection_summary.active_fragment_count));
       const auto make_active_boundary_request =
           [&](svmp::FE::geometry::CutIntegrationSide side) {
             svmp::FE::interfaces::GeneratedActiveBoundaryRequest active_request;
@@ -12425,6 +18014,11 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << geometry_ledger.retained_positive_physical_volume
         << " resident_bytes=" << geometry_snapshot->residentBytes()
         << std::endl;
+    topology_bindings.push_back(
+        ActiveCutTopologySnapshotBinding{
+            .request = &request,
+            .snapshot = geometry_snapshot.get(),
+        });
     context->addFreeSurfaceGeometrySnapshot(
         geometry_snapshot, retained_volume_sides);
     const auto global_boundary_intersection_fragments =
@@ -12600,7 +18194,6 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         globalSumDouble(static_cast<double>(local_generated_pruned_volume), comm));
     const auto facet_set_handle = addGeneratedCutAdjacentFacetSet(
         *context, result.domain, mesh_access, request.active_side);
-    mixCutContextHash(report.topology_key, facet_set_handle.stable_id);
     const auto facet_scale_summary =
         summarizeCutAdjacentFacetScales(facet_set_handle);
     const auto global_cut_adjacent_facets =
@@ -12934,6 +18527,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " positive_volume_local=" << summary.positive_volume_measure << std::endl;
   }
 
+  report.topology_key =
+      activeCutContextTopologyFingerprint(topology_bindings, comm);
   sim.fe_system->setCutIntegrationContext(std::move(context));
   sim.fe_system->rebuildConstraintState();
   application::core::oopCout()
@@ -13000,7 +18595,32 @@ struct ActiveCutContextRefreshCache {
   std::optional<ActiveCutContextRefreshSignature> last_signature{};
   std::optional<ActiveCutContextRefreshSignature> last_vector_signature{};
   std::map<int, std::uint64_t> evaluated_state_source_revisions{};
+  std::optional<std::uint64_t> topology_key{};
+  std::function<void(
+      const ActiveCutContextRefreshReport&,
+      std::string_view)> observer{};
+
+  void invalidateGeneratedState() noexcept
+  {
+    last_signature.reset();
+    last_vector_signature.reset();
+    evaluated_state_source_revisions.clear();
+    topology_key.reset();
+  }
 };
+
+void observeActiveCutContextRefresh(
+    const ActiveCutContextRefreshCache& cache,
+    const ActiveCutContextRefreshReport& report,
+    const char* provenance)
+{
+  if (cache.observer) {
+    cache.observer(
+        report,
+        provenance != nullptr ? std::string_view{provenance}
+                              : std::string_view{"unknown"});
+  }
+}
 
 const char* activeCutRefreshSignatureKindName(
     ActiveCutContextRefreshSignature::SolutionSignatureKind kind) noexcept
@@ -13233,10 +18853,18 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolutionCach
 {
   const auto requests = activeCutVolumeRequests(params);
   ActiveCutContextRefreshReport skipped_report{};
-  if (requests.empty() || !sim.fe_system) {
+  if (!sim.fe_system) {
+    if (!requests.empty()) {
+      throw std::runtime_error(
+          "Cached active-cut refresh has configured requests but no FE system; communicator consensus is unavailable.");
+    }
     return skipped_report;
   }
-  skipped_report.request_policy_key = activeCutVolumeRequestPolicyKey(requests);
+  skipped_report.request_policy_key =
+      requireActiveCutRequestConsensus(*sim.fe_system, requests);
+  if (requests.empty()) {
+    return skipped_report;
+  }
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto signature =
       activeCutContextRefreshSignature(sim, requests, fe_solution);
@@ -13249,11 +18877,14 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolutionCach
   if (!globalAnyBool(!local_can_skip, comm)) {
     skipped_report.evaluated_state_source_revisions =
         cache.evaluated_state_source_revisions;
+    skipped_report.topology_key =
+        cache.topology_key.value_or(0u);
     logActiveCutContextRefreshSkipped(
         *signature,
         provenance,
         solution_source,
         "level_set_field_hash_unchanged");
+    observeActiveCutContextRefresh(cache, skipped_report, provenance);
     return skipped_report;
   }
 
@@ -13263,7 +18894,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolutionCach
       fe_solution,
       lifecycle,
       provenance,
-      solution_source);
+      solution_source,
+      true);
   if (report.refreshed) {
     const auto refreshed_signature =
         activeCutContextRefreshSignature(sim, requests, fe_solution);
@@ -13275,7 +18907,9 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolutionCach
     cache.last_vector_signature.reset();
     cache.evaluated_state_source_revisions =
         report.evaluated_state_source_revisions;
+    cache.topology_key = report.topology_key;
   }
+  observeActiveCutContextRefresh(cache, report, provenance);
   return report;
 }
 
@@ -13307,13 +18941,31 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector
 {
   const auto requests = activeCutVolumeRequests(params);
   ActiveCutContextRefreshReport skipped_report{};
-  if (requests.empty() || !sim.fe_system) {
+  if (!sim.fe_system) {
+    if (!requests.empty()) {
+      throw std::runtime_error(
+          "Cached active-cut vector refresh has configured requests but no FE system; communicator consensus is unavailable.");
+    }
     return skipped_report;
   }
-  skipped_report.request_policy_key = activeCutVolumeRequestPolicyKey(requests);
+  skipped_report.request_policy_key =
+      requireActiveCutRequestConsensus(*sim.fe_system, requests);
+  if (requests.empty()) {
+    return skipped_report;
+  }
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
-  const auto vector_signature =
-      activeCutContextRefreshSignature(sim, requests, solution);
+  std::optional<ActiveCutContextRefreshSignature> vector_signature;
+  std::exception_ptr local_vector_signature_failure;
+  try {
+    vector_signature =
+        activeCutContextRefreshSignature(sim, requests, solution);
+  } catch (...) {
+    local_vector_signature_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_vector_signature_failure,
+      comm,
+      "active_cut_vector_signature_before_cache_consensus");
   const bool disable_refresh_cache =
       parseBoolEnv("SVMP_DISABLE_ACTIVE_CUT_REFRESH_CACHE", false);
   const bool local_vector_can_skip =
@@ -13325,6 +18977,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector
   if (!globalAnyBool(!local_vector_can_skip, comm)) {
     skipped_report.evaluated_state_source_revisions =
         cache.evaluated_state_source_revisions;
+    skipped_report.topology_key =
+        cache.topology_key.value_or(0u);
     const char* skip_reason =
         vector_signature->solution_signature_kind ==
                 ActiveCutContextRefreshSignature::SolutionSignatureKind::
@@ -13336,14 +18990,27 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector
         provenance,
         solution_source,
         skip_reason);
+    observeActiveCutContextRefresh(cache, skipped_report, provenance);
     return skipped_report;
   }
 
-  const auto fe_solution = gatherFeOrderedSolution(solution);
-  const auto signature = activeCutContextRefreshSignature(
-      sim,
-      requests,
-      std::span<const svmp::FE::Real>(fe_solution.data(), fe_solution.size()));
+  std::vector<svmp::FE::Real> fe_solution;
+  std::optional<ActiveCutContextRefreshSignature> signature;
+  std::exception_ptr local_gather_failure;
+  try {
+    fe_solution = gatherFeOrderedSolution(solution);
+    signature = activeCutContextRefreshSignature(
+        sim,
+        requests,
+        std::span<const svmp::FE::Real>(
+            fe_solution.data(), fe_solution.size()));
+  } catch (...) {
+    local_gather_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_gather_failure,
+      comm,
+      "active_cut_vector_gather_before_field_hash_consensus");
   const bool local_fe_can_skip =
       !disable_refresh_cache &&
       signature.has_value() &&
@@ -13353,6 +19020,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector
   if (!globalAnyBool(!local_fe_can_skip, comm)) {
     skipped_report.evaluated_state_source_revisions =
         cache.evaluated_state_source_revisions;
+    skipped_report.topology_key =
+        cache.topology_key.value_or(0u);
     if (vector_signature.has_value()) {
       cache.last_vector_signature = *vector_signature;
     }
@@ -13361,6 +19030,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector
         provenance,
         solution_source,
         "level_set_field_hash_unchanged");
+    observeActiveCutContextRefresh(cache, skipped_report, provenance);
     return skipped_report;
   }
 
@@ -13370,7 +19040,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector
       std::span<const svmp::FE::Real>(fe_solution.data(), fe_solution.size()),
       lifecycle,
       provenance,
-      solution_source);
+      solution_source,
+      true);
   if (report.refreshed) {
     const auto refreshed_signature = activeCutContextRefreshSignature(
         sim,
@@ -13390,7 +19061,9 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector
     }
     cache.evaluated_state_source_revisions =
         report.evaluated_state_source_revisions;
+    cache.topology_key = report.topology_key;
   }
+  observeActiveCutContextRefresh(cache, report, provenance);
   return report;
 }
 
@@ -13481,26 +19154,112 @@ public:
       const std::vector<ActiveCutVolumeRequest>& requests)
       : sim_(sim),
         lifecycle_(lifecycle),
-        refresh_cache_(refresh_cache),
-        refresh_cache_backup_(refresh_cache),
-        mesh_field_checkpoint_(
-            captureActiveLevelSetMeshFields(sim, requests))
+        refresh_cache_(refresh_cache)
   {
     if (!sim_.fe_system) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set maintenance geometry transaction requires an FE system.");
     }
-    lifecycle_.beginTransaction();
-    lifecycle_transaction_active_ = true;
+    const auto comm = activeFESystemCommunicator(*sim_.fe_system);
+    std::exception_ptr local_checkpoint_failure;
     try {
+      refresh_cache_backup_ = refresh_cache;
+      mesh_field_checkpoint_ =
+          captureActiveLevelSetMeshFields(sim, requests);
+    } catch (...) {
+      local_checkpoint_failure = std::current_exception();
+    }
+    requireCollectivePhasePreparation(
+        local_checkpoint_failure,
+        comm,
+        "level_set_geometry_transaction_checkpoint");
+
+    std::exception_ptr local_system_preflight_failure;
+    try {
+      if (!sim_.fe_system->isSetup()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set maintenance geometry transaction requires a setup FE system.");
+      }
+      if (sim_.fe_system->cutIntegrationContextTransactionActive()) {
+        throw std::logic_error(
+            "[svMultiPhysics::Application] Cut-integration-context transaction is already active.");
+      }
+    } catch (...) {
+      local_system_preflight_failure = std::current_exception();
+    }
+    requireCollectivePhasePreparation(
+        local_system_preflight_failure,
+        comm,
+        "level_set_geometry_transaction_system_preflight");
+
+    std::exception_ptr local_lifecycle_failure;
+    try {
+      lifecycle_.beginTransaction();
+      lifecycle_transaction_active_ = true;
+    } catch (...) {
+      local_lifecycle_failure = std::current_exception();
+    }
+    if (globalAnyBool(local_lifecycle_failure != nullptr, comm)) {
+      std::exception_ptr local_cleanup_failure;
+      if (lifecycle_transaction_active_) {
+        try {
+          lifecycle_.rollbackTransaction();
+          lifecycle_transaction_active_ = false;
+        } catch (...) {
+          local_cleanup_failure = std::current_exception();
+        }
+      }
+      const bool cleanup_failed =
+          globalAnyBool(local_cleanup_failure != nullptr, comm);
+      if (local_lifecycle_failure) {
+        std::rethrow_exception(local_lifecycle_failure);
+      }
+      if (local_cleanup_failure) {
+        std::rethrow_exception(local_cleanup_failure);
+      }
+      throw std::runtime_error(
+          cleanup_failed
+              ? "[svMultiPhysics::Application] Another active FE rank failed "
+                "level-set geometry lifecycle begin and cleanup did not "
+                "complete on every rank."
+              : "[svMultiPhysics::Application] Another active FE rank failed "
+                "level-set geometry lifecycle begin.");
+    }
+
+    std::exception_ptr local_system_failure;
+    try {
+      // FESystem coordinates its own rank-local backup preparation before it
+      // publishes the transaction backup.
       sim_.fe_system->beginCutIntegrationContextTransaction();
       system_transaction_active_ = true;
-      active_ = true;
     } catch (...) {
-      lifecycle_.rollbackTransaction();
-      lifecycle_transaction_active_ = false;
-      throw;
+      local_system_failure = std::current_exception();
     }
+    if (globalAnyBool(local_system_failure != nullptr, comm)) {
+      std::exception_ptr local_cleanup_failure;
+      try {
+        lifecycle_.rollbackTransaction();
+        lifecycle_transaction_active_ = false;
+      } catch (...) {
+        local_cleanup_failure = std::current_exception();
+      }
+      const bool cleanup_failed =
+          globalAnyBool(local_cleanup_failure != nullptr, comm);
+      if (local_system_failure) {
+        std::rethrow_exception(local_system_failure);
+      }
+      if (local_cleanup_failure) {
+        std::rethrow_exception(local_cleanup_failure);
+      }
+      throw std::runtime_error(
+          cleanup_failed
+              ? "[svMultiPhysics::Application] Another active FE rank failed "
+                "cut-context transaction begin and lifecycle cleanup did not "
+                "complete on every rank."
+              : "[svMultiPhysics::Application] Another active FE rank failed "
+                "cut-context transaction begin.");
+    }
+    active_ = true;
   }
 
   LevelSetMaintenanceGeometryTransaction(
@@ -13521,11 +19280,16 @@ public:
 
   [[nodiscard]] ActiveCutContextRefreshReport refresh(
       const Parameters& params,
-      std::span<const svmp::FE::Real> candidate)
+      std::span<const svmp::FE::Real> candidate,
+      bool force_rebuild = false)
   {
     if (!active_) {
       throw std::logic_error(
           "level-set maintenance geometry transaction is not active");
+    }
+    if (force_rebuild) {
+      refresh_cache_.last_signature.reset();
+      refresh_cache_.last_vector_signature.reset();
     }
     return refreshActiveCutIntegrationContextFromSolutionCached(
         sim_,
@@ -13630,6 +19394,431 @@ private:
   bool active_{false};
 };
 
+enum class PostacceptMaintenanceTopologyDecision : std::uint8_t {
+  Commit,
+  RejectMaintenance,
+  InvariantFailure,
+};
+
+struct PostacceptMaintenanceTopologyEvidence {
+  bool baseline_present{false};
+  std::uint64_t baseline_key{0u};
+  bool final_present{false};
+  std::uint64_t final_key{0u};
+  bool keys_equal{false};
+};
+
+PostacceptMaintenanceTopologyEvidence
+postacceptMaintenanceTopologyEvidence(
+    const std::optional<std::uint64_t>& baseline,
+    const std::optional<std::uint64_t>& final) noexcept
+{
+  const bool baseline_present = baseline.has_value();
+  const bool final_present = final.has_value();
+  const auto baseline_key = baseline.value_or(0u);
+  const auto final_key = final.value_or(0u);
+  return PostacceptMaintenanceTopologyEvidence{
+      .baseline_present = baseline_present,
+      .baseline_key = baseline_key,
+      .final_present = final_present,
+      .final_key = final_key,
+      .keys_equal = baseline_present && final_present &&
+                    baseline_key == final_key,
+  };
+}
+
+PostacceptMaintenanceTopologyDecision
+classifyPostacceptMaintenanceTopologyEvidence(
+    const PostacceptMaintenanceTopologyEvidence& evidence) noexcept
+{
+  const bool expected_equality =
+      evidence.baseline_present && evidence.final_present &&
+      evidence.baseline_key == evidence.final_key;
+  if (!evidence.baseline_present || evidence.baseline_key == 0u ||
+      !evidence.final_present || evidence.final_key == 0u ||
+      evidence.keys_equal != expected_equality) {
+    return PostacceptMaintenanceTopologyDecision::InvariantFailure;
+  }
+  return evidence.keys_equal
+      ? PostacceptMaintenanceTopologyDecision::Commit
+      : PostacceptMaintenanceTopologyDecision::RejectMaintenance;
+}
+
+bool collectivePostacceptMaintenanceRecoveryPhaseReady(
+    bool local_ready,
+    const svmp::MeshComm& comm)
+{
+  return !globalAnyBool(!local_ready, comm);
+}
+
+bool postacceptMaintenanceRejectionEvidenceMayPublish(
+    bool geometry_restored,
+    bool checkpoint_restored,
+    bool restored_topology_verified,
+    bool ledger_rejection_preflight_ready) noexcept
+{
+  return geometry_restored && checkpoint_restored &&
+         restored_topology_verified &&
+         ledger_rejection_preflight_ready;
+}
+
+void requirePostacceptMaintenanceRecoveryPhase(
+    const std::exception_ptr& local_failure,
+    const svmp::MeshComm& comm,
+    std::string_view phase)
+{
+  if (collectivePostacceptMaintenanceRecoveryPhaseReady(
+          local_failure == nullptr, comm)) {
+    return;
+  }
+  if (local_failure != nullptr) {
+    std::rethrow_exception(local_failure);
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Another active FE communicator rank "
+      "failed postaccept maintenance recovery phase '" +
+      std::string(phase) + "'.");
+}
+
+std::vector<svmp::FE::Real>
+capturePostacceptMaintenanceVectorCollectively(
+    svmp::FE::backends::GenericVector& solution,
+    const svmp::MeshComm& comm)
+{
+  svmp::FE::GlobalIndex local_size{-1};
+  std::exception_ptr local_size_failure;
+  try {
+    local_size = solution.size();
+    if (local_size < 0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Postaccept maintenance cannot "
+          "capture a vector with negative global size.");
+    }
+  } catch (...) {
+    local_size_failure = std::current_exception();
+  }
+  requirePostacceptMaintenanceRecoveryPhase(
+      local_size_failure,
+      comm,
+      "capture_vector_size_before_consensus");
+  const auto global_size = static_cast<std::uint64_t>(local_size);
+  const auto [minimum_size, maximum_size] =
+      globalMinMaxUint64(global_size, comm);
+  if (minimum_size != maximum_size) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Postaccept maintenance vector sizes "
+        "differ across the active FE communicator.");
+  }
+
+  std::vector<svmp::FE::Real> values;
+  std::vector<svmp::FE::GlobalIndex> owned_rows;
+  std::unique_ptr<svmp::FE::assembly::GlobalSystemView> read_view;
+  std::exception_ptr local_failure;
+  try {
+    values.resize(static_cast<std::size_t>(global_size));
+    owned_rows = solution.ownedGlobalRows();
+    if (std::adjacent_find(
+            owned_rows.begin(), owned_rows.end(),
+            [](svmp::FE::GlobalIndex left,
+               svmp::FE::GlobalIndex right) { return left >= right; }) !=
+            owned_rows.end() ||
+        !std::all_of(
+            owned_rows.begin(), owned_rows.end(),
+            [&](svmp::FE::GlobalIndex row) {
+              return row >= 0 && row < local_size;
+            })) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Postaccept maintenance capture "
+          "requires strictly ordered, unique, in-range backend-owned rows.");
+    }
+    read_view = solution.createGhostedReadView();
+    if (!read_view) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Postaccept maintenance capture "
+          "requires an owned-row read view.");
+    }
+  } catch (...) {
+    local_failure = std::current_exception();
+  }
+  requirePostacceptMaintenanceRecoveryPhase(
+      local_failure,
+      comm,
+      "capture_vector_prepare_before_owned_reads");
+
+  constexpr std::size_t chunk_capacity = 4096u;
+  static_assert(
+      sizeof(svmp::FE::Real) == sizeof(std::uint64_t),
+      "Exact postaccept maintenance capture requires a 64-bit FE scalar.");
+  std::array<std::uint64_t, chunk_capacity> local_bits{};
+  std::array<std::uint64_t, chunk_capacity> global_bits{};
+  std::array<std::uint32_t, chunk_capacity> local_counts{};
+  std::array<std::uint32_t, chunk_capacity> global_counts{};
+  std::array<svmp::FE::Real, chunk_capacity> owned_values{};
+  std::size_t owned_cursor = 0u;
+  for (std::uint64_t chunk_begin = 0u; chunk_begin < global_size;
+       chunk_begin += chunk_capacity) {
+    const auto chunk_size = static_cast<std::size_t>(
+        std::min<std::uint64_t>(
+            chunk_capacity, global_size - chunk_begin));
+    const auto chunk_end = chunk_begin + chunk_size;
+    std::fill_n(local_bits.begin(), chunk_size, std::uint64_t{0u});
+    std::fill_n(global_bits.begin(), chunk_size, std::uint64_t{0u});
+    std::fill_n(local_counts.begin(), chunk_size, std::uint32_t{0u});
+    std::fill_n(global_counts.begin(), chunk_size, std::uint32_t{0u});
+
+    const auto first = owned_rows.begin() +
+        static_cast<std::ptrdiff_t>(owned_cursor);
+    const auto last =
+        std::lower_bound(first, owned_rows.end(),
+                         static_cast<svmp::FE::GlobalIndex>(chunk_end));
+    const auto owned_count =
+        static_cast<std::size_t>(std::distance(first, last));
+    local_failure = nullptr;
+    try {
+      if (owned_count != 0u) {
+        read_view->getVectorEntries(
+            std::span<const svmp::FE::GlobalIndex>(
+                owned_rows.data() +
+                    static_cast<std::ptrdiff_t>(owned_cursor),
+                owned_count),
+            std::span<svmp::FE::Real>(owned_values.data(), owned_count));
+      }
+      for (std::size_t i = 0u; i < owned_count; ++i) {
+        const auto row = owned_rows[owned_cursor + i];
+        if (row < static_cast<svmp::FE::GlobalIndex>(chunk_begin) ||
+            row >= static_cast<svmp::FE::GlobalIndex>(chunk_end)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Postaccept maintenance owned "
+              "read escaped its fixed global chunk.");
+        }
+        const auto relative = static_cast<std::size_t>(
+            static_cast<std::uint64_t>(row) - chunk_begin);
+        local_bits[relative] =
+            std::bit_cast<std::uint64_t>(owned_values[i]);
+        local_counts[relative] = 1u;
+      }
+    } catch (...) {
+      local_failure = std::current_exception();
+    }
+    requirePostacceptMaintenanceRecoveryPhase(
+        local_failure,
+        comm,
+        "capture_vector_owned_read_before_replication");
+
+#ifdef MESH_HAS_MPI
+    if (comm.is_parallel()) {
+#ifdef MPI_UINT32_T
+      const MPI_Datatype count_type = MPI_UINT32_T;
+#else
+      static_assert(sizeof(std::uint32_t) == sizeof(unsigned));
+      const MPI_Datatype count_type = MPI_UNSIGNED;
+#endif
+#ifdef MPI_UINT64_T
+      const MPI_Datatype value_type = MPI_UINT64_T;
+#else
+      static_assert(sizeof(std::uint64_t) == sizeof(unsigned long long));
+      const MPI_Datatype value_type = MPI_UNSIGNED_LONG_LONG;
+#endif
+      MPI_Allreduce(
+          local_counts.data(), global_counts.data(),
+          static_cast<int>(chunk_size), count_type, MPI_SUM, comm.native());
+      MPI_Allreduce(
+          local_bits.data(), global_bits.data(),
+          static_cast<int>(chunk_size), value_type, MPI_BOR, comm.native());
+    } else {
+      std::copy_n(local_counts.begin(), chunk_size, global_counts.begin());
+      std::copy_n(local_bits.begin(), chunk_size, global_bits.begin());
+    }
+#else
+    if (comm.is_parallel()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Distributed postaccept maintenance "
+          "capture requires MPI.");
+    }
+    std::copy_n(local_counts.begin(), chunk_size, global_counts.begin());
+    std::copy_n(local_bits.begin(), chunk_size, global_bits.begin());
+#endif
+    if (std::any_of(
+            global_counts.begin(),
+            global_counts.begin() +
+                static_cast<std::ptrdiff_t>(chunk_size),
+            [](std::uint32_t count) { return count != 1u; })) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Postaccept maintenance capture "
+          "requires exactly one backend owner for every FE row.");
+    }
+    for (std::size_t i = 0u; i < chunk_size; ++i) {
+      values[static_cast<std::size_t>(chunk_begin) + i] =
+          std::bit_cast<svmp::FE::Real>(global_bits[i]);
+    }
+    owned_cursor += owned_count;
+  }
+  if (owned_cursor != owned_rows.size()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Postaccept maintenance capture did "
+        "not consume every backend-owned row.");
+  }
+  return values;
+}
+
+void assignPostacceptMaintenanceVectorCollectively(
+    svmp::FE::backends::GenericVector& solution,
+    std::span<const svmp::FE::Real> values,
+    const svmp::MeshComm& comm)
+{
+  std::unique_ptr<svmp::FE::assembly::GlobalSystemView> view;
+  std::span<svmp::FE::Real> local_values;
+  std::vector<svmp::FE::GlobalIndex> owned_rows;
+  std::vector<svmp::FE::Real> owned_values;
+  std::exception_ptr local_failure;
+  try {
+    if (solution.size() < 0 ||
+        static_cast<std::size_t>(solution.size()) != values.size()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Postaccept maintenance assignment "
+          "found a vector/checkpoint size mismatch.");
+    }
+    view = solution.createAssemblyView();
+    if (view) {
+      owned_rows = solution.ownedGlobalRows();
+      const bool owned_rows_valid = std::adjacent_find(
+          owned_rows.begin(),
+          owned_rows.end(),
+          [](svmp::FE::GlobalIndex left,
+             svmp::FE::GlobalIndex right) {
+            return left >= right;
+          }) == owned_rows.end() &&
+          std::all_of(
+              owned_rows.begin(),
+              owned_rows.end(),
+              [&](svmp::FE::GlobalIndex row) {
+                return row >= 0 && row < solution.size();
+              });
+      if (!owned_rows_valid) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Postaccept maintenance assignment "
+            "requires strictly ordered, unique, in-range owned vector rows.");
+      }
+      owned_values.reserve(owned_rows.size());
+      for (const auto row : owned_rows) {
+        owned_values.push_back(
+            values[static_cast<std::size_t>(row)]);
+      }
+      view->beginAssemblyPhase();
+    } else {
+      local_values = solution.localSpan();
+      if (local_values.size() != values.size()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Postaccept maintenance rollback "
+            "could not obtain a complete local vector span.");
+      }
+    }
+  } catch (...) {
+    local_failure = std::current_exception();
+  }
+  requirePostacceptMaintenanceRecoveryPhase(
+      local_failure,
+      comm,
+      "restore_vector_prepare_before_assembly");
+
+  local_failure = nullptr;
+  try {
+    if (view) {
+      constexpr std::size_t chunk_size = 4096u;
+      for (std::size_t offset = 0u;
+           offset < owned_rows.size(); offset += chunk_size) {
+        const auto chunk =
+            std::min(chunk_size, owned_rows.size() - offset);
+        view->setVectorEntries(
+            std::span<const svmp::FE::GlobalIndex>(
+                owned_rows.data() + offset, chunk),
+            std::span<const svmp::FE::Real>(
+                owned_values.data() + offset, chunk));
+      }
+    } else {
+      std::copy(values.begin(), values.end(), local_values.begin());
+    }
+  } catch (...) {
+    local_failure = std::current_exception();
+  }
+  requirePostacceptMaintenanceRecoveryPhase(
+      local_failure,
+      comm,
+      "restore_vector_values_before_assembly_flush");
+
+  if (view) {
+    local_failure = nullptr;
+    try {
+      view->endAssemblyPhase();
+    } catch (...) {
+      local_failure = std::current_exception();
+    }
+    requirePostacceptMaintenanceRecoveryPhase(
+        local_failure,
+        comm,
+        "restore_vector_assembly_flush_before_finalize");
+
+    local_failure = nullptr;
+    try {
+      view->finalizeAssembly();
+    } catch (...) {
+      local_failure = std::current_exception();
+    }
+    requirePostacceptMaintenanceRecoveryPhase(
+        local_failure,
+        comm,
+        "restore_vector_finalize_before_ghost_update");
+  }
+
+  local_failure = nullptr;
+  try {
+    solution.updateGhosts();
+  } catch (...) {
+    local_failure = std::current_exception();
+  }
+  requirePostacceptMaintenanceRecoveryPhase(
+      local_failure,
+      comm,
+      "restore_vector_ghost_update_complete");
+}
+
+enum class PostacceptMaintenanceRollbackReason : std::uint8_t {
+  MaintenanceCutTopologyChanged,
+  CollectiveConsensusRejection,
+  CandidateException,
+};
+
+const char* postacceptMaintenanceRollbackReasonName(
+    PostacceptMaintenanceRollbackReason reason) noexcept
+{
+  switch (reason) {
+    case PostacceptMaintenanceRollbackReason::
+        MaintenanceCutTopologyChanged:
+      return "maintenance_cut_topology_changed";
+    case PostacceptMaintenanceRollbackReason::
+        CollectiveConsensusRejection:
+      return "collective_consensus_rejection";
+    case PostacceptMaintenanceRollbackReason::CandidateException:
+      return "candidate_exception";
+  }
+  return "unknown";
+}
+
+enum class PostacceptMaintenanceRollbackScope : std::uint8_t {
+  AcceptedEndpointMaintenanceOnly,
+};
+
+const char* postacceptMaintenanceRollbackScopeName(
+    PostacceptMaintenanceRollbackScope scope) noexcept
+{
+  switch (scope) {
+    case PostacceptMaintenanceRollbackScope::
+        AcceptedEndpointMaintenanceOnly:
+      return "accepted_endpoint_maintenance_only";
+  }
+  return "unknown";
+}
+
 enum class LevelSetMaintenancePublicationState : std::uint8_t {
   Staged,
   Publishing,
@@ -13692,7 +19881,8 @@ void requireConservativePhaseGeometryBinding(
 svmp::FE::level_set::LevelSetP1PhaseTransportGraph&
 requireCurrentConservativePhaseGraph(
     svmp::FE::systems::FESystem& system,
-    LevelSetMaintenanceRequest& request)
+    LevelSetMaintenanceRequest& request,
+    bool allow_graph_rebuild = true)
 {
   const auto phase_field = system.findFieldByName(
       request.conservative_phase.liquid_indicator.field_name);
@@ -13721,6 +19911,10 @@ requireCurrentConservativePhaseGraph(
   const bool graph_rebuild_required =
       globalAnyBool(!local_graph_is_current, comm);
   if (graph_rebuild_required) {
+    if (!allow_graph_rebuild) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase split transport requires its accepted q^n graph and fixed background mesh to remain unchanged; rebuilding a stale graph during candidate maintenance is forbidden.");
+    }
     svmp::FE::level_set::LevelSetP1PhaseGraphOptions graph_options;
     graph_options.invariant_tolerance =
         request.conservative_phase.invariant_tolerance;
@@ -13761,10 +19955,12 @@ conservativePhaseProjectionOptions(
 svmp::FE::level_set::LevelSetP1PhaseProjectionResult
 projectCurrentConservativePhaseGeometry(
     svmp::FE::systems::FESystem& system,
-    LevelSetMaintenanceRequest& request)
+    LevelSetMaintenanceRequest& request,
+    bool allow_graph_rebuild = true)
 {
   requireConservativePhaseGeometryBinding(system, request);
-  auto& graph = requireCurrentConservativePhaseGraph(system, request);
+  auto& graph = requireCurrentConservativePhaseGraph(
+      system, request, allow_graph_rebuild);
   const auto phase_field = system.findFieldByName(
       request.conservative_phase.liquid_indicator.field_name);
   const auto projection_options = conservativePhaseProjectionOptions(
@@ -13903,19 +20099,28 @@ void allReduceConservativePhaseBuffer(
     } else if constexpr (std::is_same_v<svmp::FE::Real, double>) {
       datatype = MPI_DOUBLE;
     }
-    std::vector<svmp::FE::Real> reduced(values.size(),
-                                         svmp::FE::Real{0.0});
+    const auto [minimum_value_count, maximum_value_count] =
+        globalMinMaxUint64(
+            static_cast<std::uint64_t>(values.size()), comm);
+    if (minimum_value_count != maximum_value_count) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase reduction buffer sizes differ across ranks.");
+    }
     std::size_t offset = 0u;
     while (offset < values.size()) {
       const auto remaining = values.size() - offset;
       const int count = static_cast<int>(std::min<std::size_t>(
           remaining,
           static_cast<std::size_t>(std::numeric_limits<int>::max())));
-      MPI_Allreduce(values.data() + offset, reduced.data() + offset,
-                    count, datatype, MPI_SUM, comm.native());
+      MPI_Allreduce(
+          MPI_IN_PLACE,
+          values.data() + offset,
+          count,
+          datatype,
+          MPI_SUM,
+          comm.native());
       offset += static_cast<std::size_t>(count);
     }
-    values = std::move(reduced);
   }
 #else
   (void)comm;
@@ -13929,11 +20134,31 @@ sampleConservativePhaseVelocity(
     const svmp::FE::level_set::LevelSetP1PhaseTransportGraph& graph,
     const svmp::FE::systems::SystemStateView& state)
 {
-  std::vector<std::array<svmp::FE::Real, 3>> velocity(graph.nodes);
+  std::vector<std::array<svmp::FE::Real, 3>> velocity;
   if (request.velocity.source ==
       svmp::FE::level_set::LevelSetVelocitySource::ConstantVector) {
-    std::fill(velocity.begin(), velocity.end(),
-              request.velocity.constant_value);
+    std::exception_ptr local_preparation_failure;
+    try {
+      velocity.resize(graph.nodes);
+      for (const auto value : request.velocity.constant_value) {
+        if (!std::isfinite(value)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Conservative phase constant velocity contains a non-finite component.");
+        }
+      }
+      std::fill(velocity.begin(), velocity.end(),
+                request.velocity.constant_value);
+    } catch (...) {
+      local_preparation_failure = std::current_exception();
+    }
+    if (sim.fe_system) {
+      requireCollectivePhasePreparation(
+          local_preparation_failure,
+          activeFESystemCommunicator(*sim.fe_system),
+          "conservative_phase_constant_velocity");
+    } else if (local_preparation_failure) {
+      std::rethrow_exception(local_preparation_failure);
+    }
     return velocity;
   }
   if (!sim.fe_system || !sim.primary_mesh) {
@@ -13941,72 +20166,98 @@ sampleConservativePhaseVelocity(
         "[svMultiPhysics::Application] Conservative phase velocity sampling requires an FE system and primary mesh.");
   }
   auto& system = *sim.fe_system;
-  const auto phase_field = system.findFieldByName(
-      request.conservative_phase.liquid_indicator.field_name);
-  const auto velocity_field = system.findFieldByName(
-      request.velocity.field_name);
-  if (phase_field == svmp::FE::INVALID_FIELD_ID ||
-      velocity_field == svmp::FE::INVALID_FIELD_ID) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Conservative phase velocity sampling could not resolve its phase or velocity field.");
-  }
-  const auto& velocity_record = system.fieldRecord(velocity_field);
-  if (velocity_record.components != graph.dimension) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Conservative phase velocity dimension does not match the phase graph.");
-  }
-  const auto* entity_map =
-      system.fieldDofHandler(phase_field).getEntityDofMap();
-  if (entity_map == nullptr) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Conservative phase velocity sampling requires a vertex-nodal phase field.");
-  }
-  const auto vertex_velocity = evaluateVertexField(
-      system,
-      *sim.primary_mesh,
-      velocity_field,
-      state,
-      static_cast<std::size_t>(graph.dimension),
-      "sampling conservative phase velocity");
-  std::vector<svmp::FE::Real> accumulated(graph.nodes * 4u,
-                                           svmp::FE::Real{0.0});
-  for (std::size_t vertex = 0;
-       vertex < sim.primary_mesh->n_vertices(); ++vertex) {
-    const auto dofs = entity_map->getVertexDofs(
-        static_cast<svmp::FE::GlobalIndex>(vertex));
-    if (dofs.size() != 1u || dofs.front() < 0 ||
-        static_cast<std::size_t>(dofs.front()) >= graph.nodes) {
+  const auto comm = activeFESystemCommunicator(system);
+  std::vector<svmp::FE::Real> accumulated;
+  std::exception_ptr local_preparation_failure;
+  try {
+    if (graph.nodes >
+        std::numeric_limits<std::size_t>::max() / 4u) {
+      throw std::overflow_error(
+          "[svMultiPhysics::Application] Conservative phase velocity sampling graph size overflows its accumulation layout.");
+    }
+    velocity.resize(graph.nodes);
+    accumulated.assign(
+        graph.nodes * 4u, svmp::FE::Real{0.0});
+    const auto phase_field = system.findFieldByName(
+        request.conservative_phase.liquid_indicator.field_name);
+    const auto velocity_field = system.findFieldByName(
+        request.velocity.field_name);
+    if (phase_field == svmp::FE::INVALID_FIELD_ID ||
+        velocity_field == svmp::FE::INVALID_FIELD_ID) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase field does not have exactly one in-range DOF per mesh vertex.");
+          "[svMultiPhysics::Application] Conservative phase velocity sampling could not resolve its phase or velocity field.");
     }
-    const auto node = static_cast<std::size_t>(dofs.front());
-    for (int d = 0; d < graph.dimension; ++d) {
-      accumulated[4u * node + static_cast<std::size_t>(d)] +=
-          static_cast<svmp::FE::Real>(
-              vertex_velocity[
-                  vertex * static_cast<std::size_t>(graph.dimension) +
-                  static_cast<std::size_t>(d)]);
-    }
-    accumulated[4u * node + 3u] += svmp::FE::Real{1.0};
-  }
-  allReduceConservativePhaseBuffer(
-      accumulated, activeFESystemCommunicator(system));
-  for (std::size_t node = 0; node < graph.nodes; ++node) {
-    const auto samples = accumulated[4u * node + 3u];
-    if (!std::isfinite(samples) || !(samples > svmp::FE::Real{0.0})) {
+    const auto& velocity_record = system.fieldRecord(velocity_field);
+    if (velocity_record.components != graph.dimension) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase velocity sampling left a graph node without a value.");
+          "[svMultiPhysics::Application] Conservative phase velocity dimension does not match the phase graph.");
     }
-    for (int d = 0; d < graph.dimension; ++d) {
-      const auto value =
-          accumulated[4u * node + static_cast<std::size_t>(d)] / samples;
-      if (!std::isfinite(value)) {
+    const auto* entity_map =
+        system.fieldDofHandler(phase_field).getEntityDofMap();
+    if (entity_map == nullptr) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase velocity sampling requires a vertex-nodal phase field.");
+    }
+    const auto vertex_velocity = evaluateVertexField(
+        system,
+        *sim.primary_mesh,
+        velocity_field,
+        state,
+        static_cast<std::size_t>(graph.dimension),
+        "sampling conservative phase velocity");
+    for (std::size_t vertex = 0;
+         vertex < sim.primary_mesh->n_vertices(); ++vertex) {
+      const auto dofs = entity_map->getVertexDofs(
+          static_cast<svmp::FE::GlobalIndex>(vertex));
+      if (dofs.size() != 1u || dofs.front() < 0 ||
+          static_cast<std::size_t>(dofs.front()) >= graph.nodes) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] Conservative phase velocity sampling produced a non-finite value.");
+            "[svMultiPhysics::Application] Conservative phase field does not have exactly one in-range DOF per mesh vertex.");
       }
-      velocity[node][static_cast<std::size_t>(d)] = value;
+      const auto node = static_cast<std::size_t>(dofs.front());
+      for (int d = 0; d < graph.dimension; ++d) {
+        accumulated[4u * node + static_cast<std::size_t>(d)] +=
+            static_cast<svmp::FE::Real>(
+                vertex_velocity[
+                    vertex * static_cast<std::size_t>(graph.dimension) +
+                    static_cast<std::size_t>(d)]);
+      }
+      accumulated[4u * node + 3u] += svmp::FE::Real{1.0};
     }
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
   }
+  requireCollectivePhasePreparation(
+      local_preparation_failure,
+      comm,
+      "conservative_phase_velocity_local_sampling");
+  allReduceConservativePhaseBuffer(accumulated, comm);
+
+  std::exception_ptr local_validation_failure;
+  try {
+    for (std::size_t node = 0; node < graph.nodes; ++node) {
+      const auto samples = accumulated[4u * node + 3u];
+      if (!std::isfinite(samples) || !(samples > svmp::FE::Real{0.0})) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase velocity sampling left a graph node without a value.");
+      }
+      for (int d = 0; d < graph.dimension; ++d) {
+        const auto value =
+            accumulated[4u * node + static_cast<std::size_t>(d)] / samples;
+        if (!std::isfinite(value)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Conservative phase velocity sampling produced a non-finite value.");
+        }
+        velocity[node][static_cast<std::size_t>(d)] = value;
+      }
+    }
+  } catch (...) {
+    local_validation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_validation_failure,
+      comm,
+      "conservative_phase_velocity_post_reduction_validation");
   return velocity;
 }
 
@@ -14016,48 +20267,75 @@ conservativePhaseNodeCoordinates(
     svmp::FE::FieldId phase_field,
     const svmp::FE::level_set::LevelSetP1PhaseTransportGraph& graph)
 {
-  const auto* entity_map =
-      system.fieldDofHandler(phase_field).getEntityDofMap();
-  if (entity_map == nullptr) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Conservative phase fixed regions require a vertex-nodal phase field.");
-  }
+  const svmp::FE::dofs::EntityDofMap* entity_map = nullptr;
   const auto& mesh = system.meshAccess();
-  std::vector<svmp::FE::Real> accumulated(
-      graph.nodes * 4u, svmp::FE::Real{0.0});
-  for (svmp::FE::GlobalIndex vertex = 0;
-       vertex < mesh.numVertices(); ++vertex) {
-    const auto dofs = entity_map->getVertexDofs(vertex);
-    if (dofs.size() != 1u || dofs.front() < 0 ||
-        static_cast<std::size_t>(dofs.front()) >= graph.nodes) {
+  const auto comm = activeFESystemCommunicator(system);
+  std::vector<svmp::FE::Real> accumulated;
+  std::exception_ptr local_coordinate_preparation_failure;
+  try {
+    entity_map =
+        system.fieldDofHandler(phase_field).getEntityDofMap();
+    if (entity_map == nullptr) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase fixed regions require exactly one in-range phase DOF per vertex.");
+          "[svMultiPhysics::Application] Conservative phase fixed regions require a vertex-nodal phase field.");
     }
-    const auto coordinate = mesh.getNodeCoordinates(vertex);
-    const auto node = static_cast<std::size_t>(dofs.front());
-    for (std::size_t dimension = 0u; dimension < 3u; ++dimension) {
-      if (!std::isfinite(coordinate[dimension])) {
+    if (graph.nodes >
+        std::numeric_limits<std::size_t>::max() / 4u) {
+      throw std::overflow_error(
+          "[svMultiPhysics::Application] Conservative phase fixed-region coordinate buffer size overflows.");
+    }
+    accumulated.assign(
+        graph.nodes * 4u, svmp::FE::Real{0.0});
+    for (svmp::FE::GlobalIndex vertex = 0;
+         vertex < mesh.numVertices(); ++vertex) {
+      const auto dofs = entity_map->getVertexDofs(vertex);
+      if (dofs.size() != 1u || dofs.front() < 0 ||
+          static_cast<std::size_t>(dofs.front()) >= graph.nodes) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] Conservative phase fixed region found a non-finite node coordinate.");
+            "[svMultiPhysics::Application] Conservative phase fixed regions require exactly one in-range phase DOF per vertex.");
       }
-      accumulated[4u * node + dimension] += coordinate[dimension];
+      const auto coordinate = mesh.getNodeCoordinates(vertex);
+      const auto node = static_cast<std::size_t>(dofs.front());
+      for (std::size_t dimension = 0u; dimension < 3u; ++dimension) {
+        if (!std::isfinite(coordinate[dimension])) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Conservative phase fixed region found a non-finite node coordinate.");
+        }
+        accumulated[4u * node + dimension] += coordinate[dimension];
+      }
+      accumulated[4u * node + 3u] += svmp::FE::Real{1.0};
     }
-    accumulated[4u * node + 3u] += svmp::FE::Real{1.0};
+  } catch (...) {
+    local_coordinate_preparation_failure = std::current_exception();
   }
-  allReduceConservativePhaseBuffer(
-      accumulated, activeFESystemCommunicator(system));
-  std::vector<std::array<svmp::FE::Real, 3>> coordinates(graph.nodes);
-  for (std::size_t node = 0u; node < graph.nodes; ++node) {
-    const auto samples = accumulated[4u * node + 3u];
-    if (!std::isfinite(samples) || !(samples > svmp::FE::Real{0.0})) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase fixed region left a graph node without coordinates.");
+  requireCollectivePhasePreparation(
+      local_coordinate_preparation_failure,
+      comm,
+      "conservative_phase_fixed_region_coordinate_preparation");
+  allReduceConservativePhaseBuffer(accumulated, comm);
+
+  std::vector<std::array<svmp::FE::Real, 3>> coordinates;
+  std::exception_ptr local_coordinate_validation_failure;
+  try {
+    coordinates.resize(graph.nodes);
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+      const auto samples = accumulated[4u * node + 3u];
+      if (!std::isfinite(samples) || !(samples > svmp::FE::Real{0.0})) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase fixed region left a graph node without coordinates.");
+      }
+      for (std::size_t dimension = 0u; dimension < 3u; ++dimension) {
+        coordinates[node][dimension] =
+            accumulated[4u * node + dimension] / samples;
+      }
     }
-    for (std::size_t dimension = 0u; dimension < 3u; ++dimension) {
-      coordinates[node][dimension] =
-          accumulated[4u * node + dimension] / samples;
-    }
+  } catch (...) {
+    local_coordinate_validation_failure = std::current_exception();
   }
+  requireCollectivePhasePreparation(
+      local_coordinate_validation_failure,
+      comm,
+      "conservative_phase_fixed_region_coordinate_validation");
   return coordinates;
 }
 
@@ -14098,18 +20376,39 @@ std::vector<std::uint8_t> conservativePhaseContactProtectedNodes(
     std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>
         constraints)
 {
-  std::vector<std::uint8_t> protected_nodes(graph.nodes, 0u);
   const auto comm = activeFESystemCommunicator(system);
+  std::vector<std::uint8_t> protected_nodes;
+  std::exception_ptr local_mask_storage_failure;
+  try {
+    protected_nodes.assign(graph.nodes, 0u);
+  } catch (...) {
+    local_mask_storage_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_mask_storage_failure,
+      comm,
+      "conservative_phase_contact_mask_storage");
   if (globalSumSize(constraints.size(), comm) == 0u) {
     return protected_nodes;
   }
-  const auto phase_field = system.findFieldByName(
-      request.conservative_phase.liquid_indicator.field_name);
-  if (phase_field == svmp::FE::INVALID_FIELD_ID) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Conservative phase contact protection could not resolve the phase field.");
+  svmp::FE::FieldId phase_field = svmp::FE::INVALID_FIELD_ID;
+  const svmp::FE::dofs::DofHandler* phase_dofs = nullptr;
+  std::exception_ptr local_phase_layout_failure;
+  try {
+    phase_field = system.findFieldByName(
+        request.conservative_phase.liquid_indicator.field_name);
+    if (phase_field == svmp::FE::INVALID_FIELD_ID) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase contact protection could not resolve the phase field.");
+    }
+    phase_dofs = &system.fieldDofHandler(phase_field);
+  } catch (...) {
+    local_phase_layout_failure = std::current_exception();
   }
-  const auto& phase_dofs = system.fieldDofHandler(phase_field);
+  requireCollectivePhasePreparation(
+      local_phase_layout_failure,
+      comm,
+      "conservative_phase_contact_phase_layout");
   const auto& mesh = system.meshAccess();
   const bool local_identity_available =
       mesh.parallelSize() == 1 || mesh.globalEntityIdsAvailable();
@@ -14120,20 +20419,20 @@ std::vector<std::uint8_t> conservativePhaseContactProtectedNodes(
 
   std::set<svmp::FE::GlobalIndex> local_parent_ids;
   bool local_constraints_valid = true;
-  for (const auto& constraint : constraints) {
-    local_constraints_valid =
-        constraint.parent_cell_global_id !=
-            svmp::FE::INVALID_GLOBAL_INDEX &&
-        local_constraints_valid;
-    if (constraint.parent_cell_global_id !=
-        svmp::FE::INVALID_GLOBAL_INDEX) {
-      local_parent_ids.insert(constraint.parent_cell_global_id);
-    }
-  }
-  std::vector<svmp::FE::Real> global_mask(graph.nodes,
-                                           svmp::FE::Real{0.0});
+  std::vector<svmp::FE::Real> global_mask;
   std::set<svmp::FE::GlobalIndex> matched_parent_ids;
   try {
+    global_mask.assign(graph.nodes, svmp::FE::Real{0.0});
+    for (const auto& constraint : constraints) {
+      local_constraints_valid =
+          constraint.parent_cell_global_id !=
+              svmp::FE::INVALID_GLOBAL_INDEX &&
+          local_constraints_valid;
+      if (constraint.parent_cell_global_id !=
+          svmp::FE::INVALID_GLOBAL_INDEX) {
+        local_parent_ids.insert(constraint.parent_cell_global_id);
+      }
+    }
     mesh.forEachOwnedCell([&](svmp::FE::GlobalIndex cell) {
       const auto global_cell = mesh.globalEntityIdsAvailable()
           ? mesh.getCellGlobalId(cell)
@@ -14141,7 +20440,7 @@ std::vector<std::uint8_t> conservativePhaseContactProtectedNodes(
       if (!local_parent_ids.contains(global_cell)) {
         return;
       }
-      const auto cell_dofs = phase_dofs.getCellDofs(cell);
+      const auto cell_dofs = phase_dofs->getCellDofs(cell);
       if (cell_dofs.empty()) {
         throw std::runtime_error(
             "a protected contact parent has no phase DOFs");
@@ -14158,7 +20457,7 @@ std::vector<std::uint8_t> conservativePhaseContactProtectedNodes(
     });
     local_constraints_valid =
         matched_parent_ids == local_parent_ids && local_constraints_valid;
-  } catch (const std::exception&) {
+  } catch (...) {
     local_constraints_valid = false;
   }
   if (globalMinDouble(local_constraints_valid ? 1.0 : 0.0, comm) != 1.0) {
@@ -14166,16 +20465,24 @@ std::vector<std::uint8_t> conservativePhaseContactProtectedNodes(
         "[svMultiPhysics::Application] Conservative phase contact protection could not map every accepted contact parent to its phase DOFs.");
   }
   allReduceConservativePhaseBuffer(global_mask, comm);
-  for (std::size_t node = 0u; node < graph.nodes; ++node) {
-    if (!std::isfinite(global_mask[node]) ||
-        global_mask[node] < svmp::FE::Real{0.0}) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase contact protection produced an invalid distributed node mask.");
+  std::exception_ptr local_mask_validation_failure;
+  try {
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+      if (!std::isfinite(global_mask[node]) ||
+          global_mask[node] < svmp::FE::Real{0.0}) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase contact protection produced an invalid distributed node mask.");
+      }
+      protected_nodes[node] =
+          global_mask[node] > svmp::FE::Real{0.0} ? 1u : 0u;
     }
-    protected_nodes[node] = global_mask[node] > svmp::FE::Real{0.0}
-        ? 1u
-        : 0u;
+  } catch (...) {
+    local_mask_validation_failure = std::current_exception();
   }
+  requireCollectivePhasePreparation(
+      local_mask_validation_failure,
+      comm,
+      "conservative_phase_contact_mask_validation");
   return protected_nodes;
 }
 
@@ -14192,6 +20499,31 @@ using ConservativePhaseContactStageBuilder = std::function<
         std::span<const svmp::FE::Real>,
         LevelSetMaintenanceGeometryTransaction*)>;
 
+template <typename RestoreEndpoint>
+void restoreAcceptedContactStageEndpointAndRequireCollectiveSuccess(
+    const std::exception_ptr& local_stage_failure,
+    RestoreEndpoint&& restore_endpoint,
+    const svmp::MeshComm& comm)
+{
+  // Every rank must restore the endpoint before any rank reports a local
+  // stage failure.  Otherwise successful ranks can advance to commit
+  // consensus while a failed rank has already unwound the callback.
+  auto local_failure = local_stage_failure;
+  try {
+    std::forward<RestoreEndpoint>(restore_endpoint)();
+  } catch (...) {
+    // Keep the original stage diagnostic when both stage evaluation and
+    // endpoint restoration fail locally.
+    if (local_failure == nullptr) {
+      local_failure = std::current_exception();
+    }
+  }
+  requireCollectivePhasePreparation(
+      local_failure,
+      comm,
+      "accepted_contact_stage_evaluation_and_endpoint_restore");
+}
+
 ConservativePhaseContactStageCandidate
 buildAcceptedFreeSurfaceContactStageCandidate(
     application::core::SimulationComponents& sim,
@@ -14205,31 +20537,111 @@ buildAcceptedFreeSurfaceContactStageCandidate(
     std::uint64_t endpoint_state_revision,
     std::span<const svmp::FE::Real> previous_solution,
     std::span<const svmp::FE::Real> endpoint_solution,
-    LevelSetMaintenanceGeometryTransaction* active_transaction)
+    LevelSetMaintenanceGeometryTransaction* active_transaction,
+    const std::optional<svmp::FE::systems::
+                            FreeSurfaceFirstOrderGeneralizedAlphaProvenance>&
+        first_order_generalized_alpha = std::nullopt,
+    const DynamicContactFirstOrderGeneralizedAlphaObservation*
+        exact_operator_stage_observation = nullptr)
 {
-  if (endpoint_solution.size() != previous_solution.size()) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Contact-stage reconstruction requires equal endpoint and previous solution layouts.");
-  }
-
+  const auto comm = activeFESystemCommunicator(*sim.fe_system);
   ConservativePhaseContactStageCandidate contact_stage;
-  contact_stage.stage_solution.assign(
-      endpoint_solution.size(), svmp::FE::Real{0.0});
-  for (std::size_t i = 0; i < contact_stage.stage_solution.size(); ++i) {
-    contact_stage.stage_solution[i] =
-        (svmp::FE::Real{1.0} - stage_alpha_f) * previous_solution[i] +
-        stage_alpha_f * endpoint_solution[i];
-  }
-
-  std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
+  std::optional<LevelSetMaintenanceGeometryTransaction>
       owned_transaction;
-  if (active_transaction == nullptr) {
-    owned_transaction =
-        std::make_unique<LevelSetMaintenanceGeometryTransaction>(
-            sim, lifecycle, refresh_cache, active_cut_requests);
-    active_transaction = owned_transaction.get();
+  const bool locally_owns_transaction = active_transaction == nullptr;
+  const bool any_owned_transaction =
+      globalAnyBool(locally_owns_transaction, comm);
+  const bool any_reused_transaction =
+      globalAnyBool(!locally_owns_transaction, comm);
+  if (any_owned_transaction && any_reused_transaction) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Contact-stage reconstruction transaction ownership differs across the FE communicator.");
   }
 
+  std::exception_ptr local_preparation_failure;
+  try {
+    if (!locally_owns_transaction && !active_transaction->active()) {
+      throw std::logic_error(
+          "[svMultiPhysics::Application] Contact-stage reconstruction received an inactive geometry transaction.");
+    }
+    if (endpoint_solution.size() != previous_solution.size()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Contact-stage reconstruction requires equal endpoint and previous solution layouts.");
+    }
+    contact_stage.stage_solution.assign(
+        endpoint_solution.size(), svmp::FE::Real{0.0});
+    for (std::size_t i = 0; i < contact_stage.stage_solution.size(); ++i) {
+      contact_stage.stage_solution[i] =
+          (svmp::FE::Real{1.0} - stage_alpha_f) * previous_solution[i] +
+          stage_alpha_f * endpoint_solution[i];
+    }
+    if (first_order_generalized_alpha.has_value() !=
+        (exact_operator_stage_observation != nullptr)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] First-order generalized-alpha "
+          "contact-stage construction requires its exact operator-stage "
+          "field snapshot.");
+    }
+    if (exact_operator_stage_observation != nullptr) {
+      const auto& observation = *exact_operator_stage_observation;
+      if (observation.provenance != *first_order_generalized_alpha ||
+          !contactStageRealValuesMatch(
+              observation.state_time, stage_time) ||
+          !contactStageRealValuesMatch(
+              observation.provenance.alpha_f, stage_alpha_f) ||
+          !dynamicContactStageMeshRevisionMatches(
+              observation.mesh_revision, sim.fe_system->meshAccess())) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Exact generalized-alpha "
+            "operator-stage snapshot is stale for contact-stage "
+            "construction.");
+      }
+      overlayDynamicContactOperatorStageState(
+          *sim.fe_system,
+          sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations(),
+          observation.operator_stage_state,
+          contact_stage.stage_solution);
+    }
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_preparation_failure,
+      comm,
+      "accepted_contact_stage_geometry_refresh");
+  const auto [minimum_exact_stage_present,
+              maximum_exact_stage_present] =
+      globalMinMaxUint64(
+          exact_operator_stage_observation != nullptr ? 1u : 0u, comm);
+  if (minimum_exact_stage_present != maximum_exact_stage_present) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Exact generalized-alpha "
+        "operator-stage snapshot presence differs across the FE "
+        "communicator.");
+  }
+  if (exact_operator_stage_observation != nullptr) {
+    requireDynamicContactOperatorStageObservationConsensus(
+        *exact_operator_stage_observation, comm);
+  }
+
+  std::exception_ptr local_transaction_begin_failure;
+  try {
+    if (locally_owns_transaction) {
+      // In-place storage avoids an allocation before the transaction
+      // constructor's communicator-coordinated preparation phases.
+      owned_transaction.emplace(
+          sim, lifecycle, refresh_cache, active_cut_requests);
+      active_transaction = &*owned_transaction;
+    }
+  } catch (...) {
+    local_transaction_begin_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_transaction_begin_failure,
+      comm,
+      "accepted_contact_stage_transaction_begin");
+
+  std::exception_ptr local_stage_failure;
   try {
     (void)active_transaction->refresh(
         params,
@@ -14242,20 +20654,33 @@ buildAcceptedFreeSurfaceContactStageCandidate(
         stage_alpha_f,
         previous_state_revision,
         endpoint_state_revision,
-        contact_stage.stage_solution);
+        contact_stage.stage_solution,
+        first_order_generalized_alpha);
     contact_stage.constraints =
         captureAcceptedContactStageWallConstraints(
             sim, contact_stage.stages);
   } catch (...) {
-    const auto stage_failure = std::current_exception();
-    (void)active_transaction->refresh(params, endpoint_solution);
-    std::rethrow_exception(stage_failure);
+    local_stage_failure = std::current_exception();
   }
 
-  (void)active_transaction->refresh(params, endpoint_solution);
-  if (owned_transaction) {
-    owned_transaction->commit();
+  restoreAcceptedContactStageEndpointAndRequireCollectiveSuccess(
+      local_stage_failure,
+      [&] {
+        (void)active_transaction->refresh(params, endpoint_solution);
+      },
+      comm);
+  std::exception_ptr local_commit_failure;
+  try {
+    if (owned_transaction.has_value()) {
+      owned_transaction->commit();
+    }
+  } catch (...) {
+    local_commit_failure = std::current_exception();
   }
+  requireCollectivePhasePreparation(
+      local_commit_failure,
+      comm,
+      "accepted_contact_stage_transaction_commit");
   return contact_stage;
 }
 
@@ -14282,7 +20707,17 @@ void bindAcceptedFreeSurfaceContactStagesToEndpointRevision(
         "[svMultiPhysics::Application] Accepted contact-stage binding coverage differs across the FE communicator.");
   }
 
-  std::vector<std::uint64_t> bound_stage_revisions(stages.size(), 0u);
+  std::vector<std::uint64_t> bound_stage_revisions;
+  std::exception_ptr local_revision_storage_failure;
+  try {
+    bound_stage_revisions.assign(stages.size(), 0u);
+  } catch (...) {
+    local_revision_storage_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_revision_storage_failure,
+      comm,
+      "accepted_contact_stage_bound_revision_storage");
   for (std::size_t index = 0u; index < stages.size(); ++index) {
     const auto& stage = stages[index];
     const auto bound_stage_revision = acceptedContactStageRevision(
@@ -14291,7 +20726,8 @@ void bindAcceptedFreeSurfaceContactStagesToEndpointRevision(
         stage.geometry_revision.snapshot_revision_key,
         stage.stage_time,
         stage.stage_alpha_f,
-        stage_solution);
+        stage_solution,
+        stage.first_order_generalized_alpha);
     const auto [minimum_stage_revision, maximum_stage_revision] =
         globalMinMaxUint64(bound_stage_revision, comm);
     if (minimum_stage_revision != maximum_stage_revision) {
@@ -14376,6 +20812,47 @@ struct ConservativePhaseGeometryReconciliationResult {
   std::string diagnostic{};
 };
 
+struct ConservativePhaseFixedGraphBinding {
+  bool enabled{false};
+  std::string phase_field_name{};
+  svmp::FE::level_set::LevelSetP1PhaseGraphIdentity identity{};
+  std::uint64_t geometry_revision{0u};
+  std::uint64_t topology_revision{0u};
+  std::uint64_t ownership_revision{0u};
+  std::uint64_t numbering_revision{0u};
+};
+
+struct ConservativePhaseCandidateStageRequest {
+  bool enabled{false};
+  std::string phase_field_name{};
+  std::string velocity_field_name{};
+  svmp::FE::level_set::LevelSetVelocitySource velocity_source{
+      svmp::FE::level_set::LevelSetVelocitySource::ConstantVector};
+  svmp::FE::level_set::LevelSetP1PhaseGraphIdentity graph_identity{};
+  std::uint64_t graph_geometry_revision{0u};
+  std::uint64_t graph_topology_revision{0u};
+  std::uint64_t graph_ownership_revision{0u};
+  std::uint64_t graph_numbering_revision{0u};
+  std::vector<std::array<svmp::FE::Real, 3>> sampled_nodal_velocity{};
+};
+
+struct ConservativePhaseCandidateStageSnapshot {
+  svmp::FE::level_set::LevelSetP1PhaseSplitScheme scheme{
+      svmp::FE::level_set::LevelSetP1PhaseSplitScheme::
+          BackwardEulerExplicitIndicatorEndpointVelocity};
+  int temporal_order{0};
+  std::uint64_t prospective_step{0u};
+  std::uint64_t attempt{0u};
+  svmp::FE::Real step_start_time{0.0};
+  svmp::FE::Real step_end_time{0.0};
+  svmp::FE::Real q_input_time{0.0};
+  svmp::FE::Real velocity_state_time{0.0};
+  svmp::FE::Real time_step{0.0};
+  std::uint64_t operator_state_revision{0u};
+  std::vector<std::uint64_t> request_schedule_words{};
+  std::vector<ConservativePhaseCandidateStageRequest> requests{};
+};
+
 struct ConservativePhaseMaintenanceStageLedger {
   bool reinitialization_due{false};
   bool reinitialization_applied{false};
@@ -14384,6 +20861,8 @@ struct ConservativePhaseMaintenanceStageLedger {
   svmp::FE::Real raw_post_transport_geometry_measure{0.0};
   svmp::FE::Real post_reinitialization_geometry_measure{0.0};
   svmp::FE::Real post_correction_geometry_measure{0.0};
+  svmp::FE::Real maximum_nodal_boundary_mass_transfer{0.0};
+  svmp::FE::Real boundary_mass_tolerance{0.0};
   ConservativePhaseMomentMismatch post_reinitialization_mismatch{};
   ConservativePhaseMomentMismatch post_correction_mismatch{};
   svmp::FE::level_set::LevelSetP1PhaseTransportStageResult
@@ -14392,6 +20871,8 @@ struct ConservativePhaseMaintenanceStageLedger {
   svmp::FE::level_set::LevelSetSignedDistanceRepairResult
       reinitialization{};
   ConservativePhaseGeometryReconciliationResult reconciliation{};
+  std::optional<svmp::FE::level_set::LevelSetP1PhaseSplitStageProvenance>
+      split_stage_provenance{};
 };
 
 struct ConservativePhaseCandidateResult {
@@ -14404,6 +20885,556 @@ struct ConservativePhaseCandidateResult {
   std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
       geometry_transaction{};
 };
+
+bool sameConservativePhaseGraphIdentity(
+    const svmp::FE::level_set::LevelSetP1PhaseGraphIdentity& left,
+    const svmp::FE::level_set::LevelSetP1PhaseGraphIdentity& right) noexcept
+{
+  return left.dimension == right.dimension &&
+         left.nodes == right.nodes && left.edges == right.edges &&
+         left.geometry_revision == right.geometry_revision &&
+         left.topology_revision == right.topology_revision &&
+         left.ownership_revision == right.ownership_revision &&
+         left.numbering_revision == right.numbering_revision &&
+         left.dof_layout_revision == right.dof_layout_revision &&
+         left.content_revision == right.content_revision;
+}
+
+void appendConservativePhaseReplicatedGraphIdentityWords(
+    std::vector<std::uint64_t>& words,
+    const svmp::FE::level_set::LevelSetP1PhaseGraphIdentity& identity)
+{
+  appendMaintenanceScheduleSigned(words, identity.dimension);
+  appendMaintenanceScheduleWord(
+      words, static_cast<std::uint64_t>(identity.nodes));
+  appendMaintenanceScheduleWord(
+      words, static_cast<std::uint64_t>(identity.edges));
+  // Mesh event counters are rank-local cache stamps.  The fixed-background
+  // guard compares them locally against the accepted q^n graph; only the
+  // replicated layout and graph-content identities enter rank consensus.
+  appendMaintenanceScheduleWord(words, identity.dof_layout_revision);
+  appendMaintenanceScheduleWord(words, identity.content_revision);
+}
+
+void appendConservativePhaseCandidateStageWords(
+    std::vector<std::uint64_t>& words,
+    const ConservativePhaseCandidateStageSnapshot& stage)
+{
+  appendMaintenanceScheduleWord(words, 0x4350535441474531ull);
+  appendMaintenanceScheduleEnum(words, stage.scheme);
+  appendMaintenanceScheduleSigned(words, stage.temporal_order);
+  appendMaintenanceScheduleWord(words, stage.prospective_step);
+  appendMaintenanceScheduleWord(words, stage.attempt);
+  appendMaintenanceScheduleReal(words, stage.step_start_time);
+  appendMaintenanceScheduleReal(words, stage.step_end_time);
+  appendMaintenanceScheduleReal(words, stage.q_input_time);
+  appendMaintenanceScheduleReal(words, stage.velocity_state_time);
+  appendMaintenanceScheduleReal(words, stage.time_step);
+  appendMaintenanceScheduleWord(words, stage.operator_state_revision);
+  appendMaintenanceScheduleWord(
+      words,
+      static_cast<std::uint64_t>(stage.request_schedule_words.size()));
+  for (const auto word : stage.request_schedule_words) {
+    appendMaintenanceScheduleWord(words, word);
+  }
+  appendMaintenanceScheduleWord(
+      words, static_cast<std::uint64_t>(stage.requests.size()));
+  for (const auto& request : stage.requests) {
+    appendMaintenanceScheduleBool(words, request.enabled);
+    appendMaintenanceScheduleString(words, request.phase_field_name);
+    appendMaintenanceScheduleString(words, request.velocity_field_name);
+    appendMaintenanceScheduleEnum(words, request.velocity_source);
+    if (!request.enabled) {
+      continue;
+    }
+    appendConservativePhaseReplicatedGraphIdentityWords(
+        words, request.graph_identity);
+    appendMaintenanceScheduleWord(
+        words,
+        static_cast<std::uint64_t>(
+            request.sampled_nodal_velocity.size()));
+    appendMaintenanceScheduleWord(
+        words,
+        svmp::FE::level_set::levelSetP1PhaseVelocityContentRevision(
+            request.sampled_nodal_velocity));
+  }
+}
+
+bool collectiveConservativePhaseVelocityBitsAgree(
+    std::span<const std::array<svmp::FE::Real, 3>> velocity,
+    const svmp::MeshComm& comm)
+{
+#ifdef MESH_HAS_MPI
+  int initialized = 0;
+  int finalized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized != 0) {
+    MPI_Finalized(&finalized);
+  }
+  if (comm.size() > 1) {
+    if (initialized == 0 || finalized != 0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase velocity comparison requires an active MPI runtime.");
+    }
+    static_assert(
+        sizeof(svmp::FE::Real) == sizeof(std::uint64_t),
+        "Conservative phase exact velocity comparison expects binary64 FE scalars");
+    constexpr std::size_t chunk_nodes = 128u;
+    constexpr std::size_t chunk_words = 3u * chunk_nodes;
+    std::array<std::uint64_t, chunk_words> local_words{};
+    std::array<std::uint64_t, chunk_words> minimum_words{};
+    std::array<std::uint64_t, chunk_words> maximum_words{};
+    const auto [minimum_nodes, maximum_nodes] = globalMinMaxUint64(
+        static_cast<std::uint64_t>(velocity.size()), comm);
+    const bool sizes_agree = minimum_nodes == maximum_nodes;
+    const auto collective_nodes =
+        static_cast<std::size_t>(maximum_nodes);
+    bool values_agree = true;
+#ifdef MPI_UINT64_T
+    const MPI_Datatype datatype = MPI_UINT64_T;
+#else
+    const MPI_Datatype datatype = MPI_UNSIGNED_LONG_LONG;
+#endif
+    for (std::size_t offset = 0u; offset < collective_nodes;) {
+      const auto nodes =
+          std::min(chunk_nodes, collective_nodes - offset);
+      const auto words = nodes * 3u;
+      std::fill_n(local_words.begin(), words, 0u);
+      const auto local_nodes = offset < velocity.size()
+          ? std::min(nodes, velocity.size() - offset)
+          : 0u;
+      for (std::size_t node = 0u; node < local_nodes; ++node) {
+        for (std::size_t component = 0u; component < 3u; ++component) {
+          local_words[3u * node + component] =
+              std::bit_cast<std::uint64_t>(
+                  velocity[offset + node][component]);
+        }
+      }
+      const auto count = static_cast<int>(words);
+      MPI_Allreduce(
+          local_words.data(), minimum_words.data(), count, datatype,
+          MPI_MIN, comm.native());
+      MPI_Allreduce(
+          local_words.data(), maximum_words.data(), count, datatype,
+          MPI_MAX, comm.native());
+      values_agree =
+          std::equal(
+              minimum_words.begin(),
+              minimum_words.begin() +
+                  static_cast<std::ptrdiff_t>(words),
+              maximum_words.begin()) &&
+          values_agree;
+      offset += nodes;
+    }
+    return sizes_agree && values_agree;
+  }
+#else
+  (void)velocity;
+  (void)comm;
+#endif
+  return true;
+}
+
+bool collectiveConservativePhaseCandidateStageSnapshotAgrees(
+    const ConservativePhaseCandidateStageSnapshot& stage,
+    const svmp::MeshComm& comm)
+{
+  std::vector<std::uint64_t> words;
+  std::exception_ptr local_word_failure;
+  try {
+    appendConservativePhaseCandidateStageWords(words, stage);
+  } catch (...) {
+    local_word_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_word_failure,
+      comm,
+      "conservative_phase_candidate_stage_consensus_words");
+  if (!application::core::collectiveLevelSetMaintenanceCanonicalWordsAgree(
+          words, comm)) {
+    return false;
+  }
+  for (const auto& request : stage.requests) {
+    if (request.enabled &&
+        !collectiveConservativePhaseVelocityBitsAgree(
+            request.sampled_nodal_velocity, comm)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void appendConservativePhaseSplitStageProvenanceWords(
+    std::vector<std::uint64_t>& words,
+    const std::optional<
+        svmp::FE::level_set::LevelSetP1PhaseSplitStageProvenance>&
+        provenance)
+{
+  appendMaintenanceScheduleBool(words, provenance.has_value());
+  if (!provenance.has_value()) {
+    return;
+  }
+  appendMaintenanceScheduleEnum(words, provenance->scheme);
+  appendMaintenanceScheduleEnum(words, provenance->transport_mesh_policy);
+  appendMaintenanceScheduleSigned(words, provenance->temporal_order);
+  appendMaintenanceScheduleWord(words, provenance->prospective_step);
+  appendMaintenanceScheduleWord(words, provenance->attempt);
+  appendMaintenanceScheduleReal(words, provenance->step_start_time);
+  appendMaintenanceScheduleReal(words, provenance->step_end_time);
+  appendMaintenanceScheduleReal(words, provenance->q_input_time);
+  appendMaintenanceScheduleReal(words, provenance->velocity_state_time);
+  appendMaintenanceScheduleReal(words, provenance->time_step);
+  appendMaintenanceScheduleWord(words, provenance->operator_state_revision);
+  appendMaintenanceScheduleWord(words, provenance->previous_q_revision);
+  appendMaintenanceScheduleWord(words, provenance->nodal_velocity_revision);
+  appendConservativePhaseReplicatedGraphIdentityWords(
+      words, provenance->previous_graph_identity);
+  appendConservativePhaseReplicatedGraphIdentityWords(
+      words, provenance->operator_graph_identity);
+  appendMaintenanceScheduleWord(
+      words, provenance->final_flux_ledger_digest);
+  appendMaintenanceScheduleReal(
+      words, provenance->stage_options.invariant_tolerance);
+  appendMaintenanceScheduleReal(
+      words, provenance->stage_options.component_activity_tolerance);
+  appendMaintenanceScheduleReal(
+      words, provenance->stage_options.maximum_courant);
+  appendMaintenanceScheduleBool(
+      words, provenance->stage_options.enforce_courant_limit);
+  appendMaintenanceScheduleBool(
+      words, provenance->stage_options.require_constant_preservation);
+}
+
+std::vector<ConservativePhaseFixedGraphBinding>
+captureConservativePhaseFixedGraphBindings(
+    const svmp::FE::systems::FESystem& system,
+    const std::vector<LevelSetMaintenanceRequest>& requests,
+    const svmp::MeshComm& comm)
+{
+  std::vector<ConservativePhaseFixedGraphBinding> bindings;
+  std::exception_ptr local_failure;
+  try {
+    bindings.resize(requests.size());
+    for (std::size_t index = 0u; index < requests.size(); ++index) {
+      const auto& request = requests[index];
+      auto& binding = bindings[index];
+      binding.enabled = request.conservative_phase.enabled;
+      binding.phase_field_name =
+          request.conservative_phase.liquid_indicator.field_name;
+      if (!binding.enabled) {
+        continue;
+      }
+      if (!request.conservative_phase_graph.has_value()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase fixed-background transport requires an initialized accepted q graph.");
+      }
+      const auto& graph = *request.conservative_phase_graph;
+      binding.identity =
+          svmp::FE::level_set::levelSetP1PhaseGraphIdentity(graph);
+      binding.geometry_revision = graph.geometry_revision;
+      binding.topology_revision = graph.topology_revision;
+      binding.ownership_revision = graph.ownership_revision;
+      binding.numbering_revision = graph.numbering_revision;
+      if (!graph.success || binding.identity.content_revision == 0u) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase accepted q graph has no valid content identity.");
+      }
+    }
+  } catch (...) {
+    local_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_failure, comm, "conservative_phase_fixed_graph_capture");
+
+  std::vector<std::uint64_t> words;
+  std::exception_ptr local_word_failure;
+  try {
+    appendMaintenanceScheduleWord(
+        words, static_cast<std::uint64_t>(bindings.size()));
+    for (const auto& binding : bindings) {
+      appendMaintenanceScheduleBool(words, binding.enabled);
+      appendMaintenanceScheduleString(words, binding.phase_field_name);
+      if (binding.enabled) {
+        appendConservativePhaseReplicatedGraphIdentityWords(
+            words, binding.identity);
+      }
+    }
+  } catch (...) {
+    local_word_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_word_failure, comm,
+      "conservative_phase_fixed_graph_consensus_words");
+  if (!application::core::collectiveLevelSetMaintenanceCanonicalWordsAgree(
+          words, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase accepted q graph identity differs across the active FE communicator.");
+  }
+  (void)system;
+  return bindings;
+}
+
+void requireConservativePhaseFixedGraphBindingsCurrent(
+    const svmp::FE::systems::FESystem& system,
+    const std::vector<LevelSetMaintenanceRequest>& requests,
+    std::span<const ConservativePhaseFixedGraphBinding> bindings,
+    const svmp::MeshComm& comm,
+    std::string_view phase)
+{
+  bool local_current = bindings.size() == requests.size();
+  std::exception_ptr local_failure;
+  try {
+    const auto& mesh = system.meshAccess();
+    if (local_current) {
+      for (std::size_t index = 0u; index < requests.size(); ++index) {
+        const auto& request = requests[index];
+        const auto& binding = bindings[index];
+        if (binding.enabled != request.conservative_phase.enabled ||
+            binding.phase_field_name !=
+                request.conservative_phase.liquid_indicator.field_name) {
+          local_current = false;
+          break;
+        }
+        if (!binding.enabled) {
+          continue;
+        }
+        const auto phase_field = system.findFieldByName(
+            binding.phase_field_name);
+        if (phase_field == svmp::FE::INVALID_FIELD_ID ||
+            !request.conservative_phase_graph.has_value()) {
+          local_current = false;
+          break;
+        }
+        const auto& graph = *request.conservative_phase_graph;
+        const auto current_identity =
+            svmp::FE::level_set::levelSetP1PhaseGraphIdentity(graph);
+        const auto& dofs = system.fieldDofHandler(phase_field);
+        if (!sameConservativePhaseGraphIdentity(
+                current_identity, binding.identity) ||
+            graph.geometry_revision != binding.geometry_revision ||
+            graph.topology_revision != binding.topology_revision ||
+            graph.ownership_revision != binding.ownership_revision ||
+            graph.numbering_revision != binding.numbering_revision ||
+            mesh.geometryRevision() != binding.geometry_revision ||
+            mesh.topologyRevision() != binding.topology_revision ||
+            mesh.ownershipRevision() != binding.ownership_revision ||
+            mesh.numberingRevision() != binding.numbering_revision ||
+            dofs.dofLayoutRevision() !=
+                binding.identity.dof_layout_revision) {
+          local_current = false;
+          break;
+        }
+      }
+    }
+  } catch (...) {
+    local_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(local_failure, comm, phase);
+  if (globalAnyBool(!local_current, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase transport requires the accepted q^n graph and fixed background mesh to remain unchanged through the physical solve (phase='" +
+        std::string(phase) + "').");
+  }
+}
+
+bool sameConservativePhaseStageRealBits(double left, double right) noexcept
+{
+  return std::bit_cast<std::uint64_t>(left) ==
+         std::bit_cast<std::uint64_t>(right);
+}
+
+ConservativePhaseCandidateStageSnapshot
+buildConservativePhaseCandidateStageSnapshot(
+    application::core::SimulationComponents& sim,
+    svmp::FE::timestepping::TimeHistory& history,
+    std::vector<LevelSetMaintenanceRequest>& requests,
+    std::span<const ConservativePhaseFixedGraphBinding> fixed_graph_bindings,
+    const svmp::FE::timestepping::CandidateStageObservation& observation,
+    const svmp::MeshComm& comm)
+{
+  requireConservativePhaseFixedGraphBindingsCurrent(
+      *sim.fe_system,
+      requests,
+      fixed_graph_bindings,
+      comm,
+      "candidate_stage_fixed_background_preflight");
+
+  bool local_observation_ready = false;
+  std::exception_ptr local_observation_failure;
+  try {
+    const auto& mesh = sim.fe_system->meshAccess();
+    const auto expected_end_time = history.time() + history.dt();
+    local_observation_ready =
+        observation.scheme ==
+            svmp::FE::timestepping::SchemeKind::BackwardEuler &&
+        observation.temporal_order == 1 &&
+        observation.step_index == history.stepIndex() + 1 &&
+        observation.attempt_index >= 0 &&
+        observation.attempt_index < std::numeric_limits<int>::max() &&
+        observation.state_vector != nullptr &&
+        observation.state_vector->size() ==
+            sim.fe_system->dofHandler().getNumDofs() &&
+        !observation.generalized_alpha.has_value() &&
+        observation.mesh_revision.has_value() &&
+        std::isfinite(observation.step_start_time) &&
+        std::isfinite(observation.step_end_time) &&
+        std::isfinite(observation.state_time) &&
+        std::isfinite(observation.dt) && observation.dt > 0.0 &&
+        sameConservativePhaseStageRealBits(
+            observation.step_start_time, history.time()) &&
+        sameConservativePhaseStageRealBits(
+            observation.step_end_time, expected_end_time) &&
+        sameConservativePhaseStageRealBits(
+            observation.state_time, observation.step_end_time) &&
+        sameConservativePhaseStageRealBits(
+            observation.rate_time, observation.step_end_time) &&
+        sameConservativePhaseStageRealBits(
+            observation.dt, history.dt());
+    if (local_observation_ready) {
+      const auto& revision = *observation.mesh_revision;
+      local_observation_ready =
+          revision.geometry_revision == mesh.geometryRevision() &&
+          revision.topology_revision == mesh.topologyRevision() &&
+          revision.ownership_revision == mesh.ownershipRevision() &&
+          revision.numbering_revision == mesh.numberingRevision() &&
+          revision.field_layout_revision == mesh.fieldLayoutRevision() &&
+          revision.label_revision == mesh.labelRevision() &&
+          revision.active_configuration_epoch ==
+              mesh.activeConfigurationEpoch() &&
+          revision.coordinate_configuration_key ==
+              mesh.coordinateConfigurationKey();
+    }
+  } catch (...) {
+    local_observation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_observation_failure,
+      comm,
+      "conservative_phase_candidate_stage_metadata");
+  if (globalAnyBool(!local_observation_ready, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase transport requires one exact temporal-order-one Backward Euler endpoint-stage observation on every active FE rank.");
+  }
+
+  ConservativePhaseCandidateStageSnapshot snapshot;
+  std::exception_ptr local_state_failure;
+  try {
+    snapshot.temporal_order = observation.temporal_order;
+    snapshot.prospective_step =
+        static_cast<std::uint64_t>(observation.step_index);
+    snapshot.attempt =
+        static_cast<std::uint64_t>(observation.attempt_index) + 1u;
+    snapshot.step_start_time = observation.step_start_time;
+    snapshot.step_end_time = observation.step_end_time;
+    snapshot.q_input_time = observation.step_start_time;
+    snapshot.velocity_state_time = observation.state_time;
+    snapshot.time_step = observation.dt;
+    auto request_schedule =
+        canonicalLevelSetMaintenanceRequestSchedule(
+            requests,
+            LevelSetMaintenanceScheduleStage::
+                ProspectiveAcceptedEndpoint,
+            observation.step_index);
+    if (!request_schedule.supported) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase operator-stage provenance cannot bind an unsupported maintenance request schedule.");
+    }
+    snapshot.request_schedule_words =
+        std::move(request_schedule.words);
+    snapshot.requests.resize(requests.size());
+  } catch (...) {
+    local_state_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_state_failure,
+      comm,
+      "conservative_phase_operator_endpoint_state");
+  if (!application::core::collectiveLevelSetMaintenanceCanonicalWordsAgree(
+          snapshot.request_schedule_words, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase request metadata differs across the active FE communicator before source-dependent endpoint velocity sampling.");
+  }
+  snapshot.operator_state_revision =
+      collectiveMeshBoundaryStateFingerprint(
+          *observation.state_vector, comm);
+  if (snapshot.operator_state_revision == 0u) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase operator endpoint has no nonzero content revision.");
+  }
+
+  svmp::FE::systems::SystemStateView operator_state;
+  operator_state.time = observation.state_time;
+  operator_state.dt = observation.dt;
+  operator_state.effective_dt = observation.dt;
+  operator_state.dt_prev = history.dtPrev();
+  operator_state.u_vector = observation.state_vector;
+  operator_state.u_prev = history.uPrevSpan();
+  operator_state.u_prev_vector = &history.uPrev();
+
+  for (std::size_t index = 0u; index < requests.size(); ++index) {
+    auto& request = requests[index];
+    auto& staged_request = snapshot.requests[index];
+    std::exception_ptr local_request_failure;
+    try {
+      staged_request.enabled = request.conservative_phase.enabled;
+      staged_request.phase_field_name =
+          request.conservative_phase.liquid_indicator.field_name;
+      staged_request.velocity_field_name = request.velocity.field_name;
+      staged_request.velocity_source = request.velocity.source;
+      if (staged_request.enabled) {
+        if (!request.conservative_phase_graph.has_value()) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Conservative phase stage lost its accepted fixed-background graph.");
+        }
+        const auto& graph = *request.conservative_phase_graph;
+        staged_request.graph_identity =
+            svmp::FE::level_set::levelSetP1PhaseGraphIdentity(graph);
+        staged_request.graph_geometry_revision = graph.geometry_revision;
+        staged_request.graph_topology_revision = graph.topology_revision;
+        staged_request.graph_ownership_revision = graph.ownership_revision;
+        staged_request.graph_numbering_revision = graph.numbering_revision;
+      }
+    } catch (...) {
+      local_request_failure = std::current_exception();
+    }
+    requireCollectivePhasePreparation(
+        local_request_failure,
+        comm,
+        "conservative_phase_operator_stage_request_preparation");
+    if (!staged_request.enabled) {
+      continue;
+    }
+    staged_request.sampled_nodal_velocity =
+        sampleConservativePhaseVelocity(
+            sim,
+            request,
+            *request.conservative_phase_graph,
+            operator_state);
+    if (!collectiveConservativePhaseVelocityBitsAgree(
+            staged_request.sampled_nodal_velocity, comm)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase sampled endpoint velocity differs bitwise across the active FE communicator.");
+    }
+  }
+
+  std::vector<std::uint64_t> stage_words;
+  std::exception_ptr local_consensus_failure;
+  try {
+    appendConservativePhaseCandidateStageWords(stage_words, snapshot);
+  } catch (...) {
+    local_consensus_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_consensus_failure,
+      comm,
+      "conservative_phase_candidate_stage_consensus_words");
+  if (!application::core::collectiveLevelSetMaintenanceCanonicalWordsAgree(
+          stage_words, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase operator-stage metadata or sampled nodal velocity differs across the active FE communicator.");
+  }
+  return snapshot;
+}
 
 template <typename Value>
 void mixConservativePhaseArtifactFingerprint(
@@ -14440,9 +21471,18 @@ void mixConservativePhaseArtifactFingerprint(
 
 std::uint64_t conservativePhaseArtifactFingerprint(
     const LevelSetMaintenanceRequest& request,
-    const ConservativePhaseMaintenanceStageLedger& ledger)
+    const ConservativePhaseMaintenanceStageLedger& ledger,
+    std::uint64_t accepted_step,
+    svmp::FE::Real accepted_time,
+    svmp::FE::Real time_step,
+    std::uint64_t accepted_state_revision)
 {
   std::uint64_t fingerprint = 14695981039346656037ull;
+  mixConservativePhaseArtifactFingerprint(fingerprint, accepted_step);
+  mixConservativePhaseArtifactFingerprint(fingerprint, accepted_time);
+  mixConservativePhaseArtifactFingerprint(fingerprint, time_step);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, accepted_state_revision);
   mixConservativePhaseArtifactFingerprint(
       fingerprint, request.level_set_field_name);
   mixConservativePhaseArtifactFingerprint(
@@ -14458,6 +21498,23 @@ std::uint64_t conservativePhaseArtifactFingerprint(
       request.conservative_phase
           .classify_nonprimary_components_as_satellites);
   mixConservativePhaseArtifactFingerprint(
+      fingerprint, request.conservative_phase_graph.has_value());
+  if (request.conservative_phase_graph.has_value()) {
+    const auto live_graph_identity =
+        svmp::FE::level_set::levelSetP1PhaseGraphIdentity(
+            *request.conservative_phase_graph);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, live_graph_identity.dimension);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, live_graph_identity.nodes);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, live_graph_identity.edges);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, live_graph_identity.dof_layout_revision);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, live_graph_identity.content_revision);
+  }
+  mixConservativePhaseArtifactFingerprint(
       fingerprint, request.conservative_phase.fixed_flux_regions.size());
   for (const auto& box : request.conservative_phase.fixed_flux_regions) {
     mixConservativePhaseArtifactFingerprint(fingerprint, box.name);
@@ -14470,10 +21527,224 @@ std::uint64_t conservativePhaseArtifactFingerprint(
     }
   }
   mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.split_stage_provenance.has_value());
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint,
+      svmp::FE::level_set::levelSetP1PhaseFluxLedgerDigest(
+          ledger.transport_stage));
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint,
+      svmp::FE::level_set::levelSetP1PhaseVelocityContentRevision(
+          ledger.transport_stage.sampled_nodal_velocity));
+  if (ledger.split_stage_provenance.has_value()) {
+    const auto& provenance = *ledger.split_stage_provenance;
+    const auto mix_replicated_graph = [&](const auto& identity) {
+      mixConservativePhaseArtifactFingerprint(
+          fingerprint, identity.dimension);
+      mixConservativePhaseArtifactFingerprint(
+          fingerprint, identity.nodes);
+      mixConservativePhaseArtifactFingerprint(
+          fingerprint, identity.edges);
+      mixConservativePhaseArtifactFingerprint(
+          fingerprint, identity.dof_layout_revision);
+      mixConservativePhaseArtifactFingerprint(
+          fingerprint, identity.content_revision);
+    };
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.scheme);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.transport_mesh_policy);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.temporal_order);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.prospective_step);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.attempt);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.step_start_time);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.step_end_time);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.q_input_time);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.velocity_state_time);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.time_step);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.operator_state_revision);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.previous_q_revision);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.nodal_velocity_revision);
+    mix_replicated_graph(provenance.previous_graph_identity);
+    mix_replicated_graph(provenance.operator_graph_identity);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.final_flux_ledger_digest);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.stage_options.invariant_tolerance);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint,
+        provenance.stage_options.component_activity_tolerance);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.stage_options.maximum_courant);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, provenance.stage_options.enforce_courant_limit);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint,
+        provenance.stage_options.require_constant_preservation);
+  }
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.reinitialization_due);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.reinitialization_applied);
+  const auto& repair = ledger.reinitialization;
+  mixConservativePhaseArtifactFingerprint(fingerprint, repair.success);
+  mixConservativePhaseArtifactFingerprint(fingerprint, repair.method);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.repaired_dofs);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.preserved_dofs);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.interface_fragments);
+  mixConservativePhaseArtifactFingerprint(fingerprint, repair.cut_cells);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.interface_displacement_samples);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.max_abs_update);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.max_distance);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.max_interface_displacement);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.l2_interface_displacement);
+  mixConservativePhaseArtifactFingerprint(fingerprint, repair.iterations);
+  mixConservativePhaseArtifactFingerprint(fingerprint, repair.converged);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.zero_set_bound_satisfied);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.max_iteration_residual);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.max_signed_distance_error);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.max_unconstrained_signed_distance_error);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.max_wall_constrained_signed_distance_error);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.wall_contact_constraints);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.wall_contact_cells);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.wall_contact_dofs);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.wall_contact_constraints_satisfied);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.max_wall_contact_scale_residual);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.max_prescribed_contact_value_residual);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint,
+      repair.max_prescribed_contact_angle_error_radians);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.max_contact_line_displacement);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.max_contact_angle_change_radians);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.preserve_band_width);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, repair.diagnostic);
+
+  const auto& reconciliation = ledger.reconciliation;
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.success);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.target_reached);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.limited_by_displacement);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.limited_by_topology);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.iterations);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.line_search_evaluations);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.geometry_refresh_requests);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.geometry_rebuilds);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.rejected_geometry_trials);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.contact_protected_nodes);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.allowed_interface_displacement);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint,
+      reconciliation.accumulated_interface_displacement_bound);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.initial_residual_norm);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.final_residual_norm);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.maximum_final_nodal_residual);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.final_total_residual);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.maximum_removed_contact_increment);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.last_rejected_trial_diagnostic);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, reconciliation.diagnostic);
+
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.raw_post_transport_phase_measure);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.post_limit_phase_measure);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.raw_post_transport_geometry_measure);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.post_reinitialization_geometry_measure);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint,
+      ledger.post_reinitialization_mismatch.maximum_nodal_residual);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.post_reinitialization_mismatch.residual_norm);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.post_reinitialization_mismatch.total_residual);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.post_correction_geometry_measure);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint,
+      ledger.post_correction_mismatch.maximum_nodal_residual);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.post_correction_mismatch.residual_norm);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.post_correction_mismatch.total_residual);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.maximum_nodal_boundary_mass_transfer);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.boundary_mass_tolerance);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint,
+      std::string_view{
+          "discrete_q_flux_not_pointwise_velocity_normal"});
+
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.region_ledger.success);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.region_ledger.all_balances_satisfied);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.region_ledger.maximum_balance_residual);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint,
+      ledger.region_ledger.maximum_flux_reconstruction_residual);
+  mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.region_ledger.diagnostic);
+  mixConservativePhaseArtifactFingerprint(
       fingerprint, ledger.region_ledger.regions.size());
   for (const auto& region : ledger.region_ledger.regions) {
     mixConservativePhaseArtifactFingerprint(fingerprint, region.name);
     mixConservativePhaseArtifactFingerprint(fingerprint, region.kind);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.balance_satisfied);
     mixConservativePhaseArtifactFingerprint(
         fingerprint, region.member_nodes.size());
     for (const auto node : region.member_nodes) {
@@ -14481,6 +21752,8 @@ std::uint64_t conservativePhaseArtifactFingerprint(
     }
     mixConservativePhaseArtifactFingerprint(
         fingerprint, region.crossing_edges.size());
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.internal_edges);
     for (const auto& edge : region.crossing_edges) {
       mixConservativePhaseArtifactFingerprint(
           fingerprint, edge.first_node);
@@ -14503,6 +21776,36 @@ std::uint64_t conservativePhaseArtifactFingerprint(
         fingerprint, region.raw_target_liquid_measure);
     mixConservativePhaseArtifactFingerprint(
         fingerprint, region.limited_liquid_measure);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.physical_boundary_mass_transfer);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.discrete_divergence_mass_source);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.low_order_nodal_interior_mass_transfer);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.raw_nodal_antidiffusive_mass_transfer);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.limited_nodal_antidiffusive_mass_transfer);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.low_order_crossing_mass_transfer);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.raw_crossing_antidiffusive_mass_transfer);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.limited_crossing_antidiffusive_mass_transfer);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.low_order_flux_reconstruction_residual);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.raw_flux_reconstruction_residual);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.limited_flux_reconstruction_residual);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.low_order_balance_residual);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.raw_target_balance_residual);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.limited_balance_residual);
+    mixConservativePhaseArtifactFingerprint(
+        fingerprint, region.maximum_internal_pair_cancellation_residual);
   }
   return fingerprint;
 }
@@ -14535,9 +21838,45 @@ void writeAcceptedConservativePhaseArtifacts(
         "[svMultiPhysics::Application] Conservative phase artifact request count differs across ranks.");
   }
 
+  std::filesystem::path output_directory;
+  std::vector<std::uint64_t> output_policy_words;
+  std::vector<bool> artifact_due;
+  std::exception_ptr local_artifact_preparation_failure;
+  try {
+    output_directory = ".";
+    if (params.general_simulation_parameters.save_results_in_folder
+            .defined() &&
+        !params.general_simulation_parameters.save_results_in_folder
+             .value()
+             .empty()) {
+      output_directory =
+          params.general_simulation_parameters.save_results_in_folder
+              .value();
+    }
+    output_directory /= "conservative_phase_flux";
+    output_directory =
+        std::filesystem::absolute(output_directory).lexically_normal();
+    const auto output_directory_key = output_directory.generic_string();
+    output_policy_words.reserve(2u + output_directory_key.size());
+    output_policy_words.push_back(1u);
+    appendMaintenanceScheduleString(
+        output_policy_words, output_directory_key);
+    artifact_due.assign(requests.size(), false);
+  } catch (...) {
+    local_artifact_preparation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_artifact_preparation_failure,
+      comm,
+      "conservative phase artifact output-policy preparation");
+  if (!application::core::collectiveLevelSetMaintenanceCanonicalWordsAgree(
+          output_policy_words, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase artifact output directory differs across ranks.");
+  }
+
   bool any_artifact_due = false;
   bool local_preflight_failure = false;
-  std::vector<bool> artifact_due(requests.size(), false);
   for (std::size_t index = 0u; index < requests.size(); ++index) {
     const auto& request = requests[index];
     const int cadence =
@@ -14571,19 +21910,152 @@ void writeAcceptedConservativePhaseArtifacts(
     artifact_due[index] = due_on_any_rank && !not_due_on_any_rank;
     any_artifact_due = any_artifact_due || artifact_due[index];
     if (artifact_due[index]) {
-      const bool local_ledger_ready =
-          candidate.maintenance_ledgers.size() == requests.size() &&
-          request.conservative_phase_graph.has_value() &&
-          request.volume_cut_request.has_value() &&
-          candidate.maintenance_ledgers.size() > index &&
-          candidate.maintenance_ledgers[index].transport_stage.success &&
-          candidate.maintenance_ledgers[index].region_ledger.success;
+      bool local_ledger_ready = false;
+      std::uint64_t fingerprint = 0u;
+      std::exception_ptr local_fingerprint_preparation_failure;
+      try {
+        const auto live_graph_identity =
+            request.conservative_phase_graph.has_value()
+                ? svmp::FE::level_set::levelSetP1PhaseGraphIdentity(
+                      *request.conservative_phase_graph)
+                : svmp::FE::level_set::LevelSetP1PhaseGraphIdentity{};
+        const auto live_flux_ledger_digest =
+            candidate.maintenance_ledgers.size() > index
+                ? svmp::FE::level_set::levelSetP1PhaseFluxLedgerDigest(
+                      candidate.maintenance_ledgers[index]
+                          .transport_stage)
+                : 0u;
+        const auto live_velocity_revision =
+            candidate.maintenance_ledgers.size() > index
+                ? svmp::FE::level_set::
+                      levelSetP1PhaseVelocityContentRevision(
+                          candidate.maintenance_ledgers[index]
+                              .transport_stage.sampled_nodal_velocity)
+                : 0u;
+        svmp::FE::Real live_maximum_nodal_boundary_transfer{0.0};
+        bool live_nodal_boundary_transfer_finite = true;
+        if (candidate.maintenance_ledgers.size() > index) {
+          for (const auto transfer :
+               candidate.maintenance_ledgers[index]
+                   .transport_stage.physical_boundary_mass_transfer) {
+            live_nodal_boundary_transfer_finite =
+                std::isfinite(transfer) &&
+                live_nodal_boundary_transfer_finite;
+            if (std::isfinite(transfer)) {
+              live_maximum_nodal_boundary_transfer = std::max(
+                  live_maximum_nodal_boundary_transfer,
+                  std::abs(transfer));
+            }
+          }
+        }
+        local_ledger_ready =
+            candidate.maintenance_ledgers.size() == requests.size() &&
+            accepted_step != 0u &&
+            std::isfinite(accepted_time) &&
+            std::isfinite(time_step) &&
+            time_step > svmp::FE::Real{0.0} &&
+            state_revision != 0u &&
+            request.conservative_phase_graph.has_value() &&
+            request.volume_cut_request.has_value() &&
+            candidate.maintenance_ledgers.size() > index &&
+            candidate.maintenance_ledgers[index]
+                .split_stage_provenance.has_value() &&
+            candidate.maintenance_ledgers[index]
+                    .split_stage_provenance->prospective_step ==
+                accepted_step &&
+            sameConservativePhaseStageRealBits(
+                candidate.maintenance_ledgers[index]
+                    .split_stage_provenance->step_end_time,
+                accepted_time) &&
+            sameConservativePhaseStageRealBits(
+                candidate.maintenance_ledgers[index]
+                    .split_stage_provenance->velocity_state_time,
+                accepted_time) &&
+            sameConservativePhaseStageRealBits(
+                candidate.maintenance_ledgers[index]
+                    .split_stage_provenance->time_step,
+                time_step) &&
+            sameConservativePhaseStageRealBits(
+                candidate.maintenance_ledgers[index]
+                    .split_stage_provenance->q_input_time,
+                candidate.maintenance_ledgers[index]
+                    .split_stage_provenance->step_start_time) &&
+            sameConservativePhaseStageRealBits(
+                candidate.maintenance_ledgers[index]
+                    .split_stage_provenance->step_end_time,
+                candidate.maintenance_ledgers[index]
+                        .split_stage_provenance->step_start_time +
+                    candidate.maintenance_ledgers[index]
+                        .split_stage_provenance->time_step) &&
+            live_graph_identity.dimension ==
+                candidate.maintenance_ledgers[index]
+                    .split_stage_provenance->operator_graph_identity
+                    .dimension &&
+            live_graph_identity.nodes ==
+                candidate.maintenance_ledgers[index]
+                    .split_stage_provenance->operator_graph_identity.nodes &&
+            live_graph_identity.edges ==
+                candidate.maintenance_ledgers[index]
+                    .split_stage_provenance->operator_graph_identity.edges &&
+            live_graph_identity.dof_layout_revision ==
+                candidate.maintenance_ledgers[index]
+                    .split_stage_provenance->operator_graph_identity
+                    .dof_layout_revision &&
+            live_graph_identity.content_revision ==
+                candidate.maintenance_ledgers[index]
+                    .split_stage_provenance->operator_graph_identity
+                    .content_revision &&
+            live_flux_ledger_digest != 0u &&
+            live_velocity_revision != 0u &&
+            candidate.maintenance_ledgers[index]
+                    .split_stage_provenance->nodal_velocity_revision ==
+                live_velocity_revision &&
+            candidate.maintenance_ledgers[index]
+                    .split_stage_provenance->final_flux_ledger_digest ==
+                live_flux_ledger_digest &&
+            std::isfinite(
+                candidate.maintenance_ledgers[index]
+                    .maximum_nodal_boundary_mass_transfer) &&
+            live_nodal_boundary_transfer_finite &&
+            sameConservativePhaseStageRealBits(
+                candidate.maintenance_ledgers[index]
+                    .maximum_nodal_boundary_mass_transfer,
+                live_maximum_nodal_boundary_transfer) &&
+            std::isfinite(
+                candidate.maintenance_ledgers[index]
+                    .boundary_mass_tolerance) &&
+            candidate.maintenance_ledgers[index]
+                    .boundary_mass_tolerance >= svmp::FE::Real{0.0} &&
+            candidate.maintenance_ledgers[index]
+                    .maximum_nodal_boundary_mass_transfer <=
+                candidate.maintenance_ledgers[index]
+                    .boundary_mass_tolerance &&
+            std::abs(candidate.maintenance_ledgers[index]
+                         .transport_stage.correction
+                         .total_physical_boundary_mass_transfer) <=
+                candidate.maintenance_ledgers[index]
+                    .boundary_mass_tolerance &&
+            candidate.maintenance_ledgers[index].transport_stage.success &&
+            candidate.maintenance_ledgers[index].region_ledger.success;
+        if (local_ledger_ready) {
+          fingerprint = conservativePhaseArtifactFingerprint(
+              request,
+              candidate.maintenance_ledgers[index],
+              accepted_step,
+              accepted_time,
+              time_step,
+              state_revision);
+        }
+      } catch (...) {
+        local_fingerprint_preparation_failure =
+            std::current_exception();
+      }
+      requireCollectivePhasePreparation(
+          local_fingerprint_preparation_failure,
+          comm,
+          "conservative phase artifact fingerprint preparation");
       local_preflight_failure =
           !local_ledger_ready || local_preflight_failure;
-      const auto fingerprint = local_ledger_ready
-          ? conservativePhaseArtifactFingerprint(
-                request, candidate.maintenance_ledgers[index])
-          : 0u;
       const auto [minimum_fingerprint, maximum_fingerprint] =
           globalMinMaxUint64(fingerprint, comm);
       if (minimum_fingerprint != maximum_fingerprint) {
@@ -14599,15 +22071,22 @@ void writeAcceptedConservativePhaseArtifacts(
     return;
   }
 
-  std::filesystem::path output_directory = ".";
-  if (params.general_simulation_parameters.save_results_in_folder.defined() &&
-      !params.general_simulation_parameters.save_results_in_folder
-           .value()
-           .empty()) {
-    output_directory =
-        params.general_simulation_parameters.save_results_in_folder.value();
+  struct PublishedConservativePhaseArtifact {
+    std::string phase_field_name{};
+    svmp::FE::level_set::LevelSetConservativePhaseArtifactResult result{};
+  };
+  std::vector<PublishedConservativePhaseArtifact> published_artifacts;
+  std::exception_ptr local_publication_storage_failure;
+  try {
+    published_artifacts.reserve(static_cast<std::size_t>(std::count(
+        artifact_due.begin(), artifact_due.end(), true)));
+  } catch (...) {
+    local_publication_storage_failure = std::current_exception();
   }
-  output_directory /= "conservative_phase_flux";
+  requireCollectivePhasePreparation(
+      local_publication_storage_failure,
+      comm,
+      "conservative phase artifact publication storage");
 
   for (std::size_t index = 0u; index < requests.size(); ++index) {
     const auto& request = requests[index];
@@ -14619,92 +22098,156 @@ void writeAcceptedConservativePhaseArtifacts(
     const auto& repair = ledger.reinitialization;
     const auto& reconciliation = ledger.reconciliation;
     svmp::FE::level_set::LevelSetConservativePhaseArtifactResult artifact;
+    std::exception_ptr local_publication_failure;
+    bool current_artifact_recorded = false;
     if (comm.rank() == 0) {
-      svmp::FE::level_set::LevelSetConservativePhaseArtifactContext context;
-      context.phase_field_name =
-          request.conservative_phase.liquid_indicator.field_name;
-      context.level_set_field_name = request.level_set_field_name;
-      context.geometry_domain_id = request.volume_cut_request->domain_id;
-      context.accepted_step = accepted_step;
-      context.accepted_time = accepted_time;
-      context.time_step = time_step;
-      context.state_revision = state_revision;
-      context.graph_geometry_revision = graph.geometry_revision;
-      context.graph_topology_revision = graph.topology_revision;
-      context.graph_ownership_revision = graph.ownership_revision;
-      context.graph_numbering_revision = graph.numbering_revision;
-      context.graph_dof_layout_revision = graph.dof_layout_revision;
-      context.geometry_validated_before_commit = true;
-      context.reinitialization_due = ledger.reinitialization_due;
-      context.reinitialization_applied = ledger.reinitialization_applied;
-      context.reinitialization = repair;
-      context.reconciliation.success = reconciliation.success;
-      context.reconciliation.target_reached =
-          reconciliation.target_reached;
-      context.reconciliation.limited_by_displacement =
-          reconciliation.limited_by_displacement;
-      context.reconciliation.limited_by_topology =
-          reconciliation.limited_by_topology;
-      context.reconciliation.iterations = reconciliation.iterations;
-      context.reconciliation.line_search_evaluations =
-          reconciliation.line_search_evaluations;
-      context.reconciliation.geometry_refresh_requests =
-          reconciliation.geometry_refresh_requests;
-      context.reconciliation.geometry_rebuilds =
-          reconciliation.geometry_rebuilds;
-      context.reconciliation.rejected_geometry_trials =
-          reconciliation.rejected_geometry_trials;
-      context.reconciliation.contact_protected_nodes =
-          reconciliation.contact_protected_nodes;
-      context.reconciliation.allowed_interface_displacement =
-          reconciliation.allowed_interface_displacement;
-      context.reconciliation.accumulated_interface_displacement_bound =
-          reconciliation.accumulated_interface_displacement_bound;
-      context.reconciliation.initial_residual_norm =
-          reconciliation.initial_residual_norm;
-      context.reconciliation.final_residual_norm =
-          reconciliation.final_residual_norm;
-      context.reconciliation.maximum_final_nodal_residual =
-          reconciliation.maximum_final_nodal_residual;
-      context.reconciliation.final_total_residual =
-          reconciliation.final_total_residual;
-      context.reconciliation.maximum_removed_contact_increment =
-          reconciliation.maximum_removed_contact_increment;
-      context.reconciliation.last_rejected_trial_diagnostic =
-          reconciliation.last_rejected_trial_diagnostic;
-      context.reconciliation.diagnostic = reconciliation.diagnostic;
-      context.raw_post_transport_phase_measure =
-          ledger.raw_post_transport_phase_measure;
-      context.post_limit_phase_measure = ledger.post_limit_phase_measure;
-      context.raw_post_transport_geometry_measure =
-          ledger.raw_post_transport_geometry_measure;
-      context.post_reinitialization_phase_measure =
-          ledger.post_limit_phase_measure;
-      context.post_reinitialization_geometry_measure =
-          ledger.post_reinitialization_geometry_measure;
-      context.post_reinitialization_mismatch.maximum_nodal_residual =
-          ledger.post_reinitialization_mismatch.maximum_nodal_residual;
-      context.post_reinitialization_mismatch.residual_norm =
-          ledger.post_reinitialization_mismatch.residual_norm;
-      context.post_reinitialization_mismatch.total_residual =
-          ledger.post_reinitialization_mismatch.total_residual;
-      context.post_correction_phase_measure =
-          ledger.post_limit_phase_measure;
-      context.post_correction_geometry_measure =
-          ledger.post_correction_geometry_measure;
-      context.post_correction_mismatch.maximum_nodal_residual =
-          ledger.post_correction_mismatch.maximum_nodal_residual;
-      context.post_correction_mismatch.residual_norm =
-          ledger.post_correction_mismatch.residual_norm;
-      context.post_correction_mismatch.total_residual =
-          ledger.post_correction_mismatch.total_residual;
-      context.retained_assembly_geometry_measure =
-          ledger.post_correction_geometry_measure;
-      context.region_ledger = ledger.region_ledger;
-      artifact =
-          svmp::FE::level_set::writeLevelSetConservativePhaseArtifact(
-              output_directory, context, ledger.transport_stage);
-      if (!artifact.success) {
+      try {
+        svmp::FE::level_set::LevelSetConservativePhaseArtifactContext
+            context;
+        context.phase_field_name =
+            request.conservative_phase.liquid_indicator.field_name;
+        context.level_set_field_name = request.level_set_field_name;
+        context.geometry_domain_id = request.volume_cut_request->domain_id;
+        context.accepted_step = accepted_step;
+        context.accepted_time = accepted_time;
+        context.time_step = time_step;
+        context.state_revision = state_revision;
+        context.graph_dimension = graph.dimension;
+        context.graph_nodes = graph.nodes;
+        context.graph_edges = graph.edges.size();
+        context.graph_geometry_revision = graph.geometry_revision;
+        context.graph_topology_revision = graph.topology_revision;
+        context.graph_ownership_revision = graph.ownership_revision;
+        context.graph_numbering_revision = graph.numbering_revision;
+        context.graph_dof_layout_revision = graph.dof_layout_revision;
+        context.graph_content_revision =
+            svmp::FE::level_set::levelSetP1PhaseGraphIdentity(graph)
+                .content_revision;
+        context.split_stage_provenance =
+            ledger.split_stage_provenance;
+        context.maximum_nodal_boundary_mass_transfer =
+            ledger.maximum_nodal_boundary_mass_transfer;
+        context.boundary_mass_tolerance =
+            ledger.boundary_mass_tolerance;
+        context.boundary_flux_scope =
+            "discrete_q_flux_not_pointwise_velocity_normal";
+        context.geometry_validated_before_commit = true;
+        context.reinitialization_due = ledger.reinitialization_due;
+        context.reinitialization_applied =
+            ledger.reinitialization_applied;
+        context.reinitialization = repair;
+        context.reconciliation.success = reconciliation.success;
+        context.reconciliation.target_reached =
+            reconciliation.target_reached;
+        context.reconciliation.limited_by_displacement =
+            reconciliation.limited_by_displacement;
+        context.reconciliation.limited_by_topology =
+            reconciliation.limited_by_topology;
+        context.reconciliation.iterations = reconciliation.iterations;
+        context.reconciliation.line_search_evaluations =
+            reconciliation.line_search_evaluations;
+        context.reconciliation.geometry_refresh_requests =
+            reconciliation.geometry_refresh_requests;
+        context.reconciliation.geometry_rebuilds =
+            reconciliation.geometry_rebuilds;
+        context.reconciliation.rejected_geometry_trials =
+            reconciliation.rejected_geometry_trials;
+        context.reconciliation.contact_protected_nodes =
+            reconciliation.contact_protected_nodes;
+        context.reconciliation.allowed_interface_displacement =
+            reconciliation.allowed_interface_displacement;
+        context.reconciliation.accumulated_interface_displacement_bound =
+            reconciliation.accumulated_interface_displacement_bound;
+        context.reconciliation.initial_residual_norm =
+            reconciliation.initial_residual_norm;
+        context.reconciliation.final_residual_norm =
+            reconciliation.final_residual_norm;
+        context.reconciliation.maximum_final_nodal_residual =
+            reconciliation.maximum_final_nodal_residual;
+        context.reconciliation.final_total_residual =
+            reconciliation.final_total_residual;
+        context.reconciliation.maximum_removed_contact_increment =
+            reconciliation.maximum_removed_contact_increment;
+        context.reconciliation.last_rejected_trial_diagnostic =
+            reconciliation.last_rejected_trial_diagnostic;
+        context.reconciliation.diagnostic = reconciliation.diagnostic;
+        context.raw_post_transport_phase_measure =
+            ledger.raw_post_transport_phase_measure;
+        context.post_limit_phase_measure = ledger.post_limit_phase_measure;
+        context.raw_post_transport_geometry_measure =
+            ledger.raw_post_transport_geometry_measure;
+        context.post_reinitialization_phase_measure =
+            ledger.post_limit_phase_measure;
+        context.post_reinitialization_geometry_measure =
+            ledger.post_reinitialization_geometry_measure;
+        context.post_reinitialization_mismatch.maximum_nodal_residual =
+            ledger.post_reinitialization_mismatch.maximum_nodal_residual;
+        context.post_reinitialization_mismatch.residual_norm =
+            ledger.post_reinitialization_mismatch.residual_norm;
+        context.post_reinitialization_mismatch.total_residual =
+            ledger.post_reinitialization_mismatch.total_residual;
+        context.post_correction_phase_measure =
+            ledger.post_limit_phase_measure;
+        context.post_correction_geometry_measure =
+            ledger.post_correction_geometry_measure;
+        context.post_correction_mismatch.maximum_nodal_residual =
+            ledger.post_correction_mismatch.maximum_nodal_residual;
+        context.post_correction_mismatch.residual_norm =
+            ledger.post_correction_mismatch.residual_norm;
+        context.post_correction_mismatch.total_residual =
+            ledger.post_correction_mismatch.total_residual;
+        context.retained_assembly_geometry_measure =
+            ledger.post_correction_geometry_measure;
+        context.region_ledger = ledger.region_ledger;
+        artifact =
+            svmp::FE::level_set::writeLevelSetConservativePhaseArtifact(
+                output_directory, context, ledger.transport_stage);
+        if (artifact.success) {
+          published_artifacts.push_back(
+              PublishedConservativePhaseArtifact{
+                  .phase_field_name =
+                      request.conservative_phase.liquid_indicator
+                          .field_name,
+                  .result = artifact,
+              });
+          current_artifact_recorded = true;
+        }
+      } catch (...) {
+        local_publication_failure = std::current_exception();
+      }
+    }
+    const bool publication_failed = globalAnyBool(
+        comm.rank() == 0 &&
+            (local_publication_failure != nullptr || !artifact.success),
+        comm);
+    if (publication_failed) {
+      bool local_rollback_failed = false;
+      if (comm.rank() == 0) {
+        try {
+          if (artifact.success && !current_artifact_recorded) {
+            std::error_code removal_error;
+            const bool removed =
+                std::filesystem::remove(artifact.path, removal_error);
+            local_rollback_failed =
+                !removed || static_cast<bool>(removal_error);
+          }
+          for (const auto& published : published_artifacts) {
+            std::error_code removal_error;
+            const bool removed = std::filesystem::remove(
+                published.result.path, removal_error);
+            local_rollback_failed =
+                !removed || static_cast<bool>(removal_error) ||
+                local_rollback_failed;
+          }
+        } catch (...) {
+          local_rollback_failed = true;
+        }
+      }
+      if (globalAnyBool(local_rollback_failed, comm)) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase artifact publication and collective batch rollback both failed.");
+      }
+      if (comm.rank() == 0) {
         application::core::oopCout()
             << "[svMultiPhysics::Application] Conservative phase artifact"
             << " diagnostic=conservative_phase_flux_artifact"
@@ -14712,31 +22255,38 @@ void writeAcceptedConservativePhaseArtifacts(
             << request.conservative_phase.liquid_indicator.field_name
             << "' step=" << accepted_step
             << " outcome=failed"
-            << " reason='" << artifact.diagnostic << "'" << std::endl;
+            << " batch_rollback=complete"
+            << " removed_prior_files=" << published_artifacts.size()
+            << " reason='"
+            << (local_publication_failure != nullptr
+                    ? "exception during output-rank context construction or publication"
+                    : artifact.diagnostic)
+            << "'" << std::endl;
       }
-    }
-    const bool publication_failed = globalAnyBool(
-        comm.rank() == 0 && !artifact.success, comm);
-    if (publication_failed) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase artifact publication failed on the output rank.");
+          "[svMultiPhysics::Application] Conservative phase artifact publication failed on the output rank; earlier files from this accepted-step batch were removed.");
     }
-    if (comm.rank() == 0) {
+  }
+
+  if (comm.rank() == 0) {
+    for (const auto& published : published_artifacts) {
       application::core::oopCout()
           << "[svMultiPhysics::Application] Conservative phase artifact"
           << " diagnostic=conservative_phase_flux_artifact"
           << " field='"
-          << request.conservative_phase.liquid_indicator.field_name << "'"
+          << published.phase_field_name << "'"
           << " step=" << accepted_step
           << " outcome=written"
-          << " path='" << artifact.path.string() << "'"
-          << " bytes=" << artifact.bytes
-          << " nodes=" << artifact.nodes
-          << " edges=" << artifact.edges
-          << " resolved_components=" << artifact.resolved_components
-          << " tracked_regions=" << artifact.tracked_regions
+          << " path='" << published.result.path.string() << "'"
+          << " bytes=" << published.result.bytes
+          << " nodes=" << published.result.nodes
+          << " edges=" << published.result.edges
+          << " resolved_components="
+          << published.result.resolved_components
+          << " tracked_regions=" << published.result.tracked_regions
           << " subthreshold_component_present="
-          << (artifact.subthreshold_component_present ? "true" : "false")
+          << (published.result.subthreshold_component_present ? "true"
+                                                              : "false")
           << std::endl;
     }
   }
@@ -14759,7 +22309,8 @@ reconcileConservativePhaseGeometry(
     return result;
   }
   auto& system = *sim.fe_system;
-  auto& graph = requireCurrentConservativePhaseGraph(system, request);
+  auto& graph = requireCurrentConservativePhaseGraph(
+      system, request, /*allow_graph_rebuild=*/false);
   if (target_liquid_phase_mass.size() != graph.nodes) {
     result.diagnostic =
         "Conservative phase geometry reconciliation target does not match the phase graph";
@@ -14830,7 +22381,7 @@ reconcileConservativePhaseGeometry(
        request.conservative_phase.geometry_correction_max_iterations;
        ++iteration) {
     const auto projection = projectCurrentConservativePhaseGeometry(
-        system, request);
+        system, request, /*allow_graph_rebuild=*/false);
     if (!projection.success) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase local geometry projection failed: " +
@@ -14992,7 +22543,7 @@ reconcileConservativePhaseGeometry(
         result.geometry_rebuilds +=
             transaction.refresh(params, trial).refreshed ? 1 : 0;
         trial_projection = projectCurrentConservativePhaseGeometry(
-            system, request);
+            system, request, /*allow_graph_rebuild=*/false);
       } catch (const std::exception& exception) {
         ++result.rejected_geometry_trials;
         result.last_rejected_trial_diagnostic = exception.what();
@@ -15058,6 +22609,10 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
     ActiveCutContextRefreshCache& refresh_cache,
     const std::vector<ActiveCutVolumeRequest>& active_cut_requests,
+    ConservativePhaseCandidateStageSnapshot& temporal_stage,
+    std::span<const ConservativePhaseFixedGraphBinding>
+        fixed_graph_bindings,
+    std::uint64_t expected_attempt,
     const ConservativePhaseContactStageBuilder& contact_stage_builder = {},
     const LevelSetMaintenanceStageObserver& observe_stage = {})
 {
@@ -15078,23 +22633,135 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
   }
 
   auto& system = *sim.fe_system;
-  result.original_solution = gatherFeOrderedSolution(history.u());
-  const auto previous_solution = gatherFeOrderedSolution(history.uPrev());
-  if (result.original_solution.size() != previous_solution.size()) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Conservative phase transport requires equal endpoint and previous FE solution layouts.");
+  const auto comm = activeFESystemCommunicator(system);
+  requireConservativePhaseFixedGraphBindingsCurrent(
+      system,
+      requests,
+      fixed_graph_bindings,
+      comm,
+      "candidate_application_fixed_background_preflight");
+  bool local_stage_matches =
+      temporal_stage.scheme ==
+          svmp::FE::level_set::LevelSetP1PhaseSplitScheme::
+              BackwardEulerExplicitIndicatorEndpointVelocity &&
+      temporal_stage.temporal_order == 1 &&
+      temporal_stage.prospective_step ==
+          static_cast<std::uint64_t>(history.stepIndex() + 1) &&
+      expected_attempt != 0u &&
+      temporal_stage.attempt == expected_attempt &&
+      temporal_stage.operator_state_revision != 0u &&
+      temporal_stage.requests.size() == requests.size() &&
+      sameConservativePhaseStageRealBits(
+          temporal_stage.step_start_time, history.time()) &&
+      sameConservativePhaseStageRealBits(
+          temporal_stage.step_end_time, history.time() + history.dt()) &&
+      sameConservativePhaseStageRealBits(
+          temporal_stage.q_input_time, history.time()) &&
+      sameConservativePhaseStageRealBits(
+          temporal_stage.velocity_state_time,
+          history.time() + history.dt()) &&
+      sameConservativePhaseStageRealBits(
+          temporal_stage.time_step, history.dt());
+  std::exception_ptr local_request_schedule_failure;
+  CanonicalLevelSetMaintenanceSchedule current_request_schedule;
+  try {
+    current_request_schedule =
+        canonicalLevelSetMaintenanceRequestSchedule(
+            requests,
+            LevelSetMaintenanceScheduleStage::
+                ProspectiveAcceptedEndpoint,
+            history.stepIndex() + 1);
+    local_stage_matches =
+        current_request_schedule.supported &&
+        current_request_schedule.words ==
+            temporal_stage.request_schedule_words &&
+        local_stage_matches;
+  } catch (...) {
+    local_request_schedule_failure = std::current_exception();
   }
-  auto candidate = result.original_solution;
-  auto raw_transport_candidate = result.original_solution;
-  std::vector<svmp::FE::Real> accepted_phase_measures(
-      requests.size(), std::numeric_limits<svmp::FE::Real>::quiet_NaN());
-  std::vector<std::vector<svmp::FE::Real>> accepted_phase_masses(
-      requests.size());
+  requireCollectivePhasePreparation(
+      local_request_schedule_failure,
+      comm,
+      "conservative_phase_candidate_request_revalidation");
+  if (local_stage_matches) {
+    for (std::size_t index = 0u; index < requests.size(); ++index) {
+      const auto& request = requests[index];
+      const auto& staged_request = temporal_stage.requests[index];
+      if (staged_request.enabled != request.conservative_phase.enabled ||
+          staged_request.phase_field_name !=
+              request.conservative_phase.liquid_indicator.field_name ||
+          staged_request.velocity_field_name != request.velocity.field_name ||
+          staged_request.velocity_source != request.velocity.source) {
+        local_stage_matches = false;
+        break;
+      }
+      if (!staged_request.enabled) {
+        continue;
+      }
+      if (!request.conservative_phase_graph.has_value()) {
+        local_stage_matches = false;
+        break;
+      }
+      const auto& graph = *request.conservative_phase_graph;
+      if (!sameConservativePhaseGraphIdentity(
+              staged_request.graph_identity,
+              svmp::FE::level_set::levelSetP1PhaseGraphIdentity(graph)) ||
+          staged_request.graph_geometry_revision !=
+              graph.geometry_revision ||
+          staged_request.graph_topology_revision !=
+              graph.topology_revision ||
+          staged_request.graph_ownership_revision !=
+              graph.ownership_revision ||
+          staged_request.graph_numbering_revision !=
+              graph.numbering_revision ||
+          staged_request.sampled_nodal_velocity.size() != graph.nodes) {
+        local_stage_matches = false;
+        break;
+      }
+    }
+  }
+  if (globalAnyBool(!local_stage_matches, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase candidate is missing an exact current immutable Backward Euler operator-stage velocity snapshot.");
+  }
+  if (!collectiveConservativePhaseCandidateStageSnapshotAgrees(
+          temporal_stage, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase candidate-stage metadata or immutable endpoint velocity diverged before application.");
+  }
+
+  std::vector<svmp::FE::Real> previous_solution;
+  std::vector<svmp::FE::Real> candidate;
+  std::vector<svmp::FE::Real> raw_transport_candidate;
+  std::vector<svmp::FE::Real> accepted_phase_measures;
+  std::vector<std::vector<svmp::FE::Real>> accepted_phase_masses;
   std::vector<ConservativePhaseGeometryReconciliationResult>
-      reconciliation_reports(requests.size());
-  std::vector<std::vector<std::uint8_t>> contact_protected_nodes(
-      requests.size());
-  result.maintenance_ledgers.resize(requests.size());
+      reconciliation_reports;
+  std::vector<std::vector<std::uint8_t>> contact_protected_nodes;
+  std::exception_ptr local_candidate_storage_failure;
+  try {
+    result.original_solution = gatherFeOrderedSolution(history.u());
+    previous_solution = gatherFeOrderedSolution(history.uPrev());
+    if (result.original_solution.size() != previous_solution.size()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase transport requires equal endpoint and previous FE solution layouts.");
+    }
+    candidate = result.original_solution;
+    raw_transport_candidate = result.original_solution;
+    accepted_phase_measures.assign(
+        requests.size(),
+        std::numeric_limits<svmp::FE::Real>::quiet_NaN());
+    accepted_phase_masses.resize(requests.size());
+    reconciliation_reports.resize(requests.size());
+    contact_protected_nodes.resize(requests.size());
+    result.maintenance_ledgers.resize(requests.size());
+  } catch (...) {
+    local_candidate_storage_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_candidate_storage_failure,
+      comm,
+      "conservative_phase_candidate_dense_storage_before_stage");
 
   for (std::size_t request_index = 0u;
        request_index < requests.size(); ++request_index) {
@@ -15102,79 +22769,79 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     if (!request.conservative_phase.enabled) {
       continue;
     }
-    if (!request.conservative_phase_initialized) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase transport reached a candidate before its geometry projection was initialized.");
+    auto& staged_request = temporal_stage.requests[request_index];
+    svmp::FE::level_set::LevelSetP1PhaseTransportGraph* graph_ptr =
+        nullptr;
+    svmp::FE::FieldId phase_field = svmp::FE::INVALID_FIELD_ID;
+    std::size_t phase_offset{0u};
+    std::size_t phase_count{0u};
+    std::exception_ptr local_request_setup_failure;
+    try {
+      if (!request.conservative_phase_initialized) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase transport reached a candidate before its geometry projection was initialized.");
+      }
+      requireConservativePhaseGeometryBinding(system, request);
+      if (!request.conservative_phase_graph.has_value()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase candidate lost its fixed transport graph.");
+      }
+      graph_ptr = &*request.conservative_phase_graph;
+      phase_field = system.findFieldByName(
+          request.conservative_phase.liquid_indicator.field_name);
+      if (phase_field == svmp::FE::INVALID_FIELD_ID) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase candidate could not resolve its liquid-indicator field.");
+      }
+      const auto raw_phase_offset = system.fieldDofOffset(phase_field);
+      const auto raw_phase_count =
+          system.fieldDofHandler(phase_field).getNumDofs();
+      if (raw_phase_offset < 0 || raw_phase_count < 0) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase graph found an invalid FE solution layout.");
+      }
+      phase_offset = static_cast<std::size_t>(raw_phase_offset);
+      phase_count = static_cast<std::size_t>(raw_phase_count);
+      if (phase_count != graph_ptr->nodes ||
+          phase_offset > previous_solution.size() ||
+          phase_count > previous_solution.size() - phase_offset ||
+          phase_offset > candidate.size() ||
+          phase_count > candidate.size() - phase_offset) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase graph does not match the FE solution layout.");
+      }
+    } catch (...) {
+      local_request_setup_failure = std::current_exception();
     }
-    requireConservativePhaseGeometryBinding(system, request);
-    auto& graph = requireCurrentConservativePhaseGraph(system, request);
-    const auto phase_field = system.findFieldByName(
-        request.conservative_phase.liquid_indicator.field_name);
-    const auto raw_phase_offset = system.fieldDofOffset(phase_field);
-    const auto raw_phase_count =
-        system.fieldDofHandler(phase_field).getNumDofs();
-    if (raw_phase_offset < 0 || raw_phase_count < 0) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase graph found an invalid FE solution layout.");
-    }
-    const auto phase_offset = static_cast<std::size_t>(raw_phase_offset);
-    const auto phase_count = static_cast<std::size_t>(raw_phase_count);
-    if (phase_count != graph.nodes ||
-        phase_offset > previous_solution.size() ||
-        phase_count > previous_solution.size() - phase_offset ||
-        phase_offset > candidate.size() ||
-        phase_count > candidate.size() - phase_offset) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase graph does not match the FE solution layout.");
-    }
+    requireCollectivePhasePreparation(
+        local_request_setup_failure,
+        comm,
+        "conservative_phase_request_setup_before_stage");
+    auto& graph = *graph_ptr;
     const std::span<const svmp::FE::Real> previous_phase(
         previous_solution.data() + phase_offset, phase_count);
-    const auto [lower, upper] = conservativePhaseOneRingBounds(
-        graph, previous_phase);
-
-    svmp::FE::systems::SystemStateView state;
-    state.time = history.time() + history.dt();
-    state.dt = history.dt();
-    state.dt_prev = history.dtPrev();
-    state.u = std::span<const svmp::FE::Real>(candidate);
-    state.u_prev = std::span<const svmp::FE::Real>(previous_solution);
-
-    svmp::FE::level_set::LevelSetBoundPreservingOptions safety_options;
-    safety_options.enabled = true;
-    safety_options.bound_tolerance =
-        request.conservative_phase.invariant_tolerance;
-    safety_options.sign_tolerance =
-        request.conservative_phase.invariant_tolerance;
-    safety_options.enforce_courant_limit = false;
-    safety_options.enforce_impermeable_boundaries = true;
-    safety_options.impermeable_normal_velocity_tolerance =
-        request.conservative_phase.impermeable_normal_velocity_tolerance;
-    const auto safety =
-        svmp::FE::level_set::evaluateLevelSetTransportSafety(
-            system,
-            request.velocity,
-            svmp::FE::level_set::LevelSetBoundaryOptions{},
-            safety_options,
-            state,
-            static_cast<svmp::FE::Real>(history.dt()));
-    if (!safety.impermeable_boundaries_satisfied) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase transport rejected a nonzero wall-normal velocity for field '" +
-          request.conservative_phase.liquid_indicator.field_name +
-          "': marker=" + std::to_string(safety.worst_boundary_marker) +
-          " normalized_flux=" +
-          std::to_string(safety.maximum_boundary_normal_velocity_ratio) +
-          ". " + safety.diagnostic);
+    std::pair<std::vector<svmp::FE::Real>,
+              std::vector<svmp::FE::Real>> one_ring_bounds;
+    std::vector<svmp::FE::Real> limited_phase;
+    std::vector<svmp::FE::Real> raw_phase;
+    std::exception_ptr local_stage_input_failure;
+    try {
+      one_ring_bounds = conservativePhaseOneRingBounds(
+          graph, previous_phase);
+      limited_phase.assign(graph.nodes, svmp::FE::Real{0.0});
+      raw_phase.assign(graph.nodes, svmp::FE::Real{0.0});
+      accepted_phase_masses[request_index].assign(
+          graph.nodes, svmp::FE::Real{0.0});
+    } catch (...) {
+      local_stage_input_failure = std::current_exception();
     }
-    if (!safety.success) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase transport safety validation failed for field '" +
-          request.conservative_phase.liquid_indicator.field_name +
-          "': " + safety.diagnostic);
-    }
+    requireCollectivePhasePreparation(
+        local_stage_input_failure,
+        comm,
+        "conservative_phase_stage_input_and_output_allocation");
+    const auto& lower = one_ring_bounds.first;
+    const auto& upper = one_ring_bounds.second;
 
-    const auto velocity = sampleConservativePhaseVelocity(
-        sim, request, graph, state);
     svmp::FE::level_set::LevelSetP1PhaseStageOptions stage_options;
     stage_options.invariant_tolerance =
         request.conservative_phase.invariant_tolerance;
@@ -15192,12 +22859,30 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             previous_phase,
             lower,
             upper,
-            velocity,
+            staged_request.sampled_nodal_velocity,
             static_cast<svmp::FE::Real>(history.dt()),
             stage_options);
-    if (!stage.success) {
-      if (!stage.courant_satisfied &&
-          request.conservative_phase.enforce_courant_limit) {
+    std::vector<std::array<svmp::FE::Real, 3>>{}.swap(
+        staged_request.sampled_nodal_velocity);
+    const bool any_stage_success = globalAnyBool(stage.success, comm);
+    const bool any_stage_failure = globalAnyBool(!stage.success, comm);
+    if (any_stage_success && any_stage_failure) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase graph-stage success status differs across the active FE communicator.");
+    }
+    if (any_stage_failure) {
+      const bool local_courant_rejection =
+          !stage.courant_satisfied &&
+          request.conservative_phase.enforce_courant_limit;
+      const bool any_courant_rejection =
+          globalAnyBool(local_courant_rejection, comm);
+      const bool any_non_courant_failure =
+          globalAnyBool(!local_courant_rejection, comm);
+      if (any_courant_rejection && any_non_courant_failure) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase graph-stage rejection reason differs across the active FE communicator.");
+      }
+      if (any_courant_rejection) {
         application::core::oopCout()
             << "[svMultiPhysics::Application] Conservative phase candidate rejected"
             << " field='"
@@ -15215,80 +22900,185 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           request.conservative_phase.liquid_indicator.field_name +
           "': " + stage.diagnostic);
     }
-    std::vector<svmp::FE::Real> limited_phase(graph.nodes,
-                                                svmp::FE::Real{0.0});
-    std::vector<svmp::FE::Real> raw_phase(
-        graph.nodes, svmp::FE::Real{0.0});
-    if (stage.correction.nodes.size() != graph.nodes) {
+    svmp::FE::Real maximum_nodal_boundary_mass_transfer{0.0};
+    bool local_nodal_boundary_flux_finite = true;
+    for (const auto transfer : stage.physical_boundary_mass_transfer) {
+      if (!std::isfinite(transfer)) {
+        local_nodal_boundary_flux_finite = false;
+        continue;
+      }
+      maximum_nodal_boundary_mass_transfer = std::max(
+          maximum_nodal_boundary_mass_transfer, std::abs(transfer));
+    }
+    const auto total_boundary_mass_transfer =
+        stage.correction.total_physical_boundary_mass_transfer;
+    const auto boundary_mass_tolerance =
+        request.conservative_phase.invariant_tolerance *
+        std::max(
+            svmp::FE::Real{1.0},
+            std::abs(stage.correction.total_previous_liquid_measure));
+    const bool local_boundary_flux_satisfied =
+        local_nodal_boundary_flux_finite &&
+        std::isfinite(total_boundary_mass_transfer) &&
+        std::isfinite(boundary_mass_tolerance) &&
+        boundary_mass_tolerance >= svmp::FE::Real{0.0} &&
+        maximum_nodal_boundary_mass_transfer <= boundary_mass_tolerance &&
+        std::abs(total_boundary_mass_transfer) <= boundary_mass_tolerance;
+    if (globalAnyBool(!local_boundary_flux_satisfied, comm)) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase graph stage returned an incomplete nodal ledger.");
+          "[svMultiPhysics::Application] Conservative phase closed-domain policy rejected discrete q boundary flux above its invariant tolerance for field '" +
+          request.conservative_phase.liquid_indicator.field_name +
+          "'; this is a nodal/total phase-mass-flux gate, not a pointwise velocity-normal test.");
     }
-    for (std::size_t node = 0u; node < graph.nodes; ++node) {
-      raw_phase[node] =
-          stage.correction.nodes[node].raw_target_liquid_indicator;
-      limited_phase[node] =
-          stage.correction.nodes[node].limited_liquid_indicator;
+    const svmp::FE::level_set::LevelSetP1PhaseSplitStageProvenance
+        split_stage_provenance{
+            .scheme = temporal_stage.scheme,
+            .transport_mesh_policy =
+                svmp::FE::level_set::LevelSetP1PhaseTransportMeshPolicy::
+                    FixedBackground,
+            .temporal_order = temporal_stage.temporal_order,
+            .prospective_step = temporal_stage.prospective_step,
+            .attempt = temporal_stage.attempt,
+            .step_start_time = temporal_stage.step_start_time,
+            .step_end_time = temporal_stage.step_end_time,
+            .q_input_time = temporal_stage.q_input_time,
+            .velocity_state_time = temporal_stage.velocity_state_time,
+            .time_step = temporal_stage.time_step,
+            .operator_state_revision =
+                temporal_stage.operator_state_revision,
+            .previous_q_revision =
+                svmp::FE::level_set::
+                    levelSetP1PhaseScalarContentRevision(previous_phase),
+            .nodal_velocity_revision =
+                svmp::FE::level_set::
+                    levelSetP1PhaseVelocityContentRevision(
+                        stage.sampled_nodal_velocity),
+            .previous_graph_identity =
+                fixed_graph_bindings[request_index].identity,
+            .operator_graph_identity = staged_request.graph_identity,
+            .final_flux_ledger_digest =
+                svmp::FE::level_set::
+                    levelSetP1PhaseFluxLedgerDigest(stage),
+            .stage_options = stage.executed_options,
+        };
+    svmp::FE::level_set::LevelSetP1PhaseSplitStageValidationResult
+        split_stage_validation;
+    std::exception_ptr local_split_stage_validation_failure;
+    try {
+      split_stage_validation =
+          svmp::FE::level_set::validateLevelSetP1PhaseSplitStage(
+              graph, previous_phase, stage, split_stage_provenance);
+    } catch (...) {
+      local_split_stage_validation_failure = std::current_exception();
     }
-    assignConservativePhaseSlice(
-        system, phase_field, raw_phase, raw_transport_candidate);
-    assignConservativePhaseSlice(
-        system, phase_field, limited_phase, candidate);
-    const auto phase_measure =
-        stage.correction.total_limited_liquid_measure;
-    const auto measure_tolerance =
-        request.conservative_phase.geometry_measure_tolerance *
-        std::max({svmp::FE::Real{1.0}, graph.physical_measure,
-                  std::abs(phase_measure)});
-    if (!std::isfinite(phase_measure) ||
-        phase_measure < -measure_tolerance ||
-        phase_measure > graph.physical_measure + measure_tolerance) {
+    requireCollectivePhasePreparation(
+        local_split_stage_validation_failure,
+        comm,
+        "conservative_phase_split_stage_validation");
+    const bool any_split_stage_valid =
+        globalAnyBool(split_stage_validation.valid, comm);
+    const bool any_split_stage_invalid =
+        globalAnyBool(!split_stage_validation.valid, comm);
+    if (any_split_stage_valid && any_split_stage_invalid) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase stage produced an invalid liquid measure.");
+          "[svMultiPhysics::Application] Conservative phase split-stage validation status differs across the active FE communicator.");
     }
-    accepted_phase_measures[request_index] = phase_measure;
+    if (any_split_stage_invalid) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Conservative phase Backward Euler split-stage provenance validation failed for field '" +
+          request.conservative_phase.liquid_indicator.field_name +
+          "': " + split_stage_validation.diagnostic);
+    }
+    svmp::FE::Real phase_measure{0.0};
     auto& maintenance_ledger =
         result.maintenance_ledgers[request_index];
-    maintenance_ledger.raw_post_transport_phase_measure =
-        stage.correction.total_raw_target_liquid_measure;
-    maintenance_ledger.post_limit_phase_measure = phase_measure;
-    accepted_phase_masses[request_index].resize(
-        graph.nodes, svmp::FE::Real{0.0});
-    for (std::size_t node = 0u; node < graph.nodes; ++node) {
-      accepted_phase_masses[request_index][node] =
-          graph.lumped_control_volume[node] * limited_phase[node];
+    std::exception_ptr local_post_stage_materialization_failure;
+    try {
+      if (stage.correction.nodes.size() != graph.nodes) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase graph stage returned an incomplete nodal ledger.");
+      }
+      for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        raw_phase[node] =
+            stage.correction.nodes[node].raw_target_liquid_indicator;
+        limited_phase[node] =
+            stage.correction.nodes[node].limited_liquid_indicator;
+      }
+      assignConservativePhaseSlice(
+          system, phase_field, raw_phase, raw_transport_candidate);
+      assignConservativePhaseSlice(
+          system, phase_field, limited_phase, candidate);
+      phase_measure = stage.correction.total_limited_liquid_measure;
+      const auto measure_tolerance =
+          request.conservative_phase.geometry_measure_tolerance *
+          std::max({svmp::FE::Real{1.0}, graph.physical_measure,
+                    std::abs(phase_measure)});
+      if (!std::isfinite(phase_measure) ||
+          phase_measure < -measure_tolerance ||
+          phase_measure > graph.physical_measure + measure_tolerance) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase stage produced an invalid liquid measure.");
+      }
+      accepted_phase_measures[request_index] = phase_measure;
+      maintenance_ledger.split_stage_provenance =
+          split_stage_validation.provenance;
+      maintenance_ledger.maximum_nodal_boundary_mass_transfer =
+          maximum_nodal_boundary_mass_transfer;
+      maintenance_ledger.boundary_mass_tolerance =
+          boundary_mass_tolerance;
+      maintenance_ledger.raw_post_transport_phase_measure =
+          stage.correction.total_raw_target_liquid_measure;
+      maintenance_ledger.post_limit_phase_measure = phase_measure;
+      for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        accepted_phase_masses[request_index][node] =
+            graph.lumped_control_volume[node] * limited_phase[node];
+      }
+    } catch (...) {
+      local_post_stage_materialization_failure =
+          std::current_exception();
+    }
+    requireCollectivePhasePreparation(
+        local_post_stage_materialization_failure,
+        comm,
+        "conservative_phase_post_stage_materialization");
+
+    std::vector<std::array<svmp::FE::Real, 3>> region_coordinates;
+    if (!request.conservative_phase.fixed_flux_regions.empty()) {
+      region_coordinates = conservativePhaseNodeCoordinates(
+          system, phase_field, graph);
     }
     std::vector<svmp::FE::level_set::LevelSetPhaseRegionDefinition>
         region_definitions;
-    if (!request.conservative_phase.fixed_flux_regions.empty()) {
-      const auto coordinates = conservativePhaseNodeCoordinates(
-          system, phase_field, graph);
-      region_definitions =
-          svmp::FE::level_set::makeAxisAlignedBoxPhaseRegions(
-              request.conservative_phase.fixed_flux_regions,
-              coordinates);
-    }
-    if (request.conservative_phase
-            .classify_nonprimary_components_as_satellites) {
-      auto satellites = svmp::FE::level_set::
-          makeNonprimaryComponentSatelliteRegions(stage.correction);
-      region_definitions.insert(
-          region_definitions.end(),
-          std::make_move_iterator(satellites.begin()),
-          std::make_move_iterator(satellites.end()));
-    }
-    maintenance_ledger.region_ledger =
-        svmp::FE::level_set::buildLevelSetPhaseRegionLedgers(
-            stage.correction,
-            region_definitions,
-            request.conservative_phase.invariant_tolerance);
-    if (!maintenance_ledger.region_ledger.success) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase fixed region ledger failed for field '" +
-          request.conservative_phase.liquid_indicator.field_name +
-          "': " + maintenance_ledger.region_ledger.diagnostic);
-    }
+    std::exception_ptr local_region_ledger_failure;
+    try {
+      if (!request.conservative_phase.fixed_flux_regions.empty()) {
+        region_definitions =
+            svmp::FE::level_set::makeAxisAlignedBoxPhaseRegions(
+                request.conservative_phase.fixed_flux_regions,
+                region_coordinates);
+      }
+      if (request.conservative_phase
+              .classify_nonprimary_components_as_satellites) {
+        auto satellites = svmp::FE::level_set::
+            makeNonprimaryComponentSatelliteRegions(stage.correction);
+        region_definitions.insert(
+            region_definitions.end(),
+            std::make_move_iterator(satellites.begin()),
+            std::make_move_iterator(satellites.end()));
+      }
+      maintenance_ledger.region_ledger =
+          svmp::FE::level_set::buildLevelSetPhaseRegionLedgers(
+              stage.correction,
+              region_definitions,
+              request.conservative_phase.invariant_tolerance);
+      if (!maintenance_ledger.region_ledger.success) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase fixed region ledger failed for field '" +
+            request.conservative_phase.liquid_indicator.field_name +
+            "': " + maintenance_ledger.region_ledger.diagnostic);
+      }
 
-    application::core::oopCout()
+      application::core::oopCout()
         << "[svMultiPhysics::Application] Conservative phase staged"
         << " field='"
         << request.conservative_phase.liquid_indicator.field_name << "'"
@@ -15298,6 +23088,11 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         << " accepted_measure=" << phase_measure
         << " boundary_transfer="
         << stage.correction.total_physical_boundary_mass_transfer
+        << " maximum_nodal_boundary_mass_transfer="
+        << maximum_nodal_boundary_mass_transfer
+        << " boundary_mass_tolerance=" << boundary_mass_tolerance
+        << " boundary_safety_scope=discrete_q_flux_not_pointwise_velocity_normal"
+        << " boundary_safety_limitation=blind_where_q_is_zero"
         << " divergence_source="
         << stage.correction.total_discrete_divergence_mass_source
         << " global_balance_residual="
@@ -15321,13 +23116,68 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         << " max_region_balance_residual="
         << maintenance_ledger.region_ledger.maximum_balance_residual
         << " limited_edges=" << stage.correction.limited_edges
-        << " courant=" << stage.maximum_courant << std::endl;
-    maintenance_ledger.transport_stage = std::move(stage);
+        << " courant=" << stage.maximum_courant
+        << " temporal_split_scheme="
+        << svmp::FE::level_set::levelSetP1PhaseSplitSchemeName(
+               split_stage_validation.provenance.scheme)
+        << " temporal_order="
+        << split_stage_validation.provenance.temporal_order
+        << " attempt=" << split_stage_validation.provenance.attempt
+        << " q_input_time="
+        << split_stage_validation.provenance.q_input_time
+        << " velocity_state_time="
+        << split_stage_validation.provenance.velocity_state_time
+        << " operator_state_revision="
+        << split_stage_validation.provenance.operator_state_revision
+        << " previous_q_revision="
+        << split_stage_validation.provenance.previous_q_revision
+        << " nodal_velocity_revision="
+        << split_stage_validation.provenance.nodal_velocity_revision
+        << " final_flux_ledger_digest="
+        << split_stage_validation.provenance.final_flux_ledger_digest
+        << " stage_invariant_tolerance="
+        << split_stage_validation.provenance
+               .stage_options.invariant_tolerance
+        << " stage_component_activity_tolerance="
+        << split_stage_validation.provenance
+               .stage_options.component_activity_tolerance
+        << " stage_maximum_courant="
+        << split_stage_validation.provenance
+               .stage_options.maximum_courant
+        << " stage_enforce_courant_limit="
+        << (split_stage_validation.provenance
+                    .stage_options.enforce_courant_limit
+                ? "true"
+                : "false")
+        << " stage_require_constant_preservation="
+        << (split_stage_validation.provenance
+                    .stage_options.require_constant_preservation
+                ? "true"
+                : "false")
+          << std::endl;
+      maintenance_ledger.transport_stage = std::move(stage);
+    } catch (...) {
+      local_region_ledger_failure = std::current_exception();
+    }
+    requireCollectivePhasePreparation(
+        local_region_ledger_failure,
+        comm,
+        "conservative_phase_region_ledger_materialization");
   }
 
-  auto transaction =
-      std::make_unique<LevelSetMaintenanceGeometryTransaction>(
-          sim, lifecycle, refresh_cache, active_cut_requests);
+  std::unique_ptr<LevelSetMaintenanceGeometryTransaction> transaction;
+  std::exception_ptr local_transaction_allocation_failure;
+  try {
+    transaction =
+        std::make_unique<LevelSetMaintenanceGeometryTransaction>(
+            sim, lifecycle, refresh_cache, active_cut_requests);
+  } catch (...) {
+    local_transaction_allocation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_transaction_allocation_failure,
+      comm,
+      "conservative_phase_geometry_transaction_allocation");
   try {
     const auto raw_transport_refresh_report =
         transaction->refresh(params, raw_transport_candidate);
@@ -15353,7 +23203,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         continue;
       }
       const auto projection = projectCurrentConservativePhaseGeometry(
-          system, request);
+          system, request, /*allow_graph_rebuild=*/false);
       if (!projection.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase raw post-transport geometry projection failed for field '" +
@@ -15398,7 +23248,8 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           static_cast<svmp::FE::Real>(history.time() + history.dt()),
           result.contact_stage.stages,
           result.contact_stage.constraints);
-      auto& graph = requireCurrentConservativePhaseGraph(system, request);
+      auto& graph = requireCurrentConservativePhaseGraph(
+          system, request, /*allow_graph_rebuild=*/false);
       contact_protected_nodes[request_index] =
           conservativePhaseContactProtectedNodes(
               system,
@@ -15475,7 +23326,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         continue;
       }
       const auto projection = projectCurrentConservativePhaseGeometry(
-          system, request);
+          system, request, /*allow_graph_rebuild=*/false);
       if (!projection.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase post-reinitialization geometry projection failed for field '" +
@@ -15567,7 +23418,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         continue;
       }
       const auto projection = projectCurrentConservativePhaseGeometry(
-          system, request);
+          system, request, /*allow_graph_rebuild=*/false);
       if (!projection.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase authoritative geometry projection failed for field '" +
@@ -15644,6 +23495,19 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           << std::endl;
       const auto& repair = maintenance_ledger.reinitialization;
       const auto& transport = maintenance_ledger.transport_stage;
+      if (!maintenance_ledger.split_stage_provenance.has_value()) {
+        throw std::logic_error(
+            "[svMultiPhysics::Application] Conservative phase maintenance ledger is missing its validated temporal split-stage provenance.");
+      }
+      const auto& split_stage =
+          *maintenance_ledger.split_stage_provenance;
+      svmp::FE::Real ledger_maximum_nodal_boundary_transfer{0.0};
+      for (const auto transfer :
+           transport.physical_boundary_mass_transfer) {
+        ledger_maximum_nodal_boundary_transfer = std::max(
+            ledger_maximum_nodal_boundary_transfer,
+            std::abs(transfer));
+      }
       application::core::oopCout()
           << std::setprecision(17)
           << "[svMultiPhysics::Application] Conservative phase maintenance ledger"
@@ -15673,6 +23537,49 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
                  .maximum_nodal_residual
           << " retained_assembly_measure="
           << projection.retained_liquid_measure
+          << " temporal_split_scheme="
+          << svmp::FE::level_set::levelSetP1PhaseSplitSchemeName(
+                 split_stage.scheme)
+          << " temporal_order=" << split_stage.temporal_order
+          << " prospective_step=" << split_stage.prospective_step
+          << " attempt=" << split_stage.attempt
+          << " step_start_time=" << split_stage.step_start_time
+          << " step_end_time=" << split_stage.step_end_time
+          << " q_input_time=" << split_stage.q_input_time
+          << " velocity_state_time=" << split_stage.velocity_state_time
+          << " operator_state_revision="
+          << split_stage.operator_state_revision
+          << " previous_q_revision="
+          << split_stage.previous_q_revision
+          << " nodal_velocity_revision="
+          << split_stage.nodal_velocity_revision
+          << " transport_graph_content_revision="
+          << split_stage.operator_graph_identity.content_revision
+          << " final_flux_ledger_digest="
+          << split_stage.final_flux_ledger_digest
+          << " stage_invariant_tolerance="
+          << split_stage.stage_options.invariant_tolerance
+          << " stage_component_activity_tolerance="
+          << split_stage.stage_options.component_activity_tolerance
+          << " stage_maximum_courant="
+          << split_stage.stage_options.maximum_courant
+          << " stage_enforce_courant_limit="
+          << (split_stage.stage_options.enforce_courant_limit
+                  ? "true"
+                  : "false")
+          << " stage_require_constant_preservation="
+          << (split_stage.stage_options.require_constant_preservation
+                  ? "true"
+                  : "false")
+          << " total_physical_boundary_mass_transfer="
+          << transport.correction
+                 .total_physical_boundary_mass_transfer
+          << " maximum_nodal_physical_boundary_mass_transfer="
+          << ledger_maximum_nodal_boundary_transfer
+          << " boundary_mass_tolerance="
+          << maintenance_ledger.boundary_mass_tolerance
+          << " boundary_safety_scope=discrete_q_flux_not_pointwise_velocity_normal"
+          << " boundary_safety_limitation=blind_where_q_is_zero"
           << " transport_nodes="
           << transport.correction.nodes.size()
           << " transport_edges="
@@ -15902,6 +23809,1062 @@ public:
     return ctx;
   }
 };
+
+std::uint64_t collectiveConstraintSemanticsKey(
+    const svmp::FE::systems::FESystem& system,
+    const svmp::MeshComm& comm)
+{
+  const auto local =
+      svmp::FE::constraints::constraintSemanticFingerprint(
+          system.constraints());
+  const std::array<std::uint64_t, 4> local_words{
+      local.hash_a,
+      local.hash_b,
+      local.line_count,
+      local.entry_count,
+  };
+  const auto collective = snapshotOwnershipCollective(comm);
+  const auto global_words = collective.all_gather_revision_values(
+      std::span<const std::uint64_t>(
+          local_words.data(), local_words.size()));
+
+  std::uint64_t key = kCutContextHashOffset;
+  mixCutContextHash(
+      key, static_cast<std::uint64_t>(comm.size()));
+  mixCutContextHash(
+      key, static_cast<std::uint64_t>(global_words.size()));
+  for (const auto word : global_words) {
+    mixCutContextHash(key, word);
+  }
+  return key == 0u ? 1u : key;
+}
+
+svmp::FE::timestepping::NewtonReport
+evaluateStaticCapillaryConstantPressureCertificate(
+    application::core::SimulationComponents& sim,
+    std::span<const svmp::FE::Real> candidate)
+{
+  if (!sim.fe_system || !sim.backend || !sim.linear_solver ||
+      !sim.time_history) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary KKT certificate requires an FE system, backend, linear solver, and time history.");
+  }
+  if (candidate.empty() ||
+      candidate.size() >
+          static_cast<std::size_t>(
+              std::numeric_limits<svmp::FE::GlobalIndex>::max())) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary KKT certificate received an invalid candidate layout.");
+  }
+
+  auto& system = *sim.fe_system;
+  const auto auxiliary_state = system.checkpointAuxiliaryState();
+  const auto bordered_state = system.borderedCoupling();
+  const auto restore_system_state = [&] {
+    system.restoreAuxiliaryState(auxiliary_state);
+    system.borderedCoupling() = bordered_state;
+  };
+
+  try {
+    svmp::FE::timestepping::NewtonOptions options;
+    options.residual_op = "equations";
+    options.jacobian_op = "equations";
+    options.max_iterations = 1;
+    options.min_iterations = 0;
+    options.abs_tolerance =
+        std::numeric_limits<double>::max();
+    options.rel_tolerance = 0.0;
+    options.step_tolerance = 0.0;
+    options.use_line_search = false;
+    options.assemble_both_when_possible = false;
+    options.initial_residual_only_certificate = true;
+    options.external_state_fixed_point.enabled = false;
+    options.read_static_free_surface_environment_options = false;
+    options.initialize_static_compatible_free_surface_pressure = false;
+    options
+        .accepted_static_constant_pressure_kkt_max_relative_distance =
+        std::numeric_limits<double>::max();
+
+    svmp::FE::timestepping::NewtonSolver probe(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    probe.allocateWorkspace(system, *sim.backend, workspace);
+
+    const auto history_depth =
+        std::max(2, sim.time_history->historyDepth());
+    auto history = svmp::FE::timestepping::TimeHistory::allocate(
+        *sim.backend,
+        static_cast<svmp::FE::GlobalIndex>(candidate.size()),
+        history_depth,
+        sim.time_history->hasSecondOrderState() ||
+            system.temporalOrder() > 1);
+    scatterFeOrderedSolution(history.u(), candidate);
+    for (int slot = 1; slot <= history.historyDepth(); ++slot) {
+      scatterFeOrderedSolution(history.uPrevK(slot), candidate);
+    }
+    const double dt =
+        std::isfinite(sim.time_history->dt()) &&
+                sim.time_history->dt() > 0.0
+            ? sim.time_history->dt()
+            : 1.0;
+    history.setTime(sim.time_history->time());
+    history.setDt(dt);
+    history.setPrevDt(dt);
+    history.primeDtHistory(dt);
+    history.setStepIndex(sim.time_history->stepIndex());
+    history.updateGhosts();
+
+    const auto integrator =
+        std::make_shared<const ZeroTimeDerivativeIntegrator>();
+    svmp::FE::systems::TransientSystem transient(
+        system, integrator);
+    auto report = probe.solveStep(
+        transient,
+        *sim.linear_solver,
+        history.time(),
+        history,
+        workspace);
+    restore_system_state();
+    return report;
+  } catch (...) {
+    const auto failure = std::current_exception();
+    try {
+      restore_system_state();
+    } catch (...) {
+      std::throw_with_nested(std::runtime_error(
+          "[svMultiPhysics::Application] Static capillary KKT certificate failed and could not restore auxiliary solver state."));
+    }
+    std::rethrow_exception(failure);
+  }
+}
+
+void zeroHistoryFieldRateSlice(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::FieldId field,
+    svmp::FE::backends::GenericVector& rate)
+{
+  auto values = gatherFeOrderedSolution(rate);
+  const auto raw_offset = system.fieldDofOffset(field);
+  const auto raw_count =
+      system.fieldDofHandler(field).getNumDofs();
+  if (raw_offset < 0 || raw_count < 0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization found an invalid rate-field layout.");
+  }
+  const auto offset = static_cast<std::size_t>(raw_offset);
+  const auto count = static_cast<std::size_t>(raw_count);
+  if (offset > values.size() ||
+      count > values.size() - offset) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization rate-field slice exceeds the FE layout.");
+  }
+  std::fill(
+      values.begin() + static_cast<std::ptrdiff_t>(offset),
+      values.begin() +
+          static_cast<std::ptrdiff_t>(offset + count),
+      svmp::FE::Real{0.0});
+  scatterFeOrderedSolution(rate, values);
+}
+
+std::string staticCapillaryHistoryPublicationTargetLayoutError(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::FieldId level_set_field,
+    std::span<const svmp::FE::Real> certified_solution,
+    const svmp::FE::timestepping::TimeHistory& history)
+{
+  const auto raw_field_offset =
+      system.fieldDofOffset(level_set_field);
+  const auto raw_field_count =
+      system.fieldDofHandler(level_set_field).getNumDofs();
+  if (raw_field_offset < 0 || raw_field_count <= 0 ||
+      history.historyDepth() < 0 ||
+      certified_solution.size() !=
+          static_cast<std::size_t>(history.u().size())) {
+    return "[svMultiPhysics::Application] Static capillary publication received an invalid solution or field layout.";
+  }
+
+  const auto field_offset =
+      static_cast<std::size_t>(raw_field_offset);
+  const auto field_count =
+      static_cast<std::size_t>(raw_field_count);
+  if (field_offset > certified_solution.size() ||
+      field_count >
+          certified_solution.size() - field_offset) {
+    return "[svMultiPhysics::Application] Static capillary publication level-set slice exceeds the FE layout.";
+  }
+
+  for (int slot = 1; slot <= history.historyDepth(); ++slot) {
+    if (static_cast<std::size_t>(
+            history.uPrevK(slot).size()) !=
+            certified_solution.size()) {
+      return "[svMultiPhysics::Application] Static capillary publication target-history layout differs from the certified solution.";
+    }
+  }
+  if ((history.hasUDotState() &&
+       static_cast<std::size_t>(history.uDot().size()) !=
+           certified_solution.size()) ||
+      (history.hasUDDotState() &&
+       static_cast<std::size_t>(history.uDDot().size()) !=
+           certified_solution.size())) {
+    return "[svMultiPhysics::Application] Static capillary publication rate layout differs from the certified solution.";
+  }
+  return {};
+}
+
+std::string staticCapillaryHistoryPublicationLayoutError(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::FieldId level_set_field,
+    std::span<const svmp::FE::Real> certified_solution,
+    std::span<const std::vector<svmp::FE::Real>>
+        preserved_history,
+    const svmp::FE::timestepping::TimeHistory& history)
+{
+  const auto target_error =
+      staticCapillaryHistoryPublicationTargetLayoutError(
+          system,
+          level_set_field,
+          certified_solution,
+          history);
+  if (!target_error.empty()) {
+    return target_error;
+  }
+  if (preserved_history.size() !=
+      static_cast<std::size_t>(history.historyDepth())) {
+    return "[svMultiPhysics::Application] Static capillary publication preserved-history depth differs from the target history.";
+  }
+  for (const auto& values : preserved_history) {
+    if (values.size() != certified_solution.size()) {
+      return "[svMultiPhysics::Application] Static capillary publication preserved-history layout differs from the certified solution.";
+    }
+  }
+  return {};
+}
+
+void stageStaticCapillaryHistoryForPublication(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::FieldId level_set_field,
+    std::span<const svmp::FE::Real> certified_solution,
+    std::span<const std::vector<svmp::FE::Real>>
+        preserved_history,
+    svmp::FE::timestepping::TimeHistory& history)
+{
+  const auto layout_error =
+      staticCapillaryHistoryPublicationLayoutError(
+          system,
+          level_set_field,
+          certified_solution,
+          preserved_history,
+          history);
+  if (!layout_error.empty()) {
+    throw std::runtime_error(layout_error);
+  }
+
+  const auto raw_field_offset =
+      system.fieldDofOffset(level_set_field);
+  const auto raw_field_count =
+      system.fieldDofHandler(level_set_field).getNumDofs();
+  const auto field_offset =
+      static_cast<std::size_t>(raw_field_offset);
+  const auto field_count =
+      static_cast<std::size_t>(raw_field_count);
+
+  scatterFeOrderedSolution(history.u(), certified_solution);
+  for (int slot = 1; slot <= history.historyDepth(); ++slot) {
+    auto accepted_history = preserved_history[
+        static_cast<std::size_t>(slot - 1)];
+    std::copy(
+        certified_solution.begin() +
+            static_cast<std::ptrdiff_t>(field_offset),
+        certified_solution.begin() +
+            static_cast<std::ptrdiff_t>(
+                field_offset + field_count),
+        accepted_history.begin() +
+            static_cast<std::ptrdiff_t>(field_offset));
+    scatterFeOrderedSolution(
+        history.uPrevK(slot), accepted_history);
+  }
+  if (history.hasUDotState()) {
+    zeroHistoryFieldRateSlice(
+        system, level_set_field, history.uDot());
+  }
+  if (history.hasUDDotState()) {
+    zeroHistoryFieldRateSlice(
+        system, level_set_field, history.uDDot());
+  }
+  history.updateGhosts();
+}
+
+bool initializeDiscreteStaticCapillaryEquilibrium(
+    application::core::SimulationComponents& sim,
+    const Parameters& params,
+    std::vector<LevelSetMaintenanceRequest>& requests,
+    svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
+    ActiveCutContextRefreshCache& refresh_cache)
+{
+  const auto enabled_count = static_cast<std::size_t>(std::count_if(
+      requests.begin(), requests.end(), [](const auto& request) {
+        return request.static_capillary_equilibrium_enabled &&
+               !request.static_capillary_equilibrium_initialized;
+      }));
+  if (enabled_count == 0u) {
+    return false;
+  }
+  if (enabled_count != 1u || !sim.fe_system || !sim.time_history ||
+      !sim.backend || !sim.linear_solver) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization currently requires exactly one enabled level-set request and a complete FE solve context.");
+  }
+  const auto active_requests = activeCutVolumeRequests(params);
+  if (active_requests.size() != 1u) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization currently requires exactly one authoritative active cut-volume request.");
+  }
+
+  auto request_it = std::find_if(
+      requests.begin(), requests.end(), [](const auto& request) {
+        return request.static_capillary_equilibrium_enabled &&
+               !request.static_capillary_equilibrium_initialized;
+      });
+  auto& request = *request_it;
+  if (!request.volume_cut_request.has_value()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization requires a matching authoritative cut-volume request.");
+  }
+
+  auto& system = *sim.fe_system;
+  auto& history = *sim.time_history;
+  const auto comm = activeFESystemCommunicator(system);
+  const auto level_set_field =
+      system.findFieldByName(request.level_set_field_name);
+  if (level_set_field == svmp::FE::INVALID_FIELD_ID) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization could not resolve level-set field '" +
+        request.level_set_field_name + "'.");
+  }
+  const auto marker =
+      generatedCutContextMarkerForMaintenance(system, request);
+  if (globalAnyBool(!marker.has_value(), comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization could not resolve its authoritative interface marker.");
+  }
+
+  const auto declarations =
+      system.freeSurfaceDiscreteFunctionalDeclarations();
+  const bool local_declaration_matches =
+      declarations.size() == 1u &&
+      declarations.front().interface_marker == *marker &&
+      declarations.front().level_set_field == level_set_field &&
+      declarations.front().geometry_domain_id ==
+          request.volume_cut_request->domain_id &&
+      declarations.front().parameters.liquid_side ==
+          cutIntegrationSide(
+              request.volume_cut_request->active_side) &&
+      declarations.front().parameters.surface_tension >
+          svmp::FE::Real{0.0} &&
+      declarations.front().capillary_balance_method ==
+          svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+              DiscreteEnergyVolumeStationarity &&
+      declarations.front().capillary_balance_qualification ==
+          svmp::FE::systems::FreeSurfaceCapillaryBalanceQualification::
+              PrerequisiteOnly;
+  if (globalAnyBool(!local_declaration_matches, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization requires one matching positive-tension, active-side-consistent, prerequisite-only discrete-energy free-surface declaration.");
+  }
+  const auto& declaration = declarations.front();
+
+  const auto declaration_content_key =
+      freeSurfaceDiscreteFunctionalDeclarationContentKey(declaration);
+  const auto [minimum_declaration_content_key,
+              maximum_declaration_content_key] =
+      globalMinMaxUint64(declaration_content_key, comm);
+  if (minimum_declaration_content_key !=
+      maximum_declaration_content_key) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization free-surface declaration content differs across the FE communicator.");
+  }
+
+  const bool local_unsupported_gravity =
+      !declaration.active_volume_energy_parameters.has_value() ||
+      !std::all_of(
+          declaration.active_volume_energy_parameters
+              ->gravitational_acceleration.begin(),
+          declaration.active_volume_energy_parameters
+              ->gravitational_acceleration.end(),
+          [](svmp::FE::Real value) {
+            return std::isfinite(value) &&
+                   value == svmp::FE::Real{0.0};
+          });
+  if (globalAnyBool(local_unsupported_gravity, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization requires exactly zero finite gravitational acceleration in a present active-volume energy declaration because the current discrete minimizer and physical certificate omit gravitational potential and body-force work.");
+  }
+
+  const auto baseline = gatherFeOrderedSolution(history.u());
+  const bool local_velocity_field_declared =
+      declaration.velocity_field != svmp::FE::INVALID_FIELD_ID;
+  if (globalMinDouble(
+          local_velocity_field_declared ? 1.0 : 0.0, comm) !=
+      globalMaxDouble(
+          local_velocity_field_declared ? 1.0 : 0.0, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization velocity-field availability differs across the FE communicator.");
+  }
+  if (!local_velocity_field_declared) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization requires a declared velocity field so the zero-static-state preflight cannot be bypassed.");
+  }
+
+  svmp::FE::GlobalIndex raw_velocity_offset{-1};
+  svmp::FE::GlobalIndex raw_velocity_count{0};
+  std::string velocity_field_name;
+  bool local_velocity_metadata_valid = false;
+  try {
+    const auto unknown_fields =
+        system.unknownFieldIdsInDofMapOrder();
+    const auto velocity_is_unknown =
+        std::find(
+            unknown_fields.begin(),
+            unknown_fields.end(),
+            declaration.velocity_field) != unknown_fields.end();
+    if (velocity_is_unknown) {
+      const auto& velocity_record =
+          system.fieldRecord(declaration.velocity_field);
+      const auto& velocity_dofs =
+          system.fieldDofHandler(declaration.velocity_field);
+      raw_velocity_offset =
+          system.fieldDofOffset(declaration.velocity_field);
+      raw_velocity_count = velocity_dofs.getNumDofs();
+      const int dimension = system.meshAccess().dimension();
+      local_velocity_metadata_valid =
+          dimension >= 1 && dimension <= 3 &&
+          velocity_record.id == declaration.velocity_field &&
+          velocity_record.scope ==
+              svmp::FE::systems::FieldScope::VolumeCell &&
+          velocity_record.space != nullptr &&
+          velocity_record.components >= dimension &&
+          velocity_record.space->value_dimension() >= dimension &&
+          raw_velocity_offset >= 0 && raw_velocity_count > 0;
+      velocity_field_name = velocity_record.name;
+    }
+  } catch (...) {
+    local_velocity_metadata_valid = false;
+  }
+  if (globalAnyBool(!local_velocity_metadata_valid, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization requires its declared velocity field to be a registered, finalized, dimension-compatible unknown vector volume field on every rank.");
+  }
+  {
+    const bool local_velocity_layout_valid =
+        raw_velocity_offset >= 0 && raw_velocity_count > 0 &&
+        static_cast<std::size_t>(raw_velocity_offset) <= baseline.size() &&
+        static_cast<std::size_t>(raw_velocity_count) <=
+            baseline.size() -
+                static_cast<std::size_t>(raw_velocity_offset);
+    if (globalAnyBool(!local_velocity_layout_valid, comm)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Static capillary initialization found an invalid declared velocity-field layout.");
+    }
+    const auto velocity_begin =
+        baseline.begin() +
+        static_cast<std::ptrdiff_t>(raw_velocity_offset);
+    const auto velocity_end =
+        velocity_begin +
+        static_cast<std::ptrdiff_t>(raw_velocity_count);
+    const bool local_velocity_is_static =
+        std::all_of(velocity_begin, velocity_end, [](svmp::FE::Real value) {
+          return std::isfinite(value) &&
+                 value == svmp::FE::Real{0.0};
+        });
+    if (globalAnyBool(!local_velocity_is_static, comm)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Static capillary initialization requires an exactly zero finite current velocity field because the current discrete minimizer and physical certificate omit kinetic, inertial, advective, and viscous contributions; field '" +
+          velocity_field_name + "'.");
+    }
+  }
+
+  const auto initial_states =
+      evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+  const bool local_initial_functional_available =
+      initial_states.size() == 1u &&
+      initial_states.front().interface_marker == *marker;
+  if (globalAnyBool(
+          !local_initial_functional_available, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization could not evaluate its initial authoritative functional.");
+  }
+  const auto target_volume =
+      initial_states.front().state.owned_liquid_volume;
+  const bool local_target_volume_valid =
+      std::isfinite(target_volume) &&
+      target_volume > svmp::FE::Real{0.0};
+  if (globalAnyBool(!local_target_volume_valid, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization requires a finite positive initial liquid volume.");
+  }
+  if (globalMinDouble(
+          static_cast<double>(target_volume), comm) !=
+      globalMaxDouble(
+          static_cast<double>(target_volume), comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization target volume differs across the FE communicator.");
+  }
+  request.static_capillary_equilibrium.target_liquid_volume =
+      target_volume;
+
+  const auto raw_field_offset =
+      system.fieldDofOffset(level_set_field);
+  const auto raw_field_count =
+      system.fieldDofHandler(level_set_field).getNumDofs();
+  if (globalAnyBool(
+          raw_field_offset < 0 || raw_field_count <= 0,
+          comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization found an invalid level-set coefficient layout.");
+  }
+  const auto field_offset =
+      static_cast<std::size_t>(raw_field_offset);
+  const auto field_count =
+      static_cast<std::size_t>(raw_field_count);
+  const bool local_field_layout_valid =
+      field_offset <= baseline.size() &&
+      field_count <= baseline.size() - field_offset;
+  if (globalAnyBool(!local_field_layout_valid, comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization level-set coefficients exceed the FE solution layout.");
+  }
+
+  std::vector<svmp::FE::Real> parameters(
+      baseline.begin() +
+          static_cast<std::ptrdiff_t>(field_offset),
+      baseline.begin() +
+          static_cast<std::ptrdiff_t>(
+              field_offset + field_count));
+  (void)collectiveLevelSetMaintenanceAlgebraicRevision(
+      parameters, comm);
+  std::vector<std::size_t> active_parameters(field_count);
+  std::iota(
+      active_parameters.begin(),
+      active_parameters.end(),
+      std::size_t{0u});
+
+  LevelSetMaintenanceGeometryTransaction transaction(
+      sim, lifecycle, refresh_cache, active_requests);
+  const double constraint_dt =
+      std::isfinite(history.dt()) && history.dt() > 0.0
+          ? history.dt()
+          : 1.0;
+  std::vector<svmp::FE::Real> certified_solution;
+  double certified_constant_pressure_jump =
+      std::numeric_limits<double>::quiet_NaN();
+  double certified_constant_pressure_volume_multiplier =
+      std::numeric_limits<double>::quiet_NaN();
+  const auto evaluator =
+      [&](std::span<const svmp::FE::Real> coefficients,
+          svmp::FE::level_set::
+              LevelSetStaticCapillaryEvaluationPurpose purpose) {
+        svmp::FE::level_set::
+            LevelSetStaticCapillaryEquilibriumEvaluation evaluation;
+        if (globalAnyBool(
+                coefficients.size() != field_count, comm)) {
+          evaluation.diagnostic =
+              "candidate_level_set_coefficient_count_mismatch";
+          return evaluation;
+        }
+        (void)collectiveLevelSetMaintenanceAlgebraicRevision(
+            coefficients, comm);
+
+        std::vector<svmp::FE::Real> candidate = baseline;
+        std::copy(
+            coefficients.begin(),
+            coefficients.end(),
+            candidate.begin() +
+                static_cast<std::ptrdiff_t>(field_offset));
+        std::optional<std::uint64_t> previous_constraint_key;
+        std::uint64_t constraint_key = 0u;
+        ActiveCutContextRefreshReport refresh_report;
+        bool fixed_point_reached = false;
+        constexpr int maximum_projection_passes = 4;
+        for (int pass = 0;
+             pass < maximum_projection_passes;
+             ++pass) {
+          refresh_report = transaction.refresh(
+              params,
+              candidate,
+              purpose ==
+                      svmp::FE::level_set::
+                          LevelSetStaticCapillaryEvaluationPurpose::
+                              AcceptanceCertificate &&
+                  pass == 0);
+          if (refresh_report.topology_key == 0u) {
+            evaluation.diagnostic =
+                "candidate_cut_topology_key_unavailable";
+            return evaluation;
+          }
+          system.updateConstraints(
+              history.time(), constraint_dt);
+          constraint_key =
+              collectiveConstraintSemanticsKey(system, comm);
+          auto projected = candidate;
+          system.constraints().distribute(projected);
+          const bool projected_values_finite = std::all_of(
+              projected.begin(),
+              projected.end(),
+              [](svmp::FE::Real value) {
+                return std::isfinite(value);
+              });
+          if (globalAnyBool(
+                  !projected_values_finite, comm)) {
+            evaluation.diagnostic =
+                "candidate_constraint_projection_is_nonfinite";
+            return evaluation;
+          }
+          const auto projection_change =
+              globalMaxAbsDifference(
+                  candidate, projected, comm);
+          candidate = std::move(projected);
+          if (pass > 0 &&
+              previous_constraint_key.has_value() &&
+              *previous_constraint_key == constraint_key &&
+              projection_change == 0.0) {
+            fixed_point_reached = true;
+            break;
+          }
+          previous_constraint_key = constraint_key;
+        }
+        if (!fixed_point_reached) {
+          evaluation.diagnostic =
+              "candidate_constraint_geometry_fixed_point_failed";
+          return evaluation;
+        }
+
+        const auto states =
+            evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+        const bool local_functional_available =
+            states.size() == 1u &&
+            states.front().interface_marker == *marker;
+        if (globalAnyBool(
+                !local_functional_available, comm)) {
+          evaluation.diagnostic =
+              "candidate_authoritative_functional_unavailable";
+          return evaluation;
+        }
+        const auto& state = states.front();
+        const auto energy =
+            state.state.liquid_gas_surface_energy +
+            state.state.young_wall_energy;
+        const auto volume = state.state.owned_liquid_volume;
+        const bool local_functional_valid =
+            std::isfinite(energy) &&
+            std::isfinite(volume) &&
+            volume >= svmp::FE::Real{0.0};
+        if (globalAnyBool(
+                !local_functional_valid, comm)) {
+          evaluation.diagnostic =
+              "candidate_authoritative_functional_is_nonfinite";
+          return evaluation;
+        }
+        const auto [minimum_snapshot_revision,
+                    maximum_snapshot_revision] =
+            globalMinMaxUint64(
+                state.geometry_revision.snapshot_revision_key,
+                comm);
+        const bool functional_decision_data_identical =
+            minimum_snapshot_revision ==
+                maximum_snapshot_revision &&
+            globalMinDouble(
+                static_cast<double>(energy), comm) ==
+                globalMaxDouble(
+                    static_cast<double>(energy), comm) &&
+            globalMinDouble(
+                static_cast<double>(volume), comm) ==
+                globalMaxDouble(
+                    static_cast<double>(volume), comm);
+        if (!functional_decision_data_identical) {
+          evaluation.diagnostic =
+              "candidate_functional_decision_data_differs_across_communicator";
+          return evaluation;
+        }
+
+        evaluation.success = true;
+        evaluation.snapshot_revision_key =
+            state.geometry_revision.snapshot_revision_key;
+        evaluation.cut_topology_key =
+            refresh_report.topology_key;
+        evaluation.constraint_semantics_key =
+            constraint_key;
+        evaluation.surface_wall_energy = energy;
+        evaluation.liquid_volume = volume;
+        evaluation.production_force_projection_applied = false;
+        evaluation.diagnostic = "functional_trial_available";
+
+        if (purpose ==
+            svmp::FE::level_set::
+                LevelSetStaticCapillaryEvaluationPurpose::
+                    AcceptanceCertificate) {
+          const auto certificate =
+              evaluateStaticCapillaryConstantPressureCertificate(
+                  sim, candidate);
+          const auto post_certificate_constraint_key =
+              collectiveConstraintSemanticsKey(system, comm);
+          if (post_certificate_constraint_key !=
+              constraint_key) {
+            evaluation.success = false;
+            evaluation.diagnostic =
+                "constant_pressure_certificate_changed_constraint_semantics";
+            return evaluation;
+          }
+          if (globalAnyBool(
+                  !std::isfinite(certificate.residual_norm),
+                  comm)) {
+            evaluation.success = false;
+            evaluation.diagnostic =
+                "constant_pressure_certificate_production_residual_is_nonfinite";
+            return evaluation;
+          }
+          const bool local_kkt_scalar_invalid =
+              certificate.constant_pressure_kkt_available &&
+              (!std::isfinite(
+                   certificate
+                       .constant_pressure_kkt_residual_norm) ||
+               !std::isfinite(
+                   certificate
+                       .constant_pressure_kkt_relative_distance) ||
+               !std::isfinite(
+                   certificate.constant_pressure_kkt_pressure_jump) ||
+               !std::isfinite(
+                   certificate
+                       .constant_pressure_kkt_volume_multiplier));
+          if (globalAnyBool(
+                  local_kkt_scalar_invalid, comm)) {
+            evaluation.success = false;
+            evaluation.diagnostic =
+                "constant_pressure_certificate_kkt_scalar_is_nonfinite";
+            return evaluation;
+          }
+          const bool local_diagnostic_sampled =
+              certificate
+                  .pressure_representability_diagnostic_sampled;
+          const bool local_kkt_available =
+              local_diagnostic_sampled &&
+              certificate.constant_pressure_kkt_available;
+          const bool diagnostic_sampled_identical =
+              globalMinDouble(
+                  local_diagnostic_sampled ? 1.0 : 0.0,
+                  comm) ==
+              globalMaxDouble(
+                  local_diagnostic_sampled ? 1.0 : 0.0,
+                  comm);
+          const bool kkt_available_identical =
+              globalMinDouble(
+                  local_kkt_available ? 1.0 : 0.0,
+                  comm) ==
+              globalMaxDouble(
+                  local_kkt_available ? 1.0 : 0.0,
+                  comm);
+          if (!diagnostic_sampled_identical ||
+              !kkt_available_identical) {
+            evaluation.success = false;
+            evaluation.diagnostic =
+                "constant_pressure_certificate_availability_differs_across_communicator";
+            return evaluation;
+          }
+          if (local_kkt_available) {
+            const bool kkt_scalars_identical =
+                globalMinDouble(
+                    certificate
+                        .constant_pressure_kkt_residual_norm,
+                    comm) ==
+                    globalMaxDouble(
+                        certificate
+                            .constant_pressure_kkt_residual_norm,
+                        comm) &&
+                globalMinDouble(
+                    certificate
+                        .constant_pressure_kkt_relative_distance,
+                    comm) ==
+                    globalMaxDouble(
+                        certificate
+                            .constant_pressure_kkt_relative_distance,
+                        comm) &&
+                globalMinDouble(
+                    certificate
+                        .constant_pressure_kkt_pressure_jump,
+                    comm) ==
+                    globalMaxDouble(
+                        certificate
+                            .constant_pressure_kkt_pressure_jump,
+                        comm) &&
+                globalMinDouble(
+                    certificate
+                        .constant_pressure_kkt_volume_multiplier,
+                    comm) ==
+                    globalMaxDouble(
+                        certificate
+                            .constant_pressure_kkt_volume_multiplier,
+                        comm);
+            if (!kkt_scalars_identical) {
+              evaluation.success = false;
+              evaluation.diagnostic =
+                  "constant_pressure_certificate_scalars_differ_across_communicator";
+              return evaluation;
+            }
+          }
+          evaluation.constant_pressure_kkt_available =
+              local_kkt_available;
+          evaluation.constant_pressure_kkt_residual_norm =
+              static_cast<svmp::FE::Real>(
+                  certificate
+                      .constant_pressure_kkt_residual_norm);
+          evaluation.constant_pressure_kkt_relative_distance =
+              static_cast<svmp::FE::Real>(
+                  certificate
+                      .constant_pressure_kkt_relative_distance);
+          evaluation.diagnostic =
+              local_kkt_available
+                  ? "acceptance_certificate_available"
+                  : "acceptance_certificate_kkt_unavailable:" +
+                        certificate.constant_pressure_kkt_reason;
+          certified_constant_pressure_jump =
+              certificate.constant_pressure_kkt_pressure_jump;
+          certified_constant_pressure_volume_multiplier =
+              certificate
+                  .constant_pressure_kkt_volume_multiplier;
+          certified_solution = candidate;
+        }
+        return evaluation;
+      };
+
+  std::vector<svmp::FE::Real> accepted_parameters;
+  svmp::FE::level_set::LevelSetStaticCapillaryEquilibriumResult result;
+  try {
+    result =
+        svmp::FE::level_set::
+            minimizeLevelSetStaticCapillaryEquilibrium(
+                request.static_capillary_equilibrium,
+                parameters,
+                active_parameters,
+                evaluator,
+                accepted_parameters);
+  } catch (...) {
+    transaction.rollback();
+    throw;
+  }
+  const bool local_prepublication_result_valid =
+      result.success &&
+      result.converged &&
+      result.accepted_coefficients_assigned &&
+      accepted_parameters.size() == field_count &&
+      certified_solution.size() == baseline.size() &&
+      std::isfinite(certified_constant_pressure_jump) &&
+      std::isfinite(
+          certified_constant_pressure_volume_multiplier);
+  if (globalAnyBool(
+          !local_prepublication_result_valid, comm)) {
+    transaction.rollback();
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization failed before publication: " +
+        result.diagnostic);
+  }
+
+  (void)collectiveLevelSetMaintenanceAlgebraicRevision(
+      certified_solution, comm);
+
+  // Backend gather/scatter operations can enter communicator assembly.
+  // Reject deterministic vector-layout drift collectively before the first
+  // publication backup or mutation so every rank follows the same path.
+  const auto local_target_layout_error =
+      staticCapillaryHistoryPublicationTargetLayoutError(
+          system,
+          level_set_field,
+          certified_solution,
+          history);
+  if (globalAnyBool(
+          !local_target_layout_error.empty(), comm)) {
+    transaction.rollback();
+    if (!local_target_layout_error.empty()) {
+      throw std::runtime_error(local_target_layout_error);
+    }
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary target-history layout validation failed on another FE communicator rank.");
+  }
+
+  const auto current_backup =
+      gatherFeOrderedSolution(history.u());
+  std::vector<std::vector<svmp::FE::Real>> history_backups;
+  history_backups.reserve(
+      static_cast<std::size_t>(history.historyDepth()));
+  for (int slot = 1; slot <= history.historyDepth(); ++slot) {
+    history_backups.push_back(
+        gatherFeOrderedSolution(history.uPrevK(slot)));
+  }
+  std::optional<std::vector<svmp::FE::Real>> u_dot_backup;
+  std::optional<std::vector<svmp::FE::Real>> u_ddot_backup;
+  if (history.hasUDotState()) {
+    u_dot_backup = gatherFeOrderedSolution(history.uDot());
+  }
+  if (history.hasUDDotState()) {
+    u_ddot_backup = gatherFeOrderedSolution(history.uDDot());
+  }
+  const auto local_staging_layout_error =
+      staticCapillaryHistoryPublicationLayoutError(
+          system,
+          level_set_field,
+          certified_solution,
+          history_backups,
+          history);
+  if (globalAnyBool(
+          !local_staging_layout_error.empty(), comm)) {
+    transaction.rollback();
+    if (!local_staging_layout_error.empty()) {
+      throw std::runtime_error(local_staging_layout_error);
+    }
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary history layout validation failed on another FE communicator rank.");
+  }
+  const auto restore_history = [&] {
+    scatterFeOrderedSolution(history.u(), current_backup);
+    for (int slot = 1; slot <= history.historyDepth(); ++slot) {
+      scatterFeOrderedSolution(
+          history.uPrevK(slot),
+          history_backups[
+              static_cast<std::size_t>(slot - 1)]);
+    }
+    if (u_dot_backup.has_value()) {
+      scatterFeOrderedSolution(
+          history.uDot(), *u_dot_backup);
+    }
+    if (u_ddot_backup.has_value()) {
+      scatterFeOrderedSolution(
+          history.uDDot(), *u_ddot_backup);
+    }
+    history.updateGhosts();
+  };
+
+  std::exception_ptr local_staging_failure;
+  try {
+    stageStaticCapillaryHistoryForPublication(
+        system,
+        level_set_field,
+        certified_solution,
+        history_backups,
+        history);
+  } catch (...) {
+    local_staging_failure = std::current_exception();
+  }
+  if (globalAnyBool(
+          local_staging_failure != nullptr, comm)) {
+    std::exception_ptr rollback_failure;
+    try {
+      restore_history();
+    } catch (...) {
+      rollback_failure = std::current_exception();
+    }
+    try {
+      transaction.rollback();
+    } catch (...) {
+      if (!rollback_failure) {
+        rollback_failure = std::current_exception();
+      }
+    }
+    if (rollback_failure) {
+      std::rethrow_exception(rollback_failure);
+    }
+    if (local_staging_failure) {
+      std::rethrow_exception(local_staging_failure);
+    }
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary history staging failed on another FE communicator rank.");
+  }
+
+  try {
+    transaction.commit();
+  } catch (...) {
+    const auto failure = std::current_exception();
+    if (!transaction.publicationStarted()) {
+      std::exception_ptr rollback_failure;
+      try {
+        restore_history();
+      } catch (...) {
+        rollback_failure = std::current_exception();
+      }
+      try {
+        transaction.rollback();
+      } catch (...) {
+        if (!rollback_failure) {
+          rollback_failure = std::current_exception();
+        }
+      }
+      if (rollback_failure) {
+        std::rethrow_exception(rollback_failure);
+      }
+    }
+    std::rethrow_exception(failure);
+  }
+
+  request.static_capillary_equilibrium_initialized = true;
+  application::core::oopCout()
+      << std::setprecision(17)
+      << "[svMultiPhysics::Application] Static capillary equilibrium initialized"
+      << " diagnostic=static_capillary_equilibrium_initialization"
+      << " field='" << request.level_set_field_name << "'"
+      << " marker=" << *marker
+      << " target_liquid_volume="
+      << request.static_capillary_equilibrium.target_liquid_volume
+      << " initial_surface_wall_energy="
+      << result.initial_surface_wall_energy
+      << " final_surface_wall_energy="
+      << result.final_surface_wall_energy
+      << " final_volume_error=" << result.final_volume_error
+      << " final_projected_gradient_norm="
+      << result.final_projected_gradient_norm
+      << " final_volume_multiplier="
+      << result.final_volume_multiplier
+      << " constant_pressure_jump="
+      << certified_constant_pressure_jump
+      << " constant_pressure_volume_multiplier="
+      << certified_constant_pressure_volume_multiplier
+      << " parameter_to_physical_multiplier_difference="
+      << (result.final_volume_multiplier -
+          certified_constant_pressure_volume_multiplier)
+      << " constant_pressure_kkt_available="
+      << (result.final_constant_pressure_kkt_available ? 1 : 0)
+      << " constant_pressure_kkt_residual_norm="
+      << result.final_constant_pressure_kkt_residual_norm
+      << " constant_pressure_kkt_relative_distance="
+      << result.final_constant_pressure_kkt_relative_distance
+      << " volume_tolerance="
+      << request.static_capillary_equilibrium.volume_tolerance
+      << " projected_gradient_tolerance="
+      << request.static_capillary_equilibrium
+             .projected_gradient_tolerance
+      << " constant_pressure_kkt_max_residual_norm="
+      << request.static_capillary_equilibrium
+             .constant_pressure_kkt_max_residual_norm
+      << " constant_pressure_kkt_max_relative_distance="
+      << request.static_capillary_equilibrium
+             .constant_pressure_kkt_max_relative_distance
+      << " initial_snapshot_revision_key="
+      << result.initial_snapshot_revision_key
+      << " final_snapshot_revision_key="
+      << result.final_snapshot_revision_key
+      << " cut_topology_key="
+      << result.cut_topology_key
+      << " constraint_semantics_key="
+      << result.constraint_semantics_key
+      << " iterations=" << result.iterations
+      << " functional_evaluations="
+      << result.functional_evaluations
+      << " acceptance_certificate_evaluations="
+      << result.acceptance_certificate_evaluations
+      << " topology_change_rejections="
+      << result.topology_change_rejections
+      << " constraint_change_rejections="
+      << result.constraint_change_rejections
+      << " production_force_projection_applied=0"
+      << " qualification=prerequisite_only"
+      << std::endl;
+  return true;
+}
 
 } // namespace
 
@@ -16274,7 +25237,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   oopCout() << "[svMultiPhysics::Application] Steady: TimeHistory repacked." << std::endl;
 
   initializeLevelSetMaintenanceTargets(sim, level_set_maintenance);
-  const auto steady_initial_cut_report =
+  auto steady_initial_cut_report =
       refreshActiveCutIntegrationContextCached(
           sim,
           params,
@@ -16282,6 +25245,21 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
           *cut_lifecycle,
           *cut_refresh_cache,
           "steady_initial");
+  if (initializeDiscreteStaticCapillaryEquilibrium(
+          sim,
+          params,
+          level_set_maintenance,
+          *cut_lifecycle,
+          *cut_refresh_cache)) {
+    steady_initial_cut_report =
+        refreshActiveCutIntegrationContextCached(
+            sim,
+            params,
+            sim.time_history->u(),
+            *cut_lifecycle,
+            *cut_refresh_cache,
+            "steady_static_capillary_accepted");
+  }
   initializeConservativePhaseStates(sim, level_set_maintenance);
   (void)projectLevelSetCurvatureFieldsFromState(
       sim,
@@ -16376,20 +25354,27 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
             steady_state_revision,
             std::span<const svmp::FE::Real>(
                 steady_solution.data(), steady_solution.size()));
-    recordAcceptedFreeSurfaceDiscreteFunctionals(
+    (void)recordAcceptedFreeSurfaceDiscreteFunctionals(
         sim,
         /*accepted_step=*/1u,
         solve_time,
         sim.time_history->dt(),
         steady_state_revision,
         steady_state_revision,
-        steady_contact_stages);
+        steady_contact_stages,
+        std::span<const svmp::FE::Real>(
+            steady_solution.data(), steady_solution.size()),
+        std::span<const svmp::FE::Real>{},
+        currentLevelSetVelocityExtensionRevision(
+            *sim.fe_system,
+            steady_level_set_advection_velocity,
+            steady_accepted_extension_maps));
   }
-  sim.fe_system->recordAcceptedMeshTangentialBoundaryPolicies(
+  recordAcceptedMeshBoundaryProvenanceAtEndpoint(
+      sim,
       /*accepted_step=*/1u,
       solve_time,
-      sim.time_history->dt(),
-      sim.time_history->u().valueRevision());
+      sim.time_history->dt());
   outputResults(sim, params, /*step=*/1, solve_time, pvd);
 
   const auto comm = svmp::MeshComm::world();
@@ -16459,7 +25444,33 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   opts.newton.residual_op = "equations";
   opts.newton.jacobian_op = "equations";
 
-  const auto transient_active_cut_requests = activeCutVolumeRequests(params);
+  const auto transient_cut_topology_preflight_comm =
+      activeFESystemCommunicator(*sim.fe_system);
+  std::vector<ActiveCutVolumeRequest> transient_active_cut_requests;
+  std::exception_ptr local_cut_request_preparation_failure;
+  try {
+    transient_active_cut_requests = activeCutVolumeRequests(params);
+  } catch (...) {
+    local_cut_request_preparation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_cut_request_preparation_failure,
+      transient_cut_topology_preflight_comm,
+      "transient_cut_topology_request_preflight");
+  const bool local_transient_cut_topology_fingerprint_supported =
+      transientCutTopologyFingerprintSupportsRequests(
+          transient_active_cut_requests);
+  if (globalAnyBool(
+          !local_transient_cut_topology_fingerprint_supported,
+          transient_cut_topology_preflight_comm)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Transient fixed cut-topology "
+        "acceptance requires geometry_mode=LinearCorner for every active-cut "
+        "request. The current partition-independent structural fingerprint "
+        "is a probabilistic certificate qualified for LinearCorner cuts, not "
+        "a sound arbitrary high-order connectivity certificate; refusing to "
+        "start the transient solve rather than disabling the gate.");
+  }
   // A first-order generalized-alpha state is (u_n, uDot_n).  Starting an
   // active-cut free-surface problem with uDot_n=0 is generally inconsistent
   // with gravity, pressure, and capillary forces and excites the algorithmic
@@ -16666,9 +25677,23 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // the reference and hid all first-step volume loss.
   std::map<std::string, svmp::FE::Real> initial_wet_volume_by_key;
   initializeLevelSetMaintenanceTargets(sim, level_set_maintenance);
-  const auto initial_cut_report = refreshActiveCutIntegrationContextCached(
+  auto initial_cut_report = refreshActiveCutIntegrationContextCached(
       sim, params, sim.time_history->u(), *cut_lifecycle, *cut_refresh_cache,
       "initial");
+  if (initializeDiscreteStaticCapillaryEquilibrium(
+          sim,
+          params,
+          level_set_maintenance,
+          *cut_lifecycle,
+          *cut_refresh_cache)) {
+    initial_cut_report = refreshActiveCutIntegrationContextCached(
+        sim,
+        params,
+        sim.time_history->u(),
+        *cut_lifecycle,
+        *cut_refresh_cache,
+        "static_capillary_accepted");
+  }
   initializeConservativePhaseStates(sim, level_set_maintenance);
   if (parseBoolEnv("SVMP_CUT_RULE_DUMP", false)) {
     dumpActiveCutVolumeRulesForProbe(*sim.fe_system,
@@ -16707,7 +25732,307 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   std::optional<int> step_acceptance_attempt_step{};
   const auto velocity_extension_artifact_comm =
       activeFESystemCommunicator(*sim.fe_system);
+  const bool local_has_conservative_phase = std::any_of(
+      level_set_maintenance.begin(),
+      level_set_maintenance.end(),
+      [](const auto& request) {
+        return request.conservative_phase.enabled;
+      });
+  const auto [minimum_has_conservative_phase,
+              maximum_has_conservative_phase] =
+      globalMinMaxUint64(
+          local_has_conservative_phase ? 1u : 0u,
+          velocity_extension_artifact_comm);
+  if (minimum_has_conservative_phase !=
+      maximum_has_conservative_phase) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase enablement differs across the active FE communicator.");
+  }
+  const bool has_conservative_phase =
+      maximum_has_conservative_phase == 1u;
+  const bool local_pointwise_wall_contract_requested =
+      hasExplicitUnsupportedConservativePhasePointwiseWallContract(
+          level_set_maintenance);
+  const auto [minimum_pointwise_wall_contract_requested,
+              maximum_pointwise_wall_contract_requested] =
+      globalMinMaxUint64(
+          local_pointwise_wall_contract_requested ? 1u : 0u,
+          velocity_extension_artifact_comm);
+  if (minimum_pointwise_wall_contract_requested !=
+      maximum_pointwise_wall_contract_requested) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase pointwise wall-velocity contract configuration differs across the active FE communicator.");
+  }
+  if (maximum_pointwise_wall_contract_requested != 0u) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative_phase_impermeable_normal_velocity_tolerance requests a pointwise velocity-normal wall contract that the current conservative-phase split does not implement; the supported closed-domain gate enforces only discrete q-flux and can be blind where q=0.");
+  }
+  const bool local_conservative_phase_scheme_supported =
+      !local_has_conservative_phase ||
+      (opts.scheme ==
+           svmp::FE::timestepping::SchemeKind::BackwardEuler &&
+       sim.fe_system->temporalOrder() == 1);
+  const auto [minimum_conservative_phase_scheme_supported,
+              maximum_conservative_phase_scheme_supported] =
+      globalMinMaxUint64(
+          local_conservative_phase_scheme_supported ? 1u : 0u,
+          velocity_extension_artifact_comm);
+  if (minimum_conservative_phase_scheme_supported !=
+      maximum_conservative_phase_scheme_supported) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase temporal-split support differs across the active FE communicator.");
+  }
+  if (has_conservative_phase &&
+      maximum_conservative_phase_scheme_supported == 0u) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative phase split transport currently supports only temporal-order-one Backward Euler; generalized-alpha, DG, BDF, and other time schemes fail closed before TimeLoop.");
+  }
+  std::vector<ConservativePhaseFixedGraphBinding>
+      conservative_phase_fixed_graph_bindings;
+  std::optional<ConservativePhaseCandidateStageSnapshot>
+      pending_conservative_phase_stage;
+  if (has_conservative_phase) {
+    conservative_phase_fixed_graph_bindings =
+        captureConservativePhaseFixedGraphBindings(
+            *sim.fe_system,
+            level_set_maintenance,
+            velocity_extension_artifact_comm);
+    requireConservativePhaseFixedGraphBindingsCurrent(
+        *sim.fe_system,
+        level_set_maintenance,
+        conservative_phase_fixed_graph_bindings,
+        velocity_extension_artifact_comm,
+        "initial_fixed_background_before_time_loop");
+  }
+  const auto fitted_ale_operator_stage_declarations =
+      sim.fe_system
+          ->fittedALENormalOperatorStageMeasurementDeclarations();
+  const auto [minimum_fitted_ale_measurement_count,
+              maximum_fitted_ale_measurement_count] =
+      globalMinMaxUint64(
+          static_cast<std::uint64_t>(
+              fitted_ale_operator_stage_declarations.size()),
+          velocity_extension_artifact_comm);
+  if (minimum_fitted_ale_measurement_count !=
+      maximum_fitted_ale_measurement_count) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Fitted-ALE operator-stage normal "
+        "measurement declaration count differs across the active FE "
+        "communicator.");
+  }
+  const bool local_fitted_ale_operator_stage_scheme_supported =
+      sim.fe_system->temporalOrder() == 1 &&
+      (opts.scheme ==
+           svmp::FE::timestepping::SchemeKind::BackwardEuler ||
+       opts.scheme == svmp::FE::timestepping::SchemeKind::DG0 ||
+       opts.scheme ==
+           svmp::FE::timestepping::SchemeKind::GeneralizedAlpha);
+  const auto [minimum_fitted_ale_scheme_supported,
+              maximum_fitted_ale_scheme_supported] =
+      globalMinMaxUint64(
+          local_fitted_ale_operator_stage_scheme_supported ? 1u : 0u,
+          velocity_extension_artifact_comm);
+  if (minimum_fitted_ale_scheme_supported !=
+      maximum_fitted_ale_scheme_supported) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Fitted-ALE operator-stage "
+        "measurement scheme support differs across the active FE "
+        "communicator.");
+  }
+  const bool fitted_ale_operator_stage_scheme_supported =
+      maximum_fitted_ale_scheme_supported == 1u;
+  const bool evaluate_fitted_ale_operator_stage =
+      maximum_fitted_ale_measurement_count != 0u &&
+      fitted_ale_operator_stage_scheme_supported;
+  const auto fitted_ale_operator_stage_state_size =
+      sim.fe_system->dofHandler().getNumDofs();
+  requireFittedALEOperatorStageSchemeCoverage(
+      maximum_fitted_ale_measurement_count,
+      fitted_ale_operator_stage_scheme_supported,
+      transient_scheme.canonical_name,
+      sim.fe_system->temporalOrder());
+  const auto free_surface_declarations =
+      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+  const auto free_surface_acceptance_coverage =
+      requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
+          free_surface_declarations,
+          velocity_extension_artifact_comm);
+  const bool has_free_surface_functional =
+      free_surface_acceptance_coverage.has_functional;
+  const bool has_dynamic_contact_stage =
+      free_surface_acceptance_coverage.has_dynamic_contact;
+  const bool capture_dynamic_contact_generalized_alpha =
+      has_dynamic_contact_stage &&
+      opts.scheme ==
+          svmp::FE::timestepping::SchemeKind::GeneralizedAlpha &&
+      sim.fe_system->temporalOrder() == 1;
+  if (has_dynamic_contact_stage &&
+      opts.scheme ==
+          svmp::FE::timestepping::SchemeKind::GeneralizedAlpha &&
+      !capture_dynamic_contact_generalized_alpha) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Dynamic-contact generalized-alpha "
+        "provenance currently requires a temporal-order-one FE system.");
+  }
+  std::optional<DynamicContactFirstOrderGeneralizedAlphaObservation>
+      pending_dynamic_contact_generalized_alpha_observation;
+  std::optional<int> dynamic_contact_solve_attempt_step;
+  int dynamic_contact_solve_attempt_index{-1};
+  const auto resolve_contact_stage_temporal_coordinates_collectively =
+      [&](const svmp::FE::timestepping::TimeHistory& history,
+          int expected_attempt_index,
+          std::string_view phase) {
+        std::optional<FreeSurfaceContactStageTemporalCoordinates> resolved;
+        std::exception_ptr local_failure;
+        try {
+          if (pending_dynamic_contact_generalized_alpha_observation.has_value() &&
+              !dynamicContactStageMeshRevisionMatches(
+                  pending_dynamic_contact_generalized_alpha_observation
+                      ->mesh_revision,
+                  sim.fe_system->meshAccess())) {
+            throw std::logic_error(
+                "Dynamic-contact generalized-alpha candidate-stage mesh "
+                "provenance is stale for the live FE mesh.");
+          }
+          resolved = resolveFreeSurfaceContactStageTemporalCoordinates(
+              transient_scheme.scheme,
+              history,
+              expected_attempt_index,
+              pending_dynamic_contact_generalized_alpha_observation);
+        } catch (...) {
+          local_failure = std::current_exception();
+        }
+        requireCollectivePhasePreparation(
+            local_failure, velocity_extension_artifact_comm, phase);
+        if (!resolved.has_value()) {
+          throw std::logic_error(
+              "[svMultiPhysics::Application] Contact-stage temporal "
+              "coordinates remained unavailable after collective validation.");
+        }
+        const auto [minimum_generalized_alpha_present,
+                    maximum_generalized_alpha_present] =
+            globalMinMaxUint64(
+                resolved->first_order_generalized_alpha.has_value() ? 1u : 0u,
+                velocity_extension_artifact_comm);
+        bool parameters_agree =
+            minimum_generalized_alpha_present ==
+            maximum_generalized_alpha_present;
+        const auto require_real_agreement = [&](svmp::FE::Real value) {
+          parameters_agree =
+              globalMinDouble(
+                  static_cast<double>(value),
+                  velocity_extension_artifact_comm) ==
+                  globalMaxDouble(
+                      static_cast<double>(value),
+                      velocity_extension_artifact_comm) &&
+              parameters_agree;
+        };
+        require_real_agreement(resolved->stage_time);
+        require_real_agreement(resolved->stage_alpha_f);
+        if (parameters_agree &&
+            maximum_generalized_alpha_present != 0u) {
+          const auto& provenance =
+              *resolved->first_order_generalized_alpha;
+          require_real_agreement(provenance.alpha_m);
+          require_real_agreement(provenance.alpha_f);
+          require_real_agreement(provenance.gamma);
+          require_real_agreement(provenance.dt);
+        }
+        if (!parameters_agree) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Contact-stage temporal "
+              "provenance differs across the active FE communicator.");
+        }
+        return *resolved;
+      };
+  bool initial_free_surface_functional_baseline_recorded =
+      !has_free_surface_functional;
+  const bool track_transient_cut_topology =
+      !transient_active_cut_requests.empty();
+  auto cut_topology_attempt_tracker =
+      std::make_shared<TransientCutTopologyAttemptTracker>();
+  if (track_transient_cut_topology) {
+    cut_refresh_cache->observer =
+        [cut_topology_attempt_tracker](
+            const ActiveCutContextRefreshReport& report,
+            std::string_view provenance) {
+          cut_topology_attempt_tracker->observe(report, provenance);
+        };
+  }
+  const auto invalidate_transient_cut_topology_dependent_state = [&] {
+    cut_refresh_cache->invalidateGeneratedState();
+    curvature_projection_cache->entries.clear();
+    for (const auto& request : level_set_advection_velocity) {
+      const auto target = sim.fe_system->findFieldByName(
+          request.target_velocity_field_name);
+      if (target == svmp::FE::INVALID_FIELD_ID) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Cut-topology rejection could not invalidate a level-set velocity extension target field.");
+      }
+      auto extension_constraint =
+          svmp::FE::level_set::
+              findLevelSetVelocityExtensionConstraintKernel(
+                  *sim.fe_system, request.operator_tag, target);
+      const bool algebraic_extension =
+          sim.fe_system->fieldRecord(target).source_kind ==
+          svmp::FE::systems::FieldSourceKind::Unknown;
+      if (algebraic_extension && !extension_constraint) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Cut-topology rejection could not resolve a frozen level-set velocity extension kernel.");
+      }
+      if (extension_constraint) {
+        extension_constraint->invalidateFrozenMap();
+      }
+    }
+  };
   callbacks.on_step_start = [&](const svmp::FE::timestepping::TimeHistory& h) {
+    if (capture_dynamic_contact_generalized_alpha) {
+      if (!dynamic_contact_solve_attempt_step.has_value() ||
+          *dynamic_contact_solve_attempt_step != h.stepIndex()) {
+        dynamic_contact_solve_attempt_step = h.stepIndex();
+        dynamic_contact_solve_attempt_index = 0;
+      } else {
+        ++dynamic_contact_solve_attempt_index;
+      }
+      const auto [minimum_pending_stage, maximum_pending_stage] =
+          globalMinMaxUint64(
+              pending_dynamic_contact_generalized_alpha_observation.has_value()
+                  ? 1u
+                  : 0u,
+              velocity_extension_artifact_comm);
+      if (minimum_pending_stage != maximum_pending_stage ||
+          maximum_pending_stage != 0u) {
+        throw std::logic_error(
+            "[svMultiPhysics::Application] Dynamic-contact generalized-alpha "
+            "provenance survived into a new solve/retry attempt.");
+      }
+    }
+    if (has_conservative_phase) {
+      const auto [minimum_pending_stage, maximum_pending_stage] =
+          globalMinMaxUint64(
+              pending_conservative_phase_stage.has_value() ? 1u : 0u,
+              velocity_extension_artifact_comm);
+      if (minimum_pending_stage != maximum_pending_stage ||
+          maximum_pending_stage != 0u) {
+        throw std::logic_error(
+            "[svMultiPhysics::Application] A conservative phase operator-stage snapshot survived into a new solve/retry attempt.");
+      }
+      requireCollectiveLevelSetMaintenanceRequestSchedule(
+          level_set_maintenance,
+          LevelSetMaintenanceScheduleStage::
+              ProspectiveAcceptedEndpoint,
+          h.stepIndex() + 1,
+          velocity_extension_artifact_comm);
+      requireConservativePhaseFixedGraphBindingsCurrent(
+          *sim.fe_system,
+          level_set_maintenance,
+          conservative_phase_fixed_graph_bindings,
+          velocity_extension_artifact_comm,
+          "step_start_fixed_background_before_physical_solve");
+    }
+    if (track_transient_cut_topology) {
+      cut_topology_attempt_tracker->beginAttempt();
+    }
     if (!step_acceptance_attempt_step.has_value() ||
         *step_acceptance_attempt_step != h.stepIndex()) {
       step_acceptance_attempt_step = h.stepIndex();
@@ -16732,6 +26057,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
        curvature_projection_cache](
           const svmp::FE::systems::SystemStateView& state,
           TransientStateSyncPoint point) {
+        const bool restoring_time_step_state =
+            restoresAcceptedTimeStepGeneratedState(point);
         if (use_transient_external_state_fixed_point &&
             point != TransientStateSyncPoint::OuterFixedPointState &&
             point !=
@@ -16764,7 +26091,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             !synchronize_line_search_trials) {
           return;
         }
-        if (!use_transient_external_state_fixed_point &&
+        if (!restoring_time_step_state &&
+            !use_transient_external_state_fixed_point &&
             !refresh_generated_geometry_within_solve) {
           return;
         }
@@ -16775,7 +26103,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         // every accepted Newton iterate. CAUTION: this changes Newton's
         // fixed point — the converged quadrature lags the converged φ by
         // one solve.
-        if (!use_transient_external_state_fixed_point &&
+        if (!restoring_time_step_state &&
+            !use_transient_external_state_fixed_point &&
             per_step_only_generated_state) {
           return;
         }
@@ -16814,7 +26143,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             state,
             level_set_advection_velocity,
             /*refresh_frozen_algebraic_map=*/
-                use_transient_external_state_fixed_point);
+                refreshesFrozenLevelSetExtensionAtStateSync(
+                    point,
+                    use_transient_external_state_fixed_point));
       };
   callbacks.on_before_physics_solve =
       [&](svmp::FE::timestepping::TimeHistory& h, double /*solve_time*/, double /*dt*/) {
@@ -16826,6 +26157,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 *cut_lifecycle,
                 *cut_refresh_cache,
                 "before_physics_solve");
+        if (track_transient_cut_topology) {
+          cut_topology_attempt_tracker->requireAcceptedBaseline();
+        }
         (void)projectLevelSetCurvatureFieldsFromState(
             sim,
             stateViewForHistory(h),
@@ -16838,6 +26172,27 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             /*reuse_cached_on_projection_failure=*/false);
         (void)updateLevelSetAdvectionVelocities(
             sim, h, level_set_advection_velocity);
+        if (!initial_free_surface_functional_baseline_recorded) {
+          if (h.stepIndex() < 0) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] An initial free-surface functional baseline requires a nonnegative step index.");
+          }
+          const auto initial_solution =
+              gatherFeOrderedSolution(h.u());
+          recordInitialFreeSurfaceDiscreteFunctionalBaseline(
+              sim,
+              static_cast<std::uint64_t>(h.stepIndex()),
+              static_cast<svmp::FE::Real>(h.time()),
+              std::span<const svmp::FE::Real>(
+                  initial_solution.data(), initial_solution.size()),
+              transient_scheme.scheme ==
+                  svmp::FE::timestepping::SchemeKind::BackwardEuler,
+              currentLevelSetVelocityExtensionRevision(
+                  *sim.fe_system,
+                  level_set_advection_velocity,
+                  accepted_velocity_extension_maps));
+          initial_free_surface_functional_baseline_recorded = true;
+        }
         if (acceptedPressureUpdateDiagnosticEnabled()) {
           accepted_pressure_update_previous_solution =
               gatherFeOrderedSolution(h.u());
@@ -16861,12 +26216,271 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " iters=" << nr.linear.iterations
               << " rel=" << nr.linear.relative_residual << ")" << std::endl;
   };
-  const bool has_conservative_phase = std::any_of(
-      level_set_maintenance.begin(),
-      level_set_maintenance.end(),
-      [](const auto& request) {
-        return request.conservative_phase.enabled;
-      });
+  std::function<void(
+      const svmp::FE::timestepping::CandidateStageObservation&)>
+      fitted_ale_candidate_stage_observer;
+  std::function<void(
+      const svmp::FE::timestepping::CandidateStageObservation&)>
+      dynamic_contact_candidate_stage_observer;
+  if (capture_dynamic_contact_generalized_alpha) {
+    dynamic_contact_candidate_stage_observer =
+        [&](const svmp::FE::timestepping::CandidateStageObservation&
+                observation) {
+          std::optional<
+              DynamicContactFirstOrderGeneralizedAlphaObservation>
+              captured;
+          std::exception_ptr local_capture_failure;
+          try {
+            if (pending_dynamic_contact_generalized_alpha_observation
+                    .has_value()) {
+              throw std::logic_error(
+                  "Dynamic-contact generalized-alpha candidate-stage "
+                  "provenance is not one-shot.");
+            }
+            captured =
+                makeDynamicContactFirstOrderGeneralizedAlphaObservation(
+                    observation);
+            if (!dynamicContactStageMeshRevisionMatches(
+                    captured->mesh_revision,
+                    sim.fe_system->meshAccess())) {
+              throw std::invalid_argument(
+                  "Dynamic-contact generalized-alpha provenance has a stale "
+                  "candidate-stage mesh revision.");
+            }
+            if (dynamic_contact_solve_attempt_index < 0 ||
+                captured->attempt_index !=
+                    dynamic_contact_solve_attempt_index) {
+              throw std::invalid_argument(
+                  "Dynamic-contact generalized-alpha provenance does not "
+                  "belong to the active solve/retry attempt.");
+            }
+            if (observation.state_vector->size() !=
+                    fitted_ale_operator_stage_state_size ||
+                observation.rate_vector->size() !=
+                    fitted_ale_operator_stage_state_size) {
+              throw std::invalid_argument(
+                  "Dynamic-contact generalized-alpha provenance has an "
+                  "incompatible state/rate layout.");
+            }
+            // Contact geometry/functionals consume only operator-stage state
+            // values. Retaining the exact phi and velocity slices makes
+            // algebraic fields authentic here; this path neither consumes nor
+            // infers a field-rate value from time_derivative_fields.
+          } catch (...) {
+            local_capture_failure = std::current_exception();
+          }
+          requireCollectivePhasePreparation(
+              local_capture_failure,
+              velocity_extension_artifact_comm,
+              "dynamic_contact_generalized_alpha_observation_capture");
+          if (!captured.has_value()) {
+            throw std::logic_error(
+                "[svMultiPhysics::Application] Dynamic-contact generalized-"
+                "alpha provenance remained unavailable after collective "
+                "capture validation.");
+          }
+          captured->operator_stage_state =
+              captureDynamicContactOperatorStageState(
+                  *sim.fe_system,
+                  free_surface_declarations,
+                  *observation.state_vector,
+                  velocity_extension_artifact_comm);
+          requireDynamicContactOperatorStageObservationConsensus(
+              *captured, velocity_extension_artifact_comm);
+          std::exception_ptr local_storage_failure;
+          try {
+            pending_dynamic_contact_generalized_alpha_observation.emplace(
+                std::move(*captured));
+          } catch (...) {
+            local_storage_failure = std::current_exception();
+          }
+          requireCollectivePhasePreparation(
+              local_storage_failure,
+              velocity_extension_artifact_comm,
+              "dynamic_contact_generalized_alpha_observation_storage");
+        };
+  }
+  if (evaluate_fitted_ale_operator_stage) {
+    fitted_ale_candidate_stage_observer =
+        [&](const svmp::FE::timestepping::CandidateStageObservation&
+                observation) {
+          const bool scheme_matches =
+              observation.scheme == opts.scheme &&
+              (observation.scheme ==
+                       svmp::FE::timestepping::SchemeKind::BackwardEuler ||
+               observation.scheme ==
+                       svmp::FE::timestepping::SchemeKind::DG0 ||
+               observation.scheme ==
+                       svmp::FE::timestepping::SchemeKind::GeneralizedAlpha);
+          const bool generalized_alpha_shape_matches =
+              observation.scheme ==
+                      svmp::FE::timestepping::SchemeKind::GeneralizedAlpha
+                  ? observation.generalized_alpha.has_value()
+                  : !observation.generalized_alpha.has_value();
+          const bool local_stage_ready =
+              scheme_matches && generalized_alpha_shape_matches &&
+              observation.temporal_order == 1 &&
+              observation.step_index > 0 &&
+              observation.attempt_index >= 0 &&
+              observation.state_vector != nullptr &&
+              observation.rate_vector != nullptr &&
+              observation.state_vector != observation.rate_vector &&
+              observation.state_vector->size() ==
+                  fitted_ale_operator_stage_state_size &&
+              observation.rate_vector->size() ==
+                  fitted_ale_operator_stage_state_size &&
+              observation.mesh_revision.has_value();
+          if (globalAnyBool(
+                  !local_stage_ready,
+                  velocity_extension_artifact_comm)) {
+            if (!local_stage_ready) {
+              throw std::runtime_error(
+                  "[svMultiPhysics::Application] Fitted-ALE operator-stage "
+                  "measurement requires matching temporal-order-one stage "
+                  "state/rate vectors, scheme coordinates, and a complete "
+                  "rank-local mesh revision stamp.");
+            }
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Another active FE "
+                "communicator rank rejected fitted-ALE operator-stage "
+                "measurement readiness.");
+          }
+
+          const auto stage_state_revision =
+              collectiveMeshBoundaryStateFingerprint(
+                  *observation.state_vector,
+                  velocity_extension_artifact_comm);
+          const auto stage_rate_revision =
+              collectiveMeshBoundaryStateFingerprint(
+                  *observation.rate_vector,
+                  velocity_extension_artifact_comm);
+
+          std::optional<svmp::FE::systems::SystemStateView> stage_state;
+          std::optional<
+              svmp::FE::systems::OperatorStageMeasurementMetadata>
+              stage_metadata;
+          std::exception_ptr local_stage_construction_failure;
+          try {
+            stage_state.emplace();
+            stage_state->time = observation.state_time;
+            stage_state->dt = observation.dt;
+            stage_state->effective_dt = observation.dt;
+            stage_state->dt_prev = observation.dt;
+            stage_state->u_vector = observation.state_vector;
+            stage_state->u_prev_vector = observation.rate_vector;
+            stage_state->u_prev2 = {};
+            stage_state->u_prev2_vector = nullptr;
+            stage_state->u_history = {};
+            stage_state->dt_history = {};
+
+            const auto& revision = *observation.mesh_revision;
+            svmp::FE::systems::OperatorStageMeasurementMetadata metadata{
+                .scheme_name =
+                    observation.scheme ==
+                            svmp::FE::timestepping::SchemeKind::BackwardEuler
+                        ? "BackwardEuler"
+                        : observation.scheme ==
+                                  svmp::FE::timestepping::SchemeKind::DG0
+                              ? "DG0"
+                              : "GeneralizedAlphaFirstOrder",
+                .temporal_order = observation.temporal_order,
+                .prospective_accepted_step =
+                    static_cast<std::uint64_t>(observation.step_index),
+                .prospective_attempt =
+                    static_cast<std::uint64_t>(observation.attempt_index),
+                .step_start_time = observation.step_start_time,
+                .step_end_time = observation.step_end_time,
+                .state_time = observation.state_time,
+                .rate_time = observation.rate_time,
+                .dt = observation.dt,
+                .expected_stage_geometry =
+                    svmp::FE::systems::OperatorStageGeometryMetadata{
+                        .geometry_revision =
+                            revision.geometry_revision,
+                        .topology_revision =
+                            revision.topology_revision,
+                        .ownership_revision =
+                            revision.ownership_revision,
+                        .numbering_revision =
+                            revision.numbering_revision,
+                        .field_layout_revision =
+                            revision.field_layout_revision,
+                        .label_revision = revision.label_revision,
+                        .active_configuration_epoch =
+                            revision.active_configuration_epoch,
+                        .coordinate_configuration_key =
+                            revision.coordinate_configuration_key,
+                    },
+                .state_revision = stage_state_revision,
+                .rate_revision = stage_rate_revision,
+                .derivative_fields =
+                    observation.time_derivative_fields,
+            };
+            if (observation.generalized_alpha.has_value()) {
+              metadata.generalized_alpha =
+                  svmp::FE::systems::
+                      OperatorStageGeneralizedAlphaMetadata{
+                          .alpha_f =
+                              observation.generalized_alpha->alpha_f,
+                          .alpha_m =
+                              observation.generalized_alpha->alpha_m,
+                      };
+            }
+            stage_metadata.emplace(std::move(metadata));
+          } catch (...) {
+            local_stage_construction_failure =
+                std::current_exception();
+          }
+          if (globalAnyBool(
+                  local_stage_construction_failure != nullptr,
+                  velocity_extension_artifact_comm)) {
+            if (local_stage_construction_failure != nullptr) {
+              std::rethrow_exception(
+                  local_stage_construction_failure);
+            }
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Another active FE "
+                "communicator rank could not construct fitted-ALE "
+                "operator-stage measurement metadata.");
+          }
+          sim.fe_system
+              ->stageFittedALENormalOperatorStageMeasurements(
+                  *stage_state, std::move(*stage_metadata));
+        };
+  }
+  if (evaluate_fitted_ale_operator_stage || has_conservative_phase ||
+      capture_dynamic_contact_generalized_alpha) {
+    callbacks.on_candidate_stage =
+        [&](const svmp::FE::timestepping::CandidateStageObservation&
+                observation) {
+          if (dynamic_contact_candidate_stage_observer) {
+            dynamic_contact_candidate_stage_observer(observation);
+          }
+          if (fitted_ale_candidate_stage_observer) {
+            fitted_ale_candidate_stage_observer(observation);
+          }
+          if (!has_conservative_phase) {
+            return;
+          }
+          const auto [minimum_pending_stage, maximum_pending_stage] =
+              globalMinMaxUint64(
+                  pending_conservative_phase_stage.has_value() ? 1u : 0u,
+                  velocity_extension_artifact_comm);
+          if (minimum_pending_stage != maximum_pending_stage ||
+              maximum_pending_stage != 0u) {
+            throw std::logic_error(
+                "[svMultiPhysics::Application] Conservative phase candidate-stage observation is not one-shot on every active FE rank.");
+          }
+          pending_conservative_phase_stage.emplace(
+              buildConservativePhaseCandidateStageSnapshot(
+                  sim,
+                  *sim.time_history,
+                  level_set_maintenance,
+                  conservative_phase_fixed_graph_bindings,
+                  observation,
+                  velocity_extension_artifact_comm));
+        };
+  }
   const bool has_bound_preserving_maintenance = std::any_of(
       level_set_maintenance.begin(),
       level_set_maintenance.end(),
@@ -16875,16 +26489,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       });
   const bool has_precommit_maintenance =
       has_conservative_phase || has_bound_preserving_maintenance;
-  const auto free_surface_declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
-  const auto free_surface_acceptance_coverage =
-      requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
-          free_surface_declarations,
-          velocity_extension_artifact_comm);
-  const bool has_free_surface_functional =
-      free_surface_acceptance_coverage.has_functional;
-  const bool has_dynamic_contact_stage =
-      free_surface_acceptance_coverage.has_dynamic_contact;
   if (has_dynamic_contact_stage &&
       opts.scheme != svmp::FE::timestepping::SchemeKind::BackwardEuler &&
       opts.scheme != svmp::FE::timestepping::SchemeKind::BDF2 &&
@@ -16901,6 +26505,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   std::uint64_t
       pending_contact_stage_endpoint_algebraic_revision{0u};
   std::uint64_t pending_pre_maintenance_endpoint_state_revision{0u};
+  std::optional<application::core::
+      LevelSetMaintenanceAcceptedStepEnergyAccount>
+      pending_accepted_step_maintenance_energy_account;
+  std::optional<application::core::
+      LevelSetMaintenancePhysicalEndpointChannels>
+      pending_accepted_step_physical_endpoint_channels;
   ConservativePhaseCandidateResult pending_phase_candidate;
   ConservativePhaseCandidateResult accepted_phase_candidate;
   LevelSetMaintenancePublicationState
@@ -16919,6 +26529,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     pending_contact_stage_solution.clear();
     pending_contact_stage_endpoint_algebraic_revision = 0u;
     pending_pre_maintenance_endpoint_state_revision = 0u;
+    pending_accepted_step_maintenance_energy_account.reset();
+    pending_accepted_step_physical_endpoint_channels.reset();
   };
   const auto reject_pending_phase_work = [&] {
     if (!level_set_maintenance_work.transactionActive()) {
@@ -17058,7 +26670,31 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             h.stepIndex() + 1,
             velocity_extension_artifact_comm);
         (void)nr;
-        ++step_acceptance_attempt;
+        std::optional<ConservativePhaseCandidateStageSnapshot>
+            consumed_conservative_phase_stage;
+        if (has_conservative_phase) {
+          const auto [minimum_pending_stage, maximum_pending_stage] =
+              globalMinMaxUint64(
+                  pending_conservative_phase_stage.has_value() ? 1u : 0u,
+                  velocity_extension_artifact_comm);
+          if (minimum_pending_stage != maximum_pending_stage ||
+              maximum_pending_stage != 1u) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Conservative phase acceptance requires exactly one immutable endpoint-stage snapshot on every active FE rank.");
+          }
+          consumed_conservative_phase_stage =
+              std::move(pending_conservative_phase_stage);
+          pending_conservative_phase_stage.reset();
+          if (consumed_conservative_phase_stage->attempt <=
+              step_acceptance_attempt) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Conservative phase candidate-stage attempt provenance is stale or non-monotone for the current physical step.");
+          }
+          step_acceptance_attempt =
+              consumed_conservative_phase_stage->attempt;
+        } else {
+          ++step_acceptance_attempt;
+        }
         clear_pending_contact_provenance();
         if (pending_phase_publication_state !=
             LevelSetMaintenancePublicationState::Staged) {
@@ -17075,20 +26711,20 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           throw std::logic_error(
               "[svMultiPhysics::Application] A level-set maintenance work transaction remained active at the start of a new acceptance attempt.");
         }
+        pending_phase_accepted_row_begin =
+            level_set_maintenance_work.acceptedRows().size();
+        pending_phase_rejected_row_begin =
+            level_set_maintenance_work.rejectedRows().size();
+        pending_phase_accepted_attempt_begin =
+            level_set_maintenance_work.acceptedAttempts().size();
+        pending_phase_rejected_attempt_begin =
+            level_set_maintenance_work.rejectedAttempts().size();
         pending_phase_candidate = ConservativePhaseCandidateResult{};
         try {
           std::vector<
               application::core::LevelSetAuthoritativeFunctionalValue>
               staged_phase_functionals;
           if (has_precommit_maintenance) {
-            pending_phase_accepted_row_begin =
-                level_set_maintenance_work.acceptedRows().size();
-            pending_phase_rejected_row_begin =
-                level_set_maintenance_work.rejectedRows().size();
-            pending_phase_accepted_attempt_begin =
-                level_set_maintenance_work.acceptedAttempts().size();
-            pending_phase_rejected_attempt_begin =
-                level_set_maintenance_work.rejectedAttempts().size();
             level_set_maintenance_work.beginTransaction(
                 application::core::LevelSetMaintenanceWorkTransaction{
                     .transaction_id =
@@ -17108,10 +26744,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                             level_set_advection_velocity,
                             accepted_velocity_extension_maps),
                 });
+            const auto staged_phase_solution =
+                gatherFeOrderedSolution(h.u());
             staged_phase_functionals =
                 levelSetMaintenanceFunctionalValues(
                     sim,
-                    evaluateCurrentFreeSurfaceDiscreteFunctionals(sim));
+                    evaluateCurrentFreeSurfaceDiscreteFunctionals(sim),
+                    staged_phase_solution);
           }
           const auto build_contact_stage_candidate =
               [&](std::span<const svmp::FE::Real> endpoint_solution,
@@ -17120,10 +26759,31 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 if (!has_dynamic_contact_stage) {
                   return ConservativePhaseContactStageCandidate{};
                 }
-                const svmp::FE::Real alpha_f =
-                    transient_scheme.stage_alpha_f;
-                const auto previous_solution =
-                    gatherFeOrderedSolution(h.uPrev());
+                const auto temporal_coordinates =
+                    resolve_contact_stage_temporal_coordinates_collectively(
+                        h,
+                        dynamic_contact_solve_attempt_index,
+                        "prospective_contact_stage_temporal_provenance");
+                std::vector<svmp::FE::Real> previous_solution;
+                std::exception_ptr local_state_preparation_failure;
+                try {
+                  previous_solution = gatherFeOrderedSolution(h.uPrev());
+                  const auto expected_size = static_cast<std::size_t>(
+                      sim.fe_system->dofHandler().getNumDofs());
+                  if (previous_solution.size() != expected_size ||
+                      endpoint_solution.size() != expected_size) {
+                    throw std::runtime_error(
+                        "Prospective contact-stage endpoint/history state "
+                        "does not match the current FE layout.");
+                  }
+                } catch (...) {
+                  local_state_preparation_failure =
+                      std::current_exception();
+                }
+                requireCollectivePhasePreparation(
+                    local_state_preparation_failure,
+                    velocity_extension_artifact_comm,
+                    "prospective_contact_stage_state_preparation");
                 const auto previous_state_revision =
                     collectiveLevelSetMaintenanceAlgebraicRevision(
                         previous_solution,
@@ -17132,20 +26792,27 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                     collectiveLevelSetMaintenanceAlgebraicRevision(
                         endpoint_solution,
                         velocity_extension_artifact_comm);
+                const auto* exact_operator_stage_observation =
+                    temporal_coordinates.first_order_generalized_alpha
+                            .has_value()
+                        ? &pending_dynamic_contact_generalized_alpha_observation
+                               .value()
+                        : nullptr;
                 return buildAcceptedFreeSurfaceContactStageCandidate(
                     sim,
                     params,
                     *cut_lifecycle,
                     *cut_refresh_cache,
                     transient_active_cut_requests,
-                    static_cast<svmp::FE::Real>(h.time()) +
-                        alpha_f * static_cast<svmp::FE::Real>(h.dt()),
-                    alpha_f,
+                    temporal_coordinates.stage_time,
+                    temporal_coordinates.stage_alpha_f,
                     previous_state_revision,
                     endpoint_state_revision,
                     previous_solution,
                     endpoint_solution,
-                    active_transaction);
+                    active_transaction,
+                    temporal_coordinates.first_order_generalized_alpha,
+                    exact_operator_stage_observation);
               };
           ConservativePhaseContactStageBuilder contact_stage_builder;
           if (has_dynamic_contact_stage) {
@@ -17159,7 +26826,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 const auto after_functionals =
                     levelSetMaintenanceFunctionalValues(
                         sim,
-                        evaluateCurrentFreeSurfaceDiscreteFunctionals(sim));
+                        evaluateCurrentFreeSurfaceDiscreteFunctionals(sim),
+                        after_candidate);
                 level_set_maintenance_work.stageRow(
                     substage,
                     collectiveLevelSetMaintenanceAlgebraicRevision(
@@ -17176,20 +26844,24 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                         accepted_velocity_extension_maps));
                 staged_phase_functionals = after_functionals;
               };
-          pending_phase_candidate = applyConservativePhaseCandidates(
-              sim,
-              h,
-              level_set_maintenance,
-              params,
-              *cut_lifecycle,
-              *cut_refresh_cache,
-              transient_active_cut_requests,
-              contact_stage_builder,
-              has_conservative_phase
-                  ? observe_phase_stage
-                  : LevelSetMaintenanceStageObserver{});
+          if (has_conservative_phase) {
+            pending_phase_candidate = applyConservativePhaseCandidates(
+                sim,
+                h,
+                level_set_maintenance,
+                params,
+                *cut_lifecycle,
+                *cut_refresh_cache,
+                transient_active_cut_requests,
+                *consumed_conservative_phase_stage,
+                conservative_phase_fixed_graph_bindings,
+                step_acceptance_attempt,
+                contact_stage_builder,
+                observe_phase_stage);
+          }
           if (!pending_phase_candidate.accept_step) {
             clear_pending_contact_provenance();
+            pending_dynamic_contact_generalized_alpha_observation.reset();
             rollback_and_reject_pending_phase(
                 h, "candidate_contract_rejection");
             return false;
@@ -17214,6 +26886,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 /*honor_fail_on_trigger=*/false);
             if (triggered) {
               clear_pending_contact_provenance();
+              pending_dynamic_contact_generalized_alpha_observation.reset();
               rollback_and_reject_pending_phase(
                   h, "pressure_update_rejection");
               return false;
@@ -17241,7 +26914,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 const auto after_functionals =
                     levelSetMaintenanceFunctionalValues(
                         sim,
-                        evaluateCurrentFreeSurfaceDiscreteFunctionals(sim));
+                        evaluateCurrentFreeSurfaceDiscreteFunctionals(sim),
+                        after_candidate);
                 level_set_maintenance_work.stageRow(
                     substage,
                     collectiveLevelSetMaintenanceAlgebraicRevision(
@@ -17260,6 +26934,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               });
           if (!bound_result.accept_step) {
             clear_pending_contact_provenance();
+            pending_dynamic_contact_generalized_alpha_observation.reset();
             rollback_and_reject_pending_phase(
                 h, "bound_preserving_rejection");
             return false;
@@ -17268,6 +26943,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         } catch (...) {
           const auto failure = std::current_exception();
           clear_pending_contact_provenance();
+          pending_dynamic_contact_generalized_alpha_observation.reset();
           try {
             rollback_and_reject_pending_phase(
                 h, "candidate_exception");
@@ -17282,29 +26958,56 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       };
   callbacks.on_step_candidate_discarded =
       [&](svmp::FE::timestepping::TimeHistory& h) {
+        pending_conservative_phase_stage.reset();
+        pending_dynamic_contact_generalized_alpha_observation.reset();
+        if (track_transient_cut_topology) {
+          cut_topology_attempt_tracker->discardAttempt();
+        }
+        sim.fe_system
+            ->discardPendingFittedALENormalOperatorStageMeasurements();
         clear_pending_contact_provenance();
         rollback_and_reject_pending_phase(
             h, "time_loop_candidate_discarded");
         pending_phase_candidate = ConservativePhaseCandidateResult{};
       };
-  callbacks.on_step_commit_ready =
-      [&](svmp::FE::timestepping::TimeHistory& h) {
-        if (has_dynamic_contact_stage) {
-          const auto endpoint_solution =
-              gatherFeOrderedSolution(h.u());
-          const auto previous_solution =
-              gatherFeOrderedSolution(h.uPrev());
-          const auto previous_state_revision =
-              collectiveLevelSetMaintenanceAlgebraicRevision(
-                  previous_solution,
-                  velocity_extension_artifact_comm);
-          const auto endpoint_state_revision =
-              collectiveLevelSetMaintenanceAlgebraicRevision(
-                  endpoint_solution,
-                  velocity_extension_artifact_comm);
-          const svmp::FE::Real alpha_f =
-              transient_scheme.stage_alpha_f;
-          try {
+  callbacks.on_step_candidate_ready =
+      [&](svmp::FE::timestepping::TimeHistory& h,
+          const svmp::FE::timestepping::NewtonReport&)
+          -> std::optional<svmp::FE::timestepping::StepRejectReason> {
+        try {
+          if (has_dynamic_contact_stage) {
+            std::vector<svmp::FE::Real> endpoint_solution;
+            std::vector<svmp::FE::Real> previous_solution;
+            std::exception_ptr local_state_preparation_failure;
+            try {
+              endpoint_solution = gatherFeOrderedSolution(h.u());
+              previous_solution = gatherFeOrderedSolution(h.uPrev());
+            } catch (...) {
+              local_state_preparation_failure =
+                  std::current_exception();
+            }
+            requireCollectivePhasePreparation(
+                local_state_preparation_failure,
+                velocity_extension_artifact_comm,
+                "final_candidate_contact_state_fingerprint");
+            const auto previous_state_revision =
+                collectiveLevelSetMaintenanceAlgebraicRevision(
+                    previous_solution,
+                    velocity_extension_artifact_comm);
+            const auto endpoint_state_revision =
+                collectiveLevelSetMaintenanceAlgebraicRevision(
+                    endpoint_solution,
+                    velocity_extension_artifact_comm);
+            const auto temporal_coordinates =
+                resolve_contact_stage_temporal_coordinates_collectively(
+                    h,
+                    dynamic_contact_solve_attempt_index,
+                    "final_candidate_contact_stage_temporal_provenance");
+            const auto* exact_operator_stage_observation =
+                temporal_coordinates.first_order_generalized_alpha.has_value()
+                    ? &pending_dynamic_contact_generalized_alpha_observation
+                           .value()
+                    : nullptr;
             auto contact_stage =
                 buildAcceptedFreeSurfaceContactStageCandidate(
                     sim,
@@ -17312,35 +27015,150 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                     *cut_lifecycle,
                     *cut_refresh_cache,
                     transient_active_cut_requests,
-                    static_cast<svmp::FE::Real>(h.time()) +
-                        alpha_f *
-                            static_cast<svmp::FE::Real>(h.dt()),
-                    alpha_f,
+                    temporal_coordinates.stage_time,
+                    temporal_coordinates.stage_alpha_f,
                     previous_state_revision,
                     endpoint_state_revision,
                     previous_solution,
                     endpoint_solution,
-                    pending_phase_candidate.geometry_transaction.get());
-            pending_contact_stages =
-                std::move(contact_stage.stages);
-            pending_contact_stage_constraints =
-                std::move(contact_stage.constraints);
-            pending_contact_stage_solution =
-                std::move(contact_stage.stage_solution);
-            pending_contact_stage_endpoint_algebraic_revision =
-                endpoint_state_revision;
-          } catch (...) {
-            clear_pending_contact_provenance();
-            throw;
+                    pending_phase_candidate.geometry_transaction.get(),
+                    temporal_coordinates.first_order_generalized_alpha,
+                    exact_operator_stage_observation);
+            std::exception_ptr local_stage_storage_failure;
+            try {
+              pending_contact_stages =
+                  std::move(contact_stage.stages);
+              pending_contact_stage_constraints =
+                  std::move(contact_stage.constraints);
+              pending_contact_stage_solution =
+                  std::move(contact_stage.stage_solution);
+              pending_contact_stage_endpoint_algebraic_revision =
+                  endpoint_state_revision;
+            } catch (...) {
+              local_stage_storage_failure =
+                  std::current_exception();
+            }
+            requireCollectivePhasePreparation(
+                local_stage_storage_failure,
+                velocity_extension_artifact_comm,
+                "final_candidate_cut_context_refresh");
+            pending_dynamic_contact_generalized_alpha_observation.reset();
           }
+
+          // Dynamic-contact reconstruction may finish with an endpoint refresh,
+          // but every candidate takes this uniform final path.  In particular,
+          // per-step-only generated state can skip every within-solve endpoint
+          // synchronization, so the authoritative gate must observe h.u()
+          // itself immediately before deciding.
+          const auto final_cut_report =
+              refreshActiveCutIntegrationContextCached(
+                  sim,
+                  params,
+                  h.u(),
+                  *cut_lifecycle,
+                  *cut_refresh_cache,
+                  "final_candidate_topology_gate");
+          if (!track_transient_cut_topology) {
+            return std::nullopt;
+          }
+          if (final_cut_report.request_policy_key !=
+              expected_cut_request_policy_key) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Active cut request policy changed at the final transient candidate gate.");
+          }
+          if (!cut_topology_attempt_tracker->candidateMustReject(
+                  cut_refresh_cache->topology_key)) {
+            return std::nullopt;
+          }
+
+          oopCout()
+              << "[svMultiPhysics::Application] Transient cut-topology candidate"
+              << " diagnostic=cut_topology_acceptance_gate"
+              << " step=" << h.stepIndex()
+              << " action=reject"
+              << " accepted_topology_key="
+              << cut_topology_attempt_tracker->acceptedTopologyKey()
+                     .value_or(0u)
+              << " final_topology_key="
+              << final_cut_report.topology_key
+              << " first_mismatched_topology_key="
+              << cut_topology_attempt_tracker
+                     ->firstMismatchedTopologyKey()
+                     .value_or(0u)
+              << " first_mismatch_provenance="
+              << (cut_topology_attempt_tracker
+                          ->firstMismatchProvenance()
+                          .empty()
+                      ? "unknown"
+                      : cut_topology_attempt_tracker
+                            ->firstMismatchProvenance())
+              << std::endl;
+          invalidate_transient_cut_topology_dependent_state();
+          return svmp::FE::timestepping::StepRejectReason::
+              CutTopologyChanged;
+        } catch (...) {
+          clear_pending_contact_provenance();
+          pending_dynamic_contact_generalized_alpha_observation.reset();
+          throw;
+        }
+      };
+  callbacks.on_step_commit_ready =
+      [&](svmp::FE::timestepping::TimeHistory& h) {
+        if (capture_dynamic_contact_generalized_alpha) {
+          const auto [minimum_pending_stage, maximum_pending_stage] =
+              globalMinMaxUint64(
+                  pending_dynamic_contact_generalized_alpha_observation
+                          .has_value()
+                      ? 1u
+                      : 0u,
+                  velocity_extension_artifact_comm);
+          if (minimum_pending_stage != maximum_pending_stage ||
+              maximum_pending_stage != 0u) {
+            throw std::logic_error(
+                "[svMultiPhysics::Application] Dynamic-contact generalized-"
+                "alpha provenance reached commit-ready without one-shot "
+                "consumption.");
+          }
+        }
+        if (has_conservative_phase) {
+          const auto [minimum_pending_stage, maximum_pending_stage] =
+              globalMinMaxUint64(
+                  pending_conservative_phase_stage.has_value() ? 1u : 0u,
+                  velocity_extension_artifact_comm);
+          if (minimum_pending_stage != maximum_pending_stage ||
+              maximum_pending_stage != 0u) {
+            throw std::logic_error(
+                "[svMultiPhysics::Application] A conservative phase operator-stage snapshot reached commit-ready without one-shot consumption.");
+          }
+          requireConservativePhaseFixedGraphBindingsCurrent(
+              *sim.fe_system,
+              level_set_maintenance,
+              conservative_phase_fixed_graph_bindings,
+              velocity_extension_artifact_comm,
+              "commit_ready_fixed_background");
+        }
+        const bool local_cut_topology_commit_invalid =
+            track_transient_cut_topology &&
+            cut_topology_attempt_tracker->candidateMustReject(
+                cut_refresh_cache->topology_key);
+        if (globalAnyBool(
+                local_cut_topology_commit_invalid,
+                velocity_extension_artifact_comm)) {
+          throw std::logic_error(
+              "[svMultiPhysics::Application] A transient cut-topology "
+              "candidate reached commit-ready without passing the "
+              "fixed-topology gate on every active FE communicator rank.");
         }
         const bool changed = pending_phase_candidate.changed;
         if (has_precommit_maintenance) {
           std::vector<std::uint64_t> commit_state_words;
-          commit_state_words.reserve(
-              16u + 3u * static_cast<std::size_t>(
-                              std::max(0, h.historyDepth())));
-          appendMaintenanceScheduleWord(commit_state_words, 1u);
+          bool local_commit_invariants_satisfied = false;
+          std::exception_ptr local_commit_state_preparation_failure;
+          try {
+            commit_state_words.reserve(
+                16u + 3u * static_cast<std::size_t>(
+                                std::max(0, h.historyDepth())));
+            appendMaintenanceScheduleWord(commit_state_words, 1u);
           appendMaintenanceScheduleBool(
               commit_state_words,
               static_cast<bool>(
@@ -17398,10 +27216,138 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   sim, level_set_maintenance);
           appendCanonicalLevelSetMaintenanceGeometrySection(
               commit_state_words, geometry_state);
-          const bool local_commit_invariants_satisfied =
+          appendMaintenanceScheduleWord(
+              commit_state_words,
+              static_cast<std::uint64_t>(
+                  pending_phase_candidate.maintenance_ledgers.size()));
+          bool local_split_stage_provenance_satisfied =
+              !has_conservative_phase ||
+              pending_phase_candidate.maintenance_ledgers.size() ==
+                  level_set_maintenance.size();
+          if (has_conservative_phase &&
+              pending_phase_candidate.maintenance_ledgers.size() ==
+                  level_set_maintenance.size()) {
+            for (std::size_t index = 0u;
+                 index < level_set_maintenance.size(); ++index) {
+              const auto& request = level_set_maintenance[index];
+              const auto& ledger =
+                  pending_phase_candidate.maintenance_ledgers[index];
+              appendMaintenanceScheduleBool(
+                  commit_state_words,
+                  request.conservative_phase.enabled);
+              appendConservativePhaseSplitStageProvenanceWords(
+                  commit_state_words,
+                  ledger.split_stage_provenance);
+              if (!request.conservative_phase.enabled) {
+                continue;
+              }
+              const auto live_flux_ledger_digest =
+                  svmp::FE::level_set::levelSetP1PhaseFluxLedgerDigest(
+                      ledger.transport_stage);
+              const auto live_velocity_revision =
+                  svmp::FE::level_set::
+                      levelSetP1PhaseVelocityContentRevision(
+                          ledger.transport_stage
+                              .sampled_nodal_velocity);
+              appendMaintenanceScheduleWord(
+                  commit_state_words, live_flux_ledger_digest);
+              appendMaintenanceScheduleWord(
+                  commit_state_words, live_velocity_revision);
+              appendMaintenanceScheduleReal(
+                  commit_state_words,
+                  ledger.transport_stage.time_step);
+              appendMaintenanceScheduleReal(
+                  commit_state_words,
+                  ledger.maximum_nodal_boundary_mass_transfer);
+              appendMaintenanceScheduleReal(
+                  commit_state_words,
+                  ledger.boundary_mass_tolerance);
+              const auto* provenance =
+                  ledger.split_stage_provenance.has_value()
+                      ? &*ledger.split_stage_provenance
+                      : nullptr;
+              local_split_stage_provenance_satisfied =
+                  provenance != nullptr &&
+                  ledger.transport_stage.success &&
+                  provenance->scheme ==
+                      svmp::FE::level_set::
+                          LevelSetP1PhaseSplitScheme::
+                              BackwardEulerExplicitIndicatorEndpointVelocity &&
+                  provenance->transport_mesh_policy ==
+                      svmp::FE::level_set::
+                          LevelSetP1PhaseTransportMeshPolicy::
+                              FixedBackground &&
+                  provenance->temporal_order == 1 &&
+                  provenance->prospective_step ==
+                      static_cast<std::uint64_t>(h.stepIndex() + 1) &&
+                  provenance->attempt == step_acceptance_attempt &&
+                  provenance->operator_state_revision != 0u &&
+                  provenance->previous_q_revision != 0u &&
+                  provenance->nodal_velocity_revision ==
+                      live_velocity_revision &&
+                  provenance->final_flux_ledger_digest ==
+                      live_flux_ledger_digest &&
+                  sameConservativePhaseStageRealBits(
+                      provenance->step_start_time, h.time()) &&
+                  sameConservativePhaseStageRealBits(
+                      provenance->step_end_time,
+                      h.time() + h.dt()) &&
+                  sameConservativePhaseStageRealBits(
+                      provenance->q_input_time, h.time()) &&
+                  sameConservativePhaseStageRealBits(
+                      provenance->velocity_state_time,
+                      h.time() + h.dt()) &&
+                  sameConservativePhaseStageRealBits(
+                      provenance->time_step, h.dt()) &&
+                  sameConservativePhaseStageRealBits(
+                      ledger.transport_stage.time_step, h.dt()) &&
+                  std::isfinite(
+                      ledger.maximum_nodal_boundary_mass_transfer) &&
+                  std::isfinite(ledger.boundary_mass_tolerance) &&
+                  ledger.boundary_mass_tolerance >=
+                      svmp::FE::Real{0.0} &&
+                  ledger.maximum_nodal_boundary_mass_transfer <=
+                      ledger.boundary_mass_tolerance &&
+                  std::abs(
+                      ledger.transport_stage.correction
+                          .total_physical_boundary_mass_transfer) <=
+                      ledger.boundary_mass_tolerance &&
+                  sameConservativePhaseStageRealBits(
+                      provenance->stage_options.invariant_tolerance,
+                      ledger.transport_stage.executed_options
+                          .invariant_tolerance) &&
+                  sameConservativePhaseStageRealBits(
+                      provenance->stage_options
+                          .component_activity_tolerance,
+                      ledger.transport_stage.executed_options
+                          .component_activity_tolerance) &&
+                  sameConservativePhaseStageRealBits(
+                      provenance->stage_options.maximum_courant,
+                      ledger.transport_stage.executed_options
+                          .maximum_courant) &&
+                  provenance->stage_options.enforce_courant_limit ==
+                      ledger.transport_stage.executed_options
+                          .enforce_courant_limit &&
+                  provenance->stage_options
+                          .require_constant_preservation ==
+                      ledger.transport_stage.executed_options
+                          .require_constant_preservation &&
+                  sameConservativePhaseGraphIdentity(
+                      provenance->previous_graph_identity,
+                      conservative_phase_fixed_graph_bindings[index]
+                          .identity) &&
+                  sameConservativePhaseGraphIdentity(
+                      provenance->operator_graph_identity,
+                      conservative_phase_fixed_graph_bindings[index]
+                          .identity) &&
+                  local_split_stage_provenance_satisfied;
+            }
+          }
+            local_commit_invariants_satisfied =
               pending_phase_candidate.accept_step &&
               request_schedule.supported &&
               geometry_state.supported &&
+              local_split_stage_provenance_satisfied &&
               (!pending_phase_candidate.changed ||
                (pending_phase_candidate.geometry_transaction &&
                 pending_phase_candidate.geometry_transaction
@@ -17409,6 +27355,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               (!pending_phase_candidate.geometry_transaction ||
                pending_phase_candidate.geometry_transaction
                    ->active());
+          } catch (...) {
+            local_commit_state_preparation_failure =
+                std::current_exception();
+          }
+          requireCollectivePhasePreparation(
+              local_commit_state_preparation_failure,
+              velocity_extension_artifact_comm,
+              "conservative_phase_commit_state_preparation");
           const auto decision =
               application::core::
                   collectiveLevelSetMaintenanceTransactionDecision(
@@ -17485,9 +27439,19 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         }
         accepted_phase_candidate = std::move(pending_phase_candidate);
         pending_phase_candidate = ConservativePhaseCandidateResult{};
-      };
+        if (track_transient_cut_topology) {
+          cut_topology_attempt_tracker->completeVerifiedAttempt();
+        }
+  };
   double vtk_total_time = 0.0;
   callbacks.on_step_accepted = [&](svmp::FE::timestepping::TimeHistory& h) {
+    if (evaluate_fitted_ale_operator_stage) {
+      sim.fe_system
+          ->commitPendingFittedALENormalOperatorStageMeasurements(
+              static_cast<std::uint64_t>(h.stepIndex()),
+              static_cast<svmp::FE::Real>(h.time()),
+              static_cast<svmp::FE::Real>(h.dt()));
+    }
     requireCollectiveLevelSetMaintenanceRequestSchedule(
         level_set_maintenance,
         LevelSetMaintenanceScheduleStage::
@@ -17515,6 +27479,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     }
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_accepted step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
+    const auto accepted_post_maintenance_state_revision =
+        has_conservative_phase
+            ? collectiveMeshBoundaryStateFingerprint(
+                  h.u(), velocity_extension_artifact_comm)
+            : 0u;
     writeAcceptedConservativePhaseArtifacts(
         params,
         level_set_maintenance,
@@ -17522,8 +27491,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         static_cast<std::uint64_t>(h.stepIndex()),
         static_cast<svmp::FE::Real>(h.time()),
         static_cast<svmp::FE::Real>(h.dt()),
-        h.u().valueRevision(),
-        svmp::MeshComm::world());
+        accepted_post_maintenance_state_revision,
+        velocity_extension_artifact_comm);
     accepted_phase_candidate = ConservativePhaseCandidateResult{};
     pending_phase_publication_state =
         LevelSetMaintenancePublicationState::Staged;
@@ -17566,10 +27535,68 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                       shouldApplyLevelSetVolumeCorrection(
                           request.volume_correction, h.stepIndex()));
         });
+    const bool postaccept_maintenance_topology_tracking_required =
+        maintenance_work_due && track_transient_cut_topology;
+    std::optional<std::uint64_t>
+        postaccept_maintenance_baseline_topology_key;
+    std::optional<std::uint64_t>
+        postaccept_maintenance_final_topology_key;
+    ActiveCutContextRefreshReport cut_report{};
+    if (postaccept_maintenance_topology_tracking_required) {
+      // Rebuild from the already accepted physical endpoint before any
+      // maintenance functional is evaluated or any geometry checkpoint is
+      // captured.  The work ledger, geometry transaction backup, and topology
+      // baseline must all describe this same authoritative endpoint.
+      cut_refresh_cache->last_signature.reset();
+      cut_refresh_cache->last_vector_signature.reset();
+      const auto accepted_endpoint_report =
+          refreshActiveCutIntegrationContextCached(
+              sim,
+              params,
+              h.u(),
+              *cut_lifecycle,
+              *cut_refresh_cache,
+              "accepted_endpoint_before_postaccept_maintenance");
+      const bool local_baseline_complete =
+          accepted_endpoint_report.refreshed &&
+          accepted_endpoint_report.request_policy_key ==
+              expected_cut_request_policy_key &&
+          accepted_endpoint_report.topology_key != 0u &&
+          cut_refresh_cache->topology_key.has_value() &&
+          *cut_refresh_cache->topology_key ==
+              accepted_endpoint_report.topology_key;
+      const auto [minimum_baseline_present,
+                  maximum_baseline_present] =
+          globalMinMaxUint64(
+              local_baseline_complete ? 1u : 0u,
+              velocity_extension_artifact_comm);
+      const auto [minimum_baseline_key,
+                  maximum_baseline_key] =
+          globalMinMaxUint64(
+              local_baseline_complete
+                  ? accepted_endpoint_report.topology_key
+                  : 0u,
+              velocity_extension_artifact_comm);
+      if (minimum_baseline_present != 1u ||
+          maximum_baseline_present != 1u ||
+          minimum_baseline_key == 0u ||
+          minimum_baseline_key != maximum_baseline_key) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Postaccept level-set "
+            "maintenance requires one complete communicator-consistent "
+            "accepted-endpoint cut-topology baseline.");
+      }
+      postaccept_maintenance_baseline_topology_key =
+          accepted_endpoint_report.topology_key;
+      cut_report = accepted_endpoint_report;
+    }
     std::vector<
         svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
         pre_maintenance_functionals;
+    std::vector<svmp::FE::Real> pre_maintenance_solution;
     if (maintenance_work_due || volume_maintenance_due) {
+      pre_maintenance_solution =
+          gatherFeOrderedSolution(h.u());
       pre_maintenance_functionals =
           evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
     }
@@ -17577,7 +27604,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         applied_volume_corrections;
     std::vector<std::string> volume_correction_work_logs;
     std::vector<std::string> maintenance_commit_logs;
-    ActiveCutContextRefreshReport cut_report{};
     std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
         maintenance_geometry_transaction;
     bool level_set_maintenance_changed = false;
@@ -17592,80 +27618,159 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     auto staged_maintenance_functionals =
         levelSetMaintenanceFunctionalValues(
             sim,
-            pre_maintenance_functionals);
+            pre_maintenance_functionals,
+            pre_maintenance_solution);
     std::vector<LevelSetMaintenanceRequest>
         maintenance_requests_before_transaction;
     std::vector<svmp::FE::Real>
         maintenance_current_before_transaction;
     std::vector<std::vector<svmp::FE::Real>>
         maintenance_history_before_transaction;
+    std::optional<svmp::FE::timestepping::TimeHistory::RateStateSnapshot>
+        maintenance_rate_before_transaction;
     bool maintenance_checkpoint_restored = false;
     bool maintenance_requests_checkpoint_restored = false;
     bool maintenance_current_checkpoint_restored = false;
+    bool maintenance_rate_checkpoint_restored = false;
+    bool maintenance_rate_publication_started = false;
     std::vector<std::uint8_t>
         maintenance_history_checkpoint_levels_restored;
     bool maintenance_checkpoint_ghosts_restored = false;
     if (maintenance_work_due) {
-      maintenance_requests_before_transaction =
-          level_set_maintenance;
-      maintenance_current_before_transaction =
-          gatherFeOrderedSolution(h.u());
-      maintenance_history_before_transaction.reserve(
-          static_cast<std::size_t>(h.historyDepth()));
-      maintenance_history_checkpoint_levels_restored.assign(
-          static_cast<std::size_t>(h.historyDepth()), 0u);
-      for (int level = 1; level <= h.historyDepth(); ++level) {
-        maintenance_history_before_transaction.push_back(
-            gatherFeOrderedSolution(h.uPrevK(level)));
+      const auto local_checkpoint_history_depth = h.historyDepth();
+      if (globalAnyBool(
+              local_checkpoint_history_depth <= 0,
+              velocity_extension_artifact_comm)) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Postaccept maintenance checkpoint "
+            "requires positive history depth on every FE communicator rank.");
       }
-      level_set_maintenance_work.beginTransaction(
-          application::core::LevelSetMaintenanceWorkTransaction{
-              .transaction_id =
-                  ++level_set_maintenance_transaction_sequence,
-              .step = static_cast<std::uint64_t>(h.stepIndex()),
-              .attempt = std::max<std::uint64_t>(
-                  1u, step_acceptance_attempt),
-              .time = h.time(),
-              .dt = h.dt(),
-              .declared_stage =
-                  application::core::
-                      LevelSetMaintenanceDeclaredStage::
-                          AcceptedEndpointPostStep,
-              .extension_map_revision =
-                  currentLevelSetVelocityExtensionRevision(
-                      *sim.fe_system,
-                      level_set_advection_velocity,
-                      accepted_velocity_extension_maps),
-          });
+      const auto [minimum_checkpoint_history_depth,
+                  maximum_checkpoint_history_depth] =
+          globalMinMaxUint64(
+              static_cast<std::uint64_t>(local_checkpoint_history_depth),
+              velocity_extension_artifact_comm);
+      if (minimum_checkpoint_history_depth !=
+          maximum_checkpoint_history_depth) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Postaccept maintenance checkpoint "
+            "history depth differs across the FE communicator.");
+      }
+      std::vector<svmp::FE::backends::GenericVector*> checkpoint_targets;
+      std::exception_ptr local_checkpoint_failure;
+      try {
+        if (!sim.backend) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Postaccept maintenance rate "
+              "checkpoint requires an active backend factory.");
+        }
+        maintenance_requests_before_transaction =
+            level_set_maintenance;
+        checkpoint_targets.resize(
+            static_cast<std::size_t>(local_checkpoint_history_depth) + 1u);
+        checkpoint_targets.front() = &h.u();
+        maintenance_history_before_transaction.resize(
+            static_cast<std::size_t>(local_checkpoint_history_depth));
+        maintenance_history_checkpoint_levels_restored.assign(
+            static_cast<std::size_t>(local_checkpoint_history_depth), 0u);
+        for (int level = 1; level <= local_checkpoint_history_depth;
+             ++level) {
+          checkpoint_targets[static_cast<std::size_t>(level)] =
+              &h.uPrevK(level);
+        }
+      } catch (...) {
+        local_checkpoint_failure = std::current_exception();
+      }
+      requireCollectivePhasePreparation(
+          local_checkpoint_failure,
+          velocity_extension_artifact_comm,
+          "postaccept_maintenance_checkpoint_schedule");
+
+      local_checkpoint_failure = nullptr;
+      try {
+        maintenance_rate_before_transaction.emplace(
+            h.snapshotRateState(*sim.backend));
+      } catch (...) {
+        local_checkpoint_failure = std::current_exception();
+      }
+      requireCollectivePhasePreparation(
+          local_checkpoint_failure,
+          velocity_extension_artifact_comm,
+          "postaccept_maintenance_rate_checkpoint_capture");
+
+      auto captured_current =
+          capturePostacceptMaintenanceVectorCollectively(
+              *checkpoint_targets.front(),
+              velocity_extension_artifact_comm);
+      maintenance_current_before_transaction.swap(captured_current);
+      for (int level = 1; level <= local_checkpoint_history_depth;
+           ++level) {
+        auto captured_history =
+            capturePostacceptMaintenanceVectorCollectively(
+                *checkpoint_targets[static_cast<std::size_t>(level)],
+                velocity_extension_artifact_comm);
+        maintenance_history_before_transaction[
+            static_cast<std::size_t>(level - 1)]
+            .swap(captured_history);
+      }
+
+      std::exception_ptr local_ledger_begin_failure;
+      try {
+        level_set_maintenance_work.beginTransaction(
+            application::core::LevelSetMaintenanceWorkTransaction{
+                .transaction_id =
+                    ++level_set_maintenance_transaction_sequence,
+                .step = static_cast<std::uint64_t>(h.stepIndex()),
+                .attempt = std::max<std::uint64_t>(
+                    1u, step_acceptance_attempt),
+                .time = h.time(),
+                .dt = h.dt(),
+                .declared_stage =
+                    application::core::
+                        LevelSetMaintenanceDeclaredStage::
+                            AcceptedEndpointPostStep,
+                .extension_map_revision =
+                    currentLevelSetVelocityExtensionRevision(
+                        *sim.fe_system,
+                        level_set_advection_velocity,
+                        accepted_velocity_extension_maps),
+            });
+      } catch (...) {
+        local_ledger_begin_failure = std::current_exception();
+      }
+      requireCollectivePhasePreparation(
+          local_ledger_begin_failure,
+          velocity_extension_artifact_comm,
+          "postaccept_maintenance_ledger_begin");
     }
     const auto restore_maintenance_checkpoint = [&] {
       if (!maintenance_work_due ||
           maintenance_checkpoint_restored) {
         return;
       }
-      std::exception_ptr first_failure;
-      const auto attempt = [&](auto&& action) {
-        try {
-          action();
-        } catch (...) {
-          if (!first_failure) {
-            first_failure = std::current_exception();
-          }
-        }
-      };
       if (!maintenance_requests_checkpoint_restored) {
-        attempt([&] {
+        std::exception_ptr local_request_restore_failure;
+        bool local_request_restore_completed = false;
+        try {
           level_set_maintenance =
               maintenance_requests_before_transaction;
-          maintenance_requests_checkpoint_restored = true;
-        });
+          local_request_restore_completed = true;
+        } catch (...) {
+          local_request_restore_failure = std::current_exception();
+        }
+        requirePostacceptMaintenanceRecoveryPhase(
+            local_request_restore_failure,
+            velocity_extension_artifact_comm,
+            "restore_request_checkpoint");
+        maintenance_requests_checkpoint_restored =
+            local_request_restore_completed;
       }
       if (!maintenance_current_checkpoint_restored) {
-        attempt([&] {
-          scatterFeOrderedSolution(
-              h.u(), maintenance_current_before_transaction);
-          maintenance_current_checkpoint_restored = true;
-        });
+        assignPostacceptMaintenanceVectorCollectively(
+            h.u(),
+            maintenance_current_before_transaction,
+            velocity_extension_artifact_comm);
+        maintenance_current_checkpoint_restored = true;
       }
 
       const bool history_depth_matches =
@@ -17673,28 +27778,26 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               static_cast<std::size_t>(h.historyDepth()) &&
           maintenance_history_checkpoint_levels_restored.size() ==
               maintenance_history_before_transaction.size();
-      if (!history_depth_matches) {
-        attempt([&] {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Level-set maintenance "
-              "rollback history depth changed during the transaction.");
-        });
-      } else {
-        for (int level = 1; level <= h.historyDepth(); ++level) {
-          const auto index =
-              static_cast<std::size_t>(level - 1);
-          if (maintenance_history_checkpoint_levels_restored[index] !=
-              0u) {
-            continue;
-          }
-          attempt([&, level, index] {
-            scatterFeOrderedSolution(
-                h.uPrevK(level),
-                maintenance_history_before_transaction[index]);
-            maintenance_history_checkpoint_levels_restored[index] =
-                1u;
-          });
+      if (!collectivePostacceptMaintenanceRecoveryPhaseReady(
+              history_depth_matches,
+              velocity_extension_artifact_comm)) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set maintenance "
+            "rollback history depth changed or diverged across the "
+            "communicator.");
+      }
+      for (int level = 1; level <= h.historyDepth(); ++level) {
+        const auto index =
+            static_cast<std::size_t>(level - 1);
+        if (maintenance_history_checkpoint_levels_restored[index] !=
+            0u) {
+          continue;
         }
+        assignPostacceptMaintenanceVectorCollectively(
+            h.uPrevK(level),
+            maintenance_history_before_transaction[index],
+            velocity_extension_artifact_comm);
+        maintenance_history_checkpoint_levels_restored[index] = 1u;
       }
       const bool all_history_levels_restored =
           history_depth_matches &&
@@ -17702,27 +27805,68 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               maintenance_history_checkpoint_levels_restored.begin(),
               maintenance_history_checkpoint_levels_restored.end(),
               [](std::uint8_t value) { return value != 0u; });
+      if (!maintenance_rate_checkpoint_restored) {
+        const auto [minimum_rate_publication_started,
+                    maximum_rate_publication_started] =
+            globalMinMaxUint64(
+                maintenance_rate_publication_started ? 1u : 0u,
+                velocity_extension_artifact_comm);
+        (void)minimum_rate_publication_started;
+        const bool restore_rate_checkpoint =
+            maximum_rate_publication_started != 0u;
+        const bool local_rate_restore_ready =
+            !restore_rate_checkpoint ||
+            maintenance_rate_before_transaction.has_value();
+        if (!collectivePostacceptMaintenanceRecoveryPhaseReady(
+                local_rate_restore_ready,
+                velocity_extension_artifact_comm)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Level-set maintenance rate "
+              "rollback lacks a captured RateStateSnapshot on at least one "
+              "communicator rank.");
+        }
+        if (restore_rate_checkpoint) {
+          // The explicit target/start flag is set before any uDot mutation.
+          // Never infer rollback need from a backend value revision.
+          h.restoreRateState(*maintenance_rate_before_transaction);
+        }
+        maintenance_rate_checkpoint_restored = true;
+      }
       if (!maintenance_checkpoint_ghosts_restored &&
           maintenance_requests_checkpoint_restored &&
           maintenance_current_checkpoint_restored &&
-          all_history_levels_restored) {
-        attempt([&] {
-          h.updateGhosts();
-          maintenance_checkpoint_ghosts_restored = true;
-        });
+          all_history_levels_restored &&
+          maintenance_rate_checkpoint_restored) {
+        const bool local_restore_complete =
+            maintenance_requests_checkpoint_restored &&
+            maintenance_current_checkpoint_restored &&
+            all_history_levels_restored &&
+            maintenance_rate_checkpoint_restored;
+        if (!collectivePostacceptMaintenanceRecoveryPhaseReady(
+                local_restore_complete,
+                velocity_extension_artifact_comm)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Level-set maintenance "
+              "rollback is incomplete on another communicator rank.");
+        }
+        // Each generic state assignment completed its own ghost refresh.  A
+        // restored RateStateSnapshot already owns the captured backend-native
+        // overlap state, so no unfenced multi-vector refresh remains here.
+        maintenance_checkpoint_ghosts_restored = true;
       }
       maintenance_checkpoint_restored =
           maintenance_requests_checkpoint_restored &&
           maintenance_current_checkpoint_restored &&
           all_history_levels_restored &&
+          maintenance_rate_checkpoint_restored &&
           maintenance_checkpoint_ghosts_restored;
-      if (first_failure) {
-        std::rethrow_exception(first_failure);
-      }
-      if (!maintenance_checkpoint_restored) {
+      if (!collectivePostacceptMaintenanceRecoveryPhaseReady(
+              maintenance_checkpoint_restored,
+              velocity_extension_artifact_comm)) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Level-set maintenance "
-            "rollback checkpoint remains incomplete.");
+            "rollback checkpoint remains incomplete on at least one "
+            "communicator rank.");
       }
     };
     bool maintenance_transaction_published = false;
@@ -17733,51 +27877,180 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     bool maintenance_ledger_commit_completed = false;
     bool maintenance_rejection_records_logged = false;
     const auto rollback_and_reject_maintenance =
-        [&](std::string_view reason) {
-          std::string recovery_failure;
-          const auto record_failure =
-              [&](std::string_view resource,
-                  std::string_view diagnostic) {
-                if (!recovery_failure.empty()) {
-                  recovery_failure += "; ";
-                }
-                recovery_failure += std::string(resource);
-                recovery_failure += ": ";
-                recovery_failure += std::string(diagnostic);
-              };
-
+        [&](PostacceptMaintenanceRollbackReason reason) {
+          const auto rollback_scope =
+              PostacceptMaintenanceRollbackScope::
+                  AcceptedEndpointMaintenanceOnly;
+          std::exception_ptr local_geometry_restore_failure;
           if (maintenance_geometry_transaction) {
             try {
               maintenance_geometry_transaction->rollback();
-              if (!maintenance_geometry_transaction->active()) {
-                maintenance_geometry_transaction.reset();
-              }
-            } catch (const std::exception& error) {
-              record_failure("geometry", error.what());
             } catch (...) {
-              record_failure("geometry", "unknown failure");
+              local_geometry_restore_failure =
+                  std::current_exception();
             }
           }
-          try {
-            restore_maintenance_checkpoint();
-          } catch (const std::exception& error) {
-            record_failure("request_and_history", error.what());
-          } catch (...) {
-            record_failure(
-                "request_and_history", "unknown failure");
-          }
-          try {
-            if (level_set_maintenance_work.transactionActive()) {
-              level_set_maintenance_work.rejectTransaction();
+          const bool local_geometry_restored =
+              local_geometry_restore_failure == nullptr &&
+              (!maintenance_geometry_transaction ||
+               !maintenance_geometry_transaction->active());
+          if (!collectivePostacceptMaintenanceRecoveryPhaseReady(
+                  local_geometry_restored,
+                  velocity_extension_artifact_comm)) {
+            if (local_geometry_restore_failure != nullptr) {
+              std::rethrow_exception(
+                  local_geometry_restore_failure);
             }
-          } catch (const std::exception& error) {
-            record_failure("maintenance_ledger", error.what());
-          } catch (...) {
-            record_failure("maintenance_ledger", "unknown failure");
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Another active FE "
+                "communicator rank failed to roll back postaccept "
+                "maintenance geometry/cache state.");
+          }
+          if (maintenance_geometry_transaction &&
+              !maintenance_geometry_transaction->active()) {
+            maintenance_geometry_transaction.reset();
           }
 
-          if (!maintenance_rejection_records_logged &&
-              !level_set_maintenance_work.transactionActive()) {
+          restore_maintenance_checkpoint();
+          const bool local_checkpoint_restored =
+              !maintenance_work_due ||
+              maintenance_checkpoint_restored;
+          if (!collectivePostacceptMaintenanceRecoveryPhaseReady(
+                  local_checkpoint_restored,
+                  velocity_extension_artifact_comm)) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Postaccept maintenance "
+                "request/current/history rollback is incomplete on at "
+                "least one communicator rank.");
+          }
+
+          bool restored_topology_verified =
+              !postaccept_maintenance_topology_tracking_required;
+          if (postaccept_maintenance_topology_tracking_required) {
+            cut_refresh_cache->last_signature.reset();
+            cut_refresh_cache->last_vector_signature.reset();
+            const auto restored_endpoint_report =
+                refreshActiveCutIntegrationContextCached(
+                    sim,
+                    params,
+                    h.u(),
+                    *cut_lifecycle,
+                    *cut_refresh_cache,
+                    "postaccept_maintenance_rollback_verification");
+            const bool local_restored_topology_complete =
+                postaccept_maintenance_baseline_topology_key
+                    .has_value() &&
+                *postaccept_maintenance_baseline_topology_key != 0u &&
+                restored_endpoint_report.refreshed &&
+                restored_endpoint_report.request_policy_key ==
+                    expected_cut_request_policy_key &&
+                restored_endpoint_report.topology_key ==
+                    *postaccept_maintenance_baseline_topology_key &&
+                cut_refresh_cache->topology_key.has_value() &&
+                *cut_refresh_cache->topology_key ==
+                    *postaccept_maintenance_baseline_topology_key;
+            const auto [minimum_restored_topology_key,
+                        maximum_restored_topology_key] =
+                globalMinMaxUint64(
+                    local_restored_topology_complete
+                        ? restored_endpoint_report.topology_key
+                        : 0u,
+                    velocity_extension_artifact_comm);
+            restored_topology_verified =
+                local_restored_topology_complete &&
+                minimum_restored_topology_key != 0u &&
+                minimum_restored_topology_key ==
+                    maximum_restored_topology_key &&
+                minimum_restored_topology_key ==
+                    *postaccept_maintenance_baseline_topology_key;
+            if (!collectivePostacceptMaintenanceRecoveryPhaseReady(
+                    restored_topology_verified,
+                    velocity_extension_artifact_comm)) {
+              throw std::runtime_error(
+                  "[svMultiPhysics::Application] Postaccept maintenance "
+                  "rollback could not verify the accepted-endpoint "
+                  "cut-topology baseline communicator-wide.");
+            }
+            cut_report = restored_endpoint_report;
+          }
+
+          const auto staged_trial_row_count =
+              level_set_maintenance_work.trialRows().size();
+          const auto [minimum_staged_trial_row_count,
+                      maximum_staged_trial_row_count] =
+              globalMinMaxUint64(
+                  static_cast<std::uint64_t>(
+                      staged_trial_row_count),
+                  velocity_extension_artifact_comm);
+          const bool local_ledger_rejection_preflight_ready =
+              level_set_maintenance_work.transactionActive() &&
+              level_set_maintenance_work.acceptedRows().size() ==
+                  accepted_row_begin &&
+              level_set_maintenance_work.rejectedRows().size() ==
+                  rejected_row_begin &&
+              level_set_maintenance_work.acceptedAttempts().size() ==
+                  accepted_attempt_begin &&
+              level_set_maintenance_work.rejectedAttempts().size() ==
+                  rejected_attempt_begin &&
+              minimum_staged_trial_row_count ==
+                  maximum_staged_trial_row_count &&
+              minimum_staged_trial_row_count ==
+                  static_cast<std::uint64_t>(
+                      staged_trial_row_count);
+          const bool local_rejection_evidence_may_publish =
+              postacceptMaintenanceRejectionEvidenceMayPublish(
+                  local_geometry_restored,
+                  local_checkpoint_restored,
+                  restored_topology_verified,
+                  local_ledger_rejection_preflight_ready);
+          if (!collectivePostacceptMaintenanceRecoveryPhaseReady(
+                  local_rejection_evidence_may_publish,
+                  velocity_extension_artifact_comm)) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Postaccept maintenance "
+                "rollback recovery did not reach the collective terminal "
+                "ledger-rejection preflight; no rejected work evidence "
+                "was published.");
+          }
+
+          std::exception_ptr local_ledger_rejection_failure;
+          try {
+            level_set_maintenance_work.rejectTransaction();
+          } catch (...) {
+            local_ledger_rejection_failure =
+                std::current_exception();
+          }
+          requirePostacceptMaintenanceRecoveryPhase(
+              local_ledger_rejection_failure,
+              velocity_extension_artifact_comm,
+              "terminal_maintenance_ledger_rejection");
+          const bool local_terminal_rejection_complete =
+              !level_set_maintenance_work.transactionActive() &&
+              level_set_maintenance_work.acceptedRows().size() ==
+                  accepted_row_begin &&
+              level_set_maintenance_work.acceptedAttempts().size() ==
+                  accepted_attempt_begin &&
+              level_set_maintenance_work.rejectedRows().size() ==
+                  rejected_row_begin + staged_trial_row_count &&
+              level_set_maintenance_work.rejectedAttempts().size() ==
+                  rejected_attempt_begin + 1u &&
+              level_set_maintenance_work.trialRows().empty();
+          if (!collectivePostacceptMaintenanceRecoveryPhaseReady(
+                  local_terminal_rejection_complete,
+                  velocity_extension_artifact_comm)) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Postaccept maintenance "
+                "terminal ledger rejection is inconsistent across the "
+                "communicator; rejected rows were not logged.");
+          }
+
+          maintenance_transaction_rejected = true;
+          level_set_maintenance_changed = false;
+          applied_volume_corrections.clear();
+          volume_correction_work_logs.clear();
+          maintenance_commit_logs.clear();
+
+          if (!maintenance_rejection_records_logged) {
             const auto& rejected_attempts =
                 level_set_maintenance_work.rejectedAttempts();
             if (rejected_attempts.size() > rejected_attempt_begin) {
@@ -17799,64 +28072,64 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             maintenance_rejection_records_logged = true;
           }
 
-          const bool geometry_restored =
-              !maintenance_geometry_transaction;
-          const bool request_and_history_restored =
-              !maintenance_work_due ||
-              maintenance_checkpoint_restored;
-          const bool ledger_rejected =
-              !level_set_maintenance_work.transactionActive();
-          const bool restored =
-              recovery_failure.empty() &&
-              geometry_restored &&
-              request_and_history_restored &&
-              ledger_rejected;
-          const bool collective_rejection =
-              reason == "collective_consensus_rejection";
-          maintenance_transaction_rejected = restored;
-          level_set_maintenance_changed = false;
-          applied_volume_corrections.clear();
-          volume_correction_work_logs.clear();
-          maintenance_commit_logs.clear();
+          const auto topology_evidence =
+              postacceptMaintenanceTopologyEvidence(
+                  postaccept_maintenance_baseline_topology_key,
+                  postaccept_maintenance_final_topology_key);
           oopCout()
               << "[svMultiPhysics::Application] Level-set maintenance transaction"
               << " diagnostic=level_set_maintenance_transaction"
               << " step=" << h.stepIndex()
-              << " reason='" << reason << "'"
-              << " outcome="
-              << (restored
-                      ? (collective_rejection
-                             ? "collectively_rejected"
-                             : "rolled_back")
-                      : "rollback_failed")
-              << " accepted_state_change=false"
-              << " geometry_state_restored="
-              << (geometry_restored ? "true" : "false")
-              << " request_and_history_state_restored="
-              << (request_and_history_restored ? "true" : "false")
-              << " ledger_rejected="
-              << (ledger_rejected ? "true" : "false")
+              << " reason_code="
+              << postacceptMaintenanceRollbackReasonName(reason)
+              << " rollback_scope="
+              << postacceptMaintenanceRollbackScopeName(
+                     rollback_scope)
+              << " outcome=maintenance_transaction_rejected"
+              << " physical_step_retained=true"
+              << " full_time_step_rollback=false"
+              << " maintenance_state_change_retained=false"
+              << " geometry_state_restored=true"
+              << " request_current_history_state_restored=true"
+              << " restored_topology_verified="
+              << (restored_topology_verified ? "true" : "false")
+              << " maintenance_work_ledger_rejected=true"
+              << " free_surface_energy_ledger_rejected=false"
+              << " topology_baseline_present="
+              << (topology_evidence.baseline_present ? "true" : "false")
+              << " topology_baseline_key="
+              << topology_evidence.baseline_key
+              << " topology_final_present="
+              << (topology_evidence.final_present ? "true" : "false")
+              << " topology_final_key="
+              << topology_evidence.final_key
+              << " topology_keys_equal="
+              << (topology_evidence.keys_equal ? "true" : "false")
               << std::endl;
-          if (!restored) {
-            if (recovery_failure.empty()) {
-              recovery_failure =
-                  "covered rollback resources remain unresolved";
-            }
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] Accepted-step "
-                "maintenance rollback/rejection failed: " +
-                recovery_failure);
-          }
         };
     try {
       const auto ensure_maintenance_geometry_transaction = [&] {
         if (!maintenance_geometry_transaction) {
+          std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
+              prepared_transaction;
+          std::exception_ptr local_transaction_prepare_failure;
+          try {
+            prepared_transaction =
+                std::make_unique<LevelSetMaintenanceGeometryTransaction>(
+                    sim,
+                    *cut_lifecycle,
+                    *cut_refresh_cache,
+                    transient_active_cut_requests);
+          } catch (...) {
+            local_transaction_prepare_failure =
+                std::current_exception();
+          }
+          requireCollectivePhasePreparation(
+              local_transaction_prepare_failure,
+              velocity_extension_artifact_comm,
+              "postaccept_maintenance_geometry_transaction_begin");
           maintenance_geometry_transaction =
-              std::make_unique<LevelSetMaintenanceGeometryTransaction>(
-                  sim,
-                  *cut_lifecycle,
-                  *cut_refresh_cache,
-                  transient_active_cut_requests);
+              std::move(prepared_transaction);
         }
       };
       const LevelSetMaintenanceStageObserver observe_stage =
@@ -17872,7 +28145,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             auto after_functionals =
                 levelSetMaintenanceFunctionalValues(
                     sim,
-                    after_functional_states);
+                    after_functional_states,
+                    after_candidate);
             level_set_maintenance_work.stageRow(
                 substage,
                 collectiveLevelSetMaintenanceAlgebraicRevision(
@@ -17896,7 +28170,23 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   staged_volume_corrections) {
             ensure_maintenance_geometry_transaction();
             cut_report = maintenance_geometry_transaction->refresh(
-                params, candidate);
+                params, candidate, /*force_rebuild=*/true);
+            if (postaccept_maintenance_topology_tracking_required &&
+                cut_report.request_policy_key ==
+                    expected_cut_request_policy_key &&
+                cut_report.topology_key != 0u &&
+                cut_refresh_cache->topology_key.has_value() &&
+                *cut_refresh_cache->topology_key ==
+                    cut_report.topology_key) {
+              // This validator runs once after every maintenance transform.
+              // Intermediate stage/line-search refreshes deliberately do not
+              // contribute to the publication decision.
+              postaccept_maintenance_final_topology_key =
+                  cut_report.topology_key;
+            } else if (
+                postaccept_maintenance_topology_tracking_required) {
+              postaccept_maintenance_final_topology_key.reset();
+            }
             if (!staged_volume_corrections.empty()) {
               const auto post_maintenance_functionals =
                   evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
@@ -17918,12 +28208,71 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           &applied_volume_corrections,
           validate_candidate,
           observe_stage,
-          &maintenance_commit_logs);
+          &maintenance_commit_logs,
+          &maintenance_rate_publication_started);
+      if (postaccept_maintenance_topology_tracking_required &&
+          !level_set_maintenance_changed) {
+        // Even a no-op maintenance schedule receives an explicit final
+        // validator refresh.  Do not infer equality merely from the absence
+        // of an algebraic update.
+        const auto unchanged_final_candidate =
+            gatherFeOrderedSolution(h.u());
+        validate_candidate(
+            unchanged_final_candidate,
+            std::span<const
+                LevelSetVolumeCorrectionMaintenanceEvent>{});
+      }
       if (maintenance_work_due) {
+        const auto topology_evidence =
+            postacceptMaintenanceTopologyEvidence(
+                postaccept_maintenance_baseline_topology_key,
+                postaccept_maintenance_final_topology_key);
+        const auto local_topology_decision =
+            postaccept_maintenance_topology_tracking_required
+                ? classifyPostacceptMaintenanceTopologyEvidence(
+                      topology_evidence)
+                : PostacceptMaintenanceTopologyDecision::Commit;
+        const std::array<std::uint64_t, 7>
+            local_topology_evidence_words{{
+                postaccept_maintenance_topology_tracking_required
+                    ? 1u
+                    : 0u,
+                topology_evidence.baseline_present ? 1u : 0u,
+                topology_evidence.baseline_key,
+                topology_evidence.final_present ? 1u : 0u,
+                topology_evidence.final_key,
+                topology_evidence.keys_equal ? 1u : 0u,
+                static_cast<std::uint64_t>(local_topology_decision),
+            }};
+        bool topology_evidence_identical_across_communicator =
+            true;
+        for (const auto word : local_topology_evidence_words) {
+          const auto [minimum_word, maximum_word] =
+              globalMinMaxUint64(
+                  word, velocity_extension_artifact_comm);
+          topology_evidence_identical_across_communicator =
+              minimum_word == maximum_word &&
+              topology_evidence_identical_across_communicator;
+        }
+        const bool communicator_complete_equal_topology =
+            postaccept_maintenance_topology_tracking_required &&
+            topology_evidence_identical_across_communicator &&
+            local_topology_decision ==
+                PostacceptMaintenanceTopologyDecision::Commit;
+        const bool communicator_complete_topology_mismatch =
+            postaccept_maintenance_topology_tracking_required &&
+            topology_evidence_identical_across_communicator &&
+            local_topology_decision ==
+                PostacceptMaintenanceTopologyDecision::
+                    RejectMaintenance;
         std::vector<std::uint64_t> commit_state_words;
         commit_state_words.reserve(
-            8u + 3u * static_cast<std::size_t>(
+            15u + 3u * static_cast<std::size_t>(
                             std::max(0, h.historyDepth())));
+        for (const auto word : local_topology_evidence_words) {
+          appendMaintenanceScheduleWord(
+              commit_state_words, word);
+        }
         appendMaintenanceScheduleWord(commit_state_words, 1u);
         appendMaintenanceScheduleBool(
             commit_state_words,
@@ -17953,7 +28302,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
              (maintenance_geometry_transaction &&
               maintenance_geometry_transaction->active())) &&
             (!maintenance_geometry_transaction ||
-             maintenance_geometry_transaction->active());
+             maintenance_geometry_transaction->active()) &&
+            topology_evidence_identical_across_communicator &&
+            (!postaccept_maintenance_topology_tracking_required ||
+             local_topology_decision !=
+                 PostacceptMaintenanceTopologyDecision::
+                     InvariantFailure);
         for (int level = 1; level <= h.historyDepth(); ++level) {
           const auto history_after_maintenance =
               gatherFeOrderedSolution(h.uPrevK(level));
@@ -17994,18 +28348,38 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             request_schedule.supported &&
             geometry_state.supported &&
             local_transaction_invariants_satisfied;
-        const auto decision =
+        const auto non_topology_decision =
             application::core::
                 collectiveLevelSetMaintenanceTransactionDecision(
                     level_set_maintenance_work,
                     local_transaction_invariants_satisfied,
                     velocity_extension_artifact_comm,
                     commit_state_words);
-        if (decision ==
+        if (non_topology_decision ==
             application::core::
                 LevelSetMaintenanceTransactionDecision::Reject) {
           rollback_and_reject_maintenance(
-              "collective_consensus_rejection");
+              PostacceptMaintenanceRollbackReason::
+                  CollectiveConsensusRejection);
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Postaccept level-set "
+              "maintenance failed invariant/consensus validation; "
+              "the accepted physical endpoint was restored and retained.");
+        }
+        if (communicator_complete_topology_mismatch) {
+          rollback_and_reject_maintenance(
+              PostacceptMaintenanceRollbackReason::
+                  MaintenanceCutTopologyChanged);
+        } else if (
+            postaccept_maintenance_topology_tracking_required &&
+            !communicator_complete_equal_topology) {
+          rollback_and_reject_maintenance(
+              PostacceptMaintenanceRollbackReason::
+                  CollectiveConsensusRejection);
+          throw std::logic_error(
+              "[svMultiPhysics::Application] Postaccept maintenance "
+              "topology evidence passed non-topology consensus without a "
+              "complete equal or complete mismatched classification.");
         }
       }
       if (!maintenance_transaction_rejected) {
@@ -18108,7 +28482,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         std::rethrow_exception(failure);
       }
       try {
-        rollback_and_reject_maintenance("candidate_exception");
+        rollback_and_reject_maintenance(
+            PostacceptMaintenanceRollbackReason::
+                CandidateException);
       } catch (const std::exception& recovery_error) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Level-set maintenance "
@@ -18116,6 +28492,214 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             std::string(recovery_error.what()));
       }
       std::rethrow_exception(failure);
+    }
+    if (has_free_surface_functional) {
+      const auto& accepted_step_maintenance_attempts =
+          level_set_maintenance_work.acceptedAttempts();
+      if (pending_phase_accepted_attempt_begin >
+          accepted_step_maintenance_attempts.size()) {
+        throw std::logic_error(
+            "[svMultiPhysics::Application] Accepted-step maintenance account start is outside the accepted-attempt history.");
+      }
+      const auto& accepted_step_maintenance_rows =
+          level_set_maintenance_work.acceptedRows();
+      if (pending_phase_accepted_row_begin >
+          accepted_step_maintenance_rows.size()) {
+        throw std::logic_error(
+            "[svMultiPhysics::Application] Accepted-step maintenance account start is outside the accepted-row history.");
+      }
+      pending_accepted_step_maintenance_energy_account =
+          application::core::
+              aggregateLevelSetMaintenanceAcceptedStepEnergy(
+                  std::span<const application::core::
+                                LevelSetMaintenanceWorkAttempt>(
+                      accepted_step_maintenance_attempts)
+                      .subspan(
+                          pending_phase_accepted_attempt_begin),
+                  std::span<const application::core::
+                                LevelSetMaintenanceWorkRow>(
+                      accepted_step_maintenance_rows)
+                      .subspan(pending_phase_accepted_row_begin));
+      if (pending_accepted_step_maintenance_energy_account
+              .has_value()) {
+        const auto& account =
+            *pending_accepted_step_maintenance_energy_account;
+        if (account.step !=
+                static_cast<std::uint64_t>(h.stepIndex()) ||
+            account.attempt != std::max<std::uint64_t>(
+                                   1u, step_acceptance_attempt) ||
+            account.time != h.time() || account.dt != h.dt()) {
+          throw std::logic_error(
+              "[svMultiPhysics::Application] Accepted-step maintenance energy account does not match the accepted time-step transaction.");
+        }
+        logLevelSetMaintenanceAcceptedStepEnergyAccount(
+            account);
+        if (account.post_transport.has_value()) {
+          const auto history =
+              sim.fe_system
+                  ->freeSurfaceDiscreteFunctionalHistory();
+          const auto declaration_count =
+              free_surface_declarations.size();
+          if (declaration_count == 0u ||
+              history.size() < declaration_count ||
+              h.stepIndex() <= 0) {
+            throw std::logic_error(
+                "[svMultiPhysics::Application] Physical maintenance endpoint channels require a complete preceding accepted functional group.");
+          }
+          const auto preceding_group =
+              history.last(declaration_count);
+          const auto preceding_step =
+              preceding_group.front().accepted_step;
+          const auto preceding_time =
+              static_cast<double>(
+                  preceding_group.front().accepted_time);
+          const auto preceding_state_revision =
+              preceding_group.front().state_revision;
+          const auto preceding_extension_map_revision =
+              preceding_group.front().extension_map_revision;
+          const auto expected_preceding_step =
+              static_cast<std::uint64_t>(h.stepIndex() - 1);
+          const double expected_preceding_time =
+              account.time - account.dt;
+          const double preceding_time_scale = std::max(
+              {1.0,
+               std::abs(preceding_time),
+               std::abs(expected_preceding_time)});
+          if (preceding_step != expected_preceding_step ||
+              preceding_state_revision == 0u ||
+              !std::isfinite(preceding_time) ||
+              !std::isfinite(expected_preceding_time) ||
+              std::abs(
+                  preceding_time - expected_preceding_time) >
+                  64.0 *
+                      std::numeric_limits<double>::epsilon() *
+                      preceding_time_scale) {
+            throw std::logic_error(
+                "[svMultiPhysics::Application] The preceding accepted functional endpoint does not match the physical maintenance interval.");
+          }
+          double preceding_surface_wall_energy = 0.0;
+          std::optional<double>
+              preceding_gravitational_energy;
+          std::optional<int>
+              active_volume_owner_interface_marker;
+          std::uint64_t preceding_snapshot_set_revision =
+              1469598103934665603ull;
+          std::uint64_t
+              preceding_mesh_topology_set_revision =
+                  1469598103934665603ull;
+          std::uint64_t preceding_cut_topology_set_revision =
+              1469598103934665603ull;
+          for (std::size_t index = 0u;
+               index < declaration_count; ++index) {
+            const auto& record = preceding_group[index];
+            const auto& declaration =
+                free_surface_declarations[index];
+            if (record.accepted_step != preceding_step ||
+                record.accepted_time !=
+                    preceding_group.front().accepted_time ||
+                record.state_revision !=
+                    preceding_state_revision ||
+                record.extension_map_revision !=
+                    preceding_extension_map_revision ||
+                record.declaration.interface_marker !=
+                    declaration.interface_marker ||
+                freeSurfaceDiscreteFunctionalDeclarationContentKey(
+                    record.declaration) !=
+                    freeSurfaceDiscreteFunctionalDeclarationContentKey(
+                    declaration) ||
+                !std::isfinite(
+                    record.state.liquid_gas_surface_energy) ||
+                !std::isfinite(record.state.young_wall_energy) ||
+                record.geometry_revision.snapshot_revision_key ==
+                    0u ||
+                record.cut_topology_revision == 0u ||
+                record.active_volume_energy.has_value() !=
+                    declaration.active_volume_energy_parameters
+                        .has_value()) {
+              throw std::logic_error(
+                  "[svMultiPhysics::Application] The preceding accepted functional group has inconsistent ownership, order, provenance, or energy values.");
+            }
+            preceding_surface_wall_energy +=
+                static_cast<double>(
+                    record.state.liquid_gas_surface_energy) +
+                static_cast<double>(
+                    record.state.young_wall_energy);
+            mixMaintenanceRevision(
+                preceding_snapshot_set_revision,
+                static_cast<std::uint64_t>(
+                    record.declaration.interface_marker));
+            mixMaintenanceRevision(
+                preceding_snapshot_set_revision,
+                record.geometry_revision.snapshot_revision_key);
+            mixMaintenanceRevision(
+                preceding_mesh_topology_set_revision,
+                static_cast<std::uint64_t>(
+                    record.declaration.interface_marker));
+            mixMaintenanceRevision(
+                preceding_mesh_topology_set_revision,
+                record.geometry_revision.mesh_topology_revision);
+            mixMaintenanceRevision(
+                preceding_cut_topology_set_revision,
+                static_cast<std::uint64_t>(
+                    record.declaration.interface_marker));
+            mixMaintenanceRevision(
+                preceding_cut_topology_set_revision,
+                record.cut_topology_revision);
+            if (record.active_volume_energy.has_value()) {
+              if (preceding_gravitational_energy.has_value() ||
+                  !std::isfinite(
+                      record.active_volume_energy
+                          ->gravitational_energy)) {
+                throw std::logic_error(
+                    "[svMultiPhysics::Application] Physical maintenance endpoint channels require at most one finite active-volume energy owner.");
+              }
+              preceding_gravitational_energy =
+                  static_cast<double>(
+                      record.active_volume_energy
+                          ->gravitational_energy);
+              active_volume_owner_interface_marker =
+                  record.declaration.interface_marker;
+            }
+          }
+          if (!std::isfinite(
+                  preceding_surface_wall_energy)) {
+            throw std::overflow_error(
+                "[svMultiPhysics::Application] The preceding accepted surface and wall energy sum is not finite.");
+          }
+          preceding_snapshot_set_revision =
+              preceding_snapshot_set_revision == 0u
+                  ? 1u
+                  : preceding_snapshot_set_revision;
+          preceding_mesh_topology_set_revision =
+              preceding_mesh_topology_set_revision == 0u
+                  ? 1u
+                  : preceding_mesh_topology_set_revision;
+          preceding_cut_topology_set_revision =
+              preceding_cut_topology_set_revision == 0u
+                  ? 1u
+                  : preceding_cut_topology_set_revision;
+          pending_accepted_step_physical_endpoint_channels =
+              application::core::
+                  evaluateLevelSetMaintenancePhysicalEndpointChannels(
+                      account,
+                      preceding_gravitational_energy,
+                      preceding_surface_wall_energy);
+          logLevelSetMaintenancePhysicalEndpointChannels(
+              account,
+              *pending_accepted_step_physical_endpoint_channels,
+              preceding_step,
+              preceding_time,
+              preceding_state_revision,
+              preceding_snapshot_set_revision,
+              preceding_mesh_topology_set_revision,
+              preceding_cut_topology_set_revision,
+              preceding_extension_map_revision,
+              declaration_count,
+              preceding_surface_wall_energy,
+              preceding_gravitational_energy,
+              active_volume_owner_interface_marker);
+        }
+      }
     }
     if (!level_set_maintenance_changed) {
       cut_report = refreshActiveCutIntegrationContextCached(
@@ -18148,6 +28732,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         h,
         level_set_advection_velocity,
         &accepted_extension_map_records);
+    reimposeAcceptedMasterBearingState(h, *sim.fe_system);
+    recordAcceptedMeshBoundaryProvenanceAtEndpoint(
+        sim,
+        static_cast<std::uint64_t>(h.stepIndex()),
+        h.time(),
+        h.dt());
     writeAcceptedVelocityExtensionMapArtifacts(
         params,
         accepted_extension_map_records,
@@ -18158,27 +28748,370 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         velocity_extension_artifact_comm,
         accepted_velocity_extension_maps);
     if (has_free_surface_functional) {
+      const auto accepted_functional_extension_map_revision =
+          currentLevelSetVelocityExtensionRevision(
+              *sim.fe_system,
+              level_set_advection_velocity,
+              accepted_velocity_extension_maps);
       const auto accepted_state_solution =
           gatherFeOrderedSolution(h.u());
+      std::vector<svmp::FE::Real>
+          backward_euler_previous_solution;
+      if (transient_scheme.scheme ==
+          svmp::FE::timestepping::SchemeKind::BackwardEuler) {
+        if (h.historyDepth() < 2) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Backward-Euler free-surface kinetic work requires two accepted-history slots.");
+        }
+        backward_euler_previous_solution =
+            gatherFeOrderedSolution(h.uPrev2());
+      }
       const auto accepted_state_revision =
           collectiveLevelSetMaintenanceAlgebraicRevision(
               accepted_state_solution,
               velocity_extension_artifact_comm);
-      recordAcceptedFreeSurfaceDiscreteFunctionals(
-          sim,
-          static_cast<std::uint64_t>(h.stepIndex()),
-          h.time(),
-          h.dt(),
-          pending_pre_maintenance_endpoint_state_revision,
-          accepted_state_revision,
-          pending_contact_stages);
+      if (pending_accepted_step_maintenance_energy_account
+              .has_value()) {
+        const auto& maintenance_account =
+            *pending_accepted_step_maintenance_energy_account;
+        const bool maintenance_endpoint_available =
+            maintenance_account.maintenance_end.has_value();
+        const auto maintenance_endpoint_revision =
+            maintenance_endpoint_available
+                ? maintenance_account.maintenance_end
+                      ->algebraic_state_revision
+                : 0u;
+        const bool accepted_endpoint_matches_maintenance_end =
+            maintenance_endpoint_available &&
+            maintenance_endpoint_revision ==
+                accepted_state_revision;
+        oopCout()
+            << std::setprecision(17)
+            << "[svMultiPhysics::Application] Level-set maintenance-to-accepted endpoint connection"
+            << " diagnostic=level_set_maintenance_accepted_endpoint_connection"
+            << " step=" << h.stepIndex()
+            << " attempt=" << maintenance_account.attempt
+            << " maintenance_endpoint_available="
+            << (maintenance_endpoint_available ? "true" : "false")
+            << " maintenance_endpoint_algebraic_state_revision="
+            << maintenance_endpoint_revision
+            << " accepted_endpoint_algebraic_state_revision="
+            << accepted_state_revision
+            << " accepted_endpoint_matches_maintenance_end="
+            << (accepted_endpoint_matches_maintenance_end
+                    ? "true"
+                    : "false")
+            << " accepted_endpoint_match_scope=algebraic_state_revision_only"
+            << " subsequent_state_change_requires_separate_work="
+            << (maintenance_endpoint_available &&
+                        !accepted_endpoint_matches_maintenance_end
+                    ? "true"
+                    : "false")
+            << " complete_energy_record_connected=false"
+            << std::endl;
+      }
+      const auto accepted_functional_states =
+          recordAcceptedFreeSurfaceDiscreteFunctionals(
+              sim,
+              static_cast<std::uint64_t>(h.stepIndex()),
+              h.time(),
+              h.dt(),
+              pending_pre_maintenance_endpoint_state_revision,
+              accepted_state_revision,
+              pending_contact_stages,
+              std::span<const svmp::FE::Real>(
+                  accepted_state_solution.data(),
+                  accepted_state_solution.size()),
+              std::span<const svmp::FE::Real>(
+                  backward_euler_previous_solution.data(),
+                  backward_euler_previous_solution.size()),
+              accepted_functional_extension_map_revision);
+      if (pending_accepted_step_maintenance_energy_account
+              .has_value() &&
+          pending_accepted_step_maintenance_energy_account
+              ->maintenance_end.has_value()) {
+        const auto declaration_count =
+            free_surface_declarations.size();
+        if (declaration_count == 0u ||
+            accepted_functional_states.size() !=
+                declaration_count) {
+          throw std::logic_error(
+              "[svMultiPhysics::Application] The accepted maintenance endpoint comparison requires a complete current functional group.");
+        }
+        const auto& maintenance_endpoint =
+            *pending_accepted_step_maintenance_energy_account
+                 ->maintenance_end;
+        double current_liquid_gas_surface_energy = 0.0;
+        double current_solid_liquid_wall_energy = 0.0;
+        std::optional<double> current_kinetic_energy;
+        std::optional<double> current_gravitational_energy;
+        std::uint64_t current_snapshot_set_revision =
+            1469598103934665603ull;
+        std::uint64_t current_mesh_topology_set_revision =
+            1469598103934665603ull;
+        std::uint64_t current_cut_topology_set_revision =
+            1469598103934665603ull;
+        for (std::size_t index = 0u;
+             index < declaration_count; ++index) {
+          const auto& state =
+              accepted_functional_states[index];
+          const auto& declaration =
+              free_surface_declarations[index];
+          if (state.interface_marker !=
+                  declaration.interface_marker ||
+              !std::isfinite(
+                  state.state.liquid_gas_surface_energy) ||
+              !std::isfinite(state.state.young_wall_energy) ||
+              state.cut_topology_revision == 0u ||
+              state.active_volume_energy.has_value() !=
+                  declaration.active_volume_energy_parameters
+                      .has_value()) {
+            throw std::logic_error(
+                "[svMultiPhysics::Application] The current accepted functional group cannot be paired with the maintenance endpoint.");
+          }
+          current_liquid_gas_surface_energy +=
+              static_cast<double>(
+                  state.state.liquid_gas_surface_energy);
+          current_solid_liquid_wall_energy +=
+              static_cast<double>(
+                  state.state.young_wall_energy);
+          mixMaintenanceRevision(
+              current_snapshot_set_revision,
+              static_cast<std::uint64_t>(
+                  state.interface_marker));
+          mixMaintenanceRevision(
+              current_snapshot_set_revision,
+              state.geometry_revision.snapshot_revision_key);
+          mixMaintenanceRevision(
+              current_mesh_topology_set_revision,
+              static_cast<std::uint64_t>(
+                  state.interface_marker));
+          mixMaintenanceRevision(
+              current_mesh_topology_set_revision,
+              state.geometry_revision.mesh_topology_revision);
+          mixMaintenanceRevision(
+              current_cut_topology_set_revision,
+              static_cast<std::uint64_t>(
+                  state.interface_marker));
+          mixMaintenanceRevision(
+              current_cut_topology_set_revision,
+              state.cut_topology_revision);
+          if (state.active_volume_energy.has_value()) {
+            if (current_kinetic_energy.has_value() ||
+                !std::isfinite(
+                    state.active_volume_energy->kinetic_energy) ||
+                !std::isfinite(
+                    state.active_volume_energy
+                        ->gravitational_energy)) {
+              throw std::logic_error(
+                  "[svMultiPhysics::Application] The current accepted endpoint requires at most one finite active-volume energy owner.");
+            }
+            current_kinetic_energy =
+                static_cast<double>(
+                    state.active_volume_energy->kinetic_energy);
+            current_gravitational_energy =
+                static_cast<double>(
+                    state.active_volume_energy
+                        ->gravitational_energy);
+          }
+        }
+        if (!std::isfinite(
+                current_liquid_gas_surface_energy) ||
+            !std::isfinite(
+                current_solid_liquid_wall_energy) ||
+            current_kinetic_energy.has_value() !=
+                maintenance_endpoint.kinetic_energy.has_value() ||
+            current_gravitational_energy.has_value() !=
+                maintenance_endpoint.gravitational_energy
+                    .has_value() ||
+            current_kinetic_energy.has_value() !=
+                maintenance_endpoint.modeled_stored_energy
+                    .has_value()) {
+          throw std::logic_error(
+              "[svMultiPhysics::Application] The current accepted endpoint and maintenance endpoint have inconsistent stored-energy coverage.");
+        }
+        current_snapshot_set_revision =
+            current_snapshot_set_revision == 0u
+                ? 1u
+                : current_snapshot_set_revision;
+        current_mesh_topology_set_revision =
+            current_mesh_topology_set_revision == 0u
+                ? 1u
+                : current_mesh_topology_set_revision;
+        current_cut_topology_set_revision =
+            current_cut_topology_set_revision == 0u
+                ? 1u
+                : current_cut_topology_set_revision;
+        const auto current_extension_map_revision =
+            accepted_functional_extension_map_revision;
+        const double kinetic_energy_change =
+            current_kinetic_energy.has_value()
+                ? *current_kinetic_energy -
+                      *maintenance_endpoint.kinetic_energy
+                : 0.0;
+        const double gravitational_energy_change =
+            current_gravitational_energy.has_value()
+                ? *current_gravitational_energy -
+                      *maintenance_endpoint.gravitational_energy
+                : 0.0;
+        const double liquid_gas_surface_energy_change =
+            current_liquid_gas_surface_energy -
+            maintenance_endpoint.liquid_gas_surface_energy;
+        const double solid_liquid_wall_energy_change =
+            current_solid_liquid_wall_energy -
+            maintenance_endpoint.solid_liquid_wall_energy;
+        const bool modeled_energy_available =
+            current_kinetic_energy.has_value() &&
+            maintenance_endpoint.modeled_stored_energy.has_value();
+        const double current_modeled_stored_energy =
+            modeled_energy_available
+                ? *current_kinetic_energy +
+                      *current_gravitational_energy +
+                      current_liquid_gas_surface_energy +
+                      current_solid_liquid_wall_energy
+                : 0.0;
+        const double modeled_stored_energy_change =
+            modeled_energy_available
+                ? current_modeled_stored_energy -
+                      *maintenance_endpoint.modeled_stored_energy
+                : 0.0;
+        const std::array<double, 5> endpoint_energy_changes{{
+            kinetic_energy_change,
+            gravitational_energy_change,
+            liquid_gas_surface_energy_change,
+            solid_liquid_wall_energy_change,
+            modeled_stored_energy_change,
+        }};
+        if (!std::all_of(
+                endpoint_energy_changes.begin(),
+                endpoint_energy_changes.end(),
+                [](double value) {
+                  return std::isfinite(value);
+                })) {
+          throw std::overflow_error(
+              "[svMultiPhysics::Application] The maintenance-to-current endpoint energy change is not finite.");
+        }
+        const bool algebraic_revision_matches =
+            maintenance_endpoint.algebraic_state_revision ==
+            accepted_state_revision;
+        const bool snapshot_revision_matches =
+            maintenance_endpoint.snapshot_set_revision ==
+            current_snapshot_set_revision;
+        const bool mesh_topology_revision_matches =
+            maintenance_endpoint.mesh_topology_set_revision ==
+            current_mesh_topology_set_revision;
+        const bool cut_topology_revision_matches =
+            maintenance_endpoint.cut_topology_set_revision ==
+            current_cut_topology_set_revision;
+        const bool extension_revision_matches =
+            maintenance_endpoint.extension_map_revision ==
+            current_extension_map_revision;
+        const bool stored_energy_endpoint_match_available =
+            modeled_energy_available;
+        const bool component_energy_matches =
+            stored_energy_endpoint_match_available &&
+            kinetic_energy_change == 0.0 &&
+            gravitational_energy_change == 0.0 &&
+            liquid_gas_surface_energy_change == 0.0 &&
+            solid_liquid_wall_energy_change == 0.0;
+        const bool stored_energy_endpoint_match =
+            stored_energy_endpoint_match_available &&
+            algebraic_revision_matches &&
+            snapshot_revision_matches &&
+            mesh_topology_revision_matches &&
+            cut_topology_revision_matches &&
+            extension_revision_matches &&
+            component_energy_matches;
+        const bool unclassified_post_maintenance_work_required =
+            !stored_energy_endpoint_match;
+        oopCout()
+            << std::setprecision(17)
+            << "[svMultiPhysics::Application] Level-set maintenance-to-current accepted functional endpoint"
+            << " diagnostic=level_set_maintenance_current_functional_endpoint"
+            << " step=" << h.stepIndex()
+            << " attempt="
+            << pending_accepted_step_maintenance_energy_account
+                   ->attempt
+            << " maintenance_algebraic_state_revision="
+            << maintenance_endpoint.algebraic_state_revision
+            << " current_algebraic_state_revision="
+            << accepted_state_revision
+            << " algebraic_revision_matches="
+            << (algebraic_revision_matches ? "true" : "false")
+            << " maintenance_snapshot_set_revision="
+            << maintenance_endpoint.snapshot_set_revision
+            << " current_snapshot_set_revision="
+            << current_snapshot_set_revision
+            << " snapshot_revision_matches="
+            << (snapshot_revision_matches ? "true" : "false")
+            << " maintenance_mesh_topology_set_revision="
+            << maintenance_endpoint.mesh_topology_set_revision
+            << " current_mesh_topology_set_revision="
+            << current_mesh_topology_set_revision
+            << " mesh_topology_revision_matches="
+            << (mesh_topology_revision_matches
+                    ? "true"
+                    : "false")
+            << " maintenance_cut_topology_set_revision="
+            << maintenance_endpoint.cut_topology_set_revision
+            << " current_cut_topology_set_revision="
+            << current_cut_topology_set_revision
+            << " cut_topology_revision_matches="
+            << (cut_topology_revision_matches
+                    ? "true"
+                    : "false")
+            << " cut_topology_source=accepted_functional_state"
+            << " maintenance_extension_map_revision_available="
+            << (maintenance_endpoint.extension_map_revision
+                        .has_value()
+                    ? "true"
+                    : "false")
+            << " current_extension_map_revision_available="
+            << (current_extension_map_revision.has_value()
+                    ? "true"
+                    : "false")
+            << " maintenance_extension_map_revision="
+            << maintenance_endpoint.extension_map_revision
+                   .value_or(0u)
+            << " current_extension_map_revision="
+            << current_extension_map_revision.value_or(0u)
+            << " extension_revision_matches="
+            << (extension_revision_matches ? "true" : "false")
+            << " kinetic_energy_change_available="
+            << (current_kinetic_energy.has_value()
+                    ? "true"
+                    : "false")
+            << " kinetic_energy_change="
+            << kinetic_energy_change
+            << " gravitational_energy_change_available="
+            << (current_gravitational_energy.has_value()
+                    ? "true"
+                    : "false")
+            << " gravitational_energy_change="
+            << gravitational_energy_change
+            << " liquid_gas_surface_energy_change="
+            << liquid_gas_surface_energy_change
+            << " solid_liquid_wall_energy_change="
+            << solid_liquid_wall_energy_change
+            << " modeled_stored_energy_change_available="
+            << (modeled_energy_available ? "true" : "false")
+            << " modeled_stored_energy_change="
+            << modeled_stored_energy_change
+            << " unclassified_post_maintenance_work_required="
+            << (unclassified_post_maintenance_work_required
+                    ? "true"
+                    : "false")
+            << " stored_energy_endpoint_match_available="
+            << (stored_energy_endpoint_match_available
+                    ? "true"
+                    : "false")
+            << " stored_energy_endpoint_match="
+            << (stored_energy_endpoint_match ? "true" : "false")
+            << " complete_energy_record_connected=false"
+            << std::endl;
+      }
     }
     clear_pending_contact_provenance();
-    sim.fe_system->recordAcceptedMeshTangentialBoundaryPolicies(
-        static_cast<std::uint64_t>(h.stepIndex()),
-        h.time(),
-        h.dt(),
-        h.u().valueRevision());
     if (level_set_maintenance_changed && cut_report.refreshed) {
       oopCout()
           << "[svMultiPhysics::Application] Level-set maintenance refreshed cut context"

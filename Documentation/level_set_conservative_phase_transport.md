@@ -118,6 +118,64 @@ The replicated-stage test also changes the previous indicator, lower and upper
 bounds, velocity, time step, tolerance, and stage options on one rank at a
 time, and requires every rank to reject before entering an asymmetric stage.
 
+## Temporal and mesh-stage contract
+
+The production coupling currently implements one deliberately narrow split.
+During the nonlinear solve, `q` is held at `q^n`. After convergence, the
+time-loop candidate-stage observer freezes the Backward-Euler endpoint
+velocity `u^{n+1}` and the application performs one explicit full-step graph
+update
+
+\[
+q^{n+1}=\mathcal{A}_{\Delta t}(q^n,u^{n+1}).
+\]
+
+This contract is named **Backward-Euler explicit-indicator endpoint-velocity
+split**. It is not an implicit Backward-Euler solve for `q`. Production
+requires temporal order one and the explicit `BackwardEuler` scheme;
+generalized-alpha, DG/dG(0), BDF/VSVO, collocation, Newmark, and other schemes
+fail closed before the time loop until a corresponding phase-transport stage
+law is derived and implemented.
+
+The production split uses the exact clipped one-ring bounds derived from
+`q^n` and the canonical graph adjacency. The split-stage validator re-derives
+those bounds before accepting the ledger. The lower-level forward-Euler stage
+operator remains a generic API that may be called with other explicit bounds;
+such a result is not valid production split-stage provenance.
+
+The graph identity is captured from the accepted `q^n` state and must remain
+current through the candidate. The supported mesh policy is fixed background:
+a change in graph/base-mesh identity rejects the candidate. This operator has
+no ALE mesh-flux or geometric-conservation-law term and therefore must not be
+described as moving-mesh conservative transport.
+
+The candidate snapshot binds exact-bit scheme, order, attempt, time, step,
+`dt`, and stage-option metadata. Operator-state, previous-`q`, sampled-velocity,
+graph, and flux-ledger identities are nonzero, versioned 64-bit fingerprints.
+They are drift detectors, not collision-free proofs. The graph revision also
+binds its execution layout (communicator size, distribution mode, FE-layout
+revision, and logical edge owners), so it is not a serial/MPI-invariant
+mathematical-operator fingerprint; cross-layout numerical comparisons must use
+the operator or ledger values. Sampled velocity arrays are additionally
+compared bit-for-bit across ranks in bounded chunks before use. The snapshot is
+consumed once; rejection and retry discard it rather than reusing a previous
+attempt's velocity.
+
+The supported closed-domain boundary check is a discrete phase-flux contract:
+the maximum nodal and absolute total physical-boundary `q` mass transfers must
+remain within the scaled `invariant_tolerance`. It is not a pointwise check of
+`u.n` and can be blind where `q=0`. Consequently an explicit legacy
+`Conservative_phase_impermeable_normal_velocity_tolerance` request fails closed
+before registration/time stepping; its default value is dormant and is not
+reported as an enforced tolerance.
+
+The level-set module effective-configuration artifact is schema version 2. It
+labels that legacy value as an unsupported pointwise contract, records whether
+it was explicitly requested, and names the actual policy as
+`closed_domain_discrete_q_flux_only` with `invariant_tolerance` as its
+tolerance source. This configuration artifact is distinct from the accepted
+flux-ledger artifact described below.
+
 ## Accepted-step maintenance transaction
 
 The conservative liquid indicator is held at the previous accepted endpoint
@@ -152,16 +210,16 @@ inside a rollback-capable geometry transaction:
    are deliberately excluded because they can advance a different number of
    times on equally valid partitions.
 
-The distributed graph builder applies the same distinction. It requires an
-identical global field size, FE layout revision, dimension, and graph options,
-but retains each rank's local mesh event counters for its own staleness check.
-The production currentness helper reduces whether any rank has a stale local
-stamp before deciding whether to rebuild. If one partition is stale, every
-rank enters the collective graph builder and refreshes its own local stamps.
-The selected two-rank disjoint-wall fixture proves that a real conservative
-graph builds and passes the production request preflight while those local
-cache stamps differ. It then advances the geometry stamp on one rank only and
-requires the production helper to rebuild successfully on both ranks.
+The distributed graph builder requires an identical global field size, FE
+layout revision, dimension, graph options, and graph content identity, while
+retaining each rank's local mesh event counters for its own currentness check.
+Its lower-level currentness helper can rebuild collectively when one local
+cache stamp is stale; the existing disjoint-wall MPI fixture covers that
+mechanism. The candidate-stage split adds a stricter accepted-graph binding:
+once `q^n` is captured, any local stamp drift produces a communicator-wide
+fixed-background rejection rather than a candidate-stage rebuild. Source
+regressions for the stricter guard remain unexecuted in the present
+resource-constrained worktree.
 
 A failed stage, nonconverged repair, displacement/topology guard, stale graph,
 failed geometry invariant, or consensus mismatch rejects the covered
@@ -198,7 +256,8 @@ content drift. A selected two-rank partition fixture also compares the real
 production live-geometry serialization, builds a distributed conservative
 graph with unequal rank-local mesh cache stamps, passes the production request
 preflight, injects snapshot-revision drift, and finally invalidates one rank's
-local graph stamp to verify an all-rank rebuild through the production helper.
+local graph stamp to verify an all-rank lower-level rebuild. The stricter
+candidate-stage fixed-background guard is a separate source test.
 Paired time-loop regressions inject a commit-ready failure and verify that
 successful discard restores the provisional rate state while a fail-stop
 discard refusal makes unwind retain the candidate rate state. These are
@@ -328,23 +387,36 @@ the output rank writes
 under the configured results directory. All ranks complete preflight before
 publication. The writer closes a temporary sibling and atomically publishes a
 no-replacement final link; an existing final or temporary path is a hard
-failure rather than an overwrite. This is per-file publication atomicity only:
-several due artifacts are still published sequentially, so the low-level
-qualification does not claim a single atomic multi-artifact transaction.
+failure rather than an overwrite. Several artifacts due at one accepted step
+form one rollback-capable batch: success messages are deferred until every
+file is present, and a later failure removes every earlier file from that
+batch on the output rank before all ranks reject. A failed removal is a
+fail-stop publication error. Individual files are atomically published, but
+the batch is not observer-atomic while it is being assembled, so the low-level
+qualification still does not claim a single atomic multi-artifact filesystem
+transaction.
 
-Artifact schema version 2 contains accepted step/time, the output rank's local
-graph mesh cache stamps, and the communicator-replicated graph FE-layout
-revision; all stage and limiter invariant flags and residuals; every nodal
-control-volume state, Courant number, source, transfer, factor, and balance;
-every canonical edge and pair-cancellation residual; every resolved and
-subthreshold component ledger; and the complete reinitialization,
-reconciliation, mismatch, phase-measure, geometry-measure, and displacement
-history for that accepted transaction.
-Serial tests cover schema content, stale-file refusal, malformed-ledger
+Artifact schema version 3 contains accepted step/time and accepted-state
+fingerprint; the operator endpoint-state fingerprint; the exact temporal split
+and stage options; previous/operator graph identities; previous-`q`, sampled
+velocity, and flux-ledger fingerprints; the sampled nodal endpoint velocity;
+the explicit discrete-`q` boundary-flux scope, maximum nodal transfer, total
+transfer, and applied tolerance; and the output rank's local graph cache stamps
+as diagnostics. It also retains all stage and limiter invariant flags and
+residuals; every nodal control-volume state, Courant number, source, transfer,
+factor, and balance; every canonical edge and pair-cancellation residual;
+every resolved and subthreshold component ledger; and the complete
+reinitialization, reconciliation, mismatch, phase-measure, geometry-measure,
+and displacement history for that accepted transaction. Before rank-zero
+publication, every communicator-replicated semantic payload field is bound by
+the collective preflight. Content fingerprints remain versioned probabilistic
+drift detectors rather than exact equality certificates.
+Source tests cover schema content, stale-file refusal, malformed-ledger
 rejection, and cadence ordering. The two-rank application test requires a
 rank-local preflight fault to fail collectively before publication and a valid
 stage to produce exactly one output-rank artifact. Artifact policy and region
-membership fingerprints must also agree across ranks.
+membership fingerprints must also agree across ranks. These new schema-3 and
+stage-contract tests have not been executed in this resource-constrained pass.
 
 Film, sheet, and rim accounting uses explicit fixed Eulerian control-volume
 regions rather than an undocumented automatic shape guess. Configure
@@ -392,6 +464,12 @@ order gates, and per-resolution wall-time, memory, and output envelopes. Its
 `FROZEN_BEFORE_COMPLETE_MATRIX` status records that small feasibility points
 were run before freezing, but the complete 18-point matrix has not yet been
 claimed or used to check WP-6.
+
+The separately archived WP-6 prerequisite matrix predates the schema-3
+operator-stage contract above. It remains historical evidence only: its hashes
+and executions do not qualify these source changes. A new predeclared matrix
+must be frozen and executed after the implementation is built and the current
+serial/MPI source regressions pass.
 
 `run_level_set_phase_transport_release.py list` lists the 18 immutable points.
 Its `run` action accepts exactly one registered case, resolution, and CFL. It

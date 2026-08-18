@@ -20,6 +20,7 @@
 #include "Auxiliary/AuxiliaryOperatorRegistry.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Basis/BasisCache.h"
+#include "Spaces/FunctionSpace.h"
 #include "Systems/SystemsExceptions.h"
 
 #if defined(FE_HAS_FSILS)
@@ -182,6 +183,28 @@ acceptedStaticPressureRepresentabilityDistanceFromEnvironment() noexcept
     return std::nullopt;
 }
 
+[[nodiscard]] std::optional<double>
+acceptedStaticConstantPressureKktDistanceFromEnvironment() noexcept
+{
+    constexpr std::array<const char*, 2> names{
+        "SVMP_NS_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE",
+        "SVMP_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE",
+    };
+    for (const char* name : names) {
+        const char* text = std::getenv(name);
+        if (text == nullptr || text[0] == '\0') {
+            continue;
+        }
+        char* end = nullptr;
+        const double value = std::strtod(text, &end);
+        if (end == text || end == nullptr || end[0] != '\0') {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        return value;
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] bool
 staticCompatibleFreeSurfacePressureInitializerFromEnvironment() noexcept
 {
@@ -204,6 +227,8 @@ staticCompatibleFreeSurfacePressureInitializerFromEnvironment() noexcept
     return freeSurfaceConservativeBalanceDiagnosticEnabled() ||
            options.initialize_static_compatible_free_surface_pressure ||
            options.accepted_static_pressure_representability_max_relative_distance
+               .has_value() ||
+           options.accepted_static_constant_pressure_kkt_max_relative_distance
                .has_value();
 }
 
@@ -1188,52 +1213,8 @@ void logPostTangentAnalysisReport(const systems::FESystem& system,
     return "unknown";
 }
 
-struct ConstraintSemanticFingerprint {
-    std::uint64_t hash_a{1469598103934665603ULL};
-    std::uint64_t hash_b{0x9e3779b97f4a7c15ULL};
-    std::uint64_t line_count{0u};
-    std::uint64_t entry_count{0u};
-
-    [[nodiscard]] bool operator==(
-        const ConstraintSemanticFingerprint&) const noexcept = default;
-};
-
-[[nodiscard]] ConstraintSemanticFingerprint constraintSemanticFingerprint(
-    const constraints::AffineConstraints& affine_constraints)
-{
-    ConstraintSemanticFingerprint fingerprint;
-    auto mix_word = [&fingerprint](std::uint64_t word) noexcept {
-        fingerprint.hash_a ^= word;
-        fingerprint.hash_a *= 1099511628211ULL;
-
-        word ^= word >> 30;
-        word *= 0xbf58476d1ce4e5b9ULL;
-        word ^= word >> 27;
-        word *= 0x94d049bb133111ebULL;
-        word ^= word >> 31;
-        fingerprint.hash_b =
-            std::rotl(fingerprint.hash_b ^ word, 27) *
-                0x9e3779b185ebca87ULL +
-            0x632be59bd9b4e019ULL;
-    };
-
-    affine_constraints.forEach(
-        [&](const constraints::AffineConstraints::ConstraintView& line) {
-            mix_word(0xa0761d6478bd642fULL);
-            mix_word(static_cast<std::uint64_t>(line.slave_dof));
-            mix_word(std::bit_cast<std::uint64_t>(line.inhomogeneity));
-            mix_word(static_cast<std::uint64_t>(line.entries.size()));
-            ++fingerprint.line_count;
-            for (const auto& entry : line.entries) {
-                mix_word(static_cast<std::uint64_t>(entry.master_dof));
-                mix_word(std::bit_cast<std::uint64_t>(entry.weight));
-                ++fingerprint.entry_count;
-            }
-        });
-    mix_word(fingerprint.line_count);
-    mix_word(fingerprint.entry_count);
-    return fingerprint;
-}
+using constraints::ConstraintSemanticFingerprint;
+using constraints::constraintSemanticFingerprint;
 
 [[nodiscard]] bool mpiMultiTaskActive(NewtonCommunicator communicator) noexcept
 {
@@ -2693,6 +2674,276 @@ void zeroVectorEntries(std::span<const GlobalIndex> dofs, backends::GenericVecto
     // Distributed backends may require every communicator rank to finalize,
     // including ranks whose local constrained-row list is empty.
     view->finalizeAssembly();
+}
+
+struct ConstantPressureKktResult {
+    bool available{false};
+    double pressure_jump{std::numeric_limits<double>::quiet_NaN()};
+    double volume_multiplier{std::numeric_limits<double>::quiet_NaN()};
+    double direction_norm{std::numeric_limits<double>::quiet_NaN()};
+    double residual_norm{std::numeric_limits<double>::quiet_NaN()};
+    double relative_distance{std::numeric_limits<double>::quiet_NaN()};
+    double relative_orthogonality{
+        std::numeric_limits<double>::quiet_NaN()};
+    std::string reason{"not_evaluated"};
+};
+
+[[nodiscard]] bool unitCoefficientsRepresentConstantPressure(
+    const spaces::FunctionSpace& pressure_space)
+{
+    try {
+        if (pressure_space.field_type() != FieldType::Scalar ||
+            pressure_space.value_dimension() != 1 ||
+            pressure_space.dofs_per_element() == 0u ||
+            pressure_space.is_variable_order()) {
+            return false;
+        }
+        const auto quadrature = pressure_space.element().quadrature();
+        if (!quadrature || quadrature->num_points() == 0u) {
+            return false;
+        }
+        const std::vector<Real> unit_coefficients(
+            pressure_space.dofs_per_element(), Real{1.0});
+        const Real tolerance =
+            Real{1000.0} * std::numeric_limits<Real>::epsilon() *
+            std::max(Real{1.0},
+                     static_cast<Real>(pressure_space.dofs_per_element()));
+        for (std::size_t point = 0;
+             point < quadrature->num_points();
+             ++point) {
+            const auto value = pressure_space.evaluate(
+                quadrature->point(point), unit_coefficients);
+            if (!std::isfinite(value[0]) ||
+                std::abs(value[0] - Real{1.0}) > tolerance) {
+                return false;
+            }
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+[[nodiscard]] bool pressureConstraintsPreserveUnitField(
+    const constraints::AffineConstraints& affine_constraints,
+    GlobalIndex pressure_begin,
+    GlobalIndex pressure_count)
+{
+    if (pressure_begin < 0 || pressure_count <= 0) {
+        return false;
+    }
+    const GlobalIndex pressure_end = pressure_begin + pressure_count;
+    bool compatible = true;
+    affine_constraints.forEach(
+        [&](const constraints::AffineConstraints::ConstraintView& line) {
+            const bool pressure_slave =
+                line.slave_dof >= pressure_begin &&
+                line.slave_dof < pressure_end;
+            bool has_pressure_master = false;
+            bool has_nonpressure_master = false;
+            double weight_sum = 0.0;
+            double absolute_weight_sum = 0.0;
+            for (const auto& entry : line.entries) {
+                const bool pressure_master =
+                    entry.master_dof >= pressure_begin &&
+                    entry.master_dof < pressure_end;
+                has_pressure_master =
+                    has_pressure_master || pressure_master;
+                has_nonpressure_master =
+                    has_nonpressure_master || !pressure_master;
+                weight_sum += entry.weight;
+                absolute_weight_sum += std::abs(entry.weight);
+            }
+
+            // A pressure Dirichlet line removes the freely variable constant
+            // mode.  A cross-field relation cannot be interpreted as a unit
+            // scalar pressure trace.  Homogeneous pressure MPCs preserve the
+            // mode only when their weights form a partition of unity.
+            if (pressure_slave) {
+                const double tolerance =
+                    100.0 * std::numeric_limits<Real>::epsilon() *
+                    std::max(1.0, absolute_weight_sum);
+                compatible =
+                    compatible && !line.entries.empty() &&
+                    line.inhomogeneity == 0.0 &&
+                    !has_nonpressure_master &&
+                    std::isfinite(weight_sum) &&
+                    std::isfinite(absolute_weight_sum) &&
+                    std::abs(weight_sum - 1.0) <= tolerance;
+            } else if (has_pressure_master) {
+                compatible = false;
+            }
+        });
+    return compatible;
+}
+
+/**
+ * Evaluate the constant-pressure KKT subproblem without changing the load.
+ *
+ * The symmetric pair is K=[0,G;G^T,0].  A reduced coefficient vector c that
+ * represents the unit pressure field produces g=G*c.  The returned pressure
+ * jump minimizes ||f+p*g|| in the same constrained coefficient norm as the
+ * full pressure-range diagnostic.  The functional multiplier is -p, matching
+ * E_h + lambda*V_h to the momentum convention -p*D V_h.
+ */
+[[nodiscard]] ConstantPressureKktResult evaluateConstantPressureKkt(
+    const backends::GenericMatrix& pair,
+    const backends::GenericVector& load,
+    backends::GenericVector& unit_pressure,
+    backends::GenericVector& pressure_action,
+    backends::GenericVector& kkt_residual,
+    GlobalIndex pressure_begin,
+    GlobalIndex pressure_count,
+    GlobalIndex velocity_begin,
+    GlobalIndex velocity_count,
+    std::span<const GlobalIndex> constrained_dofs,
+    const dofs::IndexSet& fe_owned_dofs,
+    const std::function<bool(bool)>& all_ranks)
+{
+    ConstantPressureKktResult result;
+    if (pressure_begin < 0 || pressure_count <= 0 ||
+        velocity_begin < 0 || velocity_count <= 0) {
+        result.reason = "invalid_velocity_or_pressure_range";
+        return result;
+    }
+
+    const auto vector_is_finite =
+        [&all_ranks](const backends::GenericVector& vector) {
+            const auto values = vector.localSpan();
+            const bool local_finite = std::all_of(
+                values.begin(), values.end(), [](Real value) {
+                    return std::isfinite(static_cast<double>(value));
+                });
+            return all_ranks(local_finite);
+        };
+    const auto finite_nonnegative = [&all_ranks](double value) {
+        return all_ranks(std::isfinite(value) && value >= 0.0);
+    };
+
+    unit_pressure.zero();
+    const auto vector_owned_dofs =
+        ownedDofsForVector(unit_pressure, fe_owned_dofs);
+    std::vector<GlobalIndex> owned_active_pressure_dofs;
+    owned_active_pressure_dofs.reserve(vector_owned_dofs.size());
+    const GlobalIndex pressure_end = pressure_begin + pressure_count;
+    for (const auto dof : vector_owned_dofs) {
+        if (dof >= pressure_begin && dof < pressure_end &&
+            !std::binary_search(
+                constrained_dofs.begin(), constrained_dofs.end(), dof)) {
+            owned_active_pressure_dofs.push_back(dof);
+        }
+    }
+    std::vector<Real> unit_values(
+        owned_active_pressure_dofs.size(), Real{1.0});
+    auto unit_view = unit_pressure.createAssemblyView();
+    FE_CHECK_NOT_NULL(
+        unit_view.get(), "NewtonSolver: constant-pressure unit-field view");
+    unit_view->beginAssemblyPhase();
+    if (!owned_active_pressure_dofs.empty()) {
+        unit_view->setVectorEntries(
+            owned_active_pressure_dofs, unit_values);
+    }
+    unit_view->finalizeAssembly();
+    unit_pressure.updateGhosts();
+    if (!vector_is_finite(unit_pressure)) {
+        result.reason = "unit_pressure_field_nonfinite";
+        return result;
+    }
+
+    pair.mult(unit_pressure, pressure_action);
+    pressure_action.markModified();
+    if (!vector_is_finite(pressure_action)) {
+        result.reason = "constant_pressure_action_nonfinite";
+        return result;
+    }
+    result.direction_norm = pressure_action.norm();
+    if (!finite_nonnegative(result.direction_norm) ||
+        !(result.direction_norm > 0.0)) {
+        result.reason = "constant_pressure_direction_zero_or_nonfinite";
+        return result;
+    }
+
+    // K*c must lie exclusively in the velocity-test rows of the constrained
+    // system. Check that invariant before interpreting its coefficient as a
+    // pressure jump.
+    unit_pressure.copyFrom(pressure_action);
+    const GlobalIndex velocity_end = velocity_begin + velocity_count;
+    std::vector<GlobalIndex> owned_velocity_dofs;
+    owned_velocity_dofs.reserve(vector_owned_dofs.size());
+    for (const auto dof : vector_owned_dofs) {
+        if (dof >= velocity_begin && dof < velocity_end) {
+            owned_velocity_dofs.push_back(dof);
+        }
+    }
+    zeroVectorEntries(owned_velocity_dofs, unit_pressure);
+    unit_pressure.updateGhosts();
+    const double nonvelocity_action_norm = unit_pressure.norm();
+    const double subspace_tolerance =
+        100.0 * std::numeric_limits<Real>::epsilon() *
+        std::max(1.0, result.direction_norm);
+    if (!finite_nonnegative(nonvelocity_action_norm) ||
+        !all_ranks(nonvelocity_action_norm <= subspace_tolerance)) {
+        result.reason = "constant_pressure_action_outside_velocity_trace";
+        return result;
+    }
+
+    const double load_norm = load.norm();
+    const double direction_squared = pressure_action.dot(pressure_action);
+    const double direction_load = pressure_action.dot(load);
+    if (!finite_nonnegative(load_norm) ||
+        !all_ranks(std::isfinite(direction_squared) &&
+                   direction_squared > 0.0 &&
+                   std::isfinite(direction_load))) {
+        result.reason = "constant_pressure_projection_nonfinite";
+        return result;
+    }
+
+    result.pressure_jump = -direction_load / direction_squared;
+    result.volume_multiplier = -result.pressure_jump;
+    if (!all_ranks(std::isfinite(result.pressure_jump) &&
+                   std::isfinite(result.volume_multiplier))) {
+        result.reason = "constant_pressure_multiplier_nonfinite";
+        return result;
+    }
+
+    kkt_residual.copyFrom(load);
+    axpy(kkt_residual,
+         static_cast<Real>(result.pressure_jump),
+         pressure_action);
+    result.residual_norm = kkt_residual.norm();
+    if (!vector_is_finite(kkt_residual) ||
+        !finite_nonnegative(result.residual_norm)) {
+        result.reason = "constant_pressure_residual_nonfinite";
+        return result;
+    }
+
+    const double roundoff_floor =
+        100.0 * std::numeric_limits<Real>::epsilon() *
+        std::max({1.0, load_norm, result.direction_norm});
+    result.relative_distance =
+        load_norm > 0.0
+            ? result.residual_norm / load_norm
+            : (result.residual_norm <= roundoff_floor
+                   ? 0.0
+                   : std::numeric_limits<double>::infinity());
+    const double orthogonality_numerator =
+        std::abs(pressure_action.dot(kkt_residual));
+    const double orthogonality_denominator =
+        result.direction_norm *
+        std::max({load_norm, result.residual_norm, roundoff_floor});
+    result.relative_orthogonality =
+        orthogonality_numerator / orthogonality_denominator;
+    if (!all_ranks(std::isfinite(result.relative_distance) &&
+                   result.relative_distance >= 0.0 &&
+                   std::isfinite(result.relative_orthogonality) &&
+                   result.relative_orthogonality >= 0.0)) {
+        result.reason = "constant_pressure_metrics_nonfinite";
+        return result;
+    }
+
+    result.available = true;
+    result.reason = "available";
+    return result;
 }
 
 void syncOwnedRowHaloIfNeeded(backends::GenericVector& vec)
@@ -10597,12 +10848,21 @@ NewtonSolver::NewtonSolver(
     , defer_pressure_representability_distance_gate_(
           defer_pressure_representability_distance_gate)
 {
-    if (!options_
+    if (options_.read_static_free_surface_environment_options &&
+        !options_
              .accepted_static_pressure_representability_max_relative_distance
              .has_value()) {
         options_
             .accepted_static_pressure_representability_max_relative_distance =
             acceptedStaticPressureRepresentabilityDistanceFromEnvironment();
+    }
+    if (options_.read_static_free_surface_environment_options &&
+        !options_
+             .accepted_static_constant_pressure_kkt_max_relative_distance
+             .has_value()) {
+        options_
+            .accepted_static_constant_pressure_kkt_max_relative_distance =
+            acceptedStaticConstantPressureKktDistanceFromEnvironment();
     }
 #if FE_HAS_MPI
     const bool defer_pressure_threshold_validation =
@@ -10622,9 +10882,22 @@ NewtonSolver::NewtonSolver(
             InvalidArgumentException,
             "NewtonSolver: accepted static pressure-representability maximum relative distance must be finite and >= 0");
     }
+    if (options_
+            .accepted_static_constant_pressure_kkt_max_relative_distance
+            .has_value() &&
+        !defer_pressure_threshold_validation) {
+        const double threshold =
+            *options_
+                 .accepted_static_constant_pressure_kkt_max_relative_distance;
+        FE_THROW_IF(
+            threshold < 0.0 || !std::isfinite(threshold),
+            InvalidArgumentException,
+            "NewtonSolver: accepted static constant-pressure KKT maximum relative distance must be finite and >= 0");
+    }
     options_.initialize_static_compatible_free_surface_pressure =
         options_.initialize_static_compatible_free_surface_pressure ||
-        staticCompatibleFreeSurfacePressureInitializerFromEnvironment();
+        (options_.read_static_free_surface_environment_options &&
+         staticCompatibleFreeSurfacePressureInitializerFromEnvironment());
     FE_THROW_IF(
         options_.initialize_static_compatible_free_surface_pressure &&
             !options_
@@ -10646,6 +10919,21 @@ NewtonSolver::NewtonSolver(
     FE_THROW_IF(options_.step_tolerance < 0.0 || !std::isfinite(options_.step_tolerance),
                 InvalidArgumentException,
                 "NewtonSolver: step_tolerance must be finite and >= 0");
+    FE_THROW_IF(
+        options_.initial_residual_only_certificate &&
+            options_.min_iterations != 0,
+        InvalidArgumentException,
+        "NewtonSolver: initial residual-only certificate requires min_iterations == 0");
+    FE_THROW_IF(
+        options_.initial_residual_only_certificate &&
+            options_.external_state_fixed_point.enabled,
+        InvalidArgumentException,
+        "NewtonSolver: initial residual-only certificate cannot use the external-state fixed point");
+    FE_THROW_IF(
+        options_.initial_residual_only_certificate &&
+            options_.initialize_static_compatible_free_surface_pressure,
+        InvalidArgumentException,
+        "NewtonSolver: initial residual-only certificate cannot initialize pressure");
     if (options_.external_state_fixed_point.enabled) {
         FE_THROW_IF(
             options_.external_state_fixed_point.max_iterations <= 0,
@@ -10767,13 +11055,27 @@ void NewtonSolver::validateStaticPressureCommunicatorState(
     const bool threshold_valid =
         !threshold_present ||
         (threshold >= 0.0 && std::isfinite(threshold));
-    const std::array<int, 6> local_flags{
+    const bool constant_threshold_present = options_
+        .accepted_static_constant_pressure_kkt_max_relative_distance
+        .has_value();
+    const double constant_threshold = constant_threshold_present
+        ? *options_
+               .accepted_static_constant_pressure_kkt_max_relative_distance
+        : 0.0;
+    const bool constant_threshold_valid =
+        !constant_threshold_present ||
+        (constant_threshold >= 0.0 &&
+         std::isfinite(constant_threshold));
+    const std::array<int, 9> local_flags{
         options_.initialize_static_compatible_free_surface_pressure ? 1 : 0,
         threshold_present ? 1 : 0,
         threshold_valid ? 1 : 0,
+        constant_threshold_present ? 1 : 0,
+        constant_threshold_valid ? 1 : 0,
         freeSurfaceConservativeBalanceDiagnosticRequested(options_) ? 1 : 0,
         defer_pressure_representability_distance_gate_ ? 1 : 0,
         workspace.static_compatible_pressure_initialized ? 1 : 0,
+        options_.read_static_free_surface_environment_options ? 1 : 0,
     };
     std::array<int, local_flags.size()> minimum_flags{};
     std::array<int, local_flags.size()> maximum_flags{};
@@ -10802,6 +11104,24 @@ void NewtonSolver::validateStaticPressureCommunicatorState(
                   communicator);
     MPI_Allreduce(&local_threshold_bits,
                   &maximum_threshold_bits,
+                  1,
+                  MPI_UINT64_T,
+                  MPI_MAX,
+                  communicator);
+    const std::uint64_t local_constant_threshold_bits =
+        std::bit_cast<std::uint64_t>(constant_threshold);
+    std::uint64_t minimum_constant_threshold_bits =
+        local_constant_threshold_bits;
+    std::uint64_t maximum_constant_threshold_bits =
+        local_constant_threshold_bits;
+    MPI_Allreduce(&local_constant_threshold_bits,
+                  &minimum_constant_threshold_bits,
+                  1,
+                  MPI_UINT64_T,
+                  MPI_MIN,
+                  communicator);
+    MPI_Allreduce(&local_constant_threshold_bits,
+                  &maximum_constant_threshold_bits,
                   1,
                   MPI_UINT64_T,
                   MPI_MAX,
@@ -10839,18 +11159,45 @@ void NewtonSolver::validateStaticPressureCommunicatorState(
     FE_THROW_IF(
         differs(3),
         systems::InvalidStateException,
+        "NewtonSolver: accepted static constant-pressure KKT threshold "
+        "presence differs across the active system communicator");
+    FE_THROW_IF(
+        differs(4),
+        systems::InvalidStateException,
+        "NewtonSolver: accepted static constant-pressure KKT threshold "
+        "validity differs across the active system communicator");
+    FE_THROW_IF(
+        constant_threshold_present && maximum_flags[4] == 0,
+        InvalidArgumentException,
+        "NewtonSolver: accepted static constant-pressure KKT maximum "
+        "relative distance must be finite and >= 0");
+    FE_THROW_IF(
+        constant_threshold_present &&
+            minimum_constant_threshold_bits !=
+                maximum_constant_threshold_bits,
+        systems::InvalidStateException,
+        "NewtonSolver: accepted static constant-pressure KKT threshold "
+        "value differs across the active system communicator");
+    FE_THROW_IF(
+        differs(5),
+        systems::InvalidStateException,
         "NewtonSolver: free-surface conservative-balance diagnostic "
         "enablement differs across the active system communicator");
     FE_THROW_IF(
-        differs(4),
+        differs(6),
         systems::InvalidStateException,
         "NewtonSolver: deferred pressure-representability gate selection "
         "differs across the active system communicator");
     FE_THROW_IF(
-        differs(5),
+        differs(7),
         systems::InvalidStateException,
         "NewtonSolver: static compatible pressure initializer one-shot state "
         "differs across the active system communicator");
+    FE_THROW_IF(
+        differs(8),
+        systems::InvalidStateException,
+        "NewtonSolver: static free-surface environment-option policy differs "
+        "across the active system communicator");
     FE_THROW_IF(
         maximum_flags[0] != 0 && maximum_flags[1] == 0,
         InvalidArgumentException,
@@ -11616,6 +11963,88 @@ NewtonReport NewtonSolver::solveStep(
             }
             return passed;
         };
+    auto applyDeferredConstantPressureKktDistanceGate =
+        [&](NewtonReport& candidate, int outer_iteration) {
+            const auto threshold = options_
+                .accepted_static_constant_pressure_kkt_max_relative_distance;
+            if (!threshold.has_value()) {
+                return true;
+            }
+
+            bool local_passed = true;
+            const char* reason = "within_threshold";
+            if (!candidate.pressure_representability_diagnostic_sampled) {
+                local_passed = false;
+                reason = "diagnostic_not_sampled";
+            } else if (!candidate.constant_pressure_kkt_available) {
+                local_passed = false;
+                reason = "constant_pressure_kkt_unavailable";
+            } else if (!std::isfinite(
+                           candidate.constant_pressure_kkt_relative_distance)) {
+                local_passed = false;
+                reason = "relative_distance_nonfinite";
+            } else if (candidate.constant_pressure_kkt_relative_distance >
+                       *threshold) {
+                local_passed = false;
+                reason = "relative_distance_exceeds_threshold";
+            }
+            const bool passed = !anyRank(!local_passed);
+            if (!passed && local_passed) {
+                reason = "remote_rank_rejected";
+            }
+
+            candidate.constant_pressure_kkt_distance_gate_applied = true;
+            candidate.constant_pressure_kkt_distance_gate_passed = passed;
+            candidate.constant_pressure_kkt_max_relative_distance =
+                *threshold;
+            if (activeSystemRank(system) == 0) {
+                std::ostringstream oss;
+                oss << std::setprecision(17)
+                    << "NewtonSolver: accepted static constant-pressure KKT distance gate"
+                    << " diagnostic=free_surface_constant_pressure_kkt_distance_gate"
+                    << " accepted_static_state=1"
+                    << " iteration=" << candidate.iterations
+                    << " outer_iteration=" << outer_iteration
+                    << " phase='external_state_fixed_point_convergence'"
+                    << " constant_pressure_kkt_distance_gate_applied=1"
+                    << " constant_pressure_kkt_available="
+                    << (candidate.constant_pressure_kkt_available ? 1 : 0)
+                    << " constant_pressure_unit_coefficients_represent_constant="
+                    << (candidate
+                                .constant_pressure_unit_coefficients_represent_constant
+                            ? 1
+                            : 0)
+                    << " constant_pressure_constraints_preserve_constants="
+                    << (candidate
+                                .constant_pressure_constraints_preserve_constants
+                            ? 1
+                            : 0)
+                    << " constant_pressure_kkt_relative_distance="
+                    << candidate.constant_pressure_kkt_relative_distance
+                    << " constant_pressure_kkt_max_relative_distance="
+                    << *threshold
+                    << " constant_pressure_kkt_distance_gate_passed="
+                    << (passed ? 1 : 0)
+                    << " constant_pressure_kkt_claimed="
+                    << (passed ? 1 : 0)
+                    << " constant_pressure_kkt_reason="
+                    << candidate.constant_pressure_kkt_reason
+                    << " constant_pressure_kkt_force_projection_applied=0"
+                    << " reason=" << reason;
+                FE_LOG_INFO(oss.str());
+            }
+            return passed;
+        };
+    const auto applyDeferredFreeSurfaceDistanceGates =
+        [&](NewtonReport& candidate, int outer_iteration) {
+            const bool pressure_range_passed =
+                applyDeferredPressureRepresentabilityDistanceGate(
+                    candidate, outer_iteration);
+            const bool constant_pressure_passed =
+                applyDeferredConstantPressureKktDistanceGate(
+                    candidate, outer_iteration);
+            return pressure_range_passed && constant_pressure_passed;
+        };
     try {
         // The generated active set at a generalized-alpha stage can differ
         // from the state prepared at the preceding endpoint.  Establish its
@@ -11705,7 +12134,7 @@ NewtonReport NewtonSolver::solveStep(
             // residual was assembled after G was regenerated from this exact
             // algebraic state and already met every absolute tolerance.
             if (inner_report.iterations == 0) {
-                if (!applyDeferredPressureRepresentabilityDistanceGate(
+                if (!applyDeferredFreeSurfaceDistanceGates(
                         aggregate, outer + 1)) {
                     aggregate.converged = false;
                     restoreEntryState();
@@ -12771,9 +13200,28 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             report.pressure_representability_relative_distance =
                 std::numeric_limits<double>::quiet_NaN();
             report.pressure_representability_reason = "diagnostic_pending";
+            report.constant_pressure_kkt_available = false;
+            report.constant_pressure_unit_coefficients_represent_constant =
+                false;
+            report.constant_pressure_constraints_preserve_constants = false;
+            report.constant_pressure_kkt_pressure_jump =
+                std::numeric_limits<double>::quiet_NaN();
+            report.constant_pressure_kkt_volume_multiplier =
+                std::numeric_limits<double>::quiet_NaN();
+            report.constant_pressure_kkt_direction_norm =
+                std::numeric_limits<double>::quiet_NaN();
+            report.constant_pressure_kkt_residual_norm =
+                std::numeric_limits<double>::quiet_NaN();
+            report.constant_pressure_kkt_relative_distance =
+                std::numeric_limits<double>::quiet_NaN();
+            report.constant_pressure_kkt_relative_orthogonality =
+                std::numeric_limits<double>::quiet_NaN();
+            report.constant_pressure_kkt_reason = "diagnostic_pending";
             pressure_representability_pressure_field.reset();
             if (!allRanks(local_diagnostic_enabled)) {
                 report.pressure_representability_reason =
+                    "diagnostic_enablement_differs_across_communicator";
+                report.constant_pressure_kkt_reason =
                     "diagnostic_enablement_differs_across_communicator";
                 if (!free_surface_conservative_balance_unavailable_logged &&
                     communicatorRank(system_communicator) == 0) {
@@ -12787,7 +13235,9 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                         " pressure_representability_convergence=normal_equation_stationarity"
                         " pressure_representability_distance_gate_applied=0"
                         " pressure_representability_claimed=0"
-                        " pressure_representability_reason=diagnostic_enablement_differs_across_communicator");
+                        " pressure_representability_reason=diagnostic_enablement_differs_across_communicator"
+                        " constant_pressure_kkt_available=0"
+                        " constant_pressure_kkt_reason=diagnostic_enablement_differs_across_communicator");
                 }
                 free_surface_conservative_balance_unavailable_logged = true;
                 return;
@@ -12825,6 +13275,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 if (!allRanks(local_operator_installed)) {
                     report.pressure_representability_reason =
                         "conservative_balance_operator_unavailable";
+                    report.constant_pressure_kkt_reason =
+                        "conservative_balance_operator_unavailable";
                     if (!free_surface_conservative_balance_unavailable_logged &&
                         communicatorRank(system_communicator) == 0) {
                         std::ostringstream skipped;
@@ -12840,6 +13292,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                             << " pressure_representability_distance_gate_applied=0"
                             << " pressure_representability_claimed=0"
                             << " pressure_representability_reason=conservative_balance_operator_unavailable"
+                            << " constant_pressure_kkt_available=0"
+                            << " constant_pressure_kkt_reason=conservative_balance_operator_unavailable"
                             << " iteration=" << current_newton_iteration
                             << " phase='"
                             << (phase != nullptr ? phase : "unknown") << "'"
@@ -13046,8 +13500,11 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             bool pressure_representability_available = false;
             std::string pressure_representability_reason;
             PressureRepresentabilityLsqrResult pressure_representability{};
+            ConstantPressureKktResult constant_pressure_kkt{};
             std::uint64_t active_pressure_dofs = 0u;
             int pressure_representability_iteration_cap = 0;
+            bool pressure_unit_coefficients_represent_constant = false;
+            bool pressure_constraints_preserve_constants = false;
 
             std::optional<FieldId> velocity_field;
             std::optional<FieldId> pressure_field;
@@ -13126,6 +13583,19 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                         .fieldDofHandler(*pressure_field)
                         .getNumDofs();
                 const auto pressure_end = pressure_begin + pressure_count;
+                const auto& pressure_record =
+                    transient.system().fieldRecord(*pressure_field);
+                const bool local_unit_coefficients_represent_constant =
+                    pressure_record.components == 1 &&
+                    pressure_record.space != nullptr &&
+                    unitCoefficientsRepresentConstantPressure(
+                        *pressure_record.space);
+                pressure_unit_coefficients_represent_constant = allRanks(
+                    local_unit_coefficients_represent_constant);
+                pressure_constraints_preserve_constants =
+                    pressure_unit_coefficients_represent_constant &&
+                    allRanks(pressureConstraintsPreserveUnitField(
+                        constraints, pressure_begin, pressure_count));
 
                 bool local_nonzero_pressure_inhomogeneity = false;
                 constraints.forEach(
@@ -13301,6 +13771,52 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 }
             }
 
+            if (!pressure_representability_available) {
+                constant_pressure_kkt.reason =
+                    pressure_representability_reason.empty()
+                        ? "pressure_pair_or_load_unavailable"
+                        : pressure_representability_reason;
+            } else if (!pressure_unit_coefficients_represent_constant) {
+                constant_pressure_kkt.reason =
+                    "pressure_space_unit_coefficients_do_not_represent_constant";
+            } else if (!pressure_constraints_preserve_constants) {
+                constant_pressure_kkt.reason =
+                    "pressure_constraints_do_not_preserve_constants";
+            } else if (!velocity_field.has_value() ||
+                       !pressure_field.has_value()) {
+                constant_pressure_kkt.reason =
+                    "mixed_velocity_pressure_fields_not_identifiable";
+            } else {
+                const auto pressure_begin =
+                    transient.system().fieldDofOffset(*pressure_field);
+                const auto pressure_count =
+                    transient.system()
+                        .fieldDofHandler(*pressure_field)
+                        .getNumDofs();
+                const auto velocity_begin =
+                    transient.system().fieldDofOffset(*velocity_field);
+                const auto velocity_count =
+                    transient.system()
+                        .fieldDofHandler(*velocity_field)
+                        .getNumDofs();
+                constant_pressure_kkt = evaluateConstantPressureKkt(
+                    *workspace.pressure_representability_pair_matrix,
+                    *workspace.pressure_representability_load,
+                    *workspace.pressure_representability_left_basis,
+                    *workspace.pressure_representability_right_basis,
+                    *workspace.pressure_representability_direction,
+                    pressure_begin,
+                    pressure_count,
+                    velocity_begin,
+                    velocity_count,
+                    constrained_dofs,
+                    transient.system()
+                        .dofHandler()
+                        .getPartition()
+                        .locallyOwned(),
+                    allRanks);
+            }
+
             const double denominator = norms[0] + norms[1];
             const bool normalization_available =
                 std::isfinite(denominator) && denominator > 0.0;
@@ -13342,6 +13858,26 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 pressure_representability_available
                     ? "available"
                     : pressure_representability_reason;
+            report.constant_pressure_kkt_available =
+                constant_pressure_kkt.available;
+            report.constant_pressure_unit_coefficients_represent_constant =
+                pressure_unit_coefficients_represent_constant;
+            report.constant_pressure_constraints_preserve_constants =
+                pressure_constraints_preserve_constants;
+            report.constant_pressure_kkt_pressure_jump =
+                constant_pressure_kkt.pressure_jump;
+            report.constant_pressure_kkt_volume_multiplier =
+                constant_pressure_kkt.volume_multiplier;
+            report.constant_pressure_kkt_direction_norm =
+                constant_pressure_kkt.direction_norm;
+            report.constant_pressure_kkt_residual_norm =
+                constant_pressure_kkt.residual_norm;
+            report.constant_pressure_kkt_relative_distance =
+                constant_pressure_kkt.relative_distance;
+            report.constant_pressure_kkt_relative_orthogonality =
+                constant_pressure_kkt.relative_orthogonality;
+            report.constant_pressure_kkt_reason =
+                constant_pressure_kkt.reason;
 
             if (communicatorRank(system_communicator) == 0) {
                 std::ostringstream oss;
@@ -13421,6 +13957,32 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 } else {
                     oss << " pressure_representability_reason="
                         << pressure_representability_reason;
+                }
+                oss << " constant_pressure_kkt_available="
+                    << (constant_pressure_kkt.available ? 1 : 0)
+                    << " constant_pressure_unit_coefficients_represent_constant="
+                    << (pressure_unit_coefficients_represent_constant ? 1 : 0)
+                    << " constant_pressure_constraints_preserve_constants="
+                    << (pressure_constraints_preserve_constants ? 1 : 0)
+                    << " constant_pressure_kkt_method="
+                       "closed_form_one_dimensional_pressure_trace"
+                    << " constant_pressure_kkt_force_projection_applied=0";
+                if (constant_pressure_kkt.available) {
+                    oss << " constant_pressure_kkt_pressure_jump="
+                        << constant_pressure_kkt.pressure_jump
+                        << " constant_pressure_kkt_volume_multiplier="
+                        << constant_pressure_kkt.volume_multiplier
+                        << " constant_pressure_kkt_direction_norm="
+                        << constant_pressure_kkt.direction_norm
+                        << " constant_pressure_kkt_residual_norm="
+                        << constant_pressure_kkt.residual_norm
+                        << " constant_pressure_kkt_relative_distance="
+                        << constant_pressure_kkt.relative_distance
+                        << " constant_pressure_kkt_relative_orthogonality="
+                        << constant_pressure_kkt.relative_orthogonality;
+                } else {
+                    oss << " constant_pressure_kkt_reason="
+                        << constant_pressure_kkt.reason;
                 }
                 oss << " pressure_representability_norm=constrained_reduced_coefficient_l2"
                     << " pressure_representability_load=surface_area_variation_plus_young_wall_energy"
@@ -13505,6 +14067,91 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 FE_LOG_INFO(oss.str());
             }
             return passed;
+        };
+
+    auto applyAcceptedStaticConstantPressureKktDistanceGate =
+        [&](int completed_iterations, const char* phase) {
+            const auto threshold = options_
+                .accepted_static_constant_pressure_kkt_max_relative_distance;
+            if (!threshold.has_value() ||
+                defer_pressure_representability_distance_gate_) {
+                return true;
+            }
+
+            bool local_passed = true;
+            const char* reason = "within_threshold";
+            if (!report.pressure_representability_diagnostic_sampled) {
+                local_passed = false;
+                reason = "diagnostic_not_sampled";
+            } else if (!report.constant_pressure_kkt_available) {
+                local_passed = false;
+                reason = "constant_pressure_kkt_unavailable";
+            } else if (!std::isfinite(
+                           report.constant_pressure_kkt_relative_distance)) {
+                local_passed = false;
+                reason = "relative_distance_nonfinite";
+            } else if (report.constant_pressure_kkt_relative_distance >
+                       *threshold) {
+                local_passed = false;
+                reason = "relative_distance_exceeds_threshold";
+            }
+            const bool passed = allRanks(local_passed);
+            if (!passed && local_passed) {
+                reason = "remote_rank_rejected";
+            }
+
+            report.constant_pressure_kkt_distance_gate_applied = true;
+            report.constant_pressure_kkt_distance_gate_passed = passed;
+            report.constant_pressure_kkt_max_relative_distance =
+                *threshold;
+            if (communicatorRank(system_communicator) == 0) {
+                std::ostringstream oss;
+                oss << std::setprecision(17)
+                    << "NewtonSolver: accepted static constant-pressure KKT distance gate"
+                    << " diagnostic=free_surface_constant_pressure_kkt_distance_gate"
+                    << " accepted_static_state=1"
+                    << " iteration=" << completed_iterations
+                    << " phase='"
+                    << (phase != nullptr ? phase : "unknown") << "'"
+                    << " constant_pressure_kkt_distance_gate_applied=1"
+                    << " constant_pressure_kkt_available="
+                    << (report.constant_pressure_kkt_available ? 1 : 0)
+                    << " constant_pressure_unit_coefficients_represent_constant="
+                    << (report
+                                .constant_pressure_unit_coefficients_represent_constant
+                            ? 1
+                            : 0)
+                    << " constant_pressure_constraints_preserve_constants="
+                    << (report
+                                .constant_pressure_constraints_preserve_constants
+                            ? 1
+                            : 0)
+                    << " constant_pressure_kkt_relative_distance="
+                    << report.constant_pressure_kkt_relative_distance
+                    << " constant_pressure_kkt_max_relative_distance="
+                    << *threshold
+                    << " constant_pressure_kkt_distance_gate_passed="
+                    << (passed ? 1 : 0)
+                    << " constant_pressure_kkt_claimed="
+                    << (passed ? 1 : 0)
+                    << " constant_pressure_kkt_reason="
+                    << report.constant_pressure_kkt_reason
+                    << " constant_pressure_kkt_force_projection_applied=0"
+                    << " reason=" << reason;
+                FE_LOG_INFO(oss.str());
+            }
+            return passed;
+        };
+
+    const auto applyAcceptedStaticFreeSurfaceDistanceGates =
+        [&](int completed_iterations, const char* phase) {
+            const bool pressure_range_passed =
+                applyAcceptedStaticPressureRepresentabilityDistanceGate(
+                    completed_iterations, phase);
+            const bool constant_pressure_passed =
+                applyAcceptedStaticConstantPressureKktDistanceGate(
+                    completed_iterations, phase);
+            return pressure_range_passed && constant_pressure_passed;
         };
 
     auto assembleResidualOnly = [&](const systems::SystemStateView& state,
@@ -14540,13 +15187,16 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             (!can_reuse_state_independent_jacobian &&
              ((jacobian_period == 1) || ((it - last_jacobian_it) >= jacobian_period)));
         bool jacobian_ready = have_jacobian && !need_jacobian;
+        const bool initial_residual_only_certificate =
+            options_.initial_residual_only_certificate && it == 0;
         const bool residual_first_convergence_check =
-            !options_.use_line_search &&
-            it > 0 &&
-            need_jacobian &&
-            options_.assemble_both_when_possible &&
-            same_op &&
-            !has_monolithic_auxiliary_unknowns;
+            initial_residual_only_certificate ||
+            (!options_.use_line_search &&
+             it > 0 &&
+             need_jacobian &&
+             options_.assemble_both_when_possible &&
+             same_op &&
+             !has_monolithic_auxiliary_unknowns);
         if (!have_residual) {
             ntp0 = NTP();
             if (need_jacobian && options_.assemble_both_when_possible && same_op &&
@@ -14564,7 +15214,9 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 // as an optimization; those must not silently change the residual definition.)
                 current_residual_norm = assembleResidualOnly(
                     state,
-                    residual_first_convergence_check
+                    initial_residual_only_certificate
+                        ? "initial_residual_only_certificate"
+                        : residual_first_convergence_check
                         ? "post_update_convergence_check"
                         : nullptr);
                 // A residual synchronization can install a different affine
@@ -14660,7 +15312,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         if (minIterationsSatisfied(it) &&
             tolerancesSatisfied(/*pre_first_update=*/it == 0)) {
             report.iterations = it;
-            if (!applyAcceptedStaticPressureRepresentabilityDistanceGate(
+            if (!applyAcceptedStaticFreeSurfaceDistanceGates(
                     it, "pre_linear_convergence")) {
                 report.converged = false;
                 printNewtonProfile(it);
@@ -14672,6 +15324,13 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 traceLog("NewtonSolver: converged before linear solve (tolerances satisfied).");
             }
             printNewtonProfile(it);
+            return finishStaticPressureInitialGuessTransaction(
+                std::move(report));
+        }
+        if (initial_residual_only_certificate) {
+            report.iterations = 0;
+            report.converged = false;
+            printNewtonProfile(0);
             return finishStaticPressureInitialGuessTransaction(
                 std::move(report));
         }
@@ -17350,6 +18009,9 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 !field_residual_states.empty() ||
                 options_
                     .accepted_static_pressure_representability_max_relative_distance
+                    .has_value() ||
+                options_
+                    .accepted_static_constant_pressure_kkt_max_relative_distance
                     .has_value();
             if (step_tolerance_requires_residual &&
                 options_.step_tolerance > 0.0) {
@@ -17377,7 +18039,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     if (have_residual) {
                         updateResidualReport();
                     }
-                    if (!applyAcceptedStaticPressureRepresentabilityDistanceGate(
+                    if (!applyAcceptedStaticFreeSurfaceDistanceGates(
                             it + 1, "accepted_step_convergence")) {
                         report.converged = false;
                         printNewtonProfile(it + 1);
@@ -17771,7 +18433,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                  tolerancesSatisfied(/*pre_first_update=*/false))) {
                 report.iterations = it + 1;
                 updateResidualReport();
-                if (!applyAcceptedStaticPressureRepresentabilityDistanceGate(
+                if (!applyAcceptedStaticFreeSurfaceDistanceGates(
                         it + 1, "line_search_step_convergence")) {
                     report.converged = false;
                     printNewtonProfile(it + 1);
@@ -17794,7 +18456,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             tolerancesSatisfied(/*pre_first_update=*/false)) {
             report.iterations = it + 1;
             updateResidualReport();
-            if (!applyAcceptedStaticPressureRepresentabilityDistanceGate(
+            if (!applyAcceptedStaticFreeSurfaceDistanceGates(
                     it + 1, "line_search_convergence")) {
                 report.converged = false;
                 printNewtonProfile(it + 1);

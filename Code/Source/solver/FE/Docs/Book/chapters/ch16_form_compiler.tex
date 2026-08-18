@@ -1,0 +1,35 @@
+% =============================================================================
+\chapter{The Form Compiler}
+\label{ch:compiler}
+% =============================================================================
+
+\section{Compilation pipeline}
+\label{sec:compiler:pipeline}
+
+% FormExpr -> FormIR -> KernelIR -> LLVM IR -> native code
+
+\section{FormIR: intermediate representation}
+\label{sec:compiler:formir}
+
+% Lowering from AST to IR, type resolution
+
+\section{KernelIR: kernel intermediate representation}
+\label{sec:compiler:kernelir}
+
+% Tree structure, typed values, shape inference
+
+\section{Optimization passes}
+\label{sec:compiler:optimization}
+
+% Zero propagation, constant folding, identity elimination, CSE, DCE
+% Cost-based cross-block CSE, subtree costs
+
+\section{Symbolic differentiation}
+\label{sec:compiler:differentiation}
+
+% Automatic Jacobian computation from residual forms
+
+\section{Code generation}
+\label{sec:compiler:codegen}
+
+% Interpreted evaluation vs. JIT-compiled kernels

@@ -39,6 +39,7 @@
 #include "Spaces/FunctionSpace.h"
 #include "Systems/SystemState.h"
 
+#include <array>
 #include <memory>
 #include <span>
 #include <string>
@@ -50,6 +51,7 @@ namespace svmp {
 namespace FE {
 
 namespace assembly {
+class CutIntegrationContext;
 class FunctionalKernel;
 }
 
@@ -106,6 +108,24 @@ public:
      * @brief Return the number of registered boundary functionals.
      */
     [[nodiscard]] std::size_t functionalCount() const noexcept { return functionals_.size(); }
+
+    /**
+     * @brief Validate one boundary functional's generated-marker ownership.
+     *
+     * A null context is accepted while registration remains pending unless
+     * require_generated_active_context is true.
+     */
+    static void validateExteriorBoundaryMeasureAgainstCutContext(
+        const forms::BoundaryFunctional& functional,
+        const assembly::CutIntegrationContext* context,
+        bool require_generated_active_context);
+
+    /**
+     * @brief Validate every registered boundary functional against a context.
+     */
+    void validateExteriorBoundaryMeasuresAgainstCutContext(
+        const assembly::CutIntegrationContext* context,
+        bool require_generated_active_context) const;
 
     // -----------------------------------------------------------------
     //  Compilation options
@@ -174,7 +194,11 @@ public:
     [[nodiscard]] std::vector<Real> evaluateAll(const SystemStateView& state);
 
     /**
-     * @brief Compute and cache the geometric measure (area/length) of a boundary.
+     * @brief Compute the geometric measure (area/length) of a boundary.
+     *
+     * Physical-boundary measures are cached only when the mesh adapter
+     * exposes a complete revision key; adapters without revision tracking
+     * are recomputed conservatively.
      *
      * @param boundary_marker The boundary label.
      * @param state System state (needed for assembler configuration).
@@ -265,23 +289,57 @@ public:
     [[nodiscard]] FieldId primaryField() const noexcept { return primary_field_; }
 
 private:
+    enum class CollectiveOperation : std::uint8_t {
+        Value,
+        ValueOverCells,
+        EvaluateAll,
+        Measure,
+        Gradient,
+        GradientOverCells
+    };
+
     struct CompiledFunctional {
         forms::BoundaryFunctional def{};
         std::shared_ptr<assembly::FunctionalKernel> kernel{};
+    };
+    struct BoundaryMeasureCacheEntry {
+        Real value{0.0};
+        std::array<std::uint64_t, 7>
+            mesh_revision{};
     };
 
     void compileFunctionalIfNeeded(CompiledFunctional& entry);
     void configureAssembler(assembly::FunctionalAssembler& assembler,
                             const SystemStateView& state,
                             bool bind_solution) const;
-    Real evaluateFunctionalEntry(CompiledFunctional& entry, const SystemStateView& state);
+    CompiledFunctional& requireCollectiveFunctional(
+        std::string_view name,
+        CollectiveOperation operation,
+        const SystemStateView& state,
+        FieldId target_field = INVALID_FIELD_ID,
+        bool apply_constraints = false);
+    void requireCollectiveRequest(
+        CollectiveOperation operation,
+        std::string_view name,
+        const forms::BoundaryFunctional* functional,
+        bool request_valid,
+        const SystemStateView& state,
+        FieldId target_field = INVALID_FIELD_ID,
+        bool apply_constraints = false) const;
+    Real evaluateFunctionalEntryPreflighted(
+        CompiledFunctional& entry,
+        const SystemStateView& state);
+    Real boundaryMeasurePreflighted(
+        const forms::BoundaryFunctional& functional,
+        const SystemStateView& state);
 
     FESystem& system_;
     FieldId primary_field_{INVALID_FIELD_ID};
 
     std::vector<CompiledFunctional> functionals_{};
     std::unordered_map<std::string, std::size_t> name_to_functional_{};
-    std::unordered_map<int, Real> boundary_measure_cache_{};
+    std::unordered_map<int, BoundaryMeasureCacheEntry>
+        boundary_measure_cache_{};
 
     forms::SymbolicOptions compiler_options_{};
 

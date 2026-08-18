@@ -15738,7 +15738,7 @@ namespace {
 // Symbolic tangent caching (per-process, in-memory)
 // ============================================================================
 
-inline constexpr std::uint32_t kSymbolicTangentCacheVersion = 5u;
+inline constexpr std::uint32_t kSymbolicTangentCacheVersion = 6u;
 inline constexpr std::size_t kSymbolicTangentCacheMaxEntries = 128u;
 
 [[nodiscard]] std::uint64_t fnv1aInit64() noexcept
@@ -15924,6 +15924,16 @@ using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
         hashTag64(h, 0x26ULL);
         hashPod64(h, static_cast<std::uint8_t>(*v));
     }
+    if (const auto* measure = node.exteriorBoundaryMeasure()) {
+        hashTag64(h, 0x27ULL);
+        hashPod64(h, static_cast<std::uint8_t>(measure->scope()));
+        hashPod64(
+            h, static_cast<std::int32_t>(measure->physicalBoundaryMarker()));
+        hashPod64(
+            h,
+            static_cast<std::int32_t>(
+                measure->generatedActiveBoundaryMarker()));
+    }
 
     const auto kids = node.childrenShared();
     hashTag64(h, 0x30ULL);
@@ -16004,6 +16014,22 @@ using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
         hashPod64(h, static_cast<std::uint8_t>(term.domain));
         hashPod64(h, static_cast<std::int32_t>(term.boundary_marker));
         hashPod64(h, static_cast<std::int32_t>(term.interface_marker));
+        hashPod64(
+            h,
+            term.exterior_boundary_measure.has_value() ? std::uint8_t{1u}
+                                                       : std::uint8_t{0u});
+        if (term.exterior_boundary_measure.has_value()) {
+            const auto& measure = *term.exterior_boundary_measure;
+            hashPod64(h, static_cast<std::uint8_t>(measure.scope()));
+            hashPod64(
+                h,
+                static_cast<std::int32_t>(
+                    measure.physicalBoundaryMarker()));
+            hashPod64(
+                h,
+                static_cast<std::int32_t>(
+                    measure.generatedActiveBoundaryMarker()));
+        }
         hashPod64(
             h, static_cast<std::uint8_t>(term.cut_volume_side));
         hashPod64(h, static_cast<std::int32_t>(term.time_derivative_order));
@@ -16089,6 +16115,47 @@ private:
 {
     static SymbolicTangentIRCache cache;
     return cache;
+}
+
+[[nodiscard]] FormExpr wrapInterfaceTermMeasure(
+    const FormExpr& integrand,
+    const IntegralTerm& term,
+    int interface_marker)
+{
+    if (term.exterior_boundary_measure.has_value()) {
+        const auto& measure = *term.exterior_boundary_measure;
+        if (!measure.isGeneratedActiveSubset() ||
+            measure.generatedActiveBoundaryMarker() != interface_marker) {
+            throw std::invalid_argument(
+                "symbolic tangent: generated exterior-boundary selector does not match its interface term");
+        }
+        return integrand.dExteriorBoundary(measure);
+    }
+    return integrand.dI(interface_marker);
+}
+
+[[nodiscard]] FormExpr wrapIntegralTermMeasure(
+    const FormExpr& integrand,
+    const IntegralTerm& term)
+{
+    if (term.exterior_boundary_measure.has_value()) {
+        return integrand.dExteriorBoundary(*term.exterior_boundary_measure);
+    }
+    switch (term.domain) {
+        case IntegralDomain::Cell:
+            return integrand.dx();
+        case IntegralDomain::Boundary:
+            return integrand.ds(term.boundary_marker);
+        case IntegralDomain::InteriorFace:
+            return integrand.dS(term.interface_marker);
+        case IntegralDomain::InterfaceFace:
+            return integrand.dI(term.interface_marker);
+        case IntegralDomain::CutVolume:
+            return integrand.dCutVolume(
+                term.interface_marker, term.cut_volume_side);
+    }
+    throw std::invalid_argument(
+        "symbolic tangent: unsupported integral domain");
 }
 
 [[nodiscard]] FormExpr rewriteTrialFunctionsToState(const FormExpr& expr, FieldId trial_state_field)
@@ -16526,13 +16593,13 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
                         emitted_fields.push_back(domain.level_set_field);
                         append_term(
                             tangent_form,
-                            level_set_integrand_derivative(
-                                term,
-                                domain)
-                                .ds(term.boundary_marker));
+                            wrapIntegralTermMeasure(
+                                level_set_integrand_derivative(term, domain),
+                                term));
                     }
                 } else {
-                    append_term(tangent_form, dI.ds(term.boundary_marker));
+                    append_term(
+                        tangent_form, wrapIntegralTermMeasure(dI, term));
                 }
                 break;
             case IntegralDomain::InteriorFace:
@@ -16585,10 +16652,12 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
                             emitted_derivatives.push_back(emitted_domain);
                             append_term(
                                 tangent_form,
-                                level_set_integrand_derivative(
+                                wrapInterfaceTermMeasure(
+                                    level_set_integrand_derivative(
+                                        term,
+                                        domain),
                                     term,
-                                    domain)
-                                    .dI(emitted_marker));
+                                    emitted_marker));
                         }
                         if (std::find(emitted_shape_terms.begin(),
                                       emitted_shape_terms.end(),
@@ -16597,24 +16666,33 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
                             continue;
                         }
                         emitted_shape_terms.push_back(emitted_domain);
-                        append_term(tangent_form,
-                                    interface_measure_tangent_integrand(term, domain)
-                                        .dI(emitted_marker));
+                        append_term(
+                            tangent_form,
+                            wrapInterfaceTermMeasure(
+                                interface_measure_tangent_integrand(
+                                    term, domain),
+                                term,
+                                emitted_marker));
                         const auto point_tangent =
                             interface_point_tangent_integrand(term, domain);
                         if (point_tangent.isValid()) {
-                            append_term(tangent_form,
-                                        point_tangent.dI(emitted_marker));
+                            append_term(
+                                tangent_form,
+                                wrapInterfaceTermMeasure(
+                                    point_tangent, term, emitted_marker));
                         }
                         const auto normal_tangent =
                             interface_normal_tangent_integrand(term, domain);
                         if (normal_tangent.isValid()) {
-                            append_term(tangent_form,
-                                        normal_tangent.dI(emitted_marker));
+                            append_term(
+                                tangent_form,
+                                wrapInterfaceTermMeasure(
+                                    normal_tangent, term, emitted_marker));
                         }
                     }
                 } else {
-                    append_term(tangent_form, dI.dI(term.interface_marker));
+                    append_term(
+                        tangent_form, wrapIntegralTermMeasure(dI, term));
                 }
                 break;
             case IntegralDomain::CutVolume:

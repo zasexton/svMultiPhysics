@@ -94,6 +94,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -251,6 +252,15 @@ struct AuxiliaryInputSpec {
     /// Whether this input requires MPI reduction.
     bool requires_mpi_reduction{false};
 
+    /**
+     * @brief Stable identity of the collective callback route.
+     *
+     * This key is required when `requires_mpi_reduction` is true.  It must
+     * identify the same callback operation on every participating rank and
+     * remain unchanged for the lifetime of the registration.
+     */
+    std::string collective_route_key{};
+
     /// Number of entities for entity-local inputs (0 = global/scalar).
     /// When > 0, the flat storage is `entity_count * size` values,
     /// laid out as [entity0_comp0, entity0_comp1, ..., entity1_comp0, ...].
@@ -297,6 +307,63 @@ using AuxiliaryEntityInputCallback = std::function<void(
 class AuxiliaryInputRegistry {
 public:
     AuxiliaryInputRegistry() = default;
+    AuxiliaryInputRegistry(const AuxiliaryInputRegistry&) = delete;
+    AuxiliaryInputRegistry& operator=(const AuxiliaryInputRegistry&) = delete;
+    AuxiliaryInputRegistry(AuxiliaryInputRegistry&&) = delete;
+    AuxiliaryInputRegistry& operator=(AuxiliaryInputRegistry&&) = delete;
+
+    /**
+     * @brief Immutable description of one due callback route.
+     *
+     * Entity-local callbacks have one plan entry and report their exact
+     * per-entity callback count through `callback_invocation_count`.
+     */
+    struct EvaluationInvocation {
+        std::size_t input_index{0};
+        std::string input_name{};
+        AuxiliaryInputProducer producer{AuxiliaryInputProducer::DirectUserData};
+        AuxiliaryInputUpdateSchedule update_schedule{
+            AuxiliaryInputUpdateSchedule::OncePerTimeStep};
+        bool requires_mpi_reduction{false};
+        std::string collective_route_key{};
+        std::size_t callback_invocation_count{0};
+        std::size_t value_count{0};
+        bool entity_callback{false};
+    };
+
+    /**
+     * @brief Opaque, single-use callback schedule frozen at one registry state.
+     *
+     * A plan owns the exact due input indices and route metadata computed by
+     * `prepareEvaluation()`.  Execution consumes that schedule directly:
+     * dependency order and lifecycle eligibility are not recomputed.
+     */
+    class EvaluationPlan {
+    public:
+        EvaluationPlan(EvaluationPlan&&) noexcept;
+        EvaluationPlan& operator=(EvaluationPlan&&) noexcept;
+        ~EvaluationPlan();
+
+        EvaluationPlan(const EvaluationPlan&) = delete;
+        EvaluationPlan& operator=(const EvaluationPlan&) = delete;
+
+        [[nodiscard]] std::span<const std::size_t> dueInputIndices() const noexcept;
+        [[nodiscard]] std::span<const EvaluationInvocation> invocations() const noexcept;
+        [[nodiscard]] Real time() const noexcept;
+        [[nodiscard]] Real dt() const noexcept;
+        [[nodiscard]] bool isNonlinearIteration() const noexcept;
+        [[nodiscard]] bool hasStagedEvaluation() const noexcept;
+        [[nodiscard]] bool consumed() const noexcept;
+
+    private:
+        struct Storage;
+
+        explicit EvaluationPlan(std::unique_ptr<Storage> storage) noexcept;
+
+        std::unique_ptr<Storage> storage_{};
+
+        friend class AuxiliaryInputRegistry;
+    };
 
     // -----------------------------------------------------------------
     //  Registration
@@ -335,6 +402,9 @@ public:
     /// Whether an input with the given name exists.
     [[nodiscard]] bool hasInput(std::string_view name) const noexcept;
 
+    /// Whether any registered input invokes an MPI collective route.
+    [[nodiscard]] bool hasCollectiveInput() const noexcept;
+
     /// Get the slot (offset into flat array) for an input by name.
     [[nodiscard]] std::size_t slotOf(std::string_view name) const;
 
@@ -356,7 +426,10 @@ public:
     /// Whether an input is entity-local (entity_count > 0).
     [[nodiscard]] bool isEntityLocal(std::string_view name) const;
 
-    /// Mutable view of a single input's values (for DirectUserData / callbacks).
+    /// Mutable view of one input's values (all entities for entity-local input).
+    /// Acquiring a mutable view invalidates frozen evaluation plans.  The view
+    /// is an immediate-write facility: it must not be retained past a call to
+    /// `prepareEvaluation()` or used while an evaluation plan is active.
     [[nodiscard]] std::span<Real> mutableValuesOf(std::string_view name);
 
     /// Get value of a scalar input by name (convenience for size==1).
@@ -386,6 +459,59 @@ public:
      *        `EachNonlinearIteration` schedule.
      */
     void evaluate(Real time, Real dt, bool is_nonlinear_iteration = false);
+
+    /**
+     * @brief Freeze the exact callback schedule due at the current state.
+     *
+     * This method performs dependency sorting and schedule allocation but
+     * does not invoke a provider.  The returned plan is invalidated by any
+     * registration, dependency, or evaluation-lifecycle mutation.
+     * Mutable views obtained earlier must no longer be used once this method
+     * is called.
+     */
+    [[nodiscard]] EvaluationPlan prepareEvaluation(
+        Real time, Real dt, bool is_nonlinear_iteration = false) const;
+
+    /**
+     * @brief Execute a plan without rebuilding or allocating its schedule.
+     *
+     * A plan belongs to the registry that created it and may be executed
+     * exactly once.  Stale, foreign, and already-consumed plans are rejected
+     * before any callback is invoked.
+     */
+    void executeEvaluationPlan(EvaluationPlan& plan);
+
+    /**
+     * @brief Run the next provider into plan-owned scratch storage.
+     *
+     * Registry values and lifecycle flags remain unchanged until
+     * `commitStagedEvaluation()` is called.  This lets an MPI-aware owner
+     * coordinate callback success before publishing the result.  This
+     * guarantee relies on the mutable-view lifetime contract above.
+     */
+    bool stageNextEvaluation(EvaluationPlan& plan);
+
+    /**
+     * @brief Publish one successfully staged provider result.
+     *
+     * This operation performs no schedule or scratch allocation.
+     */
+    void commitStagedEvaluation(EvaluationPlan& plan);
+
+    /**
+     * @brief Check every nonthrowing precondition for staged publication.
+     */
+    [[nodiscard]] bool canCommitStagedEvaluation(
+        const EvaluationPlan& plan) const noexcept;
+
+    /**
+     * @brief Execute the next due input in a frozen plan.
+     *
+     * Compatibility helper equivalent to `stageNextEvaluation()` followed
+     * immediately by `commitStagedEvaluation()`.  MPI-aware owners should use
+     * the two-phase API so callback success can be coordinated before commit.
+     */
+    bool executeNextEvaluation(EvaluationPlan& plan);
 
     /**
      * @brief Mark an input as dirty (needing re-evaluation).
@@ -450,7 +576,11 @@ private:
     /// Flat value storage (slot-indexed, SIMD-aligned).
     std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> values_{};
 
+    std::uint64_t evaluation_revision_{0};
+    bool callback_execution_in_progress_{false};
+
     [[nodiscard]] std::size_t entryIndex(std::string_view name) const;
+    void requireNoCallbackLifecycleMutation(std::string_view operation) const;
 };
 
 } // namespace systems

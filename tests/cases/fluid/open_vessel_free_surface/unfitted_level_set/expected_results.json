@@ -1,0 +1,37 @@
+{
+  "case": "flat_hydrostatic_offset_free_surface",
+  "purpose": "Small OOP unfitted level-set free-surface hydrostatic equilibrium regression.",
+  "run": {
+    "time_step": 0.0025,
+    "time_steps": 20,
+    "final_time": 0.05
+  },
+  "fluid": {
+    "density": 998.2,
+    "gravity": 9.81,
+    "body_force": [0.0, -9.81, 0.0]
+  },
+  "analytic_solution": {
+    "free_surface_height": 0.45,
+    "area": 0.45,
+    "centroid": [0.5, 0.225, 0.0],
+    "velocity": [0.0, 0.0, 0.0],
+    "pressure": "p(x,y,z) = rho*g*(0.45 - y) in the active wet region"
+  },
+  "pressure_gauge_verification": {
+    "pressure_constraint_enabled": false,
+    "role": "read-only interior pressure diagnostic; embedded free-surface traction anchors absolute pressure"
+  },
+  "verification": {
+    "wet_pressure_margin": 1.0e-8,
+    "suggested_tolerances": {
+      "area_abs": 1.0e-5,
+      "centroid_abs": 1.0e-5,
+      "interface_height_abs": 1.0e-5,
+      "pressure_wet_rms_abs": 5.0e-2,
+      "pressure_wet_max_abs": 1.0e-1,
+      "velocity_wet_max": 1.0e-12,
+      "wet_volume_relative_drift": 1.0e-5
+    }
+  }
+}

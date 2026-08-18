@@ -110,9 +110,21 @@ struct FreeSurfaceGeometryRuleRecord {
     bool locally_owned{false};
     std::vector<std::uint64_t> source_fragment_stable_ids{};
     std::string topology_id{};
+    // Epoch-free semantic descriptor copied from the authoritative generated
+    // source.  Unlike source_fragment_stable_ids/component_id, this key must
+    // not incorporate a value revision or rank/local parent identity.  Zero
+    // remains the explicit legacy/manual-source "unclassified" value; the
+    // production active-cut publisher requires a nonzero key.
+    std::uint64_t source_topology_key{0};
     std::int64_t component_id{-1};
     FreeSurfaceGeometryMomentCertificate moment_certificate{};
 };
+
+/** Epoch-free topology descriptor used for authoritative interface sources. */
+[[nodiscard]] std::uint64_t freeSurfaceGeometrySourceTopologyKey(
+    const CutInterfaceFragment& fragment,
+    ElementType parent_element_type,
+    Real tolerance);
 
 struct FreeSurfaceGeometrySnapshotPolicy {
     Real tolerance{1.0e-12};
@@ -418,11 +430,171 @@ struct FreeSurfaceDiscreteFunctionalVectorEvaluator {
         const std::array<Real, 3>&,
         const geometry::CutQuadratureProvenance&)>
         value{};
+    std::function<FreeSurfaceDiscreteFunctionalPhysicalGradient(
+        GlobalIndex,
+        const std::array<Real, 3>&,
+        const geometry::CutQuadratureProvenance&)>
+        physical_gradient{};
 
     [[nodiscard]] bool canEvaluateValue() const noexcept {
         return static_cast<bool>(value);
     }
+    [[nodiscard]] bool canEvaluatePhysicalGradient() const noexcept {
+        return static_cast<bool>(physical_gradient);
+    }
 };
+
+struct FreeSurfaceActiveVolumeEnergyParameters {
+    geometry::CutIntegrationSide liquid_side{
+        geometry::CutIntegrationSide::Negative};
+    Real density{0.0};
+    std::array<Real, 3> gravitational_acceleration{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> gravitational_reference_point{{0.0, 0.0, 0.0}};
+};
+
+/**
+ * Rank-owned kinetic and gravitational energy on one snapshot's retained
+ * active-liquid volume rules.
+ *
+ * The gravitational potential density is
+ *
+ *   -rho g dot (x - x_ref).
+ *
+ * Its endpoint material-domain variation rate under the supplied velocity is
+ *
+ *   -rho int g dot u.
+ *
+ * Ghost and pruned rules are excluded. Distributed callers reduce the owned
+ * scalar fields exactly once on the snapshot communicator.
+ */
+struct FreeSurfaceActiveVolumeEnergyState {
+    std::uint64_t snapshot_revision_key{0};
+    geometry::CutIntegrationSide liquid_side{
+        geometry::CutIntegrationSide::Negative};
+    Real density{0.0};
+    std::array<Real, 3> gravitational_acceleration{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> gravitational_reference_point{{0.0, 0.0, 0.0}};
+    std::size_t owned_quadrature_point_count{0u};
+    Real owned_liquid_volume{0.0};
+    Real kinetic_energy{0.0};
+    Real gravitational_energy{0.0};
+    Real gravitational_potential_power{0.0};
+    Real total_energy{0.0};
+};
+
+[[nodiscard]] FreeSurfaceActiveVolumeEnergyState
+evaluateFreeSurfaceActiveVolumeEnergy(
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    const FreeSurfaceActiveVolumeEnergyParameters& parameters,
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity);
+
+struct FreeSurfaceActiveVolumeDissipationParameters {
+    geometry::CutIntegrationSide liquid_side{
+        geometry::CutIntegrationSide::Negative};
+    Real dynamic_viscosity{0.0};
+};
+
+/**
+ * Rank-owned endpoint bulk-viscous dissipation on the retained active-liquid
+ * volume rules.
+ *
+ * The rate is the production Newtonian form tested by the endpoint velocity,
+ *
+ *   2 mu int sym(grad u) : sym(grad u).
+ *
+ * Ghost and pruned rules are excluded. Distributed callers reduce the owned
+ * scalar fields exactly once on the snapshot communicator.
+ */
+struct FreeSurfaceActiveVolumeDissipationState {
+    std::uint64_t snapshot_revision_key{0};
+    geometry::CutIntegrationSide liquid_side{
+        geometry::CutIntegrationSide::Negative};
+    Real dynamic_viscosity{0.0};
+    std::size_t owned_quadrature_point_count{0u};
+    Real owned_liquid_volume{0.0};
+    Real bulk_viscous_dissipation_rate{0.0};
+};
+
+[[nodiscard]] FreeSurfaceActiveVolumeDissipationState
+evaluateFreeSurfaceActiveVolumeDissipation(
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    const FreeSurfaceActiveVolumeDissipationParameters& parameters,
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity);
+
+struct FreeSurfaceExternalPressurePowerParameters {
+    geometry::CutIntegrationSide liquid_side{
+        geometry::CutIntegrationSide::Negative};
+    Real external_pressure{0.0};
+};
+
+/**
+ * Rank-owned prescribed exterior-pressure power on the retained liquid--gas
+ * interface rules.
+ *
+ * With the snapshot normal directed outward from the selected liquid, the
+ * work rate added to the modeled liquid is
+ *
+ *   -p_external int u dot n_liquid.
+ */
+struct FreeSurfaceExternalPressurePowerState {
+    std::uint64_t snapshot_revision_key{0};
+    geometry::CutIntegrationSide liquid_side{
+        geometry::CutIntegrationSide::Negative};
+    Real external_pressure{0.0};
+    std::size_t owned_quadrature_point_count{0u};
+    Real owned_liquid_gas_area{0.0};
+    Real outward_liquid_volume_flux_rate{0.0};
+    Real external_pressure_power{0.0};
+};
+
+[[nodiscard]] FreeSurfaceExternalPressurePowerState
+evaluateFreeSurfaceExternalPressurePower(
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    const FreeSurfaceExternalPressurePowerParameters& parameters,
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity);
+
+/**
+ * Rank-owned backward-Euler kinetic-work identity evaluated on the retained
+ * active-liquid volume rules of the endpoint snapshot.
+ *
+ * Both velocity endpoints are evaluated on that one domain. The identity is
+ *
+ *   rho int (u_after-u_before) dot u_after
+ *     = K_after - K_before_on_after_domain
+ *       + rho/2 int |u_after-u_before|^2.
+ *
+ * The final term is the nonnegative backward-Euler time-discretization loss.
+ * Comparing K_before_on_after_domain with the stored energy on the preceding
+ * snapshot exposes the separate domain-change coupling term.
+ * The two velocity revisions bind the callback values to their declared
+ * field slices without conflating unrelated level-set representation changes.
+ */
+struct FreeSurfaceBackwardEulerKineticWorkState {
+    std::uint64_t snapshot_revision_key{0};
+    std::uint64_t previous_velocity_revision{0};
+    std::uint64_t endpoint_velocity_revision{0};
+    geometry::CutIntegrationSide liquid_side{
+        geometry::CutIntegrationSide::Negative};
+    Real density{0.0};
+    std::size_t owned_quadrature_point_count{0u};
+    Real owned_liquid_volume{0.0};
+    Real kinetic_energy_before_on_endpoint_domain{0.0};
+    Real kinetic_energy_after{0.0};
+    Real kinetic_energy_change_on_endpoint_domain{0.0};
+    Real step_integrated_inertia_work{0.0};
+    Real time_discretization_loss{0.0};
+    Real identity_residual{0.0};
+};
+
+[[nodiscard]] FreeSurfaceBackwardEulerKineticWorkState
+evaluateFreeSurfaceBackwardEulerKineticWork(
+    const FreeSurfaceGeometrySnapshot& endpoint_snapshot,
+    geometry::CutIntegrationSide liquid_side,
+    Real density,
+    std::uint64_t previous_velocity_revision,
+    std::uint64_t endpoint_velocity_revision,
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& previous_velocity,
+    const FreeSurfaceDiscreteFunctionalVectorEvaluator& endpoint_velocity);
 
 /** Recompute non-additive mean and motion fields after rank reduction. */
 void finalizeFreeSurfaceDynamicContactState(

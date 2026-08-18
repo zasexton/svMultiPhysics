@@ -1,0 +1,5 @@
+name,x,y,z,expected_final_pressure
+left_bottom,0.25,0.25,0.0,1985.78799459
+center_bottom,0.5,0.25,0.0,2410.89358044
+right_bottom,0.75,0.25,0.0,2835.99916628
+center_wet,0.5,0.4,0.0,964.357432175

@@ -403,7 +403,8 @@ struct CellRuleSpec {
 
 void addCellRule(assembly::CutIntegrationContext& context,
                  const CellRuleSpec& spec,
-                 geometry::CutIntegrationSide side)
+                 geometry::CutIntegrationSide side,
+                 std::uint64_t source_value_revision = 0u)
 {
     const auto cut_topology_revision =
         spec.cut_topology_revision.value_or(
@@ -421,6 +422,7 @@ void addCellRule(assembly::CutIntegrationContext& context,
     metadata.volume_fraction = spec.volume_fraction;
     metadata.revision_key = cut_topology_revision;
     metadata.cut_topology_revision = cut_topology_revision;
+    metadata.source_value_revision = source_value_revision;
 
     geometry::CutQuadratureRule rule{};
     rule.kind = geometry::CutQuadratureKind::Volume;
@@ -435,6 +437,7 @@ void addCellRule(assembly::CutIntegrationContext& context,
     rule.provenance.marker = kInterfaceMarker;
     rule.provenance.cut_topology_revision =
         cut_topology_revision;
+    rule.provenance.source_value_revision = source_value_revision;
 
     context.addGeneratedVolumeRule(kInterfaceMarker, metadata, rule);
 }
@@ -446,6 +449,33 @@ std::shared_ptr<assembly::CutIntegrationContext> makeCutContext(
     auto context = std::make_shared<assembly::CutIntegrationContext>();
     for (const auto& spec : specs) {
         addCellRule(*context, spec, side);
+    }
+    return context;
+}
+
+std::shared_ptr<assembly::CutIntegrationContext> makePublishedCutContext(
+    const std::vector<CellRuleSpec>& specs,
+    std::uint64_t source_value_revision)
+{
+    auto context = std::make_shared<assembly::CutIntegrationContext>();
+    interfaces::CutInterfaceDomainRequest request;
+    request.source = interfaces::LevelSetInterfaceSource::fromField(
+        /*field_id=*/91,
+        /*layout_revision=*/7u,
+        source_value_revision);
+    request.generated_domain_id =
+        "small_cut_class_swap_publication";
+    request.interface_marker = kInterfaceMarker;
+    request.isovalue = Real{0.0};
+    request.quadrature_policy_key = 23u;
+    request.frame = geometry::CutGeometryFrame::Current;
+    context->addGeneratedInterfaceDomain(
+        interfaces::LevelSetInterfaceDomain(request));
+    for (const auto& spec : specs) {
+        addCellRule(*context,
+                    spec,
+                    geometry::CutIntegrationSide::Negative,
+                    source_value_revision);
     }
     return context;
 }
@@ -1950,6 +1980,14 @@ TEST(SmallCutAggregationConstraint,
         const auto& report = aggregation_view->completedRefreshReport();
         ASSERT_TRUE(report.has_value());
         EXPECT_EQ(report->field, pressure);
+        EXPECT_EQ(
+            report->local_lineage.successful_publication_ordinal, 1u);
+        EXPECT_EQ(
+            report->geometry_identity.kind,
+            SmallCutAggregationGeometryIdentityKind::Unavailable);
+        EXPECT_FALSE(report->geometry_identity.available);
+        EXPECT_FALSE(report->geometry_identity
+                         .communicator_fingerprint_consensus_validated);
         EXPECT_EQ(report->active_side,
                   geometry::CutIntegrationSide::Negative);
         EXPECT_EQ(report->interface_marker, kInterfaceMarker);
@@ -2012,6 +2050,10 @@ TEST(SmallCutAggregationConstraint,
     const auto& report = aggregation_view->completedRefreshReport();
     ASSERT_TRUE(report.has_value());
     EXPECT_EQ(report->field, pressure);
+    EXPECT_EQ(report->local_lineage.successful_publication_ordinal, 2u);
+    EXPECT_FALSE(report->geometry_identity.available);
+    EXPECT_FALSE(report->canonical_topology_transition.has_value())
+        << "a failed refresh deliberately clears the prior comparison chain";
     EXPECT_EQ(report->active_side, geometry::CutIntegrationSide::Negative);
     EXPECT_EQ(report->interface_marker, kInterfaceMarker);
     EXPECT_EQ(report->canonical_candidate_vertices, 4u);
@@ -2099,6 +2141,148 @@ TEST(SmallCutAggregationConstraint,
 }
 
 TEST(SmallCutAggregationConstraint,
+     SameCountFullCutSwapHasClassSensitiveTransitionAndProvenance)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto mesh = buildQuadStrip(2);
+    auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    auto aggregation = std::make_unique<SmallCutAggregationConstraint>(
+        pressure,
+        geometry::CutIntegrationSide::Negative,
+        kInterfaceMarker);
+    const auto* aggregation_view = aggregation.get();
+    system.addSystemConstraint(std::move(aggregation));
+    ASSERT_NO_THROW(system.setup());
+
+    system.setCutIntegrationContext(makePublishedCutContext(
+        {
+            {.cell = 0,
+             .volume_fraction = Real{0.3},
+             .full_cell_equivalent = false},
+            {.cell = 1,
+             .volume_fraction = Real{1.0},
+             .full_cell_equivalent = true},
+        },
+        /*source_value_revision=*/101u));
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+    const auto first_optional = aggregation_view->completedRefreshReport();
+    ASSERT_TRUE(first_optional.has_value());
+    const auto first = *first_optional;
+    ASSERT_EQ(first.canonical_active_features.size(), 1u);
+    const auto& first_feature = first.canonical_active_features.front();
+    EXPECT_EQ(first.local_lineage.successful_publication_ordinal, 1u);
+    EXPECT_EQ(
+        first.geometry_identity.kind,
+        SmallCutAggregationGeometryIdentityKind::GeneratedPublicationSource);
+    EXPECT_TRUE(first.geometry_identity.available);
+    EXPECT_TRUE(
+        first.geometry_identity.communicator_fingerprint_consensus_validated);
+    EXPECT_EQ(first.geometry_identity.source_value_revision, 101u);
+    EXPECT_EQ(first_feature.canonical_cell_count, 2u);
+    EXPECT_EQ(first_feature.canonical_full_active_cell_count, 1u);
+    EXPECT_EQ(first_feature.canonical_cut_cell_count, 1u);
+    EXPECT_NE(first_feature.canonical_full_active_cell_gid_digest, 0u);
+    EXPECT_NE(first_feature.canonical_cut_cell_gid_digest, 0u);
+    EXPECT_NE(first_feature.canonical_full_active_cell_gid_digest,
+              first_feature.canonical_cut_cell_gid_digest);
+
+    system.setCutIntegrationContext(makePublishedCutContext(
+        {
+            {.cell = 0,
+             .volume_fraction = Real{1.0},
+             .full_cell_equivalent = true},
+            {.cell = 1,
+             .volume_fraction = Real{0.4},
+             .full_cell_equivalent = false},
+        },
+        /*source_value_revision=*/102u));
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+    const auto& second_optional =
+        aggregation_view->completedRefreshReport();
+    ASSERT_TRUE(second_optional.has_value());
+    const auto& second = *second_optional;
+    ASSERT_EQ(second.canonical_active_features.size(), 1u);
+    const auto& second_feature = second.canonical_active_features.front();
+
+    // Membership and both class counts are unchanged. Only the assignment of
+    // physical GIDs to full/cut classes swaps, so the old aggregate digest is
+    // intentionally equal while both class-sensitive digests change.
+    EXPECT_EQ(second_feature.stable_feature_id,
+              first_feature.stable_feature_id);
+    EXPECT_EQ(second_feature.canonical_cell_gid_digest,
+              first_feature.canonical_cell_gid_digest);
+    EXPECT_EQ(second_feature.canonical_cell_count,
+              first_feature.canonical_cell_count);
+    EXPECT_EQ(second_feature.canonical_full_active_cell_count,
+              first_feature.canonical_full_active_cell_count);
+    EXPECT_EQ(second_feature.canonical_cut_cell_count,
+              first_feature.canonical_cut_cell_count);
+    EXPECT_NE(second_feature.canonical_full_active_cell_gid_digest,
+              first_feature.canonical_full_active_cell_gid_digest);
+    EXPECT_NE(second_feature.canonical_cut_cell_gid_digest,
+              first_feature.canonical_cut_cell_gid_digest);
+    EXPECT_NE(second.canonical_feature_class_fingerprint,
+              first.canonical_feature_class_fingerprint);
+
+    ASSERT_TRUE(second.canonical_topology_transition.has_value());
+    const auto& transition = *second.canonical_topology_transition;
+    EXPECT_TRUE(transition.canonical_topology_changed);
+    EXPECT_EQ(transition.canonical_features_entered, 0u);
+    EXPECT_EQ(transition.canonical_features_exited, 0u);
+    EXPECT_EQ(transition.canonical_features_persisted, 1u);
+    EXPECT_EQ(transition.canonical_feature_classification_changes, 1u);
+    ASSERT_EQ(transition.canonical_feature_transitions.size(), 1u);
+    const auto& feature_transition =
+        transition.canonical_feature_transitions.front();
+    EXPECT_TRUE(feature_transition.present_before);
+    EXPECT_TRUE(feature_transition.present_after);
+    EXPECT_TRUE(feature_transition.cell_classification_changed);
+    EXPECT_EQ(
+        feature_transition.canonical_full_active_cell_gid_digest_before,
+        first_feature.canonical_full_active_cell_gid_digest);
+    EXPECT_EQ(
+        feature_transition.canonical_full_active_cell_gid_digest_after,
+        second_feature.canonical_full_active_cell_gid_digest);
+    EXPECT_EQ(feature_transition.canonical_cut_cell_gid_digest_before,
+              first_feature.canonical_cut_cell_gid_digest);
+    EXPECT_EQ(feature_transition.canonical_cut_cell_gid_digest_after,
+              second_feature.canonical_cut_cell_gid_digest);
+
+    EXPECT_EQ(
+        transition.local_lineage_before.successful_publication_ordinal,
+        1u);
+    EXPECT_EQ(
+        transition.local_lineage_after.successful_publication_ordinal,
+        2u);
+    EXPECT_EQ(transition.geometry_identity_before.source_value_revision,
+              101u);
+    EXPECT_EQ(transition.geometry_identity_after.source_value_revision,
+              102u);
+    EXPECT_EQ(transition.geometry_identity_before.source_id,
+              transition.geometry_identity_after.source_id);
+    EXPECT_EQ(transition.geometry_identity_before.domain_id,
+              transition.geometry_identity_after.domain_id);
+    EXPECT_TRUE(
+        transition.geometry_identity_before
+            .communicator_fingerprint_consensus_validated);
+    EXPECT_TRUE(
+        transition.geometry_identity_after
+            .communicator_fingerprint_consensus_validated);
+    EXPECT_EQ(transition.canonical_feature_class_fingerprint_before,
+              first.canonical_feature_class_fingerprint);
+    EXPECT_EQ(transition.canonical_feature_class_fingerprint_after,
+              second.canonical_feature_class_fingerprint);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
      CutContextTransactionRollbackRestoresFinalizedSnapshotAndConstraintState)
 {
     SVMP_AGG_TEST_BODY
@@ -2138,6 +2322,8 @@ TEST(SmallCutAggregationConstraint,
         aggregation_view->completedRefreshReport();
     ASSERT_TRUE(prior_refresh_optional.has_value());
     const auto prior_refresh = *prior_refresh_optional;
+    EXPECT_EQ(
+        prior_refresh.local_lineage.successful_publication_ordinal, 1u);
     EXPECT_EQ(prior_refresh.canonical_rooted_candidate_vertices, 2u);
     EXPECT_EQ(prior_refresh.canonical_rootless_candidate_vertices, 0u);
 
@@ -2182,6 +2368,8 @@ TEST(SmallCutAggregationConstraint,
     const auto& trial_refresh =
         aggregation_view->completedRefreshReport();
     ASSERT_TRUE(trial_refresh.has_value());
+    EXPECT_EQ(
+        trial_refresh->local_lineage.successful_publication_ordinal, 2u);
     EXPECT_EQ(trial_refresh->canonical_rooted_candidate_vertices, 0u);
     EXPECT_EQ(trial_refresh->canonical_rootless_candidate_vertices, 4u);
     EXPECT_EQ(system.constraints().numConstraints(), 4u);
@@ -2200,6 +2388,9 @@ TEST(SmallCutAggregationConstraint,
     const auto& restored_refresh =
         aggregation_view->completedRefreshReport();
     ASSERT_TRUE(restored_refresh.has_value());
+    EXPECT_EQ(
+        restored_refresh->local_lineage.successful_publication_ordinal,
+        prior_refresh.local_lineage.successful_publication_ordinal);
     EXPECT_EQ(restored_refresh->field, prior_refresh.field);
     EXPECT_EQ(restored_refresh->active_side,
               prior_refresh.active_side);
@@ -2400,7 +2591,7 @@ TEST(SmallCutAggregationConstraint,
 }
 
 TEST(SmallCutAggregationConstraint,
-     GeometryValueRefreshInvalidatesFinalizedSnapshotUntilRebuild)
+     GeometryValueRefreshRepublishesCurrentFinalizedSnapshot)
 {
     SVMP_AGG_TEST_BODY
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -2430,9 +2621,12 @@ TEST(SmallCutAggregationConstraint,
     });
     system.setCutIntegrationContext(context);
     ASSERT_NO_THROW(system.rebuildConstraintState());
-    ASSERT_EQ(
-        system.finalizedSmallCutAggregationProlongations().size(),
-        1u);
+    const auto initial_prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(initial_prolongations.size(), 1u);
+    ASSERT_NE(initial_prolongations.front(), nullptr);
+    const auto initial_prolongation =
+        initial_prolongations.front();
 
     const auto pinned_dof = vertexDof(system, pressure, 2);
     ASSERT_TRUE(system.constraints().isConstrained(pinned_dof));
@@ -2461,13 +2655,20 @@ TEST(SmallCutAggregationConstraint,
     EXPECT_NEAR(system.constraints().getInhomogeneity(pinned_dof),
                 3.25,
                 1.0e-15);
-    EXPECT_TRUE(
-        system.finalizedSmallCutAggregationProlongations().empty());
-
-    ASSERT_NO_THROW(system.rebuildConstraintState());
-    ASSERT_EQ(
-        system.finalizedSmallCutAggregationProlongations().size(),
-        1u);
+    const auto refreshed_prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(refreshed_prolongations.size(), 1u);
+    ASSERT_NE(refreshed_prolongations.front(), nullptr);
+    EXPECT_NE(refreshed_prolongations.front().get(),
+              initial_prolongation.get());
+    EXPECT_GT(
+        refreshed_prolongations.front()
+            ->revision.constraint.time_epoch,
+        initial_prolongation->revision.constraint.time_epoch);
+    EXPECT_EQ(
+        refreshed_prolongations.front()
+            ->revision.constraint.geometry,
+        mesh->local_mesh().geometry_revision());
     const auto unchanged_refresh =
         system.refreshConstraintStateForCurrentRevisions(
             /*time=*/4.0,
@@ -2476,9 +2677,11 @@ TEST(SmallCutAggregationConstraint,
     EXPECT_FALSE(unchanged_refresh.dependency_changed);
     EXPECT_FALSE(unchanged_refresh.structural_rebuild);
     EXPECT_FALSE(unchanged_refresh.value_update);
-    EXPECT_EQ(
-        system.finalizedSmallCutAggregationProlongations().size(),
-        1u);
+    const auto unchanged_prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(unchanged_prolongations.size(), 1u);
+    EXPECT_EQ(unchanged_prolongations.front().get(),
+              refreshed_prolongations.front().get());
 #endif
 }
 
@@ -2786,7 +2989,7 @@ TEST(SmallCutAggregationConstraint, DirichletInstalledAfterAggregationReplacesMa
 }
 
 TEST(SmallCutAggregationConstraint,
-     ValueOnlyConstraintUpdateInvalidatesFinalizedSnapshotUntilRebuild)
+     ValueOnlyConstraintUpdateRepublishesCurrentFinalizedSnapshot)
 {
     SVMP_AGG_TEST_BODY
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -2847,29 +3050,29 @@ TEST(SmallCutAggregationConstraint,
     EXPECT_NEAR(system.constraints().getInhomogeneity(pinned_dof),
                 updated_pin,
                 1.0e-15);
-    EXPECT_TRUE(
-        system.finalizedSmallCutAggregationProlongations().empty());
+    const auto updated_prolongations =
+        system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(updated_prolongations.size(), 1u);
+    ASSERT_NE(updated_prolongations.front(), nullptr);
+    EXPECT_NE(updated_prolongations.front().get(),
+              initial_prolongation.get());
+    EXPECT_NE(updated_prolongations.front()->canonical_content_digest,
+              initial_digest);
+    EXPECT_GT(
+        updated_prolongations.front()
+            ->revision.constraint.time_epoch,
+        initial_prolongation->revision.constraint.time_epoch);
+    const auto* updated_row =
+        findFinalizedProlongationRow(
+            *updated_prolongations.front(), pinned_dof);
+    ASSERT_NE(updated_row, nullptr);
+    EXPECT_EQ(updated_row->final_kind,
+              SmallCutAggregationFinalRowKind::FixedValue);
+    EXPECT_NEAR(updated_row->final_inhomogeneity,
+                updated_pin,
+                1.0e-15);
     EXPECT_NEAR(initial_row->final_inhomogeneity,
                 initial_pin,
-                1.0e-15);
-
-    ASSERT_NO_THROW(system.rebuildConstraintState());
-    const auto rebuilt_prolongations =
-        system.finalizedSmallCutAggregationProlongations();
-    ASSERT_EQ(rebuilt_prolongations.size(), 1u);
-    ASSERT_NE(rebuilt_prolongations.front(), nullptr);
-    EXPECT_NE(rebuilt_prolongations.front().get(),
-              initial_prolongation.get());
-    EXPECT_NE(rebuilt_prolongations.front()->canonical_content_digest,
-              initial_digest);
-    const auto* rebuilt_row =
-        findFinalizedProlongationRow(
-            *rebuilt_prolongations.front(), pinned_dof);
-    ASSERT_NE(rebuilt_row, nullptr);
-    EXPECT_EQ(rebuilt_row->final_kind,
-              SmallCutAggregationFinalRowKind::FixedValue);
-    EXPECT_NEAR(rebuilt_row->final_inhomogeneity,
-                updated_pin,
                 1.0e-15);
     EXPECT_NEAR(system.constraints().getInhomogeneity(pinned_dof),
                 updated_pin,

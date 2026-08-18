@@ -199,9 +199,13 @@ StepDecision VSVO_BDF_Controller::onRejected(const StepAttemptInfo& info, StepRe
     d.next_order = clampOrder(p - 1);
 
     double next = info.dt;
-    if (reason == StepRejectReason::NonlinearSolveFailed) {
+    if (reason == StepRejectReason::NonlinearSolveFailed ||
+        reason == StepRejectReason::CutTopologyChanged) {
         next *= options_.nonlinear_decrease_factor;
-        d.message = "rejected: nonlinear solve failed";
+        d.message =
+            reason == StepRejectReason::NonlinearSolveFailed
+                ? "rejected: nonlinear solve failed"
+                : "rejected: cut topology changed";
     } else {
         const double err = info.error_norm;
         if (!(err > 0.0) || !std::isfinite(err)) {

@@ -22,6 +22,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <stdexcept>
 #include <unordered_map>
 #include <memory>
 #include <utility>
@@ -54,6 +55,27 @@ struct BoundaryFunctional {
     Reduction reduction{Reduction::Sum};
     bool is_domain_functional{false};  ///< If true, integrate over cells instead of boundary faces.
     int region_marker{-1};            ///< Cell region/material marker for domain functionals (-1 = all cells).
+
+    /**
+     * @brief Return the explicit exterior-boundary selection represented by
+     * this boundary functional.
+     *
+     * Boundary functionals name their physical deployment boundary directly.
+     * A generated marker narrows that boundary to its active cut subset;
+     * otherwise the functional selects the full physical boundary.
+     */
+    [[nodiscard]] ExteriorBoundaryMeasure exteriorBoundaryMeasure() const
+    {
+        if (is_domain_functional) {
+            throw std::logic_error(
+                "BoundaryFunctional: a domain functional has no exterior-boundary measure");
+        }
+        return generated_active_boundary_marker.has_value()
+            ? ExteriorBoundaryMeasure::generatedActiveSubset(
+                  boundary_marker,
+                  *generated_active_boundary_marker)
+            : ExteriorBoundaryMeasure::fullPhysical(boundary_marker);
+    }
 };
 
 /**
@@ -141,7 +163,8 @@ private:
 /**
  * @brief Compile a boundary functional integrand to an Assembly/FunctionalKernel
  *
- * The returned kernel is suitable for `systems::FESystem::evaluateBoundaryFunctional`.
+ * The returned kernel is suitable for registration with the boundary
+ * reduction service.
  * The integrand must be scalar-valued and must not contain TestFunction/TrialFunction.
  */
 std::shared_ptr<assembly::FunctionalKernel>

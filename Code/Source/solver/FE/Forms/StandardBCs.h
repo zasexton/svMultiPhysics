@@ -100,23 +100,40 @@ private:
  */
 class NaturalBC : public BoundaryCondition {
 public:
+    NaturalBC(ExteriorBoundaryMeasure measure,
+              FormExpr flux)
+        : boundary_marker_(
+              measure.physicalBoundaryMarker())
+        , flux_(std::move(flux))
+        , exterior_boundary_measure_(measure)
+    {
+        if (!flux_.isValid()) {
+            throw std::invalid_argument(
+                "NaturalBC: invalid flux expression");
+        }
+    }
+
     NaturalBC(int boundary_marker,
               FormExpr flux,
               std::optional<int> generated_active_boundary_marker = std::nullopt)
         : boundary_marker_(boundary_marker)
         , flux_(std::move(flux))
-        , generated_active_boundary_marker_(generated_active_boundary_marker)
+        , exterior_boundary_measure_(
+              generated_active_boundary_marker.has_value()
+                  ? std::optional<ExteriorBoundaryMeasure>{
+                        ExteriorBoundaryMeasure::
+                            generatedActiveSubset(
+                                boundary_marker,
+                                *generated_active_boundary_marker)}
+                  : std::nullopt)
     {
         if (boundary_marker_ < 0) {
-            throw std::invalid_argument("NaturalBC: boundary_marker must be >= 0");
+            throw std::invalid_argument(
+                "NaturalBC: boundary_marker must be >= 0");
         }
         if (!flux_.isValid()) {
-            throw std::invalid_argument("NaturalBC: invalid flux expression");
-        }
-        if (generated_active_boundary_marker_.has_value() &&
-            *generated_active_boundary_marker_ < 0) {
             throw std::invalid_argument(
-                "NaturalBC: generated active-boundary marker must be nonnegative");
+                "NaturalBC: invalid flux expression");
         }
     }
 
@@ -128,8 +145,9 @@ public:
     {
         const auto integrand = inner(flux_, v);
         residual = residual -
-                   (generated_active_boundary_marker_.has_value()
-                        ? integrand.dI(*generated_active_boundary_marker_)
+                   (exterior_boundary_measure_.has_value()
+                        ? integrand.dExteriorBoundary(
+                              *exterior_boundary_measure_)
                         : integrand.ds(boundary_marker_));
     }
 
@@ -157,7 +175,8 @@ private:
 protected:
     int boundary_marker_{-1};
     FormExpr flux_{};
-    std::optional<int> generated_active_boundary_marker_{};
+    std::optional<ExteriorBoundaryMeasure>
+        exterior_boundary_measure_{};
 };
 
 /**
@@ -165,6 +184,25 @@ protected:
  */
 class RobinBC : public BoundaryCondition {
 public:
+    RobinBC(ExteriorBoundaryMeasure measure,
+            FormExpr alpha,
+            FormExpr rhs)
+        : boundary_marker_(
+              measure.physicalBoundaryMarker())
+        , alpha_(std::move(alpha))
+        , rhs_(std::move(rhs))
+        , exterior_boundary_measure_(measure)
+    {
+        if (!alpha_.isValid()) {
+            throw std::invalid_argument(
+                "RobinBC: invalid alpha expression");
+        }
+        if (!rhs_.isValid()) {
+            throw std::invalid_argument(
+                "RobinBC: invalid rhs expression");
+        }
+    }
+
     RobinBC(int boundary_marker,
             FormExpr alpha,
             FormExpr rhs,
@@ -172,21 +210,26 @@ public:
         : boundary_marker_(boundary_marker)
         , alpha_(std::move(alpha))
         , rhs_(std::move(rhs))
-        , generated_active_boundary_marker_(generated_active_boundary_marker)
+        , exterior_boundary_measure_(
+              generated_active_boundary_marker.has_value()
+                  ? std::optional<ExteriorBoundaryMeasure>{
+                        ExteriorBoundaryMeasure::
+                            generatedActiveSubset(
+                                boundary_marker,
+                                *generated_active_boundary_marker)}
+                  : std::nullopt)
     {
         if (boundary_marker_ < 0) {
-            throw std::invalid_argument("RobinBC: boundary_marker must be >= 0");
+            throw std::invalid_argument(
+                "RobinBC: boundary_marker must be >= 0");
         }
         if (!alpha_.isValid()) {
-            throw std::invalid_argument("RobinBC: invalid alpha expression");
+            throw std::invalid_argument(
+                "RobinBC: invalid alpha expression");
         }
         if (!rhs_.isValid()) {
-            throw std::invalid_argument("RobinBC: invalid rhs expression");
-        }
-        if (generated_active_boundary_marker_.has_value() &&
-            *generated_active_boundary_marker_ < 0) {
             throw std::invalid_argument(
-                "RobinBC: generated active-boundary marker must be nonnegative");
+                "RobinBC: invalid rhs expression");
         }
     }
 
@@ -198,13 +241,18 @@ public:
     {
         const auto lhs = alpha_ * inner(u, v);
         const auto rhs = inner(rhs_, v);
-        residual = residual +
-                   (generated_active_boundary_marker_.has_value()
-                        ? lhs.dI(*generated_active_boundary_marker_)
-                        : lhs.ds(boundary_marker_)) -
-                   (generated_active_boundary_marker_.has_value()
-                        ? rhs.dI(*generated_active_boundary_marker_)
-                        : rhs.ds(boundary_marker_));
+        if (exterior_boundary_measure_.has_value()) {
+            residual =
+                residual +
+                lhs.dExteriorBoundary(
+                    *exterior_boundary_measure_) -
+                rhs.dExteriorBoundary(
+                    *exterior_boundary_measure_);
+        } else {
+            residual =
+                residual + lhs.ds(boundary_marker_) -
+                rhs.ds(boundary_marker_);
+        }
     }
 
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
@@ -232,7 +280,8 @@ protected:
     int boundary_marker_{-1};
     FormExpr alpha_{};
     FormExpr rhs_{};
-    std::optional<int> generated_active_boundary_marker_{};
+    std::optional<ExteriorBoundaryMeasure>
+        exterior_boundary_measure_{};
 };
 
 /**
@@ -519,6 +568,22 @@ private:
  */
 class TraceLoadBC final : public BoundaryCondition {
 public:
+    TraceLoadBC(ExteriorBoundaryMeasure measure,
+                FormExpr value,
+                ScalarTraceOperator trace_operator =
+                    ScalarTraceOperator::NormalComponent)
+        : boundary_marker_(
+              measure.physicalBoundaryMarker())
+        , value_(std::move(value))
+        , trace_operator_(trace_operator)
+        , exterior_boundary_measure_(measure)
+    {
+        if (!value_.isValid()) {
+            throw std::invalid_argument(
+                "TraceLoadBC: invalid value expression");
+        }
+    }
+
     TraceLoadBC(int boundary_marker,
                 FormExpr value,
                 ScalarTraceOperator trace_operator = ScalarTraceOperator::NormalComponent)
@@ -527,10 +592,12 @@ public:
         , trace_operator_(trace_operator)
     {
         if (boundary_marker_ < 0) {
-            throw std::invalid_argument("TraceLoadBC: boundary_marker must be >= 0");
+            throw std::invalid_argument(
+                "TraceLoadBC: boundary_marker must be >= 0");
         }
         if (!value_.isValid()) {
-            throw std::invalid_argument("TraceLoadBC: invalid value expression");
+            throw std::invalid_argument(
+                "TraceLoadBC: invalid value expression");
         }
     }
 
@@ -540,7 +607,14 @@ public:
                               const FormExpr& /*u*/,
                               const FormExpr& v) const override
     {
-        residual = residual - (value_ * applyScalarTrace(v, trace_operator_)).ds(boundary_marker_);
+        const auto integrand =
+            value_ * applyScalarTrace(v, trace_operator_);
+        residual =
+            residual -
+            (exterior_boundary_measure_.has_value()
+                 ? integrand.dExteriorBoundary(
+                       *exterior_boundary_measure_)
+                 : integrand.ds(boundary_marker_));
     }
 
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
@@ -567,6 +641,8 @@ private:
     int boundary_marker_{-1};
     FormExpr value_{};
     ScalarTraceOperator trace_operator_{ScalarTraceOperator::NormalComponent};
+    std::optional<ExteriorBoundaryMeasure>
+        exterior_boundary_measure_{};
 };
 
 /**
@@ -577,6 +653,28 @@ private:
  */
 class TraceRobinBC final : public BoundaryCondition {
 public:
+    TraceRobinBC(ExteriorBoundaryMeasure measure,
+                 FormExpr alpha,
+                 FormExpr rhs,
+                 ScalarTraceOperator trace_operator =
+                     ScalarTraceOperator::NormalComponent)
+        : boundary_marker_(
+              measure.physicalBoundaryMarker())
+        , alpha_(std::move(alpha))
+        , rhs_(std::move(rhs))
+        , trace_operator_(trace_operator)
+        , exterior_boundary_measure_(measure)
+    {
+        if (!alpha_.isValid()) {
+            throw std::invalid_argument(
+                "TraceRobinBC: invalid alpha expression");
+        }
+        if (!rhs_.isValid()) {
+            throw std::invalid_argument(
+                "TraceRobinBC: invalid rhs expression");
+        }
+    }
+
     TraceRobinBC(int boundary_marker,
                  FormExpr alpha,
                  FormExpr rhs,
@@ -587,13 +685,16 @@ public:
         , trace_operator_(trace_operator)
     {
         if (boundary_marker_ < 0) {
-            throw std::invalid_argument("TraceRobinBC: boundary_marker must be >= 0");
+            throw std::invalid_argument(
+                "TraceRobinBC: boundary_marker must be >= 0");
         }
         if (!alpha_.isValid()) {
-            throw std::invalid_argument("TraceRobinBC: invalid alpha expression");
+            throw std::invalid_argument(
+                "TraceRobinBC: invalid alpha expression");
         }
         if (!rhs_.isValid()) {
-            throw std::invalid_argument("TraceRobinBC: invalid rhs expression");
+            throw std::invalid_argument(
+                "TraceRobinBC: invalid rhs expression");
         }
     }
 
@@ -605,8 +706,20 @@ public:
     {
         const auto tau_u = applyScalarTrace(u, trace_operator_);
         const auto tau_v = applyScalarTrace(v, trace_operator_);
-        residual = residual + (alpha_ * tau_u * tau_v).ds(boundary_marker_)
-                            - (rhs_ * tau_v).ds(boundary_marker_);
+        const auto lhs = alpha_ * tau_u * tau_v;
+        const auto rhs = rhs_ * tau_v;
+        if (exterior_boundary_measure_.has_value()) {
+            residual =
+                residual +
+                lhs.dExteriorBoundary(
+                    *exterior_boundary_measure_) -
+                rhs.dExteriorBoundary(
+                    *exterior_boundary_measure_);
+        } else {
+            residual =
+                residual + lhs.ds(boundary_marker_) -
+                rhs.ds(boundary_marker_);
+        }
     }
 
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
@@ -634,6 +747,8 @@ private:
     FormExpr alpha_{};
     FormExpr rhs_{};
     ScalarTraceOperator trace_operator_{ScalarTraceOperator::NormalComponent};
+    std::optional<ExteriorBoundaryMeasure>
+        exterior_boundary_measure_{};
 };
 
 /**
@@ -646,6 +761,20 @@ private:
  */
 class TraceInequalityBC final : public BoundaryCondition {
 public:
+    TraceInequalityBC(ExteriorBoundaryMeasure measure,
+                      FormExpr bound,
+                      FormExpr penalty,
+                      TraceInequalityOptions options = {})
+        : boundary_marker_(
+              measure.physicalBoundaryMarker())
+        , bound_(std::move(bound))
+        , penalty_(std::move(penalty))
+        , options_(std::move(options))
+        , exterior_boundary_measure_(measure)
+    {
+        validate();
+    }
+
     TraceInequalityBC(int boundary_marker,
                       FormExpr bound,
                       FormExpr penalty,
@@ -656,30 +785,10 @@ public:
         , options_(std::move(options))
     {
         if (boundary_marker_ < 0) {
-            throw std::invalid_argument("TraceInequalityBC: boundary_marker must be >= 0");
+            throw std::invalid_argument(
+                "TraceInequalityBC: boundary_marker must be >= 0");
         }
-        if (!bound_.isValid()) {
-            throw std::invalid_argument("TraceInequalityBC: invalid bound expression");
-        }
-        if (!penalty_.isValid()) {
-            throw std::invalid_argument("TraceInequalityBC: invalid penalty expression");
-        }
-        if (bound_.hasTest() || bound_.hasTrial()) {
-            throw std::invalid_argument("TraceInequalityBC: bound must not contain test/trial functions");
-        }
-        if (penalty_.hasTest() || penalty_.hasTrial()) {
-            throw std::invalid_argument("TraceInequalityBC: penalty must not contain test/trial functions");
-        }
-        if (options_.linearization == TraceInequalityLinearization::Smooth) {
-            if (!options_.smoothing_epsilon.isValid()) {
-                throw std::invalid_argument(
-                    "TraceInequalityBC: smooth linearization requires a valid smoothing epsilon");
-            }
-            if (options_.smoothing_epsilon.hasTest() || options_.smoothing_epsilon.hasTrial()) {
-                throw std::invalid_argument(
-                    "TraceInequalityBC: smoothing epsilon must not contain test/trial functions");
-            }
-        }
+        validate();
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
@@ -689,8 +798,24 @@ public:
                               const FormExpr& u,
                               const FormExpr& v) const override
     {
-        residual = applyTraceInequality(
-            std::move(residual), u, v, boundary_marker_, bound_, penalty_, options_);
+        residual =
+            exterior_boundary_measure_.has_value()
+                ? applyTraceInequality(
+                      std::move(residual),
+                      u,
+                      v,
+                      *exterior_boundary_measure_,
+                      bound_,
+                      penalty_,
+                      options_)
+                : applyTraceInequality(
+                      std::move(residual),
+                      u,
+                      v,
+                      boundary_marker_,
+                      bound_,
+                      penalty_,
+                      options_);
     }
 
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
@@ -716,10 +841,38 @@ public:
     }
 
 private:
+    void validate() const
+    {
+        if (!bound_.isValid()) {
+            throw std::invalid_argument("TraceInequalityBC: invalid bound expression");
+        }
+        if (!penalty_.isValid()) {
+            throw std::invalid_argument("TraceInequalityBC: invalid penalty expression");
+        }
+        if (bound_.hasTest() || bound_.hasTrial()) {
+            throw std::invalid_argument("TraceInequalityBC: bound must not contain test/trial functions");
+        }
+        if (penalty_.hasTest() || penalty_.hasTrial()) {
+            throw std::invalid_argument("TraceInequalityBC: penalty must not contain test/trial functions");
+        }
+        if (options_.linearization == TraceInequalityLinearization::Smooth) {
+            if (!options_.smoothing_epsilon.isValid()) {
+                throw std::invalid_argument(
+                    "TraceInequalityBC: smooth linearization requires a valid smoothing epsilon");
+            }
+            if (options_.smoothing_epsilon.hasTest() || options_.smoothing_epsilon.hasTrial()) {
+                throw std::invalid_argument(
+                    "TraceInequalityBC: smoothing epsilon must not contain test/trial functions");
+            }
+        }
+    }
+
     int boundary_marker_{-1};
     FormExpr bound_{};
     FormExpr penalty_{};
     TraceInequalityOptions options_{};
+    std::optional<ExteriorBoundaryMeasure>
+        exterior_boundary_measure_{};
 };
 
 /**
@@ -955,6 +1108,16 @@ makeTraceLoadBC(int boundary_marker,
 }
 
 [[nodiscard]] inline std::unique_ptr<BoundaryCondition>
+makeTraceLoadBC(ExteriorBoundaryMeasure measure,
+                FormExpr value,
+                ScalarTraceOperator trace_operator =
+                    ScalarTraceOperator::NormalComponent)
+{
+    return std::make_unique<TraceLoadBC>(
+        measure, std::move(value), trace_operator);
+}
+
+[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
 makeTraceRobinBC(int boundary_marker,
                  FormExpr alpha,
                  FormExpr rhs,
@@ -965,6 +1128,20 @@ makeTraceRobinBC(int boundary_marker,
 }
 
 [[nodiscard]] inline std::unique_ptr<BoundaryCondition>
+makeTraceRobinBC(ExteriorBoundaryMeasure measure,
+                 FormExpr alpha,
+                 FormExpr rhs,
+                 ScalarTraceOperator trace_operator =
+                     ScalarTraceOperator::NormalComponent)
+{
+    return std::make_unique<TraceRobinBC>(
+        measure,
+        std::move(alpha),
+        std::move(rhs),
+        trace_operator);
+}
+
+[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
 makeTraceInequalityBC(int boundary_marker,
                       FormExpr bound,
                       FormExpr penalty,
@@ -972,6 +1149,19 @@ makeTraceInequalityBC(int boundary_marker,
 {
     return std::make_unique<TraceInequalityBC>(
         boundary_marker, std::move(bound), std::move(penalty), std::move(options));
+}
+
+[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
+makeTraceInequalityBC(ExteriorBoundaryMeasure measure,
+                      FormExpr bound,
+                      FormExpr penalty,
+                      TraceInequalityOptions options = {})
+{
+    return std::make_unique<TraceInequalityBC>(
+        measure,
+        std::move(bound),
+        std::move(penalty),
+        std::move(options));
 }
 
 [[nodiscard]] inline std::unique_ptr<BoundaryCondition>

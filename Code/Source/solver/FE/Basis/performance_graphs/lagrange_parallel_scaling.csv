@@ -1,0 +1,6 @@
+case,category,mode,threads,bench_threads,iterations,seconds,ns_per_call,min_ns_per_call,max_ns_per_call,allocations_per_call,model_lower_bound_ns,measured_to_model_bound,modeled_flops_per_call,estimated_bytes_per_call,speedup,parallel_efficiency,million_calls_per_second
+lagrange_parallel_hex_order4_strided_all_threads1,lagrange_parallel_eval,strided_all,1,1,200,0.001694853,8474.265,8260.22,9193.145,0.0,0,0,27440,117000,1.0,1.0,0.11800433429919882
+lagrange_parallel_hex_order4_strided_all_threads2,lagrange_parallel_eval,strided_all,2,2,400,0.001748571,4371.4275,4215.4,4536.9225,0.0,0,0,27440,117000,1.938557828077899,0.9692789140389495,0.2287582260028332
+lagrange_parallel_hex_order4_strided_all_threads4,lagrange_parallel_eval,strided_all,4,4,800,0.003462005,4327.50625,4325.12875,4353.15875,0.0,0,0,27440,117000,1.9582328737249077,0.48955821843122693,0.2310799666667148
+lagrange_parallel_hex_order4_strided_all_threads8,lagrange_parallel_eval,strided_all,8,8,1600,0.005629083,3518.176875,3446.55875,4082.9025,0.0,0,0,27440,117000,2.4087091982832725,0.30108864978540906,0.28423812546377447
+lagrange_parallel_hex_order4_strided_all_threads16,lagrange_parallel_eval,strided_all,16,16,3200,0.010501504,3281.72,3013.6890625,3447.196875,0.0,0,0,27440,117000,2.582263264385749,0.16139145402410932,0.30471825749911635

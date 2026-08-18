@@ -8,6 +8,7 @@
 
 #include "Forms/BoundaryCondition.h"
 
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -34,6 +35,24 @@ namespace bc {
  */
 class ScalarNitscheBC final : public BoundaryCondition {
 public:
+    ScalarNitscheBC(ExteriorBoundaryMeasure measure,
+                    FormExpr value,
+                    FormExpr diffusion_coeff,
+                    Real penalty_gamma,
+                    bool symmetric,
+                    bool scale_with_p = true)
+        : boundary_marker_(
+              measure.physicalBoundaryMarker())
+        , value_(std::move(value))
+        , diffusion_coeff_(std::move(diffusion_coeff))
+        , penalty_gamma_(penalty_gamma)
+        , symmetric_(symmetric)
+        , scale_with_p_(scale_with_p)
+        , exterior_boundary_measure_(measure)
+    {
+        validate();
+    }
+
     ScalarNitscheBC(int boundary_marker,
                     FormExpr value,
                     FormExpr diffusion_coeff,
@@ -47,24 +66,7 @@ public:
         , symmetric_(symmetric)
         , scale_with_p_(scale_with_p)
     {
-        if (boundary_marker_ < 0) {
-            throw std::invalid_argument("ScalarNitscheBC: boundary_marker must be >= 0");
-        }
-        if (!value_.isValid()) {
-            throw std::invalid_argument("ScalarNitscheBC: invalid value expression");
-        }
-        if (!diffusion_coeff_.isValid()) {
-            throw std::invalid_argument("ScalarNitscheBC: invalid diffusion coefficient expression");
-        }
-        if (!(penalty_gamma_ > Real(0.0))) {
-            throw std::invalid_argument("ScalarNitscheBC: penalty_gamma must be > 0");
-        }
-        if (value_.hasTest() || value_.hasTrial()) {
-            throw std::invalid_argument("ScalarNitscheBC: value must not contain test/trial functions");
-        }
-        if (diffusion_coeff_.hasTest() || diffusion_coeff_.hasTrial()) {
-            throw std::invalid_argument("ScalarNitscheBC: diffusion_coeff must not contain test/trial functions");
-        }
+        validate();
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
@@ -81,16 +83,34 @@ public:
                                   : NitscheVariant::Unsymmetric;
         opts.scale_with_p = scale_with_p_;
 
-        residual = applyTraceNitsche(std::move(residual),
-                                     u,
-                                     v,
-                                     boundary_marker_,
-                                     value_,
-                                     diffusion_coeff_ * inner(grad(u), n),
-                                     diffusion_coeff_ * inner(grad(v), n),
-                                     diffusion_coeff_ / h,
-                                     ScalarTraceOperator::Identity,
-                                     opts);
+        const auto consistency_flux =
+            diffusion_coeff_ * inner(grad(u), n);
+        const auto adjoint_flux =
+            diffusion_coeff_ * inner(grad(v), n);
+        residual =
+            exterior_boundary_measure_.has_value()
+                ? applyTraceNitsche(
+                      std::move(residual),
+                      u,
+                      v,
+                      *exterior_boundary_measure_,
+                      value_,
+                      consistency_flux,
+                      adjoint_flux,
+                      diffusion_coeff_ / h,
+                      ScalarTraceOperator::Identity,
+                      opts)
+                : applyTraceNitsche(
+                      std::move(residual),
+                      u,
+                      v,
+                      boundary_marker_,
+                      value_,
+                      consistency_flux,
+                      adjoint_flux,
+                      diffusion_coeff_ / h,
+                      ScalarTraceOperator::Identity,
+                      opts);
     }
 
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
@@ -118,18 +138,52 @@ public:
         nitsche.adjoint_consistency_terms_present = symmetric_;
         nitsche.rhs_consistency_terms_present = true;
         nitsche.penalty_positive = penalty_gamma_ > Real(0.0);
-        nitsche.penalty_scaling_verified = scale_with_p_;
+        nitsche.penalty_scaling_verified =
+            scale_with_p_ &&
+            (!exterior_boundary_measure_.has_value() ||
+             exterior_boundary_measure_->isFullPhysical());
         d.nitsche = nitsche;
         return {d};
     }
 
 private:
+    void validate() const
+    {
+        if (boundary_marker_ < 0) {
+            throw std::invalid_argument(
+                "ScalarNitscheBC: boundary_marker must be >= 0");
+        }
+        if (!value_.isValid()) {
+            throw std::invalid_argument(
+                "ScalarNitscheBC: invalid value expression");
+        }
+        if (!diffusion_coeff_.isValid()) {
+            throw std::invalid_argument(
+                "ScalarNitscheBC: invalid diffusion coefficient expression");
+        }
+        if (!(penalty_gamma_ > Real(0.0))) {
+            throw std::invalid_argument(
+                "ScalarNitscheBC: penalty_gamma must be > 0");
+        }
+        if (value_.hasTest() || value_.hasTrial()) {
+            throw std::invalid_argument(
+                "ScalarNitscheBC: value must not contain test/trial functions");
+        }
+        if (diffusion_coeff_.hasTest() ||
+            diffusion_coeff_.hasTrial()) {
+            throw std::invalid_argument(
+                "ScalarNitscheBC: diffusion_coeff must not contain test/trial functions");
+        }
+    }
+
     int boundary_marker_{-1};
     FormExpr value_{};
     FormExpr diffusion_coeff_{};
     Real penalty_gamma_{10.0};
     bool symmetric_{true};
     bool scale_with_p_{true};
+    std::optional<ExteriorBoundaryMeasure>
+        exterior_boundary_measure_{};
 };
 
 /**
@@ -141,12 +195,37 @@ private:
  */
 class TraceNitscheBC final : public BoundaryCondition {
 public:
-    TraceNitscheBC(int boundary_marker,
+    TraceNitscheBC(ExteriorBoundaryMeasure measure,
                    FormExpr value,
                    FormExpr consistency_flux,
                    FormExpr adjoint_flux,
                    FormExpr penalty_weight,
                    ScalarTraceOperator trace_operator = ScalarTraceOperator::NormalComponent,
+                   Real penalty_gamma = 10.0,
+                   bool symmetric = true,
+                   bool scale_with_p = true)
+        : boundary_marker_(
+              measure.physicalBoundaryMarker())
+        , value_(std::move(value))
+        , consistency_flux_(std::move(consistency_flux))
+        , adjoint_flux_(std::move(adjoint_flux))
+        , penalty_weight_(std::move(penalty_weight))
+        , trace_operator_(trace_operator)
+        , penalty_gamma_(penalty_gamma)
+        , symmetric_(symmetric)
+        , scale_with_p_(scale_with_p)
+        , exterior_boundary_measure_(measure)
+    {
+        validate();
+    }
+
+    TraceNitscheBC(int boundary_marker,
+                   FormExpr value,
+                   FormExpr consistency_flux,
+                   FormExpr adjoint_flux,
+                   FormExpr penalty_weight,
+                   ScalarTraceOperator trace_operator =
+                       ScalarTraceOperator::NormalComponent,
                    Real penalty_gamma = 10.0,
                    bool symmetric = true,
                    bool scale_with_p = true)
@@ -160,30 +239,7 @@ public:
         , symmetric_(symmetric)
         , scale_with_p_(scale_with_p)
     {
-        if (boundary_marker_ < 0) {
-            throw std::invalid_argument("TraceNitscheBC: boundary_marker must be >= 0");
-        }
-        if (!value_.isValid()) {
-            throw std::invalid_argument("TraceNitscheBC: invalid value expression");
-        }
-        if (!consistency_flux_.isValid()) {
-            throw std::invalid_argument("TraceNitscheBC: invalid consistency flux expression");
-        }
-        if (!adjoint_flux_.isValid()) {
-            throw std::invalid_argument("TraceNitscheBC: invalid adjoint flux expression");
-        }
-        if (!penalty_weight_.isValid()) {
-            throw std::invalid_argument("TraceNitscheBC: invalid penalty weight expression");
-        }
-        if (!(penalty_gamma_ > Real(0.0))) {
-            throw std::invalid_argument("TraceNitscheBC: penalty_gamma must be > 0");
-        }
-        if (value_.hasTest() || value_.hasTrial()) {
-            throw std::invalid_argument("TraceNitscheBC: value must not contain test/trial functions");
-        }
-        if (penalty_weight_.hasTest() || penalty_weight_.hasTrial()) {
-            throw std::invalid_argument("TraceNitscheBC: penalty weight must not contain test/trial functions");
-        }
+        validate();
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
@@ -198,16 +254,30 @@ public:
                                   : NitscheVariant::Unsymmetric;
         opts.scale_with_p = scale_with_p_;
 
-        residual = applyTraceNitsche(std::move(residual),
-                                     u,
-                                     v,
-                                     boundary_marker_,
-                                     value_,
-                                     consistency_flux_,
-                                     adjoint_flux_,
-                                     penalty_weight_,
-                                     trace_operator_,
-                                     opts);
+        residual =
+            exterior_boundary_measure_.has_value()
+                ? applyTraceNitsche(
+                      std::move(residual),
+                      u,
+                      v,
+                      *exterior_boundary_measure_,
+                      value_,
+                      consistency_flux_,
+                      adjoint_flux_,
+                      penalty_weight_,
+                      trace_operator_,
+                      opts)
+                : applyTraceNitsche(
+                      std::move(residual),
+                      u,
+                      v,
+                      boundary_marker_,
+                      value_,
+                      consistency_flux_,
+                      adjoint_flux_,
+                      penalty_weight_,
+                      trace_operator_,
+                      opts);
     }
 
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
@@ -237,12 +307,52 @@ public:
         nitsche.adjoint_consistency_terms_present = symmetric_;
         nitsche.rhs_consistency_terms_present = true;
         nitsche.penalty_positive = penalty_gamma_ > Real(0.0);
-        nitsche.penalty_scaling_verified = scale_with_p_;
+        nitsche.penalty_scaling_verified =
+            scale_with_p_ &&
+            (!exterior_boundary_measure_.has_value() ||
+             exterior_boundary_measure_->isFullPhysical());
         d.nitsche = nitsche;
         return {d};
     }
 
 private:
+    void validate() const
+    {
+        if (boundary_marker_ < 0) {
+            throw std::invalid_argument(
+                "TraceNitscheBC: boundary_marker must be >= 0");
+        }
+        if (!value_.isValid()) {
+            throw std::invalid_argument(
+                "TraceNitscheBC: invalid value expression");
+        }
+        if (!consistency_flux_.isValid()) {
+            throw std::invalid_argument(
+                "TraceNitscheBC: invalid consistency flux expression");
+        }
+        if (!adjoint_flux_.isValid()) {
+            throw std::invalid_argument(
+                "TraceNitscheBC: invalid adjoint flux expression");
+        }
+        if (!penalty_weight_.isValid()) {
+            throw std::invalid_argument(
+                "TraceNitscheBC: invalid penalty weight expression");
+        }
+        if (!(penalty_gamma_ > Real(0.0))) {
+            throw std::invalid_argument(
+                "TraceNitscheBC: penalty_gamma must be > 0");
+        }
+        if (value_.hasTest() || value_.hasTrial()) {
+            throw std::invalid_argument(
+                "TraceNitscheBC: value must not contain test/trial functions");
+        }
+        if (penalty_weight_.hasTest() ||
+            penalty_weight_.hasTrial()) {
+            throw std::invalid_argument(
+                "TraceNitscheBC: penalty weight must not contain test/trial functions");
+        }
+    }
+
     int boundary_marker_{-1};
     FormExpr value_{};
     FormExpr consistency_flux_{};
@@ -252,6 +362,8 @@ private:
     Real penalty_gamma_{10.0};
     bool symmetric_{true};
     bool scale_with_p_{true};
+    std::optional<ExteriorBoundaryMeasure>
+        exterior_boundary_measure_{};
 };
 
 /**

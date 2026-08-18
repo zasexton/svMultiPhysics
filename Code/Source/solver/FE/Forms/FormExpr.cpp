@@ -1945,21 +1945,48 @@ public:
 
 class BoundaryIntegralNode final : public UnaryNode {
 public:
-    BoundaryIntegralNode(std::shared_ptr<FormExprNode> child, int boundary_marker)
-        : UnaryNode(std::move(child)), boundary_marker_(boundary_marker)
+    BoundaryIntegralNode(
+        std::shared_ptr<FormExprNode> child,
+        int boundary_marker,
+        std::optional<ExteriorBoundaryMeasure>
+            exterior_boundary_measure = std::nullopt)
+        : UnaryNode(std::move(child))
+        , boundary_marker_(boundary_marker)
+        , exterior_boundary_measure_(
+              std::move(exterior_boundary_measure))
     {
+        if (exterior_boundary_measure_.has_value() &&
+            (!exterior_boundary_measure_->isFullPhysical() ||
+             exterior_boundary_measure_->physicalBoundaryMarker() !=
+                 boundary_marker_)) {
+            throw std::invalid_argument(
+                "BoundaryIntegralNode: explicit exterior-boundary measure does not match the boundary node");
+        }
     }
 
     [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::BoundaryIntegral; }
     [[nodiscard]] std::string toString() const override {
         std::string marker_str = boundary_marker_ >= 0 ? std::to_string(boundary_marker_) : "all";
+        if (exterior_boundary_measure_.has_value()) {
+            return "integral_exterior_full_" + marker_str + "(" +
+                   child_->toString() + ")";
+        }
         return "integral_Gamma_" + marker_str + "(" + child_->toString() + ") ds";
     }
 
     [[nodiscard]] std::optional<int> boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] const ExteriorBoundaryMeasure*
+    exteriorBoundaryMeasure() const override
+    {
+        return exterior_boundary_measure_.has_value()
+                   ? &*exterior_boundary_measure_
+                   : nullptr;
+    }
 
 private:
     int boundary_marker_{-1};
+    std::optional<ExteriorBoundaryMeasure>
+        exterior_boundary_measure_{};
 };
 
 class InteriorFaceIntegralNode final : public UnaryNode {
@@ -1987,21 +2014,54 @@ private:
 
 class InterfaceIntegralNode final : public UnaryNode {
 public:
-    InterfaceIntegralNode(std::shared_ptr<FormExprNode> child, int interface_marker)
-        : UnaryNode(std::move(child)), interface_marker_(interface_marker)
+    InterfaceIntegralNode(
+        std::shared_ptr<FormExprNode> child,
+        int interface_marker,
+        std::optional<ExteriorBoundaryMeasure>
+            exterior_boundary_measure = std::nullopt)
+        : UnaryNode(std::move(child))
+        , interface_marker_(interface_marker)
+        , exterior_boundary_measure_(
+              std::move(exterior_boundary_measure))
     {
+        if (exterior_boundary_measure_.has_value() &&
+            (!exterior_boundary_measure_
+                  ->isGeneratedActiveSubset() ||
+             exterior_boundary_measure_
+                     ->generatedActiveBoundaryMarker() !=
+                 interface_marker_)) {
+            throw std::invalid_argument(
+                "InterfaceIntegralNode: explicit exterior-boundary measure does not match the interface node");
+        }
     }
 
     [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::InterfaceIntegral; }
     [[nodiscard]] std::string toString() const override {
         std::string marker_str = interface_marker_ >= 0 ? std::to_string(interface_marker_) : "all";
+        if (exterior_boundary_measure_.has_value()) {
+            return "integral_exterior_active_" +
+                   std::to_string(
+                       exterior_boundary_measure_
+                           ->physicalBoundaryMarker()) +
+                   "_via_" + marker_str + "(" +
+                   child_->toString() + ")";
+        }
         return "integral_I_" + marker_str + "(" + child_->toString() + ") dI";
     }
 
     [[nodiscard]] std::optional<int> interfaceMarker() const override { return interface_marker_; }
+    [[nodiscard]] const ExteriorBoundaryMeasure*
+    exteriorBoundaryMeasure() const override
+    {
+        return exterior_boundary_measure_.has_value()
+                   ? &*exterior_boundary_measure_
+                   : nullptr;
+    }
 
 private:
     int interface_marker_{-1};
+    std::optional<ExteriorBoundaryMeasure>
+        exterior_boundary_measure_{};
 };
 
 class CutVolumeIntegralNode final : public UnaryNode {
@@ -3260,6 +3320,24 @@ FormExpr FormExpr::dI(int interface_marker) const
     return FormExpr(std::make_shared<InterfaceIntegralNode>(node_, interface_marker));
 }
 
+FormExpr FormExpr::dExteriorBoundary(
+    const ExteriorBoundaryMeasure& measure) const
+{
+    if (!node_) {
+        return {};
+    }
+    if (measure.isFullPhysical()) {
+        return FormExpr(std::make_shared<BoundaryIntegralNode>(
+            node_,
+            measure.physicalBoundaryMarker(),
+            measure));
+    }
+    return FormExpr(std::make_shared<InterfaceIntegralNode>(
+        node_,
+        measure.generatedActiveBoundaryMarker(),
+        measure));
+}
+
 FormExpr FormExpr::dCutVolume(int interface_marker, CutVolumeSide side) const
 {
     if (!node_) return {};
@@ -3435,7 +3513,15 @@ std::shared_ptr<FormExprNode> transformNodeShared(
         case FormExprType::CellIntegral: return std::make_shared<CellIntegralNode>(new_kids[0]);
         case FormExprType::BoundaryIntegral: {
             const int marker = node->boundaryMarker().value_or(-1);
-            return std::make_shared<BoundaryIntegralNode>(new_kids[0], marker);
+            const auto* exterior =
+                node->exteriorBoundaryMeasure();
+            return std::make_shared<BoundaryIntegralNode>(
+                new_kids[0],
+                marker,
+                exterior == nullptr
+                    ? std::optional<ExteriorBoundaryMeasure>{}
+                    : std::optional<ExteriorBoundaryMeasure>{
+                          *exterior});
         }
         case FormExprType::InteriorFaceIntegral: {
             const int marker = node->interfaceMarker().value_or(-1);
@@ -3443,7 +3529,15 @@ std::shared_ptr<FormExprNode> transformNodeShared(
         }
         case FormExprType::InterfaceIntegral: {
             const int marker = node->interfaceMarker().value_or(-1);
-            return std::make_shared<InterfaceIntegralNode>(new_kids[0], marker);
+            const auto* exterior =
+                node->exteriorBoundaryMeasure();
+            return std::make_shared<InterfaceIntegralNode>(
+                new_kids[0],
+                marker,
+                exterior == nullptr
+                    ? std::optional<ExteriorBoundaryMeasure>{}
+                    : std::optional<ExteriorBoundaryMeasure>{
+                          *exterior});
         }
         case FormExprType::CutVolumeIntegral: {
             const int marker = node->interfaceMarker().value_or(-1);

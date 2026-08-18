@@ -485,7 +485,7 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
 
   std::ostringstream out;
   out.imbue(std::locale::classic());
-  out << "{\"artifact_schema_version\":1"
+  out << "{\"artifact_schema_version\":2"
       << ",\"component\":\"level_set_transport\""
       << ",\"capability_label\":"
       << json_string(
@@ -543,6 +543,10 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << ",\"impermeable_normal_velocity_tolerance\":"
       << json_real(options.conservative_phase
                        .impermeable_normal_velocity_tolerance)
+      << ",\"pointwise_impermeable_velocity_tolerance_explicitly_requested\":"
+      << json_bool(options.conservative_phase
+                       .pointwise_impermeable_velocity_tolerance_explicitly_requested)
+      << ",\"pointwise_impermeable_velocity_contract\":\"unsupported_fail_closed_when_explicit\""
       << ",\"reconcile_geometry\":"
       << json_bool(options.conservative_phase.reconcile_geometry)
       << ",\"geometry_measure_tolerance\":"
@@ -552,7 +556,9 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << ",\"maximum_geometry_displacement_fraction\":"
       << json_real(options.conservative_phase
                        .maximum_geometry_displacement_fraction)
-      << ",\"boundary_flux_policy\":\"closed_boundary_only\""
+      << ",\"boundary_flux_policy\":\"closed_domain_discrete_q_flux_only\""
+      << ",\"boundary_flux_tolerance_source\":\"invariant_tolerance\""
+      << ",\"boundary_flux_blind_where_q_zero\":true"
       << ",\"newton_policy\":\"held_at_previous_accepted_endpoint\"}"
       << ",\"advection_velocity\":{\"field\":"
       << json_string(options.velocity.field_name)
@@ -1353,6 +1359,8 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
            "ConservativePhaseImpermeableNormalVelocityTolerance"},
           "Conservative_phase_impermeable_normal_velocity_tolerance")) {
     options.conservative_phase.impermeable_normal_velocity_tolerance = *value;
+    options.conservative_phase
+        .pointwise_impermeable_velocity_tolerance_explicitly_requested = true;
   }
   if (const auto value = get_defined_bool(
           params,
@@ -1860,6 +1868,13 @@ create_level_set_transport_from_input(const svmp::Physics::EquationModuleInput& 
     apply_level_set_params(input.domains.front().params, options);
   }
   apply_level_set_bcs(input, options);
+
+  if (options.conservative_phase.enabled &&
+      options.conservative_phase
+          .pointwise_impermeable_velocity_tolerance_explicitly_requested) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Conservative_phase_impermeable_normal_velocity_tolerance requests a pointwise velocity-normal wall contract that the current conservative-phase split does not implement; the supported closed-domain gate enforces only discrete q-flux at invariant_tolerance and can be blind where q=0.");
+  }
 
   const bool wet_extension_enabled =
       get_defined_bool(

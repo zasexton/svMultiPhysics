@@ -763,6 +763,45 @@ TEST(CouplingFormBuilder, LowersRegionKindsToFormsMeasures)
     EXPECT_EQ(shared_region.side, CouplingInterfaceSide::Minus);
 }
 
+TEST(CouplingFormBuilder, PublishesExplicitExteriorBoundarySelection)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+    const auto integrand =
+        builder.state("participant", "primary", "u") *
+        builder.test("participant", "primary", "w");
+    const auto full =
+        forms::ExteriorBoundaryMeasure::fullPhysical(12);
+    const auto active =
+        forms::ExteriorBoundaryMeasure::generatedActiveSubset(12, 112);
+
+    const auto full_integral =
+        builder.integrate(integrand, "participant", "surface", full);
+    ASSERT_TRUE(full_integral.isValid());
+    ASSERT_NE(full_integral.node()->exteriorBoundaryMeasure(), nullptr);
+    EXPECT_EQ(*full_integral.node()->exteriorBoundaryMeasure(), full);
+
+    const auto active_integral =
+        builder.integrate(
+            integrand,
+            builder.region("participant", "surface"),
+            active);
+    ASSERT_TRUE(active_integral.isValid());
+    ASSERT_NE(active_integral.node()->exteriorBoundaryMeasure(), nullptr);
+    EXPECT_EQ(*active_integral.node()->exteriorBoundaryMeasure(), active);
+    EXPECT_THROW(
+        static_cast<void>(builder.integrate(
+            integrand,
+            "participant",
+            "surface",
+            forms::ExteriorBoundaryMeasure::fullPhysical(13))),
+        InvalidArgumentException);
+    EXPECT_THROW(
+        static_cast<void>(
+            builder.integrate(integrand, "participant", "volume", full)),
+        InvalidArgumentException);
+}
+
 TEST(CouplingFormBuilder, BuildsSharedInterfaceViewsThroughFormsVocabulary)
 {
     const auto context = makeBuilderContext();

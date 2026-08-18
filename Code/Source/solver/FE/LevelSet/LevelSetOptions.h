@@ -166,6 +166,9 @@ struct LevelSetVolumeCorrectionOptions {
 };
 
 struct LevelSetInflowBoundary {
+    // The transported level set is defined on the background space, so this
+    // condition intentionally covers the complete physical inlet. It is not
+    // a liquid-only generated-active boundary condition.
     int boundary_marker{-1};
     ScalarValue value{0.0};
     Real penalty_scale{1.0};
@@ -206,6 +209,10 @@ struct LevelSetConservativePhaseOptions {
     bool classify_nonprimary_components_as_satellites{false};
     std::vector<LevelSetPhaseRegionBox> fixed_flux_regions{};
     Real impermeable_normal_velocity_tolerance{1.0e-10};
+    // The current conservative split does not implement a pointwise u.n wall
+    // check. Translators retain this bit so an explicit legacy request can
+    // fail closed instead of silently treating the value as an active policy.
+    bool pointwise_impermeable_velocity_tolerance_explicitly_requested{false};
     bool reconcile_geometry{true};
     Real geometry_measure_tolerance{1.0e-10};
     int geometry_correction_max_iterations{50};

@@ -1,0 +1,91 @@
+{
+  "description": "Elastic pipe FSI test meshes generated with PyVista and TetGen.",
+  "layout": {
+    "fluid": "lumen volume mesh",
+    "solid": "elastic wall volume mesh"
+  },
+  "surface_ids": {
+    "fluid": {
+      "fsi_interface": 3,
+      "inlet": 1,
+      "outlet": 2
+    },
+    "solid": {
+      "fsi_interface": 3,
+      "outer_wall": 4,
+      "solid_inlet": 1,
+      "solid_outlet": 2
+    }
+  },
+  "variants": {
+    "coarse": {
+      "geometry": {
+        "axial_segments": 4,
+        "circumferential_segments": 16,
+        "inner_radius": 0.4,
+        "length": 2.0,
+        "outer_radius": 0.52
+      },
+      "mesh_controls": {
+        "fluid_radial_segments": 4,
+        "solid_max_volume": 0.02
+      },
+      "participants": {
+        "fluid": {
+          "points": 325,
+          "surfaces": {
+            "fsi_interface": 128,
+            "inlet": 112,
+            "outlet": 112
+          },
+          "tetrahedra": 1344
+        },
+        "solid": {
+          "points": 160,
+          "surfaces": {
+            "fsi_interface": 128,
+            "outer_wall": 128,
+            "solid_inlet": 32,
+            "solid_outlet": 32
+          },
+          "tetrahedra": 391
+        }
+      },
+      "solver_input": "solver.xml"
+    },
+    "refined": {
+      "geometry": {
+        "axial_segments": 8,
+        "circumferential_segments": 24,
+        "inner_radius": 0.4,
+        "length": 2.0,
+        "outer_radius": 0.52
+      },
+      "mesh_controls": {
+        "fluid_radial_segments": 5,
+        "solid_max_volume": 0.008
+      },
+      "participants": {
+        "fluid": {
+          "points": 1089,
+          "surfaces": {
+            "fsi_interface": 384,
+            "inlet": 216,
+            "outlet": 216
+          },
+          "tetrahedra": 5184
+        },
+        "solid": {
+          "points": 432,
+          "surfaces": {
+            "fsi_interface": 384,
+            "outer_wall": 384,
+            "solid_inlet": 48,
+            "solid_outlet": 48
+          },
+          "tetrahedra": 1163
+        }
+      }
+    }
+  }
+}

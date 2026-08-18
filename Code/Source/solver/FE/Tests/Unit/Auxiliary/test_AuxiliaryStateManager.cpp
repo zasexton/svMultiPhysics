@@ -474,6 +474,46 @@ TEST(AuxiliaryStateManager, GhostSyncHookCalledForOwnedAndGhost)
     EXPECT_TRUE(hook_called);
 }
 
+TEST(AuxiliaryStateManager, GhostSyncRouteSignatureTracksOrderAndHookPresence)
+{
+    AuxiliaryStateManager first;
+    AuxiliaryStateManager same_route;
+
+    auto local = makeSpec(
+        "local", 1, AuxiliaryStateScope::Cell);
+    local.sync_policy = AuxiliarySyncPolicy::None;
+    first.registerBlock(local, 3);
+    const auto empty_route =
+        first.ghostSyncRouteSignature();
+    EXPECT_EQ(empty_route[0], 0u);
+
+    auto ghosted = makeSpec(
+        "ghosted", 1, AuxiliaryStateScope::Node);
+    ghosted.sync_policy =
+        AuxiliarySyncPolicy::OwnedAndGhost;
+    first.registerBlock(ghosted, 4);
+    same_route.registerBlock(ghosted, 9);
+    EXPECT_EQ(first.ghostSyncRouteSignature(),
+              same_route.ghostSyncRouteSignature());
+    EXPECT_EQ(first.ghostSyncRouteSignature()[0], 1u);
+
+    same_route.setGhostSyncHook(
+        "ghosted",
+        [](std::string_view, std::span<Real>) {});
+    EXPECT_NE(first.ghostSyncRouteSignature(),
+              same_route.ghostSyncRouteSignature());
+
+    auto second_ghosted = ghosted;
+    second_ghosted.name = "second";
+    first.registerBlock(second_ghosted, 2);
+
+    AuxiliaryStateManager reversed;
+    reversed.registerBlock(second_ghosted, 2);
+    reversed.registerBlock(ghosted, 4);
+    EXPECT_NE(first.ghostSyncRouteSignature(),
+              reversed.ghostSyncRouteSignature());
+}
+
 TEST(AuxiliaryStateManager, GhostSyncSkippedForNonePolicy)
 {
     AuxiliaryStateManager mgr;

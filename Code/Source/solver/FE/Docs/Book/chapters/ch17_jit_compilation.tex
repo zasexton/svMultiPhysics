@@ -1,0 +1,36 @@
+% =============================================================================
+\chapter{JIT Compilation with LLVM}
+\label{ch:jit}
+% =============================================================================
+
+\section{Motivation for JIT compilation}
+\label{sec:jit:motivation}
+
+% Eliminating interpreter overhead, enabling hardware-specific optimization
+
+\section{LLVM code generation}
+\label{sec:jit:llvm}
+
+% LLVMGen: translating KernelIR to LLVM IR
+% Function signatures, memory layout, side arguments
+
+\section{Loop unrolling policies}
+\label{sec:jit:unrolling}
+
+% Three-level policy: Full, RollDof, RollQpAndDof
+% L1i budget-aware code size control
+
+\section{Trial-only caching}
+\label{sec:jit:trialcache}
+
+% Loop reordering for trial-dependent intermediate values
+
+\section{JIT engine and caching}
+\label{sec:jit:engine}
+
+% ORC JIT, disk caching, warm start
+
+\section{Performance characteristics}
+\label{sec:jit:performance}
+
+% Code size vs. instruction cache pressure, LLVM optimization levels

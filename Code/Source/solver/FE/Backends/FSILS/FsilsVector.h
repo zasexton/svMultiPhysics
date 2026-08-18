@@ -41,6 +41,11 @@ public:
     [[nodiscard]] Real norm() const override;
 
     void updateGhosts() override;
+    [[nodiscard]] bool ghostUpdateRequiresCollectiveParticipation()
+        const noexcept override
+    {
+        return shared_ != nullptr && shared_->lhs.commu.nTasks != 1;
+    }
 
     /**
      * @brief Accumulate a raw contribution buffer and refresh ghost entries.
@@ -52,9 +57,12 @@ public:
     void accumulateRawContributionsAndUpdateGhosts();
 
     [[nodiscard]] std::unique_ptr<assembly::GlobalSystemView> createAssemblyView() override;
+    [[nodiscard]] std::unique_ptr<assembly::GlobalSystemView>
+    createGhostedReadView() override;
 
     [[nodiscard]] std::span<Real> localSpan() override;
     [[nodiscard]] std::span<const Real> localSpan() const override;
+    [[nodiscard]] std::vector<GlobalIndex> ownedGlobalRows() const override;
 
     [[nodiscard]] const FsilsShared* shared() const noexcept { return shared_.get(); }
     [[nodiscard]] bool usesOwnedRowLayout() const noexcept;

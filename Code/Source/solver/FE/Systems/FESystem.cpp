@@ -33,6 +33,7 @@
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/CutIntegrationContext.h"
 #include "Assembly/GlobalSystemView.h"
+#include "Assembly/TimeIntegrationContext.h"
 
 #include "Backends/Interfaces/GenericVector.h"
 #include "Backends/Interfaces/DofPermutation.h"
@@ -45,6 +46,9 @@
 #include "Geometry/MappingFactory.h"
 
 #include "Forms/FormCompiler.h"
+#include "Forms/BoundaryConditions.h"
+#include "Forms/Vocabulary.h"
+#include "Forms/JIT/JITValidation.h"
 #include "Forms/FormKernels.h"
 #include "Forms/MixedBlockKernelSet.h"
 #include "Forms/MonolithicCellKernel.h"
@@ -65,6 +69,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -74,6 +79,7 @@
 #include <map>
 #include <numeric>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string_view>
 #include <tuple>
@@ -164,6 +170,2189 @@ void coordinateFinalizedReportLocalFailure(
         "FESystem: diagnostic=distributed_constraint_phase_failure phase='" +
         std::string(phase) +
         "' another communicator rank rejected finalized report storage");
+}
+
+void coordinateExteriorBoundaryMeasureLocalFailure(
+    const FESystem& system,
+    const std::exception_ptr& local_exception,
+    std::string_view phase,
+    bool use_dof_handler_communicator = false)
+{
+    static_cast<void>(system);
+    bool any_failed = local_exception != nullptr;
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0) {
+        const auto communicator =
+            use_dof_handler_communicator
+                ? system.dofHandler().mpiComm()
+                : system.activeMpiCommunicator();
+        if (communicator != MPI_COMM_NULL) {
+            int world_size = 1;
+            MPI_Comm_size(communicator, &world_size);
+            if (world_size > 1) {
+                const int local_ok =
+                    local_exception == nullptr ? 1 : 0;
+                int all_ok = 0;
+                const auto sequence =
+                    debug::nextMpiCollectiveTraceSeq();
+                debug::traceMpiCollective(
+                    "before",
+                    sequence,
+                    "FESystem::coordinateExteriorBoundaryMeasureLocalFailure",
+                    1,
+                    MPI_INT,
+                    MPI_MIN,
+                    communicator);
+                MPI_Allreduce(
+                    &local_ok,
+                    &all_ok,
+                    1,
+                    MPI_INT,
+                    MPI_MIN,
+                    communicator);
+                debug::traceMpiCollective(
+                    "after",
+                    sequence,
+                    "FESystem::coordinateExteriorBoundaryMeasureLocalFailure",
+                    1,
+                    MPI_INT,
+                    MPI_MIN,
+                    communicator);
+                any_failed = all_ok == 0;
+            }
+        }
+    }
+#endif
+    if (!any_failed) {
+        return;
+    }
+    if (local_exception != nullptr) {
+        std::rethrow_exception(local_exception);
+    }
+    throw std::runtime_error(
+        "FESystem: diagnostic=distributed_exterior_boundary_measure_failure "
+        "phase='" +
+        std::string(phase) +
+        "' another communicator rank rejected its local boundary provenance");
+}
+
+void coordinateAuxiliaryInputEvaluationLocalFailure(
+    const FESystem& system,
+    const std::exception_ptr& local_exception,
+    std::string_view phase)
+{
+    bool any_failed = local_exception != nullptr;
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0) {
+        const auto communicator = system.activeMpiCommunicator();
+        if (communicator != MPI_COMM_NULL) {
+            int communicator_size = 1;
+            MPI_Comm_size(communicator, &communicator_size);
+            if (communicator_size > 1) {
+                const int local_ok = local_exception == nullptr ? 1 : 0;
+                int all_ok = 0;
+                const auto sequence = debug::nextMpiCollectiveTraceSeq();
+                debug::traceMpiCollective(
+                    "before",
+                    sequence,
+                    "FESystem::coordinateAuxiliaryInputEvaluationLocalFailure",
+                    1,
+                    MPI_INT,
+                    MPI_MIN,
+                    communicator);
+                MPI_Allreduce(
+                    &local_ok,
+                    &all_ok,
+                    1,
+                    MPI_INT,
+                    MPI_MIN,
+                    communicator);
+                debug::traceMpiCollective(
+                    "after",
+                    sequence,
+                    "FESystem::coordinateAuxiliaryInputEvaluationLocalFailure",
+                    1,
+                    MPI_INT,
+                    MPI_MIN,
+                    communicator);
+                any_failed = all_ok == 0;
+            }
+        }
+    }
+#else
+    static_cast<void>(system);
+#endif
+    if (!any_failed) {
+        return;
+    }
+    if (local_exception != nullptr) {
+        std::rethrow_exception(local_exception);
+    }
+    throw std::runtime_error(
+        "FESystem: diagnostic=distributed_auxiliary_input_evaluation_failure "
+        "phase='" +
+        std::string(phase) +
+        "' another communicator rank rejected the evaluation phase");
+}
+
+void coordinatePartitionedAuxiliaryLocalFailure(
+    const FESystem& system,
+    const std::exception_ptr& local_exception,
+    std::string_view phase)
+{
+    bool any_failed = local_exception != nullptr;
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0) {
+        const auto communicator = system.activeMpiCommunicator();
+        if (communicator != MPI_COMM_NULL) {
+            int communicator_size = 1;
+            MPI_Comm_size(communicator, &communicator_size);
+            if (communicator_size > 1) {
+                const int local_ok =
+                    local_exception == nullptr ? 1 : 0;
+                int all_ok = 0;
+                const auto sequence =
+                    debug::nextMpiCollectiveTraceSeq();
+                debug::traceMpiCollective(
+                    "before",
+                    sequence,
+                    "FESystem::coordinatePartitionedAuxiliaryLocalFailure",
+                    1,
+                    MPI_INT,
+                    MPI_MIN,
+                    communicator);
+                MPI_Allreduce(
+                    &local_ok,
+                    &all_ok,
+                    1,
+                    MPI_INT,
+                    MPI_MIN,
+                    communicator);
+                debug::traceMpiCollective(
+                    "after",
+                    sequence,
+                    "FESystem::coordinatePartitionedAuxiliaryLocalFailure",
+                    1,
+                    MPI_INT,
+                    MPI_MIN,
+                    communicator);
+                any_failed = all_ok == 0;
+            }
+        }
+    }
+#else
+    static_cast<void>(system);
+#endif
+    if (!any_failed) {
+        return;
+    }
+    if (local_exception != nullptr) {
+        std::rethrow_exception(local_exception);
+    }
+    throw std::runtime_error(
+        "FESystem: diagnostic=distributed_partitioned_auxiliary_failure "
+        "phase='" +
+        std::string(phase) +
+        "' another communicator rank rejected its local auxiliary phase");
+}
+
+void requireConsistentPartitionedAuxiliaryRoute(
+    const FESystem& system,
+    bool has_state_manager,
+    bool has_partitioned_block,
+    bool has_multirate_block,
+    bool use_multirate_route)
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized == 0 || finalized != 0) {
+        return;
+    }
+    const auto communicator = system.activeMpiCommunicator();
+    if (communicator == MPI_COMM_NULL) {
+        return;
+    }
+    int communicator_size = 1;
+    MPI_Comm_size(communicator, &communicator_size);
+    if (communicator_size <= 1) {
+        return;
+    }
+
+    const std::array<int, 4> local{{
+        has_state_manager ? 1 : 0,
+        has_partitioned_block ? 1 : 0,
+        has_multirate_block ? 1 : 0,
+        use_multirate_route ? 1 : 0,
+    }};
+    std::array<int, 4> minimum{};
+    std::array<int, 4> maximum{};
+    const auto reduce =
+        [&](std::array<int, 4>& result, MPI_Op operation) {
+            const auto sequence =
+                debug::nextMpiCollectiveTraceSeq();
+            debug::traceMpiCollective(
+                "before",
+                sequence,
+                "FESystem::requireConsistentPartitionedAuxiliaryRoute",
+                static_cast<int>(local.size()),
+                MPI_INT,
+                operation,
+                communicator);
+            MPI_Allreduce(
+                local.data(),
+                result.data(),
+                static_cast<int>(local.size()),
+                MPI_INT,
+                operation,
+                communicator);
+            debug::traceMpiCollective(
+                "after",
+                sequence,
+                "FESystem::requireConsistentPartitionedAuxiliaryRoute",
+                static_cast<int>(local.size()),
+                MPI_INT,
+                operation,
+                communicator);
+        };
+    reduce(minimum, MPI_MIN);
+    reduce(maximum, MPI_MAX);
+    FE_THROW_IF(
+        minimum != maximum,
+        InvalidStateException,
+        "FESystem::advanceAuxiliaryState: state-manager presence or "
+        "partitioned advancement route differs across communicator ranks");
+#else
+    static_cast<void>(system);
+    static_cast<void>(has_state_manager);
+    static_cast<void>(has_partitioned_block);
+    static_cast<void>(has_multirate_block);
+    static_cast<void>(use_multirate_route);
+#endif
+}
+
+void requireConsistentPartitionedAuxiliaryPhaseDecision(
+    const FESystem& system,
+    bool local_decision,
+    std::string_view phase)
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized == 0 || finalized != 0) {
+        return;
+    }
+    const auto communicator = system.activeMpiCommunicator();
+    if (communicator == MPI_COMM_NULL) {
+        return;
+    }
+    int communicator_size = 1;
+    MPI_Comm_size(communicator, &communicator_size);
+    if (communicator_size <= 1) {
+        return;
+    }
+
+    const int local = local_decision ? 1 : 0;
+    int minimum = local;
+    int maximum = local;
+    auto sequence = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective(
+        "before",
+        sequence,
+        "FESystem::requireConsistentPartitionedAuxiliaryPhaseDecision.min",
+        1,
+        MPI_INT,
+        MPI_MIN,
+        communicator);
+    MPI_Allreduce(
+        &local,
+        &minimum,
+        1,
+        MPI_INT,
+        MPI_MIN,
+        communicator);
+    debug::traceMpiCollective(
+        "after",
+        sequence,
+        "FESystem::requireConsistentPartitionedAuxiliaryPhaseDecision.min",
+        1,
+        MPI_INT,
+        MPI_MIN,
+        communicator);
+
+    sequence = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective(
+        "before",
+        sequence,
+        "FESystem::requireConsistentPartitionedAuxiliaryPhaseDecision.max",
+        1,
+        MPI_INT,
+        MPI_MAX,
+        communicator);
+    MPI_Allreduce(
+        &local,
+        &maximum,
+        1,
+        MPI_INT,
+        MPI_MAX,
+        communicator);
+    debug::traceMpiCollective(
+        "after",
+        sequence,
+        "FESystem::requireConsistentPartitionedAuxiliaryPhaseDecision.max",
+        1,
+        MPI_INT,
+        MPI_MAX,
+        communicator);
+
+    FE_THROW_IF(
+        minimum != maximum,
+        InvalidStateException,
+        "FESystem: partitioned auxiliary decision differs across ranks "
+        "during phase '" +
+            std::string(phase) + "'");
+#else
+    static_cast<void>(system);
+    static_cast<void>(local_decision);
+    static_cast<void>(phase);
+#endif
+}
+
+void requireConsistentPartitionedAuxiliaryPhaseShape(
+    const FESystem& system,
+    const std::array<std::uint64_t, 2>& local_shape,
+    std::string_view phase)
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized == 0 || finalized != 0) {
+        return;
+    }
+    const auto communicator = system.activeMpiCommunicator();
+    if (communicator == MPI_COMM_NULL) {
+        return;
+    }
+    int communicator_size = 1;
+    MPI_Comm_size(communicator, &communicator_size);
+    if (communicator_size <= 1) {
+        return;
+    }
+
+    auto minimum = local_shape;
+    auto maximum = local_shape;
+    const auto reduce =
+        [&](auto& result, MPI_Op operation, const char* trace_name) {
+            const auto sequence =
+                debug::nextMpiCollectiveTraceSeq();
+            debug::traceMpiCollective(
+                "before",
+                sequence,
+                trace_name,
+                static_cast<int>(local_shape.size()),
+                MPI_UNSIGNED_LONG_LONG,
+                operation,
+                communicator);
+            MPI_Allreduce(
+                local_shape.data(),
+                result.data(),
+                static_cast<int>(local_shape.size()),
+                MPI_UNSIGNED_LONG_LONG,
+                operation,
+                communicator);
+            debug::traceMpiCollective(
+                "after",
+                sequence,
+                trace_name,
+                static_cast<int>(local_shape.size()),
+                MPI_UNSIGNED_LONG_LONG,
+                operation,
+                communicator);
+        };
+    reduce(
+        minimum,
+        MPI_MIN,
+        "FESystem::requireConsistentPartitionedAuxiliaryPhaseShape.min");
+    reduce(
+        maximum,
+        MPI_MAX,
+        "FESystem::requireConsistentPartitionedAuxiliaryPhaseShape.max");
+
+    FE_THROW_IF(
+        minimum != maximum,
+        InvalidStateException,
+        "FESystem: partitioned auxiliary phase shape differs across ranks "
+        "during phase '" +
+            std::string(phase) + "'");
+#else
+    static_cast<void>(system);
+    static_cast<void>(local_shape);
+    static_cast<void>(phase);
+#endif
+}
+
+void requireConsistentAuxiliaryInputRegistryPresence(
+    const FESystem& system,
+    bool local_presence,
+    std::string_view phase)
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    const auto communicator = system.activeMpiCommunicator();
+    if (initialized == 0 ||
+        finalized != 0 ||
+        communicator == MPI_COMM_NULL) {
+        return;
+    }
+    int communicator_size = 1;
+    MPI_Comm_size(communicator, &communicator_size);
+    if (communicator_size <= 1) {
+        return;
+    }
+
+    const int local_value = local_presence ? 1 : 0;
+    int minimum_value = local_value;
+    int maximum_value = local_value;
+    auto sequence = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective(
+        "before",
+        sequence,
+        "FESystem::requireConsistentAuxiliaryInputRegistryPresence.min",
+        1,
+        MPI_INT,
+        MPI_MIN,
+        communicator);
+    MPI_Allreduce(
+        &local_value,
+        &minimum_value,
+        1,
+        MPI_INT,
+        MPI_MIN,
+        communicator);
+    debug::traceMpiCollective(
+        "after",
+        sequence,
+        "FESystem::requireConsistentAuxiliaryInputRegistryPresence.min",
+        1,
+        MPI_INT,
+        MPI_MIN,
+        communicator);
+
+    sequence = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective(
+        "before",
+        sequence,
+        "FESystem::requireConsistentAuxiliaryInputRegistryPresence.max",
+        1,
+        MPI_INT,
+        MPI_MAX,
+        communicator);
+    MPI_Allreduce(
+        &local_value,
+        &maximum_value,
+        1,
+        MPI_INT,
+        MPI_MAX,
+        communicator);
+    debug::traceMpiCollective(
+        "after",
+        sequence,
+        "FESystem::requireConsistentAuxiliaryInputRegistryPresence.max",
+        1,
+        MPI_INT,
+        MPI_MAX,
+        communicator);
+
+    FE_THROW_IF(
+        minimum_value != maximum_value,
+        InvalidStateException,
+        "FESystem: auxiliary input registry presence differs across ranks "
+        "during phase '" +
+            std::string(phase) + "'");
+#else
+    static_cast<void>(system);
+    static_cast<void>(local_presence);
+    static_cast<void>(phase);
+#endif
+}
+
+struct AuxiliaryInputEvaluationPlanSignature {
+    std::array<std::uint64_t, 4> shape{};
+};
+
+[[nodiscard]] std::uint64_t canonicalAuxiliaryInputRealBits(Real value) noexcept
+{
+    double canonical = static_cast<double>(value);
+    if (canonical == 0.0) {
+        canonical = 0.0;
+    }
+    return std::bit_cast<std::uint64_t>(canonical);
+}
+
+[[nodiscard]] AuxiliaryInputEvaluationPlanSignature
+auxiliaryInputEvaluationPlanSignature(
+    const AuxiliaryInputRegistry::EvaluationPlan& plan,
+    std::string_view phase) noexcept
+{
+    std::uint64_t digest = 14695981039346656037ull;
+    constexpr std::uint64_t prime = 1099511628211ull;
+    const auto mix_byte = [&](std::uint8_t value) {
+        digest ^= value;
+        digest *= prime;
+    };
+    const auto mix_u64 = [&](std::uint64_t value) {
+        for (unsigned int byte = 0u; byte < 8u; ++byte) {
+            mix_byte(
+                static_cast<std::uint8_t>(
+                    (value >> (byte * 8u)) & std::uint64_t{0xffu}));
+        }
+    };
+    const auto mix_string = [&](std::string_view value) {
+        mix_u64(static_cast<std::uint64_t>(value.size()));
+        for (const unsigned char character : value) {
+            mix_byte(character);
+        }
+    };
+
+    mix_string(phase);
+    mix_u64(canonicalAuxiliaryInputRealBits(plan.time()));
+    mix_u64(canonicalAuxiliaryInputRealBits(plan.dt()));
+    mix_byte(plan.isNonlinearIteration() ? std::uint8_t{1u} : std::uint8_t{0u});
+
+    const auto invocations = plan.invocations();
+    mix_u64(static_cast<std::uint64_t>(invocations.size()));
+    std::uint64_t collective_count = 0;
+    for (const auto& invocation : invocations) {
+        mix_string(invocation.input_name);
+        mix_u64(static_cast<std::uint64_t>(invocation.producer));
+        mix_u64(static_cast<std::uint64_t>(invocation.update_schedule));
+        mix_byte(
+            invocation.requires_mpi_reduction
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_byte(
+            invocation.entity_callback
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        if (invocation.requires_mpi_reduction) {
+            ++collective_count;
+            mix_string(invocation.collective_route_key);
+            mix_u64(
+                static_cast<std::uint64_t>(
+                    invocation.callback_invocation_count));
+            mix_u64(
+                static_cast<std::uint64_t>(
+                    invocation.value_count));
+        }
+    }
+
+    return AuxiliaryInputEvaluationPlanSignature{
+        .shape =
+            {{
+                static_cast<std::uint64_t>(invocations.size()),
+                collective_count,
+                canonicalAuxiliaryInputRealBits(plan.time()) ^
+                    (canonicalAuxiliaryInputRealBits(plan.dt()) << 1u),
+                digest,
+            }},
+    };
+}
+
+void requireConsistentAuxiliaryInputEvaluationPlan(
+    const FESystem& system,
+    const AuxiliaryInputRegistry::EvaluationPlan& plan,
+    std::string_view phase)
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    const auto communicator = system.activeMpiCommunicator();
+    if (initialized == 0 ||
+        finalized != 0 ||
+        communicator == MPI_COMM_NULL) {
+        return;
+    }
+    int communicator_size = 1;
+    MPI_Comm_size(communicator, &communicator_size);
+    if (communicator_size <= 1) {
+        return;
+    }
+
+    const auto signature =
+        auxiliaryInputEvaluationPlanSignature(plan, phase);
+    std::array<unsigned long long, 4> local{};
+    std::array<unsigned long long, 4> minimum{};
+    std::array<unsigned long long, 4> maximum{};
+    for (std::size_t i = 0; i < signature.shape.size(); ++i) {
+        local[i] =
+            static_cast<unsigned long long>(signature.shape[i]);
+    }
+
+    auto sequence = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective(
+        "before",
+        sequence,
+        "FESystem::requireConsistentAuxiliaryInputEvaluationPlan.min",
+        static_cast<int>(local.size()),
+        MPI_UNSIGNED_LONG_LONG,
+        MPI_MIN,
+        communicator);
+    MPI_Allreduce(
+        local.data(),
+        minimum.data(),
+        static_cast<int>(local.size()),
+        MPI_UNSIGNED_LONG_LONG,
+        MPI_MIN,
+        communicator);
+    debug::traceMpiCollective(
+        "after",
+        sequence,
+        "FESystem::requireConsistentAuxiliaryInputEvaluationPlan.min",
+        static_cast<int>(local.size()),
+        MPI_UNSIGNED_LONG_LONG,
+        MPI_MIN,
+        communicator);
+
+    sequence = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective(
+        "before",
+        sequence,
+        "FESystem::requireConsistentAuxiliaryInputEvaluationPlan.max",
+        static_cast<int>(local.size()),
+        MPI_UNSIGNED_LONG_LONG,
+        MPI_MAX,
+        communicator);
+    MPI_Allreduce(
+        local.data(),
+        maximum.data(),
+        static_cast<int>(local.size()),
+        MPI_UNSIGNED_LONG_LONG,
+        MPI_MAX,
+        communicator);
+    debug::traceMpiCollective(
+        "after",
+        sequence,
+        "FESystem::requireConsistentAuxiliaryInputEvaluationPlan.max",
+        static_cast<int>(local.size()),
+        MPI_UNSIGNED_LONG_LONG,
+        MPI_MAX,
+        communicator);
+
+    FE_THROW_IF(
+        minimum != maximum,
+        InvalidStateException,
+        "FESystem: frozen auxiliary input evaluation plan differs across "
+        "ranks during phase '" +
+            std::string(phase) + "'");
+#else
+    static_cast<void>(system);
+    static_cast<void>(plan);
+    static_cast<void>(phase);
+#endif
+}
+
+struct CutIntegrationContextPublicationSignature {
+    std::array<std::uint64_t, 3> shape{};
+};
+
+CutIntegrationContextPublicationSignature
+cutIntegrationContextPublicationSignature(
+    const assembly::CutIntegrationContext* context,
+    std::span<const
+        CutIntegrationContextUpdateCallback> callbacks)
+{
+    std::uint64_t digest =
+        14695981039346656037ull;
+    constexpr std::uint64_t prime =
+        1099511628211ull;
+    const auto mix_byte =
+        [&](std::uint8_t value) {
+            digest ^= value;
+            digest *= prime;
+        };
+    const auto mix_u64 =
+        [&](std::uint64_t value) {
+            for (unsigned int byte = 0u;
+                 byte < 8u;
+                 ++byte) {
+                mix_byte(
+                    static_cast<std::uint8_t>(
+                        (value >>
+                         (byte * 8u)) &
+                        std::uint64_t{0xffu}));
+            }
+        };
+    const auto mix_signed =
+        [&](auto value) {
+            mix_u64(
+                static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(
+                        value)));
+        };
+    const auto mix_string =
+        [&](std::string_view value) {
+            mix_u64(
+                static_cast<std::uint64_t>(
+                    value.size()));
+            for (const unsigned char character :
+                 value) {
+                mix_byte(character);
+            }
+        };
+    const auto mix_real =
+        [&](Real value) {
+            double canonical =
+                static_cast<double>(value);
+            if (canonical == 0.0) {
+                canonical = 0.0;
+            }
+            mix_u64(
+                std::bit_cast<std::uint64_t>(
+                    canonical));
+        };
+    const auto mix_source =
+        [&](const interfaces::LevelSetInterfaceSource&
+                source) {
+            mix_byte(
+                static_cast<std::uint8_t>(
+                    source.kind));
+            if (source.kind ==
+                interfaces::CutInterfaceSourceKind::Field) {
+                mix_signed(source.field_id);
+            } else {
+                mix_string(source.evaluator_id);
+            }
+            // Snapshot preflight treats both source revisions as collective
+            // bindings even though the request also carries separate local
+            // mesh revision stamps.
+            mix_u64(source.layout_revision);
+            mix_u64(source.value_revision);
+        };
+    const auto mix_expected_revision_binding =
+        [&](const assembly::CutIntegrationContext&
+                cut_context,
+            int marker) {
+            const bool has_expected_revision =
+                cut_context
+                    .hasExpectedGeneratedSourceValueRevision(
+                        marker);
+            mix_byte(
+                has_expected_revision
+                    ? std::uint8_t{1u}
+                    : std::uint8_t{0u});
+            mix_u64(
+                cut_context
+                    .expectedGeneratedSourceValueRevision(
+                        marker));
+        };
+    const auto mix_snapshot_binding =
+        [&](const assembly::CutIntegrationContext&
+                cut_context,
+            int marker) {
+            const bool has_snapshot =
+                cut_context
+                    .hasFreeSurfaceGeometrySnapshotForMarker(
+                        marker);
+            mix_byte(
+                has_snapshot
+                    ? std::uint8_t{1u}
+                    : std::uint8_t{0u});
+            if (has_snapshot) {
+                mix_u64(
+                    cut_context
+                        .freeSurfaceGeometrySnapshotRevisionForMarker(
+                            marker));
+            }
+        };
+
+    mix_byte(
+        context != nullptr
+            ? std::uint8_t{1u}
+            : std::uint8_t{0u});
+    std::vector<std::pair<
+        int,
+        const assembly::
+            GeneratedLevelSetInterfacePublicationProvenance*>>
+        level_set_interface_provenance;
+    std::vector<std::pair<
+        int,
+        const assembly::
+            GeneratedInterfaceBoundaryPublicationProvenance*>>
+        interface_boundary_markers;
+    std::vector<const assembly::
+                    GeneratedActiveBoundaryProvenance*>
+        active_provenance;
+    if (context != nullptr) {
+        level_set_interface_provenance.reserve(
+            context
+                ->generatedLevelSetInterfaceMarkers()
+                .size());
+        for (const int marker :
+             context
+                 ->generatedLevelSetInterfaceMarkers()) {
+            const auto* provenance =
+                context
+                    ->findGeneratedLevelSetInterfacePublicationProvenance(
+                        marker);
+            FE_THROW_IF(
+                provenance == nullptr ||
+                    provenance
+                            ->generated_interface_marker !=
+                        marker,
+                InvalidStateException,
+                "FESystem: generated level-set interface is missing its "
+                "publication provenance");
+            level_set_interface_provenance.emplace_back(
+                marker,
+                provenance);
+        }
+        std::sort(
+            level_set_interface_provenance.begin(),
+            level_set_interface_provenance.end(),
+            [](const auto& lhs,
+               const auto& rhs) {
+                return lhs.first <
+                       rhs.first;
+            });
+        interface_boundary_markers.reserve(
+            context
+                ->generatedInterfaceMarkers()
+                .size());
+        for (const int marker :
+             context->generatedInterfaceMarkers()) {
+            const auto* provenance =
+                context
+                    ->findGeneratedInterfaceBoundaryPublicationProvenance(
+                        marker);
+            if (provenance != nullptr) {
+                FE_THROW_IF(
+                    provenance
+                            ->generated_interface_boundary_marker !=
+                        marker,
+                    InvalidStateException,
+                    "FESystem: generated interface-boundary publication "
+                    "provenance has the wrong marker");
+                interface_boundary_markers.emplace_back(
+                    marker,
+                    provenance);
+            }
+        }
+        std::sort(
+            interface_boundary_markers.begin(),
+            interface_boundary_markers.end(),
+            [](const auto& lhs,
+               const auto& rhs) {
+                return lhs
+                               .second
+                               ->stable_owner_key !=
+                           rhs
+                               .second
+                               ->stable_owner_key
+                    ? lhs
+                              .second
+                              ->stable_owner_key <
+                          rhs
+                              .second
+                              ->stable_owner_key
+                    : lhs.first <
+                          rhs.first;
+            });
+        active_provenance.reserve(
+            context
+                ->generatedInterfaceMarkers()
+                .size());
+        for (const int marker :
+             context->generatedInterfaceMarkers()) {
+            const auto* provenance =
+                context
+                    ->findGeneratedActiveBoundaryProvenance(
+                        marker);
+            if (provenance != nullptr) {
+                active_provenance.push_back(
+                    provenance);
+            }
+        }
+        std::sort(
+            active_provenance.begin(),
+            active_provenance.end(),
+            [](const auto* lhs,
+               const auto* rhs) {
+                return lhs
+                           ->generated_active_boundary_marker <
+                       rhs
+                           ->generated_active_boundary_marker;
+            });
+    }
+    mix_u64(
+        static_cast<std::uint64_t>(
+            level_set_interface_provenance.size()));
+    for (const auto& [marker, provenance] :
+         level_set_interface_provenance) {
+        const auto& request =
+            provenance->request;
+        FE_THROW_IF(
+            request.interface_marker != marker,
+            InvalidStateException,
+            "FESystem: generated level-set publication request has the "
+            "wrong marker");
+        FE_THROW_IF(
+            !request.valid(),
+            InvalidArgumentException,
+            "FESystem: generated level-set publication request is invalid");
+        mix_signed(marker);
+        mix_source(request.source);
+        mix_string(request.generated_domain_id);
+        mix_signed(request.interface_marker);
+        mix_real(request.isovalue);
+        mix_real(request.tolerance);
+        mix_signed(request.quadrature_order);
+        mix_signed(
+            request.interface_quadrature_order);
+        mix_signed(
+            request.volume_quadrature_order);
+        mix_byte(
+            static_cast<std::uint8_t>(
+                request.frame));
+        // Mesh revision stamps identify a rank's local partition and need not
+        // match the corresponding stamps on another rank.
+        mix_u64(request.quadrature_policy_key);
+        mix_string(
+            request.implicit_geometry_mode);
+        mix_string(
+            request.implicit_quadrature_backend);
+        mix_string(
+            request.implicit_fallback_policy);
+        mix_string(
+            request
+                .required_implicit_cut_backend_qualification);
+        mix_string(
+            request.geometry_tangent_policy);
+        mix_real(
+            request.implicit_cut_root_tolerance);
+        mix_real(
+            request
+                .implicit_cut_root_coordinate_tolerance);
+        mix_signed(
+            request.implicit_cut_root_max_iterations);
+        mix_signed(
+            request
+                .implicit_cut_max_subdivision_depth);
+        // Fallback status and achieved orders summarize the cells present on
+        // this partition, so they are not communicator-replicated request
+        // metadata.
+        mix_byte(
+            request.keep_degenerate_fragments
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_byte(
+            provenance
+                    ->volume_side_filter
+                    .has_value()
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        if (provenance
+                ->volume_side_filter
+                .has_value()) {
+            mix_signed(
+                *provenance
+                     ->volume_side_filter);
+        }
+        mix_string(
+            provenance
+                ->publication_domain_id);
+        mix_expected_revision_binding(
+            *context,
+            marker);
+        mix_snapshot_binding(
+            *context,
+            marker);
+    }
+    mix_u64(
+        static_cast<std::uint64_t>(
+            interface_boundary_markers.size()));
+    for (const auto& [marker, provenance] :
+         interface_boundary_markers) {
+        const auto& request =
+            provenance->request;
+        FE_THROW_IF(
+            !request.valid(),
+            InvalidArgumentException,
+            "FESystem: generated interface-boundary publication request is "
+            "invalid");
+        mix_signed(marker);
+        mix_string(
+            provenance->stable_owner_key);
+        mix_source(request.source);
+        mix_string(request.generated_domain_id);
+        mix_real(request.isovalue);
+        mix_signed(request.interface_marker);
+        mix_signed(request.boundary_marker);
+        mix_signed(request.intersection_marker);
+        mix_real(request.tolerance);
+        mix_signed(request.quadrature_order);
+        mix_byte(
+            static_cast<std::uint8_t>(
+                request.frame));
+        // Mesh revision stamps identify a rank's local partition and need not
+        // match the corresponding stamps on another rank.
+        mix_u64(request.quadrature_policy_key);
+        mix_u64(request.source_value_revision);
+        mix_byte(
+            request.keep_degenerate_fragments
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_expected_revision_binding(
+            *context,
+            marker);
+        mix_snapshot_binding(
+            *context,
+            marker);
+    }
+    mix_u64(
+        static_cast<std::uint64_t>(
+            active_provenance.size()));
+    for (const auto* provenance :
+         active_provenance) {
+        FE_THROW_IF(
+            provenance->owner.source.value_revision != 0u &&
+                provenance->source_value_revision != 0u &&
+                provenance->owner.source.value_revision !=
+                    provenance->source_value_revision,
+            InvalidArgumentException,
+            "FESystem: generated active-boundary provenance source value "
+            "revision disagrees with its typed owner");
+        mix_signed(
+            provenance
+                ->generated_active_boundary_marker);
+        mix_signed(
+            provenance
+                ->physicalBoundaryMarker());
+        mix_signed(
+            provenance
+                ->volumeInterfaceMarker());
+        mix_string(
+            provenance->stable_owner_key);
+        mix_u64(
+            provenance
+                ->owner.source.layout_revision);
+        mix_u64(
+            provenance
+                ->owner.source.value_revision);
+        // Mesh revision stamps identify a rank's local partition and need not
+        // match the corresponding stamps on another rank.
+        mix_u64(
+            provenance
+                ->quadrature_policy_key);
+        mix_u64(
+            provenance
+                ->source_value_revision);
+        mix_signed(
+            provenance->quadrature_order);
+        FE_THROW_IF(
+            !std::isfinite(
+                provenance->clipping_tolerance) ||
+                !(provenance->clipping_tolerance >
+                  Real{0.0}),
+            InvalidArgumentException,
+            "FESystem: generated active-boundary provenance has an "
+            "invalid clipping tolerance");
+        mix_real(
+            provenance->clipping_tolerance);
+        mix_byte(
+            static_cast<std::uint8_t>(
+                provenance->frame));
+        mix_expected_revision_binding(
+            *context,
+            provenance
+                ->generated_active_boundary_marker);
+        mix_snapshot_binding(
+            *context,
+            provenance
+                ->generated_active_boundary_marker);
+    }
+
+    // Generated rules and mesh revision stamps are partition-local.  The
+    // owner, marker, source, side/frame, quadrature policy, and callback
+    // schedule remain communicator-replicated publication metadata.
+    mix_u64(
+        static_cast<std::uint64_t>(
+            callbacks.size()));
+    for (const auto& hook : callbacks) {
+        mix_string(hook.name);
+    }
+    return CutIntegrationContextPublicationSignature{
+        .shape =
+            {{
+                context != nullptr
+                    ? std::uint64_t{1u}
+                    : std::uint64_t{0u},
+                static_cast<std::uint64_t>(
+                    level_set_interface_provenance.size()),
+                digest,
+            }},
+    };
+}
+
+void requireConsistentCutIntegrationContextPublication(
+    const FESystem& system,
+    const std::array<std::uint64_t, 3>& local_shape,
+    bool use_dof_handler_communicator = false)
+{
+    static_cast<void>(system);
+    static_cast<void>(local_shape);
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized == 0 || finalized != 0) {
+        return;
+    }
+    const auto communicator =
+        use_dof_handler_communicator
+            ? system.dofHandler().mpiComm()
+            : system.activeMpiCommunicator();
+    if (communicator == MPI_COMM_NULL) {
+        return;
+    }
+    int world_size = 1;
+    MPI_Comm_size(communicator, &world_size);
+    if (world_size <= 1) {
+        return;
+    }
+
+    std::array<std::uint64_t, 3>
+        minimum_shape{};
+    std::array<std::uint64_t, 3>
+        maximum_shape{};
+    const auto reduce =
+        [&](auto& reduced,
+            MPI_Op operation) {
+            const auto sequence =
+                debug::nextMpiCollectiveTraceSeq();
+            debug::traceMpiCollective(
+                "before",
+                sequence,
+                "FESystem::requireConsistentCutIntegrationContextPublication",
+                static_cast<int>(
+                    local_shape.size()),
+                MPI_UINT64_T,
+                operation,
+                communicator);
+            MPI_Allreduce(
+                local_shape.data(),
+                reduced.data(),
+                static_cast<int>(
+                    local_shape.size()),
+                MPI_UINT64_T,
+                operation,
+                communicator);
+            debug::traceMpiCollective(
+                "after",
+                sequence,
+                "FESystem::requireConsistentCutIntegrationContextPublication",
+                static_cast<int>(
+                    local_shape.size()),
+                MPI_UINT64_T,
+                operation,
+                communicator);
+        };
+    reduce(minimum_shape, MPI_MIN);
+    reduce(maximum_shape, MPI_MAX);
+    FE_THROW_IF(
+        minimum_shape != maximum_shape,
+        InvalidArgumentException,
+        "FESystem: cut-integration context provenance or "
+        "callback schedule differs across communicator ranks");
+#endif
+}
+
+constexpr std::uint64_t kGeneratedBoundaryTraceHashOffset =
+    1469598103934665603ull;
+constexpr std::uint64_t kGeneratedBoundaryTraceHashPrime =
+    1099511628211ull;
+
+void mixGeneratedBoundaryTraceHash(
+    std::uint64_t& digest,
+    std::uint64_t value) noexcept
+{
+    digest ^= value;
+    digest *= kGeneratedBoundaryTraceHashPrime;
+}
+
+void mixGeneratedBoundaryTraceString(
+    std::uint64_t& digest,
+    std::string_view value) noexcept
+{
+    mixGeneratedBoundaryTraceHash(
+        digest, static_cast<std::uint64_t>(value.size()));
+    for (const auto ch : value) {
+        mixGeneratedBoundaryTraceHash(
+            digest,
+            static_cast<std::uint64_t>(
+                static_cast<unsigned char>(ch)));
+    }
+}
+
+[[nodiscard]] std::uint64_t
+generatedBoundaryTraceRealBits(Real value) noexcept
+{
+    static_assert(sizeof(Real) == sizeof(std::uint64_t));
+    return std::bit_cast<std::uint64_t>(value);
+}
+
+[[nodiscard]] bool generatedBoundaryNitscheTraceSpaceMatches(
+    const spaces::FunctionSpace& space,
+    const forms::SpaceSignature& signature) noexcept
+{
+    return space.space_type() == signature.space_type &&
+           space.field_type() == signature.field_type &&
+           space.continuity() == signature.continuity &&
+           space.value_dimension() ==
+               signature.value_dimension &&
+           space.topological_dimension() ==
+               signature.topological_dimension &&
+           space.polynomial_order() ==
+               signature.polynomial_order &&
+           space.element_type() == signature.element_type;
+}
+
+[[nodiscard]] bool meshNormalMeshDescriptorMatches(
+    const analysis::BoundaryConditionDescriptor& descriptor,
+    const MeshNormalBoundaryConstraintDeclaration& declaration,
+    std::string_view source)
+{
+    std::vector<analysis::VariableKey> expected_related;
+    if (declaration.target_kind ==
+        MeshNormalBoundaryTargetKind::FluidNormalVelocity) {
+        expected_related.push_back(
+            analysis::VariableKey::field(
+                declaration.related_velocity_field));
+    }
+    return descriptor.primary_variable ==
+               analysis::VariableKey::field(
+                   declaration.mesh_displacement_field) &&
+           descriptor.domain == analysis::DomainKind::Boundary &&
+           descriptor.component == -1 &&
+           descriptor.boundary_marker == declaration.boundary_marker &&
+           descriptor.interface_marker == -1 &&
+           descriptor.trace_kind ==
+               analysis::TraceKind::NormalComponent &&
+           descriptor.enforcement_kind ==
+               declaration.enforcement_kind &&
+           descriptor.related_variables == expected_related &&
+           descriptor.source == source;
+}
+
+[[nodiscard]] bool meshNormalRelatedFluidDescriptorMatches(
+    const analysis::BoundaryConditionDescriptor& descriptor,
+    const MeshNormalBoundaryConstraintDeclaration& declaration,
+    std::string_view source)
+{
+    const std::vector<analysis::VariableKey> expected_related{
+        analysis::VariableKey::field(
+            declaration.mesh_displacement_field)};
+    return descriptor.primary_variable ==
+               analysis::VariableKey::field(
+                   declaration.related_velocity_field) &&
+           descriptor.domain == analysis::DomainKind::Boundary &&
+           descriptor.component == -1 &&
+           descriptor.boundary_marker == declaration.boundary_marker &&
+           descriptor.interface_marker == -1 &&
+           descriptor.trace_kind ==
+               analysis::TraceKind::NormalComponent &&
+           (descriptor.enforcement_kind ==
+                analysis::EnforcementKind::WeakPenalty ||
+            descriptor.enforcement_kind ==
+                analysis::EnforcementKind::WeakNitsche) &&
+           descriptor.related_variables == expected_related &&
+           descriptor.source == source;
+}
+
+template <typename Matches>
+[[nodiscard]] std::size_t countOperatorBoundBoundaryDescriptors(
+    const std::vector<analysis::BoundaryConditionDescriptor>& descriptors,
+    const std::vector<std::string>& operator_tags,
+    std::string_view operator_tag,
+    Matches&& matches)
+{
+    if (descriptors.size() != operator_tags.size()) {
+        return std::numeric_limits<std::size_t>::max();
+    }
+    std::size_t count = 0u;
+    for (std::size_t index = 0u; index < descriptors.size(); ++index) {
+        if (operator_tags[index] == operator_tag &&
+            matches(descriptors[index])) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+using MeshBoundaryConsensusTokens = std::vector<std::uint64_t>;
+
+void appendMeshBoundaryToken(
+    MeshBoundaryConsensusTokens& tokens,
+    std::uint64_t value)
+{
+    tokens.push_back(value);
+}
+
+template <typename T>
+void appendMeshBoundaryIntegral(
+    MeshBoundaryConsensusTokens& tokens,
+    T value)
+{
+    if constexpr (std::is_enum_v<T>) {
+        using Underlying = std::underlying_type_t<T>;
+        appendMeshBoundaryToken(
+            tokens,
+            static_cast<std::uint64_t>(
+                static_cast<std::make_unsigned_t<Underlying>>(value)));
+    } else {
+        using Unsigned = std::make_unsigned_t<T>;
+        appendMeshBoundaryToken(
+            tokens,
+            static_cast<std::uint64_t>(static_cast<Unsigned>(value)));
+    }
+}
+
+void appendMeshBoundaryString(
+    MeshBoundaryConsensusTokens& tokens,
+    std::string_view value)
+{
+    appendMeshBoundaryToken(
+        tokens, static_cast<std::uint64_t>(value.size()));
+    for (const unsigned char byte : value) {
+        appendMeshBoundaryToken(
+            tokens, static_cast<std::uint64_t>(byte));
+    }
+}
+
+template <typename T, typename Append>
+void appendMeshBoundaryOptional(
+    MeshBoundaryConsensusTokens& tokens,
+    const std::optional<T>& value,
+    Append&& append)
+{
+    appendMeshBoundaryToken(tokens, value.has_value() ? 1u : 0u);
+    if (value.has_value()) {
+        append(tokens, *value);
+    }
+}
+
+void appendMeshBoundarySpaceSignature(
+    MeshBoundaryConsensusTokens& tokens,
+    const forms::SpaceSignature* signature)
+{
+    appendMeshBoundaryToken(tokens, signature == nullptr ? 0u : 1u);
+    if (signature == nullptr) {
+        return;
+    }
+    appendMeshBoundaryIntegral(tokens, signature->space_type);
+    appendMeshBoundaryIntegral(tokens, signature->field_type);
+    appendMeshBoundaryIntegral(tokens, signature->continuity);
+    appendMeshBoundaryIntegral(tokens, signature->value_dimension);
+    appendMeshBoundaryIntegral(
+        tokens, signature->topological_dimension);
+    appendMeshBoundaryIntegral(tokens, signature->polynomial_order);
+    appendMeshBoundaryIntegral(tokens, signature->element_type);
+}
+
+void appendMeshBoundaryExpression(
+    MeshBoundaryConsensusTokens& tokens,
+    const forms::FormExprNode* node,
+    bool& contains_opaque_callable)
+{
+    appendMeshBoundaryToken(tokens, node == nullptr ? 0u : 1u);
+    if (node == nullptr) {
+        return;
+    }
+    appendMeshBoundaryIntegral(tokens, node->type());
+    appendMeshBoundaryOptional(
+        tokens,
+        node->constantValue(),
+        [](auto& out, Real value) {
+            appendMeshBoundaryToken(
+                out, generatedBoundaryTraceRealBits(value));
+        });
+    const auto append_int = [](auto& out, int value) {
+        appendMeshBoundaryIntegral(out, value);
+    };
+    appendMeshBoundaryOptional(tokens, node->identityDim(), append_int);
+    appendMeshBoundaryOptional(tokens, node->boundaryMarker(), append_int);
+    appendMeshBoundaryOptional(tokens, node->interfaceMarker(), append_int);
+    appendMeshBoundaryOptional(
+        tokens,
+        node->cutVolumeSide(),
+        [](auto& out, forms::CutVolumeSide value) {
+            appendMeshBoundaryIntegral(out, value);
+        });
+    appendMeshBoundaryOptional(tokens, node->componentIndex0(), append_int);
+    appendMeshBoundaryOptional(tokens, node->componentIndex1(), append_int);
+    appendMeshBoundaryOptional(tokens, node->tensorRows(), append_int);
+    appendMeshBoundaryOptional(tokens, node->tensorCols(), append_int);
+    appendMeshBoundaryOptional(tokens, node->indexRank(), append_int);
+    appendMeshBoundaryOptional(
+        tokens,
+        node->indexIds(),
+        [](auto& out, const auto& values) {
+            for (const auto value : values) {
+                appendMeshBoundaryIntegral(out, value);
+            }
+        });
+    appendMeshBoundaryOptional(
+        tokens,
+        node->indexExtents(),
+        [](auto& out, const auto& values) {
+            for (const auto value : values) {
+                appendMeshBoundaryIntegral(out, value);
+            }
+        });
+    appendMeshBoundaryOptional(
+        tokens,
+        node->indexNames(),
+        [](auto& out, const auto& values) {
+            for (const auto value : values) {
+                appendMeshBoundaryString(out, value);
+            }
+        });
+    appendMeshBoundaryOptional(
+        tokens,
+        node->indexVariances(),
+        [](auto& out, const auto& values) {
+            for (const auto value : values) {
+                appendMeshBoundaryIntegral(out, value);
+            }
+        });
+    appendMeshBoundaryOptional(
+        tokens, node->constitutiveOutputIndex(), append_int);
+    appendMeshBoundarySpaceSignature(tokens, node->spaceSignature());
+    appendMeshBoundaryOptional(
+        tokens, node->timeDerivativeOrder(), append_int);
+    appendMeshBoundaryOptional(
+        tokens,
+        node->fieldId(),
+        [](auto& out, FieldId value) {
+            appendMeshBoundaryIntegral(out, value);
+        });
+    appendMeshBoundaryOptional(
+        tokens,
+        node->symbolName(),
+        [](auto& out, std::string_view value) {
+            appendMeshBoundaryString(out, value);
+        });
+    appendMeshBoundaryOptional(
+        tokens,
+        node->slotIndex(),
+        [](auto& out, std::uint32_t value) {
+            appendMeshBoundaryIntegral(out, value);
+        });
+    appendMeshBoundaryOptional(tokens, node->historyIndex(), append_int);
+    appendMeshBoundaryOptional(
+        tokens,
+        node->stateOffsetBytes(),
+        [](auto& out, std::uint32_t value) {
+            appendMeshBoundaryIntegral(out, value);
+        });
+    appendMeshBoundaryOptional(tokens, node->eigenIndex(), append_int);
+    appendMeshBoundaryOptional(
+        tokens,
+        node->fromConfiguration(),
+        [](auto& out, forms::GeometryConfiguration value) {
+            appendMeshBoundaryIntegral(out, value);
+        });
+    appendMeshBoundaryOptional(
+        tokens,
+        node->toConfiguration(),
+        [](auto& out, forms::GeometryConfiguration value) {
+            appendMeshBoundaryIntegral(out, value);
+        });
+
+    const std::array<bool, 7> opaque_payloads{
+        node->scalarCoefficient() != nullptr,
+        node->timeScalarCoefficient() != nullptr,
+        node->vectorCoefficient() != nullptr,
+        node->matrixCoefficient() != nullptr,
+        node->tensor3Coefficient() != nullptr,
+        node->tensor4Coefficient() != nullptr,
+        node->constitutiveModel() != nullptr,
+    };
+    for (const bool present : opaque_payloads) {
+        appendMeshBoundaryToken(tokens, present ? 1u : 0u);
+        contains_opaque_callable = contains_opaque_callable || present;
+    }
+    const auto* measure = node->exteriorBoundaryMeasure();
+    appendMeshBoundaryToken(tokens, measure == nullptr ? 0u : 1u);
+    if (measure != nullptr) {
+        appendMeshBoundaryIntegral(tokens, measure->scope());
+        appendMeshBoundaryIntegral(
+            tokens, measure->physicalBoundaryMarker());
+        appendMeshBoundaryIntegral(
+            tokens, measure->generatedActiveBoundaryMarker());
+    }
+    const auto children = node->childrenShared();
+    appendMeshBoundaryToken(
+        tokens, static_cast<std::uint64_t>(children.size()));
+    for (const auto& child : children) {
+        appendMeshBoundaryExpression(
+            tokens, child.get(), contains_opaque_callable);
+    }
+}
+
+[[nodiscard]] bool meshBoundaryExpressionConstantsFinite(
+    const forms::FormExprNode* node)
+{
+    if (node == nullptr) {
+        return false;
+    }
+    const auto constant = node->constantValue();
+    if (constant.has_value() && !std::isfinite(*constant)) {
+        return false;
+    }
+    for (const auto& child : node->childrenShared()) {
+        if (!meshBoundaryExpressionConstantsFinite(child.get())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void appendMeshNormalDeclaration(
+    MeshBoundaryConsensusTokens& tokens,
+    const MeshNormalBoundaryConstraintDeclaration& declaration,
+    bool& contains_opaque_callable)
+{
+    appendMeshBoundaryIntegral(
+        tokens, declaration.mesh_displacement_field);
+    appendMeshBoundaryIntegral(tokens, declaration.boundary_marker);
+    appendMeshBoundaryIntegral(tokens, declaration.quantity);
+    appendMeshBoundaryIntegral(tokens, declaration.target_kind);
+    appendMeshBoundaryExpression(
+        tokens,
+        declaration.target_expression.node(),
+        contains_opaque_callable);
+    appendMeshBoundaryIntegral(tokens, declaration.enforcement_kind);
+    appendMeshBoundaryIntegral(
+        tokens, declaration.related_velocity_field);
+    appendMeshBoundaryString(tokens, declaration.owner_component);
+    appendMeshBoundaryToken(
+        tokens, declaration.consumer_binding.has_value() ? 1u : 0u);
+    if (!declaration.consumer_binding.has_value()) {
+        return;
+    }
+    const auto& binding = *declaration.consumer_binding;
+    appendMeshBoundaryString(tokens, binding.operator_tag);
+    appendMeshBoundaryString(tokens, binding.mesh_descriptor_source);
+    appendMeshBoundaryToken(
+        tokens, binding.related_fluid.has_value() ? 1u : 0u);
+    if (binding.related_fluid.has_value()) {
+        appendMeshBoundaryIntegral(
+            tokens, binding.related_fluid->enforcement_kind);
+        appendMeshBoundaryString(
+            tokens, binding.related_fluid->descriptor_source);
+    }
+}
+
+[[nodiscard]] bool meshNormalDeclarationsStructurallyEqual(
+    const MeshNormalBoundaryConstraintDeclaration& lhs,
+    const MeshNormalBoundaryConstraintDeclaration& rhs)
+{
+    MeshBoundaryConsensusTokens lhs_tokens;
+    MeshBoundaryConsensusTokens rhs_tokens;
+    bool lhs_contains_opaque_callable = false;
+    bool rhs_contains_opaque_callable = false;
+    appendMeshNormalDeclaration(
+        lhs_tokens, lhs, lhs_contains_opaque_callable);
+    appendMeshNormalDeclaration(
+        rhs_tokens, rhs, rhs_contains_opaque_callable);
+    return lhs_contains_opaque_callable == rhs_contains_opaque_callable &&
+           lhs_tokens == rhs_tokens;
+}
+
+void appendFittedALENormalMeasurementDeclaration(
+    MeshBoundaryConsensusTokens& tokens,
+    const FittedALENormalMeasurementDeclaration& declaration,
+    bool& contains_opaque_callable)
+{
+    appendMeshBoundaryIntegral(
+        tokens, declaration.key.mesh_displacement_field);
+    appendMeshBoundaryIntegral(tokens, declaration.key.boundary_marker);
+    appendMeshBoundaryIntegral(
+        tokens, declaration.related_velocity_field);
+    appendMeshNormalDeclaration(
+        tokens,
+        declaration.normal_constraint,
+        contains_opaque_callable);
+    appendMeshBoundaryString(
+        tokens, declaration.mesh_normal_integral_functional);
+    appendMeshBoundaryString(
+        tokens, declaration.fluid_normal_integral_functional);
+    appendMeshBoundaryString(
+        tokens, declaration.normal_gap_squared_integral_functional);
+}
+
+void appendOperatorStageMeasurementMetadata(
+    MeshBoundaryConsensusTokens& tokens,
+    const OperatorStageMeasurementMetadata& metadata)
+{
+    appendMeshBoundaryString(tokens, metadata.scheme_name);
+    appendMeshBoundaryIntegral(tokens, metadata.temporal_order);
+    appendMeshBoundaryToken(
+        tokens, metadata.prospective_accepted_step);
+    appendMeshBoundaryToken(tokens, metadata.prospective_attempt);
+    appendMeshBoundaryToken(
+        tokens,
+        generatedBoundaryTraceRealBits(metadata.step_start_time));
+    appendMeshBoundaryToken(
+        tokens,
+        generatedBoundaryTraceRealBits(metadata.step_end_time));
+    appendMeshBoundaryToken(
+        tokens,
+        generatedBoundaryTraceRealBits(metadata.state_time));
+    appendMeshBoundaryToken(
+        tokens,
+        generatedBoundaryTraceRealBits(metadata.rate_time));
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(metadata.dt));
+    appendMeshBoundaryToken(
+        tokens, metadata.generalized_alpha.has_value() ? 1u : 0u);
+    if (metadata.generalized_alpha.has_value()) {
+        appendMeshBoundaryToken(
+            tokens,
+            generatedBoundaryTraceRealBits(
+                metadata.generalized_alpha->alpha_f));
+        appendMeshBoundaryToken(
+            tokens,
+            generatedBoundaryTraceRealBits(
+                metadata.generalized_alpha->alpha_m));
+    }
+    // expected_stage_geometry is a rank-local observation-vector stamp.  It
+    // is validated against the live adapter but excluded from MPI consensus.
+    appendMeshBoundaryToken(tokens, metadata.state_revision);
+    appendMeshBoundaryToken(tokens, metadata.rate_revision);
+    appendMeshBoundaryToken(
+        tokens,
+        static_cast<std::uint64_t>(
+            metadata.derivative_fields.size()));
+    for (const auto field : metadata.derivative_fields) {
+        appendMeshBoundaryIntegral(tokens, field);
+    }
+}
+
+void appendFittedALENormalOperatorStageRawValue(
+    MeshBoundaryConsensusTokens& tokens,
+    const FittedALENormalOperatorStageRawValue& raw)
+{
+    appendMeshBoundaryIntegral(
+        tokens, raw.key.mesh_displacement_field);
+    appendMeshBoundaryIntegral(tokens, raw.key.boundary_marker);
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(raw.A));
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(raw.Wn));
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(raw.Un));
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(raw.gap_sq));
+    // Both geometry stamps are rank-local provenance and must never
+    // participate in a cross-rank equality claim.
+}
+
+void appendFittedALENormalOperatorStageRecord(
+    MeshBoundaryConsensusTokens& tokens,
+    const FittedALENormalOperatorStageHistoryRecord& record,
+    bool& contains_opaque_callable)
+{
+    appendFittedALENormalMeasurementDeclaration(
+        tokens, record.declaration, contains_opaque_callable);
+    appendOperatorStageMeasurementMetadata(tokens, record.stage);
+    appendFittedALENormalOperatorStageRawValue(tokens, record.raw);
+}
+
+struct MeshBoundaryCollectiveContext {
+    int size{1};
+#if FE_HAS_MPI
+    MPI_Comm communicator{MPI_COMM_NULL};
+#endif
+};
+
+[[nodiscard]] MeshBoundaryCollectiveContext
+meshBoundaryCollectiveContext(const FESystem& system) noexcept
+{
+    MeshBoundaryCollectiveContext context;
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0) {
+        context.communicator = system.activeMpiCommunicator();
+        if (context.communicator != MPI_COMM_NULL) {
+            MPI_Comm_size(context.communicator, &context.size);
+        }
+    }
+#else
+    static_cast<void>(system);
+#endif
+    return context;
+}
+
+[[nodiscard]] OperatorStageGeometryMetadata captureOperatorStageGeometry(
+    const assembly::IMeshAccess& mesh)
+{
+    return OperatorStageGeometryMetadata{
+        .geometry_revision = mesh.geometryRevision(),
+        .topology_revision = mesh.topologyRevision(),
+        .ownership_revision = mesh.ownershipRevision(),
+        .numbering_revision = mesh.numberingRevision(),
+        .field_layout_revision = mesh.fieldLayoutRevision(),
+        .label_revision = mesh.labelRevision(),
+        .active_configuration_epoch = mesh.activeConfigurationEpoch(),
+        .coordinate_configuration_key =
+            mesh.coordinateConfigurationKey(),
+    };
+}
+
+[[nodiscard]] bool operatorStageTimesMatch(Real lhs, Real rhs) noexcept
+{
+    if (!std::isfinite(lhs) || !std::isfinite(rhs)) {
+        return false;
+    }
+    const Real scale =
+        std::max({Real{1.0}, std::abs(lhs), std::abs(rhs)});
+    return std::abs(lhs - rhs) <=
+           Real{64.0} * std::numeric_limits<Real>::epsilon() * scale;
+}
+
+[[nodiscard]] bool coordinateMeshBoundaryLocalFailure(
+    const MeshBoundaryCollectiveContext& context,
+    bool local_failed,
+    const char* phase)
+{
+    bool any_failed = local_failed;
+#if FE_HAS_MPI
+    if (context.size > 1) {
+        const int local_value = local_failed ? 1 : 0;
+        int global_value = local_value;
+        const auto sequence = debug::nextMpiCollectiveTraceSeq();
+        debug::traceMpiCollective(
+            "before",
+            sequence,
+            phase,
+            1,
+            MPI_INT,
+            MPI_MAX,
+            context.communicator);
+        MPI_Allreduce(
+            &local_value,
+            &global_value,
+            1,
+            MPI_INT,
+            MPI_MAX,
+            context.communicator);
+        debug::traceMpiCollective(
+            "after",
+            sequence,
+            phase,
+            1,
+            MPI_INT,
+            MPI_MAX,
+            context.communicator);
+        any_failed = global_value != 0;
+    }
+#else
+    static_cast<void>(context);
+    static_cast<void>(phase);
+#endif
+    return any_failed;
+}
+
+void requireMeshBoundaryTokenConsensus(
+    const MeshBoundaryCollectiveContext& context,
+    const MeshBoundaryConsensusTokens& local_tokens,
+    MeshBoundaryConsensusTokens& minimum_tokens,
+    MeshBoundaryConsensusTokens& maximum_tokens,
+    const char* phase)
+{
+#if FE_HAS_MPI
+    if (context.size <= 1) {
+        return;
+    }
+    const std::uint64_t local_count =
+        static_cast<std::uint64_t>(local_tokens.size());
+    std::uint64_t minimum_count = local_count;
+    std::uint64_t maximum_count = local_count;
+    auto sequence = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective(
+        "before",
+        sequence,
+        phase,
+        1,
+        MPI_UINT64_T,
+        MPI_MIN,
+        context.communicator);
+    MPI_Allreduce(
+        &local_count,
+        &minimum_count,
+        1,
+        MPI_UINT64_T,
+        MPI_MIN,
+        context.communicator);
+    debug::traceMpiCollective(
+        "after",
+        sequence,
+        phase,
+        1,
+        MPI_UINT64_T,
+        MPI_MIN,
+        context.communicator);
+    sequence = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective(
+        "before",
+        sequence,
+        phase,
+        1,
+        MPI_UINT64_T,
+        MPI_MAX,
+        context.communicator);
+    MPI_Allreduce(
+        &local_count,
+        &maximum_count,
+        1,
+        MPI_UINT64_T,
+        MPI_MAX,
+        context.communicator);
+    debug::traceMpiCollective(
+        "after",
+        sequence,
+        phase,
+        1,
+        MPI_UINT64_T,
+        MPI_MAX,
+        context.communicator);
+    FE_THROW_IF(
+        minimum_count != maximum_count,
+        InvalidArgumentException,
+        "FESystem: fitted-ALE normal measurement consensus shape differs "
+        "across active communicator ranks");
+
+    const int token_count = static_cast<int>(local_tokens.size());
+    if (token_count == 0) {
+        return;
+    }
+    sequence = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective(
+        "before",
+        sequence,
+        phase,
+        token_count,
+        MPI_UINT64_T,
+        MPI_MIN,
+        context.communicator);
+    MPI_Allreduce(
+        local_tokens.data(),
+        minimum_tokens.data(),
+        token_count,
+        MPI_UINT64_T,
+        MPI_MIN,
+        context.communicator);
+    debug::traceMpiCollective(
+        "after",
+        sequence,
+        phase,
+        token_count,
+        MPI_UINT64_T,
+        MPI_MIN,
+        context.communicator);
+    sequence = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective(
+        "before",
+        sequence,
+        phase,
+        token_count,
+        MPI_UINT64_T,
+        MPI_MAX,
+        context.communicator);
+    MPI_Allreduce(
+        local_tokens.data(),
+        maximum_tokens.data(),
+        token_count,
+        MPI_UINT64_T,
+        MPI_MAX,
+        context.communicator);
+    debug::traceMpiCollective(
+        "after",
+        sequence,
+        phase,
+        token_count,
+        MPI_UINT64_T,
+        MPI_MAX,
+        context.communicator);
+    FE_THROW_IF(
+        minimum_tokens != maximum_tokens,
+        InvalidArgumentException,
+        "FESystem: fitted-ALE normal declarations, stage metadata, or raw "
+        "moments differ across active communicator ranks");
+#else
+    static_cast<void>(context);
+    static_cast<void>(local_tokens);
+    static_cast<void>(minimum_tokens);
+    static_cast<void>(maximum_tokens);
+    static_cast<void>(phase);
+#endif
+}
+
+void appendMeshTangentialDeclaration(
+    MeshBoundaryConsensusTokens& tokens,
+    const MeshTangentialBoundaryPolicyDeclaration& declaration)
+{
+    appendMeshBoundaryIntegral(
+        tokens, declaration.mesh_displacement_field);
+    appendMeshBoundaryIntegral(tokens, declaration.boundary_marker);
+    appendMeshBoundaryIntegral(tokens, declaration.policy);
+    appendMeshBoundaryString(tokens, declaration.owner_component);
+    appendMeshBoundaryToken(
+        tokens, declaration.consumer_bound ? 1u : 0u);
+    appendMeshBoundaryString(
+        tokens, declaration.consumer_operator_tag);
+    appendMeshBoundaryString(tokens, declaration.consumer_source);
+}
+
+void mixGeneratedBoundaryNitscheTracePolicy(
+    std::uint64_t& digest,
+    const GeneratedBoundaryNitscheTracePolicy& policy) noexcept
+{
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        static_cast<std::uint64_t>(policy.id));
+    mixGeneratedBoundaryTraceString(digest, policy.op);
+    mixGeneratedBoundaryTraceHash(
+        digest, static_cast<std::uint64_t>(policy.velocity_field));
+    const auto& signature =
+        policy.velocity_space_signature;
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        static_cast<std::uint64_t>(
+            signature.space_type));
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        static_cast<std::uint64_t>(
+            signature.field_type));
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        static_cast<std::uint64_t>(
+            signature.continuity));
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(
+                signature.value_dimension)));
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(
+                signature.topological_dimension)));
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(
+                signature.polynomial_order)));
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        static_cast<std::uint64_t>(
+            signature.element_type));
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(
+                policy.physical_boundary_marker)));
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(
+                policy.volume_interface_marker)));
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(
+                policy.generated_active_boundary_marker)));
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        generatedBoundaryTraceRealBits(
+            policy.dynamic_viscosity));
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        generatedBoundaryTraceRealBits(policy.penalty_gamma));
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        policy.scale_with_polynomial_order ? 1u : 0u);
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(
+                policy.penalty_polynomial_order)));
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        generatedBoundaryTraceRealBits(
+            policy.effective_penalty_multiplier));
+    mixGeneratedBoundaryTraceHash(
+        digest, policy.symmetric ? 1u : 0u);
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        static_cast<std::uint64_t>(
+            policy.maximum_reduced_dimension));
+    mixGeneratedBoundaryTraceHash(
+        digest,
+        static_cast<std::uint64_t>(
+            policy.source_formulation_record_index));
+    mixGeneratedBoundaryTraceHash(
+        digest, policy.form_binding_digest);
+}
+
+[[nodiscard]] auto generatedBoundaryNitscheTracePolicyKey(
+    const GeneratedBoundaryNitscheTracePolicy& policy)
+{
+    return std::tuple{
+        policy.op,
+        policy.velocity_field,
+        policy.velocity_space_signature.space_type,
+        policy.velocity_space_signature.field_type,
+        policy.velocity_space_signature.continuity,
+        policy.velocity_space_signature.value_dimension,
+        policy.velocity_space_signature.topological_dimension,
+        policy.velocity_space_signature.polynomial_order,
+        policy.velocity_space_signature.element_type,
+        policy.physical_boundary_marker,
+        policy.volume_interface_marker,
+        policy.generated_active_boundary_marker,
+        generatedBoundaryTraceRealBits(policy.dynamic_viscosity),
+        generatedBoundaryTraceRealBits(policy.penalty_gamma),
+        policy.scale_with_polynomial_order,
+        policy.penalty_polynomial_order,
+        generatedBoundaryTraceRealBits(
+            policy.effective_penalty_multiplier),
+        policy.symmetric,
+        policy.maximum_reduced_dimension,
+        policy.source_formulation_record_index,
+        policy.form_binding_digest};
+}
+
+[[nodiscard]] bool sameConstraintRevisionSnapshot(
+    const constraints::ConstraintRevisionSnapshot& lhs,
+    const constraints::ConstraintRevisionSnapshot& rhs) noexcept
+{
+    return lhs.valid == rhs.valid &&
+           lhs.geometry == rhs.geometry &&
+           lhs.reference_rebase == rhs.reference_rebase &&
+           lhs.topology == rhs.topology &&
+           lhs.ownership == rhs.ownership &&
+           lhs.numbering == rhs.numbering &&
+           lhs.mesh_field_layout == rhs.mesh_field_layout &&
+           lhs.mesh_field_values == rhs.mesh_field_values &&
+           lhs.labels == rhs.labels &&
+           lhs.active_configuration == rhs.active_configuration &&
+           lhs.fe_space == rhs.fe_space &&
+           lhs.fe_dof_layout == rhs.fe_dof_layout &&
+           lhs.fe_constraint_layout == rhs.fe_constraint_layout &&
+           lhs.fe_block_layout == rhs.fe_block_layout &&
+           lhs.time_epoch == rhs.time_epoch;
+}
+
+[[nodiscard]] Real outwardRoundedPositiveRatio(
+    Real numerator,
+    Real denominator)
+{
+    if (!(numerator >= Real{0.0}) ||
+        !std::isfinite(numerator) ||
+        !(denominator > Real{0.0}) ||
+        !std::isfinite(denominator)) {
+        throw std::runtime_error(
+            "FESystem: generated-boundary Nitsche trace ratio has "
+            "invalid operands");
+    }
+    if (numerator == Real{0.0}) {
+        return Real{0.0};
+    }
+    const Real ratio = numerator / denominator;
+    if (!(ratio >= Real{0.0}) || !std::isfinite(ratio)) {
+        throw std::runtime_error(
+            "FESystem: generated-boundary Nitsche trace ratio is "
+            "non-finite");
+    }
+    return std::nextafter(
+        ratio, std::numeric_limits<Real>::infinity());
+}
+
+[[nodiscard]] Real outwardRoundedPositiveSum(
+    Real lhs,
+    Real rhs)
+{
+    if (!(lhs >= Real{0.0}) ||
+        !std::isfinite(lhs) ||
+        !(rhs >= Real{0.0}) ||
+        !std::isfinite(rhs)) {
+        throw std::runtime_error(
+            "FESystem: generated-boundary Nitsche grouped trace ratio "
+            "has invalid operands");
+    }
+    if (lhs == Real{0.0}) {
+        return rhs;
+    }
+    if (rhs == Real{0.0}) {
+        return lhs;
+    }
+    const Real sum = lhs + rhs;
+    if (!(sum >= Real{0.0}) || !std::isfinite(sum)) {
+        throw std::runtime_error(
+            "FESystem: generated-boundary Nitsche grouped trace ratio "
+            "overflowed");
+    }
+    return std::nextafter(
+        sum, std::numeric_limits<Real>::infinity());
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -1836,8 +4025,17 @@ void collectRuntimeCoefficientNodes(
         child_boundary_marker = -1;
         child_interface_marker = -1;
     } else if (node.type() == FT::InterfaceIntegral) {
-        child_domain = analysis::DomainKind::InterfaceFace;
-        child_boundary_marker = -1;
+        if (const auto* measure =
+                node.exteriorBoundaryMeasure();
+            measure != nullptr &&
+            measure->isGeneratedActiveSubset()) {
+            child_domain = analysis::DomainKind::Boundary;
+            child_boundary_marker =
+                measure->physicalBoundaryMarker();
+        } else {
+            child_domain = analysis::DomainKind::InterfaceFace;
+            child_boundary_marker = -1;
+        }
         child_interface_marker = node.interfaceMarker().value_or(-1);
     }
 
@@ -4826,7 +7024,7 @@ FESystem& FESystem::operator=(FESystem&&) noexcept = default;
 #if FE_HAS_MPI
 MPI_Comm FESystem::activeMpiCommunicator() const noexcept
 {
-    if (is_setup_) {
+    if (dof_handler_.isFinalized()) {
         const auto communicator = dof_handler_.mpiComm();
         if (communicator != MPI_COMM_NULL) {
             return communicator;
@@ -4982,6 +7180,9 @@ FESystem::refreshConstraintStateForCurrentRevisions(double time,
     // Value updates may touch only locally relevant rows. Invalidate the
     // communicator-canonical snapshot on every caller rank before invoking
     // callbacks, irrespective of each rank's local update count.
+    const bool republish_aggregation_prolongations =
+        !finalized_small_cut_aggregation_prolongations_.empty();
+    invalidateGeneratedBoundaryNitscheTraceCertificates();
     finalized_small_cut_aggregation_prolongations_.clear();
     bool any_update = false;
     try {
@@ -5000,12 +7201,18 @@ FESystem::refreshConstraintStateForCurrentRevisions(double time,
             }
         }
     } catch (...) {
+        invalidateGeneratedBoundaryNitscheTraceCertificates();
         finalized_small_cut_aggregation_prolongations_.clear();
         throw;
     }
     ++constraint_time_epoch_;
     constraint_revision_snapshot_ =
         captureConstraintRevisionSnapshot(include_mesh_field_values);
+    if (republish_aggregation_prolongations) {
+        publishFinalizedSmallCutAggregationProlongations();
+    }
+    refreshGeneratedBoundaryNitscheTraceCertificates(
+        cut_integration_context_ == nullptr);
     buildConstraintSummary();
     invalidateAnalysisCache();
     result.value_update = any_update;
@@ -5173,6 +7380,10 @@ void FESystem::invalidateSetup() noexcept
     }
     assembly_plan_by_op_.clear();
     coupled_jac_cache_.clear();
+    invalidateGeneratedBoundaryNitscheTraceCertificates();
+    generated_boundary_nitsche_trace_policy_shape_validated_ =
+        false;
+    generated_boundary_nitsche_trace_policy_signature_ = 0u;
     finalized_small_cut_aggregation_prolongations_.clear();
     monolithic_aux_committed_rates_.clear();
     monolithic_aux_committed_rates_valid_.clear();
@@ -5234,7 +7445,20 @@ void FESystem::addFormulationRecord(analysis::FormulationRecord record) {
 }
 
 void FESystem::addBoundaryConditionDescriptor(analysis::BoundaryConditionDescriptor desc) {
+    addBoundaryConditionDescriptor(std::move(desc), {});
+}
+
+void FESystem::addBoundaryConditionDescriptor(
+    analysis::BoundaryConditionDescriptor desc,
+    std::string_view operator_tag)
+{
     bc_descriptors_.push_back(std::move(desc));
+    try {
+        bc_descriptor_operator_tags_.emplace_back(operator_tag);
+    } catch (...) {
+        bc_descriptors_.pop_back();
+        throw;
+    }
     invalidateAnalysisCache();
 }
 
@@ -6569,6 +8793,152 @@ bool sameFreeSurfaceFunctionalParameters(
     return true;
 }
 
+bool sameFreeSurfaceActiveVolumeEnergyParameters(
+    const interfaces::FreeSurfaceActiveVolumeEnergyParameters& lhs,
+    const interfaces::FreeSurfaceActiveVolumeEnergyParameters& rhs) noexcept
+{
+    return lhs.liquid_side == rhs.liquid_side &&
+           lhs.density == rhs.density &&
+           lhs.gravitational_acceleration ==
+               rhs.gravitational_acceleration &&
+           lhs.gravitational_reference_point ==
+               rhs.gravitational_reference_point;
+}
+
+bool sameFreeSurfaceActiveVolumeEnergyState(
+    const interfaces::FreeSurfaceActiveVolumeEnergyState& lhs,
+    const interfaces::FreeSurfaceActiveVolumeEnergyState& rhs) noexcept
+{
+    return lhs.snapshot_revision_key == rhs.snapshot_revision_key &&
+           lhs.liquid_side == rhs.liquid_side &&
+           lhs.density == rhs.density &&
+           lhs.gravitational_acceleration ==
+               rhs.gravitational_acceleration &&
+           lhs.gravitational_reference_point ==
+               rhs.gravitational_reference_point &&
+           lhs.owned_quadrature_point_count ==
+               rhs.owned_quadrature_point_count &&
+           lhs.owned_liquid_volume == rhs.owned_liquid_volume &&
+           lhs.kinetic_energy == rhs.kinetic_energy &&
+           lhs.gravitational_energy == rhs.gravitational_energy &&
+           lhs.gravitational_potential_power ==
+               rhs.gravitational_potential_power &&
+           lhs.total_energy == rhs.total_energy;
+}
+
+bool sameFreeSurfaceActiveVolumeDissipationParameters(
+    const interfaces::FreeSurfaceActiveVolumeDissipationParameters& lhs,
+    const interfaces::FreeSurfaceActiveVolumeDissipationParameters& rhs)
+    noexcept
+{
+    return lhs.liquid_side == rhs.liquid_side &&
+           lhs.dynamic_viscosity == rhs.dynamic_viscosity;
+}
+
+bool sameFreeSurfaceActiveVolumeDissipationState(
+    const interfaces::FreeSurfaceActiveVolumeDissipationState& lhs,
+    const interfaces::FreeSurfaceActiveVolumeDissipationState& rhs) noexcept
+{
+    return lhs.snapshot_revision_key == rhs.snapshot_revision_key &&
+           lhs.liquid_side == rhs.liquid_side &&
+           lhs.dynamic_viscosity == rhs.dynamic_viscosity &&
+           lhs.owned_quadrature_point_count ==
+               rhs.owned_quadrature_point_count &&
+           lhs.owned_liquid_volume == rhs.owned_liquid_volume &&
+           lhs.bulk_viscous_dissipation_rate ==
+               rhs.bulk_viscous_dissipation_rate;
+}
+
+bool sameFreeSurfaceExternalPressurePowerParameters(
+    const interfaces::FreeSurfaceExternalPressurePowerParameters& lhs,
+    const interfaces::FreeSurfaceExternalPressurePowerParameters& rhs)
+    noexcept
+{
+    return lhs.liquid_side == rhs.liquid_side &&
+           lhs.external_pressure == rhs.external_pressure;
+}
+
+bool sameFreeSurfaceDiscreteFunctionalDeclaration(
+    const FreeSurfaceDiscreteFunctionalDeclaration& lhs,
+    const FreeSurfaceDiscreteFunctionalDeclaration& rhs) noexcept
+{
+    if (lhs.interface_marker != rhs.interface_marker ||
+        lhs.level_set_field != rhs.level_set_field ||
+        lhs.velocity_field != rhs.velocity_field ||
+        lhs.geometry_domain_id != rhs.geometry_domain_id ||
+        !sameFreeSurfaceFunctionalParameters(
+            lhs.parameters, rhs.parameters) ||
+        lhs.active_volume_energy_parameters.has_value() !=
+            rhs.active_volume_energy_parameters.has_value() ||
+        lhs.active_volume_dissipation_parameters.has_value() !=
+            rhs.active_volume_dissipation_parameters.has_value() ||
+        lhs.external_pressure_power_parameters.has_value() !=
+            rhs.external_pressure_power_parameters.has_value() ||
+        lhs.endpoint_functional_power_enabled !=
+            rhs.endpoint_functional_power_enabled ||
+        lhs.capillary_balance_method != rhs.capillary_balance_method ||
+        lhs.capillary_balance_qualification !=
+            rhs.capillary_balance_qualification ||
+        lhs.owner_component != rhs.owner_component) {
+        return false;
+    }
+    return (!lhs.active_volume_energy_parameters.has_value() ||
+            sameFreeSurfaceActiveVolumeEnergyParameters(
+                *lhs.active_volume_energy_parameters,
+                *rhs.active_volume_energy_parameters)) &&
+           (!lhs.active_volume_dissipation_parameters.has_value() ||
+            sameFreeSurfaceActiveVolumeDissipationParameters(
+                *lhs.active_volume_dissipation_parameters,
+                *rhs.active_volume_dissipation_parameters)) &&
+           (!lhs.external_pressure_power_parameters.has_value() ||
+            sameFreeSurfaceExternalPressurePowerParameters(
+                *lhs.external_pressure_power_parameters,
+                *rhs.external_pressure_power_parameters));
+}
+
+bool sameFreeSurfaceExternalPressurePowerState(
+    const interfaces::FreeSurfaceExternalPressurePowerState& lhs,
+    const interfaces::FreeSurfaceExternalPressurePowerState& rhs) noexcept
+{
+    return lhs.snapshot_revision_key == rhs.snapshot_revision_key &&
+           lhs.liquid_side == rhs.liquid_side &&
+           lhs.external_pressure == rhs.external_pressure &&
+           lhs.owned_quadrature_point_count ==
+               rhs.owned_quadrature_point_count &&
+           lhs.owned_liquid_gas_area ==
+               rhs.owned_liquid_gas_area &&
+           lhs.outward_liquid_volume_flux_rate ==
+               rhs.outward_liquid_volume_flux_rate &&
+           lhs.external_pressure_power ==
+               rhs.external_pressure_power;
+}
+
+bool sameFreeSurfaceBackwardEulerKineticWorkState(
+    const interfaces::FreeSurfaceBackwardEulerKineticWorkState& lhs,
+    const interfaces::FreeSurfaceBackwardEulerKineticWorkState& rhs) noexcept
+{
+    return lhs.snapshot_revision_key == rhs.snapshot_revision_key &&
+           lhs.previous_velocity_revision ==
+               rhs.previous_velocity_revision &&
+           lhs.endpoint_velocity_revision ==
+               rhs.endpoint_velocity_revision &&
+           lhs.liquid_side == rhs.liquid_side &&
+           lhs.density == rhs.density &&
+           lhs.owned_quadrature_point_count ==
+               rhs.owned_quadrature_point_count &&
+           lhs.owned_liquid_volume == rhs.owned_liquid_volume &&
+           lhs.kinetic_energy_before_on_endpoint_domain ==
+               rhs.kinetic_energy_before_on_endpoint_domain &&
+           lhs.kinetic_energy_after == rhs.kinetic_energy_after &&
+           lhs.kinetic_energy_change_on_endpoint_domain ==
+               rhs.kinetic_energy_change_on_endpoint_domain &&
+           lhs.step_integrated_inertia_work ==
+               rhs.step_integrated_inertia_work &&
+           lhs.time_discretization_loss ==
+               rhs.time_discretization_loss &&
+           lhs.identity_residual == rhs.identity_residual;
+}
+
 bool sameFreeSurfaceFunctionalState(
     const interfaces::FreeSurfaceDiscreteFunctionalState& lhs,
     const interfaces::FreeSurfaceDiscreteFunctionalState& rhs) noexcept
@@ -6599,6 +8969,48 @@ bool sameFreeSurfaceFunctionalState(
                 right.owned_wetted_wall_area ||
             left.owned_contact_measure != right.owned_contact_measure ||
             left.young_wall_energy != right.young_wall_energy) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool sameFreeSurfaceFunctionalVariationState(
+    const interfaces::FreeSurfaceDiscreteFunctionalVariationState& lhs,
+    const interfaces::FreeSurfaceDiscreteFunctionalVariationState& rhs)
+    noexcept
+{
+    if (lhs.snapshot_revision_key != rhs.snapshot_revision_key ||
+        lhs.liquid_side != rhs.liquid_side ||
+        lhs.surface_tension != rhs.surface_tension ||
+        lhs.volume_multiplier != rhs.volume_multiplier ||
+        lhs.owned_liquid_volume_variation !=
+            rhs.owned_liquid_volume_variation ||
+        lhs.owned_liquid_gas_area_variation !=
+            rhs.owned_liquid_gas_area_variation ||
+        lhs.owned_wetted_wall_area_variation !=
+            rhs.owned_wetted_wall_area_variation ||
+        lhs.liquid_gas_surface_energy_variation !=
+            rhs.liquid_gas_surface_energy_variation ||
+        lhs.young_wall_energy_variation !=
+            rhs.young_wall_energy_variation ||
+        lhs.volume_constraint_potential_variation !=
+            rhs.volume_constraint_potential_variation ||
+        lhs.total_potential_variation !=
+            rhs.total_potential_variation ||
+        lhs.walls.size() != rhs.walls.size()) {
+        return false;
+    }
+    for (std::size_t i = 0u; i < lhs.walls.size(); ++i) {
+        const auto& left = lhs.walls[i];
+        const auto& right = rhs.walls[i];
+        if (left.boundary_marker != right.boundary_marker ||
+            left.equilibrium_contact_angle_radians !=
+                right.equilibrium_contact_angle_radians ||
+            left.owned_wetted_wall_area_variation !=
+                right.owned_wetted_wall_area_variation ||
+            left.young_wall_energy_variation !=
+                right.young_wall_energy_variation) {
             return false;
         }
     }
@@ -6673,12 +9085,44 @@ bool sameFreeSurfaceDynamicContactWallState(
            lhs.motion == rhs.motion;
 }
 
+bool validFreeSurfaceFirstOrderGeneralizedAlphaProvenance(
+    const FreeSurfaceFirstOrderGeneralizedAlphaProvenance& provenance) noexcept
+{
+    if (!std::isfinite(provenance.alpha_m) ||
+        !std::isfinite(provenance.alpha_f) ||
+        !std::isfinite(provenance.gamma) ||
+        !std::isfinite(provenance.dt) ||
+        provenance.alpha_f < Real{0.5} || provenance.alpha_f > Real{1.0} ||
+        provenance.alpha_m < Real{0.5} || provenance.alpha_m > Real{1.5} ||
+        !(provenance.gamma > Real{0.0}) || !(provenance.dt > Real{0.0})) {
+        return false;
+    }
+    // Retain exactly the first-order rho-infinity family produced by TimeLoop.
+    // alpha_m may exceed one and reaches 1.5 at rho_inf == 0.
+    const Real expected_alpha_m =
+        Real{2.0} * provenance.alpha_f - Real{0.5};
+    const Real expected_gamma = provenance.alpha_f;
+    const Real scale = std::max(
+        {Real{1.0},
+         std::abs(provenance.alpha_m),
+         std::abs(provenance.alpha_f),
+         std::abs(provenance.gamma),
+         std::abs(expected_alpha_m),
+         std::abs(expected_gamma)});
+    const Real tolerance =
+        Real{512.0} * std::numeric_limits<Real>::epsilon() * scale;
+    return std::abs(provenance.alpha_m - expected_alpha_m) <= tolerance &&
+           std::abs(provenance.gamma - expected_gamma) <= tolerance;
+}
+
 bool sameFreeSurfaceAcceptedContactStageState(
     const FreeSurfaceAcceptedContactStageState& lhs,
     const FreeSurfaceAcceptedContactStageState& rhs) noexcept
 {
     if (lhs.stage_time != rhs.stage_time ||
         lhs.stage_alpha_f != rhs.stage_alpha_f ||
+        lhs.first_order_generalized_alpha !=
+            rhs.first_order_generalized_alpha ||
         lhs.previous_state_revision != rhs.previous_state_revision ||
         lhs.endpoint_state_revision != rhs.endpoint_state_revision ||
         lhs.stage_state_revision != rhs.stage_state_revision ||
@@ -6709,6 +9153,46 @@ bool sameFreeSurfaceAcceptedContactStageState(
     return true;
 }
 
+bool sameFreeSurfaceAcceptedContactLineKinematics(
+    const FreeSurfaceAcceptedContactLineKinematics& lhs,
+    const FreeSurfaceAcceptedContactLineKinematics& rhs) noexcept
+{
+    return lhs.boundary_marker == rhs.boundary_marker &&
+           lhs.previous_accepted_step == rhs.previous_accepted_step &&
+           lhs.previous_accepted_time == rhs.previous_accepted_time &&
+           lhs.previous_stage_time == rhs.previous_stage_time &&
+           lhs.previous_stage_state_revision ==
+               rhs.previous_stage_state_revision &&
+           lhs.previous_snapshot_revision_key ==
+               rhs.previous_snapshot_revision_key &&
+           lhs.stage_time_interval == rhs.stage_time_interval &&
+           lhs.previous_mean_contact_position ==
+               rhs.previous_mean_contact_position &&
+           lhs.projection_direction == rhs.projection_direction &&
+           lhs.projected_contact_centroid_speed ==
+               rhs.projected_contact_centroid_speed &&
+           lhs.mean_fluid_contact_speed ==
+               rhs.mean_fluid_contact_speed &&
+           lhs.fluid_minus_geometric_contact_speed ==
+               rhs.fluid_minus_geometric_contact_speed;
+}
+
+bool sameFreeSurfaceAcceptedContactLineKinematics(
+    std::span<const FreeSurfaceAcceptedContactLineKinematics> lhs,
+    std::span<const FreeSurfaceAcceptedContactLineKinematics> rhs) noexcept
+{
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (std::size_t index = 0u; index < lhs.size(); ++index) {
+        if (!sameFreeSurfaceAcceptedContactLineKinematics(
+                lhs[index], rhs[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool freeSurfaceFunctionalValueNear(Real actual, Real expected) noexcept
 {
     const auto scale = std::max(
@@ -6718,6 +9202,135 @@ bool freeSurfaceFunctionalValueNear(Real actual, Real expected) noexcept
 }
 
 } // namespace
+
+std::vector<FreeSurfaceAcceptedContactLineKinematics>
+deriveFreeSurfaceAcceptedContactLineKinematics(
+    const FreeSurfaceDiscreteFunctionalHistoryRecord& previous,
+    std::uint64_t accepted_step,
+    const FreeSurfaceAcceptedContactStageState& current)
+{
+    std::vector<FreeSurfaceAcceptedContactLineKinematics> result;
+    if (accepted_step <= previous.accepted_step ||
+        !previous.contact_stage.has_value()) {
+        return result;
+    }
+    const auto& prior = *previous.contact_stage;
+    const Real stage_time_interval = current.stage_time - prior.stage_time;
+    if (!std::isfinite(previous.accepted_time) ||
+        !std::isfinite(prior.stage_time) ||
+        !std::isfinite(current.stage_time) ||
+        !std::isfinite(stage_time_interval) ||
+        !(stage_time_interval > Real{0.0}) ||
+        prior.stage_state_revision == 0u ||
+        prior.geometry_revision.snapshot_revision_key == 0u) {
+        return result;
+    }
+
+    const auto finite_array = [](const auto& values) {
+        return std::all_of(values.begin(), values.end(), [](Real value) {
+            return std::isfinite(value);
+        });
+    };
+    const auto vector_norm = [](const auto& values) {
+        Real norm_squared = Real{0.0};
+        for (const auto value : values) {
+            norm_squared += value * value;
+        }
+        return std::sqrt(norm_squared);
+    };
+    const Real direction_tolerance =
+        Real{64.0} * std::numeric_limits<Real>::epsilon();
+    result.reserve(current.state.walls.size());
+    for (const auto& wall : current.state.walls) {
+        const auto previous_wall = std::find_if(
+            prior.state.walls.begin(),
+            prior.state.walls.end(),
+            [&](const auto& candidate) {
+                return candidate.boundary_marker == wall.boundary_marker;
+            });
+        if (previous_wall == prior.state.walls.end() ||
+            !(wall.owned_contact_measure > Real{0.0}) ||
+            !(previous_wall->owned_contact_measure > Real{0.0}) ||
+            !wall.mean_contact_speed.has_value() ||
+            !previous_wall->mean_contact_speed.has_value() ||
+            !finite_array(wall.mean_contact_position) ||
+            !finite_array(previous_wall->mean_contact_position) ||
+            !finite_array(wall.mean_footprint_direction) ||
+            !finite_array(previous_wall->mean_footprint_direction)) {
+            continue;
+        }
+        const Real current_direction_norm =
+            vector_norm(wall.mean_footprint_direction);
+        const Real previous_direction_norm =
+            vector_norm(previous_wall->mean_footprint_direction);
+        if (!std::isfinite(current_direction_norm) ||
+            !std::isfinite(previous_direction_norm) ||
+            !(current_direction_norm > direction_tolerance) ||
+            !(previous_direction_norm > direction_tolerance)) {
+            continue;
+        }
+        Real direction_alignment = Real{0.0};
+        for (std::size_t component = 0u; component < 3u; ++component) {
+            direction_alignment +=
+                wall.mean_footprint_direction[component] /
+                    current_direction_norm *
+                previous_wall->mean_footprint_direction[component] /
+                    previous_direction_norm;
+        }
+        if (!std::isfinite(direction_alignment) ||
+            !(direction_alignment > Real{0.0})) {
+            continue;
+        }
+        std::array<Real, 3> projection_direction{};
+        for (std::size_t component = 0u; component < 3u; ++component) {
+            projection_direction[component] =
+                wall.mean_footprint_direction[component] /
+                    current_direction_norm +
+                previous_wall->mean_footprint_direction[component] /
+                    previous_direction_norm;
+        }
+        const Real projection_norm = vector_norm(projection_direction);
+        if (!std::isfinite(projection_norm) ||
+            !(projection_norm > direction_tolerance)) {
+            continue;
+        }
+        Real projected_displacement = Real{0.0};
+        for (std::size_t component = 0u; component < 3u; ++component) {
+            projection_direction[component] /= projection_norm;
+            projected_displacement +=
+                (wall.mean_contact_position[component] -
+                 previous_wall->mean_contact_position[component]) *
+                projection_direction[component];
+        }
+        const Real geometric_speed =
+            projected_displacement / stage_time_interval;
+        const Real fluid_speed = *wall.mean_contact_speed;
+        const Real mismatch = fluid_speed - geometric_speed;
+        if (!std::isfinite(geometric_speed) ||
+            !std::isfinite(fluid_speed) || !std::isfinite(mismatch)) {
+            continue;
+        }
+        result.push_back(
+            FreeSurfaceAcceptedContactLineKinematics{
+                .boundary_marker = wall.boundary_marker,
+                .previous_accepted_step = previous.accepted_step,
+                .previous_accepted_time = previous.accepted_time,
+                .previous_stage_time = prior.stage_time,
+                .previous_stage_state_revision =
+                    prior.stage_state_revision,
+                .previous_snapshot_revision_key =
+                    prior.geometry_revision.snapshot_revision_key,
+                .stage_time_interval = stage_time_interval,
+                .previous_mean_contact_position =
+                    previous_wall->mean_contact_position,
+                .projection_direction = projection_direction,
+                .projected_contact_centroid_speed = geometric_speed,
+                .mean_fluid_contact_speed = fluid_speed,
+                .fluid_minus_geometric_contact_speed = mismatch,
+            });
+    }
+    return result;
+}
 
 void FESystem::bindMeshMotionField(MeshMotionFieldRole role, FieldId field)
 {
@@ -6735,6 +9348,18 @@ void FESystem::bindMeshMotionField(MeshMotionFieldRole role, FieldId field)
                 "FESystem::bindMeshMotionField: mesh-motion field '" + rec.name +
                     "' has component dimension " + std::to_string(rec.components) +
                     " but mesh dimension is " + std::to_string(mesh_dim));
+
+    if (role == MeshMotionFieldRole::Displacement) {
+        const auto current =
+            meshMotionField(MeshMotionFieldRole::Displacement);
+        FE_THROW_IF(
+            current.has_value() && *current != field &&
+                (!mesh_normal_boundary_constraints_.empty() ||
+                 !mesh_tangential_boundary_policies_.empty()),
+            InvalidArgumentException,
+            "FESystem::bindMeshMotionField: mesh displacement cannot be "
+            "rebound after boundary ownership has been declared");
+    }
 
     meshMotionRoleSlot(mesh_motion_fields_, role) = field;
 }
@@ -6762,14 +9387,1832 @@ std::optional<FieldId> FESystem::meshMotionField(MeshMotionFieldRole role) const
     return field;
 }
 
+void FESystem::declareMeshNormalBoundaryConstraint(
+    MeshNormalBoundaryConstraintDeclaration declaration)
+{
+    FE_THROW_IF(
+        mesh_boundary_history_transaction_active_ ||
+            !mesh_normal_boundary_constraint_history_.empty() ||
+            fitted_ale_normal_measurement_declarations_frozen_ ||
+            fitted_ale_normal_measurement_transaction_active_ ||
+            !pending_fitted_ale_normal_measurements_.empty() ||
+            !fitted_ale_normal_measurement_history_.empty(),
+        InvalidArgumentException,
+        "FESystem::declareMeshNormalBoundaryConstraint: declarations "
+        "cannot change after mesh-boundary history or a fitted-ALE "
+        "measurement transaction has begun");
+    FE_THROW_IF(
+        declaration.consumer_binding.has_value(),
+        InvalidArgumentException,
+        "FESystem::declareMeshNormalBoundaryConstraint: consumer "
+        "provenance must be bound after its descriptors are installed");
+    const bool known_quantity =
+        declaration.quantity ==
+            MeshNormalBoundaryQuantity::DisplacementTrace ||
+        declaration.quantity ==
+            MeshNormalBoundaryQuantity::MeshVelocityTrace;
+    FE_THROW_IF(
+        !known_quantity,
+        InvalidArgumentException,
+        "FESystem::declareMeshNormalBoundaryConstraint: unknown normal "
+        "boundary quantity");
+    const bool known_target =
+        declaration.target_kind ==
+            MeshNormalBoundaryTargetKind::PrescribedDisplacement ||
+        declaration.target_kind ==
+            MeshNormalBoundaryTargetKind::TimeScaledPrescribedVelocity ||
+        declaration.target_kind ==
+            MeshNormalBoundaryTargetKind::FluidNormalVelocity;
+    FE_THROW_IF(
+        !known_target,
+        InvalidArgumentException,
+        "FESystem::declareMeshNormalBoundaryConstraint: unknown normal "
+        "boundary target kind");
+    FE_THROW_IF(
+        declaration.enforcement_kind !=
+            analysis::EnforcementKind::WeakPenalty,
+        InvalidArgumentException,
+        "FESystem::declareMeshNormalBoundaryConstraint: only the actual "
+        "weak-penalty mesh-row enforcement is supported");
+    FE_THROW_IF(
+        !field_registry_.has(declaration.mesh_displacement_field),
+        InvalidArgumentException,
+        "FESystem::declareMeshNormalBoundaryConstraint: unknown mesh "
+        "displacement field");
+    FE_THROW_IF(
+        declaration.boundary_marker < 0,
+        InvalidArgumentException,
+        "FESystem::declareMeshNormalBoundaryConstraint: boundary marker "
+        "must be nonnegative");
+    FE_THROW_IF(
+        declaration.owner_component.find_first_not_of(" \t\r\n") ==
+            std::string::npos,
+        InvalidArgumentException,
+        "FESystem::declareMeshNormalBoundaryConstraint: owner component "
+        "must be nonblank");
+    const auto& displacement =
+        field_registry_.get(declaration.mesh_displacement_field);
+    const int dimension =
+        mesh_access_ ? mesh_access_->dimension() : displacement.components;
+    FE_THROW_IF(
+        !declaration.target_expression.isValid() ||
+            declaration.target_expression.hasTest() ||
+            !meshBoundaryExpressionConstantsFinite(
+                declaration.target_expression.node()) ||
+            !forms::jit::hasScalarValueShape(
+                declaration.target_expression,
+                dimension),
+        InvalidArgumentException,
+        "FESystem::declareMeshNormalBoundaryConstraint: target expression "
+        "must be a valid scalar and may not contain a test function");
+    if (declaration.target_kind !=
+        MeshNormalBoundaryTargetKind::FluidNormalVelocity) {
+        const auto* target_node = declaration.target_expression.node();
+        FE_THROW_IF(
+            target_node == nullptr ||
+                forms::bc::detail::hasForbiddenPrescribedValueDependency(
+                    *target_node),
+            InvalidArgumentException,
+            "FESystem::declareMeshNormalBoundaryConstraint: prescribed "
+            "normal targets must be independent of FE state and "
+            "variational geometry");
+    }
+
+    FE_THROW_IF(
+        dimension < 1 || dimension > 3 ||
+            displacement.scope != FieldScope::VolumeCell ||
+            displacement.space == nullptr ||
+            displacement.space->field_type() != FieldType::Vector ||
+            displacement.components != dimension ||
+            displacement.space->value_dimension() != dimension ||
+            !fieldParticipatesInUnknownVector(
+                declaration.mesh_displacement_field),
+        InvalidArgumentException,
+        "FESystem::declareMeshNormalBoundaryConstraint: constraint target "
+        "must be the mesh-dimensional displacement unknown");
+    const auto bound_displacement =
+        meshMotionField(MeshMotionFieldRole::Displacement);
+    FE_THROW_IF(
+        !bound_displacement.has_value() ||
+            *bound_displacement != declaration.mesh_displacement_field,
+        InvalidArgumentException,
+        "FESystem::declareMeshNormalBoundaryConstraint: declaration does "
+        "not target the bound mesh displacement field");
+
+    if (declaration.target_kind ==
+        MeshNormalBoundaryTargetKind::FluidNormalVelocity) {
+        FE_THROW_IF(
+            declaration.quantity !=
+                MeshNormalBoundaryQuantity::MeshVelocityTrace ||
+                declaration.related_velocity_field == INVALID_FIELD_ID ||
+                declaration.related_velocity_field ==
+                    declaration.mesh_displacement_field ||
+                !field_registry_.has(declaration.related_velocity_field),
+            InvalidArgumentException,
+            "FESystem::declareMeshNormalBoundaryConstraint: fluid-normal "
+            "velocity targets require a distinct related velocity field");
+        const auto& velocity =
+            field_registry_.get(declaration.related_velocity_field);
+        FE_THROW_IF(
+            velocity.scope != FieldScope::VolumeCell ||
+                velocity.space == nullptr ||
+                velocity.space->field_type() != FieldType::Vector ||
+                velocity.components != dimension ||
+                velocity.space->value_dimension() != dimension ||
+                !fieldParticipatesInUnknownVector(
+                    declaration.related_velocity_field),
+            InvalidArgumentException,
+            "FESystem::declareMeshNormalBoundaryConstraint: related fluid "
+            "velocity must be a mesh-dimensional unknown");
+        const auto* target_node = declaration.target_expression.node();
+        const auto target_children =
+            target_node == nullptr
+                ? std::vector<std::shared_ptr<forms::FormExprNode>>{}
+                : target_node->childrenShared();
+        const bool exact_fluid_normal_target =
+            target_node != nullptr &&
+            target_node->type() == forms::FormExprType::InnerProduct &&
+            target_children.size() == 2u &&
+            target_children[0] != nullptr &&
+            target_children[1] != nullptr &&
+            target_children[0]->type() ==
+                forms::FormExprType::StateField &&
+            target_children[0]->fieldId().has_value() &&
+            *target_children[0]->fieldId() ==
+                declaration.related_velocity_field &&
+            target_children[0]->spaceSignature() != nullptr &&
+            generatedBoundaryNitscheTraceSpaceMatches(
+                *velocity.space,
+                *target_children[0]->spaceSignature()) &&
+            target_children[1]->type() ==
+                forms::FormExprType::CurrentNormal;
+        FE_THROW_IF(
+            !exact_fluid_normal_target,
+            InvalidArgumentException,
+            "FESystem::declareMeshNormalBoundaryConstraint: fluid-normal "
+            "velocity target must be exactly the related state-field "
+            "normal trace on the current boundary geometry");
+    } else {
+        FE_THROW_IF(
+            declaration.quantity !=
+                MeshNormalBoundaryQuantity::DisplacementTrace ||
+                declaration.related_velocity_field != INVALID_FIELD_ID,
+            InvalidArgumentException,
+            "FESystem::declareMeshNormalBoundaryConstraint: prescribed "
+            "normal targets must act on the displacement trace without a "
+            "related velocity field");
+    }
+
+    const auto conflict = std::find_if(
+        mesh_normal_boundary_constraints_.begin(),
+        mesh_normal_boundary_constraints_.end(),
+        [&](const auto& existing) {
+            return existing.mesh_displacement_field ==
+                       declaration.mesh_displacement_field &&
+                   existing.boundary_marker ==
+                       declaration.boundary_marker;
+        });
+    if (conflict != mesh_normal_boundary_constraints_.end()) {
+        throw InvalidArgumentException(
+            "FESystem::declareMeshNormalBoundaryConstraint: boundary " +
+            std::to_string(declaration.boundary_marker) +
+            " already has normal mesh-motion owner '" +
+            conflict->owner_component + "'; conflicting owner '" +
+            declaration.owner_component + "' is not permitted");
+    }
+
+    invalidateSetup();
+    FE_LOG_INFO(
+        "FESystem: diagnostic=mesh_normal_boundary_constraint marker=" +
+        std::to_string(declaration.boundary_marker) + " owner='" +
+        declaration.owner_component + "' target=" +
+        (declaration.target_kind ==
+                 MeshNormalBoundaryTargetKind::PrescribedDisplacement
+             ? std::string("PrescribedDisplacement")
+             : declaration.target_kind ==
+                       MeshNormalBoundaryTargetKind::
+                           TimeScaledPrescribedVelocity
+                   ? std::string("TimeScaledPrescribedVelocity")
+                   : std::string("FluidNormalVelocity")));
+    mesh_normal_boundary_constraints_.push_back(std::move(declaration));
+    std::sort(
+        mesh_normal_boundary_constraints_.begin(),
+        mesh_normal_boundary_constraints_.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return std::tie(lhs.mesh_displacement_field,
+                            lhs.boundary_marker) <
+                   std::tie(rhs.mesh_displacement_field,
+                            rhs.boundary_marker);
+        });
+}
+
+void FESystem::bindMeshNormalBoundaryConstraintConsumer(
+    FieldId mesh_displacement_field,
+    int boundary_marker,
+    std::string operator_tag,
+    std::string mesh_descriptor_source,
+    std::optional<std::string> related_fluid_descriptor_source)
+{
+    FE_THROW_IF(
+        mesh_boundary_history_transaction_active_ ||
+            !mesh_normal_boundary_constraint_history_.empty() ||
+            fitted_ale_normal_measurement_declarations_frozen_ ||
+            fitted_ale_normal_measurement_transaction_active_ ||
+            !pending_fitted_ale_normal_measurements_.empty() ||
+            !fitted_ale_normal_measurement_history_.empty(),
+        InvalidArgumentException,
+        "FESystem::bindMeshNormalBoundaryConstraintConsumer: consumer "
+        "provenance cannot change after mesh-boundary history or a fitted-"
+        "ALE measurement transaction has begun");
+    FE_THROW_IF(
+        operator_tag.find_first_not_of(" \t\r\n") ==
+                std::string::npos ||
+            mesh_descriptor_source.find_first_not_of(" \t\r\n") ==
+                std::string::npos,
+        InvalidArgumentException,
+        "FESystem::bindMeshNormalBoundaryConstraintConsumer: operator tag "
+        "and mesh descriptor source must be nonblank");
+    FE_THROW_IF(
+        !hasOperator(operator_tag),
+        InvalidArgumentException,
+        "FESystem::bindMeshNormalBoundaryConstraintConsumer: unknown "
+        "consumer operator '" +
+            operator_tag + "'");
+    const auto has_boundary_formulation = std::any_of(
+        formulation_records_.begin(),
+        formulation_records_.end(),
+        [&](const auto& record) {
+            return record.operator_tag == operator_tag &&
+                   record.residual_expr != nullptr &&
+                   std::find(record.active_domains.begin(),
+                             record.active_domains.end(),
+                             analysis::DomainKind::Boundary) !=
+                       record.active_domains.end();
+        });
+    FE_THROW_IF(
+        !has_boundary_formulation,
+        InvalidArgumentException,
+        "FESystem::bindMeshNormalBoundaryConstraintConsumer: consumer "
+        "operator has no installed boundary formulation");
+
+    const auto declaration = std::find_if(
+        mesh_normal_boundary_constraints_.begin(),
+        mesh_normal_boundary_constraints_.end(),
+        [&](const auto& candidate) {
+            return candidate.mesh_displacement_field ==
+                       mesh_displacement_field &&
+                   candidate.boundary_marker == boundary_marker;
+        });
+    FE_THROW_IF(
+        declaration == mesh_normal_boundary_constraints_.end(),
+        InvalidArgumentException,
+        "FESystem::bindMeshNormalBoundaryConstraintConsumer: no matching "
+        "normal constraint declaration");
+
+    const bool needs_related_fluid =
+        declaration->target_kind ==
+        MeshNormalBoundaryTargetKind::FluidNormalVelocity;
+    FE_THROW_IF(
+        needs_related_fluid
+            ? !related_fluid_descriptor_source.has_value() ||
+                  related_fluid_descriptor_source->find_first_not_of(
+                      " \t\r\n") == std::string::npos
+            : related_fluid_descriptor_source.has_value(),
+        InvalidArgumentException,
+        "FESystem::bindMeshNormalBoundaryConstraintConsumer: fitted "
+        "fluid-normal targets require one nonblank reciprocal fluid "
+        "descriptor source, while prescribed targets permit none");
+
+    const auto mesh_descriptor_count =
+        countOperatorBoundBoundaryDescriptors(
+        bc_descriptors_,
+        bc_descriptor_operator_tags_,
+        operator_tag,
+        [&](const auto& descriptor) {
+            return meshNormalMeshDescriptorMatches(
+                descriptor,
+                *declaration,
+                mesh_descriptor_source);
+        });
+    FE_THROW_IF(
+        mesh_descriptor_count != 1,
+        InvalidArgumentException,
+        "FESystem::bindMeshNormalBoundaryConstraintConsumer: expected "
+        "exactly one matching mesh normal boundary descriptor");
+
+    std::optional<MeshNormalBoundaryRelatedFluidConsumerBinding>
+        related_fluid;
+    if (needs_related_fluid) {
+        const analysis::BoundaryConditionDescriptor*
+            related_descriptor = nullptr;
+        const auto related_descriptor_count =
+            countOperatorBoundBoundaryDescriptors(
+            bc_descriptors_,
+            bc_descriptor_operator_tags_,
+            operator_tag,
+            [&](const auto& descriptor) {
+                const bool matches =
+                    meshNormalRelatedFluidDescriptorMatches(
+                    descriptor,
+                    *declaration,
+                    *related_fluid_descriptor_source);
+                if (matches) {
+                    related_descriptor = &descriptor;
+                }
+                return matches;
+            });
+        FE_THROW_IF(
+            related_descriptor_count != 1 || related_descriptor == nullptr,
+            InvalidArgumentException,
+            "FESystem::bindMeshNormalBoundaryConstraintConsumer: expected "
+            "exactly one matching reciprocal fluid normal boundary "
+            "descriptor");
+        related_fluid =
+            MeshNormalBoundaryRelatedFluidConsumerBinding{
+                .enforcement_kind =
+                    related_descriptor->enforcement_kind,
+                .descriptor_source =
+                    *related_fluid_descriptor_source,
+            };
+    }
+
+    MeshNormalBoundaryConstraintConsumerBinding binding{
+        .operator_tag = std::move(operator_tag),
+        .mesh_descriptor_source =
+            std::move(mesh_descriptor_source),
+        .related_fluid = std::move(related_fluid),
+    };
+    if (declaration->consumer_binding.has_value()) {
+        FE_THROW_IF(
+            *declaration->consumer_binding != binding,
+            InvalidArgumentException,
+            "FESystem::bindMeshNormalBoundaryConstraintConsumer: "
+            "constraint already has a different consumer binding");
+        return;
+    }
+
+    invalidateSetup();
+    declaration->consumer_binding = std::move(binding);
+}
+
+const MeshNormalBoundaryConstraintDeclaration&
+FESystem::validatedFittedALENormalConstraint_(
+    FieldId mesh_displacement_field,
+    int boundary_marker) const
+{
+    const auto declaration = std::find_if(
+        mesh_normal_boundary_constraints_.begin(),
+        mesh_normal_boundary_constraints_.end(),
+        [&](const auto& candidate) {
+            return candidate.mesh_displacement_field ==
+                       mesh_displacement_field &&
+                   candidate.boundary_marker == boundary_marker;
+        });
+    FE_THROW_IF(
+        declaration == mesh_normal_boundary_constraints_.end(),
+        InvalidArgumentException,
+        "FESystem: no matching mesh normal boundary constraint exists for "
+        "the fitted-ALE operator-stage measurement");
+    FE_THROW_IF(
+        declaration->target_kind !=
+                MeshNormalBoundaryTargetKind::FluidNormalVelocity ||
+            declaration->quantity !=
+                MeshNormalBoundaryQuantity::MeshVelocityTrace ||
+            declaration->related_velocity_field == INVALID_FIELD_ID ||
+            declaration->related_velocity_field ==
+                declaration->mesh_displacement_field ||
+            !field_registry_.has(declaration->mesh_displacement_field) ||
+            !field_registry_.has(declaration->related_velocity_field),
+        InvalidArgumentException,
+        "FESystem: fitted-ALE normal measurements require an exact fluid-"
+        "normal velocity constraint between distinct known fields");
+
+    const auto& displacement =
+        field_registry_.get(declaration->mesh_displacement_field);
+    const auto& velocity =
+        field_registry_.get(declaration->related_velocity_field);
+    const int dimension =
+        mesh_access_ ? mesh_access_->dimension() : displacement.components;
+    FE_THROW_IF(
+        dimension < 1 || dimension > 3 ||
+            displacement.scope != FieldScope::VolumeCell ||
+            velocity.scope != FieldScope::VolumeCell ||
+            displacement.space == nullptr || velocity.space == nullptr ||
+            displacement.space->field_type() != FieldType::Vector ||
+            velocity.space->field_type() != FieldType::Vector ||
+            displacement.components != dimension ||
+            velocity.components != dimension ||
+            displacement.space->value_dimension() != dimension ||
+            velocity.space->value_dimension() != dimension ||
+            !fieldParticipatesInUnknownVector(
+                declaration->mesh_displacement_field) ||
+            !fieldParticipatesInUnknownVector(
+                declaration->related_velocity_field),
+        InvalidArgumentException,
+        "FESystem: fitted-ALE normal measurement fields must be mesh-"
+        "dimensional volume unknowns");
+    FE_THROW_IF(
+        velocity.space->polynomial_order() >
+            displacement.space->polynomial_order(),
+        InvalidArgumentException,
+        "FESystem: fitted-ALE normal measurement quadrature envelope "
+        "requires related velocity field " +
+            std::to_string(declaration->related_velocity_field) +
+            " order " +
+            std::to_string(velocity.space->polynomial_order()) +
+            " <= displacement-primary field " +
+            std::to_string(declaration->mesh_displacement_field) +
+            " order " +
+            std::to_string(displacement.space->polynomial_order()) +
+            " for boundary marker " +
+            std::to_string(declaration->boundary_marker));
+
+    const auto* target_node = declaration->target_expression.node();
+    const auto target_children =
+        target_node == nullptr
+            ? std::vector<std::shared_ptr<forms::FormExprNode>>{}
+            : target_node->childrenShared();
+    const bool exact_fluid_normal_target =
+        target_node != nullptr &&
+        target_node->type() == forms::FormExprType::InnerProduct &&
+        target_children.size() == 2u &&
+        target_children[0] != nullptr && target_children[1] != nullptr &&
+        target_children[0]->type() == forms::FormExprType::StateField &&
+        target_children[0]->fieldId().has_value() &&
+        *target_children[0]->fieldId() ==
+            declaration->related_velocity_field &&
+        target_children[0]->spaceSignature() != nullptr &&
+        generatedBoundaryNitscheTraceSpaceMatches(
+            *velocity.space,
+            *target_children[0]->spaceSignature()) &&
+        target_children[1]->type() ==
+            forms::FormExprType::CurrentNormal;
+    FE_THROW_IF(
+        !exact_fluid_normal_target,
+        InvalidArgumentException,
+        "FESystem: fitted-ALE measurement target must remain exactly the "
+        "related velocity state-field trace on the current normal");
+
+    FE_THROW_IF(
+        !declaration->consumer_binding.has_value() ||
+            !declaration->consumer_binding->related_fluid.has_value(),
+        InvalidArgumentException,
+        "FESystem: fitted-ALE measurement requires the exact reciprocal "
+        "mesh/fluid consumer binding before registration");
+    const auto& binding = *declaration->consumer_binding;
+    const auto& related = *binding.related_fluid;
+    const auto has_boundary_formulation = std::any_of(
+        formulation_records_.begin(),
+        formulation_records_.end(),
+        [&](const auto& record) {
+            return record.operator_tag == binding.operator_tag &&
+                   record.residual_expr != nullptr &&
+                   std::find(record.active_domains.begin(),
+                             record.active_domains.end(),
+                             analysis::DomainKind::Boundary) !=
+                       record.active_domains.end();
+        });
+    FE_THROW_IF(
+        binding.operator_tag.find_first_not_of(" \t\r\n") ==
+                std::string::npos ||
+            binding.mesh_descriptor_source.find_first_not_of(
+                " \t\r\n") == std::string::npos ||
+            related.descriptor_source.find_first_not_of(" \t\r\n") ==
+                std::string::npos ||
+            !hasOperator(binding.operator_tag) ||
+            !has_boundary_formulation ||
+            (related.enforcement_kind !=
+                 analysis::EnforcementKind::WeakPenalty &&
+             related.enforcement_kind !=
+                 analysis::EnforcementKind::WeakNitsche),
+        InvalidArgumentException,
+        "FESystem: fitted-ALE measurement consumer provenance is not an "
+        "installed boundary operator binding");
+    const auto mesh_descriptor_count =
+        countOperatorBoundBoundaryDescriptors(
+            bc_descriptors_,
+            bc_descriptor_operator_tags_,
+            binding.operator_tag,
+            [&](const auto& descriptor) {
+                return meshNormalMeshDescriptorMatches(
+                    descriptor,
+                    *declaration,
+                    binding.mesh_descriptor_source);
+            });
+    const auto fluid_descriptor_count =
+        countOperatorBoundBoundaryDescriptors(
+            bc_descriptors_,
+            bc_descriptor_operator_tags_,
+            binding.operator_tag,
+            [&](const auto& descriptor) {
+                return meshNormalRelatedFluidDescriptorMatches(
+                           descriptor,
+                           *declaration,
+                           related.descriptor_source) &&
+                       descriptor.enforcement_kind ==
+                           related.enforcement_kind;
+            });
+    FE_THROW_IF(
+        mesh_descriptor_count != 1u || fluid_descriptor_count != 1u,
+        InvalidArgumentException,
+        "FESystem: fitted-ALE measurement requires exactly one matching "
+        "mesh descriptor and reciprocal fluid descriptor");
+    return *declaration;
+}
+
+void FESystem::registerFittedALENormalOperatorStageMeasurement(
+    FieldId mesh_displacement_field,
+    int boundary_marker)
+{
+    FE_THROW_IF(
+        mesh_boundary_history_transaction_active_ ||
+            !mesh_normal_boundary_constraint_history_.empty() ||
+            !mesh_tangential_boundary_policy_history_.empty() ||
+            fitted_ale_normal_measurement_declarations_frozen_ ||
+            fitted_ale_normal_measurement_transaction_active_ ||
+            !pending_fitted_ale_normal_measurements_.empty() ||
+            !fitted_ale_normal_measurement_history_.empty(),
+        InvalidArgumentException,
+        "FESystem::registerFittedALENormalOperatorStageMeasurement: "
+        "declarations are frozen after staging or any accepted mesh-"
+        "boundary history begins");
+
+    // Complete all declaration/consumer validation before mutating either
+    // the reduction service or the measurement declaration table.
+    const auto& constraint = validatedFittedALENormalConstraint_(
+        mesh_displacement_field, boundary_marker);
+    const FittedALENormalMeasurementKey key{
+        .mesh_displacement_field = mesh_displacement_field,
+        .boundary_marker = boundary_marker,
+    };
+    const std::string name_base =
+        "__svmp_fitted_ale_normal_operator_stage_d" +
+        std::to_string(mesh_displacement_field) + "_b" +
+        std::to_string(boundary_marker);
+    FittedALENormalMeasurementDeclaration measurement{
+        .key = key,
+        .related_velocity_field = constraint.related_velocity_field,
+        .normal_constraint = constraint,
+        .mesh_normal_integral_functional =
+            name_base + "_integral_mesh_normal",
+        .fluid_normal_integral_functional =
+            name_base + "_integral_fluid_normal",
+        .normal_gap_squared_integral_functional =
+            name_base + "_integral_normal_gap_squared",
+    };
+
+    const auto existing = std::find_if(
+        fitted_ale_normal_measurement_declarations_.begin(),
+        fitted_ale_normal_measurement_declarations_.end(),
+        [&](const auto& candidate) { return candidate.key == key; });
+    if (existing !=
+        fitted_ale_normal_measurement_declarations_.end()) {
+        FE_THROW_IF(
+            existing->related_velocity_field !=
+                    measurement.related_velocity_field ||
+                !meshNormalDeclarationsStructurallyEqual(
+                    existing->normal_constraint,
+                    measurement.normal_constraint) ||
+                existing->mesh_normal_integral_functional !=
+                    measurement.mesh_normal_integral_functional ||
+                existing->fluid_normal_integral_functional !=
+                    measurement.fluid_normal_integral_functional ||
+                existing->normal_gap_squared_integral_functional !=
+                    measurement.normal_gap_squared_integral_functional,
+            InvalidArgumentException,
+            "FESystem::registerFittedALENormalOperatorStageMeasurement: "
+            "measurement key already has a conflicting declaration");
+        return;
+    }
+
+    const auto& displacement = field_registry_.get(
+        constraint.mesh_displacement_field);
+    const auto displacement_state = forms::StateField(
+        constraint.mesh_displacement_field,
+        *displacement.space,
+        "fitted_ale_mesh_displacement");
+    const auto current_normal = forms::currentNormal();
+    const auto mesh_normal = forms::normalTrace(
+        displacement_state.dt(), current_normal);
+    // Preserve the exact consumer-bound expression rather than rebuilding an
+    // equivalent fluid trace from field metadata.
+    const auto fluid_normal = constraint.target_expression;
+    const auto normal_gap = mesh_normal - fluid_normal;
+
+    forms::BoundaryFunctional mesh_functional{
+        .integrand = mesh_normal,
+        .boundary_marker = boundary_marker,
+        .name = measurement.mesh_normal_integral_functional,
+        .reduction = forms::BoundaryFunctional::Reduction::Sum,
+    };
+    forms::BoundaryFunctional fluid_functional{
+        .integrand = fluid_normal,
+        .boundary_marker = boundary_marker,
+        .name = measurement.fluid_normal_integral_functional,
+        .reduction = forms::BoundaryFunctional::Reduction::Sum,
+    };
+    forms::BoundaryFunctional gap_functional{
+        .integrand = normal_gap * normal_gap,
+        .boundary_marker = boundary_marker,
+        .name = measurement.normal_gap_squared_integral_functional,
+        .reduction = forms::BoundaryFunctional::Reduction::Sum,
+    };
+
+    // The displacement must remain primary: dt(StateField(d)) consumes its
+    // exact history alias.  The velocity is a current-only secondary field.
+    auto& service = boundaryReductionService(mesh_displacement_field);
+    service.addBoundaryFunctional(std::move(mesh_functional));
+    service.addBoundaryFunctional(std::move(fluid_functional));
+    service.addBoundaryFunctional(std::move(gap_functional));
+    bindSecondaryFields(
+        service,
+        mesh_displacement_field,
+        std::vector<FieldId>{
+            mesh_displacement_field,
+            constraint.related_velocity_field});
+
+    // Publish the declaration only after every reduction and binding has
+    // been installed.  A retry after an allocation failure is deterministic
+    // because BoundaryReductionService registration is idempotent.
+    fitted_ale_normal_measurement_declarations_.push_back(
+        std::move(measurement));
+    std::sort(
+        fitted_ale_normal_measurement_declarations_.begin(),
+        fitted_ale_normal_measurement_declarations_.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return std::tie(lhs.key.mesh_displacement_field,
+                            lhs.key.boundary_marker) <
+                   std::tie(rhs.key.mesh_displacement_field,
+                            rhs.key.boundary_marker);
+        });
+}
+
+void FESystem::stageFittedALENormalOperatorStageMeasurements(
+    const SystemStateView& state,
+    OperatorStageMeasurementMetadata metadata)
+{
+    const auto collective = meshBoundaryCollectiveContext(*this);
+    MeshBoundaryConsensusTokens local_tokens;
+    MeshBoundaryConsensusTokens minimum_tokens;
+    MeshBoundaryConsensusTokens maximum_tokens;
+    std::exception_ptr local_exception;
+    bool contains_opaque_callable = false;
+
+    try {
+        std::sort(
+            metadata.derivative_fields.begin(),
+            metadata.derivative_fields.end());
+        metadata.derivative_fields.erase(
+            std::unique(metadata.derivative_fields.begin(),
+                        metadata.derivative_fields.end()),
+            metadata.derivative_fields.end());
+        FE_THROW_IF(
+            !is_setup_ || !dof_handler_.isFinalized(),
+            InvalidArgumentException,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "system setup must be complete");
+        FE_THROW_IF(
+            fitted_ale_normal_measurement_transaction_active_ ||
+                !pending_fitted_ale_normal_measurements_.empty(),
+            InvalidArgumentException,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: a "
+            "candidate measurement group is already active or pending");
+        const bool is_endpoint_scheme =
+            metadata.scheme_name == "BackwardEuler" ||
+            metadata.scheme_name == "DG0";
+        const bool is_generalized_alpha =
+            metadata.scheme_name == "GeneralizedAlphaFirstOrder";
+        FE_THROW_IF(
+            (!is_endpoint_scheme && !is_generalized_alpha) ||
+                metadata.temporal_order != 1 ||
+                metadata.prospective_accepted_step == 0u ||
+                !std::isfinite(metadata.step_start_time) ||
+                !std::isfinite(metadata.step_end_time) ||
+                !std::isfinite(metadata.state_time) ||
+                !std::isfinite(metadata.rate_time) ||
+                !std::isfinite(metadata.dt) || metadata.dt <= Real{0.0} ||
+                metadata.step_end_time < metadata.step_start_time ||
+                metadata.state_revision == 0u ||
+                metadata.rate_revision == 0u,
+            InvalidArgumentException,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "v1 requires BackwardEuler, DG0, or "
+            "GeneralizedAlphaFirstOrder at temporal order one, a nonzero "
+            "prospective step, finite times, positive dt, and nonzero "
+            "state/rate revisions");
+        FE_THROW_IF(
+            metadata.generalized_alpha.has_value() &&
+                (!std::isfinite(
+                     metadata.generalized_alpha->alpha_f) ||
+                 !std::isfinite(
+                     metadata.generalized_alpha->alpha_m)),
+            InvalidArgumentException,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "generalized-alpha coordinates must be finite");
+        FE_THROW_IF(
+            !operatorStageTimesMatch(
+                metadata.step_end_time,
+                metadata.step_start_time + metadata.dt),
+            InvalidArgumentException,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "step end time is inconsistent with start time plus dt");
+        if (is_endpoint_scheme) {
+            FE_THROW_IF(
+                metadata.generalized_alpha.has_value() ||
+                    !operatorStageTimesMatch(
+                        metadata.state_time,
+                        metadata.step_end_time) ||
+                    !operatorStageTimesMatch(
+                        metadata.rate_time,
+                        metadata.step_end_time),
+                InvalidArgumentException,
+                "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+                "BackwardEuler and DG0 require endpoint state/rate times and "
+                "no generalized-alpha coordinates");
+        } else {
+            FE_THROW_IF(
+                !metadata.generalized_alpha.has_value(),
+                InvalidArgumentException,
+                "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+                "GeneralizedAlphaFirstOrder requires alpha_f/alpha_m "
+                "coordinates");
+            const auto& alpha = *metadata.generalized_alpha;
+            FE_THROW_IF(
+                !operatorStageTimesMatch(
+                    metadata.state_time,
+                    metadata.step_start_time + alpha.alpha_f * metadata.dt) ||
+                    !operatorStageTimesMatch(
+                        metadata.rate_time,
+                        metadata.step_start_time +
+                            alpha.alpha_m * metadata.dt),
+                InvalidArgumentException,
+                "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+                "generalized-alpha state/rate times do not match their "
+                "alpha-derived operator coordinates");
+        }
+        for (const auto field : metadata.derivative_fields) {
+            FE_THROW_IF(
+                !field_registry_.has(field),
+                InvalidArgumentException,
+                "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+                "derivative field metadata contains an unknown field");
+        }
+
+        const bool has_current_state =
+            state.u_vector != nullptr || !state.u.empty();
+        const bool has_exact_rate =
+            state.u_prev_vector != nullptr || !state.u_prev.empty();
+        FE_THROW_IF(
+            !fitted_ale_normal_measurement_declarations_.empty() &&
+                (!has_current_state || !has_exact_rate),
+            InvalidArgumentException,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "nonempty measurements require current stage state and an "
+            "exact-rate alias in u_prev");
+
+        const auto eligible_constraint_count =
+            static_cast<std::size_t>(std::count_if(
+                mesh_normal_boundary_constraints_.begin(),
+                mesh_normal_boundary_constraints_.end(),
+                [](const auto& declaration) {
+                    return declaration.target_kind ==
+                               MeshNormalBoundaryTargetKind::
+                                   FluidNormalVelocity &&
+                           declaration.consumer_binding.has_value();
+                }));
+        FE_THROW_IF(
+            eligible_constraint_count !=
+                fitted_ale_normal_measurement_declarations_.size(),
+            InvalidArgumentException,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "every consumer-bound fluid-normal mesh constraint requires "
+            "exactly one fitted-ALE measurement declaration");
+
+        for (std::size_t index = 0u;
+             index < fitted_ale_normal_measurement_declarations_.size();
+             ++index) {
+            const auto& declaration =
+                fitted_ale_normal_measurement_declarations_[index];
+            if (index != 0u) {
+                const auto& previous =
+                    fitted_ale_normal_measurement_declarations_[index - 1u];
+                FE_THROW_IF(
+                    std::tie(declaration.key.mesh_displacement_field,
+                             declaration.key.boundary_marker) <=
+                        std::tie(previous.key.mesh_displacement_field,
+                                 previous.key.boundary_marker),
+                    InvalidArgumentException,
+                    "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+                    "measurement declarations are not in canonical key order");
+            }
+            const auto& constraint =
+                validatedFittedALENormalConstraint_(
+                    declaration.key.mesh_displacement_field,
+                    declaration.key.boundary_marker);
+            FE_THROW_IF(
+                declaration.related_velocity_field !=
+                        constraint.related_velocity_field ||
+                    !meshNormalDeclarationsStructurallyEqual(
+                        declaration.normal_constraint,
+                        constraint) ||
+                    !std::binary_search(
+                        metadata.derivative_fields.begin(),
+                        metadata.derivative_fields.end(),
+                        declaration.key.mesh_displacement_field),
+                InvalidArgumentException,
+                "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+                "measurement no longer matches its exact constraint or the "
+                "mesh displacement is not declared as a derivative field");
+            const auto* service = boundaryReductionServiceIfPresent(
+                declaration.key.mesh_displacement_field);
+            FE_THROW_IF(
+                service == nullptr ||
+                    !service->hasFunctional(
+                        declaration.mesh_normal_integral_functional) ||
+                    !service->hasFunctional(
+                        declaration.fluid_normal_integral_functional) ||
+                    !service->hasFunctional(
+                        declaration.normal_gap_squared_integral_functional),
+                InvalidArgumentException,
+                "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+                "registered reduction service is incomplete");
+        }
+
+        if (!fitted_ale_normal_measurement_declarations_.empty()) {
+            FE_THROW_IF(
+                !metadata.expected_stage_geometry.has_value() ||
+                    !meshAccess().revisionTrackingAvailable(),
+                InvalidArgumentException,
+                "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+                "v1 requires an available expected rank-local stage "
+                "geometry stamp");
+            const auto& expected = *metadata.expected_stage_geometry;
+            FE_THROW_IF(
+                captureOperatorStageGeometry(meshAccess()) != expected,
+                InvalidArgumentException,
+                "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+                "live geometry does not match the captured operator-stage "
+                "observation");
+        }
+
+        appendMeshBoundaryToken(
+            local_tokens,
+            static_cast<std::uint64_t>(
+                fitted_ale_normal_measurement_declarations_.size()));
+        appendMeshBoundaryToken(
+            local_tokens,
+            fitted_ale_normal_measurement_declarations_frozen_ ? 1u : 0u);
+        for (const auto& declaration :
+             fitted_ale_normal_measurement_declarations_) {
+            appendFittedALENormalMeasurementDeclaration(
+                local_tokens,
+                declaration,
+                contains_opaque_callable);
+        }
+        appendOperatorStageMeasurementMetadata(local_tokens, metadata);
+        appendMeshBoundaryToken(
+            local_tokens,
+            static_cast<std::uint64_t>(
+                fitted_ale_normal_measurement_history_.size()));
+        FE_THROW_IF(
+            collective.size > 1 && contains_opaque_callable,
+            InvalidArgumentException,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "distributed declarations may not contain opaque callbacks");
+        FE_THROW_IF(
+            local_tokens.size() >
+                static_cast<std::size_t>(
+                    std::numeric_limits<int>::max()),
+            InvalidArgumentException,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "consensus token sequence exceeds the MPI count range");
+        minimum_tokens = local_tokens;
+        maximum_tokens = local_tokens;
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+
+    if (coordinateMeshBoundaryLocalFailure(
+            collective,
+            local_exception != nullptr,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements/preflight")) {
+        if (local_exception != nullptr) {
+            std::rethrow_exception(local_exception);
+        }
+        throw InvalidArgumentException(
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "another active communicator rank rejected stage provenance");
+    }
+    requireMeshBoundaryTokenConsensus(
+        collective,
+        local_tokens,
+        minimum_tokens,
+        maximum_tokens,
+        "FESystem::stageFittedALENormalOperatorStageMeasurements/consensus");
+
+    if (fitted_ale_normal_measurement_declarations_.empty()) {
+        return;
+    }
+
+    // Once a collective stage transaction begins, its declaration schedule
+    // remains fixed even if the candidate is later discarded.
+    fitted_ale_normal_measurement_declarations_frozen_ = true;
+
+    OperatorStageGeometryMetadata stage_mesh_revision{};
+    local_exception = nullptr;
+    try {
+        const auto& expected = *metadata.expected_stage_geometry;
+        stage_mesh_revision =
+            captureOperatorStageGeometry(meshAccess());
+        FE_THROW_IF(
+            stage_mesh_revision != expected,
+            InvalidArgumentException,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "geometry changed during stage consensus");
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+    if (coordinateMeshBoundaryLocalFailure(
+            collective,
+            local_exception != nullptr,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements/geometry")) {
+        if (local_exception != nullptr) {
+            std::rethrow_exception(local_exception);
+        }
+        throw InvalidArgumentException(
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "another active communicator rank observed stale stage geometry");
+    }
+
+    fitted_ale_normal_measurement_transaction_active_ = true;
+    struct MeasurementRoute {
+        BoundaryReductionService* service{nullptr};
+        const forms::BoundaryFunctional* measure_functional{nullptr};
+        std::string_view mesh_normal_name{};
+        std::string_view fluid_normal_name{};
+        std::string_view gap_squared_name{};
+    };
+    std::optional<assembly::TimeIntegrationContext> exact_rate_alias;
+    std::optional<SystemStateView> measurement_state;
+    std::vector<MeasurementRoute> measurement_routes;
+    std::vector<FittedALENormalOperatorStageHistoryRecord> staged_records;
+    local_exception = nullptr;
+    try {
+        exact_rate_alias.emplace();
+        exact_rate_alias->integrator_name =
+            "FittedALEExactOperatorStageRateAlias";
+        exact_rate_alias->dt1 = assembly::TimeDerivativeStencil{
+            .order = 1,
+            .a = {Real{0.0}, Real{1.0}},
+        };
+        measurement_state.emplace(state);
+        measurement_state->time = metadata.state_time;
+        measurement_state->dt = metadata.dt;
+        measurement_state->effective_dt = metadata.dt;
+        measurement_state->u_prev2 = {};
+        measurement_state->u_prev2_vector = nullptr;
+        measurement_state->u_history = {};
+        measurement_state->dt_history = {};
+        measurement_state->time_integration =
+            &*exact_rate_alias;
+
+        measurement_routes.reserve(
+            fitted_ale_normal_measurement_declarations_.size());
+        staged_records.reserve(
+            fitted_ale_normal_measurement_declarations_.size());
+        for (const auto& declaration :
+             fitted_ale_normal_measurement_declarations_) {
+            auto* service = boundaryReductionServiceIfPresent(
+                declaration.key.mesh_displacement_field);
+            FE_THROW_IF(
+                service == nullptr,
+                InvalidArgumentException,
+                "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+                "registered reduction service disappeared during stage "
+                "preparation");
+            const auto& measure_functional = service->functionalDef(
+                declaration.mesh_normal_integral_functional);
+            measurement_routes.push_back(
+                MeasurementRoute{
+                    .service = service,
+                    .measure_functional = &measure_functional,
+                    .mesh_normal_name =
+                        declaration.mesh_normal_integral_functional,
+                    .fluid_normal_name =
+                        declaration.fluid_normal_integral_functional,
+                    .gap_squared_name =
+                        declaration.normal_gap_squared_integral_functional,
+                });
+            staged_records.push_back(
+                FittedALENormalOperatorStageHistoryRecord{
+                    .declaration = declaration,
+                    .stage = metadata,
+                    .raw =
+                        FittedALENormalOperatorStageRawValue{
+                            .key = declaration.key,
+                            .stage_mesh_revision = stage_mesh_revision,
+                        },
+                });
+        }
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+    if (coordinateMeshBoundaryLocalFailure(
+            collective,
+            local_exception != nullptr,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements/prepare")) {
+        fitted_ale_normal_measurement_transaction_active_ = false;
+        if (local_exception != nullptr) {
+            std::rethrow_exception(local_exception);
+        }
+        throw InvalidArgumentException(
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "another active communicator rank could not prepare the fixed "
+            "measurement schedule");
+    }
+
+    local_exception = nullptr;
+    try {
+        // No allocation, record copy, or local validation occurs between
+        // these fixed-order collective reduction calls.  Scalar validation
+        // is deferred until every rank has completed the complete schedule.
+        for (std::size_t index = 0u;
+             index < measurement_routes.size();
+             ++index) {
+            auto& route = measurement_routes[index];
+            auto& raw = staged_records[index].raw;
+            raw.A = route.service->boundaryMeasure(
+                *route.measure_functional, *measurement_state);
+            raw.Wn = route.service->evaluateFunctional(
+                route.mesh_normal_name, *measurement_state);
+            raw.Un = route.service->evaluateFunctional(
+                route.fluid_normal_name, *measurement_state);
+            raw.gap_sq = route.service->evaluateFunctional(
+                route.gap_squared_name, *measurement_state);
+        }
+        for (auto& record : staged_records) {
+            auto& raw = record.raw;
+            FE_THROW_IF(
+                !std::isfinite(raw.A) || raw.A <= Real{0.0} ||
+                    !std::isfinite(raw.Wn) || !std::isfinite(raw.Un) ||
+                    !std::isfinite(raw.gap_sq),
+                InvalidArgumentException,
+                "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+                "boundary measure and raw moments must be finite and area "
+                "must be positive");
+            const Real gap_roundoff =
+                Real{128.0} * std::numeric_limits<Real>::epsilon() *
+                std::max(
+                    {Real{1.0},
+                     std::abs(raw.A),
+                     std::abs(raw.Wn),
+                     std::abs(raw.Un),
+                     std::abs(raw.gap_sq)});
+            FE_THROW_IF(
+                raw.gap_sq < -gap_roundoff,
+                InvalidArgumentException,
+                "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+                "integrated squared normal gap is negative beyond "
+                "roundoff");
+            if (raw.gap_sq < Real{0.0}) {
+                raw.gap_sq = Real{0.0};
+            }
+        }
+        FE_THROW_IF(
+            captureOperatorStageGeometry(meshAccess()) !=
+                stage_mesh_revision,
+            InvalidArgumentException,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "stage geometry changed during boundary reduction evaluation");
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+
+    if (coordinateMeshBoundaryLocalFailure(
+            collective,
+            local_exception != nullptr,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements/evaluate")) {
+        fitted_ale_normal_measurement_transaction_active_ = false;
+        if (local_exception != nullptr) {
+            std::rethrow_exception(local_exception);
+        }
+        throw InvalidArgumentException(
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "another active communicator rank rejected evaluated moments");
+    }
+
+    // Reserve accepted-history storage while the candidate is still
+    // rollback-capable.  Accepted-step publication can then move records
+    // without allocating.
+    local_exception = nullptr;
+    try {
+        FE_THROW_IF(
+            staged_records.size() >
+                fitted_ale_normal_measurement_history_.max_size() -
+                    fitted_ale_normal_measurement_history_.size(),
+            InvalidArgumentException,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "accepted history size would overflow");
+        fitted_ale_normal_measurement_history_.reserve(
+            fitted_ale_normal_measurement_history_.size() +
+            staged_records.size());
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+    if (coordinateMeshBoundaryLocalFailure(
+            collective,
+            local_exception != nullptr,
+            "FESystem::stageFittedALENormalOperatorStageMeasurements/reserve")) {
+        fitted_ale_normal_measurement_transaction_active_ = false;
+        if (local_exception != nullptr) {
+            std::rethrow_exception(local_exception);
+        }
+        throw InvalidArgumentException(
+            "FESystem::stageFittedALENormalOperatorStageMeasurements: "
+            "another active communicator rank could not reserve accepted "
+            "history storage");
+    }
+
+    pending_fitted_ale_normal_measurements_ =
+        std::move(staged_records);
+    fitted_ale_normal_measurement_transaction_active_ = false;
+}
+
+void FESystem::discardPendingFittedALENormalOperatorStageMeasurements()
+    noexcept
+{
+    pending_fitted_ale_normal_measurements_.clear();
+    fitted_ale_normal_measurement_transaction_active_ = false;
+}
+
+void FESystem::commitPendingFittedALENormalOperatorStageMeasurements(
+    std::uint64_t accepted_step,
+    Real accepted_time,
+    Real dt)
+{
+    const auto collective = meshBoundaryCollectiveContext(*this);
+    MeshBoundaryConsensusTokens local_tokens;
+    MeshBoundaryConsensusTokens minimum_tokens;
+    MeshBoundaryConsensusTokens maximum_tokens;
+    std::exception_ptr local_exception;
+    bool contains_opaque_callable = false;
+    bool identical_replay = false;
+    const auto declaration_count =
+        fitted_ale_normal_measurement_declarations_.size();
+
+    try {
+        FE_THROW_IF(
+            fitted_ale_normal_measurement_transaction_active_,
+            InvalidArgumentException,
+            "FESystem::commitPendingFittedALENormalOperatorStageMeasurements: "
+            "another measurement transaction is active");
+        appendMeshBoundaryToken(
+            local_tokens,
+            static_cast<std::uint64_t>(declaration_count));
+        for (const auto& declaration :
+             fitted_ale_normal_measurement_declarations_) {
+            appendFittedALENormalMeasurementDeclaration(
+                local_tokens,
+                declaration,
+                contains_opaque_callable);
+        }
+        appendMeshBoundaryToken(
+            local_tokens,
+            static_cast<std::uint64_t>(
+                pending_fitted_ale_normal_measurements_.size()));
+
+        FE_THROW_IF(
+            declaration_count == 0u
+                ? !pending_fitted_ale_normal_measurements_.empty()
+                : pending_fitted_ale_normal_measurements_.size() !=
+                      declaration_count,
+            InvalidArgumentException,
+            "FESystem::commitPendingFittedALENormalOperatorStageMeasurements: "
+            "every nonempty declaration table requires one complete pending "
+            "group; only an empty declaration/pending pair is a no-op");
+
+        if (!pending_fitted_ale_normal_measurements_.empty()) {
+            FE_THROW_IF(
+                !is_setup_ || !dof_handler_.isFinalized() ||
+                    !std::isfinite(accepted_time) ||
+                    !std::isfinite(dt) || dt <= Real{0.0},
+                InvalidArgumentException,
+                "FESystem::commitPendingFittedALENormalOperatorStageMeasurements: "
+                "pending group, setup, and accepted metadata are invalid");
+            const auto& pending_stage =
+                pending_fitted_ale_normal_measurements_.front().stage;
+            FE_THROW_IF(
+                accepted_step !=
+                        pending_stage.prospective_accepted_step ||
+                    accepted_time != pending_stage.step_end_time ||
+                    dt != pending_stage.dt,
+                InvalidArgumentException,
+                "FESystem::commitPendingFittedALENormalOperatorStageMeasurements: "
+                "accepted step/time/dt do not match the pending prospective "
+                "stage");
+            for (std::size_t index = 0u; index < declaration_count;
+                 ++index) {
+                const auto& pending =
+                    pending_fitted_ale_normal_measurements_[index];
+                const auto& declaration =
+                    fitted_ale_normal_measurement_declarations_[index];
+                FE_THROW_IF(
+                    pending.raw.key != declaration.key ||
+                        pending.declaration.key != declaration.key ||
+                        pending.declaration.related_velocity_field !=
+                            declaration.related_velocity_field ||
+                        pending.declaration
+                                .mesh_normal_integral_functional !=
+                            declaration.mesh_normal_integral_functional ||
+                        pending.declaration
+                                .fluid_normal_integral_functional !=
+                            declaration.fluid_normal_integral_functional ||
+                        pending.declaration
+                                .normal_gap_squared_integral_functional !=
+                            declaration
+                                .normal_gap_squared_integral_functional ||
+                        !meshNormalDeclarationsStructurallyEqual(
+                            pending.declaration.normal_constraint,
+                            declaration.normal_constraint) ||
+                        pending.stage != pending_stage ||
+                        !pending.stage.expected_stage_geometry.has_value() ||
+                        pending.raw.stage_mesh_revision !=
+                            *pending.stage.expected_stage_geometry,
+                    InvalidArgumentException,
+                    "FESystem::commitPendingFittedALENormalOperatorStageMeasurements: "
+                    "pending group is inconsistent with its declaration or "
+                    "shared stage provenance");
+                appendFittedALENormalOperatorStageRecord(
+                    local_tokens,
+                    pending,
+                    contains_opaque_callable);
+            }
+            appendMeshBoundaryToken(local_tokens, accepted_step);
+            appendMeshBoundaryToken(
+                local_tokens,
+                generatedBoundaryTraceRealBits(accepted_time));
+            appendMeshBoundaryToken(
+                local_tokens, generatedBoundaryTraceRealBits(dt));
+
+            FE_THROW_IF(
+                fitted_ale_normal_measurement_history_.size() %
+                        declaration_count !=
+                    0u,
+                InvalidArgumentException,
+                "FESystem::commitPendingFittedALENormalOperatorStageMeasurements: "
+                "accepted history contains an incomplete group");
+            if (!fitted_ale_normal_measurement_history_.empty()) {
+                const auto latest_begin =
+                    fitted_ale_normal_measurement_history_.size() -
+                    declaration_count;
+                const auto& latest_stage =
+                    fitted_ale_normal_measurement_history_[latest_begin]
+                        .stage;
+                FE_THROW_IF(
+                    accepted_step <
+                        latest_stage.prospective_accepted_step,
+                    InvalidArgumentException,
+                    "FESystem::commitPendingFittedALENormalOperatorStageMeasurements: "
+                    "accepted history step must be monotone");
+                if (accepted_step ==
+                    latest_stage.prospective_accepted_step) {
+                    identical_replay = true;
+                    for (std::size_t index = 0u;
+                         index < declaration_count;
+                         ++index) {
+                        const auto& pending =
+                            pending_fitted_ale_normal_measurements_[index];
+                        const auto& latest =
+                            fitted_ale_normal_measurement_history_[
+                                latest_begin + index];
+                        MeshBoundaryConsensusTokens pending_tokens;
+                        MeshBoundaryConsensusTokens latest_tokens;
+                        bool pending_opaque = false;
+                        bool latest_opaque = false;
+                        appendFittedALENormalOperatorStageRecord(
+                            pending_tokens,
+                            pending,
+                            pending_opaque);
+                        appendFittedALENormalOperatorStageRecord(
+                            latest_tokens,
+                            latest,
+                            latest_opaque);
+                        identical_replay =
+                            identical_replay &&
+                            pending_tokens == latest_tokens &&
+                            pending_opaque == latest_opaque &&
+                            pending.stage.expected_stage_geometry ==
+                                latest.stage.expected_stage_geometry &&
+                            pending.raw.stage_mesh_revision ==
+                                latest.raw.stage_mesh_revision;
+                    }
+                    FE_THROW_IF(
+                        !identical_replay,
+                        InvalidArgumentException,
+                        "FESystem::commitPendingFittedALENormalOperatorStageMeasurements: "
+                        "an accepted step cannot be replayed with different "
+                        "operator-stage moments or provenance");
+                } else {
+                    FE_THROW_IF(
+                        accepted_time < latest_stage.step_end_time,
+                        InvalidArgumentException,
+                        "FESystem::commitPendingFittedALENormalOperatorStageMeasurements: "
+                        "accepted history time must be monotone");
+                }
+                appendMeshBoundaryToken(
+                    local_tokens,
+                    static_cast<std::uint64_t>(
+                        fitted_ale_normal_measurement_history_.size()));
+                for (std::size_t index = 0u;
+                     index < declaration_count;
+                     ++index) {
+                    appendFittedALENormalOperatorStageRecord(
+                        local_tokens,
+                        fitted_ale_normal_measurement_history_[
+                            latest_begin + index],
+                        contains_opaque_callable);
+                }
+            } else {
+                appendMeshBoundaryToken(local_tokens, 0u);
+            }
+            FE_THROW_IF(
+                !identical_replay &&
+                    fitted_ale_normal_measurement_history_.capacity() <
+                        fitted_ale_normal_measurement_history_.size() +
+                            declaration_count,
+                InvalidArgumentException,
+                "FESystem::commitPendingFittedALENormalOperatorStageMeasurements: "
+                "staging did not reserve allocation-free accepted-history "
+                "storage");
+        }
+        appendMeshBoundaryToken(
+            local_tokens, identical_replay ? 1u : 0u);
+        FE_THROW_IF(
+            collective.size > 1 && contains_opaque_callable,
+            InvalidArgumentException,
+            "FESystem::commitPendingFittedALENormalOperatorStageMeasurements: "
+            "distributed history may not contain opaque callbacks");
+        FE_THROW_IF(
+            local_tokens.size() >
+                static_cast<std::size_t>(
+                    std::numeric_limits<int>::max()),
+            InvalidArgumentException,
+            "FESystem::commitPendingFittedALENormalOperatorStageMeasurements: "
+            "consensus token sequence exceeds the MPI count range");
+        minimum_tokens = local_tokens;
+        maximum_tokens = local_tokens;
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+
+    if (coordinateMeshBoundaryLocalFailure(
+            collective,
+            local_exception != nullptr,
+            "FESystem::commitPendingFittedALENormalOperatorStageMeasurements/preflight")) {
+        if (local_exception != nullptr) {
+            std::rethrow_exception(local_exception);
+        }
+        throw InvalidArgumentException(
+            "FESystem::commitPendingFittedALENormalOperatorStageMeasurements: "
+            "another active communicator rank rejected accepted history");
+    }
+    requireMeshBoundaryTokenConsensus(
+        collective,
+        local_tokens,
+        minimum_tokens,
+        maximum_tokens,
+        "FESystem::commitPendingFittedALENormalOperatorStageMeasurements/consensus");
+
+    if (pending_fitted_ale_normal_measurements_.empty()) {
+        return;
+    }
+    if (identical_replay) {
+        pending_fitted_ale_normal_measurements_.clear();
+        return;
+    }
+
+    static_assert(
+        std::is_nothrow_move_constructible_v<
+            FittedALENormalOperatorStageHistoryRecord>);
+    static_assert(
+        std::is_nothrow_move_assignable_v<
+            FittedALENormalOperatorStageHistoryRecord>);
+    const auto history_size =
+        fitted_ale_normal_measurement_history_.size();
+    std::size_t appended_count = 0u;
+    local_exception = nullptr;
+    fitted_ale_normal_measurement_transaction_active_ = true;
+    try {
+        for (auto& record :
+             pending_fitted_ale_normal_measurements_) {
+            fitted_ale_normal_measurement_history_.push_back(
+                std::move(record));
+            ++appended_count;
+        }
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+    const bool any_failed = coordinateMeshBoundaryLocalFailure(
+        collective,
+        local_exception != nullptr,
+        "FESystem::commitPendingFittedALENormalOperatorStageMeasurements/publish");
+    if (any_failed) {
+        for (std::size_t index = 0u; index < appended_count;
+             ++index) {
+            pending_fitted_ale_normal_measurements_[index] =
+                std::move(
+                    fitted_ale_normal_measurement_history_[
+                        history_size + index]);
+        }
+        fitted_ale_normal_measurement_history_.resize(history_size);
+        fitted_ale_normal_measurement_transaction_active_ = false;
+        if (local_exception != nullptr) {
+            std::rethrow_exception(local_exception);
+        }
+        throw InvalidArgumentException(
+            "FESystem::commitPendingFittedALENormalOperatorStageMeasurements: "
+            "another active communicator rank failed accepted publication");
+    }
+
+    pending_fitted_ale_normal_measurements_.clear();
+    fitted_ale_normal_measurement_transaction_active_ = false;
+    try {
+        for (std::size_t index = history_size;
+             index < fitted_ale_normal_measurement_history_.size();
+             ++index) {
+            const auto& record =
+                fitted_ale_normal_measurement_history_[index];
+            std::ostringstream message;
+            message << std::setprecision(17)
+                    << "FESystem: accepted fitted-ALE normal measurement"
+                    << " semantics=operator_stage"
+                    << " raw_moments_not_work_or_dissipation=true"
+                    << " scheme='" << record.stage.scheme_name << "'"
+                    << " accepted_step=" << accepted_step
+                    << " attempt="
+                    << record.stage.prospective_attempt
+                    << " state_time=" << record.stage.state_time
+                    << " rate_time=" << record.stage.rate_time
+                    << " mesh_displacement_field="
+                    << record.raw.key.mesh_displacement_field
+                    << " boundary_marker="
+                    << record.raw.key.boundary_marker
+                    << " A=" << record.raw.A
+                    << " Wn=" << record.raw.Wn
+                    << " Un=" << record.raw.Un
+                    << " gap_sq=" << record.raw.gap_sq
+                    << " stage_mesh_geometry_revision="
+                    << record.raw.stage_mesh_revision.geometry_revision
+                    << " stage_mesh_topology_revision="
+                    << record.raw.stage_mesh_revision.topology_revision
+                    << " stage_mesh_ownership_revision="
+                    << record.raw.stage_mesh_revision.ownership_revision
+                    << " stage_mesh_numbering_revision="
+                    << record.raw.stage_mesh_revision.numbering_revision
+                    << " stage_mesh_field_layout_revision="
+                    << record.raw.stage_mesh_revision.field_layout_revision
+                    << " stage_mesh_label_revision="
+                    << record.raw.stage_mesh_revision.label_revision
+                    << " stage_mesh_active_configuration_epoch="
+                    << record.raw.stage_mesh_revision
+                           .active_configuration_epoch
+                    << " stage_coordinate_configuration_key="
+                    << record.raw.stage_mesh_revision
+                           .coordinate_configuration_key
+                    << " geometry_provenance_scope=rank_local";
+            FE_LOG_INFO(message.str());
+        }
+    } catch (...) {
+        // Accepted semantic history is authoritative; diagnostics are best effort.
+    }
+}
+
+void FESystem::recordAcceptedMeshNormalBoundaryConstraints(
+    std::uint64_t accepted_step,
+    Real accepted_time,
+    Real dt,
+    std::uint64_t state_revision)
+{
+    if (!mesh_boundary_history_collective_call_active_) {
+        int communicator_size = 1;
+#if FE_HAS_MPI
+        int initialized = 0;
+        int finalized = 0;
+        MPI_Initialized(&initialized);
+        if (initialized != 0) {
+            MPI_Finalized(&finalized);
+        }
+        if (initialized != 0 && finalized == 0) {
+            const auto communicator = activeMpiCommunicator();
+            if (communicator != MPI_COMM_NULL) {
+                MPI_Comm_size(communicator, &communicator_size);
+            }
+        }
+#endif
+        const int mesh_parallel_size =
+            mesh_access_ ? mesh_access_->parallelSize() : 1;
+        FE_THROW_IF(
+            communicator_size > 1 || mesh_parallel_size > 1,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshNormalBoundaryConstraints: "
+            "distributed accepted history requires the combined normal and "
+            "tangential provenance transaction");
+    }
+    FE_THROW_IF(
+        mesh_boundary_history_transaction_active_ &&
+            !mesh_boundary_history_collective_call_active_,
+        InvalidArgumentException,
+        "FESystem::recordAcceptedMeshNormalBoundaryConstraints: accepted "
+        "mesh-boundary history is owned by the collective transaction");
+    if (mesh_normal_boundary_constraints_.empty()) {
+        return;
+    }
+    FE_THROW_IF(
+        !isSetup(),
+        InvalidArgumentException,
+        "FESystem::recordAcceptedMeshNormalBoundaryConstraints: system "
+        "setup must be complete");
+    FE_THROW_IF(
+        !std::isfinite(accepted_time) || !std::isfinite(dt) ||
+            dt < Real{0.0} || state_revision == 0u,
+        InvalidArgumentException,
+        "FESystem::recordAcceptedMeshNormalBoundaryConstraints: accepted "
+        "time must be finite, dt must be finite and nonnegative, and the "
+        "state revision must be nonzero");
+
+    for (const auto& declaration :
+         mesh_normal_boundary_constraints_) {
+        FE_THROW_IF(
+            !declaration.consumer_binding.has_value(),
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshNormalBoundaryConstraints: every "
+            "normal constraint requires a complete consumer binding");
+        const auto& binding = *declaration.consumer_binding;
+        const auto has_boundary_formulation = std::any_of(
+            formulation_records_.begin(),
+            formulation_records_.end(),
+            [&](const auto& record) {
+                return record.operator_tag == binding.operator_tag &&
+                       record.residual_expr != nullptr &&
+                       std::find(record.active_domains.begin(),
+                                 record.active_domains.end(),
+                                 analysis::DomainKind::Boundary) !=
+                           record.active_domains.end();
+            });
+        FE_THROW_IF(
+            binding.operator_tag.find_first_not_of(" \t\r\n") ==
+                    std::string::npos ||
+                binding.mesh_descriptor_source.find_first_not_of(
+                    " \t\r\n") == std::string::npos ||
+                !hasOperator(binding.operator_tag) ||
+                !has_boundary_formulation,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshNormalBoundaryConstraints: bound "
+            "consumer operator or mesh descriptor provenance is invalid");
+        const auto mesh_descriptor_count =
+            countOperatorBoundBoundaryDescriptors(
+            bc_descriptors_,
+            bc_descriptor_operator_tags_,
+            binding.operator_tag,
+            [&](const auto& descriptor) {
+                return meshNormalMeshDescriptorMatches(
+                    descriptor,
+                    declaration,
+                    binding.mesh_descriptor_source);
+            });
+        FE_THROW_IF(
+            mesh_descriptor_count != 1,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshNormalBoundaryConstraints: bound "
+            "consumer requires exactly one matching mesh normal boundary "
+            "descriptor");
+
+        const bool needs_related_fluid =
+            declaration.target_kind ==
+            MeshNormalBoundaryTargetKind::FluidNormalVelocity;
+        FE_THROW_IF(
+            needs_related_fluid != binding.related_fluid.has_value(),
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshNormalBoundaryConstraints: "
+            "reciprocal fluid consumer provenance is incomplete");
+        if (needs_related_fluid) {
+            const auto& related = *binding.related_fluid;
+            FE_THROW_IF(
+                related.descriptor_source.find_first_not_of(" \t\r\n") ==
+                        std::string::npos ||
+                    (related.enforcement_kind !=
+                         analysis::EnforcementKind::WeakPenalty &&
+                     related.enforcement_kind !=
+                         analysis::EnforcementKind::WeakNitsche),
+                InvalidArgumentException,
+                "FESystem::recordAcceptedMeshNormalBoundaryConstraints: "
+                "reciprocal fluid descriptor provenance is invalid");
+            const auto related_descriptor_count =
+                countOperatorBoundBoundaryDescriptors(
+                bc_descriptors_,
+                bc_descriptor_operator_tags_,
+                binding.operator_tag,
+                [&](const auto& descriptor) {
+                    return meshNormalRelatedFluidDescriptorMatches(
+                               descriptor,
+                               declaration,
+                               related.descriptor_source) &&
+                           descriptor.enforcement_kind ==
+                               related.enforcement_kind;
+                });
+            FE_THROW_IF(
+                related_descriptor_count != 1,
+                InvalidArgumentException,
+                "FESystem::recordAcceptedMeshNormalBoundaryConstraints: "
+                "bound consumer requires exactly one matching reciprocal "
+                "fluid normal boundary descriptor");
+        }
+    }
+
+    const auto mesh_revision = meshAccess().geometryRevision();
+    const auto declaration_count =
+        mesh_normal_boundary_constraints_.size();
+    if (!mesh_normal_boundary_constraint_history_.empty()) {
+        FE_THROW_IF(
+            mesh_normal_boundary_constraint_history_.size() %
+                    declaration_count !=
+                0u,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshNormalBoundaryConstraints: "
+            "accepted history contains an incomplete constraint group");
+        const auto group_begin =
+            mesh_normal_boundary_constraint_history_.size() -
+            declaration_count;
+        const auto& latest =
+            mesh_normal_boundary_constraint_history_[group_begin];
+        for (std::size_t index = 0u; index < declaration_count;
+             ++index) {
+            const auto& record =
+                mesh_normal_boundary_constraint_history_[group_begin +
+                                                          index];
+            const auto& declaration =
+                mesh_normal_boundary_constraints_[index];
+            const auto& frozen = record.declaration;
+            FE_THROW_IF(
+                record.accepted_step != latest.accepted_step ||
+                    record.accepted_time != latest.accepted_time ||
+                    record.dt != latest.dt ||
+                    record.state_revision != latest.state_revision ||
+                    record.mesh_geometry_revision !=
+                        latest.mesh_geometry_revision ||
+                    frozen.mesh_displacement_field !=
+                        declaration.mesh_displacement_field ||
+                    frozen.boundary_marker !=
+                        declaration.boundary_marker ||
+                    frozen.quantity != declaration.quantity ||
+                    frozen.target_kind != declaration.target_kind ||
+                    frozen.target_expression.node() !=
+                        declaration.target_expression.node() ||
+                    frozen.enforcement_kind !=
+                        declaration.enforcement_kind ||
+                    frozen.related_velocity_field !=
+                        declaration.related_velocity_field ||
+                    frozen.owner_component !=
+                        declaration.owner_component ||
+                    frozen.consumer_binding !=
+                        declaration.consumer_binding,
+                InvalidArgumentException,
+                "FESystem::recordAcceptedMeshNormalBoundaryConstraints: "
+                "accepted history constraint group is inconsistent with "
+                "its declarations or shared provenance");
+        }
+        FE_THROW_IF(
+            accepted_step < latest.accepted_step ||
+                accepted_time < latest.accepted_time,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshNormalBoundaryConstraints: "
+            "accepted history must be monotone");
+        if (accepted_step == latest.accepted_step) {
+            const bool identical =
+                accepted_time == latest.accepted_time && dt == latest.dt &&
+                state_revision == latest.state_revision &&
+                mesh_revision == latest.mesh_geometry_revision;
+            FE_THROW_IF(
+                !identical,
+                InvalidArgumentException,
+                "FESystem::recordAcceptedMeshNormalBoundaryConstraints: "
+                "an accepted step cannot be recorded with conflicting "
+                "provenance");
+            return;
+        }
+    }
+
+    std::vector<MeshNormalBoundaryConstraintHistoryRecord>
+        staged_records;
+    staged_records.reserve(declaration_count);
+    for (const auto& declaration :
+         mesh_normal_boundary_constraints_) {
+        staged_records.push_back(
+            MeshNormalBoundaryConstraintHistoryRecord{
+                .accepted_step = accepted_step,
+                .accepted_time = accepted_time,
+                .dt = dt,
+                .state_revision = state_revision,
+                .mesh_geometry_revision = mesh_revision,
+                .declaration = declaration,
+            });
+    }
+    mesh_normal_boundary_constraint_history_.reserve(
+        mesh_normal_boundary_constraint_history_.size() +
+        staged_records.size());
+    for (auto& record : staged_records) {
+        mesh_normal_boundary_constraint_history_.push_back(
+            std::move(record));
+    }
+    if (!mesh_boundary_history_defer_logging_) {
+        emitAcceptedMeshNormalBoundaryConstraintHistory(
+            mesh_normal_boundary_constraint_history_.size() -
+            declaration_count);
+    }
+}
+
+void FESystem::emitAcceptedMeshNormalBoundaryConstraintHistory(
+    std::size_t group_begin) const noexcept
+{
+    const auto declaration_count =
+        mesh_normal_boundary_constraints_.size();
+    if (group_begin > mesh_normal_boundary_constraint_history_.size() ||
+        declaration_count >
+            mesh_normal_boundary_constraint_history_.size() -
+                group_begin) {
+        return;
+    }
+    try {
+        for (std::size_t index = 0u; index < declaration_count; ++index) {
+            const auto& record =
+                mesh_normal_boundary_constraint_history_[group_begin + index];
+            const auto& declaration = record.declaration;
+            const auto& binding = *declaration.consumer_binding;
+            const char* target_name = "PrescribedDisplacement";
+            if (declaration.target_kind ==
+                MeshNormalBoundaryTargetKind::TimeScaledPrescribedVelocity) {
+                target_name = "TimeScaledPrescribedVelocity";
+            } else if (declaration.target_kind ==
+                       MeshNormalBoundaryTargetKind::FluidNormalVelocity) {
+                target_name = "FluidNormalVelocity";
+            }
+            std::ostringstream message;
+            message << std::setprecision(17)
+                    << "FESystem: accepted normal mesh constraint history"
+                    << " diagnostic=mesh_normal_boundary_constraint_history"
+                    << " accepted_step=" << record.accepted_step
+                    << " accepted_time=" << record.accepted_time
+                    << " dt=" << record.dt
+                    << " state_revision=" << record.state_revision
+                    << " mesh_geometry_revision="
+                    << record.mesh_geometry_revision
+                    << " mesh_geometry_revision_scope=rank_local"
+                    << " mesh_displacement_field="
+                    << declaration.mesh_displacement_field
+                    << " boundary_marker=" << declaration.boundary_marker
+                    << " target=" << target_name
+                    << " owner='" << declaration.owner_component << "'"
+                    << " consumer_operator_tag='"
+                    << binding.operator_tag << "'"
+                    << " mesh_descriptor_source='"
+                    << binding.mesh_descriptor_source << "'"
+                    << " related_fluid_bound="
+                    << (binding.related_fluid.has_value() ? "true" : "false");
+            if (binding.related_fluid.has_value()) {
+                message << " related_fluid_descriptor_source='"
+                        << binding.related_fluid->descriptor_source << "'"
+                        << " related_fluid_enforcement="
+                        << (binding.related_fluid->enforcement_kind ==
+                                    analysis::EnforcementKind::WeakNitsche
+                                ? "WeakNitsche"
+                                : "WeakPenalty");
+            }
+            FE_LOG_INFO(message.str());
+        }
+    } catch (...) {
+        // Accepted history is semantic state; diagnostics are best effort.
+    }
+}
+
 void FESystem::declareMeshTangentialBoundaryPolicy(
     MeshTangentialBoundaryPolicyDeclaration declaration)
 {
     FE_THROW_IF(
-        !mesh_tangential_boundary_policy_history_.empty(),
+        mesh_boundary_history_transaction_active_ ||
+            !mesh_tangential_boundary_policy_history_.empty(),
         InvalidArgumentException,
         "FESystem::declareMeshTangentialBoundaryPolicy: policies cannot "
-        "change after accepted history has begun");
+        "change after accepted mesh-boundary history has begun");
+    const bool known_policy =
+        declaration.policy == MeshTangentialBoundaryPolicy::Free ||
+        declaration.policy ==
+            MeshTangentialBoundaryPolicy::SmoothingOnly ||
+        declaration.policy == MeshTangentialBoundaryPolicy::Prescribed;
+    FE_THROW_IF(
+        !known_policy,
+        InvalidArgumentException,
+        "FESystem::declareMeshTangentialBoundaryPolicy: unknown "
+        "tangential mesh-motion policy");
     FE_THROW_IF(
         !field_registry_.has(declaration.mesh_displacement_field),
         InvalidArgumentException,
@@ -6781,14 +11224,37 @@ void FESystem::declareMeshTangentialBoundaryPolicy(
         "FESystem::declareMeshTangentialBoundaryPolicy: boundary marker "
         "must be nonnegative");
     FE_THROW_IF(
-        declaration.owner_component.empty(),
+        declaration.owner_component.find_first_not_of(" \t\r\n") ==
+            std::string::npos,
         InvalidArgumentException,
         "FESystem::declareMeshTangentialBoundaryPolicy: owner component "
-        "must be nonempty");
+        "must be nonblank");
+    FE_THROW_IF(
+        declaration.consumer_bound ||
+            !declaration.consumer_operator_tag.empty() ||
+            !declaration.consumer_source.empty(),
+        InvalidArgumentException,
+        "FESystem::declareMeshTangentialBoundaryPolicy: consumer "
+        "provenance must be bound after its descriptor is installed");
+    const auto& displacement =
+        field_registry_.get(declaration.mesh_displacement_field);
+    const int dimension = mesh_access_ ? mesh_access_->dimension() : 0;
+    FE_THROW_IF(
+        dimension < 1 || dimension > 3 ||
+            displacement.scope != FieldScope::VolumeCell ||
+            displacement.space == nullptr ||
+            displacement.space->field_type() != FieldType::Vector ||
+            displacement.components != dimension ||
+            displacement.space->value_dimension() != dimension ||
+            !fieldParticipatesInUnknownVector(
+                declaration.mesh_displacement_field),
+        InvalidArgumentException,
+        "FESystem::declareMeshTangentialBoundaryPolicy: policy target "
+        "must be the mesh-dimensional displacement unknown");
     const auto bound_displacement =
         meshMotionField(MeshMotionFieldRole::Displacement);
     FE_THROW_IF(
-        bound_displacement.has_value() &&
+        !bound_displacement.has_value() ||
             *bound_displacement != declaration.mesh_displacement_field,
         InvalidArgumentException,
         "FESystem::declareMeshTangentialBoundaryPolicy: declaration does "
@@ -6822,6 +11288,122 @@ void FESystem::declareMeshTangentialBoundaryPolicy(
                    ? std::string("SmoothingOnly")
                    : std::string("Prescribed")));
     mesh_tangential_boundary_policies_.push_back(std::move(declaration));
+    std::sort(
+        mesh_tangential_boundary_policies_.begin(),
+        mesh_tangential_boundary_policies_.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return std::tie(lhs.mesh_displacement_field,
+                            lhs.boundary_marker) <
+                   std::tie(rhs.mesh_displacement_field,
+                            rhs.boundary_marker);
+        });
+}
+
+void FESystem::bindMeshTangentialBoundaryPolicyConsumer(
+    FieldId mesh_displacement_field,
+    int boundary_marker,
+    MeshTangentialBoundaryPolicy policy,
+    std::string operator_tag,
+    std::string consumer_source)
+{
+    FE_THROW_IF(
+        mesh_boundary_history_transaction_active_ ||
+            !mesh_tangential_boundary_policy_history_.empty(),
+        InvalidArgumentException,
+        "FESystem::bindMeshTangentialBoundaryPolicyConsumer: consumer "
+        "provenance cannot change after accepted mesh-boundary history has "
+        "begun");
+    FE_THROW_IF(
+        operator_tag.find_first_not_of(" \t\r\n") == std::string::npos ||
+            consumer_source.find_first_not_of(" \t\r\n") ==
+                std::string::npos,
+        InvalidArgumentException,
+        "FESystem::bindMeshTangentialBoundaryPolicyConsumer: operator tag "
+        "and consumer source must be nonblank");
+    FE_THROW_IF(
+        !hasOperator(operator_tag),
+        InvalidArgumentException,
+        "FESystem::bindMeshTangentialBoundaryPolicyConsumer: unknown "
+        "consumer operator '" +
+            operator_tag + "'");
+    const auto has_boundary_formulation = std::any_of(
+        formulation_records_.begin(),
+        formulation_records_.end(),
+        [&](const auto& record) {
+            return record.operator_tag == operator_tag &&
+                   record.residual_expr != nullptr &&
+                   std::find(record.active_domains.begin(),
+                             record.active_domains.end(),
+                             analysis::DomainKind::Boundary) !=
+                       record.active_domains.end();
+        });
+    FE_THROW_IF(
+        !has_boundary_formulation,
+        InvalidArgumentException,
+        "FESystem::bindMeshTangentialBoundaryPolicyConsumer: consumer "
+        "operator has no installed boundary formulation");
+    const auto declaration = std::find_if(
+        mesh_tangential_boundary_policies_.begin(),
+        mesh_tangential_boundary_policies_.end(),
+        [&](const auto& candidate) {
+            return candidate.mesh_displacement_field ==
+                       mesh_displacement_field &&
+                   candidate.boundary_marker == boundary_marker;
+        });
+    FE_THROW_IF(
+        declaration == mesh_tangential_boundary_policies_.end(),
+        InvalidArgumentException,
+        "FESystem::bindMeshTangentialBoundaryPolicyConsumer: no matching "
+        "tangential policy declaration");
+    FE_THROW_IF(
+        declaration->policy != policy,
+        InvalidArgumentException,
+        "FESystem::bindMeshTangentialBoundaryPolicyConsumer: consumer "
+        "policy does not match its declaration");
+    const auto expected_enforcement =
+        policy == MeshTangentialBoundaryPolicy::Prescribed
+            ? analysis::EnforcementKind::WeakPenalty
+            : analysis::EnforcementKind::WeakConsistent;
+    const auto descriptor_count =
+        countOperatorBoundBoundaryDescriptors(
+        bc_descriptors_,
+        bc_descriptor_operator_tags_,
+        operator_tag,
+        [&](const auto& descriptor) {
+            return descriptor.primary_variable ==
+                       analysis::VariableKey::field(
+                           mesh_displacement_field) &&
+                   descriptor.component == -1 &&
+                   descriptor.domain == analysis::DomainKind::Boundary &&
+                   descriptor.boundary_marker == boundary_marker &&
+                   descriptor.interface_marker == -1 &&
+                   descriptor.trace_kind ==
+                       analysis::TraceKind::TangentialComponent &&
+                   descriptor.enforcement_kind ==
+                       expected_enforcement &&
+                   descriptor.related_variables.empty() &&
+                   descriptor.source == consumer_source;
+        });
+    FE_THROW_IF(
+        descriptor_count != 1,
+        InvalidArgumentException,
+        "FESystem::bindMeshTangentialBoundaryPolicyConsumer: expected "
+        "exactly one matching tangential boundary descriptor");
+
+    if (declaration->consumer_bound) {
+        FE_THROW_IF(
+            declaration->consumer_operator_tag != operator_tag ||
+                declaration->consumer_source != consumer_source,
+            InvalidArgumentException,
+            "FESystem::bindMeshTangentialBoundaryPolicyConsumer: policy "
+            "already has a different consumer");
+        return;
+    }
+
+    invalidateSetup();
+    declaration->consumer_bound = true;
+    declaration->consumer_operator_tag = std::move(operator_tag);
+    declaration->consumer_source = std::move(consumer_source);
 }
 
 void FESystem::recordAcceptedMeshTangentialBoundaryPolicies(
@@ -6830,6 +11412,38 @@ void FESystem::recordAcceptedMeshTangentialBoundaryPolicies(
     Real dt,
     std::uint64_t state_revision)
 {
+    if (!mesh_boundary_history_collective_call_active_) {
+        int communicator_size = 1;
+#if FE_HAS_MPI
+        int initialized = 0;
+        int finalized = 0;
+        MPI_Initialized(&initialized);
+        if (initialized != 0) {
+            MPI_Finalized(&finalized);
+        }
+        if (initialized != 0 && finalized == 0) {
+            const auto communicator = activeMpiCommunicator();
+            if (communicator != MPI_COMM_NULL) {
+                MPI_Comm_size(communicator, &communicator_size);
+            }
+        }
+#endif
+        const int mesh_parallel_size =
+            mesh_access_ ? mesh_access_->parallelSize() : 1;
+        FE_THROW_IF(
+            communicator_size > 1 || mesh_parallel_size > 1,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshTangentialBoundaryPolicies: "
+            "distributed accepted history requires the combined normal and "
+            "tangential provenance transaction");
+    }
+    FE_THROW_IF(
+        mesh_boundary_history_transaction_active_ &&
+            !mesh_boundary_history_collective_call_active_,
+        InvalidArgumentException,
+        "FESystem::recordAcceptedMeshTangentialBoundaryPolicies: "
+        "accepted mesh-boundary history is owned by the collective "
+        "transaction");
     if (mesh_tangential_boundary_policies_.empty()) {
         return;
     }
@@ -6840,15 +11454,133 @@ void FESystem::recordAcceptedMeshTangentialBoundaryPolicies(
         "setup must be complete");
     FE_THROW_IF(
         !std::isfinite(accepted_time) || !std::isfinite(dt) ||
-            dt < Real{0.0},
+            dt < Real{0.0} || state_revision == 0u,
         InvalidArgumentException,
         "FESystem::recordAcceptedMeshTangentialBoundaryPolicies: accepted "
-        "time must be finite and dt must be finite and nonnegative");
+        "time must be finite, dt must be finite and nonnegative, and the "
+        "state revision must be nonzero");
+
+    for (const auto& declaration :
+         mesh_tangential_boundary_policies_) {
+        const bool provenance_absent =
+            declaration.consumer_operator_tag.empty() &&
+            declaration.consumer_source.empty();
+        const bool provenance_complete =
+            declaration.consumer_operator_tag.find_first_not_of(
+                " \t\r\n") != std::string::npos &&
+            declaration.consumer_source.find_first_not_of(
+                " \t\r\n") != std::string::npos;
+        FE_THROW_IF(
+            declaration.consumer_bound ? !provenance_complete
+                                       : !provenance_absent,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshTangentialBoundaryPolicies: "
+            "consumer binding provenance is incomplete");
+        if (!declaration.consumer_bound) {
+            continue;
+        }
+        FE_THROW_IF(
+            !hasOperator(declaration.consumer_operator_tag) ||
+                !std::any_of(
+                    formulation_records_.begin(),
+                    formulation_records_.end(),
+                    [&](const auto& record) {
+                        return record.operator_tag ==
+                                   declaration.consumer_operator_tag &&
+                               record.residual_expr != nullptr &&
+                               std::find(
+                                   record.active_domains.begin(),
+                                   record.active_domains.end(),
+                                   analysis::DomainKind::Boundary) !=
+                                   record.active_domains.end();
+                    }),
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshTangentialBoundaryPolicies: "
+            "consumer operator is no longer registered");
+        const auto expected_enforcement =
+            declaration.policy ==
+                    MeshTangentialBoundaryPolicy::Prescribed
+                ? analysis::EnforcementKind::WeakPenalty
+                : analysis::EnforcementKind::WeakConsistent;
+        const auto descriptor_count =
+            countOperatorBoundBoundaryDescriptors(
+            bc_descriptors_,
+            bc_descriptor_operator_tags_,
+            declaration.consumer_operator_tag,
+            [&](const auto& descriptor) {
+                return descriptor.primary_variable ==
+                           analysis::VariableKey::field(
+                               declaration.mesh_displacement_field) &&
+                       descriptor.component == -1 &&
+                       descriptor.domain ==
+                           analysis::DomainKind::Boundary &&
+                       descriptor.boundary_marker ==
+                           declaration.boundary_marker &&
+                       descriptor.interface_marker == -1 &&
+                       descriptor.trace_kind ==
+                           analysis::TraceKind::TangentialComponent &&
+                       descriptor.enforcement_kind ==
+                           expected_enforcement &&
+                       descriptor.related_variables.empty() &&
+                       descriptor.source ==
+                           declaration.consumer_source;
+            });
+        FE_THROW_IF(
+            descriptor_count != 1,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshTangentialBoundaryPolicies: "
+            "bound consumer requires exactly one matching tangential "
+            "boundary descriptor");
+    }
 
     const auto mesh_revision = meshAccess().geometryRevision();
+    const auto declaration_count =
+        mesh_tangential_boundary_policies_.size();
     if (!mesh_tangential_boundary_policy_history_.empty()) {
+        FE_THROW_IF(
+            mesh_tangential_boundary_policy_history_.size() %
+                    declaration_count !=
+                0u,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshTangentialBoundaryPolicies: "
+            "accepted history contains an incomplete policy group");
+        const auto group_begin =
+            mesh_tangential_boundary_policy_history_.size() -
+            declaration_count;
         const auto& latest =
-            mesh_tangential_boundary_policy_history_.back();
+            mesh_tangential_boundary_policy_history_[group_begin];
+        for (std::size_t index = 0u; index < declaration_count;
+             ++index) {
+            const auto& record =
+                mesh_tangential_boundary_policy_history_[group_begin +
+                                                          index];
+            const auto& declaration =
+                mesh_tangential_boundary_policies_[index];
+            FE_THROW_IF(
+                record.accepted_step != latest.accepted_step ||
+                    record.accepted_time != latest.accepted_time ||
+                    record.dt != latest.dt ||
+                    record.state_revision != latest.state_revision ||
+                    record.mesh_geometry_revision !=
+                        latest.mesh_geometry_revision ||
+                    record.mesh_displacement_field !=
+                        declaration.mesh_displacement_field ||
+                    record.boundary_marker !=
+                        declaration.boundary_marker ||
+                    record.policy != declaration.policy ||
+                    record.owner_component !=
+                        declaration.owner_component ||
+                    record.consumer_bound !=
+                        declaration.consumer_bound ||
+                    record.consumer_operator_tag !=
+                        declaration.consumer_operator_tag ||
+                    record.consumer_source !=
+                        declaration.consumer_source,
+                InvalidArgumentException,
+                "FESystem::recordAcceptedMeshTangentialBoundaryPolicies: "
+                "accepted history policy group is inconsistent with its "
+                "declarations or shared provenance");
+        }
         FE_THROW_IF(
             accepted_step < latest.accepted_step ||
                 accepted_time < latest.accepted_time,
@@ -6870,8 +11602,11 @@ void FESystem::recordAcceptedMeshTangentialBoundaryPolicies(
         }
     }
 
+    std::vector<MeshTangentialBoundaryPolicyHistoryRecord>
+        staged_records;
+    staged_records.reserve(declaration_count);
     for (const auto& declaration : mesh_tangential_boundary_policies_) {
-        mesh_tangential_boundary_policy_history_.push_back(
+        staged_records.push_back(
             MeshTangentialBoundaryPolicyHistoryRecord{
                 .accepted_step = accepted_step,
                 .accepted_time = accepted_time,
@@ -6883,34 +11618,495 @@ void FESystem::recordAcceptedMeshTangentialBoundaryPolicies(
                 .boundary_marker = declaration.boundary_marker,
                 .policy = declaration.policy,
                 .owner_component = declaration.owner_component,
+                .consumer_bound = declaration.consumer_bound,
+                .consumer_operator_tag =
+                    declaration.consumer_operator_tag,
+                .consumer_source = declaration.consumer_source,
             });
-        const char* policy_name = "SmoothingOnly";
-        switch (declaration.policy) {
-        case MeshTangentialBoundaryPolicy::Free:
-            policy_name = "Free";
-            break;
-        case MeshTangentialBoundaryPolicy::SmoothingOnly:
-            break;
-        case MeshTangentialBoundaryPolicy::Prescribed:
-            policy_name = "Prescribed";
-            break;
-        }
-        std::ostringstream message;
-        message << std::setprecision(17)
-                << "FESystem: accepted tangential mesh policy history"
-                << " diagnostic=mesh_tangential_boundary_policy_history"
-                << " accepted_step=" << accepted_step
-                << " accepted_time=" << accepted_time
-                << " dt=" << dt
-                << " state_revision=" << state_revision
-                << " mesh_geometry_revision=" << mesh_revision
-                << " mesh_displacement_field="
-                << declaration.mesh_displacement_field
-                << " boundary_marker=" << declaration.boundary_marker
-                << " policy=" << policy_name
-                << " owner='" << declaration.owner_component << "'";
-        FE_LOG_INFO(message.str());
     }
+    mesh_tangential_boundary_policy_history_.reserve(
+        mesh_tangential_boundary_policy_history_.size() +
+        staged_records.size());
+    for (auto& record : staged_records) {
+        mesh_tangential_boundary_policy_history_.push_back(
+            std::move(record));
+    }
+    if (!mesh_boundary_history_defer_logging_) {
+        emitAcceptedMeshTangentialBoundaryPolicyHistory(
+            mesh_tangential_boundary_policy_history_.size() -
+            declaration_count);
+    }
+}
+
+void FESystem::emitAcceptedMeshTangentialBoundaryPolicyHistory(
+    std::size_t group_begin) const noexcept
+{
+    const auto declaration_count =
+        mesh_tangential_boundary_policies_.size();
+    if (group_begin > mesh_tangential_boundary_policy_history_.size() ||
+        declaration_count >
+            mesh_tangential_boundary_policy_history_.size() -
+                group_begin) {
+        return;
+    }
+    try {
+        for (std::size_t index = 0u; index < declaration_count; ++index) {
+            const auto& record =
+                mesh_tangential_boundary_policy_history_[group_begin + index];
+            const char* policy_name = "SmoothingOnly";
+            switch (record.policy) {
+            case MeshTangentialBoundaryPolicy::Free:
+                policy_name = "Free";
+                break;
+            case MeshTangentialBoundaryPolicy::SmoothingOnly:
+                break;
+            case MeshTangentialBoundaryPolicy::Prescribed:
+                policy_name = "Prescribed";
+                break;
+            }
+            std::ostringstream message;
+            message << std::setprecision(17)
+                    << "FESystem: accepted tangential mesh policy history"
+                    << " diagnostic=mesh_tangential_boundary_policy_history"
+                    << " accepted_step=" << record.accepted_step
+                    << " accepted_time=" << record.accepted_time
+                    << " dt=" << record.dt
+                    << " state_revision=" << record.state_revision
+                    << " mesh_geometry_revision="
+                    << record.mesh_geometry_revision
+                    << " mesh_geometry_revision_scope=rank_local"
+                    << " mesh_displacement_field="
+                    << record.mesh_displacement_field
+                    << " boundary_marker=" << record.boundary_marker
+                    << " policy=" << policy_name
+                    << " owner='" << record.owner_component << "'"
+                    << " consumer_bound="
+                    << (record.consumer_bound ? "true" : "false")
+                    << " consumer_operator_tag='"
+                    << record.consumer_operator_tag << "'"
+                    << " consumer_source='"
+                    << record.consumer_source << "'";
+            FE_LOG_INFO(message.str());
+        }
+    } catch (...) {
+        // Accepted history is semantic state; diagnostics are best effort.
+    }
+}
+
+void FESystem::recordAcceptedMeshBoundaryProvenance(
+    std::uint64_t accepted_step,
+    Real accepted_time,
+    Real dt,
+    std::uint64_t state_revision)
+{
+    const auto normal_history_size =
+        mesh_normal_boundary_constraint_history_.size();
+    const auto tangential_history_size =
+        mesh_tangential_boundary_policy_history_.size();
+
+#if FE_HAS_MPI
+    MPI_Comm communicator = MPI_COMM_NULL;
+#endif
+    int communicator_size = 1;
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0) {
+        communicator = activeMpiCommunicator();
+        if (communicator != MPI_COMM_NULL) {
+            MPI_Comm_size(communicator, &communicator_size);
+        }
+    }
+#endif
+
+    const auto coordinate_failure = [&](bool local_failed,
+                                        const char* phase) {
+        bool any_failed = local_failed;
+#if FE_HAS_MPI
+        if (communicator_size > 1) {
+            const int local_value = local_failed ? 1 : 0;
+            int global_value = local_value;
+            const auto sequence = debug::nextMpiCollectiveTraceSeq();
+            debug::traceMpiCollective(
+                "before",
+                sequence,
+                phase,
+                1,
+                MPI_INT,
+                MPI_MAX,
+                communicator);
+            MPI_Allreduce(
+                &local_value,
+                &global_value,
+                1,
+                MPI_INT,
+                MPI_MAX,
+                communicator);
+            debug::traceMpiCollective(
+                "after",
+                sequence,
+                phase,
+                1,
+                MPI_INT,
+                MPI_MAX,
+                communicator);
+            any_failed = global_value != 0;
+        }
+#else
+        static_cast<void>(phase);
+#endif
+        return any_failed;
+    };
+
+    MeshBoundaryConsensusTokens local_tokens;
+    MeshBoundaryConsensusTokens minimum_tokens;
+    MeshBoundaryConsensusTokens maximum_tokens;
+    bool contains_opaque_callable = false;
+    std::exception_ptr local_exception;
+    try {
+        FE_THROW_IF(
+            !is_setup_ || !dof_handler_.isFinalized(),
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshBoundaryProvenance: every "
+            "participating system must be fully set up before collective "
+            "publication");
+        FE_THROW_IF(
+            mesh_boundary_history_collective_call_active_,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshBoundaryProvenance: nested "
+            "mesh-boundary history transactions are not permitted");
+        FE_THROW_IF(
+            !mesh_boundary_history_transaction_active_ &&
+                (normal_history_size != 0u ||
+                 tangential_history_size != 0u),
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshBoundaryProvenance: collective "
+            "history must begin before either individual history is "
+            "published");
+
+        appendMeshBoundaryToken(
+            local_tokens, mesh_boundary_history_transaction_active_ ? 1u : 0u);
+        appendMeshBoundaryToken(local_tokens, accepted_step);
+        appendMeshBoundaryToken(
+            local_tokens, generatedBoundaryTraceRealBits(accepted_time));
+        appendMeshBoundaryToken(
+            local_tokens, generatedBoundaryTraceRealBits(dt));
+        appendMeshBoundaryToken(local_tokens, state_revision);
+
+        appendMeshBoundaryToken(
+            local_tokens,
+            static_cast<std::uint64_t>(
+                mesh_normal_boundary_constraints_.size()));
+        for (const auto& declaration :
+             mesh_normal_boundary_constraints_) {
+            appendMeshNormalDeclaration(
+                local_tokens,
+                declaration,
+                contains_opaque_callable);
+        }
+        appendMeshBoundaryToken(
+            local_tokens,
+            static_cast<std::uint64_t>(
+                mesh_tangential_boundary_policies_.size()));
+        for (const auto& declaration :
+             mesh_tangential_boundary_policies_) {
+            appendMeshTangentialDeclaration(local_tokens, declaration);
+        }
+
+        appendMeshBoundaryToken(
+            local_tokens,
+            static_cast<std::uint64_t>(normal_history_size));
+        if (normal_history_size != 0u) {
+            const auto declaration_count =
+                mesh_normal_boundary_constraints_.size();
+            FE_THROW_IF(
+                declaration_count == 0u ||
+                    normal_history_size < declaration_count ||
+                    normal_history_size % declaration_count != 0u,
+                InvalidArgumentException,
+                "FESystem::recordAcceptedMeshBoundaryProvenance: existing "
+                "normal history has an incomplete group");
+            const auto group_begin =
+                normal_history_size - declaration_count;
+            for (std::size_t index = 0u; index < declaration_count;
+                 ++index) {
+                const auto& record =
+                    mesh_normal_boundary_constraint_history_[
+                        group_begin + index];
+                appendMeshBoundaryToken(
+                    local_tokens, record.accepted_step);
+                appendMeshBoundaryToken(
+                    local_tokens,
+                    generatedBoundaryTraceRealBits(record.accepted_time));
+                appendMeshBoundaryToken(
+                    local_tokens,
+                    generatedBoundaryTraceRealBits(record.dt));
+                appendMeshBoundaryToken(
+                    local_tokens, record.state_revision);
+                appendMeshNormalDeclaration(
+                    local_tokens,
+                    record.declaration,
+                    contains_opaque_callable);
+            }
+        }
+        appendMeshBoundaryToken(
+            local_tokens,
+            static_cast<std::uint64_t>(tangential_history_size));
+        if (tangential_history_size != 0u) {
+            const auto declaration_count =
+                mesh_tangential_boundary_policies_.size();
+            FE_THROW_IF(
+                declaration_count == 0u ||
+                    tangential_history_size < declaration_count ||
+                    tangential_history_size % declaration_count != 0u,
+                InvalidArgumentException,
+                "FESystem::recordAcceptedMeshBoundaryProvenance: existing "
+                "tangential history has an incomplete group");
+            const auto group_begin =
+                tangential_history_size - declaration_count;
+            for (std::size_t index = 0u; index < declaration_count;
+                 ++index) {
+                const auto& record =
+                    mesh_tangential_boundary_policy_history_[
+                        group_begin + index];
+                appendMeshBoundaryToken(
+                    local_tokens, record.accepted_step);
+                appendMeshBoundaryToken(
+                    local_tokens,
+                    generatedBoundaryTraceRealBits(record.accepted_time));
+                appendMeshBoundaryToken(
+                    local_tokens,
+                    generatedBoundaryTraceRealBits(record.dt));
+                appendMeshBoundaryToken(
+                    local_tokens, record.state_revision);
+                appendMeshBoundaryIntegral(
+                    local_tokens, record.mesh_displacement_field);
+                appendMeshBoundaryIntegral(
+                    local_tokens, record.boundary_marker);
+                appendMeshBoundaryIntegral(local_tokens, record.policy);
+                appendMeshBoundaryString(
+                    local_tokens, record.owner_component);
+                appendMeshBoundaryToken(
+                    local_tokens, record.consumer_bound ? 1u : 0u);
+                appendMeshBoundaryString(
+                    local_tokens, record.consumer_operator_tag);
+                appendMeshBoundaryString(
+                    local_tokens, record.consumer_source);
+            }
+        }
+        FE_THROW_IF(
+            communicator_size > 1 && contains_opaque_callable,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshBoundaryProvenance: distributed "
+            "normal targets may not contain opaque callbacks without a "
+            "stable cross-rank identity contract");
+        FE_THROW_IF(
+            local_tokens.size() >
+                static_cast<std::size_t>(
+                    std::numeric_limits<int>::max()),
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshBoundaryProvenance: consensus "
+            "token sequence exceeds the MPI count range");
+        minimum_tokens = local_tokens;
+        maximum_tokens = local_tokens;
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+
+    if (coordinate_failure(
+            local_exception != nullptr,
+            "FESystem::recordAcceptedMeshBoundaryProvenance/preflight")) {
+        if (local_exception != nullptr) {
+            std::rethrow_exception(local_exception);
+        }
+        throw std::runtime_error(
+            "FESystem::recordAcceptedMeshBoundaryProvenance: another "
+            "active FE communicator rank rejected the provenance "
+            "preflight");
+    }
+
+#if FE_HAS_MPI
+    if (communicator_size > 1) {
+        const std::uint64_t local_token_count =
+            static_cast<std::uint64_t>(local_tokens.size());
+        std::uint64_t minimum_token_count = local_token_count;
+        std::uint64_t maximum_token_count = local_token_count;
+        auto sequence = debug::nextMpiCollectiveTraceSeq();
+        debug::traceMpiCollective(
+            "before",
+            sequence,
+            "FESystem::recordAcceptedMeshBoundaryProvenance/token_count_min",
+            1,
+            MPI_UINT64_T,
+            MPI_MIN,
+            communicator);
+        MPI_Allreduce(
+            &local_token_count,
+            &minimum_token_count,
+            1,
+            MPI_UINT64_T,
+            MPI_MIN,
+            communicator);
+        debug::traceMpiCollective(
+            "after",
+            sequence,
+            "FESystem::recordAcceptedMeshBoundaryProvenance/token_count_min",
+            1,
+            MPI_UINT64_T,
+            MPI_MIN,
+            communicator);
+        sequence = debug::nextMpiCollectiveTraceSeq();
+        debug::traceMpiCollective(
+            "before",
+            sequence,
+            "FESystem::recordAcceptedMeshBoundaryProvenance/token_count_max",
+            1,
+            MPI_UINT64_T,
+            MPI_MAX,
+            communicator);
+        MPI_Allreduce(
+            &local_token_count,
+            &maximum_token_count,
+            1,
+            MPI_UINT64_T,
+            MPI_MAX,
+            communicator);
+        debug::traceMpiCollective(
+            "after",
+            sequence,
+            "FESystem::recordAcceptedMeshBoundaryProvenance/token_count_max",
+            1,
+            MPI_UINT64_T,
+            MPI_MAX,
+            communicator);
+        FE_THROW_IF(
+            minimum_token_count != maximum_token_count,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshBoundaryProvenance: declaration "
+            "or accepted-state metadata shape differs across ranks");
+
+        const int token_count =
+            static_cast<int>(local_tokens.size());
+        sequence = debug::nextMpiCollectiveTraceSeq();
+        debug::traceMpiCollective(
+            "before",
+            sequence,
+            "FESystem::recordAcceptedMeshBoundaryProvenance/token_min",
+            token_count,
+            MPI_UINT64_T,
+            MPI_MIN,
+            communicator);
+        MPI_Allreduce(
+            local_tokens.data(),
+            minimum_tokens.data(),
+            token_count,
+            MPI_UINT64_T,
+            MPI_MIN,
+            communicator);
+        debug::traceMpiCollective(
+            "after",
+            sequence,
+            "FESystem::recordAcceptedMeshBoundaryProvenance/token_min",
+            token_count,
+            MPI_UINT64_T,
+            MPI_MIN,
+            communicator);
+        sequence = debug::nextMpiCollectiveTraceSeq();
+        debug::traceMpiCollective(
+            "before",
+            sequence,
+            "FESystem::recordAcceptedMeshBoundaryProvenance/token_max",
+            token_count,
+            MPI_UINT64_T,
+            MPI_MAX,
+            communicator);
+        MPI_Allreduce(
+            local_tokens.data(),
+            maximum_tokens.data(),
+            token_count,
+            MPI_UINT64_T,
+            MPI_MAX,
+            communicator);
+        debug::traceMpiCollective(
+            "after",
+            sequence,
+            "FESystem::recordAcceptedMeshBoundaryProvenance/token_max",
+            token_count,
+            MPI_UINT64_T,
+            MPI_MAX,
+            communicator);
+        FE_THROW_IF(
+            minimum_tokens != maximum_tokens,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedMeshBoundaryProvenance: symbolic "
+            "declarations, consumer bindings, accepted metadata, or "
+            "history shape differ across ranks");
+    }
+#endif
+
+    if (mesh_normal_boundary_constraints_.empty() &&
+        mesh_tangential_boundary_policies_.empty()) {
+        return;
+    }
+
+    local_exception = nullptr;
+    mesh_boundary_history_collective_call_active_ = true;
+    mesh_boundary_history_defer_logging_ = true;
+    try {
+        recordAcceptedMeshNormalBoundaryConstraints(
+            accepted_step,
+            accepted_time,
+            dt,
+            state_revision);
+        recordAcceptedMeshTangentialBoundaryPolicies(
+            accepted_step,
+            accepted_time,
+            dt,
+            state_revision);
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+    mesh_boundary_history_defer_logging_ = false;
+    mesh_boundary_history_collective_call_active_ = false;
+
+    const bool any_failed = coordinate_failure(
+        local_exception != nullptr,
+        "FESystem::recordAcceptedMeshBoundaryProvenance/commit");
+    if (!any_failed) {
+        mesh_boundary_history_transaction_active_ = true;
+        if (mesh_normal_boundary_constraint_history_.size() >
+            normal_history_size) {
+            emitAcceptedMeshNormalBoundaryConstraintHistory(
+                normal_history_size);
+        }
+        if (mesh_tangential_boundary_policy_history_.size() >
+            tangential_history_size) {
+            emitAcceptedMeshTangentialBoundaryPolicyHistory(
+                tangential_history_size);
+        }
+        return;
+    }
+    mesh_normal_boundary_constraint_history_.resize(
+        normal_history_size);
+    mesh_tangential_boundary_policy_history_.resize(
+        tangential_history_size);
+    try {
+        FE_LOG_INFO(
+            "FESystem: diagnostic=mesh_boundary_history_transaction_rollback "
+            "accepted normal and tangential provenance was not published");
+    } catch (...) {
+        // Preserve the coordinated validation failure if diagnostics fail.
+    }
+    if (local_exception != nullptr) {
+        std::rethrow_exception(local_exception);
+    }
+    throw std::runtime_error(
+        "FESystem::recordAcceptedMeshBoundaryProvenance: another active FE "
+        "communicator rank rejected accepted mesh-boundary provenance");
 }
 
 void FESystem::declareFreeSurfaceDiscreteFunctional(
@@ -6949,6 +12145,51 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
         InvalidArgumentException,
         "FESystem::declareFreeSurfaceDiscreteFunctional: owner component "
         "must be nonempty");
+    const bool capillary_method_selected =
+        declaration.capillary_balance_method ==
+        FreeSurfaceCapillaryBalanceMethod::
+            DiscreteEnergyVolumeStationarity;
+    const bool capillary_method_unselected =
+        declaration.capillary_balance_method ==
+        FreeSurfaceCapillaryBalanceMethod::Unselected;
+    FE_THROW_IF(
+        !capillary_method_selected && !capillary_method_unselected,
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: unknown capillary "
+        "balance method");
+    const bool capillary_qualification_unselected =
+        declaration.capillary_balance_qualification ==
+        FreeSurfaceCapillaryBalanceQualification::Unselected;
+    const bool capillary_qualification_prerequisite =
+        declaration.capillary_balance_qualification ==
+        FreeSurfaceCapillaryBalanceQualification::PrerequisiteOnly;
+    const bool capillary_qualification_complete =
+        declaration.capillary_balance_qualification ==
+        FreeSurfaceCapillaryBalanceQualification::Qualified;
+    FE_THROW_IF(
+        !capillary_qualification_unselected &&
+            !capillary_qualification_prerequisite &&
+            !capillary_qualification_complete,
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: unknown capillary "
+        "balance qualification");
+    FE_THROW_IF(
+        capillary_method_unselected !=
+            capillary_qualification_unselected,
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: capillary balance "
+        "method and qualification must be selected together");
+    FE_THROW_IF(
+        capillary_qualification_complete,
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: no capillary "
+        "balance method is qualified in the current implementation");
+    FE_THROW_IF(
+        declaration.endpoint_functional_power_enabled &&
+            !capillary_method_selected,
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: endpoint "
+        "functional power requires the discrete-energy capillary method");
     auto& parameters = declaration.parameters;
     FE_THROW_IF(
         parameters.liquid_side != geometry::CutIntegrationSide::Negative &&
@@ -6967,6 +12208,49 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
         InvalidArgumentException,
         "FESystem::declareFreeSurfaceDiscreteFunctional: volume multiplier "
         "must be finite");
+    if (declaration.active_volume_energy_parameters.has_value()) {
+        const auto& energy =
+            *declaration.active_volume_energy_parameters;
+        const auto finite_vector = [](const auto& values) {
+            return std::all_of(
+                values.begin(), values.end(), [](Real value) {
+                    return std::isfinite(value);
+                });
+        };
+        FE_THROW_IF(
+            energy.liquid_side != parameters.liquid_side ||
+                !std::isfinite(energy.density) ||
+                !(energy.density > Real{0.0}) ||
+                !finite_vector(energy.gravitational_acceleration) ||
+                !finite_vector(energy.gravitational_reference_point),
+            InvalidArgumentException,
+            "FESystem::declareFreeSurfaceDiscreteFunctional: active-volume "
+            "energy requires the declared liquid side, positive finite "
+            "density, and finite gravitational data");
+    }
+    if (declaration.active_volume_dissipation_parameters.has_value()) {
+        const auto& dissipation =
+            *declaration.active_volume_dissipation_parameters;
+        FE_THROW_IF(
+            dissipation.liquid_side != parameters.liquid_side ||
+                !std::isfinite(dissipation.dynamic_viscosity) ||
+                !(dissipation.dynamic_viscosity > Real{0.0}),
+            InvalidArgumentException,
+            "FESystem::declareFreeSurfaceDiscreteFunctional: active-volume "
+            "dissipation requires the declared liquid side and positive "
+            "finite dynamic viscosity");
+    }
+    if (declaration.external_pressure_power_parameters.has_value()) {
+        const auto& pressure =
+            *declaration.external_pressure_power_parameters;
+        FE_THROW_IF(
+            pressure.liquid_side != parameters.liquid_side ||
+                !std::isfinite(pressure.external_pressure),
+            InvalidArgumentException,
+            "FESystem::declareFreeSurfaceDiscreteFunctional: exterior-"
+            "pressure power requires the declared liquid side and finite "
+            "pressure");
+    }
     std::sort(
         parameters.young_wall_coefficients.begin(),
         parameters.young_wall_coefficients.end(),
@@ -7047,24 +12331,34 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
             "FESystem::declareFreeSurfaceDiscreteFunctional: dynamic "
             "contact coefficients require matching Young wall coefficients");
     }
-    if (!parameters.dynamic_contact_coefficients.empty()) {
+    if (declaration.active_volume_energy_parameters.has_value() ||
+        declaration.active_volume_dissipation_parameters.has_value() ||
+        declaration.external_pressure_power_parameters.has_value() ||
+        declaration.endpoint_functional_power_enabled ||
+        !parameters.dynamic_contact_coefficients.empty()) {
         FE_THROW_IF(
             !field_registry_.has(declaration.velocity_field),
             InvalidArgumentException,
-            "FESystem::declareFreeSurfaceDiscreteFunctional: dynamic "
-            "contact telemetry requires a registered velocity field");
+            "FESystem::declareFreeSurfaceDiscreteFunctional: active-volume "
+            "energy/dissipation, exterior-pressure/endpoint functional "
+            "power, and dynamic-contact telemetry require a registered "
+            "velocity field");
         const auto& velocity =
             field_registry_.get(declaration.velocity_field);
         const int dimension = mesh_access_ ? mesh_access_->dimension() : 0;
         FE_THROW_IF(
-            velocity.scope != FieldScope::VolumeCell ||
+            dimension < 1 || dimension > 3 ||
+                velocity.scope != FieldScope::VolumeCell ||
                 velocity.space == nullptr ||
                 velocity.components < dimension ||
+                velocity.space->value_dimension() < dimension ||
                 !fieldParticipatesInUnknownVector(
                     declaration.velocity_field),
             InvalidArgumentException,
-            "FESystem::declareFreeSurfaceDiscreteFunctional: dynamic "
-            "contact telemetry requires an unknown vector volume field");
+            "FESystem::declareFreeSurfaceDiscreteFunctional: active-volume "
+            "energy/dissipation, exterior-pressure/endpoint functional "
+            "power, and dynamic-contact telemetry require an unknown vector "
+            "volume field");
     }
     const auto conflict = std::find_if(
         free_surface_discrete_functional_declarations_.begin(),
@@ -7079,6 +12373,27 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
             std::to_string(declaration.interface_marker) +
             " already has functional owner '" + conflict->owner_component +
             "'");
+    const bool owns_active_volume =
+        declaration.active_volume_energy_parameters.has_value() ||
+        declaration.active_volume_dissipation_parameters.has_value();
+    const auto active_volume_conflict = std::find_if(
+        free_surface_discrete_functional_declarations_.begin(),
+        free_surface_discrete_functional_declarations_.end(),
+        [](const auto& existing) {
+            return existing.active_volume_energy_parameters.has_value() ||
+                   existing.active_volume_dissipation_parameters.has_value();
+        });
+    FE_THROW_IF(
+        owns_active_volume &&
+            active_volume_conflict !=
+                free_surface_discrete_functional_declarations_.end(),
+        InvalidArgumentException,
+        "FESystem::declareFreeSurfaceDiscreteFunctional: active-volume "
+        "energy/dissipation owner is already assigned to interface marker " +
+            std::to_string(active_volume_conflict->interface_marker) +
+            " by '" + active_volume_conflict->owner_component +
+            "'; the current one-phase accounting contract permits exactly "
+            "one bulk owner");
 
     const int declared_marker = declaration.interface_marker;
     invalidateSetup();
@@ -7116,7 +12431,52 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
             << stored.parameters.young_wall_coefficients.size()
             << " dynamic_contact_count="
             << stored.parameters.dynamic_contact_coefficients.size()
+            << " active_volume_energy="
+            << (stored.active_volume_energy_parameters.has_value()
+                    ? "enabled"
+                    : "disabled")
+            << " active_volume_dissipation="
+            << (stored.active_volume_dissipation_parameters.has_value()
+                    ? "enabled"
+                    : "disabled")
+            << " external_pressure_power="
+            << (stored.external_pressure_power_parameters.has_value()
+                    ? "enabled"
+                    : "disabled")
+            << " endpoint_functional_power="
+            << (stored.endpoint_functional_power_enabled
+                    ? "enabled"
+                    : "disabled")
+            << " capillary_balance_method="
+            << (stored.capillary_balance_method ==
+                        FreeSurfaceCapillaryBalanceMethod::
+                            DiscreteEnergyVolumeStationarity
+                    ? "discrete_energy_volume_stationarity"
+                    : "unselected")
+            << " capillary_balance_qualification="
+            << (stored.capillary_balance_qualification ==
+                        FreeSurfaceCapillaryBalanceQualification::Qualified
+                    ? "qualified"
+                    : stored.capillary_balance_qualification ==
+                              FreeSurfaceCapillaryBalanceQualification::
+                                  PrerequisiteOnly
+                          ? "prerequisite_only"
+                          : "unselected")
             << " owner='" << stored.owner_component << "'";
+    if (stored.active_volume_energy_parameters.has_value()) {
+        const auto& energy =
+            *stored.active_volume_energy_parameters;
+        message
+            << " active_volume_density=" << energy.density
+            << " gravitational_acceleration=("
+            << energy.gravitational_acceleration[0] << ","
+            << energy.gravitational_acceleration[1] << ","
+            << energy.gravitational_acceleration[2] << ")"
+            << " gravitational_reference_point=("
+            << energy.gravitational_reference_point[0] << ","
+            << energy.gravitational_reference_point[1] << ","
+            << energy.gravitational_reference_point[2] << ")";
+    }
     for (const auto& wall : stored.parameters.young_wall_coefficients) {
         message << " young_wall_marker=" << wall.boundary_marker
                 << " equilibrium_contact_angle_radians="
@@ -7141,7 +12501,8 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
     Real dt,
     std::uint64_t pre_maintenance_endpoint_state_revision,
     std::uint64_t state_revision,
-    std::span<const AcceptedFreeSurfaceDiscreteFunctionalState> states)
+    std::span<const AcceptedFreeSurfaceDiscreteFunctionalState> states,
+    std::optional<std::uint64_t> extension_map_revision)
 {
     if (free_surface_discrete_functional_declarations_.empty()) {
         FE_THROW_IF(
@@ -7155,12 +12516,14 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
         !std::isfinite(accepted_time) || !std::isfinite(dt) ||
             dt < Real{0.0} ||
             pre_maintenance_endpoint_state_revision == 0u ||
-            state_revision == 0u,
+            state_revision == 0u ||
+            (extension_map_revision.has_value() &&
+             *extension_map_revision == 0u),
         InvalidArgumentException,
         "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: accepted "
         "time and dt must be finite, dt must be nonnegative, and the "
-        "pre-maintenance endpoint and accepted-state revisions must be "
-        "nonzero");
+        "pre-maintenance endpoint, accepted-state, and any present "
+        "extension-map revisions must be nonzero");
     FE_THROW_IF(
         !isSetup(),
         InvalidArgumentException,
@@ -7206,6 +12569,7 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
             revision.interface_marker != declaration.interface_marker ||
                 revision.source_id != expected_source ||
                 revision.domain_id != declaration.geometry_domain_id ||
+                accepted.cut_topology_revision == 0u ||
                 revision.snapshot_revision_key !=
                     state.snapshot_revision_key,
             InvalidArgumentException,
@@ -7322,6 +12686,314 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                          state.volume_constraint_potential,
                      "total potential");
 
+        const bool endpoint_functional_power_declared =
+            declaration.endpoint_functional_power_enabled;
+        FE_THROW_IF(
+            accepted.endpoint_functional_power.has_value() !=
+                endpoint_functional_power_declared,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+            "endpoint functional-power presence does not match the "
+            "capillary balance method");
+        if (accepted.endpoint_functional_power.has_value()) {
+            const auto& power =
+                *accepted.endpoint_functional_power;
+            FE_THROW_IF(
+                power.snapshot_revision_key !=
+                        revision.snapshot_revision_key ||
+                    power.liquid_side != state.liquid_side ||
+                    power.surface_tension != state.surface_tension ||
+                    power.volume_multiplier != state.volume_multiplier ||
+                    power.walls.size() != state.walls.size() ||
+                    !std::isfinite(
+                        power.owned_liquid_volume_variation) ||
+                    !std::isfinite(
+                        power.owned_liquid_gas_area_variation) ||
+                    !std::isfinite(
+                        power.owned_wetted_wall_area_variation) ||
+                    !std::isfinite(
+                        power.liquid_gas_surface_energy_variation) ||
+                    !std::isfinite(
+                        power.young_wall_energy_variation) ||
+                    !std::isfinite(
+                        power.volume_constraint_potential_variation) ||
+                    !std::isfinite(
+                        power.total_potential_variation),
+                InvalidArgumentException,
+                "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                "endpoint functional power is inconsistent or non-finite");
+            Real wetted_wall_variation_sum = Real{0.0};
+            Real young_wall_power_sum = Real{0.0};
+            for (std::size_t wall_index = 0u;
+                 wall_index < power.walls.size(); ++wall_index) {
+                const auto& wall_power = power.walls[wall_index];
+                const auto& wall_state = state.walls[wall_index];
+                FE_THROW_IF(
+                    wall_power.boundary_marker !=
+                            wall_state.boundary_marker ||
+                        wall_power.equilibrium_contact_angle_radians !=
+                            wall_state
+                                .equilibrium_contact_angle_radians ||
+                        !std::isfinite(
+                            wall_power
+                                .owned_wetted_wall_area_variation) ||
+                        !std::isfinite(
+                            wall_power.young_wall_energy_variation),
+                    InvalidArgumentException,
+                    "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                    "endpoint wall-functional power is inconsistent or "
+                    "non-finite");
+                wetted_wall_variation_sum +=
+                    wall_power.owned_wetted_wall_area_variation;
+                young_wall_power_sum +=
+                    wall_power.young_wall_energy_variation;
+            }
+            require_near(
+                power.owned_wetted_wall_area_variation,
+                wetted_wall_variation_sum,
+                "endpoint wetted-wall area power");
+            require_near(
+                power.liquid_gas_surface_energy_variation,
+                power.surface_tension *
+                    power.owned_liquid_gas_area_variation,
+                "endpoint liquid-gas surface-energy power");
+            require_near(
+                power.young_wall_energy_variation,
+                young_wall_power_sum,
+                "endpoint Young wall-energy power");
+            require_near(
+                power.volume_constraint_potential_variation,
+                power.volume_multiplier *
+                    power.owned_liquid_volume_variation,
+                "endpoint volume-constraint power");
+            require_near(
+                power.total_potential_variation,
+                power.liquid_gas_surface_energy_variation +
+                    power.young_wall_energy_variation +
+                    power.volume_constraint_potential_variation,
+                "endpoint total functional power");
+        }
+
+        const bool active_volume_energy_declared =
+            declaration.active_volume_energy_parameters.has_value();
+        FE_THROW_IF(
+            accepted.active_volume_energy.has_value() !=
+                active_volume_energy_declared,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+            "active-volume energy presence does not match the declaration");
+        if (accepted.active_volume_energy.has_value()) {
+            const auto& energy = *accepted.active_volume_energy;
+            const auto& energy_parameters =
+                *declaration.active_volume_energy_parameters;
+            FE_THROW_IF(
+                energy.snapshot_revision_key !=
+                        revision.snapshot_revision_key ||
+                    energy.liquid_side != energy_parameters.liquid_side ||
+                    energy.density != energy_parameters.density ||
+                    energy.gravitational_acceleration !=
+                        energy_parameters.gravitational_acceleration ||
+                    energy.gravitational_reference_point !=
+                        energy_parameters.gravitational_reference_point ||
+                    !finite_nonnegative(energy.owned_liquid_volume) ||
+                    !finite_nonnegative(energy.kinetic_energy) ||
+                    !std::isfinite(energy.gravitational_energy) ||
+                    !std::isfinite(
+                        energy.gravitational_potential_power) ||
+                    !std::isfinite(energy.total_energy),
+                InvalidArgumentException,
+                "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                "active-volume energy does not match its declaration or "
+                "geometry revision");
+            require_near(
+                energy.owned_liquid_volume,
+                state.owned_liquid_volume,
+                "active-volume energy liquid measure");
+            require_near(
+                energy.total_energy,
+                energy.kinetic_energy + energy.gravitational_energy,
+                "active-volume total energy");
+        }
+
+        const bool active_volume_dissipation_declared =
+            declaration.active_volume_dissipation_parameters.has_value();
+        FE_THROW_IF(
+            accepted.active_volume_dissipation.has_value() !=
+                active_volume_dissipation_declared,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+            "active-volume dissipation presence does not match the "
+            "declaration");
+        if (accepted.active_volume_dissipation.has_value()) {
+            const auto& dissipation =
+                *accepted.active_volume_dissipation;
+            const auto& dissipation_parameters =
+                *declaration.active_volume_dissipation_parameters;
+            FE_THROW_IF(
+                dissipation.snapshot_revision_key !=
+                        revision.snapshot_revision_key ||
+                    dissipation.liquid_side !=
+                        dissipation_parameters.liquid_side ||
+                    dissipation.dynamic_viscosity !=
+                        dissipation_parameters.dynamic_viscosity ||
+                    !finite_nonnegative(
+                        dissipation.owned_liquid_volume) ||
+                    !finite_nonnegative(
+                        dissipation.bulk_viscous_dissipation_rate),
+                InvalidArgumentException,
+                "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                "active-volume dissipation does not match its declaration "
+                "or geometry revision");
+            require_near(
+                dissipation.owned_liquid_volume,
+                state.owned_liquid_volume,
+                "active-volume dissipation liquid measure");
+            if (accepted.active_volume_energy.has_value()) {
+                const auto& energy = *accepted.active_volume_energy;
+                FE_THROW_IF(
+                    dissipation.owned_quadrature_point_count !=
+                        energy.owned_quadrature_point_count,
+                    InvalidArgumentException,
+                    "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                    "active-volume energy and dissipation quadrature "
+                    "coverage differ");
+                require_near(
+                    dissipation.owned_liquid_volume,
+                    energy.owned_liquid_volume,
+                    "active-volume energy/dissipation liquid measure");
+            }
+        }
+
+        const bool external_pressure_power_declared =
+            declaration.external_pressure_power_parameters.has_value();
+        FE_THROW_IF(
+            accepted.external_pressure_power.has_value() !=
+                external_pressure_power_declared,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+            "exterior-pressure power presence does not match the "
+            "declaration");
+        if (accepted.external_pressure_power.has_value()) {
+            const auto& pressure =
+                *accepted.external_pressure_power;
+            const auto& pressure_parameters =
+                *declaration.external_pressure_power_parameters;
+            FE_THROW_IF(
+                pressure.snapshot_revision_key !=
+                        revision.snapshot_revision_key ||
+                    pressure.liquid_side !=
+                        pressure_parameters.liquid_side ||
+                    pressure.external_pressure !=
+                        pressure_parameters.external_pressure ||
+                    !finite_nonnegative(
+                        pressure.owned_liquid_gas_area) ||
+                    !std::isfinite(
+                        pressure.outward_liquid_volume_flux_rate) ||
+                    !std::isfinite(
+                        pressure.external_pressure_power),
+                InvalidArgumentException,
+                "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                "exterior-pressure power does not match its declaration or "
+                "geometry revision");
+            require_near(
+                pressure.owned_liquid_gas_area,
+                state.owned_liquid_gas_area,
+                "exterior-pressure surface measure");
+            require_near(
+                pressure.external_pressure_power,
+                -pressure.external_pressure *
+                    pressure.outward_liquid_volume_flux_rate,
+                "exterior-pressure power identity");
+        }
+
+        FE_THROW_IF(
+            accepted.backward_euler_kinetic_work.has_value() &&
+                !active_volume_energy_declared,
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+            "backward-Euler kinetic work requires a declared active-volume "
+            "energy");
+        if (accepted.backward_euler_kinetic_work.has_value()) {
+            const auto& work =
+                *accepted.backward_euler_kinetic_work;
+            const auto& energy =
+                *accepted.active_volume_energy;
+            const auto& energy_parameters =
+                *declaration.active_volume_energy_parameters;
+            FE_THROW_IF(
+                work.snapshot_revision_key !=
+                        revision.snapshot_revision_key ||
+                    work.previous_velocity_revision == 0u ||
+                    work.endpoint_velocity_revision == 0u ||
+                    work.liquid_side != energy_parameters.liquid_side ||
+                    work.density != energy_parameters.density ||
+                    work.owned_quadrature_point_count !=
+                        energy.owned_quadrature_point_count ||
+                    !finite_nonnegative(work.owned_liquid_volume) ||
+                    !finite_nonnegative(
+                        work.kinetic_energy_before_on_endpoint_domain) ||
+                    !finite_nonnegative(work.kinetic_energy_after) ||
+                    !std::isfinite(
+                        work.kinetic_energy_change_on_endpoint_domain) ||
+                    !std::isfinite(
+                        work.step_integrated_inertia_work) ||
+                    !finite_nonnegative(
+                        work.time_discretization_loss) ||
+                    !std::isfinite(work.identity_residual),
+                InvalidArgumentException,
+                "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                "backward-Euler kinetic work does not match its declaration "
+                "or contains an invalid value");
+            require_near(
+                work.owned_liquid_volume,
+                state.owned_liquid_volume,
+                "backward-Euler kinetic-work liquid measure");
+            require_near(
+                work.owned_liquid_volume,
+                energy.owned_liquid_volume,
+                "backward-Euler and stored-energy liquid measures");
+            require_near(
+                work.kinetic_energy_after,
+                energy.kinetic_energy,
+                "backward-Euler endpoint kinetic energy");
+            require_near(
+                work.kinetic_energy_change_on_endpoint_domain,
+                work.kinetic_energy_after -
+                    work.kinetic_energy_before_on_endpoint_domain,
+                "backward-Euler endpoint-domain kinetic-energy change");
+            require_near(
+                work.identity_residual,
+                work.step_integrated_inertia_work -
+                    work.kinetic_energy_change_on_endpoint_domain -
+                    work.time_discretization_loss,
+                "backward-Euler kinetic identity residual");
+            require_near(
+                work.identity_residual,
+                Real{0.0},
+                "backward-Euler kinetic identity");
+            if (dt == Real{0.0}) {
+                FE_THROW_IF(
+                    work.previous_velocity_revision !=
+                        work.endpoint_velocity_revision,
+                    InvalidArgumentException,
+                    "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                    "zero-duration kinetic baseline endpoint revisions "
+                    "differ");
+                require_near(
+                    work.kinetic_energy_before_on_endpoint_domain,
+                    work.kinetic_energy_after,
+                    "zero-duration kinetic baseline");
+                require_near(
+                    work.step_integrated_inertia_work,
+                    Real{0.0},
+                    "zero-duration inertia work");
+                require_near(
+                    work.time_discretization_loss,
+                    Real{0.0},
+                    "zero-duration time-discretization loss");
+            }
+        }
+
         const bool dynamic_contact_declared =
             !declaration.parameters.dynamic_contact_coefficients.empty();
         FE_THROW_IF(
@@ -7358,6 +13030,32 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 accepted_time -
                     (Real{1.0} - contact_stage.stage_alpha_f) * dt,
                 "contact-stage time");
+            FE_THROW_IF(
+                contact_stage.stage_alpha_f < Real{1.0} &&
+                    !contact_stage.first_order_generalized_alpha.has_value(),
+                InvalidArgumentException,
+                "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                "a non-endpoint contact stage requires authentic first-order "
+                "generalized-alpha provenance");
+            if (contact_stage.first_order_generalized_alpha.has_value()) {
+                const auto& generalized_alpha =
+                    *contact_stage.first_order_generalized_alpha;
+                FE_THROW_IF(
+                    !validFreeSurfaceFirstOrderGeneralizedAlphaProvenance(
+                        generalized_alpha),
+                    InvalidArgumentException,
+                    "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                    "contact-stage first-order generalized-alpha provenance "
+                    "is outside the supported rho-infinity family");
+                require_near(
+                    generalized_alpha.alpha_f,
+                    contact_stage.stage_alpha_f,
+                    "contact-stage generalized-alpha alpha_f");
+                require_near(
+                    generalized_alpha.dt,
+                    dt,
+                    "contact-stage generalized-alpha dt");
+            }
             FE_THROW_IF(
                 !contact_revision.complete() ||
                     contact_revision.interface_marker !=
@@ -7741,34 +13439,192 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                              contact_state.wall_slip_dissipation,
                          "contact-stage total contact and wall dissipation");
         }
+        FE_THROW_IF(
+            !accepted.contact_stage.has_value() &&
+                !accepted.contact_line_kinematics.empty(),
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+            "contact-line kinematics require an accepted contact stage");
+        if (accepted.contact_stage.has_value()) {
+            const auto& contact_stage = *accepted.contact_stage;
+            for (std::size_t kinematics_index = 0u;
+                 kinematics_index <
+                     accepted.contact_line_kinematics.size();
+                 ++kinematics_index) {
+                const auto& kinematics =
+                    accepted.contact_line_kinematics[kinematics_index];
+                const auto wall = std::find_if(
+                    contact_stage.state.walls.begin(),
+                    contact_stage.state.walls.end(),
+                    [&](const auto& candidate) {
+                        return candidate.boundary_marker ==
+                               kinematics.boundary_marker;
+                    });
+                const auto finite_array = [](const auto& values) {
+                    return std::all_of(
+                        values.begin(), values.end(), [](Real value) {
+                            return std::isfinite(value);
+                        });
+                };
+                FE_THROW_IF(
+                    kinematics.boundary_marker < 0 ||
+                        (kinematics_index != 0u &&
+                         accepted.contact_line_kinematics
+                                 [kinematics_index - 1u]
+                                     .boundary_marker >=
+                             kinematics.boundary_marker) ||
+                        wall == contact_stage.state.walls.end() ||
+                        !(wall->owned_contact_measure > Real{0.0}) ||
+                        !wall->mean_contact_speed.has_value() ||
+                        kinematics.previous_accepted_step >=
+                            accepted_step ||
+                        !std::isfinite(
+                            kinematics.previous_accepted_time) ||
+                        kinematics.previous_accepted_time > accepted_time ||
+                        !std::isfinite(
+                            kinematics.previous_stage_time) ||
+                        kinematics.previous_stage_state_revision == 0u ||
+                        kinematics.previous_snapshot_revision_key == 0u ||
+                        !std::isfinite(
+                            kinematics.stage_time_interval) ||
+                        !(kinematics.stage_time_interval > Real{0.0}) ||
+                        !finite_array(
+                            kinematics.previous_mean_contact_position) ||
+                        !finite_array(
+                            kinematics.projection_direction) ||
+                        !std::isfinite(
+                            kinematics.projected_contact_centroid_speed) ||
+                        !std::isfinite(
+                            kinematics.mean_fluid_contact_speed) ||
+                        !std::isfinite(
+                            kinematics.fluid_minus_geometric_contact_speed),
+                    InvalidArgumentException,
+                    "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                    "contact-line geometric kinematics are incomplete or "
+                    "non-finite");
+                Real projection_norm_squared = Real{0.0};
+                Real projected_displacement = Real{0.0};
+                for (std::size_t component = 0u; component < 3u;
+                     ++component) {
+                    projection_norm_squared +=
+                        kinematics.projection_direction[component] *
+                        kinematics.projection_direction[component];
+                    projected_displacement +=
+                        (wall->mean_contact_position[component] -
+                         kinematics
+                             .previous_mean_contact_position[component]) *
+                        kinematics.projection_direction[component];
+                }
+                require_near(
+                    std::sqrt(projection_norm_squared),
+                    Real{1.0},
+                    "contact-line kinematics projection direction");
+                require_near(
+                    kinematics.stage_time_interval,
+                    contact_stage.stage_time -
+                        kinematics.previous_stage_time,
+                    "contact-line kinematics stage interval");
+                require_near(
+                    kinematics.projected_contact_centroid_speed,
+                    projected_displacement /
+                        kinematics.stage_time_interval,
+                    "projected contact-centroid speed");
+                require_near(
+                    kinematics.mean_fluid_contact_speed,
+                    *wall->mean_contact_speed,
+                    "contact-line kinematics fluid speed");
+                require_near(
+                    kinematics.fluid_minus_geometric_contact_speed,
+                    kinematics.mean_fluid_contact_speed -
+                        kinematics.projected_contact_centroid_speed,
+                    "fluid/geometric contact-speed mismatch");
+            }
+        }
     }
 
     const auto declaration_count =
         free_surface_discrete_functional_declarations_.size();
+    if (free_surface_discrete_functional_history_.empty()) {
+        FE_THROW_IF(
+            std::any_of(
+                states.begin(), states.end(), [](const auto& state) {
+                    return !state.contact_line_kinematics.empty();
+                }),
+            InvalidArgumentException,
+            "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+            "initial accepted contact history cannot contain geometric "
+            "kinematics without a previous accepted stage");
+    }
     if (!free_surface_discrete_functional_history_.empty()) {
         FE_THROW_IF(
             free_surface_discrete_functional_history_.size() <
-                declaration_count,
+                    declaration_count ||
+                free_surface_discrete_functional_history_.size() %
+                        declaration_count !=
+                    0u,
             InvalidArgumentException,
             "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
-            "accepted history is incomplete");
+            "accepted history is not a complete declaration-aligned group");
         const auto history_begin =
             free_surface_discrete_functional_history_.size() -
             declaration_count;
         const auto& latest =
             free_surface_discrete_functional_history_[history_begin];
+        for (std::size_t i = 0u; i < declaration_count; ++i) {
+            const auto& record =
+                free_surface_discrete_functional_history_[history_begin + i];
+            FE_THROW_IF(
+                record.accepted_step != latest.accepted_step ||
+                    record.accepted_time != latest.accepted_time ||
+                    record.dt != latest.dt ||
+                    record.pre_maintenance_endpoint_state_revision !=
+                        latest.pre_maintenance_endpoint_state_revision ||
+                    record.state_revision != latest.state_revision ||
+                    record.extension_map_revision !=
+                        latest.extension_map_revision ||
+                    !sameFreeSurfaceDiscreteFunctionalDeclaration(
+                        record.declaration,
+                        free_surface_discrete_functional_declarations_[i]),
+                InvalidArgumentException,
+                "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                "latest accepted history rows do not share one provenance "
+                "and declaration ordering");
+        }
         FE_THROW_IF(
             accepted_step < latest.accepted_step ||
                 accepted_time < latest.accepted_time,
             InvalidArgumentException,
             "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
             "accepted history must be monotone");
+        if (accepted_step > latest.accepted_step) {
+            for (std::size_t i = 0u; i < declaration_count; ++i) {
+                const auto& previous =
+                    free_surface_discrete_functional_history_[history_begin +
+                                                              i];
+                const auto expected = states[i].contact_stage.has_value()
+                    ? deriveFreeSurfaceAcceptedContactLineKinematics(
+                          previous,
+                          accepted_step,
+                          *states[i].contact_stage)
+                    : std::vector<
+                          FreeSurfaceAcceptedContactLineKinematics>{};
+                FE_THROW_IF(
+                    !sameFreeSurfaceAcceptedContactLineKinematics(
+                        states[i].contact_line_kinematics, expected),
+                    InvalidArgumentException,
+                    "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
+                    "contact-line kinematics do not bind to the latest "
+                    "accepted stage and contact-position history");
+            }
+        }
         if (accepted_step == latest.accepted_step) {
             FE_THROW_IF(
                 accepted_time != latest.accepted_time || dt != latest.dt ||
                     pre_maintenance_endpoint_state_revision !=
                         latest.pre_maintenance_endpoint_state_revision ||
-                    state_revision != latest.state_revision,
+                    state_revision != latest.state_revision ||
+                    extension_map_revision !=
+                        latest.extension_map_revision,
                 InvalidArgumentException,
                 "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
                 "an accepted step cannot be recorded with conflicting "
@@ -7778,7 +13634,9 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                     free_surface_discrete_functional_history_[history_begin +
                                                               i];
                 FE_THROW_IF(
-                    record.declaration.interface_marker !=
+                    record.extension_map_revision !=
+                            latest.extension_map_revision ||
+                        record.declaration.interface_marker !=
                             free_surface_discrete_functional_declarations_[i]
                                 .interface_marker ||
                         record.declaration.level_set_field !=
@@ -7790,6 +13648,17 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                         record.declaration.geometry_domain_id !=
                             free_surface_discrete_functional_declarations_[i]
                                 .geometry_domain_id ||
+                        record.declaration.capillary_balance_method !=
+                            free_surface_discrete_functional_declarations_[i]
+                                .capillary_balance_method ||
+                        record.declaration
+                                .capillary_balance_qualification !=
+                            free_surface_discrete_functional_declarations_[i]
+                                .capillary_balance_qualification ||
+                        record.declaration
+                                .endpoint_functional_power_enabled !=
+                            free_surface_discrete_functional_declarations_[i]
+                                .endpoint_functional_power_enabled ||
                         record.declaration.owner_component !=
                             free_surface_discrete_functional_declarations_[i]
                                 .owner_component ||
@@ -7797,17 +13666,100 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                             record.declaration.parameters,
                             free_surface_discrete_functional_declarations_[i]
                                 .parameters) ||
+                        record.declaration.active_volume_energy_parameters
+                                .has_value() !=
+                            free_surface_discrete_functional_declarations_[i]
+                                .active_volume_energy_parameters
+                                .has_value() ||
+                        (record.declaration.active_volume_energy_parameters
+                             .has_value() &&
+                         !sameFreeSurfaceActiveVolumeEnergyParameters(
+                             *record.declaration
+                                  .active_volume_energy_parameters,
+                             *free_surface_discrete_functional_declarations_[i]
+                                  .active_volume_energy_parameters)) ||
+                        record.declaration
+                                .active_volume_dissipation_parameters
+                                .has_value() !=
+                            free_surface_discrete_functional_declarations_[i]
+                                .active_volume_dissipation_parameters
+                                .has_value() ||
+                        (record.declaration
+                             .active_volume_dissipation_parameters
+                             .has_value() &&
+                         !sameFreeSurfaceActiveVolumeDissipationParameters(
+                             *record.declaration
+                                  .active_volume_dissipation_parameters,
+                             *free_surface_discrete_functional_declarations_[i]
+                                  .active_volume_dissipation_parameters)) ||
+                        record.declaration
+                                .external_pressure_power_parameters
+                                .has_value() !=
+                            free_surface_discrete_functional_declarations_[i]
+                                .external_pressure_power_parameters
+                                .has_value() ||
+                        (record.declaration
+                             .external_pressure_power_parameters
+                             .has_value() &&
+                         !sameFreeSurfaceExternalPressurePowerParameters(
+                             *record.declaration
+                                  .external_pressure_power_parameters,
+                             *free_surface_discrete_functional_declarations_[i]
+                                  .external_pressure_power_parameters)) ||
                         !sameFreeSurfaceGeometryRevision(
                             record.geometry_revision,
                             states[i].geometry_revision) ||
+                        record.cut_topology_revision !=
+                            states[i].cut_topology_revision ||
                         !sameFreeSurfaceFunctionalState(
                             record.state, states[i].state) ||
+                        record.endpoint_functional_power.has_value() !=
+                            states[i]
+                                .endpoint_functional_power
+                                .has_value() ||
+                        (record.endpoint_functional_power.has_value() &&
+                         !sameFreeSurfaceFunctionalVariationState(
+                             *record.endpoint_functional_power,
+                             *states[i].endpoint_functional_power)) ||
+                        record.active_volume_energy.has_value() !=
+                            states[i].active_volume_energy.has_value() ||
+                        (record.active_volume_energy.has_value() &&
+                         !sameFreeSurfaceActiveVolumeEnergyState(
+                             *record.active_volume_energy,
+                             *states[i].active_volume_energy)) ||
+                        record.active_volume_dissipation.has_value() !=
+                            states[i]
+                                .active_volume_dissipation
+                                .has_value() ||
+                        (record.active_volume_dissipation.has_value() &&
+                         !sameFreeSurfaceActiveVolumeDissipationState(
+                             *record.active_volume_dissipation,
+                             *states[i].active_volume_dissipation)) ||
+                        record.external_pressure_power.has_value() !=
+                            states[i]
+                                .external_pressure_power
+                                .has_value() ||
+                        (record.external_pressure_power.has_value() &&
+                         !sameFreeSurfaceExternalPressurePowerState(
+                             *record.external_pressure_power,
+                             *states[i].external_pressure_power)) ||
+                        record.backward_euler_kinetic_work.has_value() !=
+                            states[i]
+                                .backward_euler_kinetic_work
+                                .has_value() ||
+                        (record.backward_euler_kinetic_work.has_value() &&
+                         !sameFreeSurfaceBackwardEulerKineticWorkState(
+                             *record.backward_euler_kinetic_work,
+                             *states[i].backward_euler_kinetic_work)) ||
                         record.contact_stage.has_value() !=
                             states[i].contact_stage.has_value() ||
                         (record.contact_stage.has_value() &&
                          !sameFreeSurfaceAcceptedContactStageState(
                              *record.contact_stage,
-                             *states[i].contact_stage)),
+                             *states[i].contact_stage)) ||
+                        !sameFreeSurfaceAcceptedContactLineKinematics(
+                            record.contact_line_kinematics,
+                            states[i].contact_line_kinematics),
                     InvalidArgumentException,
                     "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
                     "an accepted step cannot be replayed with different "
@@ -7831,10 +13783,26 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 .pre_maintenance_endpoint_state_revision =
                     pre_maintenance_endpoint_state_revision,
                 .state_revision = state_revision,
+                .extension_map_revision =
+                    extension_map_revision,
                 .declaration = declaration,
                 .geometry_revision = accepted.geometry_revision,
+                .cut_topology_revision =
+                    accepted.cut_topology_revision,
                 .state = accepted.state,
+                .endpoint_functional_power =
+                    accepted.endpoint_functional_power,
+                .active_volume_energy =
+                    accepted.active_volume_energy,
+                .active_volume_dissipation =
+                    accepted.active_volume_dissipation,
+                .external_pressure_power =
+                    accepted.external_pressure_power,
+                .backward_euler_kinetic_work =
+                    accepted.backward_euler_kinetic_work,
                 .contact_stage = accepted.contact_stage,
+                .contact_line_kinematics =
+                    accepted.contact_line_kinematics,
             });
         const auto& revision = accepted.geometry_revision;
         const auto& state = accepted.state;
@@ -7848,9 +13816,30 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 << " pre_maintenance_endpoint_state_revision="
                 << pre_maintenance_endpoint_state_revision
                 << " state_revision=" << state_revision
+                << " extension_map_revision_available="
+                << (extension_map_revision.has_value()
+                        ? "true"
+                        : "false")
+                << " extension_map_revision="
+                << extension_map_revision.value_or(0u)
                 << " interface_marker=" << declaration.interface_marker
                 << " level_set_field=" << declaration.level_set_field
                 << " velocity_field=" << declaration.velocity_field
+                << " capillary_balance_method="
+                << (declaration.capillary_balance_method ==
+                            FreeSurfaceCapillaryBalanceMethod::
+                                DiscreteEnergyVolumeStationarity
+                        ? "discrete_energy_volume_stationarity"
+                        : "unselected")
+                << " capillary_balance_qualification="
+                << (declaration.capillary_balance_qualification ==
+                            FreeSurfaceCapillaryBalanceQualification::Qualified
+                        ? "qualified"
+                        : declaration.capillary_balance_qualification ==
+                                  FreeSurfaceCapillaryBalanceQualification::
+                                      PrerequisiteOnly
+                              ? "prerequisite_only"
+                              : "unselected")
                 << " geometry_source_id='" << revision.source_id << "'"
                 << " geometry_domain_id='" << revision.domain_id << "'"
                 << " geometry_isovalue=" << revision.isovalue
@@ -7868,6 +13857,8 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 << revision.quadrature_policy_key
                 << " snapshot_revision="
                 << revision.snapshot_revision_key
+                << " cut_topology_revision="
+                << accepted.cut_topology_revision
                 << " liquid_side="
                 << (state.liquid_side ==
                             geometry::CutIntegrationSide::Negative
@@ -7887,6 +13878,86 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 << " total_potential=" << state.total_potential
                 << " wall_count=" << state.walls.size()
                 << " owner='" << declaration.owner_component << "'";
+        if (accepted.endpoint_functional_power.has_value()) {
+            const auto& power =
+                *accepted.endpoint_functional_power;
+            message
+                << " endpoint_liquid_volume_power="
+                << power.owned_liquid_volume_variation
+                << " endpoint_liquid_gas_area_power="
+                << power.owned_liquid_gas_area_variation
+                << " endpoint_wetted_wall_area_power="
+                << power.owned_wetted_wall_area_variation
+                << " endpoint_liquid_gas_surface_energy_power="
+                << power.liquid_gas_surface_energy_variation
+                << " endpoint_young_wall_energy_power="
+                << power.young_wall_energy_variation
+                << " endpoint_volume_constraint_power="
+                << power.volume_constraint_potential_variation
+                << " endpoint_total_functional_power="
+                << power.total_potential_variation;
+        }
+        if (accepted.active_volume_energy.has_value()) {
+            const auto& energy = *accepted.active_volume_energy;
+            message
+                << " active_volume_qpoints="
+                << energy.owned_quadrature_point_count
+                << " active_volume_liquid_measure="
+                << energy.owned_liquid_volume
+                << " kinetic_energy=" << energy.kinetic_energy
+                << " gravitational_energy="
+                << energy.gravitational_energy
+                << " gravitational_potential_power="
+                << energy.gravitational_potential_power
+                << " active_volume_total_energy="
+                << energy.total_energy;
+        }
+        if (accepted.active_volume_dissipation.has_value()) {
+            const auto& dissipation =
+                *accepted.active_volume_dissipation;
+            message
+                << " active_volume_dissipation_qpoints="
+                << dissipation.owned_quadrature_point_count
+                << " active_volume_dissipation_liquid_measure="
+                << dissipation.owned_liquid_volume
+                << " bulk_viscous_dissipation_rate="
+                << dissipation.bulk_viscous_dissipation_rate;
+        }
+        if (accepted.external_pressure_power.has_value()) {
+            const auto& pressure =
+                *accepted.external_pressure_power;
+            message
+                << " exterior_pressure_surface_qpoints="
+                << pressure.owned_quadrature_point_count
+                << " exterior_pressure_surface_area="
+                << pressure.owned_liquid_gas_area
+                << " exterior_pressure_outward_liquid_flux_rate="
+                << pressure.outward_liquid_volume_flux_rate
+                << " exterior_pressure=" << pressure.external_pressure
+                << " exterior_pressure_power="
+                << pressure.external_pressure_power;
+        }
+        if (accepted.backward_euler_kinetic_work.has_value()) {
+            const auto& work =
+                *accepted.backward_euler_kinetic_work;
+            message
+                << " backward_euler_previous_velocity_revision="
+                << work.previous_velocity_revision
+                << " backward_euler_endpoint_velocity_revision="
+                << work.endpoint_velocity_revision
+                << " backward_euler_kinetic_before_on_endpoint_domain="
+                << work.kinetic_energy_before_on_endpoint_domain
+                << " backward_euler_kinetic_after="
+                << work.kinetic_energy_after
+                << " backward_euler_kinetic_change_on_endpoint_domain="
+                << work.kinetic_energy_change_on_endpoint_domain
+                << " backward_euler_step_integrated_inertia_work="
+                << work.step_integrated_inertia_work
+                << " backward_euler_time_discretization_loss="
+                << work.time_discretization_loss
+                << " backward_euler_kinetic_identity_residual="
+                << work.identity_residual;
+        }
         for (const auto& wall : state.walls) {
             message << " wall_marker=" << wall.boundary_marker;
             if (wall.equilibrium_contact_angle_radians.has_value()) {
@@ -7927,6 +13998,21 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 << contact_stage.state.wall_slip_dissipation
                 << " contact_stage_total_dissipation="
                 << contact_stage.state.total_dissipation;
+            if (contact_stage.first_order_generalized_alpha.has_value()) {
+                const auto& generalized_alpha =
+                    *contact_stage.first_order_generalized_alpha;
+                message
+                    << " contact_stage_generalized_alpha_alpha_m="
+                    << generalized_alpha.alpha_m
+                    << " contact_stage_generalized_alpha_alpha_f="
+                    << generalized_alpha.alpha_f
+                    << " contact_stage_generalized_alpha_gamma="
+                    << generalized_alpha.gamma
+                    << " contact_stage_generalized_alpha_dt="
+                    << generalized_alpha.dt;
+            } else {
+                message << " contact_stage_generalized_alpha=none";
+            }
             for (const auto& contact : contact_stage.state.walls) {
                 const char* motion = "Absent";
                 switch (contact.motion) {
@@ -7978,6 +14064,40 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                     << contact.wall_slip_speed_squared_integral
                     << " contact_wall_slip_dissipation="
                     << contact.wall_slip_dissipation;
+                const auto kinematics = std::find_if(
+                    accepted.contact_line_kinematics.begin(),
+                    accepted.contact_line_kinematics.end(),
+                    [&](const auto& candidate) {
+                        return candidate.boundary_marker ==
+                               contact.boundary_marker;
+                    });
+                message << " contact_geometric_kinematics_available="
+                        << (kinematics !=
+                                    accepted.contact_line_kinematics.end()
+                                ? "true"
+                                : "false");
+                if (kinematics !=
+                    accepted.contact_line_kinematics.end()) {
+                    message
+                        << " contact_geometric_previous_accepted_step="
+                        << kinematics->previous_accepted_step
+                        << " contact_geometric_previous_accepted_time="
+                        << kinematics->previous_accepted_time
+                        << " contact_geometric_previous_stage_time="
+                        << kinematics->previous_stage_time
+                        << " contact_geometric_previous_stage_state_revision="
+                        << kinematics->previous_stage_state_revision
+                        << " contact_geometric_previous_snapshot_revision="
+                        << kinematics->previous_snapshot_revision_key
+                        << " contact_geometric_stage_time_interval="
+                        << kinematics->stage_time_interval
+                        << " contact_projected_centroid_speed="
+                        << kinematics->projected_contact_centroid_speed
+                        << " contact_geometric_mean_fluid_speed="
+                        << kinematics->mean_fluid_contact_speed
+                        << " contact_fluid_minus_geometric_speed="
+                        << kinematics->fluid_minus_geometric_contact_speed;
+                }
                 if (contact.mean_dynamic_angle_radians.has_value()) {
                     message
                         << " contact_mean_dynamic_angle_radians="
@@ -8019,6 +14139,17 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                         << " contact_mean_wall_tangential_velocity_"
                         << component << "="
                         << contact.mean_wall_tangential_velocity[component];
+                    if (kinematics !=
+                        accepted.contact_line_kinematics.end()) {
+                        message
+                            << " contact_geometric_previous_mean_position_"
+                            << component << "="
+                            << kinematics
+                                   ->previous_mean_contact_position[component]
+                            << " contact_geometric_projection_direction_"
+                            << component << "="
+                            << kinematics->projection_direction[component];
+                    }
                 }
             }
         }
@@ -8579,30 +14710,308 @@ void FESystem::addGeometryTransactionCallback(GeometryTransactionCallback hook)
 void FESystem::addCutIntegrationContextUpdateCallback(
     CutIntegrationContextUpdateCallback hook)
 {
+    FE_THROW_IF(
+        cut_integration_context_callback_dispatch_active_,
+        InvalidStateException,
+        "FESystem::addCutIntegrationContextUpdateCallback: callback "
+        "dispatch is active");
     FE_THROW_IF(hook.name.empty(), InvalidArgumentException,
                 "FESystem::addCutIntegrationContextUpdateCallback: hook name must not be empty");
     FE_THROW_IF(!hook.callback, InvalidArgumentException,
                 "FESystem::addCutIntegrationContextUpdateCallback: callback must be callable");
+    FE_THROW_IF(
+        std::any_of(
+            cut_integration_context_update_callbacks_
+                .begin(),
+            cut_integration_context_update_callbacks_
+                .end(),
+            [&](const auto& existing) {
+                return existing.name == hook.name;
+            }),
+        InvalidArgumentException,
+        "FESystem::addCutIntegrationContextUpdateCallback: "
+        "callback name is already registered");
     cut_integration_context_update_callbacks_.push_back(std::move(hook));
+}
+
+void FESystem::requireConsistentCutIntegrationContextCandidate(
+    const assembly::CutIntegrationContext* context,
+    bool use_dof_handler_communicator) const
+{
+    CutIntegrationContextPublicationSignature signature;
+    std::exception_ptr local_signature_exception;
+    try {
+        signature =
+            cutIntegrationContextPublicationSignature(
+                context,
+                std::span<const
+                    CutIntegrationContextUpdateCallback>(
+                    cut_integration_context_update_callbacks_));
+    } catch (...) {
+        local_signature_exception =
+            std::current_exception();
+    }
+    coordinateExteriorBoundaryMeasureLocalFailure(
+        *this,
+        local_signature_exception,
+        "cut_integration_context_publication_signature",
+        use_dof_handler_communicator);
+    requireConsistentCutIntegrationContextPublication(
+        *this,
+        signature.shape,
+        use_dof_handler_communicator);
+}
+
+void FESystem::runCutIntegrationContextUpdateCallbacks(
+    const assembly::CutIntegrationContext* context,
+    bool use_dof_handler_communicator)
+{
+    FE_THROW_IF(
+        cut_integration_context_callback_dispatch_active_,
+        InvalidStateException,
+        "FESystem: cut-integration-context callback dispatch is "
+        "not reentrant");
+    if (mesh_access_ != nullptr &&
+        mesh_access_->parallelSize() > 1) {
+        bool collective_communicator_ready = false;
+#if FE_HAS_MPI
+        int mpi_initialized = 0;
+        int mpi_finalized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (mpi_initialized != 0) {
+            MPI_Finalized(&mpi_finalized);
+        }
+        if (mpi_initialized != 0 &&
+            mpi_finalized == 0) {
+            const auto communicator =
+                use_dof_handler_communicator
+                    ? dof_handler_.mpiComm()
+                    : activeMpiCommunicator();
+            if (communicator != MPI_COMM_NULL) {
+                int communicator_size = 1;
+                MPI_Comm_size(
+                    communicator,
+                    &communicator_size);
+                collective_communicator_ready =
+                    communicator_size > 1;
+            }
+        }
+#else
+        static_cast<void>(
+            use_dof_handler_communicator);
+#endif
+        FE_THROW_IF(
+            !collective_communicator_ready,
+            InvalidStateException,
+            "FESystem: distributed cut-integration-context "
+            "publication requires a multi-rank system "
+            "communicator; defer publication until the DOF layout "
+            "is finalized");
+    }
+    if (cut_integration_context_update_callbacks_.empty()) {
+        return;
+    }
+    const auto* published_context_before =
+        cut_integration_context_.get();
+    // A distinct candidate cannot mutate the published context through the
+    // callback argument, so cloning the potentially large published context
+    // is necessary only for alias validation.
+    const bool candidate_aliases_published_context =
+        context != nullptr &&
+        context == published_context_before;
+    const std::uint64_t
+        published_content_revision_before =
+            candidate_aliases_published_context
+                ? published_context_before
+                      ->contentRevision()
+                : 0u;
+    std::shared_ptr<const
+        assembly::CutIntegrationContext>
+        published_context_snapshot;
+    std::exception_ptr local_snapshot_exception;
+    try {
+        if (candidate_aliases_published_context) {
+            published_context_snapshot =
+                std::make_shared<
+                    assembly::CutIntegrationContext>(
+                    *published_context_before);
+        }
+    } catch (...) {
+        local_snapshot_exception =
+            std::current_exception();
+    }
+    coordinateExteriorBoundaryMeasureLocalFailure(
+        *this,
+        local_snapshot_exception,
+        "cut_integration_context_callback_snapshot",
+        use_dof_handler_communicator);
+    struct CallbackDispatchGuard {
+        bool& active;
+
+        explicit CallbackDispatchGuard(bool& value) noexcept
+            : active(value)
+        {
+            active = true;
+        }
+
+        ~CallbackDispatchGuard()
+        {
+            active = false;
+        }
+    };
+    CallbackDispatchGuard dispatch_guard{
+        cut_integration_context_callback_dispatch_active_};
+    const std::uint64_t candidate_content_revision =
+        context != nullptr ? context->contentRevision() : 0u;
+
+    for (const auto& hook :
+         cut_integration_context_update_callbacks_) {
+        std::exception_ptr local_callback_exception;
+        try {
+            FE_THROW_IF(
+                !hook.callback,
+                InvalidStateException,
+                "FESystem: cut-integration-context "
+                "callback is not callable");
+            hook.callback(context);
+        } catch (...) {
+            local_callback_exception =
+                std::current_exception();
+        }
+        if (context != nullptr &&
+            context->contentRevision() !=
+                candidate_content_revision) {
+            try {
+                FE_THROW_IF(
+                    true,
+                    InvalidStateException,
+                    "FESystem: cut-integration-context callback "
+                    "mutated the candidate during validation");
+            } catch (...) {
+                local_callback_exception =
+                    std::current_exception();
+            }
+        }
+        const bool published_context_mutated =
+            candidate_aliases_published_context &&
+            published_context_before
+                    ->contentRevision() !=
+                published_content_revision_before;
+        if (published_context_mutated) {
+            cut_integration_context_ =
+                published_context_snapshot;
+            try {
+                FE_THROW_IF(
+                    true,
+                    InvalidStateException,
+                    "FESystem: cut-integration-context callback "
+                    "mutated the currently published context");
+            } catch (...) {
+                local_callback_exception =
+                    std::current_exception();
+            }
+        }
+        coordinateExteriorBoundaryMeasureLocalFailure(
+            *this,
+            local_callback_exception,
+            "cut_integration_context_callback",
+            use_dof_handler_communicator);
+    }
 }
 
 void FESystem::setCutIntegrationContext(
     std::shared_ptr<const assembly::CutIntegrationContext> context)
 {
+    FE_THROW_IF(
+        cut_integration_context_callback_dispatch_active_,
+        InvalidStateException,
+        "FESystem::setCutIntegrationContext: callback dispatch is "
+        "active");
+    std::unordered_map<int, std::string>
+        candidate_owner_bindings;
+    std::exception_ptr local_validation_exception;
+    try {
+        candidate_owner_bindings =
+            generated_active_boundary_owner_bindings_;
+        if (context) {
+            for (const int marker :
+                 context->generatedInterfaceMarkers()) {
+                const auto* provenance =
+                    context
+                        ->findGeneratedActiveBoundaryProvenance(
+                            marker);
+                if (provenance == nullptr) {
+                    continue;
+                }
+                FE_THROW_IF(
+                    provenance
+                        ->stable_owner_key.empty(),
+                    InvalidArgumentException,
+                    "FESystem: generated active-boundary "
+                    "provenance has no stable owner key");
+                const auto existing =
+                    candidate_owner_bindings.find(
+                        marker);
+                FE_THROW_IF(
+                    existing !=
+                            candidate_owner_bindings.end() &&
+                        existing->second !=
+                            provenance
+                                ->stable_owner_key,
+                    InvalidArgumentException,
+                    "FESystem: generated active-boundary "
+                    "marker was rebound to a different "
+                    "stable owner");
+                if (existing ==
+                    candidate_owner_bindings.end()) {
+                    candidate_owner_bindings.emplace(
+                        marker,
+                        provenance
+                            ->stable_owner_key);
+                }
+            }
+        }
+        validateExteriorBoundaryMeasurePoliciesAgainstCutContext(
+            exterior_boundary_measure_policies_,
+            context.get(),
+            /*require_generated_active_context=*/false);
+        for (const auto& [field, service] :
+             boundary_reduction_services_) {
+            static_cast<void>(field);
+            if (service) {
+                service
+                    ->validateExteriorBoundaryMeasuresAgainstCutContext(
+                        context.get(),
+                        /*require_generated_active_context=*/false);
+            }
+        }
+    } catch (...) {
+        local_validation_exception =
+            std::current_exception();
+    }
+    coordinateExteriorBoundaryMeasureLocalFailure(
+        *this,
+        local_validation_exception,
+        "cut_integration_context_candidate");
+    requireConsistentCutIntegrationContextCandidate(
+        context.get());
+
+    // Callbacks validate the candidate before publication. Every rank has
+    // already certified the same callback schedule and coordinates each
+    // callback failure before any system state is changed.
+    runCutIntegrationContextUpdateCallbacks(
+        context.get());
+
     // The pointee can be mutated before a shared_ptr<const> is passed back
-    // with identical pointer identity. Treat every explicit setter call as a
-    // new revision boundary so no finalized snapshot survives an
-    // unobservable same-pointer content change.
+    // with identical pointer identity. Treat every explicit setter call,
+    // including null-to-null invalidation, as a new revision boundary.
     bumpConstraintLayoutRevision();
+    invalidateGeneratedBoundaryNitscheTraceCertificates();
     finalized_small_cut_aggregation_prolongations_.clear();
+    generated_active_boundary_owner_bindings_.swap(
+        candidate_owner_bindings);
     cut_integration_context_ = std::move(context);
     invalidateAnalysisCache();
-    for (const auto& hook :
-         cut_integration_context_update_callbacks_) {
-        if (hook.callback) {
-            hook.callback(cut_integration_context_.get());
-        }
-    }
 }
 
 namespace {
@@ -10134,8 +16543,1277 @@ FESystem::finalizedSmallCutAggregationProlongations() const
     return finalized_small_cut_aggregation_prolongations_;
 }
 
+void FESystem::validateExteriorBoundaryMeasurePoliciesAgainstCutContext(
+    std::span<const ExteriorBoundaryMeasurePolicy> policies,
+    const assembly::CutIntegrationContext* context,
+    bool require_generated_active_context) const
+{
+    const bool has_any_generated_active_boundary =
+        context != nullptr &&
+        std::any_of(
+            context->generatedInterfaceMarkers().begin(),
+            context->generatedInterfaceMarkers().end(),
+            [context](int marker) {
+                return context->hasGeneratedActiveBoundaryMarker(marker);
+            });
+
+    for (const auto& policy : policies) {
+        switch (policy.intent) {
+        case ExteriorBoundaryMeasureIntent::LegacyBoundary: {
+            FE_THROW_IF(
+                policy.physical_boundary_marker < -1 ||
+                    policy.generated_active_boundary_marker != -1,
+                InvalidArgumentException,
+                "FESystem: legacy boundary-measure policy fields are invalid");
+            if (context == nullptr) {
+                break;
+            }
+            const bool conflicts_with_generated_active_boundary =
+                policy.physical_boundary_marker < 0
+                    ? has_any_generated_active_boundary
+                    : !context
+                           ->generatedActiveBoundaryMarkersForPhysicalBoundary(
+                               policy.physical_boundary_marker)
+                           .empty();
+            FE_THROW_IF(
+                conflicts_with_generated_active_boundary,
+                InvalidArgumentException,
+                "FESystem: raw ds boundary measure is ambiguous in a cut "
+                "context with generated-active boundary provenance; use an "
+                "explicit full-physical or generated-active selector");
+            break;
+        }
+        case ExteriorBoundaryMeasureIntent::LegacyInterface: {
+            FE_THROW_IF(
+                policy.physical_boundary_marker != -1 ||
+                    policy.generated_active_boundary_marker < -1,
+                InvalidArgumentException,
+                "FESystem: legacy interface-measure policy fields are invalid");
+            if (context == nullptr) {
+                break;
+            }
+            const bool conflicts_with_generated_active_boundary =
+                policy.generated_active_boundary_marker < 0
+                    ? has_any_generated_active_boundary
+                    : context->hasGeneratedActiveBoundaryMarker(
+                          policy.generated_active_boundary_marker);
+            FE_THROW_IF(
+                conflicts_with_generated_active_boundary,
+                InvalidArgumentException,
+                "FESystem: raw dI interface measure is ambiguous in a cut "
+                "context with generated-active boundary provenance; use an "
+                "explicit generated-active selector");
+            break;
+        }
+        case ExteriorBoundaryMeasureIntent::FullPhysical:
+            FE_THROW_IF(
+                policy.physical_boundary_marker < 0 ||
+                    policy.generated_active_boundary_marker != -1,
+                InvalidArgumentException,
+                "FESystem: explicit full-physical boundary-measure policy "
+                "fields are invalid");
+            break;
+        case ExteriorBoundaryMeasureIntent::GeneratedActiveSubset: {
+            FE_THROW_IF(
+                policy.physical_boundary_marker < 0 ||
+                    policy.generated_active_boundary_marker < 0,
+                InvalidArgumentException,
+                "FESystem: explicit generated-active boundary-measure policy "
+                "fields are invalid");
+            if (context == nullptr) {
+                FE_THROW_IF(
+                    require_generated_active_context,
+                    InvalidStateException,
+                    "FESystem: generated-active boundary selector is pending "
+                    "a cut integration context and is not assembly-ready");
+                break;
+            }
+            const auto* provenance =
+                context->findGeneratedActiveBoundaryProvenance(
+                    policy.generated_active_boundary_marker);
+            FE_THROW_IF(
+                provenance == nullptr,
+                InvalidArgumentException,
+                "FESystem: generated-active boundary selector marker has no "
+                "generated-active provenance in the candidate cut context");
+            FE_THROW_IF(
+                provenance->physicalBoundaryMarker() !=
+                    policy.physical_boundary_marker,
+                InvalidArgumentException,
+                "FESystem: generated-active boundary selector physical marker "
+                "does not match candidate cut-context provenance");
+            break;
+        }
+        default:
+            throw InvalidArgumentException(
+                "FESystem: exterior-boundary measure policy has an invalid "
+                "intent");
+        }
+    }
+}
+
+void FESystem::prepareFormBoundExteriorBoundaryMeasurePolicies(
+    const std::vector<ExteriorBoundaryMeasurePolicy>& policies)
+{
+    if (is_setup_) {
+        throw std::logic_error(
+            "FESystem::prepareFormBoundExteriorBoundaryMeasurePolicies: "
+            "policies must be registered before setup");
+    }
+    if (policies.empty()) {
+        return;
+    }
+
+    validateExteriorBoundaryMeasurePoliciesAgainstCutContext(
+        policies,
+        cut_integration_context_.get(),
+        /*require_generated_active_context=*/false);
+
+    const auto same_route = [](const auto& lhs,
+                               const auto& rhs) noexcept {
+        return lhs.op == rhs.op &&
+               lhs.intent == rhs.intent &&
+               lhs.physical_boundary_marker ==
+                   rhs.physical_boundary_marker &&
+               lhs.generated_active_boundary_marker ==
+                   rhs.generated_active_boundary_marker &&
+               lhs.source_formulation_record_index ==
+                   rhs.source_formulation_record_index;
+    };
+    for (std::size_t index = 0u; index < policies.size(); ++index) {
+        const auto& policy = policies[index];
+        FE_THROW_IF(
+            policy.id != INVALID_EXTERIOR_BOUNDARY_MEASURE_POLICY_ID ||
+                policy.op.empty() ||
+                (policy.source_formulation_record_index !=
+                     formulation_records_.size() &&
+                 policy.source_formulation_record_index !=
+                     NO_EXTERIOR_BOUNDARY_MEASURE_FORMULATION_RECORD),
+            InvalidArgumentException,
+            "FESystem::prepareFormBoundExteriorBoundaryMeasurePolicies: "
+            "form-bound policy fields or source formulation index are invalid");
+        FE_THROW_IF(
+            std::any_of(
+                policies.begin(),
+                policies.begin() +
+                    static_cast<std::ptrdiff_t>(index),
+                [&](const auto& previous) {
+                    return same_route(previous, policy);
+                }),
+            InvalidArgumentException,
+            "FESystem::prepareFormBoundExteriorBoundaryMeasurePolicies: "
+            "a source formulation already has this exterior-boundary measure route");
+    }
+
+    const auto available_after_current =
+        std::numeric_limits<ExteriorBoundaryMeasurePolicyId>::max() -
+        next_exterior_boundary_measure_policy_id_;
+    if (next_exterior_boundary_measure_policy_id_ ==
+            INVALID_EXTERIOR_BOUNDARY_MEASURE_POLICY_ID ||
+        static_cast<std::uint64_t>(policies.size() - 1u) >
+            available_after_current) {
+        throw std::overflow_error(
+            "FESystem::prepareFormBoundExteriorBoundaryMeasurePolicies: "
+            "policy ID space is exhausted");
+    }
+    exterior_boundary_measure_policies_.reserve(
+        exterior_boundary_measure_policies_.size() + policies.size());
+}
+
+void FESystem::commitPreparedFormBoundExteriorBoundaryMeasurePolicies(
+    std::vector<ExteriorBoundaryMeasurePolicy> policies) noexcept
+{
+    if (policies.empty()) {
+        return;
+    }
+    static_assert(
+        std::is_nothrow_move_constructible_v<
+            ExteriorBoundaryMeasurePolicy>);
+    for (auto& policy : policies) {
+        policy.id = next_exterior_boundary_measure_policy_id_++;
+        exterior_boundary_measure_policies_.push_back(
+            std::move(policy));
+    }
+}
+
+void FESystem::requireCurrentExteriorBoundaryMeasurePolicies(
+    const OperatorTag& op) const
+{
+    for (const auto& policy : exterior_boundary_measure_policies_) {
+        if (policy.op != op) {
+            continue;
+        }
+        validateExteriorBoundaryMeasurePoliciesAgainstCutContext(
+            std::span<const ExteriorBoundaryMeasurePolicy>(&policy, 1u),
+            cut_integration_context_.get(),
+            /*require_generated_active_context=*/true);
+    }
+}
+
+void FESystem::requireCurrentBoundaryReductionExteriorMeasures(
+    bool use_dof_handler_communicator) const
+{
+    // Setup must freeze the collective reduction table before a generated
+    // context can be built from the finalized field DOFs. Runtime consumers
+    // still require that context and therefore fail closed after setup.
+    const bool require_generated_active_context = is_setup_;
+    std::exception_ptr local_validation_exception;
+    try {
+        for (const auto& [field, service] :
+             boundary_reduction_services_) {
+            static_cast<void>(field);
+            if (service) {
+                service
+                    ->validateExteriorBoundaryMeasuresAgainstCutContext(
+                        cut_integration_context_.get(),
+                        require_generated_active_context);
+            }
+        }
+    } catch (...) {
+        local_validation_exception =
+            std::current_exception();
+    }
+    coordinateExteriorBoundaryMeasureLocalFailure(
+        *this,
+        local_validation_exception,
+        "boundary_reduction_runtime_preflight",
+        use_dof_handler_communicator);
+
+    struct BoundaryReductionRoute {
+        FieldId primary_field{INVALID_FIELD_ID};
+        std::size_t registration_index{0u};
+        std::string name{};
+        std::string integrand_signature{};
+        std::uint8_t reduction{0u};
+        bool is_domain_functional{false};
+        int region_marker{-1};
+        int physical_boundary_marker{-1};
+        int generated_active_boundary_marker{-1};
+    };
+    std::vector<BoundaryReductionRoute> routes;
+    std::exception_ptr local_signature_exception;
+    try {
+        for (const auto& [field, service] :
+             boundary_reduction_services_) {
+            if (!service) {
+                continue;
+            }
+            const auto functional_defs =
+                service->allFunctionalDefs();
+            for (std::size_t index = 0u;
+                 index < functional_defs.size();
+                 ++index) {
+                const auto& functional =
+                    functional_defs[index];
+                routes.push_back(
+                    BoundaryReductionRoute{
+                        .primary_field = field,
+                        .registration_index = index,
+                        .name = functional.name,
+                        .integrand_signature =
+                            functional.integrand.toString(),
+                        .reduction =
+                            static_cast<std::uint8_t>(
+                                functional.reduction),
+                        .is_domain_functional =
+                            functional.is_domain_functional,
+                        .region_marker =
+                            functional.region_marker,
+                        .physical_boundary_marker =
+                            functional.boundary_marker,
+                        .generated_active_boundary_marker =
+                            functional
+                                .generated_active_boundary_marker
+                                .value_or(-1),
+                    });
+            }
+        }
+        std::sort(
+            routes.begin(),
+            routes.end(),
+            [](const auto& lhs, const auto& rhs) {
+                return std::tie(
+                           lhs.primary_field,
+                           lhs.registration_index,
+                           lhs.name,
+                           lhs.integrand_signature,
+                           lhs.reduction,
+                           lhs.is_domain_functional,
+                           lhs.region_marker,
+                           lhs.physical_boundary_marker,
+                           lhs.generated_active_boundary_marker) <
+                       std::tie(
+                           rhs.primary_field,
+                           rhs.registration_index,
+                           rhs.name,
+                           rhs.integrand_signature,
+                           rhs.reduction,
+                           rhs.is_domain_functional,
+                           rhs.region_marker,
+                           rhs.physical_boundary_marker,
+                           rhs.generated_active_boundary_marker);
+            });
+    } catch (...) {
+        local_signature_exception =
+            std::current_exception();
+    }
+    coordinateExteriorBoundaryMeasureLocalFailure(
+        *this,
+        local_signature_exception,
+        "boundary_reduction_table_signature",
+        use_dof_handler_communicator);
+
+    constexpr std::uint64_t offset =
+        14695981039346656037ull;
+    constexpr std::uint64_t prime =
+        1099511628211ull;
+    std::uint64_t digest = offset;
+    const auto mix_byte = [&](std::uint8_t value) {
+        digest ^= value;
+        digest *= prime;
+    };
+    const auto mix_u64 = [&](std::uint64_t value) {
+        for (unsigned int byte = 0u;
+             byte < 8u;
+             ++byte) {
+            mix_byte(static_cast<std::uint8_t>(
+                (value >> (byte * 8u)) &
+                std::uint64_t{0xffu}));
+        }
+    };
+    const auto mix_string = [&](std::string_view value) {
+        mix_u64(static_cast<std::uint64_t>(
+            value.size()));
+        for (const unsigned char character :
+             value) {
+            mix_byte(character);
+        }
+    };
+    mix_u64(static_cast<std::uint64_t>(
+        routes.size()));
+    for (const auto& route : routes) {
+        mix_u64(static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(
+                route.primary_field)));
+        mix_u64(static_cast<std::uint64_t>(
+            route.registration_index));
+        mix_string(route.name);
+        mix_string(route.integrand_signature);
+        mix_u64(route.reduction);
+        mix_byte(
+            route.is_domain_functional
+                ? std::uint8_t{1u}
+                : std::uint8_t{0u});
+        mix_u64(static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(
+                route.region_marker)));
+        mix_u64(static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(
+                route.physical_boundary_marker)));
+        mix_u64(static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(
+                route.generated_active_boundary_marker)));
+    }
+
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0) {
+        const auto communicator =
+            use_dof_handler_communicator
+                ? dofHandler().mpiComm()
+                : activeMpiCommunicator();
+        if (communicator != MPI_COMM_NULL) {
+            int world_size = 1;
+            MPI_Comm_size(communicator, &world_size);
+            if (world_size > 1) {
+                const std::uint64_t local_shape[2]{
+                    static_cast<std::uint64_t>(
+                        routes.size()),
+                    digest};
+                std::uint64_t minimum_shape[2]{};
+                std::uint64_t maximum_shape[2]{};
+                const auto reduce =
+                    [&](std::uint64_t* reduced,
+                        MPI_Op operation) {
+                        const auto sequence =
+                            debug::
+                                nextMpiCollectiveTraceSeq();
+                        debug::traceMpiCollective(
+                            "before",
+                            sequence,
+                            "FESystem::requireCurrentBoundaryReductionExteriorMeasures",
+                            2,
+                            MPI_UINT64_T,
+                            operation,
+                            communicator);
+                        MPI_Allreduce(
+                            local_shape,
+                            reduced,
+                            2,
+                            MPI_UINT64_T,
+                            operation,
+                            communicator);
+                        debug::traceMpiCollective(
+                            "after",
+                            sequence,
+                            "FESystem::requireCurrentBoundaryReductionExteriorMeasures",
+                            2,
+                            MPI_UINT64_T,
+                            operation,
+                            communicator);
+                    };
+                reduce(minimum_shape, MPI_MIN);
+                reduce(maximum_shape, MPI_MAX);
+                FE_THROW_IF(
+                    !std::equal(
+                        std::begin(minimum_shape),
+                        std::end(minimum_shape),
+                        std::begin(maximum_shape)),
+                    InvalidStateException,
+                    "FESystem: boundary-reduction exterior-measure table "
+                    "differs across communicator ranks");
+            }
+        }
+    }
+#endif
+}
+
+void FESystem::requireBoundaryReductionExteriorMeasure(
+    const forms::BoundaryFunctional& functional) const
+{
+    std::exception_ptr local_validation_exception;
+    try {
+        BoundaryReductionService::
+            validateExteriorBoundaryMeasureAgainstCutContext(
+                functional,
+                cut_integration_context_.get(),
+                /*require_generated_active_context=*/true);
+    } catch (...) {
+        local_validation_exception =
+            std::current_exception();
+    }
+    coordinateExteriorBoundaryMeasureLocalFailure(
+        *this,
+        local_validation_exception,
+        "boundary_reduction_measure_preflight");
+}
+
+void FESystem::prepareFormBoundGeneratedBoundaryNitscheTracePolicies(
+    const std::vector<
+        GeneratedBoundaryNitscheTracePolicy>& policies)
+{
+    if (is_setup_) {
+        throw std::logic_error(
+            "FESystem::prepareFormBoundGeneratedBoundaryNitscheTracePolicies: "
+            "policies must be registered before setup");
+    }
+    if (policies.empty()) {
+        return;
+    }
+
+    const auto same_route = [](const auto& lhs,
+                               const auto& rhs) noexcept {
+        return lhs.op == rhs.op &&
+               lhs.velocity_field == rhs.velocity_field &&
+               lhs.volume_interface_marker ==
+                   rhs.volume_interface_marker &&
+               lhs.generated_active_boundary_marker ==
+                   rhs.generated_active_boundary_marker;
+    };
+    for (std::size_t index = 0u;
+         index < policies.size();
+         ++index) {
+        const auto& policy = policies[index];
+        if (policy.id !=
+                INVALID_GENERATED_BOUNDARY_NITSCHE_TRACE_POLICY_ID ||
+            policy.op.empty() ||
+            !field_registry_.has(policy.velocity_field) ||
+            policy.physical_boundary_marker < 0 ||
+            policy.volume_interface_marker < 0 ||
+            policy.generated_active_boundary_marker < 0 ||
+            !(policy.dynamic_viscosity > Real{0.0}) ||
+            !std::isfinite(policy.dynamic_viscosity) ||
+            !(policy.penalty_gamma > Real{0.0}) ||
+            !std::isfinite(policy.penalty_gamma) ||
+            policy.penalty_polynomial_order < 1 ||
+            !(policy.effective_penalty_multiplier > Real{0.0}) ||
+            !std::isfinite(
+                policy.effective_penalty_multiplier) ||
+            policy.maximum_reduced_dimension == 0u ||
+            policy.maximum_reduced_dimension > 128u ||
+            policy.source_formulation_record_index !=
+                formulation_records_.size() ||
+            policy.form_binding_digest == 0u) {
+            throw std::invalid_argument(
+                "FESystem::prepareFormBoundGeneratedBoundaryNitscheTracePolicies: "
+                "form-bound policy fields are invalid");
+        }
+        const auto& field =
+            field_registry_.get(policy.velocity_field);
+        if (!field.space ||
+            !generatedBoundaryNitscheTraceSpaceMatches(
+                *field.space,
+                policy.velocity_space_signature) ||
+            field.space->polynomial_order() !=
+                policy.penalty_polynomial_order) {
+            throw std::invalid_argument(
+                "FESystem::prepareFormBoundGeneratedBoundaryNitscheTracePolicies: "
+                "bound velocity-space signature or penalty polynomial order differs from the installed field");
+        }
+        if (std::any_of(
+                generated_boundary_nitsche_trace_policies_.begin(),
+                generated_boundary_nitsche_trace_policies_.end(),
+                [&](const auto& existing) {
+                    return same_route(existing, policy);
+                }) ||
+            std::any_of(
+                policies.begin(),
+                policies.begin() +
+                    static_cast<std::ptrdiff_t>(index),
+                [&](const auto& previous) {
+                    return same_route(previous, policy);
+                })) {
+            throw std::invalid_argument(
+                "FESystem::prepareFormBoundGeneratedBoundaryNitscheTracePolicies: "
+                "an operator already has a policy for this generated boundary route");
+        }
+    }
+
+    const auto available_after_current =
+        std::numeric_limits<
+            GeneratedBoundaryNitscheTracePolicyId>::max() -
+        next_generated_boundary_nitsche_trace_policy_id_;
+    if (next_generated_boundary_nitsche_trace_policy_id_ ==
+            INVALID_GENERATED_BOUNDARY_NITSCHE_TRACE_POLICY_ID ||
+        static_cast<std::uint64_t>(policies.size() - 1u) >
+            available_after_current) {
+        throw std::overflow_error(
+            "FESystem::prepareFormBoundGeneratedBoundaryNitscheTracePolicies: "
+            "policy ID space is exhausted");
+    }
+    generated_boundary_nitsche_trace_policies_.reserve(
+        generated_boundary_nitsche_trace_policies_.size() +
+        policies.size());
+}
+
+void FESystem::
+commitPreparedFormBoundGeneratedBoundaryNitscheTracePolicies(
+    std::vector<
+        GeneratedBoundaryNitscheTracePolicy> policies) noexcept
+{
+    if (policies.empty()) {
+        return;
+    }
+    static_assert(
+        std::is_nothrow_move_constructible_v<
+            GeneratedBoundaryNitscheTracePolicy>);
+    for (auto& policy : policies) {
+        policy.id =
+            next_generated_boundary_nitsche_trace_policy_id_++;
+        generated_boundary_nitsche_trace_policies_.push_back(
+            std::move(policy));
+    }
+    generated_boundary_nitsche_trace_policy_shape_validated_ =
+        false;
+    generated_boundary_nitsche_trace_policy_signature_ = 0u;
+    invalidateGeneratedBoundaryNitscheTraceCertificates();
+}
+
+std::span<const GeneratedBoundaryNitscheTraceCertificateRecord>
+FESystem::generatedBoundaryNitscheTraceCertificates() const
+{
+    requireSetup();
+    return generated_boundary_nitsche_trace_certificates_;
+}
+
+void FESystem::invalidateGeneratedBoundaryNitscheTraceCertificates()
+    noexcept
+{
+    generated_boundary_nitsche_trace_certificates_.clear();
+}
+
+void FESystem::refreshGeneratedBoundaryNitscheTraceCertificates(
+    bool allow_missing_cut_context)
+{
+    requireSetup();
+    invalidateGeneratedBoundaryNitscheTraceCertificates();
+    if (generated_boundary_nitsche_trace_policy_shape_validated_ &&
+        generated_boundary_nitsche_trace_policies_.empty()) {
+        return;
+    }
+
+    std::vector<const GeneratedBoundaryNitscheTracePolicy*>
+        ordered_policies;
+    std::uint64_t policy_signature =
+        kGeneratedBoundaryTraceHashOffset;
+    std::exception_ptr local_policy_exception;
+    try {
+        ordered_policies.reserve(
+            generated_boundary_nitsche_trace_policies_.size());
+        std::set<GeneratedBoundaryNitscheTracePolicyId>
+            policy_ids;
+        for (const auto& policy :
+             generated_boundary_nitsche_trace_policies_) {
+            if (policy.id ==
+                    INVALID_GENERATED_BOUNDARY_NITSCHE_TRACE_POLICY_ID ||
+                !policy_ids.insert(policy.id).second ||
+                !operator_registry_.has(policy.op) ||
+                !field_registry_.has(policy.velocity_field)) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche trace policy "
+                    "has an invalid ID or references an unknown "
+                    "operator or field");
+            }
+            const auto& field =
+                field_registry_.get(policy.velocity_field);
+            if (!field.space) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche trace policy "
+                    "velocity field has no function space");
+            }
+            if (policy.source_formulation_record_index >=
+                    formulation_records_.size() ||
+                policy.form_binding_digest == 0u ||
+                policy.penalty_polynomial_order < 1 ||
+                !(policy.effective_penalty_multiplier >
+                  Real{0.0}) ||
+                !std::isfinite(
+                    policy.effective_penalty_multiplier)) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche trace policy "
+                    "has invalid form-binding metadata");
+            }
+            const auto& source =
+                formulation_records_[
+                    policy.source_formulation_record_index];
+            if (source.operator_tag != policy.op ||
+                std::find(
+                    source.active_fields.begin(),
+                    source.active_fields.end(),
+                    policy.velocity_field) ==
+                    source.active_fields.end() ||
+                !generatedBoundaryNitscheTraceSpaceMatches(
+                    *field.space,
+                    policy.velocity_space_signature) ||
+                field.space->polynomial_order() !=
+                    policy.penalty_polynomial_order) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche trace policy "
+                    "does not match its immutable source formulation");
+            }
+            ordered_policies.push_back(&policy);
+        }
+        std::sort(
+            ordered_policies.begin(),
+            ordered_policies.end(),
+            [](const auto* lhs, const auto* rhs) {
+                return generatedBoundaryNitscheTracePolicyKey(*lhs) <
+                       generatedBoundaryNitscheTracePolicyKey(*rhs);
+            });
+        mixGeneratedBoundaryTraceHash(
+            policy_signature,
+            static_cast<std::uint64_t>(
+                ordered_policies.size()));
+        for (const auto* policy : ordered_policies) {
+            mixGeneratedBoundaryNitscheTracePolicy(
+                policy_signature, *policy);
+        }
+    } catch (...) {
+        local_policy_exception = std::current_exception();
+    }
+    coordinateFinalizedReportLocalFailure(
+        *this,
+        local_policy_exception,
+        "generated_boundary_nitsche_policy_preflight");
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    int mpi_finalized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized != 0) {
+        MPI_Finalized(&mpi_finalized);
+    }
+    if (!generated_boundary_nitsche_trace_policy_shape_validated_ &&
+        mpi_initialized != 0 && mpi_finalized == 0) {
+        const auto communicator = dofHandler().mpiComm();
+        int world_size = 1;
+        MPI_Comm_size(communicator, &world_size);
+        if (world_size > 1) {
+            const std::uint64_t local_count =
+                static_cast<std::uint64_t>(
+                    ordered_policies.size());
+            std::uint64_t minimum_count = 0u;
+            std::uint64_t maximum_count = 0u;
+            std::uint64_t minimum_signature = 0u;
+            std::uint64_t maximum_signature = 0u;
+            MPI_Allreduce(
+                &local_count,
+                &minimum_count,
+                1,
+                MPI_UINT64_T,
+                MPI_MIN,
+                communicator);
+            MPI_Allreduce(
+                &local_count,
+                &maximum_count,
+                1,
+                MPI_UINT64_T,
+                MPI_MAX,
+                communicator);
+            MPI_Allreduce(
+                &policy_signature,
+                &minimum_signature,
+                1,
+                MPI_UINT64_T,
+                MPI_MIN,
+                communicator);
+            MPI_Allreduce(
+                &policy_signature,
+                &maximum_signature,
+                1,
+                MPI_UINT64_T,
+                MPI_MAX,
+                communicator);
+            if (minimum_count != maximum_count ||
+                minimum_signature != maximum_signature) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche trace policy "
+                    "table differs across communicator ranks");
+            }
+        }
+    }
+#endif
+
+    generated_boundary_nitsche_trace_policy_shape_validated_ =
+        true;
+    generated_boundary_nitsche_trace_policy_signature_ =
+        policy_signature;
+    if (ordered_policies.empty()) {
+        return;
+    }
+
+    const bool local_missing_cut_context =
+        cut_integration_context_ == nullptr;
+    const bool local_missing_aggregation_reports =
+        finalized_small_cut_aggregation_prolongations_.empty();
+    std::exception_ptr local_context_exception;
+    try {
+        if (local_missing_cut_context &&
+            !allow_missing_cut_context) {
+            throw std::runtime_error(
+                "FESystem: generated-boundary Nitsche trace policies "
+                "require a current cut-integration context");
+        }
+        if (!local_missing_cut_context &&
+            local_missing_aggregation_reports) {
+            throw std::runtime_error(
+                "FESystem: generated-boundary Nitsche trace policies "
+                "require finalized small-cut aggregation metadata");
+        }
+    } catch (...) {
+        local_context_exception = std::current_exception();
+    }
+    coordinateFinalizedReportLocalFailure(
+        *this,
+        local_context_exception,
+        "generated_boundary_nitsche_context_preflight");
+
+#if FE_HAS_MPI
+    if (mpi_initialized != 0 && mpi_finalized == 0) {
+        const auto communicator = dofHandler().mpiComm();
+        int world_size = 1;
+        MPI_Comm_size(communicator, &world_size);
+        if (world_size > 1) {
+            const int local_ready =
+                local_missing_cut_context ? 0 : 1;
+            int minimum_ready = 0;
+            int maximum_ready = 0;
+            MPI_Allreduce(
+                &local_ready,
+                &minimum_ready,
+                1,
+                MPI_INT,
+                MPI_MIN,
+                communicator);
+            MPI_Allreduce(
+                &local_ready,
+                &maximum_ready,
+                1,
+                MPI_INT,
+                MPI_MAX,
+                communicator);
+            if (minimum_ready != maximum_ready) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche cut-context "
+                    "availability differs across communicator ranks");
+            }
+        }
+    }
+#endif
+    if (local_missing_cut_context) {
+        return;
+    }
+
+    std::vector<GeneratedBoundaryNitscheTraceCertificateRecord>
+        certificates;
+    std::exception_ptr local_storage_exception;
+    try {
+        certificates.reserve(ordered_policies.size());
+    } catch (...) {
+        local_storage_exception = std::current_exception();
+    }
+    coordinateFinalizedReportLocalFailure(
+        *this,
+        local_storage_exception,
+        "generated_boundary_nitsche_certificate_reserve");
+
+    for (const auto* policy : ordered_policies) {
+        const auto certificate =
+            analysis::certifyGeneratedBoundaryAggregateTrace(
+                *this,
+                analysis::
+                    GeneratedBoundaryAggregateTraceCertificationOptions{
+                        .field = policy->velocity_field,
+                        .physical_boundary_marker =
+                            policy->physical_boundary_marker,
+                        .volume_interface_marker =
+                            policy->volume_interface_marker,
+                        .generated_active_boundary_marker =
+                            policy
+                                ->generated_active_boundary_marker,
+                        .dynamic_viscosity =
+                            policy->dynamic_viscosity,
+                        .maximum_reduced_dimension =
+                            policy->maximum_reduced_dimension,
+                    });
+
+        local_storage_exception = nullptr;
+        try {
+            std::shared_ptr<const constraints::
+                SmallCutAggregationProlongationReport>
+                source_report;
+            for (const auto& report :
+                 finalized_small_cut_aggregation_prolongations_) {
+                if (!report ||
+                    report->field != policy->velocity_field ||
+                    report->interface_marker !=
+                        policy->volume_interface_marker ||
+                    report->canonical_content_digest !=
+                        certificate.aggregation_content_digest) {
+                    continue;
+                }
+                if (source_report) {
+                    throw std::runtime_error(
+                        "FESystem: generated-boundary Nitsche "
+                        "certificate matches more than one aggregation "
+                        "report");
+                }
+                source_report = report;
+            }
+            if (!source_report) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche certificate "
+                    "has no matching finalized aggregation report");
+            }
+
+            const auto& field =
+                field_registry_.get(policy->velocity_field);
+            const int polynomial_order =
+                field.space->polynomial_order();
+            const Real effective_penalty =
+                policy->effective_penalty_multiplier;
+            if (!(effective_penalty > Real{0.0}) ||
+                !std::isfinite(effective_penalty)) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche effective "
+                    "penalty multiplier is invalid");
+            }
+
+            GeneratedBoundaryNitscheTraceCertificateRecord record;
+            record.policy = *policy;
+            record.certificate = certificate;
+            record.constraint_revision =
+                constraint_revision_snapshot_;
+            record.aggregation_report =
+                std::move(source_report);
+            record.polynomial_order = polynomial_order;
+            record.effective_penalty_multiplier =
+                effective_penalty;
+            record.trace_to_penalty_ratio =
+                outwardRoundedPositiveRatio(
+                    certificate.global_conservative_upper_bound,
+                    effective_penalty);
+            certificates.push_back(std::move(record));
+        } catch (...) {
+            local_storage_exception = std::current_exception();
+        }
+        coordinateFinalizedReportLocalFailure(
+            *this,
+            local_storage_exception,
+            "generated_boundary_nitsche_certificate_record");
+    }
+
+    std::exception_ptr local_group_exception;
+    try {
+        std::map<OperatorTag, Real> symmetric_group_ratios;
+        for (const auto& record : certificates) {
+            if (!record.policy.symmetric) {
+                continue;
+            }
+            auto& sum =
+                symmetric_group_ratios[record.policy.op];
+            sum = outwardRoundedPositiveSum(
+                sum, record.trace_to_penalty_ratio);
+        }
+        for (auto& record : certificates) {
+            const auto group =
+                symmetric_group_ratios.find(record.policy.op);
+            const Real grouped_ratio =
+                group == symmetric_group_ratios.end()
+                    ? Real{0.0}
+                    : group->second;
+            record
+                .grouped_symmetric_trace_to_penalty_ratio =
+                grouped_ratio;
+            if (!record.policy.symmetric) {
+                continue;
+            }
+            if (!(grouped_ratio < Real{1.0})) {
+                throw std::runtime_error(
+                    "FESystem: symmetric generated-boundary Nitsche "
+                    "trace certificate requires sum(C_i/alpha_i) < 1");
+            }
+            Real energy_ratio = Real{1.0};
+            if (grouped_ratio != Real{0.0}) {
+                energy_ratio =
+                    Real{1.0} -
+                    std::sqrt(grouped_ratio);
+                energy_ratio = std::nextafter(
+                    energy_ratio,
+                    -std::numeric_limits<Real>::infinity());
+            }
+            if (!(energy_ratio > Real{0.0}) ||
+                !std::isfinite(energy_ratio)) {
+                throw std::runtime_error(
+                    "FESystem: symmetric generated-boundary Nitsche "
+                    "energy-ratio lower bound is not positive");
+            }
+            record.symmetric_energy_ratio_lower_bound =
+                energy_ratio;
+        }
+    } catch (...) {
+        local_group_exception = std::current_exception();
+    }
+    coordinateFinalizedReportLocalFailure(
+        *this,
+        local_group_exception,
+        "generated_boundary_nitsche_group_bound");
+
+    generated_boundary_nitsche_trace_certificates_.swap(
+        certificates);
+}
+
+void FESystem::requireCurrentGeneratedBoundaryNitscheTraceCertificates(
+    const OperatorTag& op) const
+{
+    if (generated_boundary_nitsche_trace_policies_.empty()) {
+        return;
+    }
+    const auto policy_count = static_cast<std::size_t>(
+        std::count_if(
+            generated_boundary_nitsche_trace_policies_.begin(),
+            generated_boundary_nitsche_trace_policies_.end(),
+            [&](const auto& policy) {
+                return policy.op == op;
+            }));
+    if (policy_count == 0u) {
+        return;
+    }
+
+    std::exception_ptr local_validation_exception;
+    std::uint64_t local_digest =
+        kGeneratedBoundaryTraceHashOffset;
+    try {
+        if (!generated_boundary_nitsche_trace_policy_shape_validated_ ||
+            cut_integration_context_ == nullptr) {
+            throw std::runtime_error(
+                "FESystem: generated-boundary Nitsche trace "
+                "certificate cache is unavailable");
+        }
+        mixGeneratedBoundaryTraceHash(
+            local_digest,
+            generated_boundary_nitsche_trace_policy_signature_);
+        const auto deps = constraintDependencyDeclaration();
+        const auto current_constraint_revision =
+            captureConstraintRevisionSnapshot(
+                deps.structural.mesh_field_values ||
+                deps.value.mesh_field_values);
+        if (!sameConstraintRevisionSnapshot(
+                current_constraint_revision,
+                constraint_revision_snapshot_)) {
+            throw std::runtime_error(
+                "FESystem: generated-boundary Nitsche trace "
+                "certificate cache is stale for current constraints");
+        }
+
+        std::vector<const
+            GeneratedBoundaryNitscheTraceCertificateRecord*>
+            records;
+        records.reserve(policy_count);
+        for (const auto& record :
+             generated_boundary_nitsche_trace_certificates_) {
+            if (record.policy.op == op) {
+                records.push_back(&record);
+            }
+        }
+        if (records.size() != policy_count) {
+            throw std::runtime_error(
+                "FESystem: generated-boundary Nitsche trace "
+                "certificate cache is incomplete");
+        }
+        std::sort(
+            records.begin(),
+            records.end(),
+            [](const auto* lhs, const auto* rhs) {
+                return generatedBoundaryNitscheTracePolicyKey(
+                           lhs->policy) <
+                       generatedBoundaryNitscheTracePolicyKey(
+                           rhs->policy);
+            });
+        mixGeneratedBoundaryTraceHash(
+            local_digest,
+            static_cast<std::uint64_t>(records.size()));
+        for (const auto* record : records) {
+            if (record->policy
+                        .source_formulation_record_index >=
+                    formulation_records_.size()) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche trace "
+                    "certificate lost its source formulation");
+            }
+            const auto& source =
+                formulation_records_[
+                    record->policy
+                        .source_formulation_record_index];
+            const auto& field =
+                field_registry_.get(
+                    record->policy.velocity_field);
+            if (source.operator_tag != record->policy.op ||
+                std::find(
+                    source.active_fields.begin(),
+                    source.active_fields.end(),
+                    record->policy.velocity_field) ==
+                    source.active_fields.end() ||
+                !field.space ||
+                !generatedBoundaryNitscheTraceSpaceMatches(
+                    *field.space,
+                    record->policy
+                        .velocity_space_signature) ||
+                record->policy.form_binding_digest == 0u) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche trace "
+                    "certificate source formulation metadata is stale");
+            }
+            if (!sameConstraintRevisionSnapshot(
+                    record->constraint_revision,
+                    current_constraint_revision) ||
+                !record->aggregation_report ||
+                record->certificate.canonical_certificate_digest ==
+                    0u ||
+                record->certificate.cut_context_content_revision !=
+                    cut_integration_context_->contentRevision() ||
+                record->certificate
+                        .affine_constraint_layout_revision !=
+                    affine_constraints_.constraintLayoutRevision() ||
+                record->certificate.field !=
+                    record->policy.velocity_field ||
+                record->certificate.physical_boundary_marker !=
+                    record->policy.physical_boundary_marker ||
+                record->certificate.volume_interface_marker !=
+                    record->policy.volume_interface_marker ||
+                record->certificate
+                        .generated_active_boundary_marker !=
+                    record->policy
+                        .generated_active_boundary_marker ||
+                generatedBoundaryTraceRealBits(
+                    record->certificate.dynamic_viscosity) !=
+                    generatedBoundaryTraceRealBits(
+                        record->policy.dynamic_viscosity) ||
+                record->certificate.aggregation_content_digest !=
+                    record->aggregation_report
+                        ->canonical_content_digest ||
+                !sameConstraintRevisionSnapshot(
+                    record->aggregation_report
+                        ->revision.constraint,
+                    current_constraint_revision) ||
+                record->aggregation_report
+                        ->revision
+                        .affine_constraint_layout_revision !=
+                    affine_constraints_
+                        .constraintLayoutRevision()) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche trace "
+                    "certificate cache has stale revision metadata");
+            }
+            const auto current_report = std::find(
+                finalized_small_cut_aggregation_prolongations_
+                    .begin(),
+                finalized_small_cut_aggregation_prolongations_
+                    .end(),
+                record->aggregation_report);
+            if (current_report ==
+                finalized_small_cut_aggregation_prolongations_
+                    .end()) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche trace "
+                    "certificate does not own the current aggregation "
+                    "report");
+            }
+            if (!cut_integration_context_
+                     ->hasFreeSurfaceGeometrySnapshotForMarker(
+                         record->policy
+                             .volume_interface_marker) ||
+                cut_integration_context_
+                        ->freeSurfaceGeometrySnapshotRevisionForMarker(
+                            record->policy
+                                .volume_interface_marker) !=
+                    record->certificate
+                        .free_surface_snapshot_revision ||
+                !cut_integration_context_
+                     ->hasExpectedGeneratedSourceValueRevision(
+                         record->policy
+                             .volume_interface_marker) ||
+                cut_integration_context_
+                        ->expectedGeneratedSourceValueRevision(
+                            record->policy
+                                .volume_interface_marker) !=
+                    record->certificate.source_value_revision ||
+                record->polynomial_order !=
+                    record->policy.penalty_polynomial_order ||
+                generatedBoundaryTraceRealBits(
+                    record->effective_penalty_multiplier) !=
+                    generatedBoundaryTraceRealBits(
+                        record->policy
+                            .effective_penalty_multiplier) ||
+                !(record->effective_penalty_multiplier >
+                  Real{0.0}) ||
+                !std::isfinite(
+                    record->effective_penalty_multiplier) ||
+                !(record->trace_to_penalty_ratio >=
+                  Real{0.0}) ||
+                !std::isfinite(
+                    record->trace_to_penalty_ratio) ||
+                (record->policy.symmetric &&
+                 (!record
+                       ->symmetric_energy_ratio_lower_bound
+                       .has_value() ||
+                  !(*record
+                         ->symmetric_energy_ratio_lower_bound >
+                    Real{0.0}) ||
+                  !(record
+                        ->grouped_symmetric_trace_to_penalty_ratio <
+                    Real{1.0})))) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche trace "
+                    "certificate cache failed its current-state "
+                    "contract");
+            }
+            mixGeneratedBoundaryNitscheTracePolicy(
+                local_digest, record->policy);
+            mixGeneratedBoundaryTraceHash(
+                local_digest,
+                record->certificate
+                    .canonical_certificate_digest);
+            mixGeneratedBoundaryTraceHash(
+                local_digest,
+                record->certificate
+                    .aggregation_content_digest);
+            mixGeneratedBoundaryTraceHash(
+                local_digest,
+                generatedBoundaryTraceRealBits(
+                    record->effective_penalty_multiplier));
+            mixGeneratedBoundaryTraceHash(
+                local_digest,
+                generatedBoundaryTraceRealBits(
+                    record->trace_to_penalty_ratio));
+            mixGeneratedBoundaryTraceHash(
+                local_digest,
+                generatedBoundaryTraceRealBits(
+                    record
+                        ->grouped_symmetric_trace_to_penalty_ratio));
+            mixGeneratedBoundaryTraceHash(
+                local_digest,
+                record
+                        ->symmetric_energy_ratio_lower_bound
+                        .has_value()
+                    ? 1u
+                    : 0u);
+            if (record
+                    ->symmetric_energy_ratio_lower_bound
+                    .has_value()) {
+                mixGeneratedBoundaryTraceHash(
+                    local_digest,
+                    generatedBoundaryTraceRealBits(
+                        *record
+                             ->symmetric_energy_ratio_lower_bound));
+            }
+        }
+    } catch (...) {
+        local_validation_exception =
+            std::current_exception();
+    }
+    coordinateFinalizedReportLocalFailure(
+        *this,
+        local_validation_exception,
+        "generated_boundary_nitsche_assembly_preflight");
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    int mpi_finalized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized != 0) {
+        MPI_Finalized(&mpi_finalized);
+    }
+    if (mpi_initialized != 0 && mpi_finalized == 0) {
+        const auto communicator = dofHandler().mpiComm();
+        int world_size = 1;
+        MPI_Comm_size(communicator, &world_size);
+        if (world_size > 1) {
+            std::uint64_t minimum_digest = 0u;
+            std::uint64_t maximum_digest = 0u;
+            MPI_Allreduce(
+                &local_digest,
+                &minimum_digest,
+                1,
+                MPI_UINT64_T,
+                MPI_MIN,
+                communicator);
+            MPI_Allreduce(
+                &local_digest,
+                &maximum_digest,
+                1,
+                MPI_UINT64_T,
+                MPI_MAX,
+                communicator);
+            if (minimum_digest != maximum_digest) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche trace "
+                    "certificate cache differs across communicator "
+                    "ranks");
+            }
+        }
+    }
+#endif
+}
+
 void FESystem::publishFinalizedSmallCutAggregationProlongations()
 {
+    invalidateGeneratedBoundaryNitscheTraceCertificates();
     std::vector<std::shared_ptr<
         const constraints::SmallCutAggregationProlongationReport>>
         finalized;
@@ -10535,6 +18213,57 @@ Real FESystem::evaluateBoundaryFunctional(const std::string& tag,
 {
     requireSingleFieldSetup();
     FE_CHECK_NOT_NULL(operator_backends_.get(), "FESystem::operator_backends");
+    if (cut_integration_context_ != nullptr) {
+        const bool has_ambiguous_generated_boundary =
+            boundary_marker < 0
+                ? std::any_of(
+                      cut_integration_context_
+                          ->generatedInterfaceMarkers()
+                          .begin(),
+                      cut_integration_context_
+                          ->generatedInterfaceMarkers()
+                          .end(),
+                      [&](int marker) {
+                          return cut_integration_context_
+                              ->hasGeneratedActiveBoundaryMarker(
+                                  marker);
+                      })
+                : !cut_integration_context_
+                       ->generatedActiveBoundaryMarkersForPhysicalBoundary(
+                           boundary_marker)
+                       .empty();
+        FE_THROW_IF(
+            has_ambiguous_generated_boundary,
+            InvalidArgumentException,
+            "FESystem::evaluateBoundaryFunctional: raw boundary "
+            "markers are ambiguous when generated-active provenance "
+            "exists; use a typed boundary reduction");
+    }
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized != 0 && finalized == 0) {
+        const auto communicator =
+            activeMpiCommunicator();
+        if (communicator != MPI_COMM_NULL) {
+            int communicator_size = 1;
+            MPI_Comm_size(
+                communicator,
+                &communicator_size);
+            FE_THROW_IF(
+                communicator_size > 1,
+                NotImplementedException,
+                "FESystem::evaluateBoundaryFunctional: "
+                "legacy raw boundary evaluation is serial-only; "
+                "use BoundaryReductionService for distributed "
+                "boundary reductions");
+        }
+    }
+#endif
     return operator_backends_->evaluateBoundaryFunctional(*this, tag, boundary_marker, state);
 }
 
@@ -12011,12 +19740,11 @@ void FESystem::ensureMonolithicCommittedRates(const SystemStateView& state)
     prev_state.time_integration = nullptr;
 
     cacheSystemState(prev_state);
-    if (auxiliary_input_registry_) {
-        auxiliary_input_registry_->evaluate(
-            static_cast<Real>(prev_state.time),
-            static_cast<Real>(prev_state.dt),
-            /*is_nonlinear_iteration=*/true);
-    }
+    evaluateAuxiliaryInputsCollectively_(
+        static_cast<Real>(prev_state.time),
+        static_cast<Real>(prev_state.dt),
+        /*is_nonlinear_iteration=*/true,
+        "ensureMonolithicCommittedRates.previous_state");
 
     for (const auto& entry : deployed_aux_entries_) {
         if (entry.spec.solve_mode != AuxiliarySolveMode::Monolithic ||
@@ -12047,6 +19775,108 @@ void FESystem::cacheSystemState(const SystemStateView& state) const
     cached_user_data_ = state.user_data;
 }
 
+void FESystem::evaluateAuxiliaryInputsCollectively_(
+    Real time,
+    Real dt,
+    bool is_nonlinear_iteration,
+    std::string_view phase)
+{
+    requireConsistentAuxiliaryInputRegistryPresence(
+        *this,
+        auxiliary_input_registry_ != nullptr,
+        phase);
+    if (!auxiliary_input_registry_) {
+        return;
+    }
+
+    std::unique_ptr<AuxiliaryInputRegistry::EvaluationPlan> plan;
+    std::exception_ptr local_exception;
+    try {
+        FE_THROW_IF(
+            !std::isfinite(static_cast<double>(time)) ||
+                !std::isfinite(static_cast<double>(dt)),
+            InvalidArgumentException,
+            "FESystem::evaluateAuxiliaryInputsCollectively_: time and dt "
+            "must be finite");
+        plan = std::make_unique<AuxiliaryInputRegistry::EvaluationPlan>(
+            auxiliary_input_registry_->prepareEvaluation(
+                time,
+                dt,
+                is_nonlinear_iteration));
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+    coordinateAuxiliaryInputEvaluationLocalFailure(
+        *this,
+        local_exception,
+        phase);
+
+    FE_THROW_IF(
+        !plan,
+        InvalidStateException,
+        "FESystem::evaluateAuxiliaryInputsCollectively_: evaluation plan "
+        "was not created");
+    requireConsistentAuxiliaryInputEvaluationPlan(
+        *this,
+        *plan,
+        phase);
+
+    const auto invocation_count = plan->invocations().size();
+    if (invocation_count == 0u) {
+        local_exception = nullptr;
+        try {
+            static_cast<void>(
+                auxiliary_input_registry_->stageNextEvaluation(*plan));
+        } catch (...) {
+            local_exception = std::current_exception();
+        }
+        coordinateAuxiliaryInputEvaluationLocalFailure(
+            *this,
+            local_exception,
+            phase);
+        return;
+    }
+
+    for (std::size_t invocation = 0;
+         invocation < invocation_count;
+         ++invocation) {
+        local_exception = nullptr;
+        bool staged = false;
+        try {
+            staged =
+                auxiliary_input_registry_->stageNextEvaluation(*plan);
+            FE_THROW_IF(
+                !staged,
+                InvalidStateException,
+                "FESystem::evaluateAuxiliaryInputsCollectively_: frozen "
+                "evaluation plan ended early");
+        } catch (...) {
+            local_exception = std::current_exception();
+        }
+        coordinateAuxiliaryInputEvaluationLocalFailure(
+            *this,
+            local_exception,
+            phase);
+        local_exception = nullptr;
+        try {
+            FE_THROW_IF(
+                !auxiliary_input_registry_->canCommitStagedEvaluation(
+                    *plan),
+                InvalidStateException,
+                "FESystem::evaluateAuxiliaryInputsCollectively_: staged "
+                "evaluation cannot be committed");
+        } catch (...) {
+            local_exception = std::current_exception();
+        }
+        coordinateAuxiliaryInputEvaluationLocalFailure(
+            *this,
+            local_exception,
+            phase);
+        auxiliary_input_registry_->commitStagedEvaluation(
+            *plan);
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  Auxiliary lifecycle
 // ---------------------------------------------------------------------------
@@ -12054,6 +19884,8 @@ void FESystem::cacheSystemState(const SystemStateView& state) const
 void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
                                             bool is_nonlinear_iteration)
 {
+    requireCurrentBoundaryReductionExteriorMeasures();
+
     // Resolve any deferred derived-input expressions and dependency edges
     // that were registered via derivedInput().  This runs at most once —
     // after finalization, both vectors are empty.
@@ -12063,9 +19895,11 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
     cacheSystemState(state);
 
     // Evaluate auxiliary input providers.
-    if (auxiliary_input_registry_) {
-        auxiliary_input_registry_->evaluate(state.time, state.dt, is_nonlinear_iteration);
-    }
+    evaluateAuxiliaryInputsCollectively_(
+        state.time,
+        state.dt,
+        is_nonlinear_iteration,
+        "prepareAuxiliaryForAssembly");
 
     initializeAuxiliaryDAEBlocksIfNeeded_(state.time, state.dt);
     ensureMonolithicCommittedRates(state);
@@ -12895,6 +20729,10 @@ AuxiliaryInputHandle FESystem::domainIntegral(
     spec.producer = AuxiliaryInputProducer::RegionIntegral;
     spec.update_schedule = schedule;
     spec.requires_mpi_reduction = true;
+    spec.collective_route_key =
+        "domain-functional|field=" + std::to_string(primary_fid) +
+        "|name-size=" + std::to_string(input_name.size()) +
+        "|name=" + input_name;
 
     // Evaluate via the BoundaryReductionService using a cell-domain
     // functional.  The service's functional assembler handles both
@@ -13052,6 +20890,11 @@ AuxiliaryInputHandle FESystem::regionIntegral(
     spec.producer = AuxiliaryInputProducer::RegionIntegral;
     spec.update_schedule = schedule;
     spec.requires_mpi_reduction = true;
+    spec.collective_route_key =
+        "topology-region-functional|field=" +
+        std::to_string(primary_fid) +
+        "|name-size=" + std::to_string(input_name.size()) +
+        "|name=" + input_name;
 
     const auto captured_fid = primary_fid;
     const std::string func_name = input_name;
@@ -13139,6 +20982,12 @@ AuxiliaryInputHandle FESystem::regionIntegral(
     spec.producer = AuxiliaryInputProducer::DomainIntegral;
     spec.update_schedule = schedule;
     spec.requires_mpi_reduction = true;
+    spec.collective_route_key =
+        "marked-region-functional|field=" +
+        std::to_string(primary_fid) +
+        "|marker=" + std::to_string(region_marker) +
+        "|name-size=" + std::to_string(input_name.size()) +
+        "|name=" + input_name;
 
     const auto captured_fid = primary_fid;
     const std::string func_name = input_name;
@@ -13333,6 +21182,11 @@ AuxiliaryInputHandle FESystem::feExpression(
         spec.producer = AuxiliaryInputProducer::DomainIntegral;
         spec.update_schedule = schedule;
         spec.requires_mpi_reduction = true;
+        spec.collective_route_key =
+            "expression-functional|field=" +
+            std::to_string(primary_fid) +
+            "|name-size=" + std::to_string(input_name.size()) +
+            "|name=" + input_name;
 
         const auto captured_fid = primary_fid;
         const std::string func_name = input_name;
@@ -13399,116 +21253,275 @@ void FESystem::advanceAuxiliaryState(const SystemStateView& state,
     // Pre-refresh inputs using the caller's nonlinear-iteration semantics.
     // The Real/Real overload will reuse the cached values and no-op for
     // clean OncePerTimeStep inputs.
-    if (auxiliary_input_registry_) {
-        auxiliary_input_registry_->evaluate(
-            static_cast<Real>(state.time),
-            static_cast<Real>(state.dt),
-            is_nonlinear_iteration);
-    }
+    evaluateAuxiliaryInputsCollectively_(
+        static_cast<Real>(state.time),
+        static_cast<Real>(state.dt),
+        is_nonlinear_iteration,
+        "advanceAuxiliaryState.state_view");
 
     advanceAuxiliaryState(static_cast<Real>(state.time), static_cast<Real>(state.dt));
 }
 
 void FESystem::initializeAuxiliaryDAEBlocksIfNeeded_(Real time, Real dt)
 {
-    if (!auxiliary_state_manager_) {
+    const bool has_state_manager =
+        auxiliary_state_manager_ != nullptr;
+    requireConsistentPartitionedAuxiliaryPhaseDecision(
+        *this,
+        has_state_manager,
+        "consistent_initialization_manager_presence");
+    if (!has_state_manager) {
+        return;
+    }
+    requireConsistentPartitionedAuxiliaryPhaseShape(
+        *this,
+        auxiliary_state_manager_->ghostSyncRouteSignature(),
+        "consistent_initialization_ghost_route");
+
+    std::vector<DeployedAuxEntry*> pending_initializations;
+    std::array<std::uint64_t, 2> pending_shape{};
+    std::exception_ptr local_exception;
+    try {
+        pending_initializations.reserve(deployed_aux_entries_.size());
+
+        std::uint64_t digest = 14695981039346656037ull;
+        constexpr std::uint64_t prime = 1099511628211ull;
+        const auto mix_byte = [&](std::uint8_t value) {
+            digest ^= value;
+            digest *= prime;
+        };
+        const auto mix_u64 = [&](std::uint64_t value) {
+            for (unsigned int byte = 0u; byte < 8u; ++byte) {
+                mix_byte(
+                    static_cast<std::uint8_t>(
+                        (value >> (byte * 8u)) &
+                        std::uint64_t{0xffu}));
+            }
+        };
+
+        for (auto& entry : deployed_aux_entries_) {
+            if (!entry.materialized ||
+                entry.consistent_initialization_done ||
+                !entry.model ||
+                !entry.deriv_provider ||
+                !auxiliary_state_manager_->hasBlock(entry.instance_name) ||
+                !needsConsistentAuxiliaryInitialization(
+                    *entry.model,
+                    static_cast<std::size_t>(entry.spec.size),
+                    entry.spec.solve_mode)) {
+                continue;
+            }
+
+            pending_initializations.push_back(&entry);
+            mix_u64(
+                static_cast<std::uint64_t>(
+                    entry.instance_name.size()));
+            for (const unsigned char character :
+                 entry.instance_name) {
+                mix_byte(character);
+            }
+        }
+        pending_shape = {{
+            static_cast<std::uint64_t>(
+                pending_initializations.size()),
+            digest,
+        }};
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+    coordinatePartitionedAuxiliaryLocalFailure(
+        *this,
+        local_exception,
+        "consistent_initialization_plan");
+
+    requireConsistentPartitionedAuxiliaryPhaseShape(
+        *this,
+        pending_shape,
+        "consistent_initialization_required");
+    if (pending_initializations.empty()) {
         return;
     }
 
-    for (auto& entry : deployed_aux_entries_) {
-        if (!entry.materialized ||
-            entry.consistent_initialization_done ||
-            !entry.model ||
-            !entry.deriv_provider ||
-            !auxiliary_state_manager_->hasBlock(entry.instance_name) ||
-            !needsConsistentAuxiliaryInitialization(
-                *entry.model,
-                static_cast<std::size_t>(entry.spec.size),
-                entry.spec.solve_mode)) {
-            continue;
-        }
-
-        auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
-        auto params = buildParamVector(entry);
-        auto bound_inputs = buildInputVector(entry);
-
-        bool has_entity_local_inputs = false;
-        if (auxiliary_input_registry_) {
-            for (const auto& [model_name, reg_name] : entry.input_bindings) {
-                (void)model_name;
-                if (auxiliary_input_registry_->hasInput(reg_name) &&
-                    auxiliary_input_registry_->isEntityLocal(reg_name)) {
-                    has_entity_local_inputs = true;
-                    break;
+    const auto rollback_pending_work = [&]() noexcept {
+        for (auto* entry : pending_initializations) {
+            try {
+                auto& block =
+                    auxiliary_state_manager_->getBlock(
+                        entry->instance_name);
+                const auto committed = block.committed();
+                auto work = block.work();
+                if (committed.size() == work.size()) {
+                    std::copy(
+                        committed.begin(),
+                        committed.end(),
+                        work.begin());
                 }
+            } catch (...) {
             }
         }
+    };
 
-        const auto& emap = entry.entity_map;
-        const auto n_authoritative_entities = blk.ownedEntityCount();
+    local_exception = nullptr;
+    try {
+        for (auto* entry_pointer : pending_initializations) {
+            auto& entry = *entry_pointer;
+            auto& blk =
+                auxiliary_state_manager_->getBlock(entry.instance_name);
+            auto params = buildParamVector(entry);
+            auto bound_inputs = buildInputVector(entry);
 
-        for (std::size_t e = 0; e < n_authoritative_entities; ++e) {
-            auto x = blk.gatherEntityWork(e);
-            validatePartitionedAuxiliaryEntityWidth_(
-                "FESystem::initializeAuxiliaryDAEBlocksIfNeeded",
-                entry,
-                blk,
-                e,
-                x.size(),
-                "state");
-            const auto orig_e = emap.empty() ? e : emap[e];
-
-            if (has_entity_local_inputs && auxiliary_input_registry_) {
-                bound_inputs.clear();
-                if (auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get())) {
-                    for (const auto& inp : built->signature().inputs) {
-                        auto bind_it = entry.input_bindings.find(inp.name);
-                        if (bind_it != entry.input_bindings.end()) {
-                            auto vals = auxiliary_input_registry_->valuesOf(bind_it->second, orig_e);
-                            bound_inputs.insert(bound_inputs.end(), vals.begin(), vals.end());
-                        } else {
-                            bound_inputs.resize(
-                                bound_inputs.size() + static_cast<std::size_t>(inp.size),
-                                Real(0.0));
-                        }
+            bool has_entity_local_inputs = false;
+            if (auxiliary_input_registry_) {
+                for (const auto& [model_name, reg_name] :
+                     entry.input_bindings) {
+                    (void)model_name;
+                    if (auxiliary_input_registry_->hasInput(reg_name) &&
+                        auxiliary_input_registry_->isEntityLocal(reg_name)) {
+                        has_entity_local_inputs = true;
+                        break;
                     }
-                } else {
-                    rebuildGenericInputsForEntity(entry, orig_e, bound_inputs);
                 }
             }
 
-            const auto result = AuxiliaryInitializationSolver::solve(
-                *entry.model,
-                *entry.deriv_provider,
-                x,
-                bound_inputs,
-                params,
-                time,
-                InitializationOptions{},
-                IndexReductionHook{},
-                e);
-            FE_THROW_IF(!result.converged, InvalidStateException,
-                        "FESystem::initializeAuxiliaryDAEBlocksIfNeeded: auxiliary block '" +
-                            entry.instance_name + "' failed consistent initialization for entity " +
-                            std::to_string(e) + " at time " + std::to_string(time) +
-                            " with residual norm " +
-                            std::to_string(result.final_residual_norm));
+            const auto& emap = entry.entity_map;
+            const auto n_authoritative_entities =
+                blk.ownedEntityCount();
 
-            blk.scatterEntityWork(e, x);
-        }
+            for (std::size_t e = 0;
+                 e < n_authoritative_entities;
+                 ++e) {
+                auto x = blk.gatherEntityWork(e);
+                validatePartitionedAuxiliaryEntityWidth_(
+                    "FESystem::initializeAuxiliaryDAEBlocksIfNeeded",
+                    entry,
+                    blk,
+                    e,
+                    x.size(),
+                    "state");
+                const auto orig_e = emap.empty() ? e : emap[e];
 
-        if (blk.ownedEntityCount() < blk.entityCount()) {
-            auxiliary_state_manager_->syncGhosts(entry.instance_name);
-        }
-        const auto initialized = blk.work();
-        blk.initialize(initialized);
-        entry.consistent_initialization_done = true;
+                if (has_entity_local_inputs &&
+                    auxiliary_input_registry_) {
+                    bound_inputs.clear();
+                    if (auto* built =
+                            dynamic_cast<const BuiltAuxiliaryModel*>(
+                                entry.model.get())) {
+                        for (const auto& inp :
+                             built->signature().inputs) {
+                            auto bind_it =
+                                entry.input_bindings.find(inp.name);
+                            if (bind_it != entry.input_bindings.end()) {
+                                auto vals =
+                                    auxiliary_input_registry_->valuesOf(
+                                        bind_it->second,
+                                        orig_e);
+                                bound_inputs.insert(
+                                    bound_inputs.end(),
+                                    vals.begin(),
+                                    vals.end());
+                            } else {
+                                bound_inputs.resize(
+                                    bound_inputs.size() +
+                                        static_cast<std::size_t>(
+                                            inp.size),
+                                    Real(0.0));
+                            }
+                        }
+                    } else {
+                        rebuildGenericInputsForEntity(
+                            entry, orig_e, bound_inputs);
+                    }
+                }
 
-        if (monolithicAuxTraceEnabled()) {
-            FE_LOG_INFO("FESystem: consistent-initialized auxiliary block '" +
-                        entry.instance_name + "' at time=" + std::to_string(time) +
-                        " dt=" + std::to_string(dt));
+                const auto result =
+                    AuxiliaryInitializationSolver::solve(
+                        *entry.model,
+                        *entry.deriv_provider,
+                        x,
+                        bound_inputs,
+                        params,
+                        time,
+                        InitializationOptions{},
+                        IndexReductionHook{},
+                        e);
+                FE_THROW_IF(
+                    !result.converged,
+                    InvalidStateException,
+                    "FESystem::initializeAuxiliaryDAEBlocksIfNeeded: "
+                    "auxiliary block '" +
+                        entry.instance_name +
+                        "' failed consistent initialization for entity " +
+                        std::to_string(e) + " at time " +
+                        std::to_string(time) +
+                        " with residual norm " +
+                        std::to_string(
+                            result.final_residual_norm));
+
+                blk.scatterEntityWork(e, x);
+            }
         }
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+    try {
+        coordinatePartitionedAuxiliaryLocalFailure(
+            *this,
+            local_exception,
+            "consistent_initialization_local");
+    } catch (...) {
+        const auto coordinated_exception =
+            std::current_exception();
+        rollback_pending_work();
+        std::rethrow_exception(coordinated_exception);
+    }
+
+    // Every rank invokes the manager-wide configured hook schedule.  Ranks
+    // without a local ghost still participate in any communication required
+    // to publish owned values to peers.
+    local_exception = nullptr;
+    try {
+        auxiliary_state_manager_->syncGhosts();
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+    try {
+        coordinatePartitionedAuxiliaryLocalFailure(
+            *this,
+            local_exception,
+            "consistent_initialization_ghost_sync");
+    } catch (...) {
+        const auto coordinated_exception =
+            std::current_exception();
+        rollback_pending_work();
+        std::rethrow_exception(coordinated_exception);
+    }
+
+    local_exception = nullptr;
+    try {
+        for (auto* entry : pending_initializations) {
+            auto& blk =
+                auxiliary_state_manager_->getBlock(entry->instance_name);
+            const auto initialized = blk.work();
+            blk.initialize(initialized);
+
+            if (monolithicAuxTraceEnabled()) {
+                FE_LOG_INFO(
+                    "FESystem: consistent-initialized auxiliary block '" +
+                    entry->instance_name + "' at time=" +
+                    std::to_string(time) + " dt=" +
+                    std::to_string(dt));
+            }
+        }
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+    coordinatePartitionedAuxiliaryLocalFailure(
+        *this,
+        local_exception,
+        "consistent_initialization_publish");
+
+    for (auto* entry : pending_initializations) {
+        entry->consistent_initialization_done = true;
     }
 }
 
@@ -13539,199 +21552,369 @@ void FESystem::validatePartitionedAuxiliaryEntityWidth_(
 
 void FESystem::advanceAuxiliaryState(Real time, Real dt)
 {
-    last_auxiliary_advance_time_ = time + dt;
+    partitioned_auxiliary_advance_valid_ = false;
+    partitioned_auxiliary_advance_time_ =
+        std::numeric_limits<Real>::quiet_NaN();
+    partitioned_auxiliary_advance_dt_ =
+        std::numeric_limits<Real>::quiet_NaN();
 
-    if (!auxiliary_state_manager_) return;
+    bool has_partitioned = false;
+    bool has_multirate = false;
+    for (const auto& entry : deployed_aux_entries_) {
+        if (!entry.materialized ||
+            entry.spec.solve_mode != AuxiliarySolveMode::Partitioned) {
+            continue;
+        }
+        has_partitioned = true;
+        if (entry.spec.schedule_mode ==
+            AuxiliaryScheduleMode::Multirate) {
+            has_multirate = true;
+        }
+    }
+    const bool use_multirate =
+        has_multirate && aux_scheduler_ != nullptr;
+    requireConsistentPartitionedAuxiliaryRoute(
+        *this,
+        auxiliary_state_manager_ != nullptr,
+        has_partitioned,
+        has_multirate,
+        use_multirate);
+
+    if (!auxiliary_state_manager_) {
+        return;
+    }
+    requireConsistentPartitionedAuxiliaryPhaseShape(
+        *this,
+        auxiliary_state_manager_->ghostSyncRouteSignature(),
+        "partitioned_ghost_route");
+
+    std::exception_ptr local_time_step_exception;
+    try {
+        FE_THROW_IF(
+            !std::isfinite(static_cast<double>(time)) ||
+                !std::isfinite(static_cast<double>(dt)),
+            InvalidArgumentException,
+            "FESystem::advanceAuxiliaryState: time and dt must be finite");
+    } catch (...) {
+        local_time_step_exception = std::current_exception();
+    }
+    coordinatePartitionedAuxiliaryLocalFailure(
+        *this,
+        local_time_step_exception,
+        "partitioned_time_step");
+    requireConsistentPartitionedAuxiliaryPhaseShape(
+        *this,
+        {{
+            canonicalAuxiliaryInputRealBits(time),
+            canonicalAuxiliaryInputRealBits(dt),
+        }},
+        "partitioned_time_step");
+
+    std::vector<AuxiliaryMultirateScheduler::Substep>
+        multirate_plan;
+    if (use_multirate) {
+        std::exception_ptr local_plan_exception;
+        try {
+            multirate_plan =
+                aux_scheduler_->planSubsteps(time, dt);
+        } catch (...) {
+            local_plan_exception = std::current_exception();
+        }
+        coordinatePartitionedAuxiliaryLocalFailure(
+            *this,
+            local_plan_exception,
+            "partitioned_multirate_plan");
+
+        std::uint64_t digest = 14695981039346656037ull;
+        constexpr std::uint64_t prime = 1099511628211ull;
+        const auto mix_byte = [&](std::uint8_t value) {
+            digest ^= value;
+            digest *= prime;
+        };
+        const auto mix_u64 = [&](std::uint64_t value) {
+            for (unsigned int byte = 0u; byte < 8u; ++byte) {
+                mix_byte(
+                    static_cast<std::uint8_t>(
+                        (value >> (byte * 8u)) &
+                        std::uint64_t{0xffu}));
+            }
+        };
+        const auto mix_string = [&](std::string_view value) {
+            mix_u64(static_cast<std::uint64_t>(value.size()));
+            for (const unsigned char character : value) {
+                mix_byte(character);
+            }
+        };
+        for (const auto& substep : multirate_plan) {
+            mix_string(substep.block_name);
+            mix_u64(
+                canonicalAuxiliaryInputRealBits(
+                    substep.t_start));
+            mix_u64(
+                canonicalAuxiliaryInputRealBits(
+                    substep.dt_sub));
+            mix_u64(
+                static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(
+                        substep.substep_index)));
+            mix_u64(
+                static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(
+                        substep.total_substeps)));
+        }
+        requireConsistentPartitionedAuxiliaryPhaseShape(
+            *this,
+            {{
+                static_cast<std::uint64_t>(
+                    multirate_plan.size()),
+                digest,
+            }},
+            "partitioned_multirate_plan");
+    }
 
     // Ensure auxiliary inputs are evaluated before stepping reads them.
-    if (auxiliary_input_registry_) {
-        auxiliary_input_registry_->evaluate(time, dt);
-    }
+    evaluateAuxiliaryInputsCollectively_(
+        time,
+        dt,
+        /*is_nonlinear_iteration=*/false,
+        "advanceAuxiliaryState.scalar");
 
     initializeAuxiliaryDAEBlocksIfNeeded_(time, dt);
 
-    // Check if any block uses Multirate scheduling (interleaved time ordering).
-    bool has_multirate = false;
-    for (const auto& entry : deployed_aux_entries_) {
-        if (!entry.materialized) {
-            continue;
+    const auto rollback_partitioned_work = [&]() noexcept {
+        for (auto& entry : deployed_aux_entries_) {
+            if (!entry.materialized ||
+                entry.spec.solve_mode !=
+                    AuxiliarySolveMode::Partitioned) {
+                continue;
+            }
+            try {
+                if (!auxiliary_state_manager_->hasBlock(
+                        entry.instance_name)) {
+                    continue;
+                }
+                auto& block =
+                    auxiliary_state_manager_->getBlock(
+                        entry.instance_name);
+                const auto committed = block.committed();
+                auto work = block.work();
+                if (committed.size() == work.size()) {
+                    std::copy(
+                        committed.begin(),
+                        committed.end(),
+                        work.begin());
+                }
+            } catch (...) {
+            }
         }
-        if (entry.spec.solve_mode == AuxiliarySolveMode::Partitioned &&
-            entry.spec.schedule_mode == AuxiliaryScheduleMode::Multirate) {
-            has_multirate = true;
-            break;
-        }
-    }
+    };
 
-    if (has_multirate && aux_scheduler_) {
-        // Multirate dispatch: use planSubsteps() for interleaved cross-block
-        // time ordering.  Each substep advances one block by one dt_sub using
-        // advanceFromWork(), which does NOT reset from committed state.
-        auto plan = aux_scheduler_->planSubsteps(time, dt);
+    const auto advance_local = [&]() {
+        if (use_multirate) {
+            // Multirate dispatch: use planSubsteps() for interleaved cross-block
+            // time ordering.  Each substep advances one block by one dt_sub using
+            // advanceFromWork(), which does NOT reset from committed state.
+            const auto& plan = multirate_plan;
 
-        // Track per-block x_prev buffers for advanceFromWork().
-        // x_prev starts as committed state for the first substep of each block.
-        std::unordered_map<std::string, std::vector<Real>> block_x_prev;
+            // Track per-block x_prev buffers for advanceFromWork().
+            // x_prev starts as committed state for the first substep of each block.
+            std::unordered_map<std::string, std::vector<Real>> block_x_prev;
 
-        for (const auto& ss : plan) {
-            // Find the entry for this block.
-            DeployedAuxEntry* ep = nullptr;
+            for (const auto& ss : plan) {
+                // Find the entry for this block.
+                DeployedAuxEntry* ep = nullptr;
+                for (auto& entry : deployed_aux_entries_) {
+                    if (!entry.materialized) {
+                        continue;
+                    }
+                    if (entry.instance_name == ss.block_name &&
+                        entry.spec.solve_mode == AuxiliarySolveMode::Partitioned &&
+                        entry.stepper && entry.deriv_provider) {
+                        ep = &entry;
+                        break;
+                    }
+                }
+                if (!ep) continue;
+
+                auto& blk = auxiliary_state_manager_->getBlock(ep->instance_name);
+                auto params = buildParamVector(*ep);
+                auto bound_inputs = buildInputVector(*ep);
+                const auto n_entities = blk.entityCount();
+                const auto& emap = ep->entity_map;
+
+                // Detect entity-local inputs (same as standard path).
+                bool has_entity_local = false;
+                if (auxiliary_input_registry_) {
+                    for (const auto& [mn, rn] : ep->input_bindings) {
+                        if (auxiliary_input_registry_->hasInput(rn) &&
+                            auxiliary_input_registry_->isEntityLocal(rn)) {
+                            has_entity_local = true;
+                            break;
+                        }
+                    }
+                }
+
+                for (std::size_t e = 0; e < n_entities; ++e) {
+                    auto ew = blk.gatherEntityWork(e);
+                    validatePartitionedAuxiliaryEntityWidth_(
+                        "FESystem::advanceAuxiliaryState",
+                        *ep,
+                        blk,
+                        e,
+                        ew.size(),
+                        "work");
+                    const auto orig_e = emap.empty() ? e : emap[e];
+
+                    // Initialize x_prev from committed on first substep.
+                    auto key = ep->instance_name + "_" + std::to_string(e);
+                    auto it = block_x_prev.find(key);
+                    if (it == block_x_prev.end()) {
+                        auto ec = blk.gatherEntityCommitted(e);
+                        validatePartitionedAuxiliaryEntityWidth_(
+                            "FESystem::advanceAuxiliaryState",
+                            *ep,
+                            blk,
+                            e,
+                            ec.size(),
+                            "committed");
+                        block_x_prev[key] = std::vector<Real>(ec.begin(), ec.end());
+                        std::copy(block_x_prev[key].begin(), block_x_prev[key].end(), ew.begin());
+                    }
+                    auto& x_prev = block_x_prev[key];
+
+                    // Rebuild inputs per entity when entity-local.
+                    if (has_entity_local && auxiliary_input_registry_) {
+                        if (auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(ep->model.get())) {
+                            bound_inputs.clear();
+                            for (const auto& inp : built->signature().inputs) {
+                                auto bi = ep->input_bindings.find(inp.name);
+                                if (bi != ep->input_bindings.end()) {
+                                    auto v = auxiliary_input_registry_->valuesOf(bi->second, orig_e);
+                                    bound_inputs.insert(bound_inputs.end(), v.begin(), v.end());
+                                } else {
+                                    bound_inputs.resize(bound_inputs.size() + static_cast<std::size_t>(inp.size), 0.0);
+                                }
+                            }
+                        } else {
+                            rebuildGenericInputsForEntity(*ep, orig_e, bound_inputs);
+                        }
+                    }
+
+                    // Build history spans (same as standard path).
+                    std::vector<std::vector<Real>> hd;
+                    std::vector<std::span<const Real>> hs;
+                    for (std::size_t k = 0; k < blk.history().depth(); ++k) {
+                        hd.push_back(blk.gatherEntityHistory(k, e));
+                        validatePartitionedAuxiliaryEntityWidth_(
+                            "FESystem::advanceAuxiliaryState",
+                            *ep,
+                            blk,
+                            e,
+                            hd.back().size(),
+                            "history");
+                        hs.push_back(hd.back());
+                    }
+
+                    const auto ew_start = ew;
+                    const auto x_prev_start = x_prev;
+                    AuxiliaryStepResult step_result{};
+                    bool converged = false;
+                    const int max_attempts =
+                        std::max(0, ep->spec.failure_policy.max_local_retries) + 1;
+                    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+                        ew = ew_start;
+                        x_prev = x_prev_start;
+                        step_result = ep->stepper->advanceFromWork(
+                            *ep->model, *ep->deriv_provider,
+                            ew, x_prev,
+                            hs, bound_inputs, params,
+                            ss.t_start, ss.dt_sub, e);
+                        if (step_result.converged) {
+                            converged = true;
+                            break;
+                        }
+                    }
+                    if (!converged) {
+                        if (ep->spec.failure_policy.reject_timestep_on_failure) {
+                            FE_THROW(InvalidStateException,
+                                     "FESystem::advanceAuxiliaryState: partitioned auxiliary block '" +
+                                     ep->instance_name + "' failed to converge for entity " +
+                                     std::to_string(e) + " after " +
+                                     std::to_string(max_attempts) + " attempt(s); final residual norm=" +
+                                     std::to_string(step_result.final_residual_norm));
+                        }
+                        ew = ew_start;
+                        x_prev = x_prev_start;
+                    } else {
+                        if (e < ep->event_managers.size() && ep->event_managers[e]) {
+                            auto& event_manager = *ep->event_managers[e];
+                            const auto events = event_manager.detectEvents(
+                                *ep->model, x_prev_start, ew,
+                                ss.t_start, ss.dt_sub, bound_inputs, params, hs, e);
+                            for (const auto& event : events) {
+                                event_manager.applyTransition(
+                                    *ep->model, event, ew, event.event_time,
+                                    bound_inputs, params, hs, e, ss.dt_sub);
+                            }
+                        }
+                        std::copy(ew.begin(), ew.end(), x_prev.begin());
+                    }
+                    blk.scatterEntityWork(e, ew);
+                }
+            }
+        } else {
+            // Standard dispatch: each partitioned block advances once for the
+            // full dt.  The stepper's substep_count handles Subcycled scheduling.
             for (auto& entry : deployed_aux_entries_) {
                 if (!entry.materialized) {
                     continue;
                 }
-                if (entry.instance_name == ss.block_name &&
-                    entry.spec.solve_mode == AuxiliarySolveMode::Partitioned &&
-                    entry.stepper && entry.deriv_provider) {
-                    ep = &entry;
-                    break;
-                }
-            }
-            if (!ep) continue;
-
-            auto& blk = auxiliary_state_manager_->getBlock(ep->instance_name);
-            auto params = buildParamVector(*ep);
-            auto bound_inputs = buildInputVector(*ep);
-            const auto n_entities = blk.entityCount();
-            const auto& emap = ep->entity_map;
-
-            // Detect entity-local inputs (same as standard path).
-            bool has_entity_local = false;
-            if (auxiliary_input_registry_) {
-                for (const auto& [mn, rn] : ep->input_bindings) {
-                    if (auxiliary_input_registry_->hasInput(rn) &&
-                        auxiliary_input_registry_->isEntityLocal(rn)) {
-                        has_entity_local = true;
-                        break;
-                    }
-                }
-            }
-
-            for (std::size_t e = 0; e < n_entities; ++e) {
-                auto ew = blk.gatherEntityWork(e);
-                validatePartitionedAuxiliaryEntityWidth_(
-                    "FESystem::advanceAuxiliaryState",
-                    *ep,
-                    blk,
-                    e,
-                    ew.size(),
-                    "work");
-                const auto orig_e = emap.empty() ? e : emap[e];
-
-                // Initialize x_prev from committed on first substep.
-                auto key = ep->instance_name + "_" + std::to_string(e);
-                auto it = block_x_prev.find(key);
-                if (it == block_x_prev.end()) {
-                    auto ec = blk.gatherEntityCommitted(e);
-                    validatePartitionedAuxiliaryEntityWidth_(
-                        "FESystem::advanceAuxiliaryState",
-                        *ep,
-                        blk,
-                        e,
-                        ec.size(),
-                        "committed");
-                    block_x_prev[key] = std::vector<Real>(ec.begin(), ec.end());
-                    std::copy(block_x_prev[key].begin(), block_x_prev[key].end(), ew.begin());
-                }
-                auto& x_prev = block_x_prev[key];
-
-                // Rebuild inputs per entity when entity-local.
-                if (has_entity_local && auxiliary_input_registry_) {
-                    if (auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(ep->model.get())) {
-                        bound_inputs.clear();
-                        for (const auto& inp : built->signature().inputs) {
-                            auto bi = ep->input_bindings.find(inp.name);
-                            if (bi != ep->input_bindings.end()) {
-                                auto v = auxiliary_input_registry_->valuesOf(bi->second, orig_e);
-                                bound_inputs.insert(bound_inputs.end(), v.begin(), v.end());
-                            } else {
-                                bound_inputs.resize(bound_inputs.size() + static_cast<std::size_t>(inp.size), 0.0);
-                            }
-                        }
-                    } else {
-                        rebuildGenericInputsForEntity(*ep, orig_e, bound_inputs);
-                    }
-                }
-
-                // Build history spans (same as standard path).
-                std::vector<std::vector<Real>> hd;
-                std::vector<std::span<const Real>> hs;
-                for (std::size_t k = 0; k < blk.history().depth(); ++k) {
-                    hd.push_back(blk.gatherEntityHistory(k, e));
-                    validatePartitionedAuxiliaryEntityWidth_(
-                        "FESystem::advanceAuxiliaryState",
-                        *ep,
-                        blk,
-                        e,
-                        hd.back().size(),
-                        "history");
-                    hs.push_back(hd.back());
-                }
-
-                const auto ew_start = ew;
-                const auto x_prev_start = x_prev;
-                AuxiliaryStepResult step_result{};
-                bool converged = false;
-                const int max_attempts =
-                    std::max(0, ep->spec.failure_policy.max_local_retries) + 1;
-                for (int attempt = 0; attempt < max_attempts; ++attempt) {
-                    ew = ew_start;
-                    x_prev = x_prev_start;
-                    step_result = ep->stepper->advanceFromWork(
-                        *ep->model, *ep->deriv_provider,
-                        ew, x_prev,
-                        hs, bound_inputs, params,
-                        ss.t_start, ss.dt_sub, e);
-                    if (step_result.converged) {
-                        converged = true;
-                        break;
-                    }
-                }
-                if (!converged) {
-                    if (ep->spec.failure_policy.reject_timestep_on_failure) {
-                        FE_THROW(InvalidStateException,
-                                 "FESystem::advanceAuxiliaryState: partitioned auxiliary block '" +
-                                 ep->instance_name + "' failed to converge for entity " +
-                                 std::to_string(e) + " after " +
-                                 std::to_string(max_attempts) + " attempt(s); final residual norm=" +
-                                 std::to_string(step_result.final_residual_norm));
-                    }
-                    ew = ew_start;
-                    x_prev = x_prev_start;
-                } else {
-                    if (e < ep->event_managers.size() && ep->event_managers[e]) {
-                        auto& event_manager = *ep->event_managers[e];
-                        const auto events = event_manager.detectEvents(
-                            *ep->model, x_prev_start, ew,
-                            ss.t_start, ss.dt_sub, bound_inputs, params, hs, e);
-                        for (const auto& event : events) {
-                            event_manager.applyTransition(
-                                *ep->model, event, ew, event.event_time,
-                                bound_inputs, params, hs, e, ss.dt_sub);
-                        }
-                    }
-                    std::copy(ew.begin(), ew.end(), x_prev.begin());
-                }
-                blk.scatterEntityWork(e, ew);
+                if (entry.spec.solve_mode != AuxiliarySolveMode::Partitioned) continue;
+                if (!entry.stepper || !entry.deriv_provider) continue;
+                advanceOneEntry(entry, time, dt, entry.stepper_spec.substep_count);
             }
         }
-    } else {
-        // Standard dispatch: each partitioned block advances once for the
-        // full dt.  The stepper's substep_count handles Subcycled scheduling.
-        for (auto& entry : deployed_aux_entries_) {
-            if (!entry.materialized) {
-                continue;
-            }
-            if (entry.spec.solve_mode != AuxiliarySolveMode::Partitioned) continue;
-            if (!entry.stepper || !entry.deriv_provider) continue;
-            advanceOneEntry(entry, time, dt, entry.stepper_spec.substep_count);
-        }
+    };
+
+    std::exception_ptr local_advance_exception;
+    try {
+        advance_local();
+    } catch (...) {
+        local_advance_exception = std::current_exception();
+    }
+    try {
+        coordinatePartitionedAuxiliaryLocalFailure(
+            *this,
+            local_advance_exception,
+            "partitioned_step_and_events");
+    } catch (...) {
+        const auto coordinated_exception =
+            std::current_exception();
+        rollback_partitioned_work();
+        std::rethrow_exception(coordinated_exception);
     }
 
     // Partitioned blocks update their local work buffers directly.  Refresh
     // ghost copies before any downstream assembly reads node-scoped data.
-    auxiliary_state_manager_->syncGhosts();
+    std::exception_ptr local_sync_exception;
+    try {
+        auxiliary_state_manager_->syncGhosts();
+    } catch (...) {
+        local_sync_exception = std::current_exception();
+    }
+    try {
+        coordinatePartitionedAuxiliaryLocalFailure(
+            *this,
+            local_sync_exception,
+            "partitioned_ghost_sync");
+    } catch (...) {
+        const auto coordinated_exception =
+            std::current_exception();
+        rollback_partitioned_work();
+        std::rethrow_exception(coordinated_exception);
+    }
 
+    last_auxiliary_advance_time_ = time + dt;
     partitioned_auxiliary_advance_valid_ = true;
     partitioned_auxiliary_advance_time_ = time;
     partitioned_auxiliary_advance_dt_ = dt;
@@ -14308,6 +22491,11 @@ void FESystem::registerBoundaryIntegralInput(
                 InvalidArgumentException,
                 "registerBoundaryIntegralInput: domain functionals cannot use "
                 "generated_active_boundary_marker");
+    BoundaryReductionService::
+        validateExteriorBoundaryMeasureAgainstCutContext(
+            functional,
+            cut_integration_context_.get(),
+            /*require_generated_active_context=*/false);
 
     // The functional's name defaults to the input_name if not set.
     if (functional.name.empty()) {
@@ -14373,6 +22561,16 @@ void FESystem::registerBoundaryIntegralInput(
     spec.update_schedule = schedule;
     spec.boundary_marker = functional.boundary_marker;
     spec.requires_mpi_reduction = true;  // MPI reduction is handled inside the service
+    spec.collective_route_key =
+        "boundary-functional|field=" + std::to_string(primary_fid) +
+        "|physical=" + std::to_string(functional.boundary_marker) +
+        "|generated=" +
+        std::to_string(
+            functional.generated_active_boundary_marker.value_or(-1)) +
+        "|reduction=" +
+        std::to_string(static_cast<int>(functional.reduction)) +
+        "|name-size=" + std::to_string(functional.name.size()) +
+        "|name=" + functional.name;
 
     const auto func_name = functional.name;
     const auto captured_fid = primary_fid;
@@ -14458,9 +22656,11 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
     cacheSystemState(state);
 
     // Evaluate inputs with nonlinear-iteration flag.
-    if (auxiliary_input_registry_) {
-        auxiliary_input_registry_->evaluate(state.time, state.dt, is_nonlinear_iteration);
-    }
+    evaluateAuxiliaryInputsCollectively_(
+        state.time,
+        state.dt,
+        is_nonlinear_iteration,
+        "assembleMixedAuxiliaryIntoGlobal");
 
     std::vector<Real> dense_solution_storage;
     std::span<const Real> dense_solution = state.u;
@@ -15219,6 +23419,16 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                             rec.Ct_rows.end(),
                             [](const auto& row) { return row.empty(); });
                         if (needs_ct_rows) {
+                            FE_THROW_IF(
+                                auxiliary_input_registry_ &&
+                                    auxiliary_input_registry_
+                                        ->hasCollectiveInput(),
+                                NotImplementedException,
+                                "FESystem::assembleMixedAuxiliaryIntoGlobal: "
+                                "the local-condensed finite-difference "
+                                "fallback cannot refresh collective auxiliary "
+                                "inputs inside rank-local entity and DOF "
+                                "loops; provide an analytic input sensitivity");
                             constexpr Real kLocalCtFdEps = Real(1e-7);
                             std::vector<Real> base_solution(
                                 dense_solution.begin(),
@@ -16972,9 +25182,11 @@ void FESystem::assembleMonolithicAuxiliary(
 
     // Ensure auxiliary inputs are evaluated for the current step.
     // Pass is_nonlinear_iteration so EachNonlinearIteration inputs refresh.
-    if (auxiliary_input_registry_) {
-        auxiliary_input_registry_->evaluate(time, dt, is_nonlinear_iteration);
-    }
+    evaluateAuxiliaryInputsCollectively_(
+        time,
+        dt,
+        is_nonlinear_iteration,
+        "assembleMonolithicAuxiliary");
     initializeAuxiliaryDAEBlocksIfNeeded_(time, dt);
 
     SystemStateView mono_state;
@@ -19482,11 +27694,32 @@ FESystem::assembleBoundaryGradient(FieldId field,
                                     int region_marker,
                                     std::span<const GlobalIndex> cell_filter,
                                     std::optional<int>
-                                        generated_active_boundary_marker)
+                                        generated_active_boundary_marker,
+                                    bool explicit_cell_filter)
 {
     const auto& rec = fieldRecord(field);
     FE_CHECK_NOT_NULL(rec.space.get(),
                       "FESystem::assembleBoundaryGradient: field space is null");
+
+    FE_THROW_IF(generated_active_boundary_marker.has_value() &&
+                    *generated_active_boundary_marker < 0,
+                InvalidArgumentException,
+                "FESystem::assembleBoundaryGradient: "
+                "generated_active_boundary_marker must be >= 0");
+    FE_THROW_IF(generated_active_boundary_marker.has_value() &&
+                    (region_marker >= 0 ||
+                     explicit_cell_filter),
+                InvalidArgumentException,
+                "FESystem::assembleBoundaryGradient: generated active-boundary "
+                "and domain-subset integration are mutually exclusive");
+    if (generated_active_boundary_marker.has_value()) {
+        forms::BoundaryFunctional functional;
+        functional.boundary_marker = boundary_marker;
+        functional.generated_active_boundary_marker =
+            generated_active_boundary_marker;
+        requireBoundaryReductionExteriorMeasure(
+            functional);
+    }
 
     if (!assembler_) return {};
 
@@ -19494,17 +27727,6 @@ FESystem::assembleBoundaryGradient(FieldId field,
     const auto field_off = fieldDofOffset(field);
 
     // Create the gradient kernel (forward-mode AD for exact ∂(integrand)/∂(trial_dof_j)).
-    FE_THROW_IF(generated_active_boundary_marker.has_value() &&
-                    *generated_active_boundary_marker < 0,
-                InvalidArgumentException,
-                "FESystem::assembleBoundaryGradient: "
-                "generated_active_boundary_marker must be >= 0");
-    FE_THROW_IF(generated_active_boundary_marker.has_value() &&
-                    (region_marker >= 0 || !cell_filter.empty()),
-                InvalidArgumentException,
-                "FESystem::assembleBoundaryGradient: generated active-boundary "
-                "and domain-subset integration are mutually exclusive");
-
     const int integration_marker =
         generated_active_boundary_marker.value_or(boundary_marker);
     forms::BoundaryFunctionalGradientKernel grad_kernel(
@@ -19624,14 +27846,6 @@ FESystem::assembleBoundaryGradient(FieldId field,
         void zero() override {}
     };
 
-    auto refreshGhostedCoefficients = [](const backends::GenericVector* vec_ptr) {
-        if (vec_ptr == nullptr) {
-            return;
-        }
-        auto* vec = const_cast<backends::GenericVector*>(vec_ptr);
-        vec->updateGhosts();
-    };
-
     std::function<int(const forms::FormExprNode&)> maxPreviousSolutionHistory =
         [&](const forms::FormExprNode& node) -> int {
         int max_history = 0;
@@ -19649,14 +27863,6 @@ FESystem::assembleBoundaryGradient(FieldId field,
     const int required_history =
         integrand_trial.node() ? maxPreviousSolutionHistory(*integrand_trial.node()) : 0;
 
-    refreshGhostedCoefficients(state.u_vector);
-    if (required_history >= 1) {
-        refreshGhostedCoefficients(state.u_prev_vector);
-    }
-    if (required_history >= 2) {
-        refreshGhostedCoefficients(state.u_prev2_vector);
-    }
-
     std::unique_ptr<assembly::GlobalSystemView> temp_sol_view;
     std::unique_ptr<assembly::GlobalSystemView> temp_prev_view;
     std::unique_ptr<assembly::GlobalSystemView> temp_prev2_view;
@@ -19665,7 +27871,7 @@ FESystem::assembleBoundaryGradient(FieldId field,
     std::unique_ptr<SpanSolutionView> span_prev2_view;
     if (state.u_vector) {
         auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
-        temp_sol_view = vec->createAssemblyView();
+        temp_sol_view = vec->createGhostedReadView();
         assembler_->setCurrentSolutionView(temp_sol_view.get());
     } else if (!state.u.empty()) {
         // Wrap the raw solution span as a GlobalSystemView so the
@@ -19676,7 +27882,7 @@ FESystem::assembleBoundaryGradient(FieldId field,
 
     if (required_history >= 1 && state.u_prev_vector) {
         auto* vec = const_cast<backends::GenericVector*>(state.u_prev_vector);
-        temp_prev_view = vec->createAssemblyView();
+        temp_prev_view = vec->createGhostedReadView();
         assembler_->setPreviousSolutionView(temp_prev_view.get());
     } else if (required_history >= 1 && !state.u_prev.empty()) {
         span_prev_view = std::make_unique<SpanSolutionView>(state.u_prev, n_total);
@@ -19686,7 +27892,7 @@ FESystem::assembleBoundaryGradient(FieldId field,
 
     if (required_history >= 2 && state.u_prev2_vector) {
         auto* vec = const_cast<backends::GenericVector*>(state.u_prev2_vector);
-        temp_prev2_view = vec->createAssemblyView();
+        temp_prev2_view = vec->createGhostedReadView();
         assembler_->setPreviousSolutionViewK(2, temp_prev2_view.get());
     } else if (required_history >= 2 && !state.u_prev2.empty()) {
         span_prev2_view = std::make_unique<SpanSolutionView>(state.u_prev2, n_total);
@@ -19698,6 +27904,8 @@ FESystem::assembleBoundaryGradient(FieldId field,
     ScopedAssemblerOptions sensitivity_option_guard(
         assembler_.get(), sensitivity_options);
 
+    assembly::AssemblyResult
+        gradient_assembly_result;
     if (generated_active_boundary_marker.has_value()) {
         const auto* cut_context = cutIntegrationContext();
         FE_THROW_IF(cut_context == nullptr, InvalidStateException,
@@ -19710,7 +27918,8 @@ FESystem::assembleBoundaryGradient(FieldId field,
                     "FESystem::assembleBoundaryGradient: marker " +
                         std::to_string(marker) +
                         " is not a generated active-boundary marker");
-        const auto assembly_result = assembler_->assembleCutInterfaces(
+        gradient_assembly_result =
+            assembler_->assembleCutInterfaces(
             meshAccess(),
             *cut_context,
             marker,
@@ -19721,24 +27930,14 @@ FESystem::assembleBoundaryGradient(FieldId field,
             &accum,
             false,
             true);
-        const int assembly_failure_count = mpiAllreduceSumIfActive(
-            assembly_result.success ? 0 : 1,
-            activeAnalysisCommunicator(*this));
-        FE_THROW_IF(
-            assembly_failure_count != 0,
-            InvalidStateException,
-            "FESystem::assembleBoundaryGradient: generated active-boundary "
-            "assembly failed" +
-                (assembly_result.error_message.empty()
-                     ? std::string(" on at least one rank")
-                     : std::string(": ") + assembly_result.error_message));
     } else if (boundary_marker >= 0) {
         // Boundary face gradient assembly.
-        assembler_->assembleBoundaryFaces(
-            meshAccess(), boundary_marker,
-            *rec.space, grad_kernel,
-            /*matrix_view=*/nullptr,
-            /*vector_view=*/&accum);
+        gradient_assembly_result =
+            assembler_->assembleBoundaryFaces(
+                meshAccess(), boundary_marker,
+                *rec.space, grad_kernel,
+                /*matrix_view=*/nullptr,
+                /*vector_view=*/&accum);
     } else {
         // Domain (all-cells or region-filtered) gradient assembly.
         // BoundaryFunctionalGradientKernel has hasCell()=false, so we wrap
@@ -19749,14 +27948,18 @@ FESystem::assembleBoundaryGradient(FieldId field,
             const FESystem& system;
             int region_marker;
             std::span<const GlobalIndex> cell_filter;
+            bool explicit_cell_filter;
             explicit CellGradKernelAdapter(forms::BoundaryFunctionalGradientKernel& k,
                                            const FESystem& s,
                                            int marker,
-                                           std::span<const GlobalIndex> cells)
+                                           std::span<const GlobalIndex> cells,
+                                           bool has_explicit_filter)
                 : inner(k)
                 , system(s)
                 , region_marker(marker)
-                , cell_filter(cells) {}
+                , cell_filter(cells)
+                , explicit_cell_filter(
+                      has_explicit_filter) {}
             [[nodiscard]] bool hasCell() const noexcept override { return true; }
             [[nodiscard]] bool hasBoundaryFace() const noexcept override { return false; }
             [[nodiscard]] bool hasInteriorFace() const noexcept override { return false; }
@@ -19780,7 +27983,7 @@ FESystem::assembleBoundaryGradient(FieldId field,
                         return;
                     }
                 }
-                if (!cell_filter.empty()) {
+                if (explicit_cell_filter) {
                     const auto cell_id = ctx.cellId();
                     if (cell_id < 0 ||
                         std::find(cell_filter.begin(), cell_filter.end(), cell_id) ==
@@ -19800,10 +28003,30 @@ FESystem::assembleBoundaryGradient(FieldId field,
             }
         };
 
-        CellGradKernelAdapter cell_adapter(grad_kernel, *this, region_marker, cell_filter);
-        assembler_->assembleVector(
-            meshAccess(), *rec.space, cell_adapter, accum);
+        CellGradKernelAdapter cell_adapter(
+            grad_kernel,
+            *this,
+            region_marker,
+            cell_filter,
+            explicit_cell_filter);
+        gradient_assembly_result =
+            assembler_->assembleVector(
+                meshAccess(),
+                *rec.space,
+                cell_adapter,
+                accum);
     }
+    FE_THROW_IF(
+        !gradient_assembly_result.success,
+        InvalidStateException,
+        "FESystem::assembleBoundaryGradient: local "
+        "assembly failed" +
+            (gradient_assembly_result
+                     .error_message.empty()
+                 ? std::string{}
+                 : std::string(": ") +
+                       gradient_assembly_result
+                           .error_message));
 
     // Convert to SensitivityEntry pairs.
     std::vector<BoundaryReductionService::SensitivityEntry> result;
@@ -20812,6 +29035,9 @@ void FESystem::updateConstraints(double time, double dt)
     // Time-dependent callbacks may report different local update counts on
     // partitioned storage. All ranks conservatively discard the finalized
     // communicator snapshot before any callback can mutate a closed row.
+    const bool republish_aggregation_prolongations =
+        !finalized_small_cut_aggregation_prolongations_.empty();
+    invalidateGeneratedBoundaryNitscheTraceCertificates();
     finalized_small_cut_aggregation_prolongations_.clear();
     bool any_updated = false;
 
@@ -20830,6 +29056,7 @@ void FESystem::updateConstraints(double time, double dt)
             }
         }
     } catch (...) {
+        invalidateGeneratedBoundaryNitscheTraceCertificates();
         finalized_small_cut_aggregation_prolongations_.clear();
         throw;
     }
@@ -20839,7 +29066,14 @@ void FESystem::updateConstraints(double time, double dt)
         const auto deps = constraintDependencyDeclaration();
         constraint_revision_snapshot_ = captureConstraintRevisionSnapshot(
             deps.structural.mesh_field_values || deps.value.mesh_field_values);
+        buildConstraintSummary();
+        invalidateAnalysisCache();
     }
+    if (republish_aggregation_prolongations) {
+        publishFinalizedSmallCutAggregationProlongations();
+    }
+    refreshGeneratedBoundaryNitscheTraceCertificates(
+        cut_integration_context_ == nullptr);
 }
 
 } // namespace systems

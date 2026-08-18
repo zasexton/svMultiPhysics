@@ -206,6 +206,147 @@ template <typename DefinitionContainer>
     return signature;
 }
 
+struct ExteriorBoundaryMeasurePolicyTableSignature {
+    std::uint64_t count{0u};
+    std::uint64_t digest{14695981039346656037ull};
+};
+
+[[nodiscard]] ExteriorBoundaryMeasurePolicyTableSignature
+exteriorBoundaryMeasurePolicyTableSignature(
+    const FESystem& system)
+{
+    constexpr std::uint64_t prime = 1099511628211ull;
+    auto policies =
+        system.exteriorBoundaryMeasurePolicies();
+    std::vector<const ExteriorBoundaryMeasurePolicy*> ordered;
+    ordered.reserve(policies.size());
+    for (const auto& policy : policies) {
+        ordered.push_back(&policy);
+    }
+    std::sort(
+        ordered.begin(),
+        ordered.end(),
+        [](const auto* lhs, const auto* rhs) {
+            return std::tie(
+                       lhs->op,
+                       lhs->intent,
+                       lhs->physical_boundary_marker,
+                       lhs->generated_active_boundary_marker,
+                       lhs->source_formulation_record_index) <
+                   std::tie(
+                       rhs->op,
+                       rhs->intent,
+                       rhs->physical_boundary_marker,
+                       rhs->generated_active_boundary_marker,
+                       rhs->source_formulation_record_index);
+        });
+
+    ExteriorBoundaryMeasurePolicyTableSignature signature;
+    signature.count =
+        static_cast<std::uint64_t>(ordered.size());
+    const auto mix_byte = [&](std::uint8_t value) {
+        signature.digest ^= value;
+        signature.digest *= prime;
+    };
+    const auto mix_u64 = [&](std::uint64_t value) {
+        for (unsigned int byte = 0u; byte < 8u; ++byte) {
+            mix_byte(static_cast<std::uint8_t>(
+                (value >> (byte * 8u)) &
+                std::uint64_t{0xffu}));
+        }
+    };
+    mix_u64(signature.count);
+    for (const auto* policy : ordered) {
+        mix_u64(static_cast<std::uint64_t>(
+            policy->op.size()));
+        for (const unsigned char character :
+             policy->op) {
+            mix_byte(character);
+        }
+        mix_u64(static_cast<std::uint64_t>(
+            policy->intent));
+        mix_u64(static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(
+                policy->physical_boundary_marker)));
+        mix_u64(static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(
+                policy->generated_active_boundary_marker)));
+        mix_u64(static_cast<std::uint64_t>(
+            policy->source_formulation_record_index));
+    }
+    return signature;
+}
+
+void requireConsistentExteriorBoundaryMeasurePolicyTable(
+    const FESystem& system,
+    const ExteriorBoundaryMeasurePolicyTableSignature& local)
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    int finalized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        MPI_Finalized(&finalized);
+    }
+    if (initialized == 0 || finalized != 0) {
+        return;
+    }
+    const auto communicator =
+        system.dofHandler().mpiComm();
+    int world_size = 1;
+    MPI_Comm_size(communicator, &world_size);
+    if (world_size <= 1) {
+        return;
+    }
+
+    const std::uint64_t local_shape[2]{
+        local.count, local.digest};
+    std::uint64_t minimum_shape[2]{};
+    std::uint64_t maximum_shape[2]{};
+    const auto reduce =
+        [&](std::uint64_t* reduced, MPI_Op operation) {
+            const auto sequence =
+                debug::nextMpiCollectiveTraceSeq();
+            debug::traceMpiCollective(
+                "before",
+                sequence,
+                "SystemSetup::requireConsistentExteriorBoundaryMeasurePolicyTable",
+                2,
+                MPI_UINT64_T,
+                operation,
+                communicator);
+            MPI_Allreduce(
+                local_shape,
+                reduced,
+                2,
+                MPI_UINT64_T,
+                operation,
+                communicator);
+            debug::traceMpiCollective(
+                "after",
+                sequence,
+                "SystemSetup::requireConsistentExteriorBoundaryMeasurePolicyTable",
+                2,
+                MPI_UINT64_T,
+                operation,
+                communicator);
+        };
+    reduce(minimum_shape, MPI_MIN);
+    reduce(maximum_shape, MPI_MAX);
+    if (!std::equal(
+            std::begin(minimum_shape),
+            std::end(minimum_shape),
+            std::begin(maximum_shape))) {
+        throw std::runtime_error(
+            "FESystem: exterior-boundary measure policy table differs "
+            "across communicator ranks");
+    }
+#else
+    static_cast<void>(system);
+    static_cast<void>(local);
+#endif
+}
+
 void requireConsistentConstraintCallbackShape(
     const FESystem& system,
     std::size_t system_constraint_count,
@@ -3016,6 +3157,34 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         dof_handler_.finalize();
         bumpDofLayoutRevision();
     }
+
+    runCoordinatedConstraintPhase(
+        *this,
+        "setup_cut_integration_context_preflight",
+        [&] {
+            validateExteriorBoundaryMeasurePoliciesAgainstCutContext(
+                exterior_boundary_measure_policies_,
+                cut_integration_context_.get(),
+                /*require_generated_active_context=*/false);
+            for (const auto& [field, service] :
+                 boundary_reduction_services_) {
+                static_cast<void>(field);
+                if (service) {
+                    service
+                        ->validateExteriorBoundaryMeasuresAgainstCutContext(
+                            cut_integration_context_.get(),
+                            /*require_generated_active_context=*/false);
+                }
+            }
+            if (cut_integration_context_) {
+                cut_integration_context_
+                    ->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+                        meshAccess());
+            }
+        });
+    requireConsistentCutIntegrationContextCandidate(
+        cut_integration_context_.get(),
+        /*use_dof_handler_communicator=*/true);
 
     // ---------------------------------------------------------------------
     // Field/block metadata (monolithic across fields)
@@ -6160,6 +6329,17 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     constraint_structure_signature_ = computeConstraintStructureSignature(affine_constraints_);
     ++sparsity_pattern_revision_;
     is_setup_ = true;
+    try {
+        refreshGeneratedBoundaryNitscheTraceCertificates(
+            cut_integration_context_ == nullptr);
+    } catch (...) {
+        invalidateGeneratedBoundaryNitscheTraceCertificates();
+        generated_boundary_nitsche_trace_policy_shape_validated_ =
+            false;
+        generated_boundary_nitsche_trace_policy_signature_ = 0u;
+        is_setup_ = false;
+        throw;
+    }
 }
 
 std::uint64_t FESystem::computeConstraintStructureSignature(
@@ -6415,9 +6595,9 @@ void FESystem::refreshSparsityForConstraintStructureChange()
         return;
     }
     const auto old_signature = constraint_structure_signature_;
-    constraint_structure_signature_ = signature;
 
     if (!use_constraints_in_assembly_) {
+        constraint_structure_signature_ = signature;
         return;
     }
 
@@ -6437,13 +6617,13 @@ void FESystem::refreshSparsityForConstraintStructureChange()
         rebuilt_serial_by_op.emplace(tag, buildActiveSparsityPatternFromBase(*base));
     }
 
-    for (auto& [tag, pattern] : sparsity_by_op_) {
+    for (const auto& [tag, pattern] : sparsity_by_op_) {
+        static_cast<void>(pattern);
         const auto it = rebuilt_serial_by_op.find(tag);
         FE_THROW_IF(it == rebuilt_serial_by_op.end() || !it->second,
                     InvalidStateException,
                     "FESystem::rebuildConstraintState: active serial sparsity for operator '" +
                         tag + "' has no base pattern");
-        pattern = std::make_unique<sparsity::SparsityPattern>(it->second->cloneFinalized());
     }
 
     std::unordered_map<OperatorTag, std::unique_ptr<sparsity::DistributedSparsityPattern>>
@@ -6462,161 +6642,297 @@ void FESystem::refreshSparsityForConstraintStructureChange()
             tag, buildActiveDistributedSparsityPatternFromBase(*base, active_serial));
     }
 
-    for (auto& [tag, pattern] : distributed_sparsity_by_op_) {
+    for (const auto& [tag, pattern] : distributed_sparsity_by_op_) {
+        static_cast<void>(pattern);
         const auto it = rebuilt_distributed_by_op.find(tag);
         FE_THROW_IF(it == rebuilt_distributed_by_op.end() || !it->second,
                     InvalidStateException,
                     "FESystem::rebuildConstraintState: active distributed sparsity for operator '" +
                         tag + "' has no base pattern");
-        pattern = std::move(it->second);
     }
 
-    ++sparsity_pattern_revision_;
+    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>>
+        replacement_serial_by_op;
+    replacement_serial_by_op.reserve(sparsity_by_op_.size());
+    for (const auto& [tag, pattern] : sparsity_by_op_) {
+        static_cast<void>(pattern);
+        auto rebuilt = rebuilt_serial_by_op.find(tag);
+        FE_THROW_IF(rebuilt == rebuilt_serial_by_op.end() || !rebuilt->second,
+                    InvalidStateException,
+                    "FESystem::rebuildConstraintState: replacement serial sparsity for operator '" +
+                        tag + "' is unavailable");
+        replacement_serial_by_op.emplace(
+            tag, std::move(rebuilt->second));
+    }
+
+    std::unordered_map<
+        OperatorTag,
+        std::unique_ptr<sparsity::DistributedSparsityPattern>>
+        replacement_distributed_by_op;
+    replacement_distributed_by_op.reserve(
+        distributed_sparsity_by_op_.size());
+    for (const auto& [tag, pattern] : distributed_sparsity_by_op_) {
+        static_cast<void>(pattern);
+        auto rebuilt = rebuilt_distributed_by_op.find(tag);
+        FE_THROW_IF(
+            rebuilt == rebuilt_distributed_by_op.end() ||
+                !rebuilt->second,
+            InvalidStateException,
+            "FESystem::rebuildConstraintState: replacement distributed "
+            "sparsity for operator '" +
+                tag + "' is unavailable");
+        replacement_distributed_by_op.emplace(
+            tag, std::move(rebuilt->second));
+    }
+
     GlobalIndex active_distributed_diag_nnz = 0;
     GlobalIndex active_distributed_offdiag_nnz = 0;
-    for (const auto& [tag, pattern] : distributed_sparsity_by_op_) {
+    for (const auto& [tag, pattern] :
+         replacement_distributed_by_op) {
         (void)tag;
         if (pattern) {
             active_distributed_diag_nnz += pattern->getDiagNnz();
             active_distributed_offdiag_nnz += pattern->getOffdiagNnz();
         }
     }
-    FE_LOG_INFO("FESystem: constraint structure changed post-setup;"
-                " diagnostic=constraint_sparsity_refresh"
-                " old_constraint_structure_signature=" +
-                std::to_string(old_signature) +
-                " new_constraint_structure_signature=" +
-                std::to_string(constraint_structure_signature_) +
-                " master_bearing_lines=" +
-                std::to_string(countMasterBearingConstraintLines(affine_constraints_)) +
-                " re-augmented_serial=" +
-                std::to_string(sparsity_by_op_.size()) +
-                " re-augmented_distributed=" +
-                std::to_string(distributed_sparsity_by_op_.size()) +
-                " active_distributed_diag_nnz=" +
-                std::to_string(active_distributed_diag_nnz) +
-                " active_distributed_offdiag_nnz=" +
-                std::to_string(active_distributed_offdiag_nnz) +
-                " sparsity_pattern_revision=" +
-                std::to_string(sparsity_pattern_revision_));
+    const auto next_sparsity_pattern_revision =
+        sparsity_pattern_revision_ + 1u;
+    const auto log_message =
+        "FESystem: constraint structure changed post-setup;"
+        " diagnostic=constraint_sparsity_refresh"
+        " old_constraint_structure_signature=" +
+        std::to_string(old_signature) +
+        " new_constraint_structure_signature=" +
+        std::to_string(signature) +
+        " master_bearing_lines=" +
+        std::to_string(
+            countMasterBearingConstraintLines(
+                affine_constraints_)) +
+        " re-augmented_serial=" +
+        std::to_string(replacement_serial_by_op.size()) +
+        " re-augmented_distributed=" +
+        std::to_string(
+            replacement_distributed_by_op.size()) +
+        " active_distributed_diag_nnz=" +
+        std::to_string(active_distributed_diag_nnz) +
+        " active_distributed_offdiag_nnz=" +
+        std::to_string(active_distributed_offdiag_nnz) +
+        " sparsity_pattern_revision=" +
+        std::to_string(
+            next_sparsity_pattern_revision);
+
+    sparsity_by_op_.swap(replacement_serial_by_op);
+    distributed_sparsity_by_op_.swap(
+        replacement_distributed_by_op);
+    constraint_structure_signature_ = signature;
+    sparsity_pattern_revision_ =
+        next_sparsity_pattern_revision;
+    FE_LOG_INFO(log_message);
 }
 
 void FESystem::beginCutIntegrationContextTransaction()
 {
+    FE_THROW_IF(
+        cut_integration_context_callback_dispatch_active_,
+        InvalidStateException,
+        "FESystem::beginCutIntegrationContextTransaction: callback "
+        "dispatch is active");
     requireSetup();
-    if (cut_integration_context_transaction_backup_) {
-        throw std::logic_error(
-            "FESystem cut-integration-context transaction is already active");
-    }
-    auto backup =
-        std::make_unique<CutIntegrationContextTransactionBackup>();
-    backup->context = cut_integration_context_;
-    if (cut_integration_context_) {
-        backup->context_content_revision =
-            cut_integration_context_->contentRevision();
-        backup->context_content_snapshot =
-            std::make_shared<assembly::CutIntegrationContext>(
-                *cut_integration_context_);
-    }
-    backup->affine_constraints = affine_constraints_;
-    backup->fe_layout_revisions = fe_layout_revisions_;
-    backup->constraint_revision_snapshot = constraint_revision_snapshot_;
-    backup->constraint_structure_signature =
-        constraint_structure_signature_;
-    backup->sparsity_pattern_revision = sparsity_pattern_revision_;
-    backup->constraint_summary = constraint_summary_;
-    backup->analysis_report_cache = analysis_report_cache_;
-    backup->analysis_inputs_version = analysis_inputs_version_;
-    backup->analysis_report_version = analysis_report_version_;
-    backup->finalized_small_cut_aggregation_prolongations =
-        finalized_small_cut_aggregation_prolongations_;
-    for (const auto& definition : system_constraint_defs_) {
-        const auto* aggregation =
-            dynamic_cast<
-                const constraints::SmallCutAggregationConstraint*>(
-                definition.get());
-        if (aggregation != nullptr) {
-            backup->small_cut_aggregation_lifecycle_checkpoints.push_back(
-                aggregation->captureLifecycleCheckpoint());
+    std::unique_ptr<CutIntegrationContextTransactionBackup>
+        candidate_backup;
+    std::exception_ptr local_backup_exception;
+    try {
+        if (cut_integration_context_transaction_backup_) {
+            throw std::logic_error(
+                "FESystem cut-integration-context transaction is already active");
         }
+        candidate_backup =
+            std::make_unique<CutIntegrationContextTransactionBackup>();
+        candidate_backup->context = cut_integration_context_;
+        candidate_backup->generated_active_boundary_owner_bindings =
+            generated_active_boundary_owner_bindings_;
+        if (cut_integration_context_) {
+            candidate_backup->context_content_revision =
+                cut_integration_context_->contentRevision();
+            candidate_backup->context_content_snapshot =
+                std::make_shared<assembly::CutIntegrationContext>(
+                    *cut_integration_context_);
+        }
+        candidate_backup->affine_constraints = affine_constraints_;
+        candidate_backup->fe_layout_revisions = fe_layout_revisions_;
+        candidate_backup->constraint_revision_snapshot =
+            constraint_revision_snapshot_;
+        candidate_backup->constraint_structure_signature =
+            constraint_structure_signature_;
+        candidate_backup->sparsity_pattern_revision =
+            sparsity_pattern_revision_;
+        candidate_backup->constraint_summary = constraint_summary_;
+        candidate_backup->analysis_report_cache = analysis_report_cache_;
+        candidate_backup->analysis_inputs_version =
+            analysis_inputs_version_;
+        candidate_backup->analysis_report_version =
+            analysis_report_version_;
+        candidate_backup->finalized_small_cut_aggregation_prolongations =
+            finalized_small_cut_aggregation_prolongations_;
+        candidate_backup->generated_boundary_nitsche_trace_certificates =
+            generated_boundary_nitsche_trace_certificates_;
+        for (const auto& definition : system_constraint_defs_) {
+            const auto* aggregation =
+                dynamic_cast<
+                    const constraints::SmallCutAggregationConstraint*>(
+                    definition.get());
+            if (aggregation != nullptr) {
+                candidate_backup
+                    ->small_cut_aggregation_lifecycle_checkpoints
+                    .push_back(
+                        aggregation->captureLifecycleCheckpoint());
+            }
+        }
+    } catch (...) {
+        local_backup_exception = std::current_exception();
     }
-    cut_integration_context_transaction_backup_ = std::move(backup);
+    coordinateConstraintPrepublicationFailure(
+        *this,
+        local_backup_exception,
+        "cut_context_transaction_begin");
+    FE_THROW_IF(
+        !candidate_backup,
+        InvalidStateException,
+        "FESystem cut-integration-context transaction backup was not created");
+    cut_integration_context_transaction_backup_ =
+        std::move(candidate_backup);
 }
 
 void FESystem::commitCutIntegrationContextTransaction()
 {
-    if (!cut_integration_context_transaction_backup_) {
-        throw std::logic_error(
-            "FESystem cut-integration-context transaction is not active");
+    FE_THROW_IF(
+        cut_integration_context_callback_dispatch_active_,
+        InvalidStateException,
+        "FESystem::commitCutIntegrationContextTransaction: callback "
+        "dispatch is active");
+    std::exception_ptr local_transaction_exception;
+    try {
+        if (!cut_integration_context_transaction_backup_) {
+            throw std::logic_error(
+                "FESystem cut-integration-context transaction is not active");
+        }
+        if (cut_integration_context_transaction_backup_
+                ->rollback_started) {
+            throw std::logic_error(
+                "FESystem cut-integration-context transaction has a "
+                "pending rollback and cannot be committed; retry rollback");
+        }
+    } catch (...) {
+        local_transaction_exception =
+            std::current_exception();
     }
+    coordinateConstraintPrepublicationFailure(
+        *this,
+        local_transaction_exception,
+        "cut_context_transaction_commit");
     cut_integration_context_transaction_backup_.reset();
 }
 
 void FESystem::rollbackCutIntegrationContextTransaction()
 {
-    if (!cut_integration_context_transaction_backup_) {
-        throw std::logic_error(
-            "FESystem cut-integration-context transaction is not active");
+    FE_THROW_IF(
+        cut_integration_context_callback_dispatch_active_,
+        InvalidStateException,
+        "FESystem::rollbackCutIntegrationContextTransaction: callback "
+        "dispatch is active");
+    std::exception_ptr local_transaction_exception;
+    try {
+        if (!cut_integration_context_transaction_backup_) {
+            throw std::logic_error(
+                "FESystem cut-integration-context transaction is not active");
+        }
+    } catch (...) {
+        local_transaction_exception =
+            std::current_exception();
     }
+    coordinateConstraintPrepublicationFailure(
+        *this,
+        local_transaction_exception,
+        "cut_context_transaction_rollback");
     auto& backup = *cut_integration_context_transaction_backup_;
+    backup.rollback_started = true;
     const bool original_context_was_mutated =
         backup.context &&
         backup.context->contentRevision() !=
             backup.context_content_revision;
-    cut_integration_context_ =
+    const auto rollback_context =
         original_context_was_mutated
             ? backup.context_content_snapshot
             : backup.context;
-    affine_constraints_ = backup.affine_constraints;
-    refreshSparsityForConstraintStructureChange();
-    fe_layout_revisions_ = backup.fe_layout_revisions;
-    constraint_revision_snapshot_ = backup.constraint_revision_snapshot;
-    constraint_structure_signature_ =
-        backup.constraint_structure_signature;
-    sparsity_pattern_revision_ = backup.sparsity_pattern_revision;
-    constraint_summary_ = backup.constraint_summary;
-    analysis_report_cache_ = backup.analysis_report_cache;
-    analysis_inputs_version_ = backup.analysis_inputs_version;
-    analysis_report_version_ = backup.analysis_report_version;
-    finalized_small_cut_aggregation_prolongations_ =
-        backup.finalized_small_cut_aggregation_prolongations;
-    std::size_t aggregation_checkpoint = 0u;
-    for (auto& definition : system_constraint_defs_) {
-        auto* aggregation =
-            dynamic_cast<
-                constraints::SmallCutAggregationConstraint*>(
-                definition.get());
-        if (aggregation == nullptr) {
-            continue;
+    requireConsistentCutIntegrationContextCandidate(
+        rollback_context.get(),
+        /*use_dof_handler_communicator=*/true);
+    std::exception_ptr local_restore_exception;
+    try {
+        cut_integration_context_ =
+            rollback_context;
+        generated_active_boundary_owner_bindings_ =
+            backup
+                .generated_active_boundary_owner_bindings;
+        affine_constraints_ = backup.affine_constraints;
+        refreshSparsityForConstraintStructureChange();
+        fe_layout_revisions_ = backup.fe_layout_revisions;
+        constraint_revision_snapshot_ =
+            backup.constraint_revision_snapshot;
+        constraint_structure_signature_ =
+            backup.constraint_structure_signature;
+        sparsity_pattern_revision_ =
+            backup.sparsity_pattern_revision;
+        constraint_summary_ = backup.constraint_summary;
+        analysis_report_cache_ = backup.analysis_report_cache;
+        analysis_inputs_version_ = backup.analysis_inputs_version;
+        analysis_report_version_ = backup.analysis_report_version;
+        finalized_small_cut_aggregation_prolongations_ =
+            backup.finalized_small_cut_aggregation_prolongations;
+        generated_boundary_nitsche_trace_certificates_ =
+            backup.generated_boundary_nitsche_trace_certificates;
+        std::size_t aggregation_checkpoint = 0u;
+        for (auto& definition : system_constraint_defs_) {
+            auto* aggregation =
+                dynamic_cast<
+                    constraints::SmallCutAggregationConstraint*>(
+                    definition.get());
+            if (aggregation == nullptr) {
+                continue;
+            }
+            if (aggregation_checkpoint >=
+                    backup
+                        .small_cut_aggregation_lifecycle_checkpoints
+                        .size() ||
+                !backup
+                     .small_cut_aggregation_lifecycle_checkpoints[
+                         aggregation_checkpoint]) {
+                throw std::logic_error(
+                    "FESystem aggregation lifecycle transaction backup is "
+                    "incomplete");
+            }
+            aggregation->restoreLifecycleCheckpoint(
+                *backup
+                     .small_cut_aggregation_lifecycle_checkpoints[
+                         aggregation_checkpoint]);
+            ++aggregation_checkpoint;
         }
-        if (aggregation_checkpoint >=
-                backup
-                    .small_cut_aggregation_lifecycle_checkpoints
-                    .size() ||
-            !backup
-                 .small_cut_aggregation_lifecycle_checkpoints[
-                     aggregation_checkpoint]) {
+        if (aggregation_checkpoint !=
+            backup.small_cut_aggregation_lifecycle_checkpoints.size()) {
             throw std::logic_error(
-                "FESystem aggregation lifecycle transaction backup is "
-                "incomplete");
+                "FESystem aggregation lifecycle transaction backup has "
+                "unexpected entries");
         }
-        aggregation->restoreLifecycleCheckpoint(
-            *backup
-                 .small_cut_aggregation_lifecycle_checkpoints[
-                     aggregation_checkpoint]);
-        ++aggregation_checkpoint;
+    } catch (...) {
+        local_restore_exception = std::current_exception();
     }
-    if (aggregation_checkpoint !=
-        backup.small_cut_aggregation_lifecycle_checkpoints.size()) {
-        throw std::logic_error(
-            "FESystem aggregation lifecycle transaction backup has "
-            "unexpected entries");
-    }
-    for (const auto& hook : cut_integration_context_update_callbacks_) {
-        if (hook.callback) {
-            hook.callback(cut_integration_context_.get());
-        }
-    }
+    coordinateConstraintPrepublicationFailure(
+        *this,
+        local_restore_exception,
+        "cut_context_rollback_restore");
+    runCutIntegrationContextUpdateCallbacks(
+        cut_integration_context_.get(),
+        /*use_dof_handler_communicator=*/true);
     cut_integration_context_transaction_backup_.reset();
 }
 
@@ -6636,6 +6952,7 @@ void FESystem::rebuildConstraintState()
             constraint_defs_,
             0x504c41494e434f4eull),
         "rebuild_constraint_callback_preflight");
+    invalidateGeneratedBoundaryNitscheTraceCertificates();
     finalized_small_cut_aggregation_prolongations_.clear();
     affine_constraints_.clear();
     for (auto& c : system_constraint_defs_) {
@@ -6760,12 +7077,52 @@ void FESystem::rebuildConstraintState()
         local_constraint_refresh_exception,
         "rebuild_constraint_refresh");
     publishFinalizedSmallCutAggregationProlongations();
+    refreshGeneratedBoundaryNitscheTraceCertificates(
+        cut_integration_context_ == nullptr);
     buildConstraintSummary();
     invalidateAnalysisCache();
 }
 
 void FESystem::buildAssemblyPlans()
 {
+    std::exception_ptr exterior_measure_exception;
+    try {
+        validateExteriorBoundaryMeasurePoliciesAgainstCutContext(
+            exterior_boundary_measure_policies_,
+            cut_integration_context_.get(),
+            /*require_generated_active_context=*/false);
+    } catch (...) {
+        exterior_measure_exception = std::current_exception();
+    }
+    coordinateConstraintPrepublicationFailure(
+        *this,
+        exterior_measure_exception,
+        "exterior_boundary_measure_policy_preflight");
+    requireCurrentBoundaryReductionExteriorMeasures(
+        /*use_dof_handler_communicator=*/true);
+    requireConsistentCutIntegrationContextCandidate(
+        cut_integration_context_.get(),
+        /*use_dof_handler_communicator=*/true);
+
+    ExteriorBoundaryMeasurePolicyTableSignature
+        exterior_policy_signature;
+    std::exception_ptr exterior_signature_exception;
+    try {
+        exterior_policy_signature =
+            exteriorBoundaryMeasurePolicyTableSignature(
+                *this);
+    } catch (...) {
+        exterior_signature_exception =
+            std::current_exception();
+    }
+    coordinateConstraintPrepublicationFailure(
+        *this,
+        exterior_signature_exception,
+        "exterior_boundary_measure_policy_signature");
+    requireConsistentExteriorBoundaryMeasurePolicyTable(
+        *this,
+        exterior_policy_signature);
+
     assembly_plan_by_op_.clear();
 
     for (const auto& tag : operator_registry_.list()) {

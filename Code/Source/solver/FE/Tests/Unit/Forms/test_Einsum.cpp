@@ -106,6 +106,47 @@ TEST(EinsumTest, LowersGradInnerProductToExplicitComponentSum)
     }
 }
 
+TEST(EinsumTest, IntegralRebuildPreservesExteriorBoundarySelection)
+{
+    auto base =
+        std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace space(base, 3);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const Index i("i");
+    FormCompiler compiler;
+
+    const auto full =
+        ExteriorBoundaryMeasure::fullPhysical(
+            /*physical_boundary_marker=*/8);
+    const auto full_lowered = einsum(
+        (u(i) * v(i)).dExteriorBoundary(full),
+        /*auto_extent=*/3);
+    const auto full_ir = compiler.compileBilinear(full_lowered);
+    ASSERT_EQ(full_ir.terms().size(), 3u);
+    for (const auto& term : full_ir.terms()) {
+        EXPECT_EQ(term.domain, IntegralDomain::Boundary);
+        ASSERT_TRUE(term.exterior_boundary_measure.has_value());
+        EXPECT_EQ(*term.exterior_boundary_measure, full);
+    }
+
+    const auto active =
+        ExteriorBoundaryMeasure::generatedActiveSubset(
+            /*physical_boundary_marker=*/8,
+            /*generated_active_boundary_marker=*/43);
+    const auto active_lowered = einsum(
+        (u(i) * v(i)).dExteriorBoundary(active),
+        /*auto_extent=*/3);
+    const auto active_ir =
+        compiler.compileBilinear(active_lowered);
+    ASSERT_EQ(active_ir.terms().size(), 3u);
+    for (const auto& term : active_ir.terms()) {
+        EXPECT_EQ(term.domain, IntegralDomain::InterfaceFace);
+        ASSERT_TRUE(term.exterior_boundary_measure.has_value());
+        EXPECT_EQ(*term.exterior_boundary_measure, active);
+    }
+}
+
 TEST(EinsumTest, EinsumSupportsVectorOutputForOneFreeIndex)
 {
     SingleTetraMeshAccess mesh;

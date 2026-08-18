@@ -11,7 +11,10 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -178,6 +181,42 @@ struct PhaseSystemFixture {
         twice_area += first[0] * second[1] - second[0] * first[1];
     }
     return FE::Real{0.5} * std::abs(twice_area);
+}
+
+[[nodiscard]] level_set::LevelSetP1PhaseSplitStageProvenance
+makeBackwardEulerSplitStageProvenance(
+    const level_set::LevelSetP1PhaseTransportGraph& graph,
+    std::span<const FE::Real> previous_q,
+    const level_set::LevelSetP1PhaseTransportStageResult& stage,
+    FE::Real step_start_time = FE::Real{1.0})
+{
+    const auto graph_identity =
+        level_set::levelSetP1PhaseGraphIdentity(graph);
+    return level_set::LevelSetP1PhaseSplitStageProvenance{
+        .scheme = level_set::LevelSetP1PhaseSplitScheme::
+            BackwardEulerExplicitIndicatorEndpointVelocity,
+        .transport_mesh_policy =
+            level_set::LevelSetP1PhaseTransportMeshPolicy::FixedBackground,
+        .temporal_order = 1,
+        .prospective_step = 7u,
+        .attempt = 2u,
+        .step_start_time = step_start_time,
+        .step_end_time = step_start_time + stage.time_step,
+        .q_input_time = step_start_time,
+        .velocity_state_time = step_start_time + stage.time_step,
+        .time_step = stage.time_step,
+        .operator_state_revision = 0xa501u,
+        .previous_q_revision =
+            level_set::levelSetP1PhaseScalarContentRevision(previous_q),
+        .nodal_velocity_revision =
+            level_set::levelSetP1PhaseVelocityContentRevision(
+                stage.sampled_nodal_velocity),
+        .previous_graph_identity = graph_identity,
+        .operator_graph_identity = graph_identity,
+        .final_flux_ledger_digest =
+            level_set::levelSetP1PhaseFluxLedgerDigest(stage),
+        .stage_options = stage.executed_options,
+    };
 }
 
 TEST(LevelSetConservativePhaseOperator,
@@ -377,7 +416,408 @@ TEST(LevelSetConservativePhaseOperator,
             stage.correction.total_previous_liquid_measure,
         stage.correction.total_physical_boundary_mass_transfer +
             stage.correction.total_discrete_divergence_mass_source,
-        2.0e-14);
+                2.0e-14);
+}
+
+TEST(LevelSetConservativePhaseOperator,
+     ValidatesBackwardEulerExplicitIndicatorEndpointVelocityProvenance)
+{
+    auto fixture = makeUnitTriangleFixture();
+    const auto graph = level_set::buildLevelSetP1PhaseTransportGraph(
+        fixture.system, fixture.indicator);
+    ASSERT_TRUE(graph.success) << graph.diagnostic;
+
+    const std::array<FE::Real, 3> previous_q{1.0, 0.0, 0.0};
+    const std::array<FE::Real, 3> lower{0.0, 0.0, 0.0};
+    const std::array<FE::Real, 3> upper{1.0, 1.0, 1.0};
+    const std::array<std::array<FE::Real, 3>, 3> endpoint_velocity{{
+        {0.25, -0.125, 0.0},
+        {0.5, 0.25, 0.0},
+        {-0.25, 0.375, 0.0},
+    }};
+    const auto stage = level_set::advanceLevelSetP1ConservativePhaseStage(
+        graph, previous_q, lower, upper, endpoint_velocity,
+        /*time_step=*/FE::Real{0.0625});
+    ASSERT_TRUE(stage.success) << stage.diagnostic;
+    EXPECT_TRUE(stage.replicated_stage_inputs_satisfied);
+    EXPECT_EQ(stage.time_step, FE::Real{0.0625});
+    const std::vector<std::array<FE::Real, 3>>
+        expected_endpoint_velocity(
+            endpoint_velocity.begin(), endpoint_velocity.end());
+    EXPECT_EQ(stage.sampled_nodal_velocity, expected_endpoint_velocity);
+    EXPECT_NE(stage.sampled_nodal_velocity.front()[0], FE::Real{0.0});
+
+    const auto provenance = makeBackwardEulerSplitStageProvenance(
+        graph, previous_q, stage);
+    const auto validation = level_set::validateLevelSetP1PhaseSplitStage(
+        graph, previous_q, stage, provenance);
+
+    ASSERT_TRUE(validation.valid) << validation.diagnostic;
+    EXPECT_STREQ(
+        level_set::levelSetP1PhaseSplitSchemeName(provenance.scheme),
+        "backward_euler_explicit_indicator_endpoint_velocity");
+    EXPECT_EQ(validation.computed_previous_q_revision,
+              provenance.previous_q_revision);
+    EXPECT_EQ(validation.computed_nodal_velocity_revision,
+              provenance.nodal_velocity_revision);
+    EXPECT_EQ(validation.computed_flux_ledger_digest,
+              provenance.final_flux_ledger_digest);
+    EXPECT_NE(validation.computed_flux_ledger_digest, 0u);
+    EXPECT_EQ(validation.actual_operator_graph_identity.content_revision,
+              provenance.operator_graph_identity.content_revision);
+}
+
+TEST(LevelSetConservativePhaseOperator,
+     RejectsSplitStageTimeRevisionMetadataAndFixedGraphDrift)
+{
+    auto fixture = makeUnitTriangleFixture();
+    const auto graph = level_set::buildLevelSetP1PhaseTransportGraph(
+        fixture.system, fixture.indicator);
+    ASSERT_TRUE(graph.success) << graph.diagnostic;
+    const std::array<FE::Real, 3> previous_q{0.8, 0.1, 0.0};
+    const std::array<FE::Real, 3> lower{0.0, 0.0, 0.0};
+    const std::array<FE::Real, 3> upper{0.8, 0.8, 0.8};
+    const std::array<std::array<FE::Real, 3>, 3> endpoint_velocity{{
+        {0.125, 0.0, 0.0},
+        {0.25, 0.125, 0.0},
+        {-0.125, 0.25, 0.0},
+    }};
+    const auto stage = level_set::advanceLevelSetP1ConservativePhaseStage(
+        graph, previous_q, lower, upper, endpoint_velocity,
+        /*time_step=*/FE::Real{0.03125});
+    ASSERT_TRUE(stage.success) << stage.diagnostic;
+    const auto baseline = makeBackwardEulerSplitStageProvenance(
+        graph, previous_q, stage);
+
+    const auto expect_invalid = [&](auto mutate, std::string_view text) {
+        auto provenance = baseline;
+        mutate(provenance);
+        const auto validation =
+            level_set::validateLevelSetP1PhaseSplitStage(
+                graph, previous_q, stage, provenance);
+        EXPECT_FALSE(validation.valid);
+        EXPECT_NE(validation.diagnostic.find(text), std::string::npos)
+            << validation.diagnostic;
+    };
+    expect_invalid(
+        [](auto& provenance) {
+            provenance.scheme = level_set::LevelSetP1PhaseSplitScheme::
+                GeneralizedAlphaUnsupported;
+        },
+        "only the Backward-Euler");
+    expect_invalid(
+        [](auto& provenance) {
+            provenance.transport_mesh_policy =
+                level_set::LevelSetP1PhaseTransportMeshPolicy::
+                    MovingMeshUnsupported;
+        },
+        "fixed background");
+    expect_invalid(
+        [](auto& provenance) { provenance.temporal_order = 2; },
+        "temporal order one");
+    expect_invalid(
+        [](auto& provenance) { provenance.prospective_step = 0u; },
+        "positive prospective-step");
+    expect_invalid(
+        [](auto& provenance) { provenance.attempt = 0u; },
+        "positive prospective-step");
+    expect_invalid(
+        [](auto& provenance) {
+            provenance.q_input_time = std::nextafter(
+                provenance.q_input_time,
+                std::numeric_limits<FE::Real>::infinity());
+        },
+        "exact q^n/start");
+    expect_invalid(
+        [](auto& provenance) {
+            provenance.velocity_state_time = std::nextafter(
+                provenance.velocity_state_time,
+                std::numeric_limits<FE::Real>::infinity());
+        },
+        "exact q^n/start");
+    expect_invalid(
+        [](auto& provenance) {
+            provenance.time_step = FE::Real{0.0};
+        },
+        "positive finite time step");
+    expect_invalid(
+        [](auto& provenance) {
+            provenance.step_end_time =
+                std::numeric_limits<FE::Real>::infinity();
+        },
+        "finite times");
+    expect_invalid(
+        [](auto& provenance) {
+            provenance.operator_state_revision = 0u;
+        },
+        "nonzero operator");
+    expect_invalid(
+        [](auto& provenance) { provenance.previous_q_revision = 0u; },
+        "nonzero operator");
+    expect_invalid(
+        [](auto& provenance) { provenance.nodal_velocity_revision = 0u; },
+        "nonzero operator");
+    expect_invalid(
+        [](auto& provenance) {
+            provenance.final_flux_ledger_digest = 0u;
+        },
+        "nonzero operator");
+    expect_invalid(
+        [](auto& provenance) {
+            ++provenance.previous_graph_identity.topology_revision;
+        },
+        "graph geometry/topology");
+    expect_invalid(
+        [](auto& provenance) {
+            ++provenance.operator_graph_identity.dof_layout_revision;
+        },
+        "graph geometry/topology");
+}
+
+TEST(LevelSetConservativePhaseOperator,
+     SplitStageRequiresExactClampedProductionOneRingBounds)
+{
+    auto fixture = makeUnitTriangleFixture();
+    const auto graph = level_set::buildLevelSetP1PhaseTransportGraph(
+        fixture.system, fixture.indicator);
+    ASSERT_TRUE(graph.success) << graph.diagnostic;
+    const std::array<std::array<FE::Real, 3>, 3> zero_velocity{};
+
+    const std::array<FE::Real, 3> previous_q{0.8, 0.1, 0.0};
+    const std::array<FE::Real, 3> generic_lower{0.0, 0.0, 0.0};
+    const std::array<FE::Real, 3> generic_upper{1.0, 1.0, 1.0};
+    const auto generic_stage =
+        level_set::advanceLevelSetP1ConservativePhaseStage(
+            graph, previous_q, generic_lower, generic_upper,
+            zero_velocity, FE::Real{0.03125});
+    ASSERT_TRUE(generic_stage.success) << generic_stage.diagnostic;
+    const auto generic_provenance =
+        makeBackwardEulerSplitStageProvenance(
+            graph, previous_q, generic_stage);
+    const auto generic_validation =
+        level_set::validateLevelSetP1PhaseSplitStage(
+            graph, previous_q, generic_stage, generic_provenance);
+    EXPECT_FALSE(generic_validation.valid);
+    EXPECT_NE(generic_validation.diagnostic.find(
+                  "production one-ring bound mismatch"),
+              std::string::npos)
+        << generic_validation.diagnostic;
+
+    const std::array<FE::Real, 3> near_unit_q{
+        -FE::Real{5.0e-13}, FE::Real{0.4}, FE::Real{0.8}};
+    const std::array<FE::Real, 3> clamped_lower{0.0, 0.0, 0.0};
+    const std::array<FE::Real, 3> clamped_upper{0.8, 0.8, 0.8};
+    const auto clamped_stage =
+        level_set::advanceLevelSetP1ConservativePhaseStage(
+            graph, near_unit_q, clamped_lower, clamped_upper,
+            zero_velocity, FE::Real{0.03125});
+    ASSERT_TRUE(clamped_stage.success) << clamped_stage.diagnostic;
+    const auto clamped_provenance =
+        makeBackwardEulerSplitStageProvenance(
+            graph, near_unit_q, clamped_stage);
+    const auto clamped_validation =
+        level_set::validateLevelSetP1PhaseSplitStage(
+            graph, near_unit_q, clamped_stage, clamped_provenance);
+    EXPECT_TRUE(clamped_validation.valid)
+        << clamped_validation.diagnostic;
+}
+
+TEST(LevelSetConservativePhaseOperator,
+     ExactInputAndCompleteFluxLedgerDigestsAreMutationSensitive)
+{
+    auto fixture = makeUnitTriangleFixture();
+    const auto graph = level_set::buildLevelSetP1PhaseTransportGraph(
+        fixture.system, fixture.indicator);
+    ASSERT_TRUE(graph.success) << graph.diagnostic;
+    const std::array<FE::Real, 3> previous_q{1.0, 0.0, 0.0};
+    const std::array<FE::Real, 3> lower{0.0, 0.0, 0.0};
+    const std::array<FE::Real, 3> upper{1.0, 1.0, 1.0};
+    const std::array<std::array<FE::Real, 3>, 3> endpoint_velocity{{
+        {0.5, 0.0, 0.0},
+        {0.5, 0.25, 0.0},
+        {-0.25, 0.5, 0.0},
+    }};
+    const auto stage = level_set::advanceLevelSetP1ConservativePhaseStage(
+        graph, previous_q, lower, upper, endpoint_velocity,
+        /*time_step=*/FE::Real{0.03125});
+    ASSERT_TRUE(stage.success) << stage.diagnostic;
+    ASSERT_FALSE(stage.correction.nodes.empty());
+    ASSERT_FALSE(stage.correction.edges.empty());
+    ASSERT_FALSE(stage.correction.components.empty());
+    const auto provenance = makeBackwardEulerSplitStageProvenance(
+        graph, previous_q, stage);
+
+    auto drifted_options_provenance = provenance;
+    drifted_options_provenance.stage_options.maximum_courant =
+        std::nextafter(
+            drifted_options_provenance.stage_options.maximum_courant,
+            std::numeric_limits<FE::Real>::infinity());
+    const auto drifted_options_validation =
+        level_set::validateLevelSetP1PhaseSplitStage(
+            graph, previous_q, stage, drifted_options_provenance);
+    EXPECT_FALSE(drifted_options_validation.valid);
+    EXPECT_NE(drifted_options_validation.diagnostic.find(
+                  "options do not exactly match"),
+              std::string::npos)
+        << drifted_options_validation.diagnostic;
+
+    auto changed_options_stage = stage;
+    changed_options_stage.executed_options.enforce_courant_limit =
+        !changed_options_stage.executed_options.enforce_courant_limit;
+    EXPECT_NE(level_set::levelSetP1PhaseFluxLedgerDigest(
+                  changed_options_stage),
+              provenance.final_flux_ledger_digest);
+    EXPECT_FALSE(level_set::validateLevelSetP1PhaseSplitStage(
+                     graph, previous_q, changed_options_stage, provenance)
+                     .valid);
+
+    auto changed_q = previous_q;
+    changed_q[1] = std::nextafter(
+        changed_q[1], std::numeric_limits<FE::Real>::infinity());
+    EXPECT_NE(level_set::levelSetP1PhaseScalarContentRevision(changed_q),
+              provenance.previous_q_revision);
+    EXPECT_FALSE(level_set::validateLevelSetP1PhaseSplitStage(
+                     graph, changed_q, stage, provenance)
+                     .valid);
+
+    auto changed_velocity_stage = stage;
+    changed_velocity_stage.sampled_nodal_velocity[1][2] =
+        std::nextafter(
+            changed_velocity_stage.sampled_nodal_velocity[1][2],
+            std::numeric_limits<FE::Real>::infinity());
+    EXPECT_NE(level_set::levelSetP1PhaseVelocityContentRevision(
+                  changed_velocity_stage.sampled_nodal_velocity),
+              provenance.nodal_velocity_revision);
+    EXPECT_FALSE(level_set::validateLevelSetP1PhaseSplitStage(
+                     graph, previous_q, changed_velocity_stage, provenance)
+                     .valid);
+
+    const auto baseline_digest =
+        level_set::levelSetP1PhaseFluxLedgerDigest(stage);
+    const auto expect_digest_change = [&](auto mutate) {
+        auto changed = stage;
+        mutate(changed);
+        EXPECT_NE(level_set::levelSetP1PhaseFluxLedgerDigest(changed),
+                  baseline_digest);
+        EXPECT_FALSE(level_set::validateLevelSetP1PhaseSplitStage(
+                         graph, previous_q, changed, provenance)
+                         .valid);
+    };
+
+    const auto expect_invariant_rejection = [&](auto mutate) {
+        auto changed = stage;
+        mutate(changed);
+        auto changed_provenance = provenance;
+        changed_provenance.final_flux_ledger_digest =
+            level_set::levelSetP1PhaseFluxLedgerDigest(changed);
+        const auto validation =
+            level_set::validateLevelSetP1PhaseSplitStage(
+                graph, previous_q, changed, changed_provenance);
+        EXPECT_FALSE(validation.valid);
+        EXPECT_NE(validation.diagnostic.find(
+                      "successful replicated transport stage"),
+                  std::string::npos)
+            << validation.diagnostic;
+    };
+    expect_invariant_rejection(
+        [](auto& changed) { changed.courant_satisfied = false; });
+    expect_invariant_rejection([](auto& changed) {
+        changed.low_order_coefficients_nonnegative = false;
+    });
+    expect_invariant_rejection([](auto& changed) {
+        changed.strong_form_decomposition_satisfied = false;
+    });
+    expect_invariant_rejection([](auto& changed) {
+        changed.correction.low_order_bounds_satisfied = false;
+    });
+    expect_invariant_rejection([](auto& changed) {
+        changed.correction.limited_bounds_satisfied = false;
+    });
+    expect_invariant_rejection([](auto& changed) {
+        changed.correction.interior_cancellation_satisfied = false;
+    });
+    expect_invariant_rejection([](auto& changed) {
+        changed.correction.local_balance_satisfied = false;
+    });
+    expect_invariant_rejection([](auto& changed) {
+        changed.correction.global_balance_satisfied = false;
+    });
+    expect_invariant_rejection([](auto& changed) {
+        changed.correction.component_balance_satisfied = false;
+    });
+    expect_invariant_rejection([](auto& changed) {
+        changed.correction.component_measure_closure_satisfied = false;
+    });
+    expect_invariant_rejection([](auto& changed) {
+        changed.correction.constant_preservation_satisfied = false;
+    });
+    const auto expect_equation_rejection = [&](auto mutate) {
+        auto changed = stage;
+        mutate(changed);
+        auto changed_provenance = provenance;
+        changed_provenance.final_flux_ledger_digest =
+            level_set::levelSetP1PhaseFluxLedgerDigest(changed);
+        const auto validation =
+            level_set::validateLevelSetP1PhaseSplitStage(
+                graph, previous_q, changed, changed_provenance);
+        EXPECT_FALSE(validation.valid);
+        EXPECT_NE(validation.diagnostic.find(
+                      "independent ledger verification"),
+                  std::string::npos)
+            << validation.diagnostic;
+    };
+    expect_equation_rejection([](auto& changed) {
+        changed.maximum_courant =
+            changed.executed_options.maximum_courant + FE::Real{0.25};
+    });
+    expect_equation_rejection([](auto& changed) {
+        changed.correction.nodes.front().local_mass_balance_residual =
+            FE::Real{0.125};
+    });
+    expect_equation_rejection([](auto& changed) {
+        changed.correction.nodes[1].upper_liquid_indicator =
+            std::nextafter(
+                changed.correction.nodes[1].upper_liquid_indicator,
+                FE::Real{0.0});
+    });
+    expect_digest_change([](auto& changed) {
+        changed.correction.nodes.front().local_mass_balance_residual =
+            std::nextafter(
+                changed.correction.nodes.front().local_mass_balance_residual,
+                std::numeric_limits<FE::Real>::infinity());
+    });
+    expect_digest_change([](auto& changed) {
+        changed.correction.edges.front().limited_pair_cancellation_residual =
+            std::nextafter(
+                changed.correction.edges.front()
+                    .limited_pair_cancellation_residual,
+                std::numeric_limits<FE::Real>::infinity());
+    });
+    expect_digest_change([](auto& changed) {
+        changed.correction.components.front().limited_balance_residual =
+            std::nextafter(
+                changed.correction.components.front()
+                    .limited_balance_residual,
+                std::numeric_limits<FE::Real>::infinity());
+    });
+    expect_digest_change([](auto& changed) {
+        changed.correction.subthreshold_component
+            .limited_balance_residual = std::nextafter(
+                changed.correction.subthreshold_component
+                    .limited_balance_residual,
+                std::numeric_limits<FE::Real>::infinity());
+    });
+
+    auto changed_graph = graph;
+    changed_graph.lumped_control_volume.front() = std::nextafter(
+        changed_graph.lumped_control_volume.front(),
+        std::numeric_limits<FE::Real>::infinity());
+    EXPECT_NE(level_set::levelSetP1PhaseGraphIdentity(changed_graph)
+                  .content_revision,
+              provenance.operator_graph_identity.content_revision);
+    EXPECT_FALSE(level_set::validateLevelSetP1PhaseSplitStage(
+                     changed_graph, previous_q, stage, provenance)
+                     .valid);
 }
 
 TEST(LevelSetConservativePhaseOperator,

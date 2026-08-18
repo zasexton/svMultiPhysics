@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Physics/Formulations/MeshMotion/HarmonicMeshMotionModule.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
@@ -44,6 +45,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -55,6 +57,7 @@
 namespace svmp::Physics::test {
 namespace {
 
+namespace mm = formulations::mesh_motion;
 namespace ns = formulations::navier_stokes;
 
 constexpr std::array<FE::Real, 8> kWetFractions{{
@@ -113,11 +116,15 @@ public:
                                        int rank,
                                        int size,
                                        int owner_rank,
-                                       FE::Real length_scale = FE::Real{1.0})
+                                       FE::Real length_scale = FE::Real{1.0},
+                                       std::optional<
+                                           std::array<std::uint64_t, 8>>
+                                           revision_stamp = std::nullopt)
         : marker_(marker)
         , rank_(rank)
         , size_(size)
         , owner_rank_(owner_rank)
+        , revision_stamp_(std::move(revision_stamp))
     {
         nodes_ = {{
             {{0.0, 0.0, 0.0}},
@@ -144,11 +151,39 @@ public:
     [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
     [[nodiscard]] int dimension() const override { return 3; }
     [[nodiscard]] bool revisionTrackingAvailable() const override { return true; }
-    [[nodiscard]] std::uint64_t geometryRevision() const override { return 1u; }
-    [[nodiscard]] std::uint64_t topologyRevision() const override { return 1u; }
+    [[nodiscard]] std::uint64_t geometryRevision() const override
+    {
+        return revision_stamp_.has_value() ? (*revision_stamp_)[0] : 1u;
+    }
+    [[nodiscard]] std::uint64_t topologyRevision() const override
+    {
+        return revision_stamp_.has_value() ? (*revision_stamp_)[1] : 1u;
+    }
     [[nodiscard]] std::uint64_t ownershipRevision() const override
     {
-        return enforce_partition_ ? 2u : 1u;
+        return revision_stamp_.has_value()
+                   ? (*revision_stamp_)[2]
+                   : (enforce_partition_ ? 2u : 1u);
+    }
+    [[nodiscard]] std::uint64_t numberingRevision() const override
+    {
+        return revision_stamp_.has_value() ? (*revision_stamp_)[3] : 0u;
+    }
+    [[nodiscard]] std::uint64_t fieldLayoutRevision() const override
+    {
+        return revision_stamp_.has_value() ? (*revision_stamp_)[4] : 0u;
+    }
+    [[nodiscard]] std::uint64_t labelRevision() const override
+    {
+        return revision_stamp_.has_value() ? (*revision_stamp_)[5] : 0u;
+    }
+    [[nodiscard]] std::uint64_t activeConfigurationEpoch() const override
+    {
+        return revision_stamp_.has_value() ? (*revision_stamp_)[6] : 0u;
+    }
+    [[nodiscard]] std::uint64_t coordinateConfigurationKey() const override
+    {
+        return revision_stamp_.has_value() ? (*revision_stamp_)[7] : 0u;
     }
     [[nodiscard]] bool cellIdsAreDense() const override { return true; }
     [[nodiscard]] bool globalEntityIdsAvailable() const override { return true; }
@@ -256,6 +291,7 @@ private:
     int size_{1};
     int owner_rank_{0};
     bool enforce_partition_{false};
+    std::optional<std::array<std::uint64_t, 8>> revision_stamp_{};
     std::array<std::array<FE::Real, 3>, 4> nodes_{};
     std::array<FE::GlobalIndex, 4> cell_{};
 };
@@ -1134,7 +1170,8 @@ public:
         int size,
         ChannelPartition partition,
         StructuredChannelOperatorScales scales,
-        bool serial_communicator)
+        bool serial_communicator,
+        bool use_generated_boundary_nitsche = true)
         : rank_(rank)
         , size_(size)
         , scales_(scales)
@@ -1164,11 +1201,19 @@ public:
                 .pressure = FE::Real{1.2} * scales_.outlet_pressure,
                 .backflow_beta = FE::Real{0.0},
             });
-        options.velocity_dirichlet_weak.push_back(
-            ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
-                .boundary_marker = kChannelSideWallMarker,
-                .value = {0.1, -0.05, 0.2},
-            });
+        if (use_generated_boundary_nitsche) {
+            options.velocity_dirichlet_weak.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+                    .boundary_marker = kChannelSideWallMarker,
+                    .value = {0.1, -0.05, 0.2},
+                });
+        } else {
+            options.velocity_dirichlet.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+                    .boundary_marker = kChannelSideWallMarker,
+                    .value = {0.1, -0.05, 0.2},
+                });
+        }
         options.nitsche_gamma = scales_.sidewall_nitsche_gamma;
         options.nitsche_symmetric = true;
         options.nitsche_scale_with_p = false;
@@ -1918,14 +1963,17 @@ enum class OperatorFamily {
     WallSlip,
 };
 
-constexpr std::array<OperatorFamily, 7> kOperatorFamilies{{
+constexpr std::array<OperatorFamily, 5> kSyntheticAssemblyOperatorFamilies{{
     OperatorFamily::Traction,
     OperatorFamily::Robin,
     OperatorFamily::PressureFlux,
     OperatorFamily::Outflow,
+    OperatorFamily::WallSlip,
+}};
+
+constexpr std::array<OperatorFamily, 2> kNitscheOperatorFamilies{{
     OperatorFamily::SymmetricNitsche,
     OperatorFamily::UnsymmetricNitsche,
-    OperatorFamily::WallSlip,
 }};
 
 struct AssemblySample {
@@ -2034,7 +2082,7 @@ public:
             break;
         case OperatorFamily::PressureFlux:
             options.enable_vms = true;
-            options.velocity_dirichlet_weak.push_back(
+            options.velocity_dirichlet.push_back(
                 ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
                     .boundary_marker = wall_marker_,
                     .value = {0.0, 0.0, 0.0},
@@ -2829,7 +2877,7 @@ TEST(FreeSurfaceSharpBoundaryOperators,
     FE::Real maximum_flux_error{0.0};
     FE::Real maximum_robin_error{0.0};
     FE::Real maximum_penalty_error{0.0};
-    for (const auto family : kOperatorFamilies) {
+    for (const auto family : kSyntheticAssemblyOperatorFamilies) {
         for (const auto side : kActiveSides) {
             SharpBoundaryAssemblyHarness harness(
                 family, side, 0, 1, 0, true);
@@ -2894,7 +2942,7 @@ TEST(FreeSurfaceSharpBoundaryOperators,
         static_cast<int>(kWetFractions.size()));
     ::testing::Test::RecordProperty(
         "sharp_operator_family_count",
-        static_cast<int>(kOperatorFamilies.size()));
+        static_cast<int>(kSyntheticAssemblyOperatorFamilies.size()));
     ::testing::Test::RecordProperty(
         "sharp_operator_active_side_case_count",
         static_cast<int>(kActiveSides.size()));
@@ -3085,7 +3133,7 @@ TEST(FreeSurfaceSharpBoundaryOperators,
     int dry_rule_count = 0;
     int explicit_empty_marker_registration_count = 0;
     int whole_face_contribution_count = 0;
-    for (const auto family : kOperatorFamilies) {
+    for (const auto family : kSyntheticAssemblyOperatorFamilies) {
         SharpBoundaryAssemblyHarness harness(
             family,
             FE::geometry::CutIntegrationSide::Negative,
@@ -3145,11 +3193,11 @@ TEST(FreeSurfaceSharpBoundaryOperators,
     EXPECT_EQ(maximum_dry_entry_magnitude, FE::Real{0.0});
     EXPECT_EQ(
         explicit_empty_marker_registration_count,
-        static_cast<int>(kOperatorFamilies.size()));
+        static_cast<int>(kSyntheticAssemblyOperatorFamilies.size()));
     EXPECT_EQ(whole_face_contribution_count, 0);
     ::testing::Test::RecordProperty(
         "sharp_dry_operator_family_count",
-        static_cast<int>(kOperatorFamilies.size()));
+        static_cast<int>(kSyntheticAssemblyOperatorFamilies.size()));
     ::testing::Test::RecordProperty(
         "sharp_dry_generated_rule_count",
         dry_rule_count);
@@ -3171,7 +3219,7 @@ TEST(FreeSurfaceSharpBoundaryOperators,
      MissingGeneratedActiveDomainFailsClosed)
 {
     int rejection_count = 0;
-    for (const auto family : kOperatorFamilies) {
+    for (const auto family : kSyntheticAssemblyOperatorFamilies) {
         SharpBoundaryAssemblyHarness harness(
             family,
             FE::geometry::CutIntegrationSide::Negative,
@@ -3196,7 +3244,7 @@ TEST(FreeSurfaceSharpBoundaryOperators,
     }
     EXPECT_EQ(
         rejection_count,
-        static_cast<int>(kOperatorFamilies.size()));
+        static_cast<int>(kSyntheticAssemblyOperatorFamilies.size()));
     ::testing::Test::RecordProperty(
         "sharp_missing_domain_rejection_count",
         rejection_count);
@@ -3209,7 +3257,30 @@ TEST(FreeSurfaceSharpBoundaryOperators,
         [](int velocity_order,
            int pressure_order,
            std::string generated_geometry,
-           std::string_view expected_message) {
+           std::string_view expected_message,
+           bool strong_marker_pspg_form = false) {
+            std::optional<ScopedEnvVar>
+                pressure_flux_scale;
+            std::optional<ScopedEnvVar>
+                pressure_flux_scale_alias;
+            std::optional<ScopedEnvVar>
+                force_vms_enable;
+            std::optional<ScopedEnvVar>
+                clear_vms_disable;
+            if (strong_marker_pspg_form) {
+                pressure_flux_scale.emplace(
+                    "SVMP_NS_PSPG_BOUNDARY_PRESSURE_FLUX_SCALE",
+                    std::string("1"));
+                pressure_flux_scale_alias.emplace(
+                    "SVMP_PSPG_BOUNDARY_PRESSURE_FLUX_SCALE",
+                    std::nullopt);
+                force_vms_enable.emplace(
+                    "SVMP_NS_ENABLE_VMS",
+                    std::string("1"));
+                clear_vms_disable.emplace(
+                    "SVMP_NS_DISABLE_VMS",
+                    std::nullopt);
+            }
             auto mesh =
                 std::make_shared<PartitionedSingleTetraBoundaryMesh>(
                     232, 0, 1, 0);
@@ -3234,12 +3305,21 @@ TEST(FreeSurfaceSharpBoundaryOperators,
                     FE::systems::FieldSourceKind::PrescribedData,
             });
             auto options = baseOptions();
-            options.traction_neumann.push_back(
-                ns::IncompressibleNavierStokesVMSOptions::
-                    TractionNeumannBC{
-                        .boundary_marker = 232,
-                        .traction = {1.0, 0.0, 0.0},
-                    });
+            if (strong_marker_pspg_form) {
+                options.velocity_dirichlet.push_back(
+                    ns::IncompressibleNavierStokesVMSOptions::
+                        VelocityDirichletBC{
+                            .boundary_marker = 232,
+                            .value = {0.0, 0.0, 0.0},
+                        });
+            } else {
+                options.traction_neumann.push_back(
+                    ns::IncompressibleNavierStokesVMSOptions::
+                        TractionNeumannBC{
+                            .boundary_marker = 232,
+                            .traction = {1.0, 0.0, 0.0},
+                        });
+            }
             options.free_surface.push_back(
                 ns::IncompressibleNavierStokesVMSOptions::
                     FreeSurfaceBoundary{
@@ -3284,8 +3364,14 @@ TEST(FreeSurfaceSharpBoundaryOperators,
         1,
         "HighOrderImplicit",
         "Generated_interface_geometry=LinearCorner");
+    expect_rejection(
+        2,
+        1,
+        "LinearCorner",
+        "order-1 velocity and pressure",
+        /*strong_marker_pspg_form=*/true);
     ::testing::Test::RecordProperty(
-        "sharp_high_order_envelope_rejection_count", 3);
+        "sharp_high_order_envelope_rejection_count", 4);
 }
 
 TEST(FreeSurfaceSharpBoundaryOperators,
@@ -3315,23 +3401,18 @@ TEST(FreeSurfaceSharpBoundaryOperators,
     force_scales.inlet_traction = FE::Real{1.0};
     auto flux_scales = baseline_scales;
     flux_scales.outlet_pressure = FE::Real{1.0};
-    auto penalty_scales = baseline_scales;
-    penalty_scales.sidewall_nitsche_gamma = FE::Real{12.0};
 
     StructuredChannelAssemblyHarness baseline(
-        2, 0, 1, ChannelPartition::Serial, baseline_scales, true);
+        2, 0, 1, ChannelPartition::Serial, baseline_scales, true, false);
     StructuredChannelAssemblyHarness force(
-        2, 0, 1, ChannelPartition::Serial, force_scales, true);
+        2, 0, 1, ChannelPartition::Serial, force_scales, true, false);
     StructuredChannelAssemblyHarness flux(
-        2, 0, 1, ChannelPartition::Serial, flux_scales, true);
-    StructuredChannelAssemblyHarness penalty(
-        2, 0, 1, ChannelPartition::Serial, penalty_scales, true);
+        2, 0, 1, ChannelPartition::Serial, flux_scales, true, false);
     const auto probe = baseline.constantVelocityProbe(probe_value);
 
     const auto baseline_reference = baseline.assemble(reference_height);
     const auto force_reference = force.assemble(reference_height);
     const auto flux_reference = flux.assemble(reference_height);
-    const auto penalty_reference = penalty.assemble(reference_height);
     const FE::Real reference_force_work = work(
         difference(force_reference.residual,
                    baseline_reference.residual),
@@ -3340,23 +3421,16 @@ TEST(FreeSurfaceSharpBoundaryOperators,
         difference(flux_reference.residual,
                    baseline_reference.residual),
         probe);
-    const FE::Real reference_penalty_work = work(
-        difference(penalty_reference.residual,
-                   baseline_reference.residual),
-        probe);
     ASSERT_GT(std::abs(reference_force_work), FE::Real{1.0e-12});
     ASSERT_GT(std::abs(reference_flux_work), FE::Real{1.0e-12});
-    ASSERT_GT(std::abs(reference_penalty_work), FE::Real{1.0e-12});
 
     FE::Real maximum_force_error{0.0};
     FE::Real maximum_flux_error{0.0};
-    FE::Real maximum_penalty_error{0.0};
     FE::Real maximum_measure_error{0.0};
     for (const FE::Real height : interface_heights) {
         const auto baseline_sample = baseline.assemble(height);
         const auto force_sample = force.assemble(height);
         const auto flux_sample = flux.assemble(height);
-        const auto penalty_sample = penalty.assemble(height);
 
         constexpr std::array<FE::Real, 3> parent_measures{{
             FE::Real{1.0}, FE::Real{1.0}, FE::Real{2.0}}};
@@ -3383,10 +3457,6 @@ TEST(FreeSurfaceSharpBoundaryOperators,
             difference(flux_sample.residual,
                        baseline_sample.residual),
             probe);
-        const FE::Real penalty_work = work(
-            difference(penalty_sample.residual,
-                       baseline_sample.residual),
-            probe);
         const FE::Real ratio = height / reference_height;
         maximum_force_error = std::max(
             maximum_force_error,
@@ -3398,17 +3468,11 @@ TEST(FreeSurfaceSharpBoundaryOperators,
             scaledAbsoluteError(flux_work,
                                 ratio * reference_flux_work,
                                 reference_flux_work));
-        maximum_penalty_error = std::max(
-            maximum_penalty_error,
-            scaledAbsoluteError(penalty_work,
-                                ratio * reference_penalty_work,
-                                reference_penalty_work));
     }
 
     EXPECT_LE(maximum_measure_error, FE::Real{2.0e-11});
     EXPECT_LE(maximum_force_error, FE::Real{1.0e-9});
     EXPECT_LE(maximum_flux_error, FE::Real{1.0e-9});
-    EXPECT_LE(maximum_penalty_error, FE::Real{1.0e-9});
     ::testing::Test::RecordProperty("sharp_channel_boundary_role_count", 3);
     ::testing::Test::RecordProperty(
         "sharp_channel_structured_cell_count",
@@ -3425,9 +3489,6 @@ TEST(FreeSurfaceSharpBoundaryOperators,
     recordRealProperty(
         "sharp_channel_maximum_scaled_flux_error",
         maximum_flux_error);
-    recordRealProperty(
-        "sharp_channel_maximum_scaled_penalty_work_error",
-        maximum_penalty_error);
 }
 
 TEST(FreeSurfaceSharpBoundaryOperators,
@@ -3462,14 +3523,16 @@ TEST(FreeSurfaceSharpBoundaryOperators,
             1,
             ChannelPartition::Serial,
             baseline_scales,
-            true);
+            true,
+            false);
         StructuredChannelAssemblyHarness traction(
             resolution,
             0,
             1,
             ChannelPartition::Serial,
             traction_scales,
-            true);
+            true,
+            false);
         const auto probe = baseline.constantVelocityProbe(probe_value);
         const FE::Real mesh_size =
             FE::Real{1.0} / static_cast<FE::Real>(resolution);
@@ -3525,189 +3588,69 @@ TEST(FreeSurfaceSharpBoundaryOperators,
 }
 
 TEST(FreeSurfaceSharpBoundaryOperators,
-     NitscheTraceScalingProducesFiniteSampledMargins)
+     SyntheticNitscheTraceSamplingFailsWithoutAggregationCertificate)
 {
-    constexpr std::array<OperatorFamily, 2> nitsche_policies{{
-        OperatorFamily::SymmetricNitsche,
-        OperatorFamily::UnsymmetricNitsche,
-    }};
-    constexpr FE::Real high_gamma = FE::Real{12.0};
-    constexpr FE::Real low_gamma = FE::Real{6.0};
-    constexpr FE::Real viscosity = FE::Real{0.01};
-    constexpr std::array<FE::Real, 3> probe_value{{
-        FE::Real{0.3}, FE::Real{-0.15}, FE::Real{0.2}}};
-    constexpr FE::Real probe_squared =
-        probe_value[0] * probe_value[0] +
-        probe_value[1] * probe_value[1] +
-        probe_value[2] * probe_value[2];
-    const FE::Real expected_diameter = std::sqrt(FE::Real{2.0});
-    constexpr FE::Real expected_cell_measure = FE::Real{1.0} / FE::Real{6.0};
-    constexpr FE::Real expected_facet_measure = FE::Real{0.5};
-    constexpr FE::Real expected_h_normal = FE::Real{2.0} / FE::Real{3.0};
-    const FE::Real full_penalty_scale =
-        (high_gamma - low_gamma) * viscosity /
-        expected_h_normal * expected_facet_measure * probe_squared;
-
-    int finite_positive_count = 0;
-    int nonpositive_count = 0;
-    int zero_area_rejection_count = 0;
-    FE::Real minimum_margin = std::numeric_limits<FE::Real>::infinity();
-    FE::Real maximum_consistency_error{0.0};
-    FE::Real maximum_diameter_error{0.0};
-    FE::Real maximum_cell_measure_error{0.0};
-    FE::Real maximum_facet_measure_error{0.0};
-    FE::Real maximum_h_normal_error{0.0};
-
-    for (const auto policy : nitsche_policies) {
-        std::array<std::unique_ptr<SharpBoundaryAssemblyHarness>, 2>
-            high_harnesses;
-        std::array<std::unique_ptr<SharpBoundaryAssemblyHarness>, 2>
-            low_harnesses;
-        for (std::size_t side_index = 0u;
-             side_index < kActiveSides.size();
-             ++side_index) {
-            high_harnesses[side_index] =
-                std::make_unique<SharpBoundaryAssemblyHarness>(
-                    policy,
-                    kActiveSides[side_index],
-                    0,
-                    1,
-                    0,
-                    true,
-                    FE::Real{1.0},
-                    FE::Real{1.0},
-                    high_gamma);
-            low_harnesses[side_index] =
-                std::make_unique<SharpBoundaryAssemblyHarness>(
-                    policy,
-                    kActiveSides[side_index],
-                    0,
-                    1,
-                    0,
-                    true,
-                    FE::Real{1.0},
-                    FE::Real{1.0},
-                    low_gamma);
-        }
-
-        for (const FE::Real fraction : kWetFractions) {
-            bool both_sides_positive = true;
-            for (std::size_t side_index = 0u;
-                 side_index < kActiveSides.size();
-                 ++side_index) {
-                auto& high_harness = *high_harnesses[side_index];
-                auto& low_harness = *low_harnesses[side_index];
-                const auto high_sample =
-                    high_harness.assembleGeneratedFraction(fraction);
-                const auto low_sample =
-                    low_harness.assembleGeneratedFraction(fraction);
-                const auto metric_sample =
-                    high_harness.observeGeneratedMetrics(fraction);
-                const auto probe =
-                    high_harness.constantVelocityProbe(probe_value);
-                const FE::Real margin = quadraticWork(
-                    difference(high_sample.assembly.jacobian,
-                               low_sample.assembly.jacobian),
-                    probe);
-                const FE::Real expected_margin =
-                    (high_gamma - low_gamma) * viscosity /
-                    expected_h_normal *
-                    (expected_facet_measure * fraction) * probe_squared;
-
-                EXPECT_EQ(high_sample.active_rule_count, 1u);
-                EXPECT_EQ(metric_sample.active_rule_count, 1u);
-                EXPECT_NEAR(metric_sample.active_measure,
-                            expected_facet_measure * fraction,
-                            FE::Real{2.0e-12});
-                maximum_diameter_error = std::max(
-                    maximum_diameter_error,
-                    std::abs(metric_sample.cell_diameter -
-                             expected_diameter));
-                maximum_cell_measure_error = std::max(
-                    maximum_cell_measure_error,
-                    std::abs(metric_sample.cell_measure -
-                             expected_cell_measure));
-                maximum_facet_measure_error = std::max(
-                    maximum_facet_measure_error,
-                    std::abs(metric_sample.facet_measure -
-                             expected_facet_measure));
-                const FE::Real observed_h_normal =
-                    FE::Real{2.0} * metric_sample.cell_measure /
-                    metric_sample.facet_measure;
-                maximum_h_normal_error = std::max(
-                    maximum_h_normal_error,
-                    std::abs(observed_h_normal - expected_h_normal));
-                maximum_consistency_error = std::max(
-                    maximum_consistency_error,
-                    scaledAbsoluteError(margin,
-                                        expected_margin,
-                                        full_penalty_scale));
-                minimum_margin = std::min(minimum_margin, margin);
-                if (!std::isfinite(margin) ||
-                    !(margin > FE::Real{0.0})) {
-                    both_sides_positive = false;
-                }
+    int rejection_count = 0;
+    for (const auto policy : kNitscheOperatorFamilies) {
+        for (const auto side : kActiveSides) {
+            try {
+                SharpBoundaryAssemblyHarness harness(
+                    policy, side, 0, 1, 0, true);
+                (void)harness;
+            } catch (const std::invalid_argument& error) {
+                EXPECT_NE(
+                    std::string(error.what()).find(
+                        "generated-boundary Nitsche routes require CutVolume "
+                        "small-cut aggregation and aggregate-trace "
+                        "certification"),
+                    std::string::npos);
+                ++rejection_count;
+                continue;
             }
-            if (both_sides_positive) {
-                ++finite_positive_count;
-            } else {
-                ++nonpositive_count;
-            }
-
-            const FE::Real zero_area_margin = FE::Real{0.0};
-            EXPECT_FALSE(zero_area_margin > FE::Real{0.0});
-            if (!(zero_area_margin > FE::Real{0.0})) {
-                ++zero_area_rejection_count;
-            }
+            ADD_FAILURE()
+                << "synthetic generated-boundary Nitsche route did not "
+                   "fail before trace sampling for policy "
+                << static_cast<int>(policy);
         }
     }
 
-    EXPECT_EQ(finite_positive_count, 16);
-    EXPECT_EQ(nonpositive_count, 0);
-    EXPECT_EQ(zero_area_rejection_count, 16);
-    EXPECT_GT(minimum_margin, FE::Real{0.0});
-    EXPECT_LE(maximum_consistency_error, FE::Real{1.0e-10});
-    EXPECT_LE(maximum_diameter_error, FE::Real{1.0e-12});
-    EXPECT_LE(maximum_cell_measure_error, FE::Real{1.0e-12});
-    EXPECT_LE(maximum_facet_measure_error, FE::Real{1.0e-12});
-    EXPECT_LE(maximum_h_normal_error, FE::Real{1.0e-12});
-
+    const int expected_rejection_count = static_cast<int>(
+        kNitscheOperatorFamilies.size() * kActiveSides.size());
+    EXPECT_EQ(rejection_count, expected_rejection_count);
     ::testing::Test::RecordProperty(
-        "sharp_nitsche_fraction_case_count",
-        static_cast<int>(kWetFractions.size()));
+        "sharp_nitsche_uncertified_registration_rejection_count",
+        rejection_count);
     ::testing::Test::RecordProperty(
-        "sharp_nitsche_policy_count",
-        static_cast<int>(nitsche_policies.size()));
-    ::testing::Test::RecordProperty(
-        "sharp_nitsche_finite_positive_sample_count",
-        finite_positive_count);
-    ::testing::Test::RecordProperty(
-        "sharp_nitsche_nonpositive_sample_count",
-        nonpositive_count);
-    recordRealProperty(
-        "sharp_nitsche_maximum_scaled_consistency_error",
-        maximum_consistency_error);
-    ::testing::Test::RecordProperty(
-        "sharp_nitsche_active_side_count",
-        static_cast<int>(kActiveSides.size()));
-    ::testing::Test::RecordProperty(
-        "sharp_nitsche_zero_area_rejection_count",
-        zero_area_rejection_count);
-    recordRealProperty("sharp_nitsche_minimum_sampled_margin", minimum_margin);
-    recordRealProperty(
-        "sharp_nitsche_maximum_cell_diameter_error",
-        maximum_diameter_error);
-    recordRealProperty(
-        "sharp_nitsche_maximum_cell_measure_error",
-        maximum_cell_measure_error);
-    recordRealProperty(
-        "sharp_nitsche_maximum_parent_facet_measure_error",
-        maximum_facet_measure_error);
-    recordRealProperty(
-        "sharp_nitsche_maximum_h_normal_error",
-        maximum_h_normal_error);
+        "sharp_nitsche_uncertified_registration_case_count",
+        expected_rejection_count);
 }
 
+TEST(FreeSurfaceSharpBoundaryOperators,
+     StructuredSyntheticNitscheRouteFailsWithoutAggregationCertificate)
+{
+    const StructuredChannelOperatorScales scales{
+        .inlet_traction = FE::Real{0.0},
+        .outlet_pressure = FE::Real{0.0},
+        .sidewall_nitsche_gamma = FE::Real{12.0},
+    };
+    try {
+        StructuredChannelAssemblyHarness harness(
+            2, 0, 1, ChannelPartition::Serial, scales, true);
+        (void)harness;
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "generated-boundary Nitsche routes require CutVolume "
+                "small-cut aggregation and aggregate-trace certification"),
+            std::string::npos);
+        ::testing::Test::RecordProperty(
+            "sharp_structured_nitsche_uncertified_registration_rejection_count",
+            1);
+        return;
+    }
+    FAIL() << "structured synthetic generated-boundary Nitsche route did not "
+              "fail before assembly";
+}
 #if FE_HAS_MPI || defined(MESH_HAS_MPI)
 
 std::vector<FE::Real> globalSum(std::span<const FE::Real> local)
@@ -3776,7 +3719,616 @@ bool mpiWorld(int& rank, int& size)
     return true;
 }
 
+#if FE_HAS_MPI
+
+class FittedALENumericHistoryFixture {
+public:
+    static constexpr int boundary_marker = 246;
+
+    FittedALENumericHistoryFixture(int rank,
+                                   int size,
+                                   bool drift_declaration = false)
+        : revision_stamp_(makeRevisionStamp(rank))
+        , mesh_(std::make_shared<PartitionedSingleTetraBoundaryMesh>(
+              boundary_marker,
+              rank,
+              size,
+              /*owner_rank=*/0,
+              FE::Real{1.0},
+              std::optional<std::array<std::uint64_t, 8>>{
+                  revision_stamp_}))
+        , system_(mesh_)
+    {
+        auto displacement_space = makeVelocitySpace(mesh_);
+        auto pressure_space = makePressureSpace(mesh_);
+
+        mm::HarmonicMeshMotionOptions mesh_options;
+        mesh_options.field_name = "mesh_displacement";
+        mesh_options.operator_tag = "mesh_motion";
+        mesh_options.kappa = FE::Real{1.5};
+        mm::HarmonicMeshMotionModule mesh_module(
+            displacement_space, std::move(mesh_options));
+        mesh_module.registerOn(system_);
+
+        auto fluid_options = baseOptions();
+        const std::string velocity_field_name =
+            drift_declaration && rank == 0
+                ? "u_rank_zero_declaration_drift"
+                : "u";
+        fluid_options.velocity_field_name = velocity_field_name;
+        fluid_options.enable_ale = true;
+        fluid_options.mesh_velocity_source =
+            ns::ALEMeshVelocitySource::CoupledDisplacement;
+        fluid_options.mesh_displacement_field_name =
+            "mesh_displacement";
+        fluid_options.mesh_velocity_field_name = "mesh_velocity";
+        fluid_options.free_surface.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+                .implementation = ns::FreeSurfaceImplementation::FittedALE,
+                .boundary_marker = boundary_marker,
+                .external_pressure = FE::Real{0.0},
+                .tangential_mesh_policy =
+                    ns::FreeSurfaceTangentialMeshPolicy::Free,
+                .tangential_mesh_penalty = FE::Real{0.0},
+                .kinematic_enforcement =
+                    ns::FreeSurfaceKinematicEnforcement::Penalty,
+                .kinematic_penalty = FE::Real{9.0},
+            });
+        ns::IncompressibleNavierStokesVMSModule fluid_module(
+            displacement_space, pressure_space, std::move(fluid_options));
+        fluid_module.registerOn(system_);
+
+        displacement_ = system_.findFieldByName("mesh_displacement");
+        velocity_ = system_.findFieldByName(velocity_field_name);
+        pressure_ = system_.findFieldByName("p");
+        if (displacement_ == FE::INVALID_FIELD_ID ||
+            velocity_ == FE::INVALID_FIELD_ID ||
+            pressure_ == FE::INVALID_FIELD_ID ||
+            system_.fittedALENormalOperatorStageMeasurementDeclarations()
+                    .size() != 1u) {
+            throw std::runtime_error(
+                "fitted-ALE numeric-history fixture registration failed");
+        }
+
+        mesh_->enforcePartitionOwnership();
+        FE::systems::SetupOptions setup_options;
+        setup_options.dof_options.my_rank = rank;
+        setup_options.dof_options.world_size = size;
+        setup_options.dof_options.mpi_comm = MPI_COMM_WORLD;
+        system_.setup(
+            setup_options,
+            makePartitionedSingleTetraSetupInputs(/*owner_rank=*/0));
+
+        const auto state_size = static_cast<std::size_t>(
+            system_.dofHandler().getNumDofs());
+        stage_state_.assign(state_size, FE::Real{0.0});
+        stage_rate_.assign(state_size, FE::Real{0.0});
+        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            setFieldComponentValue(
+                stage_state_, system_, velocity_, vertex, 0, FE::Real{0.35});
+            setFieldComponentValue(
+                stage_state_, system_, velocity_, vertex, 1, FE::Real{-0.2});
+            setFieldComponentValue(
+                stage_state_, system_, velocity_, vertex, 2, FE::Real{0.1});
+            setFieldComponentValue(
+                stage_state_, system_, pressure_, vertex, 0, FE::Real{0.0});
+            setFieldComponentValue(
+                stage_rate_, system_, displacement_, vertex, 0, FE::Real{0.1});
+            setFieldComponentValue(
+                stage_rate_, system_, displacement_, vertex, 1, FE::Real{-0.05});
+            setFieldComponentValue(
+                stage_rate_, system_, displacement_, vertex, 2, FE::Real{0.3});
+        }
+    }
+
+    [[nodiscard]] FE::systems::FESystem& system() noexcept
+    {
+        return system_;
+    }
+
+    [[nodiscard]] FE::systems::SystemStateView state() const
+    {
+        FE::systems::SystemStateView result;
+        result.time = FE::Real{0.35};
+        result.dt = FE::Real{0.05};
+        result.effective_dt = FE::Real{0.05};
+        result.dt_prev = FE::Real{0.05};
+        result.u = std::span<const FE::Real>(stage_state_);
+        result.u_prev = std::span<const FE::Real>(stage_rate_);
+        return result;
+    }
+
+    [[nodiscard]] FE::systems::OperatorStageMeasurementMetadata metadata(
+        std::uint64_t state_revision,
+        std::uint64_t rate_revision) const
+    {
+        return FE::systems::OperatorStageMeasurementMetadata{
+            .scheme_name = "BackwardEuler",
+            .temporal_order = 1,
+            .prospective_accepted_step = 7u,
+            .prospective_attempt = 0u,
+            .step_start_time = FE::Real{0.30},
+            .step_end_time = FE::Real{0.35},
+            .state_time = FE::Real{0.35},
+            .rate_time = FE::Real{0.35},
+            .dt = FE::Real{0.05},
+            .expected_stage_geometry = stageGeometry(),
+            .state_revision = state_revision,
+            .rate_revision = rate_revision,
+            .derivative_fields = {displacement_},
+        };
+    }
+
+    [[nodiscard]] FE::systems::OperatorStageGeometryMetadata
+    stageGeometry() const noexcept
+    {
+        return FE::systems::OperatorStageGeometryMetadata{
+            .geometry_revision = revision_stamp_[0],
+            .topology_revision = revision_stamp_[1],
+            .ownership_revision = revision_stamp_[2],
+            .numbering_revision = revision_stamp_[3],
+            .field_layout_revision = revision_stamp_[4],
+            .label_revision = revision_stamp_[5],
+            .active_configuration_epoch = revision_stamp_[6],
+            .coordinate_configuration_key = revision_stamp_[7],
+        };
+    }
+
+private:
+    [[nodiscard]] static std::array<std::uint64_t, 8>
+    makeRevisionStamp(int rank)
+    {
+        const auto base = std::uint64_t{1000} +
+                          std::uint64_t{100} *
+                              static_cast<std::uint64_t>(rank);
+        return {{base + 1u,
+                 base + 2u,
+                 base + 3u,
+                 base + 4u,
+                 base + 5u,
+                 base + 6u,
+                 base + 7u,
+                 base + 8u}};
+    }
+
+    std::array<std::uint64_t, 8> revision_stamp_{};
+    std::shared_ptr<PartitionedSingleTetraBoundaryMesh> mesh_{};
+    FE::systems::FESystem system_;
+    FE::FieldId displacement_{FE::INVALID_FIELD_ID};
+    FE::FieldId velocity_{FE::INVALID_FIELD_ID};
+    FE::FieldId pressure_{FE::INVALID_FIELD_ID};
+    std::vector<FE::Real> stage_state_{};
+    std::vector<FE::Real> stage_rate_{};
+};
+
 #endif
+
+#endif
+
+TEST(MovingDomainPhysicsMPI,
+     FittedALEOperatorStageHistoryCommitsCompleteGlobalMomentsAndRejectsRankDrift)
+{
+#if FE_HAS_MPI
+    int rank = 0;
+    int size = 1;
+    if (!mpiWorld(rank, size) || size != 2) {
+        GTEST_SKIP() << "requires an MPI launch with exactly two ranks";
+    }
+
+    FittedALENumericHistoryFixture fixture(rank, size);
+    auto& system = fixture.system();
+    const auto state = fixture.state();
+    const auto metadata = fixture.metadata(
+        /*state_revision=*/101u,
+        /*rate_revision=*/202u);
+
+    ASSERT_NO_THROW(
+        system.stageFittedALENormalOperatorStageMeasurements(
+            state, metadata));
+    auto pending =
+        system.pendingFittedALENormalOperatorStageMeasurements();
+    ASSERT_EQ(pending.size(), 1u);
+    ASSERT_TRUE(pending.front().stage.expected_stage_geometry.has_value());
+    const auto raw = pending.front().raw;
+    const auto expected_geometry = fixture.stageGeometry();
+    EXPECT_EQ(*pending.front().stage.expected_stage_geometry,
+              expected_geometry);
+    EXPECT_EQ(raw.stage_mesh_revision, expected_geometry);
+    EXPECT_EQ(
+        raw.stage_mesh_revision.geometry_revision,
+        std::uint64_t{1001} +
+            std::uint64_t{100} * static_cast<std::uint64_t>(rank));
+
+    const auto expect_global_value = [size](FE::Real value) {
+        const FE::Real sum = globalSum(value);
+        const FE::Real scale = std::max(
+            FE::Real{1.0},
+            std::abs(value) * static_cast<FE::Real>(size));
+        EXPECT_NEAR(
+            sum,
+            static_cast<FE::Real>(size) * value,
+            FE::Real{1.0e-12} * scale);
+    };
+    EXPECT_TRUE(std::isfinite(raw.A));
+    EXPECT_TRUE(std::isfinite(raw.Wn));
+    EXPECT_TRUE(std::isfinite(raw.Un));
+    EXPECT_TRUE(std::isfinite(raw.gap_sq));
+    EXPECT_NEAR(raw.A, kParentBoundaryMeasure, FE::Real{1.0e-12});
+    EXPECT_GT(std::abs(raw.Wn), FE::Real{0.0});
+    EXPECT_GT(std::abs(raw.Un), FE::Real{0.0});
+    EXPECT_GT(raw.gap_sq, FE::Real{0.0});
+    EXPECT_NEAR(
+        raw.gap_sq,
+        (raw.Wn - raw.Un) * (raw.Wn - raw.Un) / raw.A,
+        FE::Real{1.0e-12});
+    expect_global_value(raw.A);
+    expect_global_value(raw.Wn);
+    expect_global_value(raw.Un);
+    expect_global_value(raw.gap_sq);
+    EXPECT_TRUE(
+        system.fittedALENormalOperatorStageMeasurementHistory().empty());
+
+    ASSERT_NO_THROW(
+        system.commitPendingFittedALENormalOperatorStageMeasurements(
+            /*accepted_step=*/7u,
+            FE::Real{0.35},
+            FE::Real{0.05}));
+    EXPECT_TRUE(
+        system.pendingFittedALENormalOperatorStageMeasurements().empty());
+    auto history =
+        system.fittedALENormalOperatorStageMeasurementHistory();
+    ASSERT_EQ(history.size(), 1u);
+    EXPECT_DOUBLE_EQ(history.front().raw.A, raw.A);
+    EXPECT_DOUBLE_EQ(history.front().raw.Wn, raw.Wn);
+    EXPECT_DOUBLE_EQ(history.front().raw.Un, raw.Un);
+    EXPECT_DOUBLE_EQ(history.front().raw.gap_sq, raw.gap_sq);
+    EXPECT_EQ(history.front().raw.stage_mesh_revision,
+              expected_geometry);
+
+    ASSERT_NO_THROW(
+        system.stageFittedALENormalOperatorStageMeasurements(
+            state, metadata));
+    ASSERT_NO_THROW(
+        system.commitPendingFittedALENormalOperatorStageMeasurements(
+            /*accepted_step=*/7u,
+            FE::Real{0.35},
+            FE::Real{0.05}));
+    EXPECT_EQ(
+        system.fittedALENormalOperatorStageMeasurementHistory().size(),
+        1u);
+    EXPECT_TRUE(
+        system.pendingFittedALENormalOperatorStageMeasurements().empty());
+
+    ASSERT_NO_THROW(
+        system.stageFittedALENormalOperatorStageMeasurements(
+            state, metadata));
+    system.discardPendingFittedALENormalOperatorStageMeasurements();
+    EXPECT_TRUE(
+        system.pendingFittedALENormalOperatorStageMeasurements().empty());
+    EXPECT_EQ(
+        system.fittedALENormalOperatorStageMeasurementHistory().size(),
+        1u);
+
+    const auto expect_coordinated_rejection =
+        [&](FittedALENumericHistoryFixture& rejected_fixture,
+            FE::systems::OperatorStageMeasurementMetadata rejected_metadata,
+            std::size_t expected_history_size) {
+            bool rejected = false;
+            std::string error_message;
+            try {
+                rejected_fixture.system()
+                    .stageFittedALENormalOperatorStageMeasurements(
+                        rejected_fixture.state(),
+                        std::move(rejected_metadata));
+            } catch (const std::exception& error) {
+                rejected = true;
+                error_message = error.what();
+            }
+            const int rejection_count = globalSum(rejected ? 1 : 0);
+            const int consensus_message_count = globalSum(
+                error_message.find(
+                    "differ across active communicator ranks") !=
+                        std::string::npos
+                    ? 1
+                    : 0);
+            EXPECT_EQ(rejection_count, size);
+            EXPECT_EQ(consensus_message_count, size);
+            EXPECT_TRUE(
+                rejected_fixture.system()
+                    .pendingFittedALENormalOperatorStageMeasurements()
+                    .empty());
+            EXPECT_EQ(
+                rejected_fixture.system()
+                    .fittedALENormalOperatorStageMeasurementHistory()
+                    .size(),
+                expected_history_size);
+            rejected_fixture.system()
+                .discardPendingFittedALENormalOperatorStageMeasurements();
+        };
+
+    auto state_revision_drift = fixture.metadata(
+        /*state_revision=*/301u + static_cast<std::uint64_t>(rank),
+        /*rate_revision=*/402u);
+    expect_coordinated_rejection(
+        fixture, std::move(state_revision_drift), 1u);
+
+    auto rate_revision_drift = fixture.metadata(
+        /*state_revision=*/501u,
+        /*rate_revision=*/602u + static_cast<std::uint64_t>(rank));
+    expect_coordinated_rejection(
+        fixture, std::move(rate_revision_drift), 1u);
+
+    FittedALENumericHistoryFixture declaration_drift_fixture(
+        rank, size, /*drift_declaration=*/true);
+    expect_coordinated_rejection(
+        declaration_drift_fixture,
+        declaration_drift_fixture.metadata(
+            /*state_revision=*/701u,
+            /*rate_revision=*/802u),
+        0u);
+
+    ::testing::Test::RecordProperty(
+        "fitted_ale_operator_stage_global_moment_count", 4);
+    ::testing::Test::RecordProperty(
+        "fitted_ale_operator_stage_rank_local_revision_count", 8);
+    ::testing::Test::RecordProperty(
+        "fitted_ale_operator_stage_coordinated_drift_cases", 3);
+#else
+    GTEST_SKIP() << "requires an MPI-enabled build";
+#endif
+}
+
+TEST(MovingDomainPhysicsMPI,
+     MeshBoundaryHistoryRejectsRankDriftAndRollsBackCollectively)
+{
+#if FE_HAS_MPI
+    int rank = 0;
+    int size = 1;
+    if (!mpiWorld(rank, size) || size < 2) {
+        GTEST_SKIP() << "requires an MPI launch with at least two ranks";
+    }
+
+    constexpr int marker = 245;
+    constexpr std::string_view operator_tag = "mpi_mesh_history";
+    auto mesh = std::make_shared<PartitionedSingleTetraBoundaryMesh>(
+        marker, rank, size, /*owner_rank=*/0);
+    auto displacement_space = makeVelocitySpace(mesh);
+
+    mm::HarmonicMeshMotionOptions options;
+    options.operator_tag = std::string(operator_tag);
+    options.normal_constraint.push_back(mm::NormalConstraintBC{
+        .boundary_marker = marker,
+        .quantity = mm::NormalConstraintQuantity::Displacement,
+        .target = FE::Real{0.0},
+        .penalty = FE::Real{4.0},
+        .velocity_time_scale = FE::Real{1.0},
+    });
+    options.tangential_policy.push_back(mm::TangentialPolicyBC{
+        .boundary_marker = marker,
+        .policy = mm::TangentialMeshPolicy::Free,
+        .quantity = mm::TangentialConstraintQuantity::Displacement,
+        .target = {FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}},
+        .penalty = FE::Real{1.0},
+        .velocity_time_scale = FE::Real{1.0},
+    });
+
+    FE::systems::FESystem system(mesh);
+    mm::HarmonicMeshMotionModule module(
+        displacement_space, std::move(options));
+    module.registerOn(system);
+
+    const auto normal_declarations =
+        system.meshNormalBoundaryConstraints();
+    const FE::analysis::BoundaryConditionDescriptor*
+        duplicate_normal_descriptor_source = nullptr;
+    if (normal_declarations.size() == 1u &&
+        normal_declarations.front().consumer_binding.has_value()) {
+        const auto& normal_binding =
+            *normal_declarations.front().consumer_binding;
+        const auto descriptor = std::find_if(
+            system.boundaryConditionDescriptors().begin(),
+            system.boundaryConditionDescriptors().end(),
+            [&](const auto& candidate) {
+                return candidate.source ==
+                       normal_binding.mesh_descriptor_source;
+            });
+        if (descriptor != system.boundaryConditionDescriptors().end()) {
+            duplicate_normal_descriptor_source = &*descriptor;
+        }
+    }
+    const int fixture_ready_count = globalSum(
+        duplicate_normal_descriptor_source != nullptr ? 1 : 0);
+    ASSERT_EQ(fixture_ready_count, size)
+        << "MPI mesh-history fixture must bind one normal row on every rank";
+    ASSERT_NE(duplicate_normal_descriptor_source, nullptr);
+    const auto duplicate_normal_descriptor =
+        *duplicate_normal_descriptor_source;
+
+    mesh->enforcePartitionOwnership();
+    FE::systems::SetupOptions setup_options;
+    setup_options.dof_options.my_rank = rank;
+    setup_options.dof_options.world_size = size;
+    setup_options.dof_options.mpi_comm = MPI_COMM_WORLD;
+    system.setup(
+        setup_options,
+        makePartitionedSingleTetraSetupInputs(/*owner_rank=*/0));
+
+    bool individual_rejected = false;
+    std::string individual_error;
+    try {
+        system.recordAcceptedMeshNormalBoundaryConstraints(
+            /*accepted_step=*/1u,
+            FE::Real{0.1},
+            FE::Real{0.1},
+            /*state_revision=*/11u);
+    } catch (const std::exception& error) {
+        individual_rejected = true;
+        individual_error = error.what();
+    }
+    const int individual_rejection_count =
+        globalSum(individual_rejected ? 1 : 0);
+    const int individual_message_count = globalSum(
+        individual_error.find(
+            "distributed accepted history requires the combined normal "
+            "and tangential provenance transaction") != std::string::npos
+            ? 1
+            : 0);
+    const int individual_empty_history_count = globalSum(
+        system.meshNormalBoundaryConstraintHistory().empty() &&
+                system.meshTangentialBoundaryPolicyHistory().empty()
+            ? 1
+            : 0);
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    bool metadata_rejected = false;
+    std::string metadata_error;
+    try {
+        system.recordAcceptedMeshBoundaryProvenance(
+            /*accepted_step=*/2u,
+            FE::Real{0.2},
+            FE::Real{0.1},
+            /*state_revision=*/20u +
+                static_cast<std::uint64_t>(rank));
+    } catch (const std::exception& error) {
+        metadata_rejected = true;
+        metadata_error = error.what();
+    }
+    auto metadata_log = testing::internal::GetCapturedStdout();
+    metadata_log += testing::internal::GetCapturedStderr();
+
+    const int metadata_rejection_count =
+        globalSum(metadata_rejected ? 1 : 0);
+    const int metadata_message_count = globalSum(
+        metadata_error.find("accepted metadata") != std::string::npos &&
+                metadata_error.find("differ across ranks") !=
+                    std::string::npos
+            ? 1
+            : 0);
+    const int metadata_empty_history_count = globalSum(
+        system.meshNormalBoundaryConstraintHistory().empty() &&
+                system.meshTangentialBoundaryPolicyHistory().empty()
+            ? 1
+            : 0);
+    const int metadata_accepted_log_count = globalSum(
+        metadata_log.find(
+            "diagnostic=mesh_normal_boundary_constraint_history") !=
+                std::string::npos ||
+                metadata_log.find(
+                    "diagnostic=mesh_tangential_boundary_policy_history") !=
+                    std::string::npos
+            ? 1
+            : 0);
+
+    bool duplicate_descriptor_inserted = true;
+    std::string duplicate_descriptor_insertion_error;
+    if (rank == 0) {
+        try {
+            system.addBoundaryConditionDescriptor(
+                duplicate_normal_descriptor, operator_tag);
+        } catch (const std::exception& error) {
+            duplicate_descriptor_inserted = false;
+            duplicate_descriptor_insertion_error = error.what();
+        }
+    }
+    const int duplicate_descriptor_insertion_count = globalSum(
+        duplicate_descriptor_inserted ? 1 : 0);
+    ASSERT_EQ(duplicate_descriptor_insertion_count, size)
+        << "rank-local duplicate descriptor insertion failed: "
+        << duplicate_descriptor_insertion_error;
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    bool duplicate_rejected = false;
+    std::string duplicate_error;
+    try {
+        system.recordAcceptedMeshBoundaryProvenance(
+            /*accepted_step=*/2u,
+            FE::Real{0.2},
+            FE::Real{0.1},
+            /*state_revision=*/21u);
+    } catch (const std::exception& error) {
+        duplicate_rejected = true;
+        duplicate_error = error.what();
+    }
+    auto duplicate_log = testing::internal::GetCapturedStdout();
+    duplicate_log += testing::internal::GetCapturedStderr();
+
+    const int duplicate_rejection_count =
+        globalSum(duplicate_rejected ? 1 : 0);
+    const int duplicate_local_validation_count = globalSum(
+        duplicate_error.find(
+            "requires exactly one matching mesh normal boundary descriptor") !=
+                std::string::npos
+            ? 1
+            : 0);
+    const int duplicate_remote_rejection_count = globalSum(
+        duplicate_error.find(
+            "another active FE communicator rank rejected accepted "
+            "mesh-boundary provenance") != std::string::npos
+            ? 1
+            : 0);
+    const int duplicate_empty_history_count = globalSum(
+        system.meshNormalBoundaryConstraintHistory().empty() &&
+                system.meshTangentialBoundaryPolicyHistory().empty()
+            ? 1
+            : 0);
+    const int duplicate_accepted_log_count = globalSum(
+        duplicate_log.find(
+            "diagnostic=mesh_normal_boundary_constraint_history") !=
+                std::string::npos ||
+                duplicate_log.find(
+                    "diagnostic=mesh_tangential_boundary_policy_history") !=
+                    std::string::npos
+            ? 1
+            : 0);
+    const int duplicate_rollback_log_count = globalSum(
+        duplicate_log.find(
+            "diagnostic=mesh_boundary_history_transaction_rollback") !=
+                std::string::npos
+            ? 1
+            : 0);
+
+    EXPECT_EQ(individual_rejection_count, size);
+    EXPECT_EQ(individual_message_count, size);
+    EXPECT_EQ(individual_empty_history_count, size);
+    EXPECT_EQ(metadata_rejection_count, size);
+    EXPECT_EQ(metadata_message_count, size);
+    EXPECT_EQ(metadata_empty_history_count, size);
+    EXPECT_EQ(metadata_accepted_log_count, 0);
+    EXPECT_EQ(duplicate_rejection_count, size);
+    EXPECT_EQ(duplicate_local_validation_count, 1);
+    EXPECT_EQ(duplicate_remote_rejection_count, size - 1);
+    EXPECT_EQ(duplicate_empty_history_count, size);
+    EXPECT_EQ(duplicate_accepted_log_count, 0);
+
+    ::testing::Test::RecordProperty(
+        "mesh_boundary_history_mpi_rank_count", size);
+    ::testing::Test::RecordProperty(
+        "mesh_boundary_history_individual_rejection_count",
+        individual_rejection_count);
+    ::testing::Test::RecordProperty(
+        "mesh_boundary_history_metadata_rejection_count",
+        metadata_rejection_count);
+    ::testing::Test::RecordProperty(
+        "mesh_boundary_history_duplicate_rejection_count",
+        duplicate_rejection_count);
+    ::testing::Test::RecordProperty(
+        "mesh_boundary_history_duplicate_local_validation_count",
+        duplicate_local_validation_count);
+    ::testing::Test::RecordProperty(
+        "mesh_boundary_history_duplicate_remote_rejection_count",
+        duplicate_remote_rejection_count);
+    ::testing::Test::RecordProperty(
+        "mesh_boundary_history_rollback_log_count",
+        duplicate_rollback_log_count);
+    ::testing::Test::RecordProperty(
+        "mesh_boundary_history_accepted_log_count",
+        metadata_accepted_log_count + duplicate_accepted_log_count);
+#else
+    GTEST_SKIP() << "requires an MPI-enabled build";
+#endif
+}
 
 TEST(MovingDomainPhysicsMPI,
      GeneratedActiveCoupledOutflowReductionGradientAndTractionArePartitionIndependent)
@@ -4105,20 +4657,23 @@ TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
         1,
         ChannelPartition::Serial,
         baseline_scales,
-        true);
+        true,
+        false);
     StructuredChannelAssemblyHarness serial_active(
         2,
         0,
         1,
         ChannelPartition::Serial,
         active_scales,
-        true);
+        true,
+        false);
     StructuredChannelAssemblyHarness slab_baseline(
         2,
         rank,
         size,
         ChannelPartition::XSlab,
         baseline_scales,
+        false,
         false);
     StructuredChannelAssemblyHarness slab_active(
         2,
@@ -4126,6 +4681,7 @@ TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
         size,
         ChannelPartition::XSlab,
         active_scales,
+        false,
         false);
     StructuredChannelAssemblyHarness round_robin_baseline(
         2,
@@ -4133,6 +4689,7 @@ TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
         size,
         ChannelPartition::RoundRobin,
         baseline_scales,
+        false,
         false);
     StructuredChannelAssemblyHarness round_robin_active(
         2,
@@ -4140,6 +4697,7 @@ TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
         size,
         ChannelPartition::RoundRobin,
         active_scales,
+        false,
         false);
 
     const auto serial_baseline_sample =
@@ -4386,28 +4944,9 @@ TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
     FE::Real maximum_jacobian_scaling_error{0.0};
     FE::Real minimum_full_residual_norm =
         std::numeric_limits<FE::Real>::infinity();
-    int trace_sample_count = 0;
-    int positive_trace_sample_count = 0;
-    FE::Real minimum_trace_margin =
-        std::numeric_limits<FE::Real>::infinity();
-    FE::Real maximum_trace_partition_error{0.0};
-    FE::Real maximum_trace_consistency_error{0.0};
-    constexpr FE::Real trace_high_gamma = FE::Real{12.0};
-    constexpr FE::Real trace_low_gamma = FE::Real{6.0};
-    constexpr FE::Real trace_viscosity = FE::Real{0.01};
-    constexpr FE::Real trace_h_normal = FE::Real{2.0} / FE::Real{3.0};
-    constexpr std::array<FE::Real, 3> trace_probe_value{{
-        FE::Real{0.3}, FE::Real{-0.15}, FE::Real{0.2}}};
-    constexpr FE::Real trace_probe_squared =
-        trace_probe_value[0] * trace_probe_value[0] +
-        trace_probe_value[1] * trace_probe_value[1] +
-        trace_probe_value[2] * trace_probe_value[2];
-    constexpr FE::Real full_trace_margin =
-        (trace_high_gamma - trace_low_gamma) * trace_viscosity /
-        trace_h_normal * kParentBoundaryMeasure * trace_probe_squared;
 
     for (std::size_t family_index = 0;
-         family_index < kOperatorFamilies.size();
+         family_index < kSyntheticAssemblyOperatorFamilies.size();
          ++family_index) {
         for (std::size_t side_index = 0;
              side_index < kActiveSides.size();
@@ -4415,52 +4954,18 @@ TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
             const int owner_rank = static_cast<int>(
                 family_index * kActiveSides.size() + side_index) % size;
             SharpBoundaryAssemblyHarness reference_harness(
-                kOperatorFamilies[family_index],
+                kSyntheticAssemblyOperatorFamilies[family_index],
                 kActiveSides[side_index],
                 rank,
                 size,
                 rank,
                 true);
             SharpBoundaryAssemblyHarness partition_harness(
-                kOperatorFamilies[family_index],
+                kSyntheticAssemblyOperatorFamilies[family_index],
                 kActiveSides[side_index],
                 rank,
                 size,
                 owner_rank);
-            const bool is_nitsche =
-                kOperatorFamilies[family_index] ==
-                    OperatorFamily::SymmetricNitsche ||
-                kOperatorFamilies[family_index] ==
-                    OperatorFamily::UnsymmetricNitsche;
-            std::unique_ptr<SharpBoundaryAssemblyHarness>
-                reference_low_penalty;
-            std::unique_ptr<SharpBoundaryAssemblyHarness>
-                partition_low_penalty;
-            if (is_nitsche) {
-                reference_low_penalty =
-                    std::make_unique<SharpBoundaryAssemblyHarness>(
-                        kOperatorFamilies[family_index],
-                        kActiveSides[side_index],
-                        rank,
-                        size,
-                        rank,
-                        true,
-                        FE::Real{1.0},
-                        FE::Real{1.0},
-                        trace_low_gamma);
-                partition_low_penalty =
-                    std::make_unique<SharpBoundaryAssemblyHarness>(
-                        kOperatorFamilies[family_index],
-                        kActiveSides[side_index],
-                        rank,
-                        size,
-                        owner_rank,
-                        false,
-                        FE::Real{1.0},
-                        FE::Real{1.0},
-                        trace_low_gamma);
-            }
-
             const auto reference_dry =
                 reference_harness.assemble(FE::Real{0.0});
             const auto reference_full =
@@ -4531,52 +5036,6 @@ TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
                     maximumScalingError(reference_jacobian,
                                         reference_full_jacobian,
                                         fraction));
-
-                if (is_nitsche) {
-                    const auto reference_low =
-                        reference_low_penalty->assemble(measure);
-                    const auto partition_low =
-                        partition_low_penalty->assemble(measure);
-                    const auto reference_penalty_matrix = difference(
-                        reference_wet.jacobian,
-                        reference_low.jacobian);
-                    const auto local_penalty_matrix = difference(
-                        partition_wet.jacobian,
-                        partition_low.jacobian);
-                    const auto global_penalty_matrix =
-                        globalSum(local_penalty_matrix);
-                    const auto trace_probe =
-                        reference_harness.constantVelocityProbe(
-                            trace_probe_value);
-                    const FE::Real reference_margin = quadraticWork(
-                        reference_penalty_matrix, trace_probe);
-                    const FE::Real partition_margin = quadraticWork(
-                        global_penalty_matrix, trace_probe);
-                    const FE::Real expected_margin =
-                        (trace_high_gamma - trace_low_gamma) *
-                        trace_viscosity / trace_h_normal * measure *
-                        trace_probe_squared;
-                    ++trace_sample_count;
-                    if (std::isfinite(reference_margin) &&
-                        reference_margin > FE::Real{0.0} &&
-                        std::isfinite(partition_margin) &&
-                        partition_margin > FE::Real{0.0}) {
-                        ++positive_trace_sample_count;
-                    }
-                    minimum_trace_margin = std::min(
-                        minimum_trace_margin,
-                        std::min(reference_margin, partition_margin));
-                    maximum_trace_partition_error = std::max(
-                        maximum_trace_partition_error,
-                        scaledAbsoluteError(partition_margin,
-                                            reference_margin,
-                                            full_trace_margin));
-                    maximum_trace_consistency_error = std::max(
-                        maximum_trace_consistency_error,
-                        scaledAbsoluteError(reference_margin,
-                                            expected_margin,
-                                            full_trace_margin));
-                }
             }
         }
     }
@@ -4589,11 +5048,6 @@ TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
     maximum_jacobian_scaling_error =
         globalMaximum(maximum_jacobian_scaling_error);
     minimum_full_residual_norm = -globalMaximum(-minimum_full_residual_norm);
-    minimum_trace_margin = -globalMaximum(-minimum_trace_margin);
-    maximum_trace_partition_error =
-        globalMaximum(maximum_trace_partition_error);
-    maximum_trace_consistency_error =
-        globalMaximum(maximum_trace_consistency_error);
 
     EXPECT_EQ(minimum_owner_multiplicity, 1);
     EXPECT_EQ(maximum_owner_multiplicity, 1);
@@ -4603,13 +5057,6 @@ TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
     EXPECT_LE(maximum_work_error, kPartitionTolerance);
     EXPECT_LE(maximum_residual_scaling_error, kPartitionTolerance);
     EXPECT_LE(maximum_jacobian_scaling_error, kPartitionTolerance);
-    EXPECT_EQ(trace_sample_count,
-              static_cast<int>(2u * kActiveSides.size() *
-                               kWetFractions.size()));
-    EXPECT_EQ(positive_trace_sample_count, trace_sample_count);
-    EXPECT_GT(minimum_trace_margin, FE::Real{0.0});
-    EXPECT_LE(maximum_trace_partition_error, kPartitionTolerance);
-    EXPECT_LE(maximum_trace_consistency_error, FE::Real{1.0e-10});
 
     ::testing::Test::RecordProperty("sharp_operator_mpi_rank_count", size);
     ::testing::Test::RecordProperty(
@@ -4620,11 +5067,11 @@ TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
         static_cast<int>(kActiveSides.size()));
     ::testing::Test::RecordProperty(
         "sharp_operator_mpi_family_count",
-        static_cast<int>(kOperatorFamilies.size()));
+        static_cast<int>(kSyntheticAssemblyOperatorFamilies.size()));
     ::testing::Test::RecordProperty(
         "sharp_operator_mpi_partition_case_count",
         static_cast<int>(kWetFractions.size() * kActiveSides.size() *
-                         kOperatorFamilies.size()));
+                         kSyntheticAssemblyOperatorFamilies.size()));
     ::testing::Test::RecordProperty(
         "sharp_operator_mpi_minimum_owner_multiplicity",
         minimum_owner_multiplicity);
@@ -4649,21 +5096,6 @@ TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
     recordRealProperty(
         "sharp_operator_mpi_maximum_jacobian_scaling_error",
         maximum_jacobian_scaling_error);
-    ::testing::Test::RecordProperty(
-        "sharp_operator_mpi_trace_sample_count",
-        trace_sample_count);
-    ::testing::Test::RecordProperty(
-        "sharp_operator_mpi_positive_trace_sample_count",
-        positive_trace_sample_count);
-    recordRealProperty(
-        "sharp_operator_mpi_minimum_trace_margin",
-        minimum_trace_margin);
-    recordRealProperty(
-        "sharp_operator_mpi_maximum_trace_partition_error",
-        maximum_trace_partition_error);
-    recordRealProperty(
-        "sharp_operator_mpi_maximum_trace_consistency_error",
-        maximum_trace_consistency_error);
 #else
     GTEST_SKIP() << "requires an MPI-enabled build";
 #endif

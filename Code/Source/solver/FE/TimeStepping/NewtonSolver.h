@@ -192,6 +192,18 @@ struct NewtonOptions {
 
     bool assemble_both_when_possible{true};
 
+    /**
+     * Assemble and certify only the entry residual, then return without
+     * assembling the production Jacobian or applying a nonlinear update.
+     *
+     * This is an output-only diagnostic path for a caller that needs the
+     * conservative free-surface certificates attached to the exact supplied
+     * state. It requires `min_iterations == 0`, cannot be combined with the
+     * external-state fixed point or the static pressure initializer, and
+     * reports nonconvergence when the entry residual tolerances are not met.
+     */
+    bool initial_residual_only_certificate{false};
+
     // Modified Newton: reuse the Jacobian for multiple nonlinear iterations.
     // `1` => full Newton (assemble every iteration).
     int jacobian_rebuild_period{1};
@@ -234,6 +246,16 @@ struct NewtonOptions {
     bool accepted_state_sync_invalidates_residual{false};
 
     /**
+     * Read the legacy process-environment settings for static free-surface
+     * diagnostics and pressure initialization.
+     *
+     * Ordinary solves retain the historical default. An internally owned
+     * output-only certificate can disable this so ambient settings cannot
+     * turn a diagnostic probe into a state-mutating pressure initializer.
+     */
+    bool read_static_free_surface_environment_options{true};
+
+    /**
      * Maximum relative distance of the accepted static capillary load from
      * the constrained discrete pressure-gradient range.
      *
@@ -245,6 +267,17 @@ struct NewtonOptions {
      */
     std::optional<double>
         accepted_static_pressure_representability_max_relative_distance{};
+
+    /**
+     * Maximum relative KKT residual after fitting only a physical constant
+     * pressure jump to the accepted static capillary load.
+     *
+     * This is stricter than the complete pressure-space distance above and
+     * is intended for a discrete fixed-volume stationary geometry.  It does
+     * not project or replace the production capillary load.
+     */
+    std::optional<double>
+        accepted_static_constant_pressure_kkt_max_relative_distance{};
 
     /**
      * Add the stationary least-squares pressure correction for the assembled
@@ -282,6 +315,32 @@ struct NewtonReport {
     double pressure_representability_relative_distance{
         std::numeric_limits<double>::quiet_NaN()};
     std::string pressure_representability_reason{"not_sampled"};
+    /**
+     * One-dimensional equilibrium subproblem for a physical unit pressure
+     * trace.  This reports the best constant pressure jump and the residual
+     * left in the assembled surface/Young virtual work.  It never replaces or
+     * projects the production capillary load.
+     */
+    bool constant_pressure_kkt_available{false};
+    bool constant_pressure_unit_coefficients_represent_constant{false};
+    bool constant_pressure_constraints_preserve_constants{false};
+    double constant_pressure_kkt_pressure_jump{
+        std::numeric_limits<double>::quiet_NaN()};
+    double constant_pressure_kkt_volume_multiplier{
+        std::numeric_limits<double>::quiet_NaN()};
+    double constant_pressure_kkt_direction_norm{
+        std::numeric_limits<double>::quiet_NaN()};
+    double constant_pressure_kkt_residual_norm{
+        std::numeric_limits<double>::quiet_NaN()};
+    double constant_pressure_kkt_relative_distance{
+        std::numeric_limits<double>::quiet_NaN()};
+    double constant_pressure_kkt_relative_orthogonality{
+        std::numeric_limits<double>::quiet_NaN()};
+    std::string constant_pressure_kkt_reason{"not_sampled"};
+    bool constant_pressure_kkt_distance_gate_applied{false};
+    bool constant_pressure_kkt_distance_gate_passed{false};
+    double constant_pressure_kkt_max_relative_distance{
+        std::numeric_limits<double>::quiet_NaN()};
     bool pressure_representability_distance_gate_applied{false};
     bool pressure_representability_distance_gate_passed{false};
     double pressure_representability_max_relative_distance{

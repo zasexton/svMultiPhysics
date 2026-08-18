@@ -552,6 +552,21 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     EXPECT_EQ(system.cutIntegrationContext(), nullptr);
     EXPECT_FALSE(system.constraintStateStaleForCurrentRevisions());
 
+    bool reject_next_context_update = false;
+    system.addCutIntegrationContextUpdateCallback(
+        systems::CutIntegrationContextUpdateCallback{
+            .name =
+                "level-set-constraint-rollback-retry",
+            .callback =
+                [&](const assembly::CutIntegrationContext*) {
+                    if (reject_next_context_update) {
+                        reject_next_context_update = false;
+                        throw std::runtime_error(
+                            "rollback callback rejected");
+                    }
+                },
+        });
+
     const auto phi_handle = MeshFields::get_field_handle(
         mesh->local_mesh(), EntityKind::Vertex, "phi");
     auto* phi = MeshFields::field_data_as<real_t>(
@@ -587,6 +602,17 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     std::copy(original_phi.begin(), original_phi.end(), phi);
     mesh->event_bus().notify(MeshEvent::FieldsChanged);
     mesh->event_bus().restore_revision_state(original_mesh_revisions);
+    reject_next_context_update = true;
+    EXPECT_THROW(
+        system.rollbackCutIntegrationContextTransaction(),
+        std::runtime_error);
+    EXPECT_TRUE(
+        system.cutIntegrationContextTransactionActive());
+    EXPECT_THROW(
+        system.commitCutIntegrationContextTransaction(),
+        std::logic_error);
+    EXPECT_TRUE(
+        system.cutIntegrationContextTransactionActive());
     ASSERT_NO_THROW(system.rollbackCutIntegrationContextTransaction());
     EXPECT_FALSE(system.cutIntegrationContextTransactionActive());
     EXPECT_THROW(system.rollbackCutIntegrationContextTransaction(),

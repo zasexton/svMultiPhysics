@@ -1,0 +1,152 @@
+#pragma once
+
+/**
+ * @file
+ * @ingroup fe_level_set
+ * @brief Transactional fixed-volume minimization for a discrete static cap.
+ */
+
+#include "Core/Types.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <span>
+#include <string>
+#include <vector>
+
+namespace svmp::FE::level_set {
+
+/**
+ * Options for fixed-topology minimization of the snapshot-owned
+ * surface-plus-Young-wall energy at a prescribed liquid volume.
+ */
+struct LevelSetStaticCapillaryEquilibriumOptions {
+    Real target_liquid_volume{0.0};
+    Real volume_tolerance{1.0e-10};
+    Real projected_gradient_tolerance{1.0e-8};
+    Real constant_pressure_kkt_max_residual_norm{1.0e-10};
+    Real constant_pressure_kkt_max_relative_distance{1.0e-8};
+
+    // Coefficient-valued scales. The relative finite-difference step is
+    // multiplied by the larger of this reference scale and the coefficient
+    // magnitude. The inverse stiffness has units coefficient^2 / energy.
+    Real finite_difference_reference_coefficient_scale{1.0};
+    Real finite_difference_relative_step{1.0e-6};
+    Real minimum_finite_difference_step{1.0e-12};
+    int finite_difference_max_shrinks{12};
+
+    int max_iterations{50};
+    int max_line_search_iterations{20};
+    Real projected_gradient_inverse_stiffness{1.0};
+    Real tangent_trust_radius{0.05};
+    Real maximum_coefficient_update_linf{0.25};
+    Real line_search_shrink{0.5};
+    Real armijo_fraction{1.0e-4};
+    // Energy per unit volume. The iteration also raises this value above the
+    // current multiplier magnitude so the l1 volume merit has a descent step.
+    Real minimum_volume_merit_penalty{1.0};
+};
+
+/**
+ * Globally reduced evaluation of one immutable candidate geometry.
+ *
+ * The energy excludes the volume-multiplier term. The evaluator must build
+ * all fields from the supplied coefficients, return identical decision data
+ * on every participating rank, and leave published solver state unchanged.
+ */
+struct LevelSetStaticCapillaryEquilibriumEvaluation {
+    bool success{false};
+    std::uint64_t snapshot_revision_key{0u};
+    // Candidate-stable combinatorial key. It must exclude source-value and
+    // snapshot revisions so geometry can move within one topology epoch.
+    std::uint64_t cut_topology_key{0u};
+    // Deterministic fingerprint of the constrained admissible trace used by
+    // the candidate. The evaluator must recompute it from slave/master
+    // relations, weights, and prescribed values.
+    std::uint64_t constraint_semantics_key{0u};
+    Real surface_wall_energy{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real liquid_volume{std::numeric_limits<Real>::quiet_NaN()};
+    bool constant_pressure_kkt_available{false};
+    Real constant_pressure_kkt_residual_norm{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real constant_pressure_kkt_relative_distance{
+        std::numeric_limits<Real>::quiet_NaN()};
+    // Trial evaluation must never obtain equilibrium by replacing the
+    // production surface/Young load with a pressure-range projection.
+    bool production_force_projection_applied{false};
+    std::string diagnostic{};
+};
+
+enum class LevelSetStaticCapillaryEvaluationPurpose : std::uint8_t {
+    FunctionalTrial,
+    AcceptanceCertificate,
+};
+
+using LevelSetStaticCapillaryEquilibriumEvaluator =
+    std::function<LevelSetStaticCapillaryEquilibriumEvaluation(
+        std::span<const Real>,
+        LevelSetStaticCapillaryEvaluationPurpose)>;
+
+struct LevelSetStaticCapillaryEquilibriumResult {
+    bool success{false};
+    bool converged{false};
+    bool accepted_coefficients_assigned{false};
+    int iterations{0};
+    std::size_t functional_evaluations{0u};
+    std::size_t acceptance_certificate_evaluations{0u};
+    std::size_t finite_difference_step_shrinks{0u};
+    std::size_t line_search_rejections{0u};
+    std::size_t topology_change_rejections{0u};
+    std::size_t constraint_change_rejections{0u};
+
+    std::uint64_t initial_snapshot_revision_key{0u};
+    std::uint64_t final_snapshot_revision_key{0u};
+    std::uint64_t cut_topology_key{0u};
+    std::uint64_t constraint_semantics_key{0u};
+    Real initial_surface_wall_energy{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real final_surface_wall_energy{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real initial_liquid_volume{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real final_liquid_volume{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real final_volume_error{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real final_volume_multiplier{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real final_projected_gradient_norm{
+        std::numeric_limits<Real>::quiet_NaN()};
+    bool final_constant_pressure_kkt_available{false};
+    Real final_constant_pressure_kkt_residual_norm{
+        std::numeric_limits<Real>::quiet_NaN()};
+    Real final_constant_pressure_kkt_relative_distance{
+        std::numeric_limits<Real>::quiet_NaN()};
+    std::string diagnostic{};
+};
+
+/**
+ * Minimize a fixed-topology discrete capillary functional.
+ *
+ * Central differences are evaluated only inside the initial cut-topology and
+ * constrained-trace epoch. Each SQP-like step satisfies the linearized volume
+ * constraint and descends an l1 volume-merit function. Convergence
+ * additionally requires the evaluator's unprojected constant-pressure KKT
+ * residual to pass both declared absolute and relative gates.
+ *
+ * `accepted_coefficients` is assigned only after every convergence gate
+ * passes. It is left byte-for-byte unchanged on invalid input, evaluator
+ * failure, topology rejection, line-search failure, or nonconvergence.
+ */
+[[nodiscard]] LevelSetStaticCapillaryEquilibriumResult
+minimizeLevelSetStaticCapillaryEquilibrium(
+    const LevelSetStaticCapillaryEquilibriumOptions& options,
+    std::span<const Real> input_coefficients,
+    std::span<const std::size_t> active_coefficient_indices,
+    const LevelSetStaticCapillaryEquilibriumEvaluator& evaluator,
+    std::vector<Real>& accepted_coefficients);
+
+} // namespace svmp::FE::level_set

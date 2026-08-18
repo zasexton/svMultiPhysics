@@ -666,11 +666,39 @@ forms::FormExpr CouplingFormBuilder::integrate(const forms::FormExpr& integrand,
              "user-defined coupling region requires a concrete Forms integration kind");
 }
 
+forms::FormExpr CouplingFormBuilder::integrate(
+    const forms::FormExpr& integrand,
+    const CouplingRegionRef& region,
+    const forms::ExteriorBoundaryMeasure& boundary_measure) const
+{
+    FE_THROW_IF(
+        region.kind != CouplingRegionKind::Boundary,
+        InvalidArgumentException,
+        "an explicit exterior boundary measure requires a boundary coupling region");
+    FE_THROW_IF(
+        region.marker != boundary_measure.physicalBoundaryMarker(),
+        InvalidArgumentException,
+        "the exterior boundary measure physical marker must match the coupling region marker");
+    return integrand.dExteriorBoundary(boundary_measure);
+}
+
 forms::FormExpr CouplingFormBuilder::integrate(const forms::FormExpr& integrand,
                                                std::string_view participant_name,
                                                std::string_view region_name) const
 {
     return integrate(integrand, region(participant_name, region_name));
+}
+
+forms::FormExpr CouplingFormBuilder::integrate(
+    const forms::FormExpr& integrand,
+    std::string_view participant_name,
+    std::string_view region_name,
+    const forms::ExteriorBoundaryMeasure& boundary_measure) const
+{
+    return integrate(
+        integrand,
+        region(participant_name, region_name),
+        boundary_measure);
 }
 
 forms::FormExpr CouplingFormBuilder::integrateShared(
@@ -679,6 +707,18 @@ forms::FormExpr CouplingFormBuilder::integrateShared(
     std::string_view participant_name) const
 {
     return integrate(integrand, sharedRegion(shared_region_name, participant_name));
+}
+
+forms::FormExpr CouplingFormBuilder::integrateShared(
+    const forms::FormExpr& integrand,
+    std::string_view shared_region_name,
+    std::string_view participant_name,
+    const forms::ExteriorBoundaryMeasure& boundary_measure) const
+{
+    return integrate(
+        integrand,
+        sharedRegion(shared_region_name, participant_name),
+        boundary_measure);
 }
 
 CouplingSharedInterfaceView CouplingFormBuilder::sharedInterface(

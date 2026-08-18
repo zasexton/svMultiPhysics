@@ -8,6 +8,7 @@
 #include "Backends/Interfaces/BlockVector.h"
 
 #include <cmath>
+#include <limits>
 
 namespace svmp {
 namespace FE {
@@ -125,6 +126,45 @@ void BlockVector::updateGhosts()
     ++value_revision_;
 }
 
+bool BlockVector::ghostUpdateRequiresCollectiveParticipation() const noexcept
+{
+    return std::any_of(
+        blocks_.begin(),
+        blocks_.end(),
+        [](const auto& block) {
+            return block != nullptr &&
+                   block->ghostUpdateRequiresCollectiveParticipation();
+        });
+}
+
+std::vector<GlobalIndex> BlockVector::ownedGlobalRows() const
+{
+    std::vector<GlobalIndex> rows;
+    for (std::size_t block_index = 0u; block_index < blocks_.size();
+         ++block_index) {
+        const auto child_rows = blocks_[block_index]->ownedGlobalRows();
+        rows.reserve(rows.size() + child_rows.size());
+        for (const auto child_row : child_rows) {
+            FE_THROW_IF(
+                child_row < 0 || child_row >= blocks_[block_index]->size(),
+                InvalidArgumentException,
+                "BlockVector::ownedGlobalRows: child row is out of range");
+            FE_THROW_IF(
+                offsets_[block_index] >
+                    std::numeric_limits<GlobalIndex>::max() - child_row,
+                InvalidArgumentException,
+                "BlockVector::ownedGlobalRows: global row offset overflows");
+            rows.push_back(offsets_[block_index] + child_row);
+        }
+    }
+    FE_THROW_IF(
+        !std::is_sorted(rows.begin(), rows.end()) ||
+            std::adjacent_find(rows.begin(), rows.end()) != rows.end(),
+        InvalidArgumentException,
+        "BlockVector::ownedGlobalRows: child ownership is not strictly sorted");
+    return rows;
+}
+
 GenericVector& BlockVector::block(std::size_t i)
 {
     FE_THROW_IF(i >= blocks_.size(), InvalidArgumentException, "BlockVector::block: index out of range");
@@ -159,12 +199,18 @@ namespace {
 
 class BlockVectorView final : public assembly::GlobalSystemView {
 public:
-    explicit BlockVectorView(BlockVector& vec) : vec_(&vec)
+    explicit BlockVectorView(BlockVector& vec,
+                             bool locally_relevant_reads = false)
+        : vec_(&vec),
+          locally_relevant_reads_(locally_relevant_reads)
     {
         FE_CHECK_NOT_NULL(vec_, "BlockVectorView::vec");
         block_views_.reserve(vec_->numBlocks());
         for (std::size_t i = 0; i < vec_->numBlocks(); ++i) {
-            block_views_.push_back(vec_->block(i).createAssemblyView());
+            block_views_.push_back(
+                locally_relevant_reads
+                    ? vec_->block(i).createGhostedReadView()
+                    : vec_->block(i).createAssemblyView());
         }
     }
 
@@ -216,6 +262,9 @@ public:
         FE_CHECK_NOT_NULL(vec_, "BlockVectorView::vec");
         const auto [bidx, local] = vec_->locate(dof);
         if (bidx >= block_views_.size()) {
+            FE_THROW_IF(locally_relevant_reads_,
+                        InvalidArgumentException,
+                        "BlockVectorView::getVectorEntry: global index out of range");
             return 0.0;
         }
         return block_views_[bidx]->getVectorEntry(local);
@@ -270,6 +319,7 @@ public:
 
 private:
     BlockVector* vec_{nullptr};
+    bool locally_relevant_reads_{false};
     std::vector<std::unique_ptr<assembly::GlobalSystemView>> block_views_{};
     assembly::AssemblyPhase phase_{assembly::AssemblyPhase::NotStarted};
 };
@@ -279,6 +329,13 @@ private:
 std::unique_ptr<assembly::GlobalSystemView> BlockVector::createAssemblyView()
 {
     return std::make_unique<BlockVectorView>(*this);
+}
+
+std::unique_ptr<assembly::GlobalSystemView>
+BlockVector::createGhostedReadView()
+{
+    return std::make_unique<BlockVectorView>(
+        *this, /*locally_relevant_reads=*/true);
 }
 
 std::span<Real> BlockVector::localSpan()

@@ -101,6 +101,33 @@ bc_manager.add(forms::bc::makeTraceRobinBC(7, Constant(alpha), Constant(rhs)));
 bc_manager.applyAll(system, residual, q, w, q_field);
 ```
 
+For an exterior face clipped by an unfitted active domain, pass the typed
+selector instead of a bare physical marker:
+
+```cpp
+const auto wet_wall =
+    forms::ExteriorBoundaryMeasure::generatedActiveSubset(
+        physical_wall_marker, generated_wet_wall_marker);
+bc_manager.add(forms::bc::makeTraceRobinBC(
+    wet_wall, Constant(alpha), Constant(rhs)));
+```
+
+The same selector overload is available for trace loads, trace inequalities,
+generic trace Nitsche forms, scalar Nitsche wrappers, and the generic
+Neumann/Robin helper families. The compiled term retains both markers so
+system setup can verify generated-domain provenance before assembly.
+An integer marker alone remains a legacy, unqualified boundary route; it is
+rejected if the current cut context exposes a generated active subset for that
+physical marker. A formulation that genuinely needs the complete background
+face must say so with
+`ExteriorBoundaryMeasure::fullPhysical(physical_marker)`.
+`CouplingFormBuilder::integrate(...)` has corresponding selector overloads;
+they require the selector's physical marker to match the declared coupling
+boundary region before constructing the form.
+Selection alone does not certify a cut-stable numerical penalty. Generated
+Nitsche production routes that claim that property must also use the
+form-bound trace-certificate workflow and its aggregation prerequisite.
+
 Interface trace conditions use the same manager surface:
 
 ```cpp

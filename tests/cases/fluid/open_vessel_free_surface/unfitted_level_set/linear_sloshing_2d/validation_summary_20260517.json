@@ -1,0 +1,187 @@
+{
+  "case": "linear_sloshing_2d",
+  "date": "2026-05-17",
+  "purpose": "Acceptance evidence for the OOP unfitted level-set free-surface regression path.",
+  "binary": "build/svMultiPhysics-build/bin/svmultiphysics",
+  "reference_configuration": {
+    "nx": 16,
+    "ny": 16,
+    "time_step": 0.004924231346267527,
+    "time_steps": 50,
+    "final_time": 0.2462115673135,
+    "cut_cell_velocity_gradient_penalty": 1.0,
+    "cut_cell_pressure_gradient_penalty": 1.0,
+    "cut_cell_stabilization": true
+  },
+  "refinement_study": [
+    {
+      "name": "baseline_16",
+      "nx": 16,
+      "ny": 16,
+      "time_step": 0.004924231346267527,
+      "time_steps": 50,
+      "passed": true,
+      "interface_l2_height_error": 0.00012849194434947503,
+      "interface_max_height_error": 0.0003790624993861291,
+      "velocity_relative_l2_error": 0.03230182546399846,
+      "pressure_relative_rms_error_after_constant_offset_removal": 0.00010621689787469091,
+      "relative_area_error": 0.000001954619046617978
+    },
+    {
+      "name": "dt_half_16",
+      "nx": 16,
+      "ny": 16,
+      "time_step": 0.0024621156731337635,
+      "time_steps": 100,
+      "passed": true,
+      "interface_l2_height_error": 0.00012290860366952945,
+      "interface_max_height_error": 0.00036335681567933875,
+      "velocity_relative_l2_error": 0.02589216555699186,
+      "pressure_relative_rms_error_after_constant_offset_removal": 0.00015400059145268653,
+      "relative_area_error": 0.00000196527925000467
+    },
+    {
+      "name": "mesh_24",
+      "nx": 24,
+      "ny": 24,
+      "time_step": 0.004924231346267527,
+      "time_steps": 50,
+      "passed": true,
+      "interface_l2_height_error": 0.00009987761251291497,
+      "interface_max_height_error": 0.0003532267078842355,
+      "velocity_relative_l2_error": 0.03482449551729177,
+      "pressure_relative_rms_error_after_constant_offset_removal": 0.000051306892087714944,
+      "relative_area_error": 0.0000005327312737612999
+    },
+    {
+      "name": "mesh24_dt_half",
+      "nx": 24,
+      "ny": 24,
+      "time_step": 0.0024621156731337635,
+      "time_steps": 100,
+      "passed": true,
+      "interface_l2_height_error": 0.00010250498801494173,
+      "interface_max_height_error": 0.0003699582662521905,
+      "velocity_relative_l2_error": 0.028567990511741,
+      "pressure_relative_rms_error_after_constant_offset_removal": 0.00008033338239755517,
+      "relative_area_error": 0.0000006480705359024341
+    }
+  ],
+  "stabilization_study": [
+    {
+      "name": "disabled",
+      "cut_cell_stabilization": false,
+      "velocity_penalty": 0.0,
+      "pressure_penalty": 0.0,
+      "passed": true,
+      "interface_l2_height_error": 0.0001284640184275593,
+      "velocity_relative_l2_error": 0.031028938113095785,
+      "pressure_relative_rms_error_after_constant_offset_removal": 0.00009908211105754989,
+      "relative_area_error": 0.0000018467286075907197,
+      "interface_pressure_max_abs": 1.6021926353656966
+    },
+    {
+      "name": "nearzero",
+      "cut_cell_stabilization": true,
+      "velocity_penalty": 0.000001,
+      "pressure_penalty": 0.000001,
+      "passed": true,
+      "interface_l2_height_error": 0.00012777414174056271,
+      "velocity_relative_l2_error": 0.031806691451863975,
+      "pressure_relative_rms_error_after_constant_offset_removal": 0.0001036920422123782,
+      "relative_area_error": 0.0000019686756695946883,
+      "interface_pressure_max_abs": 3.895085542778574
+    },
+    {
+      "name": "velocity_dominant_eps",
+      "cut_cell_stabilization": true,
+      "velocity_penalty": 1.0,
+      "pressure_penalty": 0.000001,
+      "passed": true,
+      "interface_l2_height_error": 0.00012777380958706164,
+      "velocity_relative_l2_error": 0.031806676488352385,
+      "pressure_relative_rms_error_after_constant_offset_removal": 0.00010369193300424349,
+      "relative_area_error": 0.0000019686095649174007,
+      "interface_pressure_max_abs": 3.895076327180874
+    },
+    {
+      "name": "pressure_dominant_eps",
+      "cut_cell_stabilization": true,
+      "velocity_penalty": 0.000001,
+      "pressure_penalty": 1.0,
+      "passed": true,
+      "interface_l2_height_error": 0.00012849226745594936,
+      "velocity_relative_l2_error": 0.03230184215245979,
+      "pressure_relative_rms_error_after_constant_offset_removal": 0.00010621708194485863,
+      "relative_area_error": 0.0000019547091933969085,
+      "interface_pressure_max_abs": 3.842713232071887
+    },
+    {
+      "name": "strong_10",
+      "cut_cell_stabilization": true,
+      "velocity_penalty": 10.0,
+      "pressure_penalty": 10.0,
+      "passed": true,
+      "interface_l2_height_error": 0.00012848908793308952,
+      "velocity_relative_l2_error": 0.03230167999756354,
+      "pressure_relative_rms_error_after_constant_offset_removal": 0.00010621554651136463,
+      "relative_area_error": 0.0000019573213529966438,
+      "interface_pressure_max_abs": 3.8426180551171996
+    }
+  ],
+  "known_singular_stabilization_limit": {
+    "name": "velocity_only_zero_pressure_penalty",
+    "cut_cell_stabilization": true,
+    "velocity_penalty": 1.0,
+    "pressure_penalty": 0.0,
+    "result": "solver_failed",
+    "reason": "The direct linear solve reports zero pressure rows when the pressure cut-cell penalty is exactly zero. The supported isolated limit keeps the inactive side at a small nonzero penalty."
+  },
+  "oop_incompressible_navier_stokes_fixture_sweeps": [
+    {
+      "xml": "solver_perf_oop.xml",
+      "modes": ["serial", "mpi2"],
+      "cases_passed": [
+        "pipe_simple",
+        "Channel2D_Simple",
+        "Channel2D",
+        "vortex_shedding",
+        "pipe_RCR_3d",
+        "iliac_artery"
+      ]
+    },
+    {
+      "xml": "solver_new.xml",
+      "modes": ["serial", "mpi2"],
+      "cases_passed": [
+        "pipe_simple",
+        "Channel2D_Simple",
+        "Channel2D",
+        "vortex_shedding",
+        "pipe_RCR_3d",
+        "iliac_artery"
+      ],
+      "configuration_update": "pipe_simple and pipe_RCR_3d solver_new.xml use the same 15 nonlinear-iteration cap as their passing solver_perf_oop.xml fixtures."
+    }
+  ],
+  "focused_tests": [
+    "LevelSetTransport.InterfaceKinematicAddsInterfaceResidual",
+    "LevelSetTransport.ValidatesInterfaceKinematicOptions",
+    "MovingDomainPhysics.NavierStokesUnfittedFreeSurfaceUsesGeneratedInterfaceMarker",
+    "MovingDomainPhysics.NavierStokesUnfittedFreeSurfaceAddsCutCellStabilization",
+    "MovingDomainPhysics.NavierStokesActiveDomainResidualFollowsNewtonLevelSetSignChange",
+    "CutCellForms.CutVolumeIntegralJITMatchesInterpreterOnSameCutQuadrature",
+    "CutCellForms.HighOrderGeneratedCutRulesJITMatchInterpreter",
+    "CutCellForms.CutInterfaceIntegralJITMatchesInterpreterOnSameCutQuadrature",
+    "CutCellForms.HighOrderCutInterfaceTangentMatchesFixedGeometryFiniteDifference",
+    "CutCellForms.CutInterfaceSurfaceTractionSignFollowsQuadratureNormal",
+    "CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesConstantsAcrossPaths",
+    "CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesLinearFieldsAcrossPaths",
+    "CutIntegrationInfrastructure.BindsCutAdjacentFacetScalesFromSelectedSideMetadata",
+    "CutIntegrationInfrastructure.ProductionCutScalarOperatorsConsumeImportedTopologyAcrossAllExecutionPaths"
+  ],
+  "interpretation": {
+    "refinement": "The smaller time step improves interface and velocity errors. The finer mesh improves interface, pressure, and area errors. The combined finer mesh and smaller time step improves the velocity error relative to the baseline. These trends are sufficient for regression acceptance; the case remains a linear-reference regression rather than a full physical validation benchmark.",
+    "stabilization": "Near-zero, pressure-dominant, velocity-dominant, strong, and disabled stabilization all complete and pass the verifier. The pressure-penalty zero limit is singular for the direct-solve regression, so isolation should use a small nonzero pressure penalty."
+  }
+}

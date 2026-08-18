@@ -24,6 +24,7 @@ using application::core::LevelSetMaintenanceWorkTransaction;
 enum class TransactionDrift : std::uint8_t {
   None,
   FunctionalContent,
+  ModeledEnergyContent,
   AlgebraicRevision,
   SnapshotRevision,
   MeshTopologyRevision,
@@ -56,6 +57,14 @@ LevelSetAuthoritativeFunctionalValue makeFunctional(
       .young_wall_energy = -0.25,
       .volume_constraint_potential = total_potential - 2.75,
       .total_potential = total_potential,
+      .kinetic_energy = 1.0,
+      .gravitational_energy = 2.0,
+      .gravitational_potential_power = -0.5,
+      .surface_wall_potential_power = 0.25,
+      .volume_constraint_potential_power = -0.125,
+      .bulk_viscous_dissipation_rate = 0.75,
+      .external_pressure_power = -0.4,
+      .modeled_stored_energy = 5.75,
   };
 }
 
@@ -95,7 +104,11 @@ bool rowsExactlyEqual(
          left.after == right.after &&
          left.numerical_work == right.numerical_work &&
          left.accepted_numerical_work ==
-             right.accepted_numerical_work;
+             right.accepted_numerical_work &&
+         left.modeled_energy_numerical_work ==
+             right.modeled_energy_numerical_work &&
+         left.accepted_modeled_energy_numerical_work ==
+             right.accepted_modeled_energy_numerical_work;
 }
 
 void seedAcceptedLedgerRow(LevelSetMaintenanceWorkLedger& ledger)
@@ -151,6 +164,10 @@ void beginCandidateTransaction(
         break;
       case TransactionDrift::FunctionalContent:
         after.liquid_volume += 0.125;
+        break;
+      case TransactionDrift::ModeledEnergyContent:
+        *after.kinetic_energy += 0.25;
+        *after.modeled_stored_energy += 0.25;
         break;
       case TransactionDrift::AlgebraicRevision:
         ++algebraic_revision_after;
@@ -302,6 +319,10 @@ void runRejectCase(
       had_active_transaction ? local_trial_row_count : 0u);
   for (const auto& row : ledger.rejectedRows()) {
     EXPECT_DOUBLE_EQ(row.accepted_numerical_work, 0.0);
+    ASSERT_TRUE(
+        row.accepted_modeled_energy_numerical_work.has_value());
+    EXPECT_DOUBLE_EQ(
+        *row.accepted_modeled_energy_numerical_work, 0.0);
   }
   ASSERT_EQ(
       ledger.rejectedAttempts().size(),
@@ -313,6 +334,15 @@ void runRejectCase(
     EXPECT_DOUBLE_EQ(
         ledger.rejectedAttempts().front().accepted_numerical_work,
         0.0);
+    ASSERT_TRUE(
+        ledger.rejectedAttempts()
+            .front()
+            .accepted_modeled_energy_numerical_work.has_value());
+    EXPECT_DOUBLE_EQ(
+        *ledger.rejectedAttempts()
+             .front()
+             .accepted_modeled_energy_numerical_work,
+        0.0);
   }
 }
 
@@ -323,6 +353,8 @@ std::string_view driftName(TransactionDrift drift)
       return "none";
     case TransactionDrift::FunctionalContent:
       return "functional_content";
+    case TransactionDrift::ModeledEnergyContent:
+      return "modeled_energy_content";
     case TransactionDrift::AlgebraicRevision:
       return "algebraic_revision";
     case TransactionDrift::SnapshotRevision:
@@ -371,8 +403,9 @@ void runCommitRejectAndContentRevisionAgreement(
         rank,
         size);
   }
-  constexpr std::array<TransactionDrift, 12> drifts{
+  constexpr std::array<TransactionDrift, 13> drifts{
       TransactionDrift::FunctionalContent,
+      TransactionDrift::ModeledEnergyContent,
       TransactionDrift::AlgebraicRevision,
       TransactionDrift::SnapshotRevision,
       TransactionDrift::MeshTopologyRevision,

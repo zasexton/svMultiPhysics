@@ -890,6 +890,9 @@ void writeLevelSetInterfaceQuadratureDebugJson(
     out << "{\n";
     out << "  \"parent_cell\": " << parent_cell << ",\n";
     out << "  \"request\": {\n";
+    out << "    \"generated_domain_id\": ";
+    writeJsonString(out, request.generated_domain_id);
+    out << ",\n";
     out << "    \"interface_marker\": " << request.interface_marker << ",\n";
     out << "    \"isovalue\": " << request.isovalue << ",\n";
     out << "    \"tolerance\": " << request.tolerance << ",\n";

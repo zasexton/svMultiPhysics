@@ -25,7 +25,7 @@ REPOSITORY_ROOT = SCRIPT_PATH.parents[3]
 DEFAULT_MATRIX = SCRIPT_PATH.with_name(
     "free_surface_wp10_capability_boundary_matrix.json"
 )
-EXPECTED_MATRIX_ID = "free_surface_wp10_capability_boundary_v2"
+EXPECTED_MATRIX_ID = "free_surface_wp10_capability_boundary_v3"
 EXPECTED_STATUS = "FROZEN_CAPABILITY_BOUNDARY"
 EXPECTED_ARCHITECTURE_RECORD = (
     "Documentation/free_surface_wp10_physical_capability_boundary.md"
@@ -37,7 +37,7 @@ EXPECTED_SCOPE = (
     "qualify any two-fluid or gas-sensitive phenomenon."
 )
 EXPECTED_CURRENT_BOUNDARY = {
-    "artifact_schema_version": 2,
+    "artifact_schema_version": 3,
     "momentum_capability_label": "one_phase_liquid_sharp_interface",
     "physical_model_name": "one_phase_liquid_prescribed_exterior_pressure",
     "legacy_physical_model": None,
@@ -89,7 +89,13 @@ EXPECTED_SOURCE_CHECKS = {
             "IncompressibleNavierStokesVMSModule.cpp"
         ),
         "required_fragments": [
-            'out << "{\\"artifact_schema_version\\":2"',
+            'out << "{\\"artifact_schema_version\\":3"',
+            "fitted_surface_contact_capability",
+            "supported_configuration_envelope",
+            "fail_closed_before_system_mutation",
+            "fitted_surface_stress_current_frame_gradient_unqualified",
+            "fitted_contact_line_codimension_two_unavailable",
+            "dynamic_contact_requires_sharp_unfitted_level_set",
             '",\\"physical_model\\":"',
             '"one_phase_liquid_prescribed_exterior_pressure"',
             "prescribed_scalar_traction_reference",
@@ -121,7 +127,18 @@ EXPECTED_SOURCE_CHECKS = {
             '"FreeSurfacePhysicalModel"',
             "validate_and_resolve_free_surface_physical_model(",
             "create_navier_stokes_from_input(",
+            "preflightFittedSurfaceContactCapability(",
             "preRegisterPrimaryVelocityField(",
+        ],
+        "forbidden_fragments": [],
+    },
+    "application_fitted_capability_preflight": {
+        "path": "Code/Source/solver/Application/Core/SimulationBuilder.cpp",
+        "required_fragments": [
+            "preflightNavierStokesFittedSurfaceContactCapabilities(",
+            "preflightFittedSurfaceContactCapability(",
+            "preflightAndPreRegisterPhysicsModuleDependencies(",
+            "preRegisterFutureWetExtensionVelocity(",
         ],
         "forbidden_fragments": [],
     },
@@ -209,6 +226,10 @@ EXPECTED_GROUPS = {
             (
                 "EquationTranslatorFreeSurface."
                 "XmlPhysicalModelIsExplicitAndUnsupportedScopeFailsClosed"
+            ),
+            (
+                "OpenVesselExamples."
+                "SimulationBuilderPreflightsFittedCapabilityBeforeWetExtensionMutation"
             ),
         ],
         "execution": {

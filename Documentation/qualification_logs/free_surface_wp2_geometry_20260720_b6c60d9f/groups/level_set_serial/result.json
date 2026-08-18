@@ -1,0 +1,147 @@
+{
+  "checks": [
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "process_return_code",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": null,
+      "expected": null,
+      "metric": "termination_reason",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 49,
+      "expected": 49,
+      "metric": "test_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "failure_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "error_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "disabled_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "missing_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "incomplete_or_skipped_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "tests_with_failure_records",
+      "passed": true,
+      "relation": "equal"
+    }
+  ],
+  "command": [
+    "/home/zack/Downloads/svMultiPhysics/build-fe-check/test_fe_levelset",
+    "--gtest_filter=LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSameSignCornerInteriorIsland:LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSerendipityInteriorProbeIsland:LevelSetInterfaceLifecycle.Saye3DTerminalBoxUsesInteriorHintToSplitSameSignCorners:LevelSetInterfaceLifecycle.LinearBackendOutputPassesCommonValidation:LevelSetInterfaceLifecycle.InvalidBackendOutputIsRejected:LevelSetInterfaceLifecycle.BackendValidationRejectsInconsistentInterfaceNormals:LevelSetInterfaceLifecycle.BackendValidationRejectsInconsistentQuadratureWeights:LevelSetInterfaceLifecycle.BackendValidationRejectsBadRootPolishMetadata:LevelSetInterfaceLifecycle.BackendMetadataReachesCutIntegrationContext:LevelSetInterfaceLifecycle.SayeHyperrectangleP1LineMatchesLinearMeasures:LevelSetInterfaceLifecycle.SayeHyperrectangleSeededLineCutsMatchAnalyticAreas:LevelSetInterfaceLifecycle.SayeHyperrectangleP1PlaneMatchesHexMeasures:LevelSetInterfaceLifecycle.SayeHexReferenceVolumeRulesMapToPhysicalCutVolume:LevelSetInterfaceLifecycle.HighOrderSubcellP2CircleSegmentApproximatesAreaAndLength:LevelSetInterfaceLifecycle.HighOrderSubcellTriangleCircleErrorsDecreaseUnderHRefinement:LevelSetInterfaceLifecycle.HighOrderSubcellTriangleCircleErrorsDecreaseUnderPRefinement:LevelSetInterfaceLifecycle.HighOrderSubcellTriangleVertexAndEdgeTouchesAreDegenerate:LevelSetInterfaceLifecycle.BackendIndependentValidationFixturesCheckRuleInvariants:LevelSetInterfaceLifecycle.CurvedInterfaceMomentsUseIndependentBackendReferenceRules:LevelSetInterfaceLifecycle.GeneratedOrderSummariesMatchRuleProvenance:LevelSetInterfaceLifecycle.AffineCutsMatchLinearMeasuresForSupportedHighOrderCells:LevelSetInterfaceLifecycle.AffinePlaneCutsStayPlanarOnHighOrderPhysicalCells:LevelSetInterfaceLifecycle.Affine2DCutRulesIntegratePolynomialMomentsToAdvertisedOrder:LevelSetInterfaceLifecycle.Affine3DCutRulesIntegratePolynomialMomentsToAdvertisedOrder:LevelSetInterfaceLifecycle.PromotedAffineCutRulesUseConsistentNormalsAndSides:LevelSetInterfaceLifecycle.Affine2DCutRulesImprovePolynomialMomentsUnderQRefinement:LevelSetInterfaceLifecycle.GeneratedRulesConserveParentMeasureAndUsePositiveWeights:LevelSetInterfaceLifecycle.HighOrderSubcellP2SphereCapApproximatesVolumeAndArea:LevelSetInterfaceLifecycle.HighOrderSubcellTetraSphereCapErrorsDecreaseUnderHRefinement:LevelSetInterfaceLifecycle.HighOrderSubcellTetraP2EdgeDofMovesCutVolume:LevelSetInterfaceLifecycle.SayeHyperrectangleQuadP3DofMovesGeometryAndQuadrature:LevelSetInterfaceLifecycle.HighOrderSubcellTriangleP3DofMovesGeometryAndQuadrature:LevelSetInterfaceLifecycle.SayeHyperrectangleP2CircleApproximatesAreaAndLength:LevelSetInterfaceLifecycle.SayeHyperrectangleVolumeNormalsFollowSideConvention:LevelSetInterfaceLifecycle.SayeHyperrectangleP2EllipseIntegratesAreaAndArcLength:LevelSetInterfaceLifecycle.SayeHyperrectangleCircleErrorsDecreaseUnderHAndPRefinement:LevelSetInterfaceLifecycle.SayeHyperrectangleEllipseErrorsDecreaseUnderHRefinement:LevelSetInterfaceLifecycle.SmallVolumeCutsReturnFinitePositiveRules:LevelSetInterfaceLifecycle.MultipleComponentsInSingleParentCellProduceSeparatedRules:LevelSetInterfaceLifecycle.SayeHyperrectangleNearTangentCircleReturnsRulesOrDiagnostic:LevelSetInterfaceLifecycle.SayeHyperrectangleP2SphereApproximatesVolumeAndArea:LevelSetInterfaceLifecycle.SayeHyperrectangleP2EllipsoidApproximatesVolumeAndArea:LevelSetInterfaceLifecycle.SayeHyperrectangleSphereAndEllipsoidErrorsDecreaseUnderHRefinement:LevelSetInterfaceLifecycle.SayeHyperrectangleRulesAssembleFixedGeometryMeasures:LevelSetInterfaceLifecycle.GeneratedRulesUseReferenceCoordinatesOnPhysicalCells:LevelSetInterfaceLifecycle.SayeHyperrectangleReferenceRulesMapToCurvedHexGeometry:LevelSetVolume.GeneratedCutVolumeUsesPointwiseJacobianOnWarpedTensorProductCell:LevelSetVolume.GeneratedInterfaceVolumeDiscoversInteriorIsland:LevelSetVolume.GeneratedInterfaceGlobalShiftUsesGeneratedQuadrature",
+    "--gtest_color=no",
+    "--gtest_output=json:/home/zack/Downloads/svMultiPhysics/Documentation/qualification_logs/free_surface_wp2_geometry_20260720_b6c60d9f/groups/level_set_serial/gtest.json"
+  ],
+  "execution": {
+    "memory_mib": 6144,
+    "output_mib": 256,
+    "wall_time_seconds": 1800
+  },
+  "expected_tests": [
+    "LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSameSignCornerInteriorIsland",
+    "LevelSetInterfaceLifecycle.ProductionQualifiedHighOrderDiscoversSerendipityInteriorProbeIsland",
+    "LevelSetInterfaceLifecycle.Saye3DTerminalBoxUsesInteriorHintToSplitSameSignCorners",
+    "LevelSetInterfaceLifecycle.LinearBackendOutputPassesCommonValidation",
+    "LevelSetInterfaceLifecycle.InvalidBackendOutputIsRejected",
+    "LevelSetInterfaceLifecycle.BackendValidationRejectsInconsistentInterfaceNormals",
+    "LevelSetInterfaceLifecycle.BackendValidationRejectsInconsistentQuadratureWeights",
+    "LevelSetInterfaceLifecycle.BackendValidationRejectsBadRootPolishMetadata",
+    "LevelSetInterfaceLifecycle.BackendMetadataReachesCutIntegrationContext",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleP1LineMatchesLinearMeasures",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleSeededLineCutsMatchAnalyticAreas",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleP1PlaneMatchesHexMeasures",
+    "LevelSetInterfaceLifecycle.SayeHexReferenceVolumeRulesMapToPhysicalCutVolume",
+    "LevelSetInterfaceLifecycle.HighOrderSubcellP2CircleSegmentApproximatesAreaAndLength",
+    "LevelSetInterfaceLifecycle.HighOrderSubcellTriangleCircleErrorsDecreaseUnderHRefinement",
+    "LevelSetInterfaceLifecycle.HighOrderSubcellTriangleCircleErrorsDecreaseUnderPRefinement",
+    "LevelSetInterfaceLifecycle.HighOrderSubcellTriangleVertexAndEdgeTouchesAreDegenerate",
+    "LevelSetInterfaceLifecycle.BackendIndependentValidationFixturesCheckRuleInvariants",
+    "LevelSetInterfaceLifecycle.CurvedInterfaceMomentsUseIndependentBackendReferenceRules",
+    "LevelSetInterfaceLifecycle.GeneratedOrderSummariesMatchRuleProvenance",
+    "LevelSetInterfaceLifecycle.AffineCutsMatchLinearMeasuresForSupportedHighOrderCells",
+    "LevelSetInterfaceLifecycle.AffinePlaneCutsStayPlanarOnHighOrderPhysicalCells",
+    "LevelSetInterfaceLifecycle.Affine2DCutRulesIntegratePolynomialMomentsToAdvertisedOrder",
+    "LevelSetInterfaceLifecycle.Affine3DCutRulesIntegratePolynomialMomentsToAdvertisedOrder",
+    "LevelSetInterfaceLifecycle.PromotedAffineCutRulesUseConsistentNormalsAndSides",
+    "LevelSetInterfaceLifecycle.Affine2DCutRulesImprovePolynomialMomentsUnderQRefinement",
+    "LevelSetInterfaceLifecycle.GeneratedRulesConserveParentMeasureAndUsePositiveWeights",
+    "LevelSetInterfaceLifecycle.HighOrderSubcellP2SphereCapApproximatesVolumeAndArea",
+    "LevelSetInterfaceLifecycle.HighOrderSubcellTetraSphereCapErrorsDecreaseUnderHRefinement",
+    "LevelSetInterfaceLifecycle.HighOrderSubcellTetraP2EdgeDofMovesCutVolume",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleQuadP3DofMovesGeometryAndQuadrature",
+    "LevelSetInterfaceLifecycle.HighOrderSubcellTriangleP3DofMovesGeometryAndQuadrature",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleP2CircleApproximatesAreaAndLength",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleVolumeNormalsFollowSideConvention",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleP2EllipseIntegratesAreaAndArcLength",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleCircleErrorsDecreaseUnderHAndPRefinement",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleEllipseErrorsDecreaseUnderHRefinement",
+    "LevelSetInterfaceLifecycle.SmallVolumeCutsReturnFinitePositiveRules",
+    "LevelSetInterfaceLifecycle.MultipleComponentsInSingleParentCellProduceSeparatedRules",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleNearTangentCircleReturnsRulesOrDiagnostic",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleP2SphereApproximatesVolumeAndArea",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleP2EllipsoidApproximatesVolumeAndArea",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleSphereAndEllipsoidErrorsDecreaseUnderHRefinement",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleRulesAssembleFixedGeometryMeasures",
+    "LevelSetInterfaceLifecycle.GeneratedRulesUseReferenceCoordinatesOnPhysicalCells",
+    "LevelSetInterfaceLifecycle.SayeHyperrectangleReferenceRulesMapToCurvedHexGeometry",
+    "LevelSetVolume.GeneratedCutVolumeUsesPointwiseJacobianOnWarpedTensorProductCell",
+    "LevelSetVolume.GeneratedInterfaceVolumeDiscoversInteriorIsland",
+    "LevelSetVolume.GeneratedInterfaceGlobalShiftUsesGeneratedQuadrature"
+  ],
+  "group_id": "level_set_serial",
+  "gtest_output_copies": 1,
+  "mpi_ranks": 1,
+  "outcome": "PASS",
+  "resources": {
+    "final_output_bytes": 28295,
+    "peak_resident_kib_sampled": 238528,
+    "return_code": 0,
+    "termination_reason": null,
+    "wall_time_seconds": 25.283789818990044
+  }
+}

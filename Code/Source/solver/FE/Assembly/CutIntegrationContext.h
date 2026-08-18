@@ -35,6 +35,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -56,6 +57,65 @@ struct CutCellAssemblyMetadata {
     std::uint64_t quadrature_policy_key = 0;
     std::uint64_t source_value_revision = 0;
     std::uint64_t free_surface_snapshot_revision_key = 0;
+};
+
+/**
+ * @brief Typed ownership record for a generated active physical boundary.
+ *
+ * The generated marker is an assembly key, not sufficient provenance on its
+ * own. This record retains the physical boundary, level-set owner, active side,
+ * geometry frame, and all request revisions needed to validate an explicit
+ * exterior-boundary selection before a form is installed or a new cut context
+ * is published.
+ */
+struct GeneratedActiveBoundaryProvenance {
+    int generated_active_boundary_marker{-1};
+    interfaces::GeneratedActiveBoundaryMarkerKey owner{};
+    geometry::CutGeometryFrame frame{geometry::CutGeometryFrame::Reference};
+    int quadrature_order{0};
+    Real clipping_tolerance{0.0};
+    std::uint64_t mesh_geometry_revision{0};
+    std::uint64_t mesh_topology_revision{0};
+    std::uint64_t ownership_revision{0};
+    std::uint64_t quadrature_policy_key{0};
+    std::uint64_t source_value_revision{0};
+    std::string stable_owner_key{};
+
+    [[nodiscard]] int physicalBoundaryMarker() const noexcept {
+        return owner.boundary_marker;
+    }
+
+    [[nodiscard]] int volumeInterfaceMarker() const noexcept {
+        return owner.interface_marker;
+    }
+};
+
+/**
+ * @brief Publication state for one generated level-set domain.
+ *
+ * The request retains communicator-wide source and policy bindings together
+ * with rank-local mesh and achieved-quadrature stamps used for local
+ * validation. Generated fragments and quadrature rules are rank-local and
+ * intentionally excluded.
+ */
+struct GeneratedLevelSetInterfacePublicationProvenance {
+    int generated_interface_marker{-1};
+    interfaces::CutInterfaceDomainRequest request{};
+    std::optional<geometry::CutIntegrationSide> volume_side_filter{};
+    std::string publication_domain_id{};
+};
+
+/**
+ * @brief Publication state for one generated contact domain.
+ *
+ * The stable owner key identifies marker ownership while the typed request
+ * preserves communicator-wide policy bindings and rank-local geometry stamps
+ * needed for local validation.
+ */
+struct GeneratedInterfaceBoundaryPublicationProvenance {
+    int generated_interface_boundary_marker{-1};
+    interfaces::GeneratedInterfaceBoundaryIntersectionRequest request{};
+    std::string stable_owner_key{};
 };
 
 struct CutStabilizationHook {
@@ -363,8 +423,11 @@ public:
         generated_volume_markers_.clear();
         generated_interface_rule_indices_by_marker_.clear();
         generated_interface_two_sided_bindings_by_marker_.clear();
-        generated_active_boundary_marker_keys_.clear();
-        generated_interface_boundary_marker_keys_.clear();
+        generated_level_set_interface_markers_.clear();
+        generated_level_set_interface_provenance_by_marker_.clear();
+        generated_active_boundary_provenance_by_marker_.clear();
+        generated_active_boundary_markers_by_physical_marker_.clear();
+        generated_interface_boundary_provenance_by_marker_.clear();
         free_surface_geometry_snapshots_.clear();
         free_surface_snapshot_revision_by_marker_.clear();
         generated_interface_markers_.clear();
@@ -440,6 +503,13 @@ public:
         if (metadata.side != rule.side) {
             throw std::invalid_argument("generated level-set volume metadata side must match the rule side");
         }
+        if (rule.provenance.marker == -1) {
+            rule.provenance.marker = marker;
+        } else if (rule.provenance.marker != marker) {
+            throw std::invalid_argument(
+                "generated level-set volume rule provenance marker must "
+                "match the registration marker");
+        }
         if (metadata.source_value_revision != 0u &&
             rule.provenance.source_value_revision != 0u &&
             metadata.source_value_revision != rule.provenance.source_value_revision) {
@@ -463,6 +533,19 @@ public:
             metadata.free_surface_snapshot_revision_key =
                 rule.provenance.free_surface_snapshot_revision_key;
         }
+        if (generated_interface_boundary_provenance_by_marker_.contains(
+                marker) ||
+            generated_active_boundary_provenance_by_marker_.contains(
+                marker) ||
+            hasGeneratedLevelSetInterfaceMarker(marker) ||
+            generated_interface_rule_indices_by_marker_.contains(
+                marker) ||
+            generated_interface_two_sided_bindings_by_marker_.contains(
+                marker)) {
+            throw std::invalid_argument(
+                "generated volume marker collides with an "
+                "existing generated-interface marker");
+        }
         if (shouldPruneGeneratedVolumeRule(rule)) {
             ++generated_pruned_volume_rule_count_;
             if (std::isfinite(rule.measure) && rule.measure > Real{0.0}) {
@@ -473,67 +556,267 @@ public:
         }
 
         const bool keep_binding_alignment = bindings_.size() == volume_rules_.size();
-        const auto index = volume_rules_.size();
-        const bool new_marker =
-            generated_volume_rule_indices_by_marker_.find(marker) ==
+        const auto old_metadata_size = metadata_.size();
+        const auto old_volume_rule_size = volume_rules_.size();
+        const auto old_binding_size = bindings_.size();
+        const auto old_generated_volume_marker_size =
+            generated_volume_markers_.size();
+        const auto old_content_revision = content_revision_;
+        const auto marker_indices_before =
+            generated_volume_rule_indices_by_marker_.find(marker);
+        const bool had_marker_indices =
+            marker_indices_before !=
             generated_volume_rule_indices_by_marker_.end();
-        if (new_marker) {
-            generated_volume_markers_.push_back(marker);
+        const auto old_marker_index_count =
+            had_marker_indices
+                ? marker_indices_before->second.size()
+                : std::size_t{0u};
+        const auto side_buckets_before =
+            generated_volume_rule_indices_by_marker_and_side_.find(
+                marker);
+        const bool had_side_buckets =
+            side_buckets_before !=
+            generated_volume_rule_indices_by_marker_and_side_.end();
+        std::array<std::size_t, 2> old_side_index_counts{{0u, 0u}};
+        std::array<GeneratedVolumeRuleDiagnostics, 2>
+            old_side_diagnostics{};
+        if (had_side_buckets) {
+            for (std::size_t side = 0u; side < 2u; ++side) {
+                old_side_index_counts[side] =
+                    side_buckets_before->second[side].indices.size();
+                old_side_diagnostics[side] =
+                    side_buckets_before->second[side].diagnostics;
+            }
         }
 
-        generated_volume_rule_indices_by_marker_[marker].push_back(index);
-        auto& side_bucket = generated_volume_rule_indices_by_marker_and_side_[marker]
-            [volumeSideIndex(rule.side)];
-        side_bucket.indices.push_back(index);
-        metadata_.push_back(std::move(metadata));
-        volume_rules_.push_back(std::move(rule));
-        side_bucket.diagnostics.recordRule(volume_rules_.back());
+        try {
+            const auto index = volume_rules_.size();
+            const bool new_marker =
+                generated_volume_rule_indices_by_marker_.find(marker) ==
+                generated_volume_rule_indices_by_marker_.end();
+            if (new_marker) {
+                generated_volume_markers_.push_back(marker);
+            }
 
-        if (keep_binding_alignment) {
-            const auto& stored_metadata = metadata_.back();
-            const auto& stored_rule = volume_rules_.back();
-            CutIntegrationBinding binding;
-            binding.marker = marker;
-            binding.parent_entity = stored_metadata.parent_entity;
-            binding.kind = geometry::CutQuadratureKind::Volume;
-            binding.side = stored_rule.side;
-            binding.cut_revision_key = stored_metadata.revision_key;
-            binding.cut_topology_revision = stored_metadata.cut_topology_revision;
-            binding.quadrature_policy_key = stored_metadata.quadrature_policy_key;
-            binding.source_value_revision = stored_metadata.source_value_revision;
-            binding.free_surface_snapshot_revision_key =
-                stored_metadata.free_surface_snapshot_revision_key;
-            binding.visible_to_paths = {
-                CutIntegrationAssemblyPath::Standard,
-                CutIntegrationAssemblyPath::MatrixFree,
-                CutIntegrationAssemblyPath::Interpreter,
-                CutIntegrationAssemblyPath::AD,
-                CutIntegrationAssemblyPath::SymbolicTangent,
-                CutIntegrationAssemblyPath::JIT};
-            bindings_.push_back(std::move(binding));
+            generated_volume_rule_indices_by_marker_[marker].push_back(index);
+            auto& side_bucket =
+                generated_volume_rule_indices_by_marker_and_side_[marker]
+                    [volumeSideIndex(rule.side)];
+            side_bucket.indices.push_back(index);
+            metadata_.push_back(std::move(metadata));
+            volume_rules_.push_back(std::move(rule));
+            side_bucket.diagnostics.recordRule(volume_rules_.back());
+
+            if (keep_binding_alignment) {
+                const auto& stored_metadata = metadata_.back();
+                const auto& stored_rule = volume_rules_.back();
+                CutIntegrationBinding binding;
+                binding.marker = marker;
+                binding.parent_entity = stored_metadata.parent_entity;
+                binding.kind = geometry::CutQuadratureKind::Volume;
+                binding.side = stored_rule.side;
+                binding.cut_revision_key = stored_metadata.revision_key;
+                binding.cut_topology_revision =
+                    stored_metadata.cut_topology_revision;
+                binding.quadrature_policy_key =
+                    stored_metadata.quadrature_policy_key;
+                binding.source_value_revision =
+                    stored_metadata.source_value_revision;
+                binding.free_surface_snapshot_revision_key =
+                    stored_metadata.free_surface_snapshot_revision_key;
+                binding.visible_to_paths = {
+                    CutIntegrationAssemblyPath::Standard,
+                    CutIntegrationAssemblyPath::MatrixFree,
+                    CutIntegrationAssemblyPath::Interpreter,
+                    CutIntegrationAssemblyPath::AD,
+                    CutIntegrationAssemblyPath::SymbolicTangent,
+                    CutIntegrationAssemblyPath::JIT};
+                bindings_.push_back(std::move(binding));
+            }
+            markModified();
+        } catch (...) {
+            metadata_.resize(old_metadata_size);
+            volume_rules_.resize(old_volume_rule_size);
+            bindings_.resize(old_binding_size);
+            generated_volume_markers_.resize(
+                old_generated_volume_marker_size);
+
+            const auto marker_indices =
+                generated_volume_rule_indices_by_marker_.find(marker);
+            if (had_marker_indices) {
+                if (marker_indices !=
+                    generated_volume_rule_indices_by_marker_.end()) {
+                    marker_indices->second.resize(
+                        old_marker_index_count);
+                }
+            } else if (
+                marker_indices !=
+                generated_volume_rule_indices_by_marker_.end()) {
+                generated_volume_rule_indices_by_marker_.erase(
+                    marker_indices);
+            }
+
+            const auto side_buckets =
+                generated_volume_rule_indices_by_marker_and_side_.find(
+                    marker);
+            if (had_side_buckets) {
+                if (side_buckets !=
+                    generated_volume_rule_indices_by_marker_and_side_
+                        .end()) {
+                    for (std::size_t side = 0u;
+                         side < 2u;
+                         ++side) {
+                        side_buckets->second[side].indices.resize(
+                            old_side_index_counts[side]);
+                        side_buckets->second[side].diagnostics =
+                            old_side_diagnostics[side];
+                    }
+                }
+            } else if (
+                side_buckets !=
+                generated_volume_rule_indices_by_marker_and_side_
+                    .end()) {
+                generated_volume_rule_indices_by_marker_and_side_.erase(
+                    side_buckets);
+            }
+
+            content_revision_ = old_content_revision;
+            throw;
         }
-        markModified();
     }
 
     void addGeneratedInterfaceDomain(
         const interfaces::LevelSetInterfaceDomain& domain,
-        std::optional<geometry::CutIntegrationSide> volume_side_filter = std::nullopt) {
+        std::optional<geometry::CutIntegrationSide> volume_side_filter =
+            std::nullopt,
+        std::string_view publication_domain_id = {}) {
         const int marker = domain.marker();
         if (marker < 0) {
             return;
+        }
+        if (std::find(
+                generated_level_set_interface_markers_.begin(),
+                generated_level_set_interface_markers_.end(),
+                marker) !=
+                generated_level_set_interface_markers_.end() ||
+            generated_level_set_interface_provenance_by_marker_.contains(
+                marker)) {
+            throw std::invalid_argument(
+                "generated level-set interface domain was imported more than once");
         }
         if (volume_side_filter.has_value() &&
             *volume_side_filter == geometry::CutIntegrationSide::Interface) {
             throw std::invalid_argument(
                 "generated level-set volume side filter requires Negative or Positive side");
         }
-        if (generated_interface_boundary_marker_keys_.find(marker) !=
-                generated_interface_boundary_marker_keys_.end() ||
-            generated_active_boundary_marker_keys_.find(marker) !=
-                generated_active_boundary_marker_keys_.end()) {
+        GeneratedLevelSetInterfacePublicationProvenance
+            publication_provenance;
+        publication_provenance.generated_interface_marker =
+            marker;
+        publication_provenance.request =
+            domain.request();
+        publication_provenance.volume_side_filter =
+            volume_side_filter;
+        publication_provenance.publication_domain_id =
+            publication_domain_id.empty()
+                ? domain.request().generated_domain_id
+                : std::string(publication_domain_id);
+        if (generated_interface_boundary_provenance_by_marker_.find(marker) !=
+                generated_interface_boundary_provenance_by_marker_.end() ||
+            generated_active_boundary_provenance_by_marker_.find(marker) !=
+                generated_active_boundary_provenance_by_marker_.end() ||
+            generated_volume_rule_indices_by_marker_.contains(marker) ||
+            generated_interface_rule_indices_by_marker_.contains(marker) ||
+            generated_interface_two_sided_bindings_by_marker_.contains(
+                marker)) {
             throw std::invalid_argument(
                 "generated level-set interface marker collides with an imported generated boundary marker");
         }
+        generated_level_set_interface_markers_.reserve(
+            generated_level_set_interface_markers_.size() + 1u);
+        generated_level_set_interface_provenance_by_marker_.reserve(
+            generated_level_set_interface_provenance_by_marker_
+                    .size() +
+                1u);
+        const auto old_metadata_size = metadata_.size();
+        const auto old_volume_rule_size = volume_rules_.size();
+        const auto old_interface_rule_size = interface_rules_.size();
+        const auto old_binding_size = bindings_.size();
+        const auto old_sensitivity_metadata_size =
+            sensitivity_metadata_.size();
+        const auto old_generated_volume_marker_size =
+            generated_volume_markers_.size();
+        const auto old_generated_interface_marker_size =
+            generated_interface_markers_.size();
+        const auto old_generated_level_set_interface_marker_size =
+            generated_level_set_interface_markers_.size();
+        const auto old_generated_pruned_volume_rule_count =
+            generated_pruned_volume_rule_count_;
+        const auto old_generated_pruned_volume_measure =
+            generated_pruned_volume_measure_;
+        const auto old_content_revision = content_revision_;
+        struct ExpectedRevisionCheckpoint {
+            int marker{-1};
+            bool existed{false};
+            std::uint64_t value{0u};
+        };
+        std::vector<int> affected_expected_revision_markers{
+            marker};
+        const auto snapshot_binding =
+            free_surface_snapshot_revision_by_marker_.find(
+                marker);
+        if (snapshot_binding !=
+            free_surface_snapshot_revision_by_marker_.end()) {
+            for (const auto& [bound_marker, revision] :
+                 free_surface_snapshot_revision_by_marker_) {
+                if (revision == snapshot_binding->second &&
+                    std::find(
+                        affected_expected_revision_markers.begin(),
+                        affected_expected_revision_markers.end(),
+                        bound_marker) ==
+                        affected_expected_revision_markers.end()) {
+                    affected_expected_revision_markers.push_back(
+                        bound_marker);
+                }
+            }
+        }
+        std::vector<ExpectedRevisionCheckpoint>
+            expected_revision_checkpoints;
+        expected_revision_checkpoints.reserve(
+            affected_expected_revision_markers.size());
+        for (const int affected_marker :
+             affected_expected_revision_markers) {
+            const auto existing =
+                expected_source_value_revision_by_marker_.find(
+                    affected_marker);
+            expected_revision_checkpoints.push_back(
+                ExpectedRevisionCheckpoint{
+                    .marker = affected_marker,
+                    .existed =
+                        existing !=
+                        expected_source_value_revision_by_marker_
+                            .end(),
+                    .value =
+                        existing ==
+                                expected_source_value_revision_by_marker_
+                                    .end()
+                            ? std::uint64_t{0u}
+                            : existing->second,
+                });
+        }
+        try {
+        const auto [stored_provenance,
+                    inserted_provenance] =
+            generated_level_set_interface_provenance_by_marker_
+                .emplace(
+                    marker,
+                    std::move(
+                        publication_provenance));
+        if (!inserted_provenance) {
+            throw std::invalid_argument(
+                "generated level-set interface publication provenance was registered more than once");
+        }
+        static_cast<void>(stored_provenance);
         setExpectedGeneratedSourceValueRevision(marker,
                                                 domain.request().source.value_revision);
         const auto make_sensitivity_metadata =
@@ -653,6 +936,54 @@ public:
                 stored_bindings.end());
             markModified();
         }
+        generated_level_set_interface_markers_.push_back(marker);
+        markModified();
+        } catch (...) {
+            metadata_.resize(old_metadata_size);
+            volume_rules_.resize(old_volume_rule_size);
+            interface_rules_.resize(old_interface_rule_size);
+            bindings_.resize(old_binding_size);
+            sensitivity_metadata_.resize(
+                old_sensitivity_metadata_size);
+            generated_volume_markers_.resize(
+                old_generated_volume_marker_size);
+            generated_interface_markers_.resize(
+                old_generated_interface_marker_size);
+            generated_level_set_interface_markers_.resize(
+                old_generated_level_set_interface_marker_size);
+            generated_level_set_interface_provenance_by_marker_.erase(
+                marker);
+            generated_volume_rule_indices_by_marker_.erase(
+                marker);
+            generated_volume_rule_indices_by_marker_and_side_.erase(
+                marker);
+            generated_interface_rule_indices_by_marker_.erase(
+                marker);
+            generated_interface_two_sided_bindings_by_marker_.erase(
+                marker);
+            for (const auto& checkpoint :
+                 expected_revision_checkpoints) {
+                if (checkpoint.existed) {
+                    const auto found =
+                        expected_source_value_revision_by_marker_
+                            .find(checkpoint.marker);
+                    if (found !=
+                        expected_source_value_revision_by_marker_
+                            .end()) {
+                        found->second = checkpoint.value;
+                    }
+                } else {
+                    expected_source_value_revision_by_marker_.erase(
+                        checkpoint.marker);
+                }
+            }
+            generated_pruned_volume_rule_count_ =
+                old_generated_pruned_volume_rule_count;
+            generated_pruned_volume_measure_ =
+                old_generated_pruned_volume_measure;
+            content_revision_ = old_content_revision;
+            throw;
+        }
     }
 
     void addGeneratedInterfaceBoundaryIntersectionDomain(
@@ -662,7 +993,6 @@ public:
             throw std::invalid_argument(
                 "generated interface-boundary intersection domain requires a nonnegative marker");
         }
-        auto rules = domain.intersectionQuadratureRules();
         interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey marker_key;
         marker_key.source = domain.request().source;
         marker_key.domain_id = domain.request().generated_domain_id;
@@ -671,33 +1001,103 @@ public:
         marker_key.boundary_marker = domain.request().boundary_marker;
         marker_key.requested_marker = domain.request().intersection_marker;
         const auto stable_key = marker_key.stableKey();
-        const auto registered_key =
-            generated_interface_boundary_marker_keys_.find(marker);
-        if (registered_key != generated_interface_boundary_marker_keys_.end()) {
+        GeneratedInterfaceBoundaryPublicationProvenance
+            publication_provenance;
+        publication_provenance
+            .generated_interface_boundary_marker =
+            marker;
+        publication_provenance.request =
+            domain.request();
+        publication_provenance.stable_owner_key =
+            stable_key;
+        const auto registered_provenance =
+            generated_interface_boundary_provenance_by_marker_
+                .find(marker);
+        if (registered_provenance !=
+            generated_interface_boundary_provenance_by_marker_
+                .end()) {
             throw std::invalid_argument(
-                registered_key->second == stable_key
+                registered_provenance
+                            ->second
+                            .stable_owner_key ==
+                        stable_key
                     ? "generated interface-boundary domain was imported more than once"
                     : "generated interface-boundary marker hash collision detected");
         }
         const auto existing_rules =
             generated_interface_rule_indices_by_marker_.find(marker);
-        if (existing_rules != generated_interface_rule_indices_by_marker_.end() &&
-            !existing_rules->second.empty()) {
+        if (generated_active_boundary_provenance_by_marker_.contains(
+                marker) ||
+            hasGeneratedLevelSetInterfaceMarker(marker) ||
+            generated_volume_rule_indices_by_marker_.contains(marker) ||
+            (existing_rules !=
+             generated_interface_rule_indices_by_marker_.end())) {
             throw std::invalid_argument(
                 "generated interface-boundary marker collides with an existing generated-interface marker");
         }
-        generated_interface_boundary_marker_keys_.emplace(marker, stable_key);
-        auto& indices = generated_interface_rule_indices_by_marker_[marker];
-        if (indices.empty()) {
+
+        auto rules =
+            domain.intersectionQuadratureRules();
+        generated_interface_boundary_provenance_by_marker_.reserve(
+            generated_interface_boundary_provenance_by_marker_
+                    .size() +
+                1u);
+        generated_interface_rule_indices_by_marker_.reserve(
+            generated_interface_rule_indices_by_marker_.size() + 1u);
+        generated_interface_markers_.reserve(
+            generated_interface_markers_.size() + 1u);
+        interface_rules_.reserve(
+            interface_rules_.size() + rules.size());
+        const auto old_interface_rule_size =
+            interface_rules_.size();
+        const auto old_interface_marker_size =
+            generated_interface_markers_.size();
+        const auto old_content_revision = content_revision_;
+        try {
+            const auto [registered, inserted] =
+                generated_interface_boundary_provenance_by_marker_
+                    .emplace(
+                        marker,
+                        std::move(
+                            publication_provenance));
+            if (!inserted) {
+                throw std::invalid_argument(
+                    registered
+                                ->second
+                                .stable_owner_key ==
+                            stable_key
+                        ? "generated interface-boundary domain was imported more than once"
+                        : "generated interface-boundary marker hash collision detected");
+            }
+            auto [stored_indices, inserted_indices] =
+                generated_interface_rule_indices_by_marker_
+                    .try_emplace(marker);
+            if (!inserted_indices) {
+                throw std::invalid_argument(
+                    "generated interface-boundary marker was registered concurrently");
+            }
+            auto& indices = stored_indices->second;
+            indices.reserve(rules.size());
             generated_interface_markers_.push_back(marker);
-        }
-        if (rules.empty()) {
-            markModified();
-        }
-        for (auto& rule : rules) {
-            indices.push_back(interface_rules_.size());
-            interface_rules_.push_back(std::move(rule));
-            markModified();
+            if (rules.empty()) {
+                markModified();
+            }
+            for (auto& rule : rules) {
+                indices.push_back(interface_rules_.size());
+                interface_rules_.push_back(std::move(rule));
+                markModified();
+            }
+        } catch (...) {
+            interface_rules_.resize(
+                old_interface_rule_size);
+            generated_interface_markers_.resize(
+                old_interface_marker_size);
+            generated_interface_rule_indices_by_marker_.erase(
+                marker);
+            generated_interface_boundary_provenance_by_marker_.erase(
+                marker);
+            content_revision_ = old_content_revision;
+            throw;
         }
     }
 
@@ -717,33 +1117,108 @@ public:
         marker_key.side = domain.request().side;
         marker_key.requested_marker = domain.request().active_boundary_marker;
         const auto stable_key = marker_key.stableKey();
-        if (generated_interface_boundary_marker_keys_.find(marker) !=
-                generated_interface_boundary_marker_keys_.end() ||
-            generated_interface_rule_indices_by_marker_.find(marker) !=
-                generated_interface_rule_indices_by_marker_.end()) {
+        GeneratedActiveBoundaryProvenance provenance;
+        provenance.generated_active_boundary_marker = marker;
+        provenance.owner = marker_key;
+        provenance.frame = domain.request().frame;
+        provenance.quadrature_order = domain.request().quadrature_order;
+        provenance.clipping_tolerance =
+            domain.request().tolerance;
+        provenance.mesh_geometry_revision =
+            domain.request().mesh_geometry_revision;
+        provenance.mesh_topology_revision =
+            domain.request().mesh_topology_revision;
+        provenance.ownership_revision =
+            domain.request().ownership_revision;
+        provenance.quadrature_policy_key =
+            domain.request().quadrature_policy_key;
+        provenance.source_value_revision =
+            domain.request().source_value_revision;
+        provenance.stable_owner_key = stable_key;
+        const auto registered_provenance =
+            generated_active_boundary_provenance_by_marker_
+                .find(marker);
+        if (registered_provenance !=
+            generated_active_boundary_provenance_by_marker_
+                .end()) {
             throw std::invalid_argument(
-                "generated active-boundary marker collides with an existing generated-interface marker");
-        }
-        const auto [registered, inserted] =
-            generated_active_boundary_marker_keys_.emplace(marker, stable_key);
-        if (!inserted) {
-            throw std::invalid_argument(
-                registered->second == stable_key
+                registered_provenance->second
+                            .stable_owner_key ==
+                        stable_key
                     ? "generated active-boundary domain was imported more than once"
                     : "generated active-boundary marker hash collision detected");
         }
-        auto rules = domain.boundaryQuadratureRules();
-        auto& indices = generated_interface_rule_indices_by_marker_[marker];
-        if (indices.empty()) {
-            generated_interface_markers_.push_back(marker);
+        if (generated_interface_boundary_provenance_by_marker_.find(marker) !=
+                generated_interface_boundary_provenance_by_marker_.end() ||
+            hasGeneratedLevelSetInterfaceMarker(marker) ||
+            generated_interface_rule_indices_by_marker_.find(marker) !=
+                generated_interface_rule_indices_by_marker_.end() ||
+            generated_volume_rule_indices_by_marker_.contains(marker)) {
+            throw std::invalid_argument(
+                "generated active-boundary marker collides with an existing generated-interface marker");
         }
-        if (rules.empty()) {
-            markModified();
+        auto rules =
+            domain.boundaryQuadratureRules();
+        const auto [registered, inserted] =
+            generated_active_boundary_provenance_by_marker_.emplace(
+                marker, std::move(provenance));
+        if (!inserted) {
+            throw std::invalid_argument(
+                registered->second.stable_owner_key == stable_key
+                    ? "generated active-boundary domain was imported more than once"
+                    : "generated active-boundary marker hash collision detected");
         }
-        for (auto& rule : rules) {
-            indices.push_back(interface_rules_.size());
-            interface_rules_.push_back(std::move(rule));
-            markModified();
+        const auto old_interface_rule_size = interface_rules_.size();
+        const auto old_interface_marker_size =
+            generated_interface_markers_.size();
+        const auto old_content_revision = content_revision_;
+        const auto existing_physical_markers =
+            generated_active_boundary_markers_by_physical_marker_.find(
+                marker_key.boundary_marker);
+        const bool had_physical_marker_entry =
+            existing_physical_markers !=
+            generated_active_boundary_markers_by_physical_marker_.end();
+        const auto old_physical_marker_size =
+            had_physical_marker_entry
+                ? existing_physical_markers->second.size()
+                : std::size_t{0u};
+        try {
+            auto& physical_markers =
+                generated_active_boundary_markers_by_physical_marker_[
+                    marker_key.boundary_marker];
+            physical_markers.push_back(marker);
+            auto& indices =
+                generated_interface_rule_indices_by_marker_[marker];
+            if (indices.empty()) {
+                generated_interface_markers_.push_back(marker);
+            }
+            if (rules.empty()) {
+                markModified();
+            }
+            for (auto& rule : rules) {
+                indices.push_back(interface_rules_.size());
+                interface_rules_.push_back(std::move(rule));
+                markModified();
+            }
+        } catch (...) {
+            interface_rules_.resize(old_interface_rule_size);
+            generated_interface_markers_.resize(
+                old_interface_marker_size);
+            generated_interface_rule_indices_by_marker_.erase(marker);
+            const auto physical_markers =
+                generated_active_boundary_markers_by_physical_marker_.find(
+                    marker_key.boundary_marker);
+            if (physical_markers !=
+                generated_active_boundary_markers_by_physical_marker_.end()) {
+                physical_markers->second.resize(old_physical_marker_size);
+                if (!had_physical_marker_entry) {
+                    generated_active_boundary_markers_by_physical_marker_.erase(
+                        physical_markers);
+                }
+            }
+            generated_active_boundary_provenance_by_marker_.erase(marker);
+            content_revision_ = old_content_revision;
+            throw;
         }
     }
 
@@ -783,10 +1258,11 @@ public:
                     "free-surface snapshot reuses a generated marker");
             }
             if (free_surface_snapshot_revision_by_marker_.contains(marker) ||
+                hasGeneratedLevelSetInterfaceMarker(marker) ||
                 generated_volume_rule_indices_by_marker_.contains(marker) ||
                 generated_interface_rule_indices_by_marker_.contains(marker) ||
-                generated_active_boundary_marker_keys_.contains(marker) ||
-                generated_interface_boundary_marker_keys_.contains(marker)) {
+                generated_active_boundary_provenance_by_marker_.contains(marker) ||
+                generated_interface_boundary_provenance_by_marker_.contains(marker)) {
                 throw std::invalid_argument(
                     "free-surface snapshot marker is already imported");
             }
@@ -803,6 +1279,107 @@ public:
         const auto first_interface_rule = interface_rules_.size();
         const auto first_metadata = metadata_.size();
         const auto first_binding = bindings_.size();
+        const auto first_sensitivity_metadata =
+            sensitivity_metadata_.size();
+        const auto first_generated_volume_marker =
+            generated_volume_markers_.size();
+        const auto first_generated_interface_marker =
+            generated_interface_markers_.size();
+        const auto first_generated_level_set_interface_marker =
+            generated_level_set_interface_markers_.size();
+        const auto first_snapshot =
+            free_surface_geometry_snapshots_.size();
+        const auto old_generated_pruned_volume_rule_count =
+            generated_pruned_volume_rule_count_;
+        const auto old_generated_pruned_volume_measure =
+            generated_pruned_volume_measure_;
+        const auto old_content_revision = content_revision_;
+        struct ExpectedSourceRevisionCheckpoint {
+            int marker{-1};
+            bool existed{false};
+            std::uint64_t value{0u};
+        };
+        std::vector<int> expected_source_revision_markers =
+            snapshot_markers;
+        for (const auto& [marker, bound_revision] :
+             free_surface_snapshot_revision_by_marker_) {
+            if (bound_revision != revision_key ||
+                std::find(
+                    expected_source_revision_markers.begin(),
+                    expected_source_revision_markers.end(),
+                    marker) !=
+                    expected_source_revision_markers.end()) {
+                continue;
+            }
+            expected_source_revision_markers.push_back(marker);
+        }
+        std::vector<ExpectedSourceRevisionCheckpoint>
+            expected_source_revision_checkpoints;
+        expected_source_revision_checkpoints.reserve(
+            expected_source_revision_markers.size());
+        for (const int marker :
+             expected_source_revision_markers) {
+            const auto existing =
+                expected_source_value_revision_by_marker_.find(
+                    marker);
+            expected_source_revision_checkpoints.push_back(
+                ExpectedSourceRevisionCheckpoint{
+                    .marker = marker,
+                    .existed =
+                        existing !=
+                        expected_source_value_revision_by_marker_
+                            .end(),
+                    .value =
+                        existing ==
+                                expected_source_value_revision_by_marker_
+                                    .end()
+                            ? std::uint64_t{0u}
+                            : existing->second,
+                });
+        }
+        struct PhysicalMarkerCheckpoint {
+            int marker{-1};
+            bool existed{false};
+            std::size_t size{0u};
+        };
+        std::vector<PhysicalMarkerCheckpoint>
+            physical_marker_checkpoints;
+        physical_marker_checkpoints.reserve(
+            snapshot->activeBoundaryDomains().size());
+        for (const auto& active :
+             snapshot->activeBoundaryDomains()) {
+            const int physical_marker =
+                active.request().boundary_marker;
+            const auto duplicate =
+                std::find_if(
+                    physical_marker_checkpoints.begin(),
+                    physical_marker_checkpoints.end(),
+                    [physical_marker](const auto& checkpoint) {
+                        return checkpoint.marker ==
+                               physical_marker;
+                    });
+            if (duplicate !=
+                physical_marker_checkpoints.end()) {
+                continue;
+            }
+            const auto existing =
+                generated_active_boundary_markers_by_physical_marker_
+                    .find(physical_marker);
+            physical_marker_checkpoints.push_back(
+                PhysicalMarkerCheckpoint{
+                    .marker = physical_marker,
+                    .existed =
+                        existing !=
+                        generated_active_boundary_markers_by_physical_marker_
+                            .end(),
+                    .size =
+                        existing ==
+                                generated_active_boundary_markers_by_physical_marker_
+                                    .end()
+                            ? std::size_t{0u}
+                            : existing->second.size(),
+                });
+        }
         const auto bind_marker = [&](int marker) {
             if (marker < 0) {
                 throw std::invalid_argument(
@@ -818,43 +1395,132 @@ public:
             (void)stored;
         };
 
-        bind_marker(snapshot->interfaceDomain().marker());
-        for (const auto& contact : snapshot->contactDomains()) {
-            bind_marker(contact.marker());
+        try {
+            bind_marker(snapshot->interfaceDomain().marker());
+            for (const auto& contact : snapshot->contactDomains()) {
+                bind_marker(contact.marker());
+            }
+            for (const auto& active : snapshot->activeBoundaryDomains()) {
+                bind_marker(active.marker());
+            }
+            addGeneratedInterfaceDomain(
+                snapshot->interfaceDomain(),
+                volume_side_filter,
+                snapshot->revision().domain_id);
+            for (const auto& contact : snapshot->contactDomains()) {
+                addGeneratedInterfaceBoundaryIntersectionDomain(
+                    contact);
+            }
+            for (const auto& active : snapshot->activeBoundaryDomains()) {
+                addGeneratedActiveBoundaryDomain(active);
+            }
+            for (std::size_t index = first_volume_rule;
+                 index < volume_rules_.size();
+                 ++index) {
+                volume_rules_[index]
+                    .provenance
+                    .free_surface_snapshot_revision_key =
+                    revision_key;
+            }
+            for (std::size_t index = first_interface_rule;
+                 index < interface_rules_.size();
+                 ++index) {
+                interface_rules_[index]
+                    .provenance
+                    .free_surface_snapshot_revision_key =
+                    revision_key;
+            }
+            for (std::size_t index = first_metadata;
+                 index < metadata_.size();
+                 ++index) {
+                metadata_[index]
+                    .free_surface_snapshot_revision_key =
+                    revision_key;
+            }
+            for (std::size_t index = first_binding;
+                 index < bindings_.size();
+                 ++index) {
+                bindings_[index]
+                    .free_surface_snapshot_revision_key =
+                    revision_key;
+            }
+            free_surface_geometry_snapshots_.push_back(
+                std::move(snapshot));
+            markModified();
+        } catch (...) {
+            metadata_.resize(first_metadata);
+            volume_rules_.resize(first_volume_rule);
+            interface_rules_.resize(first_interface_rule);
+            bindings_.resize(first_binding);
+            sensitivity_metadata_.resize(
+                first_sensitivity_metadata);
+            generated_volume_markers_.resize(
+                first_generated_volume_marker);
+            generated_interface_markers_.resize(
+                first_generated_interface_marker);
+            generated_level_set_interface_markers_.resize(
+                first_generated_level_set_interface_marker);
+            free_surface_geometry_snapshots_.resize(
+                first_snapshot);
+
+            for (const int marker : snapshot_markers) {
+                free_surface_snapshot_revision_by_marker_.erase(
+                    marker);
+                generated_volume_rule_indices_by_marker_.erase(
+                    marker);
+                generated_volume_rule_indices_by_marker_and_side_
+                    .erase(marker);
+                generated_interface_rule_indices_by_marker_.erase(
+                    marker);
+                generated_interface_two_sided_bindings_by_marker_
+                    .erase(marker);
+                generated_level_set_interface_provenance_by_marker_
+                    .erase(marker);
+                generated_active_boundary_provenance_by_marker_
+                    .erase(marker);
+                generated_interface_boundary_provenance_by_marker_.erase(
+                    marker);
+            }
+            for (const auto& checkpoint :
+                 physical_marker_checkpoints) {
+                const auto found =
+                    generated_active_boundary_markers_by_physical_marker_
+                        .find(checkpoint.marker);
+                if (found ==
+                    generated_active_boundary_markers_by_physical_marker_
+                        .end()) {
+                    continue;
+                }
+                if (checkpoint.existed) {
+                    found->second.resize(checkpoint.size);
+                } else {
+                    generated_active_boundary_markers_by_physical_marker_
+                        .erase(found);
+                }
+            }
+            for (const auto& checkpoint :
+                 expected_source_revision_checkpoints) {
+                if (checkpoint.existed) {
+                    const auto found =
+                        expected_source_value_revision_by_marker_
+                            .find(checkpoint.marker);
+                    if (found !=
+                        expected_source_value_revision_by_marker_
+                            .end()) {
+                        found->second = checkpoint.value;
+                    }
+                } else {
+                    expected_source_value_revision_by_marker_.erase(
+                        checkpoint.marker);
+                }
+            }
+            generated_pruned_volume_rule_count_ =
+                old_generated_pruned_volume_rule_count;
+            generated_pruned_volume_measure_ =
+                old_generated_pruned_volume_measure;
+            content_revision_ = old_content_revision;
+            throw;
         }
-        for (const auto& active : snapshot->activeBoundaryDomains()) {
-            bind_marker(active.marker());
-        }
-        addGeneratedInterfaceDomain(snapshot->interfaceDomain(),
-                                    volume_side_filter);
-        for (const auto& contact : snapshot->contactDomains()) {
-            addGeneratedInterfaceBoundaryIntersectionDomain(contact);
-        }
-        for (const auto& active : snapshot->activeBoundaryDomains()) {
-            addGeneratedActiveBoundaryDomain(active);
-        }
-        for (std::size_t index = first_volume_rule;
-             index < volume_rules_.size();
-             ++index) {
-            volume_rules_[index]
-                .provenance.free_surface_snapshot_revision_key = revision_key;
-        }
-        for (std::size_t index = first_interface_rule;
-             index < interface_rules_.size();
-             ++index) {
-            interface_rules_[index]
-                .provenance.free_surface_snapshot_revision_key = revision_key;
-        }
-        for (std::size_t index = first_metadata; index < metadata_.size();
-             ++index) {
-            metadata_[index].free_surface_snapshot_revision_key = revision_key;
-        }
-        for (std::size_t index = first_binding; index < bindings_.size();
-             ++index) {
-            bindings_[index].free_surface_snapshot_revision_key = revision_key;
-        }
-        free_surface_geometry_snapshots_.push_back(std::move(snapshot));
-        markModified();
     }
 
     [[nodiscard]] bool hasFreeSurfaceGeometrySnapshotForMarker(int marker) const {
@@ -1295,8 +1961,82 @@ public:
                generated_interface_rule_indices_by_marker_.end();
     }
 
+    [[nodiscard]] bool hasGeneratedLevelSetInterfaceMarker(
+        int marker) const noexcept {
+        return std::find(
+                   generated_level_set_interface_markers_.begin(),
+                   generated_level_set_interface_markers_.end(),
+                   marker) !=
+               generated_level_set_interface_markers_.end();
+    }
+
+    [[nodiscard]] std::span<const int>
+    generatedLevelSetInterfaceMarkers() const noexcept {
+        return generated_level_set_interface_markers_;
+    }
+
+    [[nodiscard]] const GeneratedLevelSetInterfacePublicationProvenance*
+    findGeneratedLevelSetInterfacePublicationProvenance(
+        int marker) const noexcept {
+        const auto found =
+            generated_level_set_interface_provenance_by_marker_.find(
+                marker);
+        return found ==
+                   generated_level_set_interface_provenance_by_marker_.end()
+            ? nullptr
+            : &found->second;
+    }
+
+    [[nodiscard]] const std::string*
+    findGeneratedInterfaceBoundaryMarkerKey(
+        int marker) const noexcept {
+        const auto found =
+            generated_interface_boundary_provenance_by_marker_.find(
+                marker);
+        return found ==
+                   generated_interface_boundary_provenance_by_marker_.end()
+            ? nullptr
+            : &found->second.stable_owner_key;
+    }
+
+    [[nodiscard]] const GeneratedInterfaceBoundaryPublicationProvenance*
+    findGeneratedInterfaceBoundaryPublicationProvenance(
+        int marker) const noexcept {
+        const auto found =
+            generated_interface_boundary_provenance_by_marker_.find(
+                marker);
+        return found ==
+                   generated_interface_boundary_provenance_by_marker_.end()
+            ? nullptr
+            : &found->second;
+    }
+
     [[nodiscard]] bool hasGeneratedActiveBoundaryMarker(int marker) const noexcept {
-        return generated_active_boundary_marker_keys_.contains(marker);
+        return generated_active_boundary_provenance_by_marker_.contains(
+            marker);
+    }
+
+    [[nodiscard]] const GeneratedActiveBoundaryProvenance*
+    findGeneratedActiveBoundaryProvenance(int marker) const noexcept {
+        const auto found =
+            generated_active_boundary_provenance_by_marker_.find(marker);
+        return found == generated_active_boundary_provenance_by_marker_.end()
+            ? nullptr
+            : &found->second;
+    }
+
+    [[nodiscard]] std::span<const int>
+    generatedActiveBoundaryMarkersForPhysicalBoundary(
+        int physical_boundary_marker) const noexcept {
+        const auto found =
+            generated_active_boundary_markers_by_physical_marker_.find(
+                physical_boundary_marker);
+        if (found ==
+            generated_active_boundary_markers_by_physical_marker_.end()) {
+            return {};
+        }
+        return std::span<const int>(
+            found->second.data(), found->second.size());
     }
 
     [[nodiscard]] const std::vector<int>& generatedInterfaceMarkers() const noexcept {
@@ -1353,6 +2093,26 @@ public:
             }
         }
         return rules;
+    }
+
+    /**
+     * Nonallocating generated-interface rule lookup for capped consumers.
+     *
+     * The returned indices address `interfaceRules()` and remain valid until
+     * this context is modified. A registered marker with no rules returns an
+     * empty span.
+     */
+    [[nodiscard]] std::span<const std::size_t>
+    generatedInterfaceRuleIndexSpanForMarker(int marker) const {
+        assertGeneratedInterfaceRulesCurrentForMarker(marker);
+        const auto it =
+            generated_interface_rule_indices_by_marker_.find(marker);
+        if (it ==
+            generated_interface_rule_indices_by_marker_.end()) {
+            return {};
+        }
+        return std::span<const std::size_t>(
+            it->second.data(), it->second.size());
     }
 
     [[nodiscard]] std::vector<std::size_t>
@@ -2180,10 +2940,15 @@ private:
         generated_interface_rule_indices_by_marker_{};
     std::unordered_map<int, std::vector<interfaces::GeneratedInterfaceTwoSidedBinding>>
         generated_interface_two_sided_bindings_by_marker_{};
-    std::unordered_map<int, std::string>
-        generated_active_boundary_marker_keys_{};
-    std::unordered_map<int, std::string>
-        generated_interface_boundary_marker_keys_{};
+    std::vector<int> generated_level_set_interface_markers_{};
+    std::unordered_map<int, GeneratedLevelSetInterfacePublicationProvenance>
+        generated_level_set_interface_provenance_by_marker_{};
+    std::unordered_map<int, GeneratedActiveBoundaryProvenance>
+        generated_active_boundary_provenance_by_marker_{};
+    std::unordered_map<int, std::vector<int>>
+        generated_active_boundary_markers_by_physical_marker_{};
+    std::unordered_map<int, GeneratedInterfaceBoundaryPublicationProvenance>
+        generated_interface_boundary_provenance_by_marker_{};
     std::vector<std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>>
         free_surface_geometry_snapshots_{};
     std::unordered_map<int, std::uint64_t>

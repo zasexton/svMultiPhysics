@@ -700,6 +700,119 @@ std::shared_ptr<Mesh> makeOpenTankQuadMesh(int left_marker,
 
     return create_mesh(std::move(base));
 }
+
+std::shared_ptr<Mesh> makeOpenTankTriangleMesh(
+    int left_marker,
+    int right_marker,
+    int bottom_marker,
+    int free_surface_marker,
+    std::string_view free_surface_set)
+{
+    auto base = std::make_shared<MeshBase>();
+    const std::vector<real_t> x_ref = {
+        -1.0, -1.0,
+         1.0, -1.0,
+         1.0,  1.0,
+        -1.0,  1.0,
+    };
+    const std::vector<offset_t>
+        cell2vertex_offsets = {0, 3, 6};
+    const std::vector<index_t> cell2vertex = {
+        0, 1, 2,
+        0, 2, 3,
+    };
+    CellShape shape{};
+    shape.family = CellFamily::Triangle;
+    shape.num_corners = 3;
+    shape.order = 1;
+    base->build_from_arrays(
+        /*spatial_dim=*/2,
+        x_ref,
+        cell2vertex_offsets,
+        cell2vertex,
+        std::vector<CellShape>(2, shape));
+    base->finalize();
+
+    base->register_label(
+        "wall_left",
+        static_cast<label_t>(left_marker));
+    base->register_label(
+        "wall_right",
+        static_cast<label_t>(right_marker));
+    base->register_label(
+        "wall_bottom",
+        static_cast<label_t>(bottom_marker));
+    base->register_label(
+        "free_surface",
+        static_cast<label_t>(free_surface_marker));
+    const auto coordinate =
+        [&](index_t vertex, int component) {
+            return base->X_ref().at(
+                static_cast<std::size_t>(
+                    2 * vertex + component));
+        };
+    const auto all_vertices_match =
+        [&](std::span<const index_t> vertices,
+            int component,
+            real_t value) {
+            return std::all_of(
+                vertices.begin(),
+                vertices.end(),
+                [&](index_t vertex) {
+                    return std::abs(
+                               coordinate(
+                                   vertex,
+                                   component) -
+                               value) <
+                           real_t(1.0e-14);
+                });
+        };
+    for (index_t face = 0;
+         face < static_cast<index_t>(
+                    base->n_faces());
+         ++face) {
+        const auto vertices =
+            base->face_vertices(face);
+        if (vertices.size() != 2u) {
+            continue;
+        }
+        label_t label = INVALID_LABEL;
+        if (all_vertices_match(
+                vertices, 1, real_t(1.0))) {
+            label =
+                static_cast<label_t>(
+                    free_surface_marker);
+        } else if (all_vertices_match(
+                       vertices, 1, real_t(-1.0))) {
+            label =
+                static_cast<label_t>(
+                    bottom_marker);
+        } else if (all_vertices_match(
+                       vertices, 0, real_t(-1.0))) {
+            label =
+                static_cast<label_t>(
+                    left_marker);
+        } else if (all_vertices_match(
+                       vertices, 0, real_t(1.0))) {
+            label =
+                static_cast<label_t>(
+                    right_marker);
+        }
+        if (label == INVALID_LABEL) {
+            continue;
+        }
+        base->set_boundary_label(face, label);
+        if (label ==
+            static_cast<label_t>(
+                free_surface_marker)) {
+            base->add_to_set(
+                EntityKind::Face,
+                std::string(free_surface_set),
+                face);
+        }
+    }
+    return create_mesh(std::move(base));
+}
 #endif
 
 FE::systems::SetupInputs makeSingleTriangleSetupInputs()
@@ -1508,7 +1621,9 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     FE::Real liquid_pressure = FE::Real{0.0},
     FE::Real external_pressure = FE::Real{0.0},
     bool use_constitutive_viscosity = false,
-    bool reverse_wall_orientation = false)
+    bool reverse_wall_orientation = false,
+    std::optional<std::array<FE::Real, 4>> liquid_pressure_nodal_values =
+        std::nullopt)
 {
     constexpr int interface_marker = 167;
     constexpr int wall_marker = 57;
@@ -1719,7 +1834,10 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
             pressure,
             vertex,
             0,
-            liquid_pressure);
+            liquid_pressure_nodal_values.has_value()
+                ? liquid_pressure_nodal_values->at(
+                      static_cast<std::size_t>(vertex))
+                : liquid_pressure);
         const auto vertex_dofs = velocity_entity_map->getVertexDofs(vertex);
         out.velocity_x_dofs[static_cast<std::size_t>(vertex)] =
             velocity_offset +
@@ -4032,6 +4150,106 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceNitscheKinematicsRejectsN
 }
 
 TEST(MovingDomainPhysics,
+     FittedFreeSurfaceNitscheKeepsMeshAndFluidNormalDescriptorsDistinct)
+{
+    constexpr int marker = 385;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.enable_convection = false;
+    opts.mesh_velocity_source =
+        ns::ALEMeshVelocitySource::CoupledDisplacement;
+    opts.auto_register_mesh_displacement_field = true;
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                ns::FreeSurfaceImplementation::FittedALE,
+            .boundary_marker = marker,
+            .tangential_mesh_policy =
+                ns::FreeSurfaceTangentialMeshPolicy::Free,
+            .kinematic_enforcement =
+                ns::FreeSurfaceKinematicEnforcement::Nitsche,
+            .kinematic_nitsche_gamma = FE::Real{16.0},
+        });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(
+        u_space, p_space, std::move(opts));
+    ASSERT_NO_THROW(module.registerOn(system));
+
+    const auto displacement = system.meshMotionField(
+        FE::systems::MeshMotionFieldRole::Displacement);
+    ASSERT_TRUE(displacement.has_value());
+    const auto velocity = system.findFieldByName("u");
+    ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
+    const auto normal_declarations =
+        system.meshNormalBoundaryConstraints();
+    ASSERT_EQ(normal_declarations.size(), 1u);
+    EXPECT_EQ(normal_declarations.front().enforcement_kind,
+              FE::analysis::EnforcementKind::WeakPenalty);
+    ASSERT_TRUE(
+        normal_declarations.front().consumer_binding.has_value());
+    ASSERT_TRUE(normal_declarations.front()
+                    .consumer_binding->related_fluid.has_value());
+    EXPECT_EQ(normal_declarations.front()
+                  .consumer_binding->related_fluid->enforcement_kind,
+              FE::analysis::EnforcementKind::WeakNitsche);
+
+    const auto find_descriptor = [&](std::string_view source) {
+        return std::find_if(
+            system.boundaryConditionDescriptors().begin(),
+            system.boundaryConditionDescriptors().end(),
+            [&](const auto& descriptor) {
+                return descriptor.source == source;
+            });
+    };
+    const auto mesh_descriptor = find_descriptor(
+        "Fitted free-surface mesh normal kinematic row on marker 385");
+    ASSERT_NE(mesh_descriptor,
+              system.boundaryConditionDescriptors().end());
+    EXPECT_EQ(mesh_descriptor->primary_variable,
+              FE::analysis::VariableKey::field(*displacement));
+    EXPECT_EQ(mesh_descriptor->enforcement_kind,
+              FE::analysis::EnforcementKind::WeakPenalty);
+    ASSERT_EQ(mesh_descriptor->related_variables.size(), 1u);
+    EXPECT_EQ(mesh_descriptor->related_variables.front(),
+              FE::analysis::VariableKey::field(velocity));
+
+    const auto fluid_descriptor = find_descriptor(
+        "Fitted free-surface fluid normal kinematic row on marker 385");
+    ASSERT_NE(fluid_descriptor,
+              system.boundaryConditionDescriptors().end());
+    EXPECT_EQ(fluid_descriptor->primary_variable,
+              FE::analysis::VariableKey::field(velocity));
+    EXPECT_EQ(fluid_descriptor->enforcement_kind,
+              FE::analysis::EnforcementKind::WeakNitsche);
+    ASSERT_EQ(fluid_descriptor->related_variables.size(), 1u);
+    EXPECT_EQ(fluid_descriptor->related_variables.front(),
+              FE::analysis::VariableKey::field(*displacement));
+
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    ASSERT_NO_THROW(system.recordAcceptedMeshNormalBoundaryConstraints(
+        /*accepted_step=*/1u,
+        FE::Real{0.1},
+        FE::Real{0.1},
+        /*state_revision=*/2u));
+    const auto normal_history =
+        system.meshNormalBoundaryConstraintHistory();
+    ASSERT_EQ(normal_history.size(), 1u);
+    ASSERT_TRUE(normal_history.front()
+                    .declaration.consumer_binding.has_value());
+    ASSERT_TRUE(normal_history.front()
+                    .declaration.consumer_binding->related_fluid
+                    .has_value());
+    EXPECT_EQ(normal_history.front()
+                  .declaration.consumer_binding->related_fluid
+                  ->enforcement_kind,
+              FE::analysis::EnforcementKind::WeakNitsche);
+}
+
+TEST(MovingDomainPhysics,
      FittedFreeSurfaceNitschePoliciesAreBoundaryLocalAndOrderInvariant)
 {
     constexpr int low_marker = 381;
@@ -4240,18 +4458,34 @@ TEST(MovingDomainPhysics,
         return opts;
     };
     const auto expect_rejected_before_mutation =
-        [&](const auto& mutate) {
+        [&](const auto& mutate,
+            std::string_view expected_diagnostic = {}) {
             auto opts = valid_options();
             mutate(opts);
             FE::systems::FESystem system(mesh);
             ns::IncompressibleNavierStokesVMSModule module(
                 u_space, p_space, std::move(opts));
-            EXPECT_THROW(module.registerOn(system),
-                         std::invalid_argument);
+            try {
+                module.registerOn(system);
+                FAIL() << "fitted capability exclusion must fail closed";
+            } catch (const std::invalid_argument& error) {
+                if (!expected_diagnostic.empty()) {
+                    EXPECT_NE(
+                        std::string(error.what()).find(
+                            expected_diagnostic),
+                        std::string::npos)
+                        << error.what();
+                }
+            }
             EXPECT_EQ(system.fieldMap().numFields(), 0u);
             EXPECT_TRUE(system.formulationRecords().empty());
             EXPECT_TRUE(
                 system.meshTangentialBoundaryPolicies().empty());
+            EXPECT_TRUE(
+                system.meshNormalBoundaryConstraints().empty());
+            EXPECT_FALSE(system.hasOperator("equations"));
+            EXPECT_FALSE(
+                module.effectiveConfigurationArtifact().has_value());
         };
 
     expect_rejected_before_mutation(
@@ -4268,14 +4502,64 @@ TEST(MovingDomainPhysics,
         opts.free_surface.front().kinematic_enforcement =
             ns::FreeSurfaceKinematicEnforcement::None;
     });
-    expect_rejected_before_mutation([](auto& opts) {
-        opts.free_surface.front().tangential_mesh_policy =
-            ns::FreeSurfaceTangentialMeshPolicy::Free;
-    });
-    expect_rejected_before_mutation([](auto& opts) {
-        opts.free_surface.front().tangential_mesh_policy =
-            ns::FreeSurfaceTangentialMeshPolicy::SmoothingOnly;
-    });
+    expect_rejected_before_mutation(
+        [](auto& opts) {
+            opts.free_surface.front().contact_lines.push_back(
+                dynamicRenEContactLine(
+                    /*wall_marker=*/38,
+                    FE::Real{1.0},
+                    {FE::Real{1.0}, FE::Real{0.0}, FE::Real{0.0}},
+                    FE::Real{0.5},
+                    FE::Real{0.2}));
+        },
+        "DynamicContactAngle is currently supported only for sharp "
+        "unfitted level-set free surfaces");
+
+    {
+        auto quadratic_velocity = FE::spaces::VectorSpace(
+            FE::spaces::SpaceType::H1,
+            mesh,
+            /*order=*/2,
+            /*components=*/3);
+        FE::systems::FESystem system(mesh);
+        const auto displacement = system.addField(
+            FE::systems::FieldSpec{
+                .name = "mesh_displacement",
+                .space = u_space,
+                .components = 3,
+            });
+        system.bindMeshMotionField(
+            FE::systems::MeshMotionFieldRole::Displacement,
+            displacement);
+        auto opts = valid_options();
+        opts.auto_register_mesh_displacement_field = false;
+        ns::IncompressibleNavierStokesVMSModule module(
+            quadratic_velocity, p_space, std::move(opts));
+        try {
+            module.registerOn(system);
+            FAIL() << "under-integrated fitted normal measurements must "
+                      "fail closed";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(
+                std::string(error.what()).find(
+                    "normal measurement quadrature requires velocity "
+                    "order 2 <= displacement-primary order 1"),
+                std::string::npos)
+                << error.what();
+        }
+        EXPECT_EQ(system.findFieldByName("mesh_displacement"),
+                  displacement);
+        EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+        EXPECT_FALSE(system.hasOperator("equations"));
+        EXPECT_TRUE(system.formulationRecords().empty());
+        EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
+        EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+        EXPECT_TRUE(
+            system.fittedALENormalOperatorStageMeasurementDeclarations()
+                .empty());
+        EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
+    }
 }
 
 TEST(MovingDomainPhysics,
@@ -4294,29 +4578,43 @@ TEST(MovingDomainPhysics,
         std::pair{ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
                   FE::systems::MeshTangentialBoundaryPolicy::Prescribed},
     };
-    for (const auto [policy, expected_policy] : cases) {
+    constexpr std::string_view fitted_surface_contact_capability =
+        "\"fitted_surface_contact_capability\":{"
+        "\"qualification\":\"supported_configuration_envelope\","
+        "\"supported_requests\":{"
+        "\"surface_tension_form\":[\"Automatic\",\"CurvatureTraction\"],"
+        "\"contact_line_model\":[\"None\",\"Pinned\"]},"
+        "\"exclusion_disposition\":"
+        "\"fail_closed_before_system_mutation\","
+        "\"exclusions\":[{"
+        "\"feature\":\"surface_tension_form\","
+        "\"value\":\"SurfaceStress\","
+        "\"reason_code\":"
+        "\"fitted_surface_stress_current_frame_gradient_unqualified\""
+        "},{\"feature\":\"contact_line_model\","
+        "\"value\":\"PrescribedAngle\","
+        "\"reason_code\":"
+        "\"fitted_contact_line_codimension_two_unavailable\""
+        "},{\"feature\":\"contact_line_model\","
+        "\"value\":\"DynamicRenE\","
+        "\"reason_code\":"
+        "\"dynamic_contact_requires_sharp_unfitted_level_set\"}]}";
+    for (const auto& policy_case : cases) {
+        const auto policy = policy_case.first;
+        const auto expected_policy = policy_case.second;
         auto opts = baseNavierStokesOptions();
         opts.enable_ale = true;
         opts.enable_convection = false;
         opts.mesh_velocity_source =
             ns::ALEMeshVelocitySource::CoupledDisplacement;
         opts.auto_register_mesh_displacement_field = true;
-        if (policy !=
-            ns::FreeSurfaceTangentialMeshPolicy::Prescribed) {
-            opts.input_configuration_schema_version = 1;
-            opts.explicit_legacy_configuration = true;
-        }
         auto boundary =
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
                 .implementation = ns::FreeSurfaceImplementation::FittedALE,
                 .boundary_marker = marker,
                 .tangential_mesh_policy = policy,
                 .kinematic_enforcement =
-                    policy ==
-                            ns::FreeSurfaceTangentialMeshPolicy::
-                                Prescribed
-                        ? ns::FreeSurfaceKinematicEnforcement::Penalty
-                        : ns::FreeSurfaceKinematicEnforcement::None,
+                    ns::FreeSurfaceKinematicEnforcement::Penalty,
                 .kinematic_penalty = FE::Real{4.0},
             };
         if (policy ==
@@ -4342,17 +4640,130 @@ TEST(MovingDomainPhysics,
         ASSERT_TRUE(displacement.has_value());
         EXPECT_EQ(declarations.front().mesh_displacement_field,
                   *displacement);
+        const auto normal_declarations =
+            system.meshNormalBoundaryConstraints();
+        ASSERT_EQ(normal_declarations.size(), 1u);
+        EXPECT_EQ(normal_declarations.front().mesh_displacement_field,
+                  *displacement);
+        EXPECT_EQ(normal_declarations.front().boundary_marker, marker);
+        EXPECT_EQ(
+            normal_declarations.front().quantity,
+            FE::systems::MeshNormalBoundaryQuantity::MeshVelocityTrace);
+        EXPECT_EQ(
+            normal_declarations.front().target_kind,
+            FE::systems::MeshNormalBoundaryTargetKind::
+                FluidNormalVelocity);
+        EXPECT_EQ(
+            normal_declarations.front().enforcement_kind,
+            FE::analysis::EnforcementKind::WeakPenalty);
+        EXPECT_NE(normal_declarations.front().related_velocity_field,
+                  FE::INVALID_FIELD_ID);
+        EXPECT_EQ(
+            normal_declarations.front().owner_component,
+            "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary");
+        EXPECT_TRUE(
+            normal_declarations.front().target_expression.isValid());
+        EXPECT_FALSE(
+            normal_declarations.front().target_expression.hasTest());
 
-        const bool has_tangential_descriptor = std::any_of(
+        const auto velocity =
+            normal_declarations.front().related_velocity_field;
+        const auto measurements =
+            system.fittedALENormalOperatorStageMeasurementDeclarations();
+        ASSERT_EQ(measurements.size(), 1u);
+        EXPECT_EQ(measurements.front().key.mesh_displacement_field,
+                  *displacement);
+        EXPECT_EQ(measurements.front().key.boundary_marker, marker);
+        EXPECT_EQ(measurements.front().related_velocity_field, velocity);
+        EXPECT_EQ(
+            measurements.front().normal_constraint.target_expression.node(),
+            normal_declarations.front().target_expression.node());
+        EXPECT_FALSE(
+            measurements.front().mesh_normal_integral_functional.empty());
+        EXPECT_FALSE(
+            measurements.front().fluid_normal_integral_functional.empty());
+        EXPECT_FALSE(
+            measurements.front()
+                .normal_gap_squared_integral_functional.empty());
+        EXPECT_EQ(
+            measurements.front()
+                .normal_gap_squared_integral_functional.find("work"),
+            std::string::npos);
+        EXPECT_EQ(
+            measurements.front()
+                .normal_gap_squared_integral_functional.find("dissipation"),
+            std::string::npos);
+        const auto find_normal_descriptor =
+            [&](std::string_view source) {
+                return std::find_if(
+                    system.boundaryConditionDescriptors().begin(),
+                    system.boundaryConditionDescriptors().end(),
+                    [&](const auto& descriptor) {
+                        return descriptor.source == source;
+                    });
+            };
+        const auto mesh_normal_descriptor = find_normal_descriptor(
+            "Fitted free-surface mesh normal kinematic row on marker 39");
+        ASSERT_NE(mesh_normal_descriptor,
+                  system.boundaryConditionDescriptors().end());
+        EXPECT_EQ(mesh_normal_descriptor->primary_variable,
+                  FE::analysis::VariableKey::field(*displacement));
+        EXPECT_EQ(mesh_normal_descriptor->boundary_marker, marker);
+        EXPECT_EQ(mesh_normal_descriptor->trace_kind,
+                  FE::analysis::TraceKind::NormalComponent);
+        EXPECT_EQ(mesh_normal_descriptor->enforcement_kind,
+                  FE::analysis::EnforcementKind::WeakPenalty);
+        ASSERT_EQ(mesh_normal_descriptor->related_variables.size(), 1u);
+        EXPECT_EQ(mesh_normal_descriptor->related_variables.front(),
+                  FE::analysis::VariableKey::field(velocity));
+
+        const auto fluid_normal_descriptor = find_normal_descriptor(
+            "Fitted free-surface fluid normal kinematic row on marker 39");
+        ASSERT_NE(fluid_normal_descriptor,
+                  system.boundaryConditionDescriptors().end());
+        EXPECT_EQ(fluid_normal_descriptor->primary_variable,
+                  FE::analysis::VariableKey::field(velocity));
+        EXPECT_EQ(fluid_normal_descriptor->boundary_marker, marker);
+        EXPECT_EQ(fluid_normal_descriptor->trace_kind,
+                  FE::analysis::TraceKind::NormalComponent);
+        EXPECT_EQ(fluid_normal_descriptor->enforcement_kind,
+                  FE::analysis::EnforcementKind::WeakPenalty);
+        ASSERT_EQ(fluid_normal_descriptor->related_variables.size(), 1u);
+        EXPECT_EQ(fluid_normal_descriptor->related_variables.front(),
+                  FE::analysis::VariableKey::field(*displacement));
+
+        const auto tangential_descriptor = std::find_if(
             system.boundaryConditionDescriptors().begin(),
             system.boundaryConditionDescriptors().end(),
             [](const auto& descriptor) {
                 return descriptor.trace_kind ==
                        FE::analysis::TraceKind::TangentialComponent;
             });
+        ASSERT_NE(tangential_descriptor,
+                  system.boundaryConditionDescriptors().end());
         EXPECT_EQ(
-            has_tangential_descriptor,
-            policy == ns::FreeSurfaceTangentialMeshPolicy::Prescribed);
+            tangential_descriptor->enforcement_kind,
+            policy == ns::FreeSurfaceTangentialMeshPolicy::Prescribed
+                ? FE::analysis::EnforcementKind::WeakPenalty
+                : FE::analysis::EnforcementKind::WeakConsistent);
+        const auto expected_source = [&]() {
+            switch (policy) {
+            case ns::FreeSurfaceTangentialMeshPolicy::Free:
+                return std::string(
+                    "Fitted free-surface natural tangential state on "
+                    "marker 39");
+            case ns::FreeSurfaceTangentialMeshPolicy::SmoothingOnly:
+                return std::string(
+                    "Fitted free-surface tangential surface smoothing on "
+                    "marker 39");
+            case ns::FreeSurfaceTangentialMeshPolicy::Prescribed:
+                return std::string(
+                    "Fitted free-surface prescribed tangential mesh "
+                    "velocity on marker 39");
+            }
+            return std::string{};
+        }();
+        EXPECT_EQ(tangential_descriptor->source, expected_source);
         const auto artifact =
             module.effectiveConfigurationArtifact();
         ASSERT_TRUE(artifact.has_value());
@@ -4362,26 +4773,20 @@ TEST(MovingDomainPhysics,
                 "\"IncompressibleNavierStokesVMSModule."
                 "FreeSurfaceBoundary\""),
             std::string::npos);
-        EXPECT_EQ(
-            artifact->json.find("\"policy_consumed\":true") !=
-                std::string::npos,
-            policy ==
-                ns::FreeSurfaceTangentialMeshPolicy::Prescribed);
-        EXPECT_EQ(
-            artifact->json.find(
-                "\"operator_tag\":\"equations\"") !=
-                std::string::npos,
-            policy ==
-                ns::FreeSurfaceTangentialMeshPolicy::Prescribed);
+        EXPECT_NE(
+            artifact->json.find("\"policy_consumed\":true"),
+            std::string::npos);
         EXPECT_NE(
             artifact->json.find(
-                policy ==
-                        ns::FreeSurfaceTangentialMeshPolicy::
-                            Prescribed
-                    ? "\"policy_qualification\":"
-                      "\"supported_configuration_envelope\""
-                    : "\"policy_qualification\":"
-                      "\"unqualified_explicit_legacy\""),
+                "\"operator_tag\":\"equations\""),
+            std::string::npos);
+        EXPECT_NE(
+            artifact->json.find(
+                "\"policy_qualification\":"
+                "\"supported_configuration_envelope\""),
+            std::string::npos);
+        EXPECT_NE(
+            artifact->json.find(fitted_surface_contact_capability),
             std::string::npos);
     }
 }
@@ -4472,8 +4877,6 @@ TEST(MovingDomainPhysics,
 
     const auto make_fluid_options = [&]() {
         auto opts = baseNavierStokesOptions();
-        opts.input_configuration_schema_version = 1;
-        opts.explicit_legacy_configuration = true;
         opts.enable_ale = true;
         opts.mesh_velocity_source =
             ns::ALEMeshVelocitySource::CoupledDisplacement;
@@ -4484,6 +4887,9 @@ TEST(MovingDomainPhysics,
                 .boundary_marker = marker,
                 .tangential_mesh_policy =
                     ns::FreeSurfaceTangentialMeshPolicy::Free,
+                .kinematic_enforcement =
+                    ns::FreeSurfaceKinematicEnforcement::Penalty,
+                .kinematic_penalty = FE::Real{4.0},
             });
         return opts;
     };
@@ -4583,6 +4989,959 @@ TEST(MovingDomainPhysics,
 }
 
 TEST(MovingDomainPhysics,
+     FittedFreeSurfaceRejectsMeshMotionNormalOwnerInEitherOrder)
+{
+    constexpr int marker = 142;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(
+        std::array<int, 4>{marker, marker + 1, marker + 2, marker + 3});
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+
+    const auto make_fluid_options = [&]() {
+        auto opts = baseNavierStokesOptions();
+        opts.enable_ale = true;
+        opts.mesh_velocity_source =
+            ns::ALEMeshVelocitySource::CoupledDisplacement;
+        opts.auto_register_mesh_displacement_field = true;
+        opts.free_surface.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+                .implementation =
+                    ns::FreeSurfaceImplementation::FittedALE,
+                .boundary_marker = marker,
+                .tangential_mesh_policy =
+                    ns::FreeSurfaceTangentialMeshPolicy::Free,
+                .kinematic_enforcement =
+                    ns::FreeSurfaceKinematicEnforcement::Penalty,
+                .kinematic_penalty = FE::Real{4.0},
+            });
+        return opts;
+    };
+    const auto make_normal = [&]() {
+        return mm::NormalConstraintBC{
+            .boundary_marker = marker,
+            .quantity = mm::NormalConstraintQuantity::Velocity,
+            .target = FE::Real{0.1},
+            .penalty = FE::Real{3.0},
+            .velocity_time_scale = FE::Real{0.25},
+        };
+    };
+    const auto expect_conflict = [&](const auto& invocation,
+                                     std::string_view owner) {
+        try {
+            invocation();
+            FAIL() << "Expected a same-marker normal owner conflict";
+        } catch (const std::exception& error) {
+            const std::string message(error.what());
+            EXPECT_NE(message.find("normal"), std::string::npos)
+                << message;
+            EXPECT_NE(message.find(std::to_string(marker)),
+                      std::string::npos)
+                << message;
+            EXPECT_NE(message.find(owner), std::string::npos)
+                << message;
+        }
+    };
+
+    {
+        mm::HarmonicMeshMotionOptions mesh_options;
+        mesh_options.operator_tag = "mesh_motion";
+        mesh_options.normal_constraint.push_back(make_normal());
+        FE::systems::FESystem system(mesh);
+        mm::HarmonicMeshMotionModule mesh_module(
+            u_space, std::move(mesh_options));
+        ASSERT_NO_THROW(mesh_module.registerOn(system));
+        ASSERT_EQ(system.meshNormalBoundaryConstraints().size(), 1u);
+        const auto field_count = system.fieldMap().numFields();
+        const auto formulation_count = system.formulationRecords().size();
+        const auto descriptor_count =
+            system.boundaryConditionDescriptors().size();
+
+        ns::IncompressibleNavierStokesVMSModule fluid_module(
+            u_space, p_space, make_fluid_options());
+        expect_conflict(
+            [&]() { fluid_module.registerOn(system); },
+            "HarmonicMeshMotionModule");
+        EXPECT_EQ(system.fieldMap().numFields(), field_count);
+        EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.formulationRecords().size(), formulation_count);
+        EXPECT_EQ(system.boundaryConditionDescriptors().size(),
+                  descriptor_count);
+        EXPECT_EQ(system.meshNormalBoundaryConstraints().size(), 1u);
+        EXPECT_FALSE(system.hasOperator("equations"));
+    }
+
+    {
+        FE::systems::FESystem system(mesh);
+        ns::IncompressibleNavierStokesVMSModule fluid_module(
+            u_space, p_space, make_fluid_options());
+        ASSERT_NO_THROW(fluid_module.registerOn(system));
+        ASSERT_EQ(system.meshNormalBoundaryConstraints().size(), 1u);
+        const auto field_count = system.fieldMap().numFields();
+        const auto formulation_count = system.formulationRecords().size();
+        const auto descriptor_count =
+            system.boundaryConditionDescriptors().size();
+
+        mm::HarmonicMeshMotionOptions mesh_options;
+        mesh_options.operator_tag = "mesh_motion";
+        mesh_options.normal_constraint.push_back(make_normal());
+        mm::HarmonicMeshMotionModule mesh_module(
+            u_space, std::move(mesh_options));
+        expect_conflict(
+            [&]() { mesh_module.registerOn(system); },
+            "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary");
+        EXPECT_EQ(system.fieldMap().numFields(), field_count);
+        EXPECT_EQ(system.formulationRecords().size(), formulation_count);
+        EXPECT_EQ(system.boundaryConditionDescriptors().size(),
+                  descriptor_count);
+        EXPECT_EQ(system.meshNormalBoundaryConstraints().size(), 1u);
+        EXPECT_FALSE(system.hasOperator("mesh_motion"));
+    }
+
+    {
+        FE::systems::FESystem system(mesh);
+        ns::IncompressibleNavierStokesVMSModule fluid_module(
+            u_space, p_space, make_fluid_options());
+        ASSERT_NO_THROW(fluid_module.registerOn(system));
+        const auto field_count = system.fieldMap().numFields();
+        const auto formulation_count = system.formulationRecords().size();
+        const auto descriptor_count =
+            system.boundaryConditionDescriptors().size();
+
+        mm::PseudoElasticMeshMotionOptions mesh_options;
+        mesh_options.operator_tag = "pseudo_mesh_motion";
+        mesh_options.normal_constraint.push_back(make_normal());
+        mm::PseudoElasticMeshMotionModule mesh_module(
+            u_space, std::move(mesh_options));
+        expect_conflict(
+            [&]() { mesh_module.registerOn(system); },
+            "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary");
+        EXPECT_EQ(system.fieldMap().numFields(), field_count);
+        EXPECT_EQ(system.formulationRecords().size(), formulation_count);
+        EXPECT_EQ(system.boundaryConditionDescriptors().size(),
+                  descriptor_count);
+        EXPECT_EQ(system.meshNormalBoundaryConstraints().size(), 1u);
+        EXPECT_FALSE(system.hasOperator("pseudo_mesh_motion"));
+    }
+
+    {
+        mm::PseudoElasticMeshMotionOptions mesh_options;
+        mesh_options.operator_tag = "pseudo_mesh_motion";
+        mesh_options.normal_constraint.push_back(make_normal());
+        FE::systems::FESystem system(mesh);
+        mm::PseudoElasticMeshMotionModule mesh_module(
+            u_space, std::move(mesh_options));
+        ASSERT_NO_THROW(mesh_module.registerOn(system));
+        const auto field_count = system.fieldMap().numFields();
+        const auto formulation_count = system.formulationRecords().size();
+        const auto descriptor_count =
+            system.boundaryConditionDescriptors().size();
+
+        ns::IncompressibleNavierStokesVMSModule fluid_module(
+            u_space, p_space, make_fluid_options());
+        expect_conflict(
+            [&]() { fluid_module.registerOn(system); },
+            "PseudoElasticMeshMotionModule");
+        EXPECT_EQ(system.fieldMap().numFields(), field_count);
+        EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.formulationRecords().size(), formulation_count);
+        EXPECT_EQ(system.boundaryConditionDescriptors().size(),
+                  descriptor_count);
+        EXPECT_EQ(system.meshNormalBoundaryConstraints().size(), 1u);
+        EXPECT_FALSE(system.hasOperator("equations"));
+    }
+
+    {
+        auto fluid_options = make_fluid_options();
+        fluid_options.velocity_dirichlet_weak.push_back(
+            ns::IncompressibleNavierStokesVMSOptions::
+                VelocityDirichletBC{
+                    .boundary_marker = marker + 2,
+                    .value = {FE::Real{0.0}, FE::Real{0.0},
+                              FE::Real{0.0}},
+                });
+        FE::systems::FESystem system(mesh);
+        ns::IncompressibleNavierStokesVMSModule fluid_module(
+            u_space, p_space, std::move(fluid_options));
+        ASSERT_NO_THROW(fluid_module.registerOn(system));
+        ASSERT_EQ(system.meshNormalBoundaryConstraints().size(), 1u);
+        EXPECT_EQ(
+            system.meshNormalBoundaryConstraints().front()
+                .boundary_marker,
+            marker);
+        EXPECT_TRUE(formulationRecordsContainBoundaryMarker(
+            system, marker + 2));
+
+        auto distinct_normal = make_normal();
+        distinct_normal.boundary_marker = marker + 1;
+        mm::HarmonicMeshMotionOptions mesh_options;
+        mesh_options.operator_tag = "mesh_motion";
+        mesh_options.normal_constraint.push_back(
+            std::move(distinct_normal));
+        mm::HarmonicMeshMotionModule mesh_module(
+            u_space, std::move(mesh_options));
+        ASSERT_NO_THROW(mesh_module.registerOn(system));
+        const auto normal_declarations =
+            system.meshNormalBoundaryConstraints();
+        ASSERT_EQ(normal_declarations.size(), 2u);
+        EXPECT_EQ(normal_declarations[0].boundary_marker, marker);
+        EXPECT_EQ(normal_declarations[1].boundary_marker, marker + 1);
+        EXPECT_EQ(
+            normal_declarations[0].owner_component,
+            "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary");
+        EXPECT_EQ(normal_declarations[1].owner_component,
+                  "HarmonicMeshMotionModule");
+        EXPECT_TRUE(system.hasOperator("equations"));
+        EXPECT_TRUE(system.hasOperator("mesh_motion"));
+    }
+}
+
+TEST(MovingDomainPhysics,
+     MeshNormalBoundaryRegistryRejectsInvalidDuplicateAndRebinding)
+{
+    constexpr int marker = 143;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto displacement_space = makeVelocitySpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto displacement = system.addField(
+        FE::systems::FieldSpec{
+            .name = "normal_registry_displacement",
+            .space = displacement_space,
+            .components = 3,
+        });
+    const auto replacement = system.addField(
+        FE::systems::FieldSpec{
+            .name = "normal_registry_replacement",
+            .space = displacement_space,
+            .components = 3,
+        });
+    const auto velocity = system.addField(
+        FE::systems::FieldSpec{
+            .name = "normal_registry_velocity",
+            .space = displacement_space,
+            .components = 3,
+        });
+    system.bindMeshMotionField(
+        FE::systems::MeshMotionFieldRole::Displacement,
+        displacement);
+
+    const auto make_declaration =
+        [&](int boundary_marker, std::string owner) {
+            return FE::systems::MeshNormalBoundaryConstraintDeclaration{
+                .mesh_displacement_field = displacement,
+                .boundary_marker = boundary_marker,
+                .quantity = FE::systems::MeshNormalBoundaryQuantity::
+                    DisplacementTrace,
+                .target_kind =
+                    FE::systems::MeshNormalBoundaryTargetKind::
+                        PrescribedDisplacement,
+                .target_expression =
+                    FE::forms::FormExpr::constant(FE::Real{0.0}),
+                .enforcement_kind =
+                    FE::analysis::EnforcementKind::WeakPenalty,
+                .related_velocity_field = FE::INVALID_FIELD_ID,
+                .owner_component = std::move(owner),
+            };
+        };
+
+    auto invalid_quantity =
+        make_declaration(marker, "invalid_quantity_owner");
+    invalid_quantity.quantity = static_cast<
+        FE::systems::MeshNormalBoundaryQuantity>(255u);
+    EXPECT_THROW(
+        system.declareMeshNormalBoundaryConstraint(
+            std::move(invalid_quantity)),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+
+    auto invalid_target =
+        make_declaration(marker, "invalid_target_owner");
+    invalid_target.target_expression = FE::forms::TestField(
+        displacement,
+        *displacement_space,
+        "normal_registry_test");
+    EXPECT_THROW(
+        system.declareMeshNormalBoundaryConstraint(
+            std::move(invalid_target)),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+
+    auto invalid_shape =
+        make_declaration(marker, "invalid_shape_owner");
+    invalid_shape.target_expression = FE::forms::FormExpr::asVector({
+        FE::forms::FormExpr::constant(FE::Real{0.0}),
+        FE::forms::FormExpr::constant(FE::Real{0.0}),
+        FE::forms::FormExpr::constant(FE::Real{0.0}),
+    });
+    EXPECT_THROW(
+        system.declareMeshNormalBoundaryConstraint(
+            std::move(invalid_shape)),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+
+    auto mislabeled_fluid_target =
+        make_declaration(marker, "mislabeled_fluid_target_owner");
+    mislabeled_fluid_target.quantity =
+        FE::systems::MeshNormalBoundaryQuantity::MeshVelocityTrace;
+    mislabeled_fluid_target.target_kind =
+        FE::systems::MeshNormalBoundaryTargetKind::FluidNormalVelocity;
+    mislabeled_fluid_target.related_velocity_field = velocity;
+    EXPECT_THROW(
+        system.declareMeshNormalBoundaryConstraint(
+            std::move(mislabeled_fluid_target)),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+
+    auto wrong_velocity_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1,
+        mesh,
+        /*order=*/2,
+        /*components=*/3);
+    auto wrong_space_fluid_target =
+        make_declaration(marker, "wrong_space_fluid_target_owner");
+    wrong_space_fluid_target.quantity =
+        FE::systems::MeshNormalBoundaryQuantity::MeshVelocityTrace;
+    wrong_space_fluid_target.target_kind =
+        FE::systems::MeshNormalBoundaryTargetKind::FluidNormalVelocity;
+    wrong_space_fluid_target.related_velocity_field = velocity;
+    wrong_space_fluid_target.target_expression = FE::forms::normalTrace(
+        FE::forms::StateField(
+            velocity,
+            *wrong_velocity_space,
+            "wrong_space_fluid_velocity"),
+        FE::forms::currentNormal());
+    EXPECT_THROW(
+        system.declareMeshNormalBoundaryConstraint(
+            std::move(wrong_space_fluid_target)),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+
+    auto valid = make_declaration(marker, "first_normal_owner");
+    ASSERT_NO_THROW(system.declareMeshNormalBoundaryConstraint(
+        std::move(valid)));
+    ASSERT_EQ(system.meshNormalBoundaryConstraints().size(), 1u);
+
+    auto duplicate = make_declaration(marker, "second_normal_owner");
+    EXPECT_THROW(
+        system.declareMeshNormalBoundaryConstraint(std::move(duplicate)),
+        FE::InvalidArgumentException);
+    ASSERT_EQ(system.meshNormalBoundaryConstraints().size(), 1u);
+    EXPECT_EQ(system.meshNormalBoundaryConstraints().front().owner_component,
+              "first_normal_owner");
+
+    EXPECT_THROW(
+        system.bindMeshMotionField(
+            FE::systems::MeshMotionFieldRole::Displacement,
+            replacement),
+        FE::InvalidArgumentException);
+    EXPECT_EQ(
+        system.meshMotionField(
+            FE::systems::MeshMotionFieldRole::Displacement),
+        displacement);
+
+    auto distinct =
+        make_declaration(marker + 1, "distinct_marker_owner");
+    ASSERT_NO_THROW(system.declareMeshNormalBoundaryConstraint(
+        std::move(distinct)));
+    ASSERT_EQ(system.meshNormalBoundaryConstraints().size(), 2u);
+    EXPECT_EQ(system.meshNormalBoundaryConstraints()[0].boundary_marker,
+              marker);
+    EXPECT_EQ(system.meshNormalBoundaryConstraints()[1].boundary_marker,
+              marker + 1);
+
+    FE::systems::FESystem unbound_system(mesh);
+    mm::HarmonicMeshMotionOptions unbound_options;
+    unbound_options.operator_tag = "unbound_mesh_motion";
+    unbound_options.bind_as_mesh_displacement = false;
+    unbound_options.normal_constraint.push_back(mm::NormalConstraintBC{
+        .boundary_marker = marker,
+        .quantity = mm::NormalConstraintQuantity::Displacement,
+        .target = FE::Real{0.0},
+        .penalty = FE::Real{1.0},
+        .velocity_time_scale = FE::Real{1.0},
+    });
+    mm::HarmonicMeshMotionModule unbound_module(
+        displacement_space, std::move(unbound_options));
+    EXPECT_THROW(unbound_module.registerOn(unbound_system),
+                 std::invalid_argument);
+    EXPECT_EQ(unbound_system.findFieldByName("mesh_displacement"),
+              FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(unbound_system.meshNormalBoundaryConstraints().empty());
+    EXPECT_FALSE(unbound_system.hasOperator("unbound_mesh_motion"));
+}
+
+TEST(MovingDomainPhysics,
+     MeshNormalBoundaryConsumerBindingRequiresUniqueExactDescriptor)
+{
+    constexpr int marker = 145;
+    constexpr std::string_view operator_tag =
+        "normal_consumer_equations";
+    constexpr std::string_view mesh_source =
+        "normal consumer mesh row";
+    constexpr std::string_view fluid_source =
+        "normal consumer reciprocal fluid row";
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto vector_space = makeVelocitySpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto displacement = system.addField(
+        FE::systems::FieldSpec{
+            .name = "normal_consumer_displacement",
+            .space = vector_space,
+            .components = 3,
+        });
+    const auto velocity = system.addField(
+        FE::systems::FieldSpec{
+            .name = "normal_consumer_velocity",
+            .space = vector_space,
+            .components = 3,
+        });
+    system.bindMeshMotionField(
+        FE::systems::MeshMotionFieldRole::Displacement,
+        displacement);
+
+    const auto make_declaration = [&]() {
+        return FE::systems::MeshNormalBoundaryConstraintDeclaration{
+            .mesh_displacement_field = displacement,
+            .boundary_marker = marker,
+            .quantity = FE::systems::MeshNormalBoundaryQuantity::
+                MeshVelocityTrace,
+            .target_kind = FE::systems::MeshNormalBoundaryTargetKind::
+                FluidNormalVelocity,
+            .target_expression = FE::forms::normalTrace(
+                FE::forms::StateField(
+                    velocity, *vector_space, "normal_consumer_velocity"),
+                FE::forms::currentNormal()),
+            .enforcement_kind =
+                FE::analysis::EnforcementKind::WeakPenalty,
+            .related_velocity_field = velocity,
+            .owner_component = "normal_consumer_owner",
+        };
+    };
+
+    auto prebound = make_declaration();
+    prebound.consumer_binding =
+        FE::systems::MeshNormalBoundaryConstraintConsumerBinding{
+            .operator_tag = std::string(operator_tag),
+            .mesh_descriptor_source = std::string(mesh_source),
+        };
+    EXPECT_THROW(
+        system.declareMeshNormalBoundaryConstraint(std::move(prebound)),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+
+    ASSERT_NO_THROW(system.declareMeshNormalBoundaryConstraint(
+        make_declaration()));
+    EXPECT_THROW(
+        system.bindMeshNormalBoundaryConstraintConsumer(
+            displacement,
+            marker,
+            std::string(operator_tag),
+            std::string(mesh_source),
+            std::string(fluid_source)),
+        FE::InvalidArgumentException);
+    system.addOperator(std::string(operator_tag));
+    EXPECT_THROW(
+        system.bindMeshNormalBoundaryConstraintConsumer(
+            displacement,
+            marker,
+            std::string(operator_tag),
+            std::string(mesh_source),
+            std::string(fluid_source)),
+        FE::InvalidArgumentException);
+
+    const auto d_mesh = FE::forms::StateField(
+        displacement, *vector_space, "normal_consumer_displacement");
+    const auto u = FE::forms::StateField(
+        velocity, *vector_space, "normal_consumer_velocity");
+    const auto psi = FE::forms::TestField(
+        displacement, *vector_space, "normal_consumer_test");
+    const auto n = FE::forms::currentNormal();
+    const auto normal_residual =
+        (FE::forms::normalTrace(FE::forms::dt(d_mesh) - u, n) *
+         FE::forms::normalTrace(psi, n))
+            .ds(marker);
+    FE::systems::FormInstallOptions normal_install;
+    normal_install.extra_trial_fields.push_back(velocity);
+    (void)FE::systems::installFormulation(
+        system,
+        std::string(operator_tag),
+        {displacement},
+        normal_residual,
+        normal_install);
+
+    FE::analysis::BoundaryConditionDescriptor wrong_mesh_descriptor;
+    wrong_mesh_descriptor.primary_variable =
+        FE::analysis::VariableKey::field(displacement);
+    wrong_mesh_descriptor.domain = FE::analysis::DomainKind::Boundary;
+    wrong_mesh_descriptor.boundary_marker = marker;
+    wrong_mesh_descriptor.trace_kind =
+        FE::analysis::TraceKind::NormalComponent;
+    wrong_mesh_descriptor.enforcement_kind =
+        FE::analysis::EnforcementKind::WeakPenalty;
+    wrong_mesh_descriptor.source = std::string(mesh_source);
+    system.addBoundaryConditionDescriptor(
+        wrong_mesh_descriptor, operator_tag);
+    EXPECT_THROW(
+        system.bindMeshNormalBoundaryConstraintConsumer(
+            displacement,
+            marker,
+            std::string(operator_tag),
+            std::string(mesh_source),
+            std::string(fluid_source)),
+        FE::InvalidArgumentException);
+
+    auto mesh_descriptor = wrong_mesh_descriptor;
+    mesh_descriptor.related_variables.push_back(
+        FE::analysis::VariableKey::field(velocity));
+    system.addBoundaryConditionDescriptor(mesh_descriptor, operator_tag);
+    EXPECT_THROW(
+        system.bindMeshNormalBoundaryConstraintConsumer(
+            displacement,
+            marker,
+            std::string(operator_tag),
+            std::string(mesh_source),
+            std::string(fluid_source)),
+        FE::InvalidArgumentException);
+
+    FE::analysis::BoundaryConditionDescriptor wrong_fluid_descriptor;
+    wrong_fluid_descriptor.primary_variable =
+        FE::analysis::VariableKey::field(velocity);
+    wrong_fluid_descriptor.domain = FE::analysis::DomainKind::Boundary;
+    wrong_fluid_descriptor.boundary_marker = marker;
+    wrong_fluid_descriptor.trace_kind =
+        FE::analysis::TraceKind::NormalComponent;
+    wrong_fluid_descriptor.enforcement_kind =
+        FE::analysis::EnforcementKind::WeakNitsche;
+    wrong_fluid_descriptor.source = std::string(fluid_source);
+    system.addBoundaryConditionDescriptor(
+        wrong_fluid_descriptor, operator_tag);
+    EXPECT_THROW(
+        system.bindMeshNormalBoundaryConstraintConsumer(
+            displacement,
+            marker,
+            std::string(operator_tag),
+            std::string(mesh_source),
+            std::string(fluid_source)),
+        FE::InvalidArgumentException);
+
+    auto fluid_descriptor = wrong_fluid_descriptor;
+    fluid_descriptor.related_variables.push_back(
+        FE::analysis::VariableKey::field(displacement));
+    system.addBoundaryConditionDescriptor(fluid_descriptor, operator_tag);
+    ASSERT_NO_THROW(
+        system.bindMeshNormalBoundaryConstraintConsumer(
+            displacement,
+            marker,
+            std::string(operator_tag),
+            std::string(mesh_source),
+            std::string(fluid_source)));
+    const auto& declaration =
+        system.meshNormalBoundaryConstraints().front();
+    ASSERT_TRUE(declaration.consumer_binding.has_value());
+    EXPECT_EQ(declaration.consumer_binding->operator_tag, operator_tag);
+    EXPECT_EQ(
+        declaration.consumer_binding->mesh_descriptor_source,
+        mesh_source);
+    ASSERT_TRUE(
+        declaration.consumer_binding->related_fluid.has_value());
+    EXPECT_EQ(
+        declaration.consumer_binding->related_fluid->enforcement_kind,
+        FE::analysis::EnforcementKind::WeakNitsche);
+    EXPECT_EQ(
+        declaration.consumer_binding->related_fluid->descriptor_source,
+        fluid_source);
+    ASSERT_NO_THROW(
+        system.bindMeshNormalBoundaryConstraintConsumer(
+            displacement,
+            marker,
+            std::string(operator_tag),
+            std::string(mesh_source),
+            std::string(fluid_source)));
+    EXPECT_THROW(
+        system.bindMeshNormalBoundaryConstraintConsumer(
+            displacement,
+            marker,
+            std::string(operator_tag),
+            "different mesh source",
+            std::string(fluid_source)),
+        FE::InvalidArgumentException);
+
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    system.addBoundaryConditionDescriptor(fluid_descriptor, operator_tag);
+    EXPECT_THROW(
+        system.recordAcceptedMeshNormalBoundaryConstraints(
+            /*accepted_step=*/1u,
+            FE::Real{0.1},
+            FE::Real{0.1},
+            /*state_revision=*/2u),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(system.meshNormalBoundaryConstraintHistory().empty());
+
+    FE::systems::FESystem unbound_system(mesh);
+    const auto unbound_displacement = unbound_system.addField(
+        FE::systems::FieldSpec{
+            .name = "unbound_normal_consumer_displacement",
+            .space = vector_space,
+            .components = 3,
+        });
+    unbound_system.bindMeshMotionField(
+        FE::systems::MeshMotionFieldRole::Displacement,
+        unbound_displacement);
+    unbound_system.declareMeshNormalBoundaryConstraint(
+        FE::systems::MeshNormalBoundaryConstraintDeclaration{
+            .mesh_displacement_field = unbound_displacement,
+            .boundary_marker = marker,
+            .quantity = FE::systems::MeshNormalBoundaryQuantity::
+                DisplacementTrace,
+            .target_kind = FE::systems::MeshNormalBoundaryTargetKind::
+                PrescribedDisplacement,
+            .target_expression =
+                FE::forms::FormExpr::constant(FE::Real{0.0}),
+            .enforcement_kind =
+                FE::analysis::EnforcementKind::WeakPenalty,
+            .related_velocity_field = FE::INVALID_FIELD_ID,
+            .owner_component = "unbound_normal_consumer_owner",
+        });
+    ASSERT_NO_THROW(
+        unbound_system.setup({}, makeSingleTetraSetupInputs()));
+    EXPECT_THROW(
+        unbound_system.recordAcceptedMeshNormalBoundaryConstraints(
+            /*accepted_step=*/1u,
+            FE::Real{0.1},
+            FE::Real{0.1},
+            /*state_revision=*/2u),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(
+        unbound_system.meshNormalBoundaryConstraintHistory().empty());
+}
+
+TEST(MovingDomainPhysics,
+     MeshTangentialPolicyRegistryRejectsUnknownPolicyBeforeMutation)
+{
+    constexpr int marker = 42;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto displacement = system.addField(
+        FE::systems::FieldSpec{
+            .name = "unknown_policy_mesh_displacement",
+            .space = u_space,
+            .components = 3,
+        });
+    system.bindMeshMotionField(
+        FE::systems::MeshMotionFieldRole::Displacement,
+        displacement);
+
+    EXPECT_THROW(
+        system.declareMeshTangentialBoundaryPolicy(
+            FE::systems::MeshTangentialBoundaryPolicyDeclaration{
+                .mesh_displacement_field = displacement,
+                .boundary_marker = marker,
+                .policy = static_cast<
+                    FE::systems::MeshTangentialBoundaryPolicy>(255u),
+                .owner_component = "invalid_policy_owner",
+            }),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
+    EXPECT_TRUE(system.meshTangentialBoundaryPolicyHistory().empty());
+
+    FE::systems::FESystem unbound_system(mesh);
+    const auto unbound_displacement = unbound_system.addField(
+        FE::systems::FieldSpec{
+            .name = "unbound_policy_mesh_displacement",
+            .space = u_space,
+            .components = 3,
+        });
+    EXPECT_THROW(
+        unbound_system.declareMeshTangentialBoundaryPolicy(
+            FE::systems::MeshTangentialBoundaryPolicyDeclaration{
+                .mesh_displacement_field = unbound_displacement,
+                .boundary_marker = marker,
+                .policy =
+                    FE::systems::MeshTangentialBoundaryPolicy::Free,
+                .owner_component = "unbound_policy_owner",
+            }),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(
+        unbound_system.meshTangentialBoundaryPolicies().empty());
+
+    EXPECT_THROW(
+        system.declareMeshTangentialBoundaryPolicy(
+            FE::systems::MeshTangentialBoundaryPolicyDeclaration{
+                .mesh_displacement_field = displacement,
+                .boundary_marker = marker,
+                .policy =
+                    FE::systems::MeshTangentialBoundaryPolicy::Free,
+                .owner_component = " \t ",
+            }),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
+}
+
+TEST(MovingDomainPhysics,
+     MeshTangentialPolicyConsumerBindingRequiresUniqueExactDescriptor)
+{
+    constexpr int marker = 47;
+    constexpr std::string_view operator_tag = "mesh_policy_equations";
+    constexpr std::string_view source =
+        "Fitted free-surface natural tangential state on marker 47";
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto displacement = system.addField(
+        FE::systems::FieldSpec{
+            .name = "consumer_binding_mesh_displacement",
+            .space = u_space,
+            .components = 3,
+        });
+    system.bindMeshMotionField(
+        FE::systems::MeshMotionFieldRole::Displacement,
+        displacement);
+    system.declareMeshTangentialBoundaryPolicy(
+        FE::systems::MeshTangentialBoundaryPolicyDeclaration{
+            .mesh_displacement_field = displacement,
+            .boundary_marker = marker,
+            .policy = FE::systems::MeshTangentialBoundaryPolicy::Free,
+            .owner_component = "consumer_binding_owner",
+        });
+
+    EXPECT_THROW(
+        system.bindMeshTangentialBoundaryPolicyConsumer(
+            displacement,
+            marker,
+            FE::systems::MeshTangentialBoundaryPolicy::Free,
+            std::string(operator_tag),
+            std::string(source)),
+        FE::InvalidArgumentException);
+    ASSERT_EQ(system.meshTangentialBoundaryPolicies().size(), 1u);
+    EXPECT_FALSE(
+        system.meshTangentialBoundaryPolicies().front().consumer_bound);
+
+    system.addOperator(std::string(operator_tag));
+    EXPECT_THROW(
+        system.bindMeshTangentialBoundaryPolicyConsumer(
+            displacement,
+            marker,
+            FE::systems::MeshTangentialBoundaryPolicy::Free,
+            std::string(operator_tag),
+            std::string(source)),
+        FE::InvalidArgumentException);
+    EXPECT_FALSE(
+        system.meshTangentialBoundaryPolicies().front().consumer_bound);
+
+    const auto d_mesh = FE::forms::StateField(
+        displacement, *u_space, "tangential_consumer_displacement");
+    const auto psi = FE::forms::TestField(
+        displacement, *u_space, "tangential_consumer_test");
+    const auto n = FE::forms::currentNormal();
+    const auto tangential_residual =
+        FE::forms::inner(
+            FE::forms::tangentialTrace(d_mesh, n),
+            FE::forms::tangentialTrace(psi, n))
+            .ds(marker);
+    (void)FE::systems::installFormulation(
+        system,
+        std::string(operator_tag),
+        {displacement},
+        tangential_residual);
+
+    FE::analysis::BoundaryConditionDescriptor descriptor;
+    descriptor.primary_variable =
+        FE::analysis::VariableKey::field(displacement);
+    descriptor.boundary_marker = marker;
+    descriptor.trace_kind =
+        FE::analysis::TraceKind::TangentialComponent;
+    descriptor.enforcement_kind =
+        FE::analysis::EnforcementKind::WeakConsistent;
+    descriptor.source = std::string(source);
+    system.addBoundaryConditionDescriptor(descriptor, operator_tag);
+
+    EXPECT_THROW(
+        system.bindMeshTangentialBoundaryPolicyConsumer(
+            displacement,
+            marker,
+            FE::systems::MeshTangentialBoundaryPolicy::Prescribed,
+            std::string(operator_tag),
+            std::string(source)),
+        FE::InvalidArgumentException);
+    ASSERT_NO_THROW(
+        system.bindMeshTangentialBoundaryPolicyConsumer(
+            displacement,
+            marker,
+            FE::systems::MeshTangentialBoundaryPolicy::Free,
+            std::string(operator_tag),
+            std::string(source)));
+    const auto& declaration =
+        system.meshTangentialBoundaryPolicies().front();
+    EXPECT_TRUE(declaration.consumer_bound);
+    EXPECT_EQ(declaration.consumer_operator_tag, std::string(operator_tag));
+    EXPECT_EQ(declaration.consumer_source, std::string(source));
+    ASSERT_NO_THROW(
+        system.bindMeshTangentialBoundaryPolicyConsumer(
+            displacement,
+            marker,
+            FE::systems::MeshTangentialBoundaryPolicy::Free,
+            std::string(operator_tag),
+            std::string(source)));
+
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    system.addBoundaryConditionDescriptor(descriptor, operator_tag);
+    EXPECT_THROW(
+        system.bindMeshTangentialBoundaryPolicyConsumer(
+            displacement,
+            marker,
+            FE::systems::MeshTangentialBoundaryPolicy::Free,
+            std::string(operator_tag),
+            std::string(source)),
+        FE::InvalidArgumentException);
+    EXPECT_THROW(
+        system.recordAcceptedMeshTangentialBoundaryPolicies(
+            /*accepted_step=*/1u,
+            FE::Real{0.1},
+            FE::Real{0.1},
+            /*state_revision=*/2u),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(system.meshTangentialBoundaryPolicyHistory().empty());
+}
+
+TEST(MovingDomainPhysics,
+     MeshBoundaryHistoryTransactionRollsBackBeforeAcceptedLogs)
+{
+    constexpr int normal_marker = 49;
+    constexpr int tangential_marker = 50;
+    constexpr std::string_view operator_tag = "mesh_motion";
+    constexpr std::string_view tangential_source =
+        "transactional tangential mesh row";
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(
+        std::array<int, 4>{normal_marker, tangential_marker, 51, 52});
+    auto displacement_space = makeVelocitySpace(mesh);
+
+    mm::HarmonicMeshMotionOptions options;
+    options.operator_tag = std::string(operator_tag);
+    options.normal_constraint.push_back(mm::NormalConstraintBC{
+        .boundary_marker = normal_marker,
+        .quantity = mm::NormalConstraintQuantity::Displacement,
+        .target = FE::Real{0.0},
+        .penalty = FE::Real{4.0},
+        .velocity_time_scale = FE::Real{1.0},
+    });
+    FE::systems::FESystem system(mesh);
+    mm::HarmonicMeshMotionModule module(
+        displacement_space, std::move(options));
+    ASSERT_NO_THROW(module.registerOn(system));
+    const auto displacement = system.findFieldByName("mesh_displacement");
+    ASSERT_NE(displacement, FE::INVALID_FIELD_ID);
+
+    const auto d_mesh = FE::forms::StateField(
+        displacement, *displacement_space, "transaction_displacement");
+    const auto psi = FE::forms::TestField(
+        displacement, *displacement_space, "transaction_test");
+    const auto n = FE::forms::currentNormal();
+    const auto tangential_residual =
+        FE::forms::inner(
+            FE::forms::tangentialTrace(d_mesh, n),
+            FE::forms::tangentialTrace(psi, n))
+            .ds(tangential_marker);
+    (void)FE::systems::installFormulation(
+        system,
+        std::string(operator_tag),
+        {displacement},
+        tangential_residual);
+    system.declareMeshTangentialBoundaryPolicy(
+        FE::systems::MeshTangentialBoundaryPolicyDeclaration{
+            .mesh_displacement_field = displacement,
+            .boundary_marker = tangential_marker,
+            .policy =
+                FE::systems::MeshTangentialBoundaryPolicy::Prescribed,
+            .owner_component = "transaction_test_owner",
+        });
+    FE::analysis::BoundaryConditionDescriptor descriptor;
+    descriptor.primary_variable =
+        FE::analysis::VariableKey::field(displacement);
+    descriptor.domain = FE::analysis::DomainKind::Boundary;
+    descriptor.boundary_marker = tangential_marker;
+    descriptor.trace_kind =
+        FE::analysis::TraceKind::TangentialComponent;
+    descriptor.enforcement_kind =
+        FE::analysis::EnforcementKind::WeakPenalty;
+    descriptor.source = std::string(tangential_source);
+    system.addBoundaryConditionDescriptor(descriptor, operator_tag);
+    ASSERT_NO_THROW(system.bindMeshTangentialBoundaryPolicyConsumer(
+        displacement,
+        tangential_marker,
+        FE::systems::MeshTangentialBoundaryPolicy::Prescribed,
+        std::string(operator_tag),
+        std::string(tangential_source)));
+    system.addBoundaryConditionDescriptor(descriptor, operator_tag);
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    EXPECT_THROW(system.recordAcceptedMeshBoundaryProvenance(
+                     /*accepted_step=*/1u,
+                     FE::Real{0.1},
+                     FE::Real{0.1},
+                     /*state_revision=*/2u),
+                 FE::InvalidArgumentException);
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(system.meshNormalBoundaryConstraintHistory().empty());
+    EXPECT_TRUE(system.meshTangentialBoundaryPolicyHistory().empty());
+    EXPECT_EQ(
+        log_output.find(
+            "diagnostic=mesh_normal_boundary_constraint_history"),
+        std::string::npos);
+    EXPECT_EQ(
+        log_output.find(
+            "diagnostic=mesh_tangential_boundary_policy_history"),
+        std::string::npos);
+    EXPECT_NE(
+        log_output.find(
+            "diagnostic=mesh_boundary_history_transaction_rollback"),
+        std::string::npos);
+}
+
+TEST(MovingDomainPhysics,
+     EmptyMeshBoundaryProvenanceDoesNotSealLaterDeclarations)
+{
+    constexpr int marker = 53;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(
+        std::array<int, 4>{marker, marker + 1, marker + 2, marker + 3});
+    auto displacement_space = makeVelocitySpace(mesh);
+
+    mm::HarmonicMeshMotionOptions options;
+    options.operator_tag = "empty_history_mesh_motion";
+    FE::systems::FESystem system(mesh);
+    mm::HarmonicMeshMotionModule module(displacement_space, options);
+    ASSERT_NO_THROW(module.registerOn(system));
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    ASSERT_TRUE(system.meshNormalBoundaryConstraints().empty());
+    ASSERT_TRUE(system.meshTangentialBoundaryPolicies().empty());
+
+    ASSERT_NO_THROW(system.recordAcceptedMeshBoundaryProvenance(
+        /*accepted_step=*/2u,
+        FE::Real{0.2},
+        FE::Real{0.1},
+        /*state_revision=*/3u));
+    EXPECT_TRUE(system.meshNormalBoundaryConstraintHistory().empty());
+    EXPECT_TRUE(system.meshTangentialBoundaryPolicyHistory().empty());
+
+    const auto displacement = system.findFieldByName("mesh_displacement");
+    ASSERT_NE(displacement, FE::INVALID_FIELD_ID);
+    ASSERT_NO_THROW(system.declareMeshTangentialBoundaryPolicy(
+        FE::systems::MeshTangentialBoundaryPolicyDeclaration{
+            .mesh_displacement_field = displacement,
+            .boundary_marker = marker,
+            .policy = FE::systems::MeshTangentialBoundaryPolicy::Free,
+            .owner_component = "post_empty_history_owner",
+        }));
+    ASSERT_EQ(system.meshTangentialBoundaryPolicies().size(), 1u);
+    EXPECT_EQ(system.meshTangentialBoundaryPolicies().front().boundary_marker,
+              marker);
+}
+
+TEST(MovingDomainPhysics,
      FittedFreeSurfacePrescribedTangentialVelocityProjectsOutNormalTarget)
 {
     constexpr int marker = 42;
@@ -4661,17 +6020,107 @@ TEST(MovingDomainPhysics,
 }
 
 TEST(MovingDomainPhysics,
+     FittedFreeSurfaceFreeAndSmoothingPoliciesProduceDistinctMeshRows)
+{
+    constexpr int marker = 142;
+    const auto assemble_policy =
+        [&](ns::FreeSurfaceTangentialMeshPolicy policy,
+            bool rotate_current_geometry) {
+            auto mesh =
+                std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+            if (rotate_current_geometry) {
+                mesh->setCurrentNodeCoordinates(1, {0.0, 1.0, 0.0});
+                mesh->setCurrentNodeCoordinates(2, {0.0, 0.0, 1.0});
+                mesh->setCurrentNodeCoordinates(3, {1.0, 0.0, 0.0});
+            }
+            auto u_space = makeVelocitySpace(mesh);
+            auto p_space = makePressureSpace(mesh);
+            auto opts = baseNavierStokesOptions();
+            opts.enable_ale = true;
+            opts.enable_convection = false;
+            opts.mesh_velocity_source =
+                ns::ALEMeshVelocitySource::CoupledDisplacement;
+            opts.auto_register_mesh_displacement_field = true;
+            opts.free_surface.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::
+                    FreeSurfaceBoundary{
+                        .implementation =
+                            ns::FreeSurfaceImplementation::FittedALE,
+                        .boundary_marker = marker,
+                        .tangential_mesh_policy = policy,
+                        .tangential_mesh_penalty = FE::Real{3.0},
+                        .kinematic_enforcement =
+                            ns::FreeSurfaceKinematicEnforcement::Penalty,
+                        .kinematic_penalty = FE::Real{5.0},
+                    });
+
+            FE::systems::FESystem system(mesh);
+            ns::IncompressibleNavierStokesVMSModule module(
+                u_space, p_space, std::move(opts));
+            module.registerOn(system);
+            system.setup({}, makeSingleTetraSetupInputs());
+
+            const auto displacement = system.meshMotionField(
+                FE::systems::MeshMotionFieldRole::Displacement);
+            if (!displacement.has_value()) {
+                throw std::runtime_error(
+                    "fitted tangential policy fixture has no mesh "
+                    "displacement field");
+            }
+            std::vector<FE::Real> solution(
+                static_cast<std::size_t>(
+                    system.dofHandler().getNumDofs()),
+                FE::Real{0.0});
+            const int tangential_component =
+                rotate_current_geometry ? 1 : 0;
+            setFieldComponentValue(
+                solution, system, *displacement,
+                /*vertex=*/1, tangential_component, FE::Real{0.0});
+            setFieldComponentValue(
+                solution, system, *displacement,
+                /*vertex=*/2, tangential_component, FE::Real{0.08});
+            setFieldComponentValue(
+                solution, system, *displacement,
+                /*vertex=*/3, tangential_component, FE::Real{-0.03});
+            const auto previous = solution;
+
+            FE::systems::SystemStateView state;
+            state.dt = FE::Real{1.0};
+            state.u = solution;
+            state.u_prev = previous;
+            const FE::systems::BackwardDifferenceIntegrator integrator;
+            const auto time_context = integrator.buildContext(
+                /*max_time_derivative_order=*/1, state);
+            state.time_integration = &time_context;
+            return residualVector(system, state, "equations");
+        };
+
+    for (const bool rotate_current_geometry : {false, true}) {
+        const auto free_rows = assemble_policy(
+            ns::FreeSurfaceTangentialMeshPolicy::Free,
+            rotate_current_geometry);
+        const auto smoothing_rows = assemble_policy(
+            ns::FreeSurfaceTangentialMeshPolicy::SmoothingOnly,
+            rotate_current_geometry);
+        EXPECT_LT(vectorNorm(free_rows), FE::Real{1.0e-12});
+        EXPECT_GT(vectorNorm(smoothing_rows), FE::Real{1.0e-8});
+        EXPECT_NE(free_rows, smoothing_rows);
+    }
+}
+
+TEST(MovingDomainPhysics,
      FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal)
 {
-    constexpr int free_marker = 43;
-    constexpr int prescribed_marker = 44;
+    // Register the larger marker first. The central registry and accepted
+    // history must canonicalize by field and marker rather than preserve
+    // module registration order.
+    constexpr int free_marker = 44;
+    constexpr int prescribed_marker = 43;
     auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(
         std::array<int, 4>{free_marker, prescribed_marker, 45, 46});
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
-    opts.input_configuration_schema_version = 1;
-    opts.explicit_legacy_configuration = true;
     opts.enable_ale = true;
     opts.enable_convection = false;
     opts.mesh_velocity_source =
@@ -4683,6 +6132,9 @@ TEST(MovingDomainPhysics,
             .boundary_marker = free_marker,
             .tangential_mesh_policy =
                 ns::FreeSurfaceTangentialMeshPolicy::Free,
+            .kinematic_enforcement =
+                ns::FreeSurfaceKinematicEnforcement::Penalty,
+            .kinematic_penalty = FE::Real{5.0},
         });
     opts.free_surface.push_back(
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -4693,6 +6145,9 @@ TEST(MovingDomainPhysics,
             .prescribed_tangential_mesh_velocity = {
                 FE::Real{0.1}, FE::Real{-0.05}, FE::Real{0.0}},
             .tangential_mesh_penalty = FE::Real{4.0},
+            .kinematic_enforcement =
+                ns::FreeSurfaceKinematicEnforcement::Penalty,
+            .kinematic_penalty = FE::Real{5.0},
         });
 
     FE::systems::FESystem system(mesh);
@@ -4701,6 +6156,50 @@ TEST(MovingDomainPhysics,
     ASSERT_NO_THROW(module.registerOn(system));
     const auto declarations = system.meshTangentialBoundaryPolicies();
     ASSERT_EQ(declarations.size(), 2u);
+    EXPECT_EQ(declarations[0].boundary_marker, prescribed_marker);
+    EXPECT_EQ(declarations[1].boundary_marker, free_marker);
+    const auto normal_declarations =
+        system.meshNormalBoundaryConstraints();
+    ASSERT_EQ(normal_declarations.size(), 2u);
+    EXPECT_EQ(normal_declarations[0].boundary_marker,
+              prescribed_marker);
+    EXPECT_EQ(normal_declarations[1].boundary_marker, free_marker);
+    for (const auto& declaration : normal_declarations) {
+        EXPECT_EQ(
+            declaration.quantity,
+            FE::systems::MeshNormalBoundaryQuantity::MeshVelocityTrace);
+        EXPECT_EQ(
+            declaration.target_kind,
+            FE::systems::MeshNormalBoundaryTargetKind::
+                FluidNormalVelocity);
+        EXPECT_EQ(
+            declaration.owner_component,
+            "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary");
+    }
+    for (const int marker : {prescribed_marker, free_marker}) {
+        const auto mesh_source =
+            "Fitted free-surface mesh normal kinematic row on marker " +
+            std::to_string(marker);
+        const auto fluid_source =
+            "Fitted free-surface fluid normal kinematic row on marker " +
+            std::to_string(marker);
+        EXPECT_EQ(
+            std::count_if(
+                system.boundaryConditionDescriptors().begin(),
+                system.boundaryConditionDescriptors().end(),
+                [&](const auto& descriptor) {
+                    return descriptor.source == mesh_source;
+                }),
+            1);
+        EXPECT_EQ(
+            std::count_if(
+                system.boundaryConditionDescriptors().begin(),
+                system.boundaryConditionDescriptors().end(),
+                [&](const auto& descriptor) {
+                    return descriptor.source == fluid_source;
+                }),
+            1);
+    }
     const auto find_declaration = [&](int marker) {
         return std::find_if(
             declarations.begin(), declarations.end(),
@@ -4712,11 +6211,23 @@ TEST(MovingDomainPhysics,
     ASSERT_NE(free_declaration, declarations.end());
     EXPECT_EQ(free_declaration->policy,
               FE::systems::MeshTangentialBoundaryPolicy::Free);
+    EXPECT_TRUE(free_declaration->consumer_bound);
+    EXPECT_EQ(free_declaration->consumer_operator_tag, "equations");
+    EXPECT_EQ(
+        free_declaration->consumer_source,
+        "Fitted free-surface natural tangential state on marker 44");
     const auto prescribed_declaration =
         find_declaration(prescribed_marker);
     ASSERT_NE(prescribed_declaration, declarations.end());
     EXPECT_EQ(prescribed_declaration->policy,
               FE::systems::MeshTangentialBoundaryPolicy::Prescribed);
+    EXPECT_TRUE(prescribed_declaration->consumer_bound);
+    EXPECT_EQ(
+        prescribed_declaration->consumer_operator_tag, "equations");
+    EXPECT_EQ(
+        prescribed_declaration->consumer_source,
+        "Fitted free-surface prescribed tangential mesh velocity on "
+        "marker 43");
 
     const auto tangential_descriptor_count = std::count_if(
         system.boundaryConditionDescriptors().begin(),
@@ -4725,9 +6236,16 @@ TEST(MovingDomainPhysics,
             return descriptor.trace_kind ==
                    FE::analysis::TraceKind::TangentialComponent;
         });
-    EXPECT_EQ(tangential_descriptor_count, 1);
+    EXPECT_EQ(tangential_descriptor_count, 2);
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 
+    EXPECT_THROW(system.recordAcceptedMeshTangentialBoundaryPolicies(
+                     /*accepted_step=*/7u,
+                     FE::Real{0.35},
+                     FE::Real{0.05},
+                     /*state_revision=*/0u),
+                 FE::InvalidArgumentException);
+    EXPECT_TRUE(system.meshTangentialBoundaryPolicyHistory().empty());
     ASSERT_NO_THROW(system.recordAcceptedMeshTangentialBoundaryPolicies(
         /*accepted_step=*/7u,
         FE::Real{0.35},
@@ -4735,6 +6253,8 @@ TEST(MovingDomainPhysics,
         /*state_revision=*/13u));
     auto history = system.meshTangentialBoundaryPolicyHistory();
     ASSERT_EQ(history.size(), 2u);
+    EXPECT_EQ(history[0].boundary_marker, prescribed_marker);
+    EXPECT_EQ(history[1].boundary_marker, free_marker);
     for (const auto& record : history) {
         EXPECT_EQ(record.accepted_step, 7u);
         EXPECT_DOUBLE_EQ(record.accepted_time, FE::Real{0.35});
@@ -4742,6 +6262,9 @@ TEST(MovingDomainPhysics,
         EXPECT_EQ(record.state_revision, 13u);
         EXPECT_EQ(record.mesh_geometry_revision,
                   mesh->geometryRevision());
+        EXPECT_TRUE(record.consumer_bound);
+        EXPECT_EQ(record.consumer_operator_tag, "equations");
+        EXPECT_FALSE(record.consumer_source.empty());
     }
 
     // Replaying identical accepted provenance is idempotent, while a
@@ -4758,6 +6281,95 @@ TEST(MovingDomainPhysics,
     EXPECT_THROW(system.recordAcceptedMeshTangentialBoundaryPolicies(
                      6u, FE::Real{0.30}, FE::Real{0.05}, 12u),
                  FE::InvalidArgumentException);
+}
+
+TEST(MovingDomainPhysics,
+     FreeSurfaceDiscreteFunctionalRejectsDuplicateActiveVolumeOwnerBeforeMutation)
+{
+    auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+    auto velocity_space = makeVelocitySpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto phi_first = system.addField(FE::systems::FieldSpec{
+        .name = "phi_first_bulk_owner",
+        .space = scalar_space,
+        .components = 1,
+    });
+    const auto phi_second = system.addField(FE::systems::FieldSpec{
+        .name = "phi_second_bulk_owner",
+        .space = scalar_space,
+        .components = 1,
+    });
+    const auto velocity = system.addField(FE::systems::FieldSpec{
+        .name = "velocity_bulk_owner",
+        .space = velocity_space,
+        .components = 3,
+    });
+
+    FE::systems::FreeSurfaceDiscreteFunctionalDeclaration first;
+    first.interface_marker = 191;
+    first.level_set_field = phi_first;
+    first.velocity_field = velocity;
+    first.geometry_domain_id = "first_bulk_owner_domain";
+    first.active_volume_energy_parameters =
+        FE::interfaces::FreeSurfaceActiveVolumeEnergyParameters{
+            .liquid_side =
+                FE::geometry::CutIntegrationSide::Negative,
+            .density = FE::Real{1.0},
+        };
+    first.owner_component =
+        "MovingDomainPhysics.FirstBulkOwnerFixture";
+    ASSERT_NO_THROW(
+        system.declareFreeSurfaceDiscreteFunctional(std::move(first)));
+    ASSERT_EQ(
+        system.freeSurfaceDiscreteFunctionalDeclarations().size(), 1u);
+
+    FE::systems::FreeSurfaceDiscreteFunctionalDeclaration duplicate;
+    duplicate.interface_marker = 192;
+    duplicate.level_set_field = phi_second;
+    duplicate.velocity_field = velocity;
+    duplicate.geometry_domain_id = "second_bulk_owner_domain";
+    duplicate.active_volume_dissipation_parameters =
+        FE::interfaces::FreeSurfaceActiveVolumeDissipationParameters{
+            .liquid_side =
+                FE::geometry::CutIntegrationSide::Negative,
+            .dynamic_viscosity = FE::Real{0.01},
+        };
+    duplicate.owner_component =
+        "MovingDomainPhysics.SecondBulkOwnerFixture";
+    try {
+        system.declareFreeSurfaceDiscreteFunctional(
+            std::move(duplicate));
+        FAIL() << "Expected duplicate active-volume ownership to fail";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "permits exactly one bulk owner"),
+            std::string::npos)
+            << error.what();
+    }
+    ASSERT_EQ(
+        system.freeSurfaceDiscreteFunctionalDeclarations().size(), 1u);
+    EXPECT_EQ(
+        system.freeSurfaceDiscreteFunctionalDeclarations()
+            .front()
+            .interface_marker,
+        191);
+
+    FE::systems::FreeSurfaceDiscreteFunctionalDeclaration surface_only;
+    surface_only.interface_marker = 193;
+    surface_only.level_set_field = phi_second;
+    surface_only.geometry_domain_id = "surface_only_domain";
+    surface_only.owner_component =
+        "MovingDomainPhysics.SurfaceOnlyFixture";
+    ASSERT_NO_THROW(system.declareFreeSurfaceDiscreteFunctional(
+        std::move(surface_only)));
+    ASSERT_EQ(
+        system.freeSurfaceDiscreteFunctionalDeclarations().size(), 2u);
+    EXPECT_EQ(
+        system.freeSurfaceDiscreteFunctionalDeclarations()[1]
+            .interface_marker,
+        193);
 }
 
 TEST(MovingDomainPhysics,
@@ -4809,8 +6421,31 @@ TEST(MovingDomainPhysics,
         .level_set_field = phi,
         .geometry_domain_id = "history_surface",
         .parameters = parameters,
+        .capillary_balance_method =
+            FE::systems::FreeSurfaceCapillaryBalanceMethod::
+                DiscreteEnergyVolumeStationarity,
+        .capillary_balance_qualification =
+            FE::systems::FreeSurfaceCapillaryBalanceQualification::
+                PrerequisiteOnly,
         .owner_component = "MovingDomainPhysics.FunctionalHistoryFixture",
     };
+    auto mismatched_balance_declaration = declaration;
+    mismatched_balance_declaration.capillary_balance_qualification =
+        FE::systems::FreeSurfaceCapillaryBalanceQualification::
+            Unselected;
+    EXPECT_THROW(
+        system.declareFreeSurfaceDiscreteFunctional(
+            std::move(mismatched_balance_declaration)),
+        FE::InvalidArgumentException);
+    auto premature_balance_declaration = declaration;
+    premature_balance_declaration.capillary_balance_qualification =
+        FE::systems::FreeSurfaceCapillaryBalanceQualification::Qualified;
+    EXPECT_THROW(
+        system.declareFreeSurfaceDiscreteFunctional(
+            std::move(premature_balance_declaration)),
+        FE::InvalidArgumentException);
+    EXPECT_TRUE(
+        system.freeSurfaceDiscreteFunctionalDeclarations().empty());
     ASSERT_NO_THROW(system.declareFreeSurfaceDiscreteFunctional(declaration));
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 
@@ -4863,6 +6498,7 @@ TEST(MovingDomainPhysics,
             FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState{
                 .interface_marker = interface_marker,
                 .geometry_revision = geometry_revision,
+                .cut_topology_revision = 102u,
                 .state = functional_state,
             }};
 
@@ -4881,9 +6517,19 @@ TEST(MovingDomainPhysics,
         history.front().pre_maintenance_endpoint_state_revision, 13u);
     EXPECT_EQ(history.front().state_revision, 13u);
     EXPECT_EQ(history.front().geometry_revision.snapshot_revision_key, 101u);
+    EXPECT_EQ(history.front().cut_topology_revision, 102u);
+    EXPECT_FALSE(history.front().extension_map_revision.has_value());
     EXPECT_EQ(history.front().state.snapshot_revision_key,
               history.front().geometry_revision.snapshot_revision_key);
     EXPECT_DOUBLE_EQ(history.front().state.total_potential, total_potential);
+    EXPECT_EQ(
+        history.front().declaration.capillary_balance_method,
+        FE::systems::FreeSurfaceCapillaryBalanceMethod::
+            DiscreteEnergyVolumeStationarity);
+    EXPECT_EQ(
+        history.front().declaration.capillary_balance_qualification,
+        FE::systems::FreeSurfaceCapillaryBalanceQualification::
+            PrerequisiteOnly);
 
     ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
         7u,
@@ -4893,6 +6539,16 @@ TEST(MovingDomainPhysics,
         13u,
         accepted_states));
     EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            7u,
+            FE::Real{0.35},
+            FE::Real{0.05},
+            13u,
+            13u,
+            accepted_states,
+            103u),
+        FE::InvalidArgumentException);
     auto mismatched_snapshot_states = accepted_states;
     mismatched_snapshot_states.front().state.snapshot_revision_key = 102u;
     EXPECT_THROW(
@@ -4923,8 +6579,18 @@ TEST(MovingDomainPhysics,
         FE::Real{0.05},
         14u,
         14u,
-        accepted_states));
+        accepted_states,
+        103u));
     EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 2u);
+    ASSERT_TRUE(
+        system.freeSurfaceDiscreteFunctionalHistory()
+            .back()
+            .extension_map_revision.has_value());
+    EXPECT_EQ(
+        *system.freeSurfaceDiscreteFunctionalHistory()
+             .back()
+             .extension_map_revision,
+        103u);
     EXPECT_THROW(
         system.recordAcceptedFreeSurfaceDiscreteFunctionals(
             6u,
@@ -5119,11 +6785,20 @@ TEST(MovingDomainPhysics,
             FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState{
                 .interface_marker = interface_marker,
                 .geometry_revision = geometry_revision,
+                .cut_topology_revision = 102u,
                 .state = functional_state,
                 .contact_stage =
                     FE::systems::FreeSurfaceAcceptedContactStageState{
                         .stage_time = FE::Real{0.325},
                         .stage_alpha_f = FE::Real{0.5},
+                        .first_order_generalized_alpha =
+                            FE::systems::
+                                FreeSurfaceFirstOrderGeneralizedAlphaProvenance{
+                                    .alpha_m = FE::Real{0.5},
+                                    .alpha_f = FE::Real{0.5},
+                                    .gamma = FE::Real{0.5},
+                                    .dt = FE::Real{0.05},
+                                },
                         .previous_state_revision = 12u,
                         .endpoint_state_revision = 13u,
                         .stage_state_revision = 201u,
@@ -5143,12 +6818,22 @@ TEST(MovingDomainPhysics,
     EXPECT_EQ(
         history.front().pre_maintenance_endpoint_state_revision, 13u);
     EXPECT_EQ(history.front().state_revision, 13u);
+    EXPECT_EQ(history.front().cut_topology_revision, 102u);
     ASSERT_TRUE(history.front().contact_stage.has_value());
     const auto& stage = *history.front().contact_stage;
     EXPECT_EQ(stage.state.snapshot_revision_key,
               stage.geometry_revision.snapshot_revision_key);
     EXPECT_DOUBLE_EQ(stage.stage_time, FE::Real{0.325});
     EXPECT_DOUBLE_EQ(stage.stage_alpha_f, FE::Real{0.5});
+    ASSERT_TRUE(stage.first_order_generalized_alpha.has_value());
+    EXPECT_DOUBLE_EQ(
+        stage.first_order_generalized_alpha->alpha_m, FE::Real{0.5});
+    EXPECT_DOUBLE_EQ(
+        stage.first_order_generalized_alpha->alpha_f, FE::Real{0.5});
+    EXPECT_DOUBLE_EQ(
+        stage.first_order_generalized_alpha->gamma, FE::Real{0.5});
+    EXPECT_DOUBLE_EQ(
+        stage.first_order_generalized_alpha->dt, FE::Real{0.05});
     ASSERT_EQ(stage.state.walls.size(), 1u);
     ASSERT_TRUE(
         stage.state.walls.front().mean_dynamic_angle_radians.has_value());
@@ -5182,6 +6867,35 @@ TEST(MovingDomainPhysics,
         13u,
         13u,
         accepted_states));
+
+    auto generalized_alpha_replay_mismatch = accepted_states;
+    generalized_alpha_replay_mismatch.front()
+        .contact_stage->first_order_generalized_alpha->dt = std::nextafter(
+            FE::Real{0.05}, FE::Real{0.10});
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            7u,
+            FE::Real{0.35},
+            FE::Real{0.05},
+            13u,
+            13u,
+            generalized_alpha_replay_mismatch),
+        FE::InvalidArgumentException);
+    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+
+    auto generalized_alpha_replay_drop = accepted_states;
+    generalized_alpha_replay_drop.front()
+        .contact_stage->first_order_generalized_alpha.reset();
+    EXPECT_THROW(
+        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+            7u,
+            FE::Real{0.35},
+            FE::Real{0.05},
+            13u,
+            13u,
+            generalized_alpha_replay_drop),
+        FE::InvalidArgumentException);
+    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
 
     EXPECT_THROW(
         system.recordAcceptedFreeSurfaceDiscreteFunctionals(
@@ -5489,9 +7203,38 @@ TEST(MovingDomainPhysics, FittedPrescribedContactAngleFailsClosedWithoutContactL
         },
     });
 
+    const auto field_count_before = system.fieldMap().numFields();
+    const auto formulation_count_before =
+        system.formulationRecords().size();
+    const auto normal_count_before =
+        system.meshNormalBoundaryConstraints().size();
+    const auto tangential_count_before =
+        system.meshTangentialBoundaryPolicies().size();
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
-    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    try {
+        module.registerOn(system);
+        FAIL() << "fitted prescribed contact angle must fail closed";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "prescribed fitted contact angles are unsupported until a "
+                "true fitted contact-line"),
+            std::string::npos)
+            << error.what();
+    }
+    EXPECT_EQ(system.fieldMap().numFields(), field_count_before);
+    EXPECT_EQ(
+        system.formulationRecords().size(),
+        formulation_count_before);
+    EXPECT_EQ(
+        system.meshNormalBoundaryConstraints().size(),
+        normal_count_before);
+    EXPECT_EQ(
+        system.meshTangentialBoundaryPolicies().size(),
+        tangential_count_before);
     EXPECT_FALSE(system.hasOperator("mesh_motion"));
+    EXPECT_FALSE(system.hasOperator("equations"));
+    EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
 }
 
 TEST(MovingDomainPhysics, FittedPrescribedContactAngleFailsClosedWithoutALEToo)
@@ -5663,6 +7406,10 @@ TEST(MovingDomainPhysics, NavierStokesFittedSurfaceStressFailsClosed)
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.mesh_velocity_source =
+        ns::ALEMeshVelocitySource::CoupledDisplacement;
+    opts.auto_register_mesh_displacement_field = true;
     opts.free_surface.push_back(
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
             .implementation = ns::FreeSurfaceImplementation::FittedALE,
@@ -5670,12 +7417,32 @@ TEST(MovingDomainPhysics, NavierStokesFittedSurfaceStressFailsClosed)
             .surface_tension = 0.072,
             .surface_tension_form =
                 ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
+            .kinematic_enforcement =
+                ns::FreeSurfaceKinematicEnforcement::Penalty,
+            .kinematic_penalty = FE::Real{4.0},
         });
 
     FE::systems::FESystem system(mesh);
     ns::IncompressibleNavierStokesVMSModule module(
         u_space, p_space, std::move(opts));
-    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    try {
+        module.registerOn(system);
+        FAIL() << "fitted SurfaceStress must fail closed";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "fitted-ALE SurfaceStress is not yet qualified for "
+                "current-frame test-function gradients"),
+            std::string::npos)
+            << error.what();
+    }
+    EXPECT_EQ(system.fieldMap().numFields(), 0u);
+    EXPECT_TRUE(system.formulationRecords().empty());
+    EXPECT_TRUE(system.boundaryConditionDescriptors().empty());
+    EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+    EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
+    EXPECT_FALSE(system.hasOperator("equations"));
+    EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
 }
 
 TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsNitscheKinematics)
@@ -5740,12 +7507,11 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsPenaltyKinematic
 }
 
 TEST(MovingDomainPhysics,
-     NavierStokesUnfittedNaturalAndWeakBoundaryOperatorsUseSharpActiveTrace)
+     NavierStokesUnfittedNaturalBoundaryOperatorsUseSharpActiveTrace)
 {
     constexpr int physical_marker = 214;
     constexpr int interface_marker = 215;
     constexpr std::size_t natural_variant_count = 3u;
-    constexpr std::size_t weak_variant_count = 4u;
     const auto mesh =
         std::make_shared<SingleTetraBoundaryMeshAccess>(physical_marker);
     auto u_space = makeVelocitySpace(mesh);
@@ -5827,36 +7593,98 @@ TEST(MovingDomainPhysics,
                 .backflow_beta = 0.25,
             });
     });
+
+    EXPECT_EQ(generated_trace_count, natural_variant_count);
+    EXPECT_EQ(whole_face_fallback_count, 0u);
+    RecordProperty("sharp_natural_operator_variant_count",
+                   natural_variant_count);
+    RecordProperty("sharp_operator_generated_trace_count",
+                   generated_trace_count);
+    RecordProperty("sharp_operator_whole_face_fallback_count",
+                   whole_face_fallback_count);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesSyntheticGeneratedBoundaryNitscheRequiresAggregationCertificate)
+{
+    constexpr int physical_marker = 214;
+    constexpr int interface_marker = 215;
+    constexpr std::size_t weak_variant_count = 4u;
+    const auto mesh =
+        std::make_shared<SingleTetraBoundaryMeshAccess>(physical_marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+
+    std::size_t rejection_count = 0u;
     for (const bool symmetric : {true, false}) {
         for (const bool scale_with_p : {true, false}) {
             const std::string variant =
                 std::string("weak_nitsche_") +
                 (symmetric ? "symmetric" : "unsymmetric") +
                 (scale_with_p ? "_p_scaled" : "_unscaled");
-            verify(variant, [=](auto& opts) {
-                opts.velocity_dirichlet_weak.push_back(
-                    ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
-                        .boundary_marker = physical_marker,
-                        .value = {0.0, 0.0, 0.0},
-                    });
-                opts.nitsche_gamma = 12.0;
-                opts.nitsche_symmetric = symmetric;
-                opts.nitsche_scale_with_p = scale_with_p;
+            SCOPED_TRACE(variant);
+            auto opts = baseNavierStokesOptions();
+            opts.enable_convection = false;
+            opts.jit_policy.enable = false;
+            opts.velocity_dirichlet_weak.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+                    .boundary_marker = physical_marker,
+                    .value = {0.0, 0.0, 0.0},
+                });
+            opts.nitsche_gamma = 12.0;
+            opts.nitsche_symmetric = symmetric;
+            opts.nitsche_scale_with_p = scale_with_p;
+            opts.free_surface.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+                    .implementation =
+                        ns::FreeSurfaceImplementation::UnfittedLevelSet,
+                    .interface_marker = interface_marker,
+                    .level_set_field_name = "phi_sharp_boundary",
+                    .generated_interface_domain_id =
+                        "sharp_boundary_routing",
+                    .active_domain =
+                        ns::FreeSurfaceActiveDomain::LevelSetNegative,
+                    .active_domain_method =
+                        ns::FreeSurfaceActiveDomainMethod::CutVolume,
+                    .small_cut_aggregation = false,
+                });
+
+            FE::systems::FESystem system(mesh);
+            system.addField(FE::systems::FieldSpec{
+                .name = "phi_sharp_boundary",
+                .space = p_space,
+                .components = 1,
+                .source_kind =
+                    FE::systems::FieldSourceKind::PrescribedData,
             });
+            ns::IncompressibleNavierStokesVMSModule module(
+                u_space, p_space, std::move(opts));
+            try {
+                module.registerOn(system);
+                ADD_FAILURE()
+                    << "synthetic generated-boundary Nitsche route did not "
+                       "fail before registration";
+            } catch (const std::invalid_argument& error) {
+                EXPECT_NE(
+                    std::string(error.what()).find(
+                        "generated-boundary Nitsche routes require CutVolume "
+                        "small-cut aggregation and aggregate-trace "
+                        "certification"),
+                    std::string::npos)
+                    << error.what();
+                ++rejection_count;
+            }
+            EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+            EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+            EXPECT_FALSE(system.hasOperator("equations"));
+            EXPECT_TRUE(
+                system.generatedBoundaryNitscheTracePolicies().empty());
         }
     }
 
-    const auto supported_variant_count =
-        natural_variant_count + weak_variant_count;
-    EXPECT_EQ(generated_trace_count, supported_variant_count);
-    EXPECT_EQ(whole_face_fallback_count, 0u);
-    RecordProperty("sharp_natural_operator_variant_count",
-                   natural_variant_count);
-    RecordProperty("sharp_weak_operator_variant_count", weak_variant_count);
-    RecordProperty("sharp_operator_generated_trace_count",
-                   generated_trace_count);
-    RecordProperty("sharp_operator_whole_face_fallback_count",
-                   whole_face_fallback_count);
+    EXPECT_EQ(rejection_count, weak_variant_count);
+    RecordProperty("sharp_weak_nitsche_uncertified_rejection_count",
+                   rejection_count);
 }
 
 TEST(MovingDomainPhysics,
@@ -6208,20 +8036,17 @@ TEST(FreeSurfaceSharpBoundaryOperators,
         FE::geometry::CutIntegrationSide::Negative,
         FE::geometry::CutIntegrationSide::Positive,
     }};
-    const std::array<SharpBoundaryOperatorFamily, 7> families{{
+    const std::array<SharpBoundaryOperatorFamily, 5> families{{
         SharpBoundaryOperatorFamily::Traction,
         SharpBoundaryOperatorFamily::Robin,
         SharpBoundaryOperatorFamily::PressureFlux,
         SharpBoundaryOperatorFamily::Outflow,
-        SharpBoundaryOperatorFamily::SymmetricNitsche,
-        SharpBoundaryOperatorFamily::UnsymmetricNitsche,
         SharpBoundaryOperatorFamily::WallSlip,
     }};
 
     FE::Real maximum_force_error{0.0};
     FE::Real maximum_flux_error{0.0};
     FE::Real maximum_robin_error{0.0};
-    FE::Real maximum_penalty_error{0.0};
     std::size_t nonzero_family_side_count{0u};
     for (const auto family : families) {
         for (const auto active_side : active_sides) {
@@ -6357,8 +8182,6 @@ TEST(FreeSurfaceSharpBoundaryOperators,
                     break;
                 case SharpBoundaryOperatorFamily::SymmetricNitsche:
                 case SharpBoundaryOperatorFamily::UnsymmetricNitsche:
-                    maximum_penalty_error =
-                        std::max(maximum_penalty_error, error);
                     break;
                 }
             }
@@ -6377,8 +8200,50 @@ TEST(FreeSurfaceSharpBoundaryOperators,
                    ::testing::PrintToString(maximum_flux_error));
     RecordProperty("sharp_operator_maximum_scaled_robin_error",
                    ::testing::PrintToString(maximum_robin_error));
-    RecordProperty("sharp_operator_maximum_scaled_penalty_error",
-                   ::testing::PrintToString(maximum_penalty_error));
+}
+
+TEST(FreeSurfaceSharpBoundaryOperators,
+     SyntheticSingleTetraGeneratedNitscheFailsBeforeInjectedMeasureAssembly)
+{
+    const std::array<SharpBoundaryOperatorFamily, 2> nitsche_families{{
+        SharpBoundaryOperatorFamily::SymmetricNitsche,
+        SharpBoundaryOperatorFamily::UnsymmetricNitsche,
+    }};
+    const std::array<FE::geometry::CutIntegrationSide, 2> active_sides{{
+        FE::geometry::CutIntegrationSide::Negative,
+        FE::geometry::CutIntegrationSide::Positive,
+    }};
+
+    std::size_t rejection_count = 0u;
+    for (const auto family : nitsche_families) {
+        for (const auto active_side : active_sides) {
+            SCOPED_TRACE(sharpBoundaryOperatorFamilyName(family));
+            SCOPED_TRACE(static_cast<int>(active_side));
+            try {
+                SharpBoundaryOperatorAssemblyHarness harness(
+                    family, active_side);
+                (void)harness;
+                ADD_FAILURE()
+                    << "synthetic generated-boundary Nitsche route did not "
+                       "fail before injected-measure assembly";
+            } catch (const std::invalid_argument& error) {
+                EXPECT_NE(
+                    std::string(error.what()).find(
+                        "generated-boundary Nitsche routes require CutVolume "
+                        "small-cut aggregation and aggregate-trace "
+                        "certification"),
+                    std::string::npos)
+                    << error.what();
+                ++rejection_count;
+            }
+        }
+    }
+
+    const auto expected_rejection_count =
+        nitsche_families.size() * active_sides.size();
+    EXPECT_EQ(rejection_count, expected_rejection_count);
+    RecordProperty("sharp_injected_nitsche_uncertified_rejection_count",
+                   rejection_count);
 }
 
 TEST(FreeSurfaceSharpBoundaryOperators,
@@ -6474,13 +8339,11 @@ TEST(FreeSurfaceSharpBoundaryOperators,
 TEST(FreeSurfaceSharpBoundaryOperators,
      SyntheticSingleTetraInjectedMeasureCompletelyDryBoundaryProducesExactlyZeroWetRows)
 {
-    const std::array<SharpBoundaryOperatorFamily, 7> families{{
+    const std::array<SharpBoundaryOperatorFamily, 5> families{{
         SharpBoundaryOperatorFamily::Traction,
         SharpBoundaryOperatorFamily::Robin,
         SharpBoundaryOperatorFamily::PressureFlux,
         SharpBoundaryOperatorFamily::Outflow,
-        SharpBoundaryOperatorFamily::SymmetricNitsche,
-        SharpBoundaryOperatorFamily::UnsymmetricNitsche,
         SharpBoundaryOperatorFamily::WallSlip,
     }};
     const std::array<FE::geometry::CutIntegrationSide, 2> active_sides{{
@@ -8247,7 +10110,39 @@ TEST(MovingDomainPhysics,
     ASSERT_EQ(declarations.size(), 1u);
     EXPECT_EQ(declarations.front().interface_marker, interface_marker);
     EXPECT_EQ(declarations.front().level_set_field, phi);
-    EXPECT_EQ(declarations.front().velocity_field, FE::INVALID_FIELD_ID);
+    EXPECT_EQ(
+        declarations.front().velocity_field,
+        system.findFieldByName(opts.velocity_field_name));
+    ASSERT_TRUE(
+        declarations.front().active_volume_energy_parameters.has_value());
+    EXPECT_DOUBLE_EQ(
+        declarations.front().active_volume_energy_parameters->density,
+        opts.density);
+    EXPECT_EQ(
+        declarations.front()
+            .active_volume_energy_parameters
+            ->gravitational_acceleration,
+        opts.body_force);
+    ASSERT_TRUE(
+        declarations.front()
+            .active_volume_dissipation_parameters
+            .has_value());
+    EXPECT_DOUBLE_EQ(
+        declarations.front()
+            .active_volume_dissipation_parameters
+            ->dynamic_viscosity,
+        opts.viscosity);
+    ASSERT_TRUE(
+        declarations.front()
+            .external_pressure_power_parameters
+            .has_value());
+    EXPECT_DOUBLE_EQ(
+        declarations.front()
+            .external_pressure_power_parameters
+            ->external_pressure,
+        FE::Real{0.0});
+    EXPECT_TRUE(
+        declarations.front().endpoint_functional_power_enabled);
     ASSERT_EQ(
         declarations.front().parameters.young_wall_coefficients.size(),
         1u);
@@ -8344,7 +10239,32 @@ TEST(MovingDomainPhysics,
     ASSERT_EQ(declarations.size(), 1u);
     EXPECT_EQ(declarations.front().interface_marker, interface_marker);
     EXPECT_EQ(declarations.front().level_set_field, phi);
-    EXPECT_EQ(declarations.front().velocity_field, FE::INVALID_FIELD_ID);
+    EXPECT_NE(declarations.front().velocity_field, FE::INVALID_FIELD_ID);
+    ASSERT_TRUE(
+        declarations.front().active_volume_energy_parameters.has_value());
+    EXPECT_DOUBLE_EQ(
+        declarations.front().active_volume_energy_parameters->density,
+        FE::Real{1.0});
+    ASSERT_TRUE(
+        declarations.front()
+            .active_volume_dissipation_parameters
+            .has_value());
+    EXPECT_DOUBLE_EQ(
+        declarations.front()
+            .active_volume_dissipation_parameters
+            ->dynamic_viscosity,
+        FE::Real{0.01});
+    ASSERT_TRUE(
+        declarations.front()
+            .external_pressure_power_parameters
+            .has_value());
+    EXPECT_DOUBLE_EQ(
+        declarations.front()
+            .external_pressure_power_parameters
+            ->external_pressure,
+        FE::Real{0.0});
+    EXPECT_FALSE(
+        declarations.front().endpoint_functional_power_enabled);
     EXPECT_DOUBLE_EQ(declarations.front().parameters.surface_tension,
                      FE::Real{0.8});
     ASSERT_EQ(
@@ -8799,6 +10719,150 @@ TEST(MovingDomainPhysics,
 }
 
 TEST(MovingDomainPhysics,
+     NavierStokesRejectsUnsupportedFreeSurfaceImplementationBeforeMutation)
+{
+    const auto mesh = makeMesh();
+    auto opts = baseNavierStokesOptions();
+    opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation =
+                static_cast<ns::FreeSurfaceImplementation>(255),
+            .boundary_marker = 173,
+        });
+    const auto velocity_name = opts.velocity_field_name;
+    const auto pressure_name = opts.pressure_field_name;
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(
+        makeVelocitySpace(mesh), makePressureSpace(mesh), std::move(opts));
+    try {
+        module.registerOn(system);
+        FAIL() << "unsupported implementation must be rejected";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "unsupported free-surface implementation"),
+            std::string::npos);
+    }
+    EXPECT_EQ(system.findFieldByName(velocity_name), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName(pressure_name), FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(system.formulationRecords().empty());
+    EXPECT_FALSE(system.hasOperator("equations"));
+    EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesRejectsUnsupportedFreeSurfacePoliciesBeforeMutation)
+{
+    using Boundary =
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary;
+    const auto mesh = makeMesh();
+    const auto expect_rejected = [&](Boundary boundary) {
+        auto opts = baseNavierStokesOptions();
+        opts.free_surface.push_back(std::move(boundary));
+        const auto velocity_name = opts.velocity_field_name;
+        const auto pressure_name = opts.pressure_field_name;
+
+        FE::systems::FESystem system(mesh);
+        ns::IncompressibleNavierStokesVMSModule module(
+            makeVelocitySpace(mesh),
+            makePressureSpace(mesh),
+            std::move(opts));
+        try {
+            module.registerOn(system);
+            FAIL() << "unsupported boundary policy must be rejected";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(
+                std::string(error.what()).find(
+                    "unsupported free-surface boundary policy"),
+                std::string::npos);
+        }
+        EXPECT_EQ(
+            system.findFieldByName(velocity_name),
+            FE::INVALID_FIELD_ID);
+        EXPECT_EQ(
+            system.findFieldByName(pressure_name),
+            FE::INVALID_FIELD_ID);
+        EXPECT_TRUE(system.formulationRecords().empty());
+        EXPECT_FALSE(system.hasOperator("equations"));
+        EXPECT_FALSE(
+            module.effectiveConfigurationArtifact().has_value());
+    };
+
+    Boundary boundary{};
+    boundary.boundary_marker = 173;
+    boundary.active_domain =
+        static_cast<ns::FreeSurfaceActiveDomain>(255);
+    expect_rejected(boundary);
+
+    boundary = Boundary{};
+    boundary.boundary_marker = 173;
+    boundary.active_domain_method =
+        static_cast<ns::FreeSurfaceActiveDomainMethod>(255);
+    expect_rejected(boundary);
+
+    boundary = Boundary{};
+    boundary.boundary_marker = 173;
+    boundary.kinematic_enforcement =
+        static_cast<ns::FreeSurfaceKinematicEnforcement>(255);
+    expect_rejected(boundary);
+
+    boundary = Boundary{};
+    boundary.boundary_marker = 173;
+    boundary.normal_kinematic_policy =
+        static_cast<ns::FreeSurfaceNormalKinematicPolicy>(255);
+    expect_rejected(boundary);
+
+    boundary = Boundary{};
+    boundary.boundary_marker = 173;
+    boundary.tangential_mesh_policy =
+        static_cast<ns::FreeSurfaceTangentialMeshPolicy>(255);
+    expect_rejected(boundary);
+
+    boundary = Boundary{};
+    boundary.boundary_marker = 173;
+    boundary.cut_cell_stabilization.pressure_policy =
+        static_cast<
+            ns::FreeSurfacePressureStabilizationPolicy>(255);
+    expect_rejected(boundary);
+
+    boundary = Boundary{};
+    boundary.boundary_marker = 173;
+    boundary.surface_tension_form =
+        static_cast<ns::FreeSurfaceSurfaceTensionForm>(255);
+    expect_rejected(boundary);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesRejectsUnsupportedAleMeshVelocitySourceBeforeMutation)
+{
+    const auto mesh = makeMesh();
+    auto opts = baseNavierStokesOptions();
+    opts.mesh_velocity_source =
+        static_cast<ns::ALEMeshVelocitySource>(255);
+    const auto velocity_name = opts.velocity_field_name;
+    const auto pressure_name = opts.pressure_field_name;
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(
+        makeVelocitySpace(mesh), makePressureSpace(mesh), std::move(opts));
+    try {
+        module.registerOn(system);
+        FAIL() << "unsupported mesh-velocity source must be rejected";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "unsupported ALE mesh-velocity source"),
+            std::string::npos);
+    }
+    EXPECT_EQ(system.findFieldByName(velocity_name), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName(pressure_name), FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(system.formulationRecords().empty());
+    EXPECT_FALSE(system.hasOperator("equations"));
+    EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
+}
+
+TEST(MovingDomainPhysics,
      NavierStokesLegacySchemaIsExplicitAndLosesCurrentCapabilityLabel)
 {
     constexpr int interface_marker = 171;
@@ -8905,7 +10969,7 @@ TEST(MovingDomainPhysics,
     expected_with_aggregation_guards.replace(
         artifact_schema,
         artifact_schema_fragment.size(),
-        "\"artifact_schema_version\":2");
+        "\"artifact_schema_version\":3");
     constexpr std::string_view capability_fragment =
         "\"capability_label\":\"one_phase_liquid_sharp_interface\"";
     const auto physical_model =
@@ -8926,6 +10990,34 @@ TEST(MovingDomainPhysics,
         "\"exterior_pressure_field_solved\":false,"
         "\"incompressible_two_fluid_implemented\":false,"
         "\"gas_dynamics_implemented\":false}");
+    constexpr std::string_view effective_surface_tension_fragment =
+        "\"surface_tension_form_effective\":\"CurvatureTraction\"";
+    const auto fitted_capability =
+        expected_with_aggregation_guards.find(
+            effective_surface_tension_fragment);
+    ASSERT_NE(fitted_capability, std::string::npos);
+    expected_with_aggregation_guards.insert(
+        fitted_capability + effective_surface_tension_fragment.size(),
+        ",\"fitted_surface_contact_capability\":{"
+        "\"qualification\":\"supported_configuration_envelope\","
+        "\"supported_requests\":{"
+        "\"surface_tension_form\":[\"Automatic\",\"CurvatureTraction\"],"
+        "\"contact_line_model\":[\"None\",\"Pinned\"]},"
+        "\"exclusion_disposition\":"
+        "\"fail_closed_before_system_mutation\","
+        "\"exclusions\":[{"
+        "\"feature\":\"surface_tension_form\","
+        "\"value\":\"SurfaceStress\","
+        "\"reason_code\":"
+        "\"fitted_surface_stress_current_frame_gradient_unqualified\""
+        "},{\"feature\":\"contact_line_model\","
+        "\"value\":\"PrescribedAngle\","
+        "\"reason_code\":"
+        "\"fitted_contact_line_codimension_two_unavailable\""
+        "},{\"feature\":\"contact_line_model\","
+        "\"value\":\"DynamicRenE\","
+        "\"reason_code\":"
+        "\"dynamic_contact_requires_sharp_unfitted_level_set\"}]}");
     constexpr std::string_view cut_scale_fragment =
         "\"cut_metadata_scale_cap\":null";
     const auto insertion = expected_with_aggregation_guards.find(
@@ -9528,6 +11620,14 @@ TEST(MovingDomainPhysics,
             declaration.parameters.dynamic_contact_coefficients.front()
                 .dynamic_viscosity,
             0.01);
+        EXPECT_EQ(
+            declaration.capillary_balance_method,
+            FE::systems::FreeSurfaceCapillaryBalanceMethod::
+                DiscreteEnergyVolumeStationarity);
+        EXPECT_EQ(
+            declaration.capillary_balance_qualification,
+            FE::systems::FreeSurfaceCapillaryBalanceQualification::
+                PrerequisiteOnly);
         EXPECT_FALSE(declaration.owner_component.empty());
     }
 }
@@ -9565,6 +11665,42 @@ TEST(MovingDomainPhysics,
                   std::string::npos)
             << error.what();
     }
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesConstitutiveViscosityLeavesEndpointBulkDissipationAbsent)
+{
+    constexpr FE::Real theta =
+        FE::Real{1.04719755119659774615421446109316763};
+    constexpr std::array<FE::Real, 4> zero_velocity{
+        FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}};
+    const auto assembled = assembleDynamicContactAngleCase(
+        theta,
+        theta,
+        zero_velocity,
+        /*include_dynamic_contact_angle=*/false,
+        /*assemble_jacobian=*/false,
+        std::array<FE::Real, 4>{0.0, 0.0, 0.0, 0.0},
+        std::array<FE::Real, 3>{0.0, 0.0, -1.0},
+        /*level_set_scale=*/1.0,
+        /*level_set_shift=*/0.0,
+        /*velocity_component=*/0,
+        ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
+        /*liquid_pressure=*/0.0,
+        /*external_pressure=*/0.0,
+        /*use_constitutive_viscosity=*/true);
+
+    ASSERT_EQ(assembled.discrete_functional_declarations.size(), 1u);
+    const auto& declaration =
+        assembled.discrete_functional_declarations.front();
+    EXPECT_TRUE(
+        declaration.active_volume_energy_parameters.has_value());
+    EXPECT_FALSE(
+        declaration.active_volume_dissipation_parameters.has_value());
+    EXPECT_TRUE(
+        declaration.external_pressure_power_parameters.has_value());
+    EXPECT_TRUE(declaration.endpoint_functional_power_enabled);
 }
 
 TEST(MovingDomainPhysics,
@@ -9697,6 +11833,11 @@ TEST(MovingDomainPhysics,
         FE::Real{1.04719755119659774615421446109316763};
     constexpr std::array<FE::Real, 4> zero_velocity{
         FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}};
+    constexpr std::array<FE::Real, 4> nonconstant_pressure{
+        FE::Real{0.19},
+        FE::Real{0.43},
+        FE::Real{0.71},
+        FE::Real{0.31}};
     const auto assembled = assembleDynamicContactAngleCase(
         theta,
         theta,
@@ -9710,8 +11851,11 @@ TEST(MovingDomainPhysics,
         /*velocity_component=*/0,
         ns::FreeSurfaceActiveDomain::LevelSetNegative,
         ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
-        /*liquid_pressure=*/FE::Real{0.37},
-        /*external_pressure=*/FE::Real{0.0});
+        /*liquid_pressure=*/FE::Real{0.0},
+        /*external_pressure=*/FE::Real{0.0},
+        /*use_constitutive_viscosity=*/false,
+        /*reverse_wall_orientation=*/false,
+        nonconstant_pressure);
 
     ASSERT_FALSE(
         assembled.pressure_representability_pair_jacobian.empty());
@@ -9768,9 +11912,9 @@ TEST(MovingDomainPhysics,
 
     // The upper-right block must be the pressure virtual-work operator with
     // the production sign, not merely some symmetric transpose pair.  With
-    // zero external pressure, applying G to the assembled pressure
-    // coefficients must reproduce the independently assembled pressure-only
-    // residual on every velocity test row.
+    // zero external pressure, applying G to a nonconstant P1 pressure must
+    // reproduce the independently assembled pressure-only residual on every
+    // velocity test row.
     FE::Real projected_pressure_norm2 = FE::Real{0.0};
     for (FE::GlobalIndex velocity_row = velocity_first;
          velocity_row < velocity_first + velocity_count;
@@ -9895,6 +12039,13 @@ TEST(MovingDomainPhysics,
     ASSERT_EQ(declarations.size(), 1u);
     EXPECT_EQ(declarations.front().interface_marker, interface_marker);
     EXPECT_EQ(declarations.front().level_set_field, phi);
+    EXPECT_EQ(
+        declarations.front().capillary_balance_method,
+        FE::systems::FreeSurfaceCapillaryBalanceMethod::Unselected);
+    EXPECT_EQ(
+        declarations.front().capillary_balance_qualification,
+        FE::systems::FreeSurfaceCapillaryBalanceQualification::
+            Unselected);
     EXPECT_EQ(
         declarations.front().velocity_field,
         system.findFieldByName(opts.velocity_field_name));
@@ -11025,6 +13176,455 @@ TEST(MovingDomainPhysics,
 }
 
 TEST(MovingDomainPhysics,
+     GeneratedBoundaryNitscheTraceRejectsVariableViscosityBeforeMutation)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    constexpr int left_marker = 2711;
+    constexpr int right_marker = 2712;
+    constexpr int bottom_marker = 2713;
+    constexpr int top_marker = 2714;
+    constexpr int interface_marker = 2715;
+    auto mesh = makeOpenTankQuadMesh(
+        left_marker,
+        right_marker,
+        bottom_marker,
+        top_marker,
+        "generated_boundary_nitsche_trace_preflight");
+    auto velocity_space =
+        FE::spaces::SpaceFactory::create_vector_h1(
+            FE::ElementType::Quad4,
+            /*order=*/1,
+            /*components=*/2);
+    auto pressure_space =
+        FE::spaces::SpaceFactory::create_h1(
+            FE::ElementType::Quad4,
+            /*order=*/1);
+
+    auto options = baseNavierStokesOptions();
+    options.viscosity_model =
+        std::make_shared<
+            materials::fluid::CarreauYasudaViscosity>(
+            0.16,
+            0.0035,
+            8.2,
+            0.2128,
+            0.64);
+    options.velocity_dirichlet_weak.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::
+            VelocityDirichletBC{
+                .boundary_marker = left_marker,
+                .value = {0.0, 0.0, 0.0},
+            });
+    options.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::
+            FreeSurfaceBoundary{
+                .implementation =
+                    ns::FreeSurfaceImplementation::
+                        UnfittedLevelSet,
+                .interface_marker = interface_marker,
+                .level_set_field_name = "phi_trace_preflight",
+                .generated_interface_domain_id =
+                    "generated_boundary_nitsche_trace_preflight",
+                .active_domain =
+                    ns::FreeSurfaceActiveDomain::
+                        LevelSetNegative,
+                .active_domain_method =
+                    ns::FreeSurfaceActiveDomainMethod::
+                        CutVolume,
+                .surface_tension = 0.0,
+                .use_level_set_curvature = false,
+                .small_cut_aggregation = true,
+            });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi_trace_preflight",
+        .space = pressure_space,
+        .components = 1,
+    });
+    ns::IncompressibleNavierStokesVMSModule module(
+        velocity_space,
+        pressure_space,
+        std::move(options));
+    try {
+        module.registerOn(system);
+        FAIL() << "variable-viscosity certified Nitsche route "
+                  "must fail before registration";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "certified generated-boundary Nitsche routes require "
+                "finite positive constant Newtonian viscosity"),
+            std::string::npos)
+            << error.what();
+    }
+    EXPECT_EQ(
+        system.findFieldByName("u"),
+        FE::INVALID_FIELD_ID);
+    EXPECT_EQ(
+        system.findFieldByName("p"),
+        FE::INVALID_FIELD_ID);
+    EXPECT_FALSE(system.hasOperator("equations"));
+    EXPECT_TRUE(
+        system.generatedBoundaryNitscheTracePolicies()
+            .empty());
+#endif
+}
+
+TEST(MovingDomainPhysics,
+     GeneratedBoundaryNitscheRouteRegistersItsTracePolicy)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    constexpr int left_marker = 2721;
+    constexpr int right_marker = 2722;
+    constexpr int bottom_marker = 2723;
+    constexpr int top_marker = 2724;
+    constexpr int interface_marker = 2725;
+    auto mesh = makeOpenTankTriangleMesh(
+        left_marker,
+        right_marker,
+        bottom_marker,
+        top_marker,
+        "generated_boundary_nitsche_trace_registration");
+    const auto phi_mesh_field = MeshFields::attach_field(
+        mesh->local_mesh(),
+        EntityKind::Vertex,
+        "phi_trace_registration",
+        FieldScalarType::Float64,
+        1);
+    auto* phi_mesh_values = MeshFields::field_data_as<real_t>(
+        mesh->local_mesh(), phi_mesh_field);
+    ASSERT_NE(phi_mesh_values, nullptr);
+    for (std::size_t vertex = 0u;
+         vertex < mesh->n_vertices();
+         ++vertex) {
+        phi_mesh_values[vertex] = mesh->local_mesh().X_ref().at(
+            2u * vertex + 1u);
+    }
+    auto velocity_space =
+        FE::spaces::SpaceFactory::create_vector_h1(
+            FE::ElementType::Triangle3,
+            /*order=*/1,
+            /*components=*/2);
+    auto pressure_space =
+        FE::spaces::SpaceFactory::create_h1(
+            FE::ElementType::Triangle3,
+            /*order=*/1);
+
+    auto options = baseNavierStokesOptions();
+    options.viscosity = FE::Real{0.037};
+    options.nitsche_gamma = FE::Real{9.0};
+    options.nitsche_symmetric = true;
+    options.nitsche_scale_with_p = true;
+    options.velocity_dirichlet_weak.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::
+            VelocityDirichletBC{
+                .boundary_marker = left_marker,
+                .value = {0.0, 0.0, 0.0},
+            });
+    options.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::
+            FreeSurfaceBoundary{
+                .implementation =
+                    ns::FreeSurfaceImplementation::
+                        UnfittedLevelSet,
+                .interface_marker = interface_marker,
+                .level_set_field_name = "phi_trace_registration",
+                .generated_interface_domain_id =
+                    "generated_boundary_nitsche_trace_registration",
+                .active_domain =
+                    ns::FreeSurfaceActiveDomain::
+                        LevelSetNegative,
+                .active_domain_method =
+                    ns::FreeSurfaceActiveDomainMethod::
+                        CutVolume,
+                .surface_tension = 0.0,
+                .use_level_set_curvature = false,
+                .small_cut_aggregation = true,
+            });
+
+    {
+        auto invalid_options = options;
+        invalid_options.nitsche_gamma =
+            std::numeric_limits<FE::Real>::infinity();
+        FE::systems::FESystem invalid_system(mesh);
+        invalid_system.addField(
+            FE::systems::FieldSpec{
+                .name = "phi_trace_registration",
+                .space = pressure_space,
+                .components = 1,
+            });
+        ns::IncompressibleNavierStokesVMSModule
+            invalid_module(
+                velocity_space,
+                pressure_space,
+                std::move(invalid_options));
+        try {
+            invalid_module.registerOn(
+                invalid_system);
+            FAIL() << "nonfinite Nitsche penalty must fail before "
+                      "registration";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(
+                std::string(error.what()).find(
+                    "nitsche_gamma must be finite and > 0"),
+                std::string::npos)
+                << error.what();
+        }
+        EXPECT_EQ(
+            invalid_system.findFieldByName("u"),
+            FE::INVALID_FIELD_ID);
+        EXPECT_EQ(
+            invalid_system.findFieldByName("p"),
+            FE::INVALID_FIELD_ID);
+        EXPECT_FALSE(
+            invalid_system.hasOperator("equations"));
+        EXPECT_TRUE(
+            invalid_system
+                .generatedBoundaryNitscheTracePolicies()
+                .empty());
+    }
+
+    {
+        auto uncertified_options = options;
+        uncertified_options.free_surface.front()
+            .small_cut_aggregation = false;
+        FE::systems::FESystem uncertified_system(mesh);
+        uncertified_system.addField(
+            FE::systems::FieldSpec{
+                .name = "phi_trace_registration",
+                .space = pressure_space,
+                .components = 1,
+            });
+        ns::IncompressibleNavierStokesVMSModule
+            uncertified_module(
+                velocity_space,
+                pressure_space,
+                std::move(uncertified_options));
+        try {
+            uncertified_module.registerOn(
+                uncertified_system);
+            FAIL() << "generated-boundary Nitsche without aggregation "
+                      "must fail before registration";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(
+                std::string(error.what()).find(
+                    "generated-boundary Nitsche routes require CutVolume "
+                    "small-cut aggregation and aggregate-trace "
+                    "certification"),
+                std::string::npos)
+                << error.what();
+        }
+        EXPECT_EQ(
+            uncertified_system.findFieldByName("u"),
+            FE::INVALID_FIELD_ID);
+        EXPECT_EQ(
+            uncertified_system.findFieldByName("p"),
+            FE::INVALID_FIELD_ID);
+        EXPECT_FALSE(
+            uncertified_system.hasOperator("equations"));
+        EXPECT_TRUE(
+            uncertified_system
+                .generatedBoundaryNitscheTracePolicies()
+                .empty());
+    }
+
+    {
+        auto unsupported_mesh =
+            makeOpenTankQuadMesh(
+                left_marker,
+                right_marker,
+                bottom_marker,
+                top_marker,
+                "generated_boundary_nitsche_trace_registration");
+        auto unsupported_velocity_space =
+            FE::spaces::SpaceFactory::create_vector_h1(
+                FE::ElementType::Quad4,
+                /*order=*/1,
+                /*components=*/2);
+        auto unsupported_pressure_space =
+            FE::spaces::SpaceFactory::create_h1(
+                FE::ElementType::Quad4,
+                /*order=*/1);
+        FE::systems::FESystem unsupported_system(
+            unsupported_mesh);
+        unsupported_system.addField(
+            FE::systems::FieldSpec{
+                .name = "phi_trace_registration",
+                .space = unsupported_pressure_space,
+                .components = 1,
+            });
+        ns::IncompressibleNavierStokesVMSModule
+            unsupported_module(
+                unsupported_velocity_space,
+                unsupported_pressure_space,
+                options);
+        try {
+            unsupported_module.registerOn(
+                unsupported_system);
+            FAIL() << "unsupported quadrilateral certified trace "
+                      "route must fail before registration";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(
+                std::string(error.what()).find(
+                    "certified generated-boundary Nitsche routes "
+                    "require an affine P1 Product H1 velocity "
+                    "space on Triangle3 or Tetra4 cells"),
+                std::string::npos)
+                << error.what();
+        }
+        EXPECT_EQ(
+            unsupported_system.findFieldByName("u"),
+            FE::INVALID_FIELD_ID);
+        EXPECT_EQ(
+            unsupported_system.findFieldByName("p"),
+            FE::INVALID_FIELD_ID);
+        EXPECT_FALSE(
+            unsupported_system.hasOperator(
+                "equations"));
+        EXPECT_TRUE(
+            unsupported_system
+                .generatedBoundaryNitscheTracePolicies()
+                .empty());
+    }
+
+    {
+        auto dependent_options = options;
+        dependent_options.velocity_dirichlet_weak.front()
+            .value.front() =
+            FE::forms::component(
+                FE::forms::currentCoordinate(), 0);
+        FE::systems::FESystem dependent_system(mesh);
+        dependent_system.addField(
+            FE::systems::FieldSpec{
+                .name = "phi_trace_registration",
+                .space = pressure_space,
+                .components = 1,
+            });
+        ns::IncompressibleNavierStokesVMSModule
+            dependent_module(
+                velocity_space,
+                pressure_space,
+                std::move(dependent_options));
+        try {
+            dependent_module.registerOn(
+                dependent_system);
+            FAIL() << "geometry-dependent generated-boundary Nitsche data "
+                      "must fail before registration";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(
+                std::string(error.what()).find(
+                    "prescribed value must be independent of FE state, "
+                    "coupled data, and variational geometry"),
+                std::string::npos)
+                << error.what();
+        }
+        EXPECT_EQ(
+            dependent_system.findFieldByName("u"),
+            FE::INVALID_FIELD_ID);
+        EXPECT_EQ(
+            dependent_system.findFieldByName("p"),
+            FE::INVALID_FIELD_ID);
+        EXPECT_FALSE(
+            dependent_system.hasOperator("equations"));
+        EXPECT_TRUE(
+            dependent_system
+                .generatedBoundaryNitscheTracePolicies()
+                .empty());
+    }
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi_trace_registration",
+        .space = pressure_space,
+        .components = 1,
+    });
+    ns::IncompressibleNavierStokesVMSModule module(
+        velocity_space,
+        pressure_space,
+        std::move(options));
+    ASSERT_NO_THROW(module.registerOn(system));
+
+    const auto velocity =
+        system.findFieldByName("u");
+    ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
+    const auto policies =
+        system.generatedBoundaryNitscheTracePolicies();
+    ASSERT_EQ(policies.size(), 1u);
+    EXPECT_EQ(policies.front().op, "equations");
+    EXPECT_EQ(
+        policies.front().velocity_field,
+        velocity);
+    EXPECT_EQ(
+        policies.front().physical_boundary_marker,
+        left_marker);
+    EXPECT_EQ(
+        policies.front().volume_interface_marker,
+        interface_marker);
+    EXPECT_GE(
+        policies.front().generated_active_boundary_marker,
+        0);
+    EXPECT_NE(
+        policies.front().generated_active_boundary_marker,
+        left_marker);
+    EXPECT_EQ(
+        policies.front().dynamic_viscosity,
+        FE::Real{0.037});
+    EXPECT_EQ(
+        policies.front().penalty_gamma,
+        FE::Real{9.0});
+    EXPECT_TRUE(
+        policies.front().scale_with_polynomial_order);
+    EXPECT_EQ(
+        policies.front().penalty_polynomial_order,
+        1);
+    EXPECT_EQ(
+        policies.front().velocity_space_signature.space_type,
+        velocity_space->space_type());
+    EXPECT_EQ(
+        policies.front().velocity_space_signature.field_type,
+        velocity_space->field_type());
+    EXPECT_EQ(
+        policies.front().velocity_space_signature.continuity,
+        velocity_space->continuity());
+    EXPECT_EQ(
+        policies.front().velocity_space_signature.value_dimension,
+        velocity_space->value_dimension());
+    EXPECT_EQ(
+        policies.front()
+            .velocity_space_signature
+            .topological_dimension,
+        velocity_space->topological_dimension());
+    EXPECT_EQ(
+        policies.front().velocity_space_signature.element_type,
+        velocity_space->element_type());
+    EXPECT_EQ(
+        policies.front().effective_penalty_multiplier,
+        FE::Real{9.0});
+    EXPECT_NE(
+        policies.front().form_binding_digest,
+        0u);
+    ASSERT_LT(
+        policies.front().source_formulation_record_index,
+        system.formulationRecords().size());
+    EXPECT_EQ(
+        system.formulationRecords()[
+            policies.front().source_formulation_record_index]
+            .operator_tag,
+        "equations");
+    EXPECT_TRUE(policies.front().symmetric);
+    ASSERT_NO_THROW(system.setup());
+    EXPECT_TRUE(
+        system.generatedBoundaryNitscheTraceCertificates()
+            .empty());
+#endif
+}
+
+TEST(MovingDomainPhysics,
      NavierStokesRejectsDuplicatePrescribedWallOwnershipWithUniqueMarkers)
 {
     constexpr int interface_marker = 216;
@@ -11649,6 +14249,19 @@ TEST(MovingDomainPhysics, HarmonicMeshMotionNormalConstraintAcceptsVelocityTarge
     FE::systems::FESystem system(mesh);
     mm::HarmonicMeshMotionModule module(d_space, opts);
     module.registerOn(system);
+    const auto declarations = system.meshNormalBoundaryConstraints();
+    ASSERT_EQ(declarations.size(), 1u);
+    EXPECT_EQ(declarations.front().boundary_marker, marker);
+    EXPECT_EQ(
+        declarations.front().quantity,
+        FE::systems::MeshNormalBoundaryQuantity::DisplacementTrace);
+    EXPECT_EQ(
+        declarations.front().target_kind,
+        FE::systems::MeshNormalBoundaryTargetKind::
+            TimeScaledPrescribedVelocity);
+    EXPECT_EQ(declarations.front().related_velocity_field,
+              FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(declarations.front().target_expression.isValid());
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Normal));
     system.setup({}, makeSingleTetraSetupInputs());
@@ -11657,6 +14270,271 @@ TEST(MovingDomainPhysics, HarmonicMeshMotionNormalConstraintAcceptsVelocityTarge
     FE::systems::SystemStateView state;
     state.u = std::span<const FE::Real>(u);
     EXPECT_GT(residualNorm(system, state, "mesh_motion"), 0.0);
+    const auto velocity_target_residual =
+        residualVector(system, state, "mesh_motion");
+
+    auto displacement_options = opts;
+    displacement_options.normal_constraint.clear();
+    normal.quantity = mm::NormalConstraintQuantity::Displacement;
+    normal.target = FE::Real{0.5};
+    normal.velocity_time_scale = FE::Real{1.0};
+    displacement_options.normal_constraint.push_back(normal);
+    FE::systems::FESystem displacement_system(mesh);
+    mm::HarmonicMeshMotionModule displacement_module(
+        d_space, std::move(displacement_options));
+    displacement_module.registerOn(displacement_system);
+    displacement_system.setup({}, makeSingleTetraSetupInputs());
+    std::vector<FE::Real> displacement_state_values(
+        static_cast<std::size_t>(
+            displacement_system.dofHandler().getNumDofs()),
+        FE::Real{0.0});
+    FE::systems::SystemStateView displacement_state;
+    displacement_state.u =
+        std::span<const FE::Real>(displacement_state_values);
+    const auto displacement_target_residual = residualVector(
+        displacement_system, displacement_state, "mesh_motion");
+    ASSERT_EQ(velocity_target_residual.size(),
+              displacement_target_residual.size());
+    for (std::size_t index = 0u;
+         index < velocity_target_residual.size();
+         ++index) {
+        EXPECT_NEAR(velocity_target_residual[index],
+                    displacement_target_residual[index],
+                    FE::Real{1.0e-13});
+    }
+}
+
+TEST(MovingDomainPhysics,
+     PseudoElasticNormalConsumerHistoryFreezesBeforeLateRegistration)
+{
+    constexpr int marker = 11;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(
+        std::array<int, 4>{marker, marker + 1, marker + 2, marker + 3});
+    auto displacement_space = makeVelocitySpace(mesh);
+    mm::PseudoElasticMeshMotionOptions options;
+    options.operator_tag = "pseudo_normal_history";
+    options.normal_constraint.push_back(mm::NormalConstraintBC{
+        .boundary_marker = marker,
+        .quantity = mm::NormalConstraintQuantity::Displacement,
+        .target = FE::Real{0.25},
+        .penalty = FE::Real{5.0},
+        .velocity_time_scale = FE::Real{1.0},
+    });
+    FE::systems::FESystem system(mesh);
+    mm::PseudoElasticMeshMotionModule module(
+        displacement_space, options);
+    ASSERT_NO_THROW(module.registerOn(system));
+
+    const auto displacement = system.findFieldByName("mesh_displacement");
+    ASSERT_NE(displacement, FE::INVALID_FIELD_ID);
+    const auto declarations = system.meshNormalBoundaryConstraints();
+    ASSERT_EQ(declarations.size(), 1u);
+    ASSERT_TRUE(declarations.front().consumer_binding.has_value());
+    EXPECT_EQ(declarations.front().consumer_binding->operator_tag,
+              options.operator_tag);
+    EXPECT_EQ(
+        declarations.front().consumer_binding->mesh_descriptor_source,
+        "TraceRobinBC on marker 11");
+    EXPECT_FALSE(
+        declarations.front().consumer_binding->related_fluid.has_value());
+    EXPECT_THROW(
+        system.bindMeshNormalBoundaryConstraintConsumer(
+            displacement,
+            marker,
+            options.operator_tag,
+            "TraceRobinBC on marker 11",
+            std::optional<std::string>{std::string{}}),
+        FE::InvalidArgumentException);
+
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    ASSERT_NO_THROW(system.recordAcceptedMeshBoundaryProvenance(
+        /*accepted_step=*/4u,
+        FE::Real{0.4},
+        FE::Real{0.1},
+        /*state_revision=*/7u));
+    const auto history = system.meshNormalBoundaryConstraintHistory();
+    ASSERT_EQ(history.size(), 1u);
+    EXPECT_EQ(history.front().declaration.consumer_binding,
+              system.meshNormalBoundaryConstraints()
+                  .front()
+                  .consumer_binding);
+
+    const auto was_setup = system.isSetup();
+    const auto field_count = system.fieldMap().numFields();
+    const auto formulation_count = system.formulationRecords().size();
+    const auto descriptor_count =
+        system.boundaryConditionDescriptors().size();
+    const auto declaration_count =
+        system.meshNormalBoundaryConstraints().size();
+    const auto tangential_declaration_count =
+        system.meshTangentialBoundaryPolicies().size();
+    const auto history_count =
+        system.meshNormalBoundaryConstraintHistory().size();
+    EXPECT_THROW(
+        system.declareMeshTangentialBoundaryPolicy(
+            FE::systems::MeshTangentialBoundaryPolicyDeclaration{
+                .mesh_displacement_field = displacement,
+                .boundary_marker = marker + 2,
+                .policy =
+                    FE::systems::MeshTangentialBoundaryPolicy::Free,
+                .owner_component = "late_tangential_owner",
+            }),
+        FE::InvalidArgumentException);
+    EXPECT_EQ(system.isSetup(), was_setup);
+    EXPECT_EQ(system.meshTangentialBoundaryPolicies().size(),
+              tangential_declaration_count);
+    mm::PseudoElasticMeshMotionOptions late_options;
+    late_options.operator_tag = "late_pseudo_normal";
+    late_options.normal_constraint.push_back(mm::NormalConstraintBC{
+        .boundary_marker = marker + 1,
+        .quantity = mm::NormalConstraintQuantity::Displacement,
+        .target = FE::Real{0.0},
+        .penalty = FE::Real{3.0},
+        .velocity_time_scale = FE::Real{1.0},
+    });
+    mm::PseudoElasticMeshMotionModule late_module(
+        displacement_space, std::move(late_options));
+    try {
+        late_module.registerOn(system);
+        FAIL() << "expected std::invalid_argument";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find(
+                      "accepted normal-constraint history"),
+                  std::string::npos)
+            << error.what();
+    }
+    EXPECT_EQ(system.isSetup(), was_setup);
+    EXPECT_EQ(system.fieldMap().numFields(), field_count);
+    EXPECT_EQ(system.formulationRecords().size(), formulation_count);
+    EXPECT_EQ(system.boundaryConditionDescriptors().size(),
+              descriptor_count);
+    EXPECT_EQ(system.meshNormalBoundaryConstraints().size(),
+              declaration_count);
+    EXPECT_EQ(system.meshTangentialBoundaryPolicies().size(),
+              tangential_declaration_count);
+    EXPECT_EQ(system.meshNormalBoundaryConstraintHistory().size(),
+              history_count);
+    EXPECT_FALSE(system.hasOperator("late_pseudo_normal"));
+}
+
+TEST(MovingDomainPhysics,
+     MeshMotionNormalConstraintsRejectInvalidScalingAndShapeBeforeMutation)
+{
+    constexpr int marker = 12;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto displacement_space = makeVelocitySpace(mesh);
+
+    {
+        mm::HarmonicMeshMotionOptions options;
+        options.operator_tag = "invalid_normal_penalty";
+        options.normal_constraint.push_back(mm::NormalConstraintBC{
+            .boundary_marker = marker,
+            .quantity = mm::NormalConstraintQuantity::Displacement,
+            .target = FE::Real{0.0},
+            .penalty = FE::Real{0.0},
+            .velocity_time_scale = FE::Real{1.0},
+        });
+        FE::systems::FESystem system(mesh);
+        mm::HarmonicMeshMotionModule module(
+            displacement_space, std::move(options));
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+        EXPECT_EQ(system.fieldMap().numFields(), 0u);
+        EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+        EXPECT_FALSE(system.hasOperator("invalid_normal_penalty"));
+    }
+
+    {
+        mm::PseudoElasticMeshMotionOptions options;
+        options.operator_tag = "invalid_normal_time_scale";
+        options.normal_constraint.push_back(mm::NormalConstraintBC{
+            .boundary_marker = marker,
+            .quantity = mm::NormalConstraintQuantity::Velocity,
+            .target = FE::Real{1.0},
+            .penalty = FE::Real{1.0},
+            .velocity_time_scale = FE::Real{0.0},
+        });
+        FE::systems::FESystem system(mesh);
+        mm::PseudoElasticMeshMotionModule module(
+            displacement_space, std::move(options));
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+        EXPECT_EQ(system.fieldMap().numFields(), 0u);
+        EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+        EXPECT_FALSE(system.hasOperator("invalid_normal_time_scale"));
+    }
+
+    {
+        mm::HarmonicMeshMotionOptions options;
+        options.operator_tag = "invalid_normal_target_shape";
+        options.normal_constraint.push_back(mm::NormalConstraintBC{
+            .boundary_marker = marker,
+            .quantity = mm::NormalConstraintQuantity::Displacement,
+            .target = FE::forms::FormExpr::asVector({
+                FE::forms::FormExpr::constant(FE::Real{0.0}),
+                FE::forms::FormExpr::constant(FE::Real{0.0}),
+                FE::forms::FormExpr::constant(FE::Real{0.0}),
+            }),
+            .penalty = FE::Real{1.0},
+            .velocity_time_scale = FE::Real{1.0},
+        });
+        FE::systems::FESystem system(mesh);
+        mm::HarmonicMeshMotionModule module(
+            displacement_space, std::move(options));
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+        EXPECT_EQ(system.fieldMap().numFields(), 0u);
+        EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+        EXPECT_FALSE(system.hasOperator("invalid_normal_target_shape"));
+    }
+
+    {
+        const auto vector_target = FE::forms::FormExpr::asVector({
+            FE::forms::FormExpr::constant(FE::Real{0.0}),
+            FE::forms::FormExpr::constant(FE::Real{0.0}),
+            FE::forms::FormExpr::constant(FE::Real{0.0}),
+        });
+        mm::PseudoElasticMeshMotionOptions options;
+        options.operator_tag = "malformed_scalar_normal_target";
+        options.normal_constraint.push_back(mm::NormalConstraintBC{
+            .boundary_marker = marker,
+            .quantity = mm::NormalConstraintQuantity::Displacement,
+            .target = FE::forms::min(vector_target, vector_target),
+            .penalty = FE::Real{1.0},
+            .velocity_time_scale = FE::Real{1.0},
+        });
+        FE::systems::FESystem system(mesh);
+        mm::PseudoElasticMeshMotionModule module(
+            displacement_space, std::move(options));
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+        EXPECT_EQ(system.fieldMap().numFields(), 0u);
+        EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+        EXPECT_FALSE(system.hasOperator("malformed_scalar_normal_target"));
+    }
+
+    {
+        auto triangle =
+            std::make_shared<FE::forms::test::SingleTriangleMeshAccess>();
+        auto displacement_2d = FE::spaces::VectorSpace(
+            FE::spaces::SpaceType::H1,
+            triangle,
+            /*order=*/1,
+            /*components=*/2);
+        mm::HarmonicMeshMotionOptions options;
+        options.operator_tag = "out_of_range_normal_target";
+        options.normal_constraint.push_back(mm::NormalConstraintBC{
+            .boundary_marker = marker,
+            .quantity = mm::NormalConstraintQuantity::Displacement,
+            .target = FE::forms::component(
+                FE::forms::FormExpr::referenceCoordinate(), 2),
+            .penalty = FE::Real{1.0},
+            .velocity_time_scale = FE::Real{1.0},
+        });
+        FE::systems::FESystem system(triangle);
+        mm::HarmonicMeshMotionModule module(
+            displacement_2d, std::move(options));
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+        EXPECT_EQ(system.fieldMap().numFields(), 0u);
+        EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+        EXPECT_FALSE(system.hasOperator("out_of_range_normal_target"));
+    }
 }
 
 TEST(MovingDomainPhysics, HarmonicMeshMotionTangentialPoliciesSelectBoundaryTerms)
@@ -12134,7 +15012,10 @@ TEST(MovingDomainPhysics, CoupledALEAndHarmonicMeshMotionShareDisplacementUnknow
 TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
 {
     constexpr int marker = 39;
-    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    constexpr int mesh_normal_marker = marker + 1;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(
+        std::array<int, 4>{marker, mesh_normal_marker, marker + 2,
+                           marker + 3});
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
 
@@ -12146,7 +15027,7 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
     mesh_opts.kappa = 1.5;
 
     mm::NormalConstraintBC normal;
-    normal.boundary_marker = marker;
+    normal.boundary_marker = mesh_normal_marker;
     normal.quantity = mm::NormalConstraintQuantity::Velocity;
     normal.target = 0.15;
     normal.penalty = 6.0;
@@ -12180,6 +15061,72 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
 
     ns::IncompressibleNavierStokesVMSModule ns_module(u_space, p_space, ns_opts);
     ns_module.registerOn(system);
+
+    const auto normal_declarations =
+        system.meshNormalBoundaryConstraints();
+    ASSERT_EQ(normal_declarations.size(), 2u);
+    const auto fitted_measurements =
+        system.fittedALENormalOperatorStageMeasurementDeclarations();
+    ASSERT_EQ(fitted_measurements.size(), 1u);
+    EXPECT_EQ(fitted_measurements.front().key.mesh_displacement_field,
+              displacement);
+    EXPECT_EQ(fitted_measurements.front().key.boundary_marker, marker);
+    EXPECT_EQ(normal_declarations[0].boundary_marker, marker);
+    EXPECT_EQ(
+        normal_declarations[0].target_kind,
+        FE::systems::MeshNormalBoundaryTargetKind::FluidNormalVelocity);
+    EXPECT_EQ(
+        normal_declarations[0].quantity,
+        FE::systems::MeshNormalBoundaryQuantity::MeshVelocityTrace);
+    EXPECT_EQ(normal_declarations[0].mesh_displacement_field,
+              displacement);
+    ASSERT_TRUE(normal_declarations[0].consumer_binding.has_value());
+    EXPECT_EQ(normal_declarations[0].consumer_binding->operator_tag,
+              "equations");
+    EXPECT_EQ(
+        normal_declarations[0].consumer_binding->mesh_descriptor_source,
+        "Fitted free-surface mesh normal kinematic row on marker 39");
+    ASSERT_TRUE(
+        normal_declarations[0].consumer_binding->related_fluid.has_value());
+    EXPECT_EQ(
+        normal_declarations[0]
+            .consumer_binding->related_fluid->descriptor_source,
+        "Fitted free-surface fluid normal kinematic row on marker 39");
+    EXPECT_EQ(
+        normal_declarations[0]
+            .consumer_binding->related_fluid->enforcement_kind,
+        FE::analysis::EnforcementKind::WeakPenalty);
+    const auto* fitted_target =
+        normal_declarations[0].target_expression.node();
+    ASSERT_NE(fitted_target, nullptr);
+    EXPECT_EQ(fitted_target->type(), FormExprType::InnerProduct);
+    const auto fitted_target_children = fitted_target->childrenShared();
+    ASSERT_EQ(fitted_target_children.size(), 2u);
+    ASSERT_NE(fitted_target_children[0], nullptr);
+    ASSERT_NE(fitted_target_children[1], nullptr);
+    EXPECT_EQ(fitted_target_children[0]->type(), FormExprType::StateField);
+    ASSERT_TRUE(fitted_target_children[0]->fieldId().has_value());
+    EXPECT_EQ(*fitted_target_children[0]->fieldId(),
+              system.findFieldByName(ns_opts.velocity_field_name));
+    EXPECT_EQ(fitted_target_children[1]->type(),
+              FormExprType::CurrentNormal);
+    EXPECT_EQ(normal_declarations[1].boundary_marker,
+              mesh_normal_marker);
+    EXPECT_EQ(
+        normal_declarations[1].target_kind,
+        FE::systems::MeshNormalBoundaryTargetKind::
+            TimeScaledPrescribedVelocity);
+    EXPECT_EQ(
+        normal_declarations[1].quantity,
+        FE::systems::MeshNormalBoundaryQuantity::DisplacementTrace);
+    ASSERT_TRUE(normal_declarations[1].consumer_binding.has_value());
+    EXPECT_EQ(normal_declarations[1].consumer_binding->operator_tag,
+              "mesh_motion");
+    EXPECT_EQ(
+        normal_declarations[1].consumer_binding->mesh_descriptor_source,
+        "TraceRobinBC on marker 40");
+    EXPECT_FALSE(
+        normal_declarations[1].consumer_binding->related_fluid.has_value());
 
     const auto mesh_velocity = system.findFieldByName("mesh_velocity");
     ASSERT_NE(mesh_velocity, FE::INVALID_FIELD_ID);
@@ -12257,6 +15204,166 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
 
     EXPECT_GT(residualNorm(system, state, "mesh_motion"), 0.0);
     EXPECT_GT(residualNorm(system, state, "equations"), 0.0);
+
+    const FE::systems::OperatorStageGeometryMetadata stage_geometry{
+        .geometry_revision = mesh->geometryRevision(),
+        .topology_revision = mesh->topologyRevision(),
+        .ownership_revision = mesh->ownershipRevision(),
+        .numbering_revision = mesh->numberingRevision(),
+        .field_layout_revision = mesh->fieldLayoutRevision(),
+        .label_revision = mesh->labelRevision(),
+        .active_configuration_epoch =
+            mesh->activeConfigurationEpoch(),
+        .coordinate_configuration_key =
+            mesh->coordinateConfigurationKey(),
+    };
+    const FE::systems::OperatorStageMeasurementMetadata stage_metadata{
+        .scheme_name = "BackwardEuler",
+        .temporal_order = 1,
+        .prospective_accepted_step = 7u,
+        .prospective_attempt = 0u,
+        .step_start_time = FE::Real{0.30},
+        .step_end_time = FE::Real{0.35},
+        .state_time = FE::Real{0.35},
+        .rate_time = FE::Real{0.35},
+        .dt = FE::Real{0.05},
+        .expected_stage_geometry = stage_geometry,
+        .state_revision = 17u,
+        .rate_revision = 18u,
+        .derivative_fields = {displacement},
+    };
+    ASSERT_NO_THROW(
+        system.stageFittedALENormalOperatorStageMeasurements(
+            state, stage_metadata));
+    auto pending_measurements =
+        system.pendingFittedALENormalOperatorStageMeasurements();
+    ASSERT_EQ(pending_measurements.size(), 1u);
+    EXPECT_EQ(pending_measurements.front().raw.key.boundary_marker,
+              marker);
+    EXPECT_GT(pending_measurements.front().raw.A, FE::Real{0.0});
+    EXPECT_NEAR(pending_measurements.front().raw.Wn,
+                FE::Real{0.0}, FE::Real{1.0e-14});
+    EXPECT_TRUE(std::isfinite(pending_measurements.front().raw.Un));
+    EXPECT_GE(pending_measurements.front().raw.gap_sq,
+              FE::Real{0.0});
+    EXPECT_EQ(pending_measurements.front().raw.stage_mesh_revision,
+              stage_geometry);
+    EXPECT_TRUE(
+        system.fittedALENormalOperatorStageMeasurementHistory().empty());
+
+    ASSERT_NO_THROW(
+        system.commitPendingFittedALENormalOperatorStageMeasurements(
+            7u, FE::Real{0.35}, FE::Real{0.05}));
+    ASSERT_EQ(
+        system.fittedALENormalOperatorStageMeasurementHistory().size(),
+        1u);
+    ASSERT_NO_THROW(
+        system.stageFittedALENormalOperatorStageMeasurements(
+            state, stage_metadata));
+    ASSERT_NO_THROW(
+        system.commitPendingFittedALENormalOperatorStageMeasurements(
+            7u, FE::Real{0.35}, FE::Real{0.05}));
+    EXPECT_EQ(
+        system.fittedALENormalOperatorStageMeasurementHistory().size(),
+        1u);
+    ASSERT_NO_THROW(
+        system.stageFittedALENormalOperatorStageMeasurements(
+            state, stage_metadata));
+    system.discardPendingFittedALENormalOperatorStageMeasurements();
+    EXPECT_TRUE(
+        system.pendingFittedALENormalOperatorStageMeasurements().empty());
+    EXPECT_EQ(
+        system.fittedALENormalOperatorStageMeasurementHistory().size(),
+        1u);
+
+    ASSERT_NO_THROW(system.recordAcceptedMeshBoundaryProvenance(
+        /*accepted_step=*/7u,
+        FE::Real{0.35},
+        FE::Real{0.05},
+        /*state_revision=*/13u));
+    auto normal_history =
+        system.meshNormalBoundaryConstraintHistory();
+    ASSERT_EQ(normal_history.size(), 2u);
+    EXPECT_EQ(normal_history[0].declaration.boundary_marker, marker);
+    EXPECT_EQ(normal_history[1].declaration.boundary_marker,
+              mesh_normal_marker);
+    for (std::size_t index = 0u; index < normal_history.size(); ++index) {
+        EXPECT_EQ(normal_history[index].accepted_step, 7u);
+        EXPECT_DOUBLE_EQ(normal_history[index].accepted_time,
+                         FE::Real{0.35});
+        EXPECT_DOUBLE_EQ(normal_history[index].dt, FE::Real{0.05});
+        EXPECT_EQ(normal_history[index].state_revision, 13u);
+        EXPECT_EQ(normal_history[index].mesh_geometry_revision,
+                  mesh->geometryRevision());
+        EXPECT_EQ(
+            normal_history[index].declaration.target_expression.node(),
+            normal_declarations[index].target_expression.node());
+        EXPECT_EQ(
+            normal_history[index].declaration.consumer_binding,
+            normal_declarations[index].consumer_binding);
+    }
+    ASSERT_EQ(system.meshTangentialBoundaryPolicyHistory().size(), 1u);
+
+    ASSERT_NO_THROW(system.recordAcceptedMeshBoundaryProvenance(
+        7u, FE::Real{0.35}, FE::Real{0.05}, 13u));
+    EXPECT_EQ(system.meshNormalBoundaryConstraintHistory().size(), 2u);
+    EXPECT_EQ(system.meshTangentialBoundaryPolicyHistory().size(), 1u);
+    EXPECT_THROW(system.recordAcceptedMeshBoundaryProvenance(
+                     7u, FE::Real{0.35}, FE::Real{0.05}, 14u),
+                 FE::InvalidArgumentException);
+    EXPECT_EQ(system.meshNormalBoundaryConstraintHistory().size(), 2u);
+    EXPECT_EQ(system.meshTangentialBoundaryPolicyHistory().size(), 1u);
+
+    const auto first_geometry_revision = mesh->geometryRevision();
+    mesh->setCurrentNodeCoordinates(1, {1.05, 0.0, 0.0});
+    ASSERT_NE(mesh->geometryRevision(), first_geometry_revision);
+    EXPECT_THROW(system.recordAcceptedMeshBoundaryProvenance(
+                     7u, FE::Real{0.35}, FE::Real{0.05}, 13u),
+                 FE::InvalidArgumentException);
+    EXPECT_EQ(system.meshNormalBoundaryConstraintHistory().size(), 2u);
+    EXPECT_EQ(system.meshTangentialBoundaryPolicyHistory().size(), 1u);
+
+    ASSERT_NO_THROW(system.recordAcceptedMeshBoundaryProvenance(
+        8u, FE::Real{0.40}, FE::Real{0.05}, 15u));
+    normal_history = system.meshNormalBoundaryConstraintHistory();
+    ASSERT_EQ(normal_history.size(), 4u);
+    EXPECT_EQ(normal_history[2].mesh_geometry_revision,
+              mesh->geometryRevision());
+    EXPECT_EQ(normal_history[3].mesh_geometry_revision,
+              mesh->geometryRevision());
+    EXPECT_EQ(system.meshTangentialBoundaryPolicyHistory().size(), 2u);
+    EXPECT_THROW(system.recordAcceptedMeshBoundaryProvenance(
+                     6u, FE::Real{0.30}, FE::Real{0.05}, 12u),
+                 FE::InvalidArgumentException);
+    EXPECT_EQ(system.meshNormalBoundaryConstraintHistory().size(), 4u);
+    EXPECT_EQ(system.meshTangentialBoundaryPolicyHistory().size(), 2u);
+
+    EXPECT_THROW(
+        system.bindMeshNormalBoundaryConstraintConsumer(
+            displacement,
+            marker,
+            "equations",
+            "Fitted free-surface mesh normal kinematic row on marker 39",
+            "Fitted free-surface fluid normal kinematic row on marker 39"),
+        FE::InvalidArgumentException);
+    EXPECT_THROW(
+        system.declareMeshNormalBoundaryConstraint(
+            FE::systems::MeshNormalBoundaryConstraintDeclaration{
+                .mesh_displacement_field = displacement,
+                .boundary_marker = marker + 2,
+                .quantity = FE::systems::MeshNormalBoundaryQuantity::
+                    DisplacementTrace,
+                .target_kind =
+                    FE::systems::MeshNormalBoundaryTargetKind::
+                        PrescribedDisplacement,
+                .target_expression =
+                    FE::forms::FormExpr::constant(FE::Real{0.0}),
+                .enforcement_kind =
+                    FE::analysis::EnforcementKind::WeakPenalty,
+                .related_velocity_field = FE::INVALID_FIELD_ID,
+                .owner_component = "late_normal_history_owner",
+            }),
+        FE::InvalidArgumentException);
 }
 
 TEST(MovingDomainPhysics, ALEAdvectionDiffusionManufacturedResidualUsesPhysicalMinusMeshVelocity)

@@ -1,0 +1,59 @@
+Note: Google Test filter = CutIntegrationInfrastructure.ContentRevisionTracksGeneratedRuleMutations:CutIntegrationInfrastructure.ImportsGeneratedLevelSetInterfaceDomainByMarker:CutIntegrationInfrastructure.ImportsGeneratedLevelSetInterfaceDomainForRequestedVolumeSide:CutIntegrationInfrastructure.GeneratedCutVolumesRejectStaleSourceRevision:CutIntegrationInfrastructure.GeneratedInterfaceRulesRejectStaleSourceRevision:CutIntegrationInfrastructure.FullCellGeneratedRulesCarryDiagnosticMetadata:CutIntegrationInfrastructure.IndexesGeneratedLevelSetVolumeRulesByMarkerAndSide:CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesConstantsAcrossPaths:CutIntegrationInfrastructure.FixedGeometryDiagnosticsCountHighOrderRules:CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesLinearFieldsAcrossPaths:CutIntegrationInfrastructure.AssemblyContextCarriesQuadratureMetadataAndHooks:CutIntegrationInfrastructure.InvalidationSeparatesGeometryAndFELayoutChanges:CutIntegrationInfrastructure.ImportsClosedCutTopologyIntoAllAssemblyPathBindings:CutIntegrationInfrastructure.ImportsCurvedIsoparametricTopologyQuadrature:CutIntegrationInfrastructure.QuadraticCurvedPlaneCutDataIsIdenticalAcrossAllExecutionPaths:CutIntegrationInfrastructure.ImportsLinearizedCutQuadratureForEveryAdvertisedFamily:CutIntegrationInfrastructure.LinearizedPlaneCutDataIsIdenticalAcrossAllExecutionPaths:CutIntegrationInfrastructure.LinearizedCutDataIsIdenticalAcrossAllExecutionPaths:CutIntegrationInfrastructure.ProductionCutScalarOperatorsMatchAnalyticHalfCubePlaneCut:FormsInstaller.FormsInstaller_RevisionBoundFullSideCutVolumeUsesSnapshotRulePoints:FormsInstaller.FormsInstaller_UnflaggedFullMeasureCutVolumeUsesRulePoints
+[==========] Running 21 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 19 tests from CutIntegrationInfrastructure
+[ RUN      ] CutIntegrationInfrastructure.ContentRevisionTracksGeneratedRuleMutations
+[       OK ] CutIntegrationInfrastructure.ContentRevisionTracksGeneratedRuleMutations (0 ms)
+[ RUN      ] CutIntegrationInfrastructure.ImportsGeneratedLevelSetInterfaceDomainByMarker
+[       OK ] CutIntegrationInfrastructure.ImportsGeneratedLevelSetInterfaceDomainByMarker (0 ms)
+[ RUN      ] CutIntegrationInfrastructure.ImportsGeneratedLevelSetInterfaceDomainForRequestedVolumeSide
+[       OK ] CutIntegrationInfrastructure.ImportsGeneratedLevelSetInterfaceDomainForRequestedVolumeSide (0 ms)
+[ RUN      ] CutIntegrationInfrastructure.GeneratedCutVolumesRejectStaleSourceRevision
+[       OK ] CutIntegrationInfrastructure.GeneratedCutVolumesRejectStaleSourceRevision (0 ms)
+[ RUN      ] CutIntegrationInfrastructure.GeneratedInterfaceRulesRejectStaleSourceRevision
+[       OK ] CutIntegrationInfrastructure.GeneratedInterfaceRulesRejectStaleSourceRevision (0 ms)
+[ RUN      ] CutIntegrationInfrastructure.FullCellGeneratedRulesCarryDiagnosticMetadata
+[       OK ] CutIntegrationInfrastructure.FullCellGeneratedRulesCarryDiagnosticMetadata (0 ms)
+[ RUN      ] CutIntegrationInfrastructure.IndexesGeneratedLevelSetVolumeRulesByMarkerAndSide
+[       OK ] CutIntegrationInfrastructure.IndexesGeneratedLevelSetVolumeRulesByMarkerAndSide (0 ms)
+[ RUN      ] CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesConstantsAcrossPaths
+[       OK ] CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesConstantsAcrossPaths (0 ms)
+[ RUN      ] CutIntegrationInfrastructure.FixedGeometryDiagnosticsCountHighOrderRules
+[       OK ] CutIntegrationInfrastructure.FixedGeometryDiagnosticsCountHighOrderRules (0 ms)
+[ RUN      ] CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesLinearFieldsAcrossPaths
+[       OK ] CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesLinearFieldsAcrossPaths (0 ms)
+[ RUN      ] CutIntegrationInfrastructure.AssemblyContextCarriesQuadratureMetadataAndHooks
+[       OK ] CutIntegrationInfrastructure.AssemblyContextCarriesQuadratureMetadataAndHooks (0 ms)
+[ RUN      ] CutIntegrationInfrastructure.InvalidationSeparatesGeometryAndFELayoutChanges
+[       OK ] CutIntegrationInfrastructure.InvalidationSeparatesGeometryAndFELayoutChanges (0 ms)
+[ RUN      ] CutIntegrationInfrastructure.ImportsClosedCutTopologyIntoAllAssemblyPathBindings
+[       OK ] CutIntegrationInfrastructure.ImportsClosedCutTopologyIntoAllAssemblyPathBindings (0 ms)
+[ RUN      ] CutIntegrationInfrastructure.ImportsCurvedIsoparametricTopologyQuadrature
+[       OK ] CutIntegrationInfrastructure.ImportsCurvedIsoparametricTopologyQuadrature (0 ms)
+[ RUN      ] CutIntegrationInfrastructure.QuadraticCurvedPlaneCutDataIsIdenticalAcrossAllExecutionPaths
+[       OK ] CutIntegrationInfrastructure.QuadraticCurvedPlaneCutDataIsIdenticalAcrossAllExecutionPaths (114 ms)
+[ RUN      ] CutIntegrationInfrastructure.ImportsLinearizedCutQuadratureForEveryAdvertisedFamily
+[       OK ] CutIntegrationInfrastructure.ImportsLinearizedCutQuadratureForEveryAdvertisedFamily (3 ms)
+[ RUN      ] CutIntegrationInfrastructure.LinearizedPlaneCutDataIsIdenticalAcrossAllExecutionPaths
+[       OK ] CutIntegrationInfrastructure.LinearizedPlaneCutDataIsIdenticalAcrossAllExecutionPaths (2 ms)
+[ RUN      ] CutIntegrationInfrastructure.LinearizedCutDataIsIdenticalAcrossAllExecutionPaths
+[       OK ] CutIntegrationInfrastructure.LinearizedCutDataIsIdenticalAcrossAllExecutionPaths (6 ms)
+[ RUN      ] CutIntegrationInfrastructure.ProductionCutScalarOperatorsMatchAnalyticHalfCubePlaneCut
+[       OK ] CutIntegrationInfrastructure.ProductionCutScalarOperatorsMatchAnalyticHalfCubePlaneCut (0 ms)
+[----------] 19 tests from CutIntegrationInfrastructure (127 ms total)
+
+[----------] 2 tests from FormsInstaller
+[ RUN      ] FormsInstaller.FormsInstaller_RevisionBoundFullSideCutVolumeUsesSnapshotRulePoints
+[09:24:57.035] [INFO] FESystem: sparsity setup diagnostic=constraint_sparsity_setup operator='op' master_bearing_lines=0 serial_base_nnz=16 serial_active_nnz=16 distributed_indexing=none distributed_base_diag_nnz=0 distributed_base_offdiag_nnz=0 distributed_active_diag_nnz=0 distributed_active_offdiag_nnz=0
+[09:24:57.036] [INFO] LLVM JIT: OrcJIT initialized (LLVM 14.0.0, triple=x86_64-pc-linux-gnu, opt=2, vectorize=false, fp_regs=16, simd=128b, target_aware=false, max_fused_terms=0)
+[09:24:57.036] [INFO] assembleOperator: cut-volume active-domain diagnostics diagnostic=cut_volume_assembly marker=82 side=Negative active_wet_volume=0.166667 cut_cell_active_wet_volume=0 full_cell_active_wet_volume=0.166667 rules=1 cut_cell_rules=0 full_cell_rules=1 quadrature_points=1 null_rules=0 zero_quadrature_rules=0 nonfinite_measure_rules=0 negative_measure_rules=0 nonfinite_volume_fraction_rules=0 min_rule_measure=0.166667 max_rule_measure=0.166667 min_volume_fraction=1 max_volume_fraction=1 min_exact_order=0 max_exact_order=0
+[       OK ] FormsInstaller.FormsInstaller_RevisionBoundFullSideCutVolumeUsesSnapshotRulePoints (2 ms)
+[ RUN      ] FormsInstaller.FormsInstaller_UnflaggedFullMeasureCutVolumeUsesRulePoints
+[09:24:57.036] [INFO] FESystem: sparsity setup diagnostic=constraint_sparsity_setup operator='op' master_bearing_lines=0 serial_base_nnz=16 serial_active_nnz=16 distributed_indexing=none distributed_base_diag_nnz=0 distributed_base_offdiag_nnz=0 distributed_active_diag_nnz=0 distributed_active_offdiag_nnz=0
+[09:24:57.036] [INFO] assembleOperator: cut-volume active-domain diagnostics diagnostic=cut_volume_assembly marker=81 side=Negative active_wet_volume=0.166667 cut_cell_active_wet_volume=0.166667 full_cell_active_wet_volume=0 rules=1 cut_cell_rules=1 full_cell_rules=0 quadrature_points=1 null_rules=0 zero_quadrature_rules=0 nonfinite_measure_rules=0 negative_measure_rules=0 nonfinite_volume_fraction_rules=0 min_rule_measure=0.166667 max_rule_measure=0.166667 min_volume_fraction=1 max_volume_fraction=1 min_exact_order=0 max_exact_order=0
+[       OK ] FormsInstaller.FormsInstaller_UnflaggedFullMeasureCutVolumeUsesRulePoints (0 ms)
+[----------] 2 tests from FormsInstaller (2 ms total)
+
+[----------] Global test environment tear-down
+[==========] 21 tests from 2 test suites ran. (130 ms total)
+[  PASSED  ] 21 tests.

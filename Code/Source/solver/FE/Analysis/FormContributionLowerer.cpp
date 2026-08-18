@@ -60,7 +60,8 @@ namespace {
 
         forms::FormExpr filtered;
         for (const auto& term : ir.terms()) {
-            if (term.domain == forms::IntegralDomain::Boundary) {
+            if (term.domain == forms::IntegralDomain::Boundary ||
+                term.exterior_boundary_measure.has_value()) {
                 continue;
             }
 
@@ -74,6 +75,10 @@ namespace {
                     break;
                 case forms::IntegralDomain::InterfaceFace:
                     wrapped = term.integrand.dI(term.interface_marker);
+                    break;
+                case forms::IntegralDomain::CutVolume:
+                    wrapped = term.integrand.dCutVolume(
+                        term.interface_marker, term.cut_volume_side);
                     break;
                 case forms::IntegralDomain::Boundary:
                     break;
@@ -215,6 +220,19 @@ void appendDomainScope(ContributionDescriptor& d,
 void attachDomainScopes(ContributionDescriptor& d,
                         const FormExprScanResult& scan)
 {
+    for (const auto& measure :
+         scan.exterior_boundary_measures) {
+        appendDomainScope(
+            d,
+            DomainKind::Boundary,
+            measure.physicalBoundaryMarker(),
+            measure.isGeneratedActiveSubset()
+                ? "generated-active-boundary:" +
+                      std::to_string(
+                          measure
+                              .generatedActiveBoundaryMarker())
+                : "full-physical-boundary");
+    }
     if (scan.has_cell_integral) {
         appendDomainScope(d, DomainKind::Cell, -1, "cell");
     }
@@ -253,6 +271,22 @@ void attachDomainScopes(ContributionDescriptor& d,
         d.domain = DomainKind::Boundary;
         d.boundary_marker =
             scan.boundary_markers.empty() ? -1 : scan.boundary_markers.front();
+        const auto generated =
+            std::find_if(
+                scan.exterior_boundary_measures.begin(),
+                scan.exterior_boundary_measures.end(),
+                [&](const auto& measure) {
+                    return measure.isGeneratedActiveSubset() &&
+                           (d.boundary_marker < 0 ||
+                            measure.physicalBoundaryMarker() ==
+                                d.boundary_marker);
+                });
+        if (generated !=
+            scan.exterior_boundary_measures.end()) {
+            d.interface_marker =
+                generated
+                    ->generatedActiveBoundaryMarker();
+        }
         return;
     }
     if (scan.has_interior_face_integral) {
@@ -276,9 +310,13 @@ lowerFormulation(const FormulationRecord& rec) {
     // including test-side structure (self_adjoint_pattern, etc.)
     // This provides accurate trait flags for all fields.
     forms::FormExpr residual_expr(std::const_pointer_cast<forms::FormExprNode>(rec.residual_expr));
+    const auto residual_scan =
+        residual_expr.isValid() && residual_expr.node()
+            ? scanFormExpr(*residual_expr.node())
+            : FormExprScanResult{};
     const bool residual_has_boundary_terms =
-        residual_expr.isValid() && residual_expr.node() &&
-        scanFormExpr(*residual_expr.node()).has_boundary_integral;
+        residual_scan.has_boundary_integral ||
+        !residual_scan.exterior_boundary_measures.empty();
     std::map<FieldId, FieldOperatorSummary> field_summaries;
     if (residual_expr.isValid()) {
         auto full_summary = fsa.analyze(residual_expr, rec.active_fields);
@@ -371,7 +409,9 @@ lowerFormulation(const FormulationRecord& rec) {
 
             // Scan for boundary/interface markers on the block node
             auto scan = scanFormExpr(*block_node);
-            const bool block_has_boundary_terms = scan.has_boundary_integral;
+            const bool block_has_boundary_terms =
+                scan.has_boundary_integral ||
+                !scan.exterior_boundary_measures.empty();
 
             for (FieldId trial_fid : trial_fields_to_analyze) {
 

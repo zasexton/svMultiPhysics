@@ -5,7 +5,7 @@
   "campaign": "Q0",
   "audit_contract": "Documentation/free_surface_boundary_unfitted_audit_20260720.md",
   "architecture_record": "Documentation/free_surface_q0_harness_provenance_architecture.md",
-  "freeze_scope": "Executable control-layer prerequisite evidence only. This matrix freezes the committed WP-0 configuration-containment tests, including negative cases, their dedicated CTest registration and tracked push/pull-request CI route through the Ubuntu and macOS actions, qualification-runner result gates, campaign artifact-schema rejection tests, and exact source definitions for the committed WP-0, WP-1, WP-2, and WP-10 runners plus the WP-10 one-phase scope guard. Hosted same-revision CI execution is not archived by this source-only registration. This matrix does not supply the missing accepted-step Q0 telemetry campaign or authorize Q0 closure.",
+  "freeze_scope": "Executable control-layer prerequisite evidence only. This matrix freezes the committed WP-0 configuration-containment tests, including negative cases, their dedicated CTest registration and tracked push/pull-request CI route through the Ubuntu and macOS actions, qualification-runner result gates, campaign artifact-schema rejection tests, and exact source definitions for the committed WP-0, WP-1, resource-bounded WP-2, and WP-10 runners plus the WP-10 one-phase scope guard. Hosted same-revision CI execution is not archived by this source-only registration. This matrix does not supply the missing accepted-step Q0 telemetry campaign or authorize Q0 closure.",
   "source_definitions": [
     {
       "id": "q0_audit_contract",
@@ -123,24 +123,28 @@
       "id": "wp2_runner",
       "role": "strict_runner",
       "path": "tests/cases/fluid/run_free_surface_wp2_geometry_qualification.py",
-      "sha256": "5aea557b1bd3123116bbf034f39c0dd5f914f66286df65dd2250ec9bd906561f",
+      "sha256": "4b2e8a97ff080450c560e921e58a9dd92474ff561faabbcb10bacd6264f542d9",
       "required_fragments": [
         "run_clean_builds",
         "--timestepping-binary",
         "QUALIFICATION_BINARY_KEYS",
         "build_preflight.json",
-        "final_provenance.json"
+        "final_provenance.json",
+        "minimum_host_available_mib",
+        "minimum_filesystem_free_mib",
+        "binary_link_provenance"
       ]
     },
     {
       "id": "wp10_matrix",
       "role": "nonclosure_pattern_definition",
       "path": "tests/cases/fluid/free_surface_wp10_capability_boundary_matrix.json",
-      "sha256": "b8e81b1ae59adb94e837400f3841e8722b00e7bc63e41cdbbe534ed1404d456d",
+      "sha256": "5cc4750574b6527122419c3306d3ce884d590234f316334cd568c33215e36512",
       "required_fragments": [
         "\"schema_version\": 2",
-        "\"matrix_id\": \"free_surface_wp10_capability_boundary_v2\"",
+        "\"matrix_id\": \"free_surface_wp10_capability_boundary_v3\"",
         "\"status\": \"FROZEN_CAPABILITY_BOUNDARY\"",
+        "\"artifact_schema_version\": 3",
         "\"physical_model_name\": \"one_phase_liquid_prescribed_exterior_pressure\"",
         "\"source_checks\"",
         "\"xml_input_scope_containment\"",
@@ -152,9 +156,9 @@
       "id": "wp10_runner",
       "role": "nonclosure_pattern_runner",
       "path": "tests/cases/fluid/run_free_surface_wp10_capability_boundary_qualification.py",
-      "sha256": "228f4efee84b7f942ee4d3b9f3442df2274552aace40def4cff9c340596b0530",
+      "sha256": "d47bf789d6a9418eecfde0696bd0c8e92b540f93a6eb1e31a77713831a363656",
       "required_fragments": [
-        "free_surface_wp10_capability_boundary_v2",
+        "free_surface_wp10_capability_boundary_v3",
         "one_phase_liquid_prescribed_exterior_pressure",
         "production_input_scope_containment",
         "xml_input_scope_containment",
@@ -236,7 +240,7 @@
       "id": "wp10_runner_tests",
       "role": "python_test_definition",
       "path": "tests/test_free_surface_wp10_capability_boundary_runner.py",
-      "sha256": "13619c33b436ca3cb678caf93f159736c3829d57da94776994010b4046d70926",
+      "sha256": "25c121b73760599aa7090e2df1bfe14f90f91d8c0442a2dbfe5fa94c5dde6563",
       "required_fragments": [
         "test_cli_rejects_closure_before_binary_or_output_validation",
         "test_source_boundary_rejects_repository_escape",

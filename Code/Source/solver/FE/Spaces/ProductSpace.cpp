@@ -70,6 +70,36 @@ FunctionSpace::Value ProductSpace::evaluate(const Value& xi,
     return result;
 }
 
+FunctionSpace::Jacobian ProductSpace::evaluate_jacobian(
+    const Value& xi,
+    const std::vector<Real>& coefficients) const {
+    const std::size_t per_comp = scalar_dofs_per_component();
+    FE_CHECK_ARG(
+        coefficients.size() ==
+            per_comp * static_cast<std::size_t>(components_),
+        "ProductSpace::evaluate_jacobian: coefficient size mismatch");
+
+    Jacobian result{};
+    std::vector<Real> component_coefficients(per_comp, Real(0));
+    for (int component = 0; component < components_; ++component) {
+        const std::size_t offset =
+            static_cast<std::size_t>(component) * per_comp;
+        for (std::size_t local = 0; local < per_comp; ++local) {
+            component_coefficients[local] =
+                coefficients[offset + local];
+        }
+        const auto gradient =
+            base_->evaluate_gradient(xi, component_coefficients);
+        for (std::size_t direction = 0u; direction < 3u;
+             ++direction) {
+            result(
+                static_cast<std::size_t>(component), direction) =
+                gradient[direction];
+        }
+    }
+    return result;
+}
+
 } // namespace spaces
 } // namespace FE
 } // namespace svmp

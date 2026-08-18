@@ -53,6 +53,19 @@ struct ValidationResult {
 };
 
 /**
+ * @brief Return whether structural shape inference proves a well-typed scalar.
+ *
+ * This query does not execute coefficient callbacks and does not assert JIT
+ * compatibility or admissible data dependencies. Invalid, ill-typed,
+ * unknown, and non-scalar expressions return false. When @p ambient_dimension
+ * is nonzero, geometry and callback terminals are checked in that dimension;
+ * otherwise a consistent dimension is inferred from field signatures and
+ * defaults to three when no such signature exists.
+ */
+[[nodiscard]] bool hasScalarValueShape(const FormExpr& expression,
+                                       int ambient_dimension = 0);
+
+/**
  * @brief Validate a single integrand expression (no measures)
  */
 ValidationResult canCompile(const FormExpr& integrand,
@@ -70,4 +83,3 @@ ValidationResult canCompile(const FormIR& ir,
 } // namespace svmp
 
 #endif // SVMP_FE_FORMS_JIT_VALIDATION_H
-

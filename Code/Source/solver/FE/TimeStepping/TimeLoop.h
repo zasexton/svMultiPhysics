@@ -15,9 +15,11 @@
 #include "TimeStepping/TimeHistory.h"
 #include "TimeStepping/StepController.h"
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -45,6 +47,72 @@ enum class CollocationSolveStrategy : std::uint8_t {
     // Nonlinear block Gauss–Seidel over stages (avoids the block Jacobian).
     // Supported for temporalOrder()==1 and temporalOrder()==2 collocation.
     StageGaussSeidel
+};
+
+/**
+ * @brief Generalized-alpha parameters attached to an operator-stage observation.
+ *
+ * The state is evaluated at @f$t_{n+\alpha_f}@f$ and its first time
+ * derivative at @f$t_{n+\alpha_m}@f$.  The metadata is absent for schemes
+ * whose state and rate are both evaluated at the endpoint.
+ */
+struct GeneralizedAlphaStageMetadata {
+    double alpha_f{1.0};
+    double alpha_m{1.0};
+    double gamma{1.0};
+};
+
+/** Rank-local mesh identity captured with a converged operator stage. */
+struct CandidateStageMeshRevision {
+    std::uint64_t geometry_revision{0};
+    std::uint64_t topology_revision{0};
+    std::uint64_t ownership_revision{0};
+    std::uint64_t numbering_revision{0};
+    std::uint64_t field_layout_revision{0};
+    std::uint64_t label_revision{0};
+    std::uint64_t active_configuration_epoch{0};
+    std::uint64_t coordinate_configuration_key{0};
+
+    friend bool operator==(const CandidateStageMeshRevision&,
+                           const CandidateStageMeshRevision&) = default;
+};
+
+/**
+ * @brief Immutable snapshot of a converged time-integration operator stage.
+ *
+ * The state and rate vectors are copied before any endpoint reconstruction,
+ * generated geometry replacement, or history rotation.  The rate vector is
+ * obtained by applying the exact first-derivative stencil used by the
+ * converged operator; it is physically meaningful only for fields listed in
+ * `time_derivative_fields`.  Algebraic-field entries are deliberately not
+ * advertised as rates.  The const backend-vector pointers remain valid only
+ * for the duration of the callback; consumers may read them through a const
+ * local span or pass them to a `SystemStateView`-based evaluator that creates
+ * the backend's global-indexed read view.
+ */
+struct CandidateStageObservation {
+    SchemeKind scheme{SchemeKind::BackwardEuler};
+    int temporal_order{0};
+    int step_index{0};
+    int attempt_index{0};
+
+    double step_start_time{0.0};
+    double step_end_time{0.0};
+    double state_time{0.0};
+    double rate_time{0.0};
+    double dt{0.0};
+
+    std::optional<GeneralizedAlphaStageMetadata> generalized_alpha{};
+
+    std::vector<FieldId> time_derivative_fields{};
+    /**
+     * Rank-local mesh revisions captured before `on_nonlinear_done` runs.
+     * Consumers that combine the copied state/rate with live mesh geometry
+     * must require this value and prove that the live revisions still match.
+     */
+    std::optional<CandidateStageMeshRevision> mesh_revision{};
+    const backends::GenericVector* state_vector{nullptr};
+    const backends::GenericVector* rate_vector{nullptr};
 };
 
 struct TimeLoopOptions {
@@ -97,9 +165,26 @@ struct TimeLoopOptions {
 
     // Optional adaptive step-size controller. If null, TimeLoop uses a fixed dt
     // (with optional last-step adjustment) and throws on nonlinear failure.
+    // In distributed runs every decision and failure returned by the controller
+    // must be communicator-identical/collective; TimeLoop cannot reconcile
+    // rank-divergent retry, rejection, or acceptance decisions.
     std::shared_ptr<StepController> step_controller{};
 };
 
+/**
+ * @brief Time-loop callbacks and their distributed execution contract.
+ *
+ * Every rank in the active FE communicator must install the same callback
+ * set. Callbacks that execute communicator operations must enter them in the
+ * same order, and callbacks that affect acceptance must return the same
+ * decision or fail collectively. In particular,
+ * `on_step_candidate_discarded` must not throw, while
+ * `on_before_step_accept` and `on_step_commit_ready` must coordinate any
+ * failure before returning or throwing. TimeLoop explicitly coordinates
+ * rank-local `on_candidate_stage` and `on_step_candidate_ready` exceptions
+ * and decisions, but it cannot recover peers already blocked inside an
+ * asymmetric user-callback collective.
+ */
 struct TimeLoopCallbacks {
     std::function<void(const TimeHistory&)> on_step_start{};
     /**
@@ -127,7 +212,8 @@ struct TimeLoopCallbacks {
      */
     std::function<bool(TimeHistory&, const NewtonReport&)> on_before_step_accept{};
     /**
-     * @brief Roll back state staged by @ref on_before_step_accept.
+     * @brief Roll back state staged by @ref on_before_step_accept or
+     * @ref on_candidate_stage.
      *
      * The hook runs before accepted-state regeneration whenever a prepared
      * candidate is discarded by an adaptive decision or endpoint failure.
@@ -135,7 +221,8 @@ struct TimeLoopCallbacks {
      */
     std::function<void(TimeHistory&)> on_step_candidate_discarded{};
     /**
-     * @brief Commit state staged by @ref on_before_step_accept.
+     * @brief Commit state staged by @ref on_before_step_accept or
+     * @ref on_candidate_stage.
      *
      * This hook runs after every retry decision and endpoint finalization,
      * immediately before the first irreversible system acceptance operation.
@@ -145,6 +232,43 @@ struct TimeLoopCallbacks {
 
     std::function<void(const TimeHistory&, StepRejectReason, const NewtonReport&)> on_step_rejected{};
     std::function<void(double old_dt, double new_dt, int step_index, int attempt_index)> on_dt_updated{};
+    /**
+     * @brief Observe a converged operator stage before endpoint finalization.
+     *
+     * This hook is currently supported for temporal-order-one systems under
+     * Backward Euler, the explicit `SchemeKind::DG0` route, and first-order
+     * generalized-alpha. It runs before @ref on_before_step_accept. The
+     * observer must only stage rollback-capable data: clear it from @ref
+     * on_step_candidate_discarded, validate it without publishing from @ref
+     * on_step_commit_ready, and publish accepted semantic history only from
+     * @ref on_step_accepted after system and history acceptance complete.
+     * Installing this hook automatically arms the rollback-capable candidate
+     * transaction boundaries, even when @ref on_before_step_accept is unset.
+     * Rank-local exceptions from this observer are coordinated by TimeLoop
+     * before rollback; the discard and commit callbacks remain subject to the
+     * distributed callback contract above.
+     */
+    std::function<void(const CandidateStageObservation&)>
+        on_candidate_stage{};
+    /**
+     * @brief Final reversible acceptance gate for a projected endpoint.
+     *
+     * The hook runs after endpoint reconstruction, constraint projection, and
+     * generated-state synchronization, but before auxiliary accepted-event
+     * finalization, before the adaptive controller records acceptance, before
+     * @ref on_step_commit_ready, and before any system/history commit. Return
+     * no value to accept or a typed reason to reject. TimeLoop coordinates
+     * callback presence, rank-local exceptions, and the returned decision on
+     * the active FE communicator. A rejection follows the ordinary bounded
+     * retry path; fixed-step runs restore the candidate and then fail.
+     *
+     * The callback may stage only rollback-capable state. Such state must be
+     * cleared by @ref on_step_candidate_discarded and may be published only
+     * after the gate accepts through the existing commit/accepted hooks.
+     */
+    std::function<std::optional<StepRejectReason>(
+        TimeHistory&, const NewtonReport&)>
+        on_step_candidate_ready{};
 };
 
 struct TimeLoopReport {

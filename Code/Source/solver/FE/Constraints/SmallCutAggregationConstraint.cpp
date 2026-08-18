@@ -19,6 +19,7 @@
 #include "Geometry/GeometryFrameUtils.h"
 #include "Geometry/MappingFactory.h"
 #include "Geometry/CutQuadratureMapping.h"
+#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Systems/FESystem.h"
 
 #include <algorithm>
@@ -34,12 +35,15 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <span>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -72,6 +76,18 @@ struct SmallCutAggregationPendingProlongation {
 };
 
 } // namespace detail
+
+static_assert(std::is_nothrow_move_assignable_v<
+              std::optional<SmallCutAggregationRefreshReport>>);
+static_assert(std::is_nothrow_move_constructible_v<
+              std::optional<SmallCutAggregationRefreshReport>>);
+static_assert(std::is_nothrow_move_assignable_v<std::shared_ptr<
+              const detail::SmallCutAggregationPendingProlongation>>);
+static_assert(noexcept(std::declval<std::vector<GlobalIndex>&>().swap(
+    std::declval<std::vector<GlobalIndex>&>())));
+static_assert(noexcept(
+    std::declval<AffineConstraints&>() =
+        std::declval<AffineConstraints&&>()));
 
 namespace {
 
@@ -2290,6 +2306,17 @@ inline void aggregationDigestMix(std::uint64_t& digest,
     }
 }
 
+inline void aggregationDigestMixString(std::uint64_t& digest,
+                                       std::string_view value) noexcept
+{
+    constexpr std::uint64_t prime = 1099511628211ull;
+    aggregationDigestMix(digest, static_cast<std::uint64_t>(value.size()));
+    for (const unsigned char byte : value) {
+        digest ^= byte;
+        digest *= prime;
+    }
+}
+
 [[nodiscard]] std::uint64_t aggregationDigestReal(double value)
 {
     if (!std::isfinite(value)) {
@@ -2299,6 +2326,550 @@ inline void aggregationDigestMix(std::uint64_t& digest,
     }
     const double canonical = value == 0.0 ? 0.0 : value;
     return std::bit_cast<std::uint64_t>(canonical);
+}
+
+[[nodiscard]] std::uint64_t canonicalFeatureClassFingerprint(
+    std::span<const SmallCutAggregationActiveFeatureReport> features) noexcept
+{
+    std::uint64_t digest = 14695981039346656037ull;
+    aggregationDigestMix(digest, 0x4147464541545552ull);
+    aggregationDigestMix(digest,
+                         static_cast<std::uint64_t>(features.size()));
+    for (const auto& feature : features) {
+        aggregationDigestMix(
+            digest, static_cast<std::uint64_t>(feature.stable_feature_id));
+        aggregationDigestMix(digest, feature.canonical_cell_gid_digest);
+        aggregationDigestMix(
+            digest, feature.canonical_full_active_cell_gid_digest);
+        aggregationDigestMix(digest, feature.canonical_cut_cell_gid_digest);
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(feature.canonical_cell_count));
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(
+                feature.canonical_full_active_cell_count));
+        aggregationDigestMix(
+            digest,
+            static_cast<std::uint64_t>(feature.canonical_cut_cell_count));
+        aggregationDigestMix(
+            digest, static_cast<std::uint64_t>(feature.disposition));
+    }
+    return digest;
+}
+
+[[nodiscard]] std::uint64_t canonicalSlaveSetFingerprint(
+    std::span<const GlobalIndex> slaves) noexcept
+{
+    std::uint64_t digest = 14695981039346656037ull;
+    aggregationDigestMix(digest, 0x414747534c415645ull);
+    aggregationDigestMix(digest, static_cast<std::uint64_t>(slaves.size()));
+    for (const auto slave : slaves) {
+        aggregationDigestMix(digest, static_cast<std::uint64_t>(slave));
+    }
+    return digest;
+}
+
+void finalizeGeometryIdentityFingerprint(
+    SmallCutAggregationCanonicalGeometryIdentity& identity)
+{
+    std::uint64_t digest = 14695981039346656037ull;
+    aggregationDigestMix(digest, 0x41474747454f4d45ull);
+    aggregationDigestMix(digest, static_cast<std::uint64_t>(identity.kind));
+    aggregationDigestMix(digest, identity.available ? 1u : 0u);
+    aggregationDigestMixString(digest, identity.source_id);
+    aggregationDigestMixString(digest, identity.domain_id);
+    aggregationDigestMix(
+        digest, static_cast<std::uint64_t>(identity.interface_marker));
+    aggregationDigestMix(
+        digest, aggregationDigestReal(static_cast<double>(identity.isovalue)));
+    aggregationDigestMix(digest, identity.source_layout_revision);
+    aggregationDigestMix(digest, identity.source_value_revision);
+    aggregationDigestMix(digest, identity.quadrature_policy_key);
+    aggregationDigestMix(digest, identity.snapshot_revision_key);
+    aggregationDigestMix(
+        digest, identity.distributed_mesh_geometry_revision);
+    aggregationDigestMix(
+        digest, identity.distributed_mesh_topology_revision);
+    aggregationDigestMix(digest, identity.distributed_ownership_revision);
+    aggregationDigestMix(digest, identity.distributed_numbering_revision);
+    identity.canonical_fingerprint = digest;
+}
+
+struct SmallCutAggregationPreparedProvenance {
+    SmallCutAggregationCanonicalGeometryIdentity geometry_identity{};
+    SmallCutAggregationLocalPublicationLineage local_lineage{};
+};
+
+[[nodiscard]] SmallCutAggregationPreparedProvenance
+prepareRefreshProvenance(
+    const systems::FESystem& system,
+    const assembly::CutIntegrationContext& cut_context,
+    int interface_marker,
+    std::uint64_t successful_publication_ordinal,
+    const AffineConstraints& staged_constraints)
+{
+    SmallCutAggregationPreparedProvenance result;
+    auto& identity = result.geometry_identity;
+    auto& lineage = result.local_lineage;
+    lineage.successful_publication_ordinal =
+        successful_publication_ordinal;
+    lineage.cut_context_content_revision = cut_context.contentRevision();
+
+    const auto& mesh = system.meshAccess();
+    lineage.mesh_revision_tracking_available =
+        mesh.revisionTrackingAvailable();
+    if (lineage.mesh_revision_tracking_available) {
+        lineage.mesh_geometry_revision = mesh.geometryRevision();
+        lineage.mesh_topology_revision = mesh.topologyRevision();
+        lineage.mesh_ownership_revision = mesh.ownershipRevision();
+        lineage.mesh_numbering_revision = mesh.numberingRevision();
+        lineage.mesh_field_layout_revision = mesh.fieldLayoutRevision();
+        lineage.mesh_label_revision = mesh.labelRevision();
+        lineage.mesh_active_configuration_epoch =
+            mesh.activeConfigurationEpoch();
+    }
+    lineage.fe_space_revision = system.spaceRevision();
+    lineage.fe_dof_layout_revision = system.dofLayoutRevision();
+    lineage.fe_constraint_layout_revision =
+        system.constraintLayoutRevision();
+    lineage.fe_block_layout_revision = system.blockLayoutRevision();
+    lineage.affine_constraint_build_revision =
+        staged_constraints.constraintLayoutRevision();
+
+    const auto* publication =
+        cut_context.findGeneratedLevelSetInterfacePublicationProvenance(
+            interface_marker);
+    if (publication != nullptr) {
+        lineage.has_generated_publication_request = true;
+        lineage.generated_request_mesh_geometry_revision =
+            publication->request.mesh_geometry_revision;
+        lineage.generated_request_mesh_topology_revision =
+            publication->request.mesh_topology_revision;
+        lineage.generated_request_ownership_revision =
+            publication->request.ownership_revision;
+    }
+
+    if (cut_context.hasFreeSurfaceGeometrySnapshotForMarker(
+            interface_marker)) {
+        const auto bound_revision =
+            cut_context.freeSurfaceGeometrySnapshotRevisionForMarker(
+                interface_marker);
+        const interfaces::FreeSurfaceGeometrySnapshot* selected = nullptr;
+        for (const auto& snapshot :
+             cut_context.freeSurfaceGeometrySnapshots()) {
+            if (snapshot != nullptr &&
+                snapshot->revision().snapshot_revision_key ==
+                    bound_revision) {
+                if (selected != nullptr) {
+                    throw std::logic_error(
+                        "SmallCutAggregationConstraint: authoritative "
+                        "free-surface snapshot identity is ambiguous");
+                }
+                selected = snapshot.get();
+            }
+        }
+        if (selected == nullptr || !selected->revision().complete() ||
+            selected->revision().interface_marker != interface_marker) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: authoritative free-surface "
+                "snapshot identity is unavailable or incomplete");
+        }
+        const auto& revision = selected->revision();
+        identity.kind = SmallCutAggregationGeometryIdentityKind::
+            AuthoritativeFreeSurfaceSnapshot;
+        identity.available = true;
+        identity.source_id = revision.source_id;
+        identity.domain_id = revision.domain_id;
+        identity.interface_marker = revision.interface_marker;
+        identity.isovalue = revision.isovalue;
+        identity.source_layout_revision =
+            revision.source_layout_revision;
+        identity.source_value_revision = revision.source_value_revision;
+        identity.quadrature_policy_key = revision.quadrature_policy_key;
+        identity.snapshot_revision_key = revision.snapshot_revision_key;
+        identity.distributed_mesh_geometry_revision =
+            revision.mesh_geometry_revision;
+        identity.distributed_mesh_topology_revision =
+            revision.mesh_topology_revision;
+        identity.distributed_ownership_revision =
+            revision.ownership_revision;
+        identity.distributed_numbering_revision =
+            revision.numbering_revision;
+        const auto& local_mesh = selected->localMeshRevision();
+        lineage.has_snapshot_local_mesh_revision = true;
+        lineage.snapshot_local_mesh_geometry_revision =
+            local_mesh.mesh_geometry_revision;
+        lineage.snapshot_local_mesh_topology_revision =
+            local_mesh.mesh_topology_revision;
+        lineage.snapshot_local_ownership_revision =
+            local_mesh.ownership_revision;
+        lineage.snapshot_local_numbering_revision =
+            local_mesh.numbering_revision;
+    } else if (publication != nullptr) {
+        const auto& request = publication->request;
+        const auto source_id = request.source.identifier();
+        const auto domain_id =
+            publication->publication_domain_id.empty()
+                ? (request.generated_domain_id.empty()
+                       ? source_id
+                       : request.generated_domain_id)
+                : publication->publication_domain_id;
+        if (publication->generated_interface_marker == interface_marker &&
+            request.interface_marker == interface_marker &&
+            request.source.valid() && !source_id.empty() &&
+            !domain_id.empty() && std::isfinite(request.isovalue) &&
+            request.source.value_revision != 0u) {
+            identity.kind = SmallCutAggregationGeometryIdentityKind::
+                GeneratedPublicationSource;
+            identity.available = true;
+            identity.source_id = source_id;
+            identity.domain_id = domain_id;
+            identity.interface_marker = request.interface_marker;
+            identity.isovalue = request.isovalue;
+            identity.source_layout_revision =
+                request.source.layout_revision;
+            identity.source_value_revision = request.source.value_revision;
+            identity.quadrature_policy_key =
+                request.quadrature_policy_key;
+        }
+    }
+    finalizeGeometryIdentityFingerprint(identity);
+    return result;
+}
+
+void coordinateRefreshPublicationConsensus(
+    const systems::FESystem& system,
+    const std::exception_ptr& local_exception,
+    std::uint64_t canonical_feature_class_fingerprint,
+    std::uint64_t canonical_slave_set_fingerprint,
+    std::uint64_t canonical_geometry_fingerprint,
+    std::uint64_t successful_publication_ordinal)
+{
+    bool any_failed = local_exception != nullptr;
+    bool fingerprints_differ = false;
+#if FE_HAS_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        const auto comm = system.dofHandler().mpiComm();
+        int world_size = 1;
+        MPI_Comm_size(comm, &world_size);
+        if (world_size > 1) {
+            const std::array<std::uint64_t, 9> local{{
+                local_exception == nullptr ? 1u : 0u,
+                canonical_feature_class_fingerprint,
+                ~canonical_feature_class_fingerprint,
+                canonical_slave_set_fingerprint,
+                ~canonical_slave_set_fingerprint,
+                canonical_geometry_fingerprint,
+                ~canonical_geometry_fingerprint,
+                successful_publication_ordinal,
+                ~successful_publication_ordinal,
+            }};
+            std::array<std::uint64_t, 9> minimum{};
+            MPI_Allreduce(local.data(),
+                          minimum.data(),
+                          static_cast<int>(minimum.size()),
+                          MPI_UINT64_T,
+                          MPI_MIN,
+                          comm);
+            any_failed = minimum[0] == 0u;
+            fingerprints_differ =
+                !any_failed &&
+                (minimum[1] != ~minimum[2] ||
+                 minimum[3] != ~minimum[4] ||
+                 minimum[5] != ~minimum[6] ||
+                 minimum[7] != ~minimum[8]);
+        }
+    }
+#endif
+    if (any_failed) {
+        if (local_exception != nullptr) {
+            std::rethrow_exception(local_exception);
+        }
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: diagnostic="
+            "distributed_local_phase_failure phase='post_resolver_refresh_"
+            "publication' another communicator rank rejected its local "
+            "aggregation publication");
+    }
+    if (fingerprints_differ) {
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: canonical feature-class, slave, "
+            "geometry, or publication-sequence fingerprint differs across "
+            "communicator ranks");
+    }
+}
+
+[[nodiscard]] SmallCutAggregationTopologyTransitionReport
+buildCanonicalTopologyTransitionReport(
+    const SmallCutAggregationRefreshReport& previous,
+    const SmallCutAggregationRefreshReport& current,
+    std::span<const GlobalIndex> previous_canonical_slaves,
+    std::span<const GlobalIndex> current_canonical_slaves)
+{
+    if (previous.field != current.field ||
+        previous.active_side != current.active_side ||
+        previous.interface_marker != current.interface_marker) {
+        throw std::logic_error(
+            "SmallCutAggregationConstraint: cannot compare refresh reports "
+            "from different field/marker/side constraints");
+    }
+    if (previous.local_lineage.successful_publication_ordinal == 0u ||
+        previous.local_lineage.successful_publication_ordinal ==
+            std::numeric_limits<std::uint64_t>::max() ||
+        current.local_lineage.successful_publication_ordinal == 0u ||
+        current.local_lineage.successful_publication_ordinal !=
+            previous.local_lineage.successful_publication_ordinal + 1u) {
+        throw std::logic_error(
+            "SmallCutAggregationConstraint: topology transition requires "
+            "adjacent successful publication ordinals");
+    }
+    const auto feature_id_less = [](const auto& lhs, const auto& rhs) {
+        return lhs.stable_feature_id < rhs.stable_feature_id;
+    };
+    const auto valid_features = [&](const auto& features) {
+        return std::is_sorted(
+                   features.begin(), features.end(), feature_id_less) &&
+               std::adjacent_find(
+                   features.begin(),
+                   features.end(),
+                   [](const auto& lhs, const auto& rhs) {
+                       return lhs.stable_feature_id ==
+                              rhs.stable_feature_id;
+                   }) == features.end();
+    };
+    if (!valid_features(previous.canonical_active_features) ||
+        !valid_features(current.canonical_active_features) ||
+        previous.canonical_active_feature_count !=
+            previous.canonical_active_features.size() ||
+        current.canonical_active_feature_count !=
+            current.canonical_active_features.size() ||
+        !std::is_sorted(previous_canonical_slaves.begin(),
+                        previous_canonical_slaves.end()) ||
+        !std::is_sorted(current_canonical_slaves.begin(),
+                        current_canonical_slaves.end()) ||
+        std::adjacent_find(previous_canonical_slaves.begin(),
+                           previous_canonical_slaves.end()) !=
+            previous_canonical_slaves.end() ||
+        std::adjacent_find(current_canonical_slaves.begin(),
+                           current_canonical_slaves.end()) !=
+            current_canonical_slaves.end() ||
+        previous.canonical_feature_class_fingerprint !=
+            canonicalFeatureClassFingerprint(
+                previous.canonical_active_features) ||
+        current.canonical_feature_class_fingerprint !=
+            canonicalFeatureClassFingerprint(
+                current.canonical_active_features) ||
+        previous.canonical_slave_set_fingerprint !=
+            canonicalSlaveSetFingerprint(previous_canonical_slaves) ||
+        current.canonical_slave_set_fingerprint !=
+            canonicalSlaveSetFingerprint(current_canonical_slaves)) {
+        throw std::logic_error(
+            "SmallCutAggregationConstraint: non-canonical refresh history "
+            "cannot form a topology transition ledger");
+    }
+
+    SmallCutAggregationTopologyTransitionReport result;
+    result.geometry_identity_before = previous.geometry_identity;
+    result.geometry_identity_after = current.geometry_identity;
+    result.local_lineage_before = previous.local_lineage;
+    result.local_lineage_after = current.local_lineage;
+    result.canonical_feature_class_fingerprint_before =
+        previous.canonical_feature_class_fingerprint;
+    result.canonical_feature_class_fingerprint_after =
+        current.canonical_feature_class_fingerprint;
+    result.canonical_slave_set_fingerprint_before =
+        previous.canonical_slave_set_fingerprint;
+    result.canonical_slave_set_fingerprint_after =
+        current.canonical_slave_set_fingerprint;
+    result.canonical_active_feature_count_before =
+        previous.canonical_active_features.size();
+    result.canonical_active_feature_count_after =
+        current.canonical_active_features.size();
+    result.canonical_aggregate_slaves_before =
+        previous_canonical_slaves.size();
+    result.canonical_aggregate_slaves_after =
+        current_canonical_slaves.size();
+    result.canonical_rootless_active_physical_volume_before =
+        previous.canonical_rootless_active_physical_volume;
+    result.canonical_rootless_active_physical_volume_after =
+        current.canonical_rootless_active_physical_volume;
+    result.canonical_rootless_active_physical_volume_delta =
+        result.canonical_rootless_active_physical_volume_after -
+        result.canonical_rootless_active_physical_volume_before;
+    result.canonical_feature_transitions.reserve(
+        previous.canonical_active_features.size() +
+        current.canonical_active_features.size());
+
+    std::size_t previous_index = 0u;
+    std::size_t current_index = 0u;
+    while (previous_index < previous.canonical_active_features.size() ||
+           current_index < current.canonical_active_features.size()) {
+        const auto* before =
+            previous_index < previous.canonical_active_features.size()
+                ? &previous.canonical_active_features[previous_index]
+                : nullptr;
+        const auto* after =
+            current_index < current.canonical_active_features.size()
+                ? &current.canonical_active_features[current_index]
+                : nullptr;
+        const bool before_only =
+            before != nullptr &&
+            (after == nullptr ||
+             before->stable_feature_id < after->stable_feature_id);
+        const bool after_only =
+            after != nullptr &&
+            (before == nullptr ||
+             after->stable_feature_id < before->stable_feature_id);
+
+        SmallCutAggregationActiveFeatureTransitionReport transition;
+        if (before_only) {
+            transition.stable_feature_id = before->stable_feature_id;
+            transition.present_before = true;
+            transition.canonical_cell_gid_digest_before =
+                before->canonical_cell_gid_digest;
+            transition.canonical_full_active_cell_gid_digest_before =
+                before->canonical_full_active_cell_gid_digest;
+            transition.canonical_cut_cell_gid_digest_before =
+                before->canonical_cut_cell_gid_digest;
+            transition.disposition_before = before->disposition;
+            transition.canonical_cell_count_before =
+                before->canonical_cell_count;
+            transition.canonical_full_active_cell_count_before =
+                before->canonical_full_active_cell_count;
+            transition.canonical_cut_cell_count_before =
+                before->canonical_cut_cell_count;
+            transition.canonical_retained_physical_volume_before =
+                before->canonical_retained_physical_volume;
+            ++result.canonical_features_exited;
+            ++previous_index;
+        } else if (after_only) {
+            transition.stable_feature_id = after->stable_feature_id;
+            transition.present_after = true;
+            transition.canonical_cell_gid_digest_after =
+                after->canonical_cell_gid_digest;
+            transition.canonical_full_active_cell_gid_digest_after =
+                after->canonical_full_active_cell_gid_digest;
+            transition.canonical_cut_cell_gid_digest_after =
+                after->canonical_cut_cell_gid_digest;
+            transition.disposition_after = after->disposition;
+            transition.canonical_cell_count_after =
+                after->canonical_cell_count;
+            transition.canonical_full_active_cell_count_after =
+                after->canonical_full_active_cell_count;
+            transition.canonical_cut_cell_count_after =
+                after->canonical_cut_cell_count;
+            transition.canonical_retained_physical_volume_after =
+                after->canonical_retained_physical_volume;
+            ++result.canonical_features_entered;
+            ++current_index;
+        } else {
+            if (before == nullptr || after == nullptr ||
+                before->stable_feature_id != after->stable_feature_id) {
+                throw std::logic_error(
+                    "SmallCutAggregationConstraint: invalid feature merge "
+                    "while forming a topology transition ledger");
+            }
+            transition.stable_feature_id = before->stable_feature_id;
+            transition.present_before = true;
+            transition.present_after = true;
+            transition.canonical_cell_gid_digest_before =
+                before->canonical_cell_gid_digest;
+            transition.canonical_cell_gid_digest_after =
+                after->canonical_cell_gid_digest;
+            transition.canonical_full_active_cell_gid_digest_before =
+                before->canonical_full_active_cell_gid_digest;
+            transition.canonical_full_active_cell_gid_digest_after =
+                after->canonical_full_active_cell_gid_digest;
+            transition.canonical_cut_cell_gid_digest_before =
+                before->canonical_cut_cell_gid_digest;
+            transition.canonical_cut_cell_gid_digest_after =
+                after->canonical_cut_cell_gid_digest;
+            transition.disposition_before = before->disposition;
+            transition.disposition_after = after->disposition;
+            transition.canonical_cell_count_before =
+                before->canonical_cell_count;
+            transition.canonical_cell_count_after =
+                after->canonical_cell_count;
+            transition.canonical_full_active_cell_count_before =
+                before->canonical_full_active_cell_count;
+            transition.canonical_full_active_cell_count_after =
+                after->canonical_full_active_cell_count;
+            transition.canonical_cut_cell_count_before =
+                before->canonical_cut_cell_count;
+            transition.canonical_cut_cell_count_after =
+                after->canonical_cut_cell_count;
+            transition.canonical_retained_physical_volume_before =
+                before->canonical_retained_physical_volume;
+            transition.canonical_retained_physical_volume_after =
+                after->canonical_retained_physical_volume;
+            transition.cell_classification_changed =
+                before->canonical_cell_gid_digest !=
+                    after->canonical_cell_gid_digest ||
+                before->canonical_full_active_cell_gid_digest !=
+                    after->canonical_full_active_cell_gid_digest ||
+                before->canonical_cut_cell_gid_digest !=
+                    after->canonical_cut_cell_gid_digest ||
+                before->canonical_cell_count !=
+                    after->canonical_cell_count ||
+                before->canonical_full_active_cell_count !=
+                    after->canonical_full_active_cell_count ||
+                before->canonical_cut_cell_count !=
+                    after->canonical_cut_cell_count;
+            transition.disposition_changed =
+                before->disposition != after->disposition;
+            ++result.canonical_features_persisted;
+            if (transition.cell_classification_changed) {
+                ++result.canonical_feature_classification_changes;
+            }
+            if (transition.disposition_changed) {
+                if (after->disposition ==
+                    SmallCutAggregationActiveFeatureDisposition::Rooted) {
+                    ++result.canonical_features_became_rooted;
+                } else {
+                    ++result.canonical_features_became_rootless;
+                }
+            }
+            ++previous_index;
+            ++current_index;
+        }
+        result.canonical_feature_transitions.push_back(
+            std::move(transition));
+    }
+
+    std::size_t previous_slave_index = 0u;
+    std::size_t current_slave_index = 0u;
+    while (previous_slave_index < previous_canonical_slaves.size() ||
+           current_slave_index < current_canonical_slaves.size()) {
+        if (current_slave_index >= current_canonical_slaves.size() ||
+            (previous_slave_index < previous_canonical_slaves.size() &&
+             previous_canonical_slaves[previous_slave_index] <
+                 current_canonical_slaves[current_slave_index])) {
+            ++result.canonical_aggregate_slaves_left;
+            ++previous_slave_index;
+        } else if (
+            previous_slave_index >= previous_canonical_slaves.size() ||
+            current_canonical_slaves[current_slave_index] <
+                previous_canonical_slaves[previous_slave_index]) {
+            ++result.canonical_aggregate_slaves_entered;
+            ++current_slave_index;
+        } else {
+            ++previous_slave_index;
+            ++current_slave_index;
+        }
+    }
+
+    result.canonical_topology_changed =
+        result.canonical_features_entered > 0u ||
+        result.canonical_features_exited > 0u ||
+        result.canonical_feature_classification_changes > 0u ||
+        result.canonical_features_became_rooted > 0u ||
+        result.canonical_features_became_rootless > 0u ||
+        result.canonical_aggregate_slaves_entered > 0u ||
+        result.canonical_aggregate_slaves_left > 0u;
+    return result;
 }
 
 } // namespace
@@ -2348,6 +2919,11 @@ SmallCutAggregationConstraint::SmallCutAggregationConstraint(
 void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                           AffineConstraints& constraints)
 {
+    // Moving the prior report is allocation-free. This occurs before any
+    // communicator collective below, so enabling transition telemetry cannot
+    // introduce a rank-asymmetric allocation failure ahead of a collective.
+    auto previous_completed_refresh_report =
+        std::move(completed_refresh_report_);
     completed_refresh_report_.reset();
     pending_prolongation_.reset();
     const auto* cut_context = system.cutIntegrationContext();
@@ -3664,6 +4240,16 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         }
         feature.canonical_cell_count = component_cells.size();
         feature.canonical_cell_gid_digest = 14695981039346656037ull;
+        feature.canonical_full_active_cell_gid_digest =
+            14695981039346656037ull;
+        feature.canonical_cut_cell_gid_digest =
+            14695981039346656037ull;
+        aggregationDigestMix(
+            feature.canonical_full_active_cell_gid_digest,
+            0x46554c4c41435449ull);
+        aggregationDigestMix(
+            feature.canonical_cut_cell_gid_digest,
+            0x43555443454c4c53ull);
         long double physical_volume = 0.0L;
         GlobalIndex previous_gid = INVALID_GLOBAL_INDEX;
         for (const auto& cell : component_cells) {
@@ -3680,6 +4266,16 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 static_cast<std::uint64_t>(physical_gid);
             feature.canonical_cell_gid_digest *= 1099511628211ull;
             const auto& klass = global_cell_classes.at(cell);
+            if (klass.full_active) {
+                aggregationDigestMix(
+                    feature.canonical_full_active_cell_gid_digest,
+                    static_cast<std::uint64_t>(physical_gid));
+            }
+            if (klass.cut) {
+                aggregationDigestMix(
+                    feature.canonical_cut_cell_gid_digest,
+                    static_cast<std::uint64_t>(physical_gid));
+            }
             feature.canonical_full_active_cell_count +=
                 klass.full_active ? 1u : 0u;
             feature.canonical_cut_cell_count += klass.cut ? 1u : 0u;
@@ -3693,6 +4289,14 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 "SmallCutAggregationConstraint: active feature class "
                 "accounting is inconsistent");
         }
+        aggregationDigestMix(
+            feature.canonical_full_active_cell_gid_digest,
+            static_cast<std::uint64_t>(
+                feature.canonical_full_active_cell_count));
+        aggregationDigestMix(
+            feature.canonical_cut_cell_gid_digest,
+            static_cast<std::uint64_t>(
+                feature.canonical_cut_cell_count));
         feature.canonical_retained_physical_volume =
             static_cast<Real>(physical_volume);
         if (!(feature.canonical_retained_physical_volume > Real{0.0}) ||
@@ -4389,9 +4993,33 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     } else {
         distributed_result.validation =
             DistributedAggregationValidation::DebugBypass;
+    }
+
+    const auto distributed_validation = distributed_result.validation;
+    std::vector<SmallCutAggregationProlongationPatch>
+        canonical_prolongation_patches;
+    std::optional<AffineConstraints> next_constraints;
+    std::vector<GlobalIndex> next_previous_canonical_slaves;
+    std::optional<SmallCutAggregationRefreshReport>
+        next_completed_report;
+    std::shared_ptr<
+        const detail::SmallCutAggregationPendingProlongation>
+        next_pending_prolongation;
+    std::uint64_t next_successful_publication_ordinal =
+        successful_publication_ordinal_;
+    std::uint64_t next_feature_class_fingerprint = 0u;
+    std::uint64_t next_slave_set_fingerprint = 0u;
+    std::uint64_t next_geometry_fingerprint = 0u;
+    std::exception_ptr local_publication_exception;
+    try {
+    next_constraints.emplace(constraints);
+    auto& staged_constraints = *next_constraints;
+    if (distributed_validation ==
+        DistributedAggregationValidation::DebugBypass) {
         // Preserve the debug line-cap contract: no global completion is
         // attempted while intentional partial coverage is requested.
-        for (const auto& [dof, declarations] : local_aggregation_declarations) {
+        for (const auto& [dof, declarations] :
+             local_aggregation_declarations) {
             static_cast<void>(dof);
             const auto declaration = std::find_if(
                 declarations.begin(), declarations.end(),
@@ -4403,15 +5031,12 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 continue;
             }
             for (const auto& line : declaration->lines) {
-                if (!constraints.isConstrained(line.slave_dof)) {
+                if (!staged_constraints.isConstrained(line.slave_dof)) {
                     distributed_result.relevant_lines.push_back(line);
                 }
             }
         }
     }
-
-    std::vector<SmallCutAggregationProlongationPatch>
-        canonical_prolongation_patches;
     if (distributed_result.validation !=
         DistributedAggregationValidation::DebugBypass) {
         std::map<GlobalIndex, const SmallCutAggregationProlongationCell*>
@@ -4576,7 +5201,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         }
     }
     for (const auto& line : distributed_result.relevant_lines) {
-        if (constraints.isConstrained(line.slave_dof)) {
+        if (staged_constraints.isConstrained(line.slave_dof)) {
             continue;
         }
         if (!line.entries.empty()) {
@@ -4590,14 +5215,12 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                     guard.reason);
             }
         }
-        constraints.addConstraintLine(line);
+        staged_constraints.addConstraintLine(line);
         current_slaves.push_back(line.slave_dof);
         if (line.entries.empty()) {
             ++island_pinned_dofs;
         }
     }
-    const auto distributed_validation = distributed_result.validation;
-
     {
         static const bool dump_probe = [] {
             const char* env = std::getenv("SVMP_AGGREGATION_DUMP");
@@ -4688,7 +5311,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         << canonical_rootless_active_feature_count
         << " canonical_rootless_active_physical_volume="
         << canonical_rootless_active_physical_volume
-        << " local_relevant_lines_installed=" << current_slaves.size()
+        << " local_relevant_lines_prepared=" << current_slaves.size()
         << " distributed_halo_validation="
         << (distributed_validation == DistributedAggregationValidation::Passed
                 ? "passed"
@@ -4701,7 +5324,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         << " pruned_volume_measure=" << cut_context->generatedPrunedVolumeMeasure();
     FE_LOG_INFO(oss.str());
 
-    auto next_previous_canonical_slaves =
+    next_previous_canonical_slaves =
         distributed_result.canonical_slaves;
     {
         // Churn is computed from the replicated canonical slave set, not the
@@ -4761,116 +5384,201 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
 
     if (distributed_validation !=
         DistributedAggregationValidation::DebugBypass) {
-        auto completed_report = SmallCutAggregationRefreshReport{
-            .field = field_,
-            .active_side = active_side_,
-            .interface_marker = interface_marker_,
-            .maximum_root_path_length =
-                guards_.maximum_root_path_length,
-            .maximum_observed_root_path =
-                maximum_observed_root_path,
-            .root_path_guard_rejections =
-                root_path_guard_rejections,
-            .maximum_reference_extrapolation_distance =
-                guards_.maximum_reference_extrapolation_distance,
-            .maximum_observed_reference_extrapolation =
-                maximum_observed_reference_extrapolation,
-            .extrapolation_guard_rejections =
-                communicator_extrapolation_guard_rejections,
-            .maximum_absolute_coefficient =
-                guards_.maximum_absolute_coefficient,
-            .maximum_observed_absolute_coefficient =
-                maximum_observed_absolute_coefficient,
-            .maximum_row_l1_norm =
-                guards_.maximum_row_l1_norm,
-            .maximum_observed_row_l1_norm =
-                maximum_observed_row_l1_norm,
-            .line_guard_rejections =
-                communicator_line_guard_rejections,
-            .canonical_candidate_vertices =
-                distributed_result.canonical_candidate_vertices,
-            .canonical_rooted_candidate_vertices =
-                distributed_result.canonical_rooted_candidate_vertices,
-            .canonical_rootless_candidate_vertices =
-                distributed_result.canonical_rootless_candidate_vertices,
-            .canonical_owned_aggregate_dofs =
-                distributed_result.canonical_owned_aggregate_dofs,
-            .canonical_owned_pinned_dofs =
-                distributed_result.canonical_owned_pinned_dofs,
-            .canonical_strong_suppressed_dofs =
-                distributed_result.canonical_strong_suppressed_dofs,
-            .canonical_active_feature_count =
-                canonical_active_features.size(),
-            .canonical_rooted_active_feature_count =
-                canonical_rooted_active_feature_count,
-            .canonical_rootless_active_feature_count =
-                canonical_rootless_active_feature_count,
-            .canonical_rootless_active_physical_volume =
-                canonical_rootless_active_physical_volume,
-            .canonical_active_features =
-                canonical_active_features,
-        };
-
-        auto pending = std::make_shared<
-            detail::SmallCutAggregationPendingProlongation>();
-        pending->field = field_;
-        pending->active_side = active_side_;
-        pending->interface_marker = interface_marker_;
-        pending->slave_all_cut = slave_all_cut;
-        pending->linear_extension = runtime_options.linear_extension;
-        pending->allow_unaggregated = allow_unaggregated;
-        pending->trace_bound_eligible =
-            !allow_unaggregated &&
-            std::all_of(
-                canonical_active_cells.begin(),
-                canonical_active_cells.end(),
-                [](const auto& cell) {
-                    return !cell.retained_rule_stable_ids.empty() &&
-                        std::none_of(
-                            cell.retained_rule_stable_ids.begin(),
-                            cell.retained_rule_stable_ids.end(),
-                            [](std::uint64_t stable_id) {
-                                return stable_id == 0u;
-                            });
-                }) &&
-            std::none_of(
-                distributed_result.canonical_rows.begin(),
-                distributed_result.canonical_rows.end(),
-                [](const auto& row) {
-                    return row.provisional_kind ==
-                        SmallCutAggregationProvisionalRowKind::
-                            UnaggregatedFreeIdentity;
+            if (successful_publication_ordinal_ ==
+                std::numeric_limits<std::uint64_t>::max()) {
+                throw std::overflow_error(
+                    "SmallCutAggregationConstraint: successful publication "
+                    "ordinal is exhausted");
+            }
+            next_successful_publication_ordinal =
+                successful_publication_ordinal_ + 1u;
+            next_feature_class_fingerprint =
+                canonicalFeatureClassFingerprint(
+                    canonical_active_features);
+            next_slave_set_fingerprint =
+                canonicalSlaveSetFingerprint(
+                    next_previous_canonical_slaves);
+            auto prepared_provenance = prepareRefreshProvenance(
+                system,
+                *cut_context,
+                interface_marker_,
+                next_successful_publication_ordinal,
+                staged_constraints);
+            next_geometry_fingerprint =
+                prepared_provenance
+                    .geometry_identity.canonical_fingerprint;
+            next_completed_report.emplace(
+                SmallCutAggregationRefreshReport{
+                    .field = field_,
+                    .active_side = active_side_,
+                    .interface_marker = interface_marker_,
+                    .geometry_identity =
+                        std::move(
+                            prepared_provenance.geometry_identity),
+                    .local_lineage =
+                        prepared_provenance.local_lineage,
+                    .canonical_feature_class_fingerprint =
+                        next_feature_class_fingerprint,
+                    .canonical_slave_set_fingerprint =
+                        next_slave_set_fingerprint,
+                    .maximum_root_path_length =
+                        guards_.maximum_root_path_length,
+                    .maximum_observed_root_path =
+                        maximum_observed_root_path,
+                    .root_path_guard_rejections =
+                        root_path_guard_rejections,
+                    .maximum_reference_extrapolation_distance =
+                        guards_.maximum_reference_extrapolation_distance,
+                    .maximum_observed_reference_extrapolation =
+                        maximum_observed_reference_extrapolation,
+                    .extrapolation_guard_rejections =
+                        communicator_extrapolation_guard_rejections,
+                    .maximum_absolute_coefficient =
+                        guards_.maximum_absolute_coefficient,
+                    .maximum_observed_absolute_coefficient =
+                        maximum_observed_absolute_coefficient,
+                    .maximum_row_l1_norm =
+                        guards_.maximum_row_l1_norm,
+                    .maximum_observed_row_l1_norm =
+                        maximum_observed_row_l1_norm,
+                    .line_guard_rejections =
+                        communicator_line_guard_rejections,
+                    .canonical_candidate_vertices =
+                        distributed_result.canonical_candidate_vertices,
+                    .canonical_rooted_candidate_vertices =
+                        distributed_result
+                            .canonical_rooted_candidate_vertices,
+                    .canonical_rootless_candidate_vertices =
+                        distributed_result
+                            .canonical_rootless_candidate_vertices,
+                    .canonical_owned_aggregate_dofs =
+                        distributed_result.canonical_owned_aggregate_dofs,
+                    .canonical_owned_pinned_dofs =
+                        distributed_result.canonical_owned_pinned_dofs,
+                    .canonical_strong_suppressed_dofs =
+                        distributed_result
+                            .canonical_strong_suppressed_dofs,
+                    .canonical_active_feature_count =
+                        canonical_active_features.size(),
+                    .canonical_rooted_active_feature_count =
+                        canonical_rooted_active_feature_count,
+                    .canonical_rootless_active_feature_count =
+                        canonical_rootless_active_feature_count,
+                    .canonical_rootless_active_physical_volume =
+                        canonical_rootless_active_physical_volume,
+                    .canonical_active_features =
+                        canonical_active_features,
                 });
-        pending->guards = guards_;
-        pending->cut_context_content_revision =
-            cut_context->contentRevision();
-        pending->has_free_surface_snapshot_revision =
-            cut_context->hasFreeSurfaceGeometrySnapshotForMarker(
-                interface_marker_);
-        if (pending->has_free_surface_snapshot_revision) {
-            pending->free_surface_snapshot_revision =
-                cut_context
-                    ->freeSurfaceGeometrySnapshotRevisionForMarker(
-                        interface_marker_);
-        }
-        pending->has_source_value_revision =
-            cut_context->hasExpectedGeneratedSourceValueRevision(
-                interface_marker_);
-        if (pending->has_source_value_revision) {
-            pending->source_value_revision =
-                cut_context->expectedGeneratedSourceValueRevision(
+            if (previous_completed_refresh_report.has_value()) {
+                next_completed_report->canonical_topology_transition =
+                    buildCanonicalTopologyTransitionReport(
+                        *previous_completed_refresh_report,
+                        *next_completed_report,
+                        previous_canonical_slaves_,
+                        next_previous_canonical_slaves);
+            }
+
+            auto pending = std::make_shared<
+                detail::SmallCutAggregationPendingProlongation>();
+            pending->field = field_;
+            pending->active_side = active_side_;
+            pending->interface_marker = interface_marker_;
+            pending->slave_all_cut = slave_all_cut;
+            pending->linear_extension = runtime_options.linear_extension;
+            pending->allow_unaggregated = allow_unaggregated;
+            pending->trace_bound_eligible =
+                !allow_unaggregated &&
+                std::all_of(
+                    canonical_active_cells.begin(),
+                    canonical_active_cells.end(),
+                    [](const auto& cell) {
+                        return !cell.retained_rule_stable_ids.empty() &&
+                            std::none_of(
+                                cell.retained_rule_stable_ids.begin(),
+                                cell.retained_rule_stable_ids.end(),
+                                [](std::uint64_t stable_id) {
+                                    return stable_id == 0u;
+                                });
+                    }) &&
+                std::none_of(
+                    distributed_result.canonical_rows.begin(),
+                    distributed_result.canonical_rows.end(),
+                    [](const auto& row) {
+                        return row.provisional_kind ==
+                            SmallCutAggregationProvisionalRowKind::
+                                UnaggregatedFreeIdentity;
+                    });
+            pending->guards = guards_;
+            pending->cut_context_content_revision =
+                cut_context->contentRevision();
+            pending->has_free_surface_snapshot_revision =
+                cut_context->hasFreeSurfaceGeometrySnapshotForMarker(
                     interface_marker_);
+            if (pending->has_free_surface_snapshot_revision) {
+                pending->free_surface_snapshot_revision =
+                    cut_context
+                        ->freeSurfaceGeometrySnapshotRevisionForMarker(
+                            interface_marker_);
+            }
+            pending->has_source_value_revision =
+                cut_context->hasExpectedGeneratedSourceValueRevision(
+                    interface_marker_);
+            if (pending->has_source_value_revision) {
+                pending->source_value_revision =
+                    cut_context->expectedGeneratedSourceValueRevision(
+                        interface_marker_);
+            }
+            pending->rows =
+                std::move(distributed_result.canonical_rows);
+            pending->active_cells = std::move(canonical_active_cells);
+            pending->patches =
+                std::move(canonical_prolongation_patches);
+            next_pending_prolongation = std::move(pending);
+    }
+    } catch (...) {
+        local_publication_exception = std::current_exception();
+    }
+
+    // Exactly one post-resolver collective coordinates every allocation,
+    // validation, diagnostic, staged-constraint, report, and pending-state
+    // operation above. It also validates the rank-invariant canonical
+    // fingerprints before any caller-owned or lifecycle state is published.
+    coordinateRefreshPublicationConsensus(
+        system,
+        local_publication_exception,
+        next_feature_class_fingerprint,
+        next_slave_set_fingerprint,
+        next_geometry_fingerprint,
+        next_successful_publication_ordinal);
+
+    // All operations after the final consensus are statically no-throw moves,
+    // swaps, and scalar writes. In particular, aggregation lines were added
+    // only to `next_constraints`; a coordinated failure leaves the caller-owned
+    // AffineConstraints object untouched by this constraint instance.
+    constraints = std::move(*next_constraints);
+    if (distributed_validation !=
+        DistributedAggregationValidation::DebugBypass) {
+        next_completed_report->geometry_identity
+            .communicator_fingerprint_consensus_validated =
+                next_completed_report->geometry_identity.available;
+        if (next_completed_report->canonical_topology_transition.has_value()) {
+            auto& transition =
+                *next_completed_report->canonical_topology_transition;
+            transition.geometry_identity_before
+                .communicator_fingerprint_consensus_validated =
+                    transition.geometry_identity_before.available;
+            transition.geometry_identity_after
+                .communicator_fingerprint_consensus_validated =
+                    transition.geometry_identity_after.available;
         }
-        pending->rows =
-            std::move(distributed_result.canonical_rows);
-        pending->active_cells = std::move(canonical_active_cells);
-        pending->patches =
-            std::move(canonical_prolongation_patches);
-        pending_prolongation_ = std::move(pending);
+        pending_prolongation_ =
+            std::move(next_pending_prolongation);
         completed_refresh_report_ =
-            std::move(completed_report);
+            std::move(next_completed_report);
         previous_canonical_slaves_.swap(
             next_previous_canonical_slaves);
+        successful_publication_ordinal_ =
+            next_successful_publication_ordinal;
     }
 }
 
@@ -5649,18 +6357,32 @@ SmallCutAggregationConstraint::captureLifecycleCheckpoint() const
     checkpoint->completed_refresh_report =
         completed_refresh_report_;
     checkpoint->pending_prolongation = pending_prolongation_;
+    checkpoint->successful_publication_ordinal =
+        successful_publication_ordinal_;
     return checkpoint;
 }
 
 void SmallCutAggregationConstraint::restoreLifecycleCheckpoint(
     const LifecycleCheckpoint& checkpoint)
 {
-    previous_canonical_slaves_ =
+    // Finish every allocation-bearing copy before mutating live lifecycle
+    // state. The following swaps/moves/scalar write then restore the report,
+    // its comparison ledger, and its successful-publication ordinal as one
+    // exception-safe local publication.
+    auto restored_previous_canonical_slaves =
         checkpoint.previous_canonical_slaves;
-    completed_refresh_report_ =
+    auto restored_completed_refresh_report =
         checkpoint.completed_refresh_report;
-    pending_prolongation_ =
+    auto restored_pending_prolongation =
         checkpoint.pending_prolongation;
+    previous_canonical_slaves_.swap(
+        restored_previous_canonical_slaves);
+    completed_refresh_report_ =
+        std::move(restored_completed_refresh_report);
+    pending_prolongation_ =
+        std::move(restored_pending_prolongation);
+    successful_publication_ordinal_ =
+        checkpoint.successful_publication_ordinal;
 }
 
 bool SmallCutAggregationConstraint::updateValues(const systems::FESystem& /*system*/,

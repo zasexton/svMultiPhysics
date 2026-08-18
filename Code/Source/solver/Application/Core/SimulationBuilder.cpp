@@ -74,6 +74,26 @@ bool parse_bool_relaxed(std::string value)
          value == "on";
 }
 
+void preflightNavierStokesFittedSurfaceContactCapabilities(
+    const Parameters& params,
+    const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes)
+{
+  for (const auto* equation : params.equation_parameters) {
+    if (equation == nullptr || !equation->type.defined()) {
+      continue;
+    }
+    const auto type = lower_copy(trim_copy(equation->type.value()));
+    if (type != "fluid" && type != "stokes") {
+      continue;
+    }
+    const auto input =
+        application::translators::EquationTranslator::buildInput(
+            *equation, meshes);
+    svmp::Physics::formulations::navier_stokes::
+        preflightFittedSurfaceContactCapability(input);
+  }
+}
+
 void preRegisterFutureWetExtensionVelocity(
     const Parameters& params,
     const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes,
@@ -885,6 +905,20 @@ SimulationComponents& SimulationComponents::operator=(SimulationComponents&&) no
 
 SimulationComponents::~SimulationComponents() = default;
 
+void detail::preflightAndPreRegisterPhysicsModuleDependencies(
+    const Parameters& params,
+    SimulationComponents& components)
+{
+  if (!components.fe_system) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Physics dependency preflight requires an FE system.");
+  }
+  preflightNavierStokesFittedSurfaceContactCapabilities(
+      params, components.meshes);
+  preRegisterFutureWetExtensionVelocity(
+      params, components.meshes, *components.fe_system);
+}
+
 SimulationBuilder::SimulationBuilder(const Parameters& params)
   : params_(params)
 {
@@ -1031,8 +1065,8 @@ void SimulationBuilder::createPhysicsModules()
                                      [](const auto* p) { return p != nullptr; }));
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: equations declared=" << declared << std::endl;
 
-  preRegisterFutureWetExtensionVelocity(
-      params_, components_.meshes, *components_.fe_system);
+  detail::preflightAndPreRegisterPhysicsModuleDependencies(
+      params_, components_);
 
   components_.physics_modules.clear();
   for (const auto* eq_params : params_.equation_parameters) {

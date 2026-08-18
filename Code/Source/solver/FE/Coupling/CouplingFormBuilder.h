@@ -134,12 +134,26 @@ public:
 
     [[nodiscard]] forms::FormExpr integrate(const forms::FormExpr& integrand,
                                             const CouplingRegionRef& region) const;
+    [[nodiscard]] forms::FormExpr integrate(
+        const forms::FormExpr& integrand,
+        const CouplingRegionRef& region,
+        const forms::ExteriorBoundaryMeasure& boundary_measure) const;
     [[nodiscard]] forms::FormExpr integrate(const forms::FormExpr& integrand,
                                             std::string_view participant,
                                             std::string_view region) const;
+    [[nodiscard]] forms::FormExpr integrate(
+        const forms::FormExpr& integrand,
+        std::string_view participant,
+        std::string_view region,
+        const forms::ExteriorBoundaryMeasure& boundary_measure) const;
     [[nodiscard]] forms::FormExpr integrateShared(const forms::FormExpr& integrand,
                                                   std::string_view shared_region,
                                                   std::string_view participant) const;
+    [[nodiscard]] forms::FormExpr integrateShared(
+        const forms::FormExpr& integrand,
+        std::string_view shared_region,
+        std::string_view participant,
+        const forms::ExteriorBoundaryMeasure& boundary_measure) const;
 
     [[nodiscard]] CouplingSharedInterfaceView sharedInterface(
         std::string_view name) const;

@@ -174,8 +174,10 @@ enum class SmallCutAggregationActiveFeatureDisposition {
  * Canonical face-connected retained active-cell component.
  *
  * The stable feature ID is the minimum physical cell GID in the component.
- * The digest mixes the sorted physical cell GIDs to expose membership churn;
- * it is an audit aid and not a collision-free identity proof. Connectivity is
+ * The whole-feature digest and the separately domain-tagged full-active and
+ * cut-cell digests mix sorted physical cell GIDs to expose membership and
+ * equal-count class churn. These 64-bit digests are audit aids and not
+ * collision-free identity proofs. Connectivity is
  * deliberately the background-cell face graph: it neither resolves multiple
  * selected-side regions within one cut cell nor proves that selected-side
  * geometry crosses a shared face.
@@ -183,6 +185,8 @@ enum class SmallCutAggregationActiveFeatureDisposition {
 struct SmallCutAggregationActiveFeatureReport {
     GlobalIndex stable_feature_id{INVALID_GLOBAL_INDEX};
     std::uint64_t canonical_cell_gid_digest{0u};
+    std::uint64_t canonical_full_active_cell_gid_digest{0u};
+    std::uint64_t canonical_cut_cell_gid_digest{0u};
     SmallCutAggregationActiveFeatureDisposition disposition{
         SmallCutAggregationActiveFeatureDisposition::Rootless};
     std::size_t canonical_cell_count{0u};
@@ -192,9 +196,173 @@ struct SmallCutAggregationActiveFeatureReport {
 };
 
 /**
- * Canonical result of the most recent successful aggregation refresh.
+ * One communicator-canonical active-feature comparison across successive
+ * successful publications with no intervening failed refresh.
  *
- * Candidate fields count vertices, while aggregate, pin, and suppression
+ * Absent-side disposition and volume fields are placeholders and must be read
+ * only when the corresponding `present_*` flag is true. A classification
+ * change means that the stable feature retained the same minimum-cell
+ * identity while its cell membership, full/cut partition, whole-cell digest,
+ * or class-specific digest changed. Continuous retained-volume change alone
+ * is deliberately not a topology change.
+ */
+struct SmallCutAggregationActiveFeatureTransitionReport {
+    GlobalIndex stable_feature_id{INVALID_GLOBAL_INDEX};
+    bool present_before{false};
+    bool present_after{false};
+    std::uint64_t canonical_cell_gid_digest_before{0u};
+    std::uint64_t canonical_cell_gid_digest_after{0u};
+    std::uint64_t canonical_full_active_cell_gid_digest_before{0u};
+    std::uint64_t canonical_full_active_cell_gid_digest_after{0u};
+    std::uint64_t canonical_cut_cell_gid_digest_before{0u};
+    std::uint64_t canonical_cut_cell_gid_digest_after{0u};
+    SmallCutAggregationActiveFeatureDisposition disposition_before{
+        SmallCutAggregationActiveFeatureDisposition::Rootless};
+    SmallCutAggregationActiveFeatureDisposition disposition_after{
+        SmallCutAggregationActiveFeatureDisposition::Rootless};
+    std::size_t canonical_cell_count_before{0u};
+    std::size_t canonical_cell_count_after{0u};
+    std::size_t canonical_full_active_cell_count_before{0u};
+    std::size_t canonical_full_active_cell_count_after{0u};
+    std::size_t canonical_cut_cell_count_before{0u};
+    std::size_t canonical_cut_cell_count_after{0u};
+    Real canonical_retained_physical_volume_before{0.0};
+    Real canonical_retained_physical_volume_after{0.0};
+    bool cell_classification_changed{false};
+    bool disposition_changed{false};
+};
+
+enum class SmallCutAggregationGeometryIdentityKind : std::uint8_t {
+    Unavailable,
+    GeneratedPublicationSource,
+    AuthoritativeFreeSurfaceSnapshot,
+};
+
+/**
+ * Rank-invariant source/snapshot identity for one published refresh.
+ *
+ * Authoritative snapshot revisions use the snapshot's distributed revision
+ * keys. The generated-publication fallback contains only source and policy
+ * fields whose publication contract is communicator-wide; its rank-local
+ * request mesh epochs are deliberately retained in LocalPublicationLineage
+ * instead. `communicator_fingerprint_consensus_validated` is set only after
+ * the final all-rank 64-bit fingerprint consensus. That consensus is
+ * collision-prone audit evidence, not exact cross-rank comparison of every
+ * string and scalar. An unavailable identity is explicit and is never
+ * promoted to a canonical geometry identity.
+ */
+struct SmallCutAggregationCanonicalGeometryIdentity {
+    SmallCutAggregationGeometryIdentityKind kind{
+        SmallCutAggregationGeometryIdentityKind::Unavailable};
+    bool available{false};
+    bool communicator_fingerprint_consensus_validated{false};
+    std::string source_id{};
+    std::string domain_id{};
+    int interface_marker{-1};
+    Real isovalue{0.0};
+    std::uint64_t source_layout_revision{0u};
+    std::uint64_t source_value_revision{0u};
+    std::uint64_t quadrature_policy_key{0u};
+    std::uint64_t snapshot_revision_key{0u};
+    std::uint64_t distributed_mesh_geometry_revision{0u};
+    std::uint64_t distributed_mesh_topology_revision{0u};
+    std::uint64_t distributed_ownership_revision{0u};
+    std::uint64_t distributed_numbering_revision{0u};
+    std::uint64_t canonical_fingerprint{0u};
+};
+
+/**
+ * Explicitly rank-local lineage captured while preparing one publication.
+ *
+ * These values are diagnostic cache/lifecycle stamps. They identify the
+ * local source view used for before/after auditing but are not canonicalized
+ * and must not be interpreted as communicator-global epochs.
+ */
+struct SmallCutAggregationLocalPublicationLineage {
+    std::uint64_t successful_publication_ordinal{0u};
+    std::uint64_t cut_context_content_revision{0u};
+    bool has_snapshot_local_mesh_revision{false};
+    std::uint64_t snapshot_local_mesh_geometry_revision{0u};
+    std::uint64_t snapshot_local_mesh_topology_revision{0u};
+    std::uint64_t snapshot_local_ownership_revision{0u};
+    std::uint64_t snapshot_local_numbering_revision{0u};
+    bool has_generated_publication_request{false};
+    std::uint64_t generated_request_mesh_geometry_revision{0u};
+    std::uint64_t generated_request_mesh_topology_revision{0u};
+    std::uint64_t generated_request_ownership_revision{0u};
+    bool mesh_revision_tracking_available{false};
+    std::uint64_t mesh_geometry_revision{0u};
+    std::uint64_t mesh_topology_revision{0u};
+    std::uint64_t mesh_ownership_revision{0u};
+    std::uint64_t mesh_numbering_revision{0u};
+    std::uint64_t mesh_field_layout_revision{0u};
+    std::uint64_t mesh_label_revision{0u};
+    std::uint64_t mesh_active_configuration_epoch{0u};
+    std::uint64_t fe_space_revision{0u};
+    std::uint64_t fe_dof_layout_revision{0u};
+    std::uint64_t fe_constraint_layout_revision{0u};
+    std::uint64_t fe_block_layout_revision{0u};
+    std::uint64_t affine_constraint_build_revision{0u};
+};
+
+/**
+ * Transition report for successive successful publications of one
+ * field/marker/side aggregation constraint with no intervening failed
+ * refresh.
+ *
+ * Its feature/slave ledger is communicator-canonical because it is derived
+ * only from the already communicator-canonical feature and slave sets. The
+ * vector is sorted by stable feature ID and contains the union of previous
+ * and current features, including unchanged persistent features. The local
+ * lineage subfields are intentionally rank-local and need not match across
+ * ranks. This is
+ * topology/constraint telemetry only: it does not compare assembled
+ * operators or solved states and therefore cannot establish node-crossing
+ * solution continuity by itself. Entered/exited feature identities, feature
+ * and cell-class counts, dispositions, and slave-set changes are exact within
+ * the canonical ledgers. Same-count membership changes additionally rely on
+ * the 64-bit whole/class cell-GID digests and are therefore collision-prone
+ * audit evidence, not a collision-free topology oracle. The before/after
+ * geometry identity and local lineage fields identify the compared source
+ * publications when source provenance is available; unavailable provenance
+ * remains explicit. Local lineage epochs remain rank-local even when their
+ * publication ordinals happen to agree.
+ */
+struct SmallCutAggregationTopologyTransitionReport {
+    SmallCutAggregationCanonicalGeometryIdentity geometry_identity_before{};
+    SmallCutAggregationCanonicalGeometryIdentity geometry_identity_after{};
+    SmallCutAggregationLocalPublicationLineage local_lineage_before{};
+    SmallCutAggregationLocalPublicationLineage local_lineage_after{};
+    std::uint64_t canonical_feature_class_fingerprint_before{0u};
+    std::uint64_t canonical_feature_class_fingerprint_after{0u};
+    std::uint64_t canonical_slave_set_fingerprint_before{0u};
+    std::uint64_t canonical_slave_set_fingerprint_after{0u};
+    std::size_t canonical_active_feature_count_before{0u};
+    std::size_t canonical_active_feature_count_after{0u};
+    std::size_t canonical_features_entered{0u};
+    std::size_t canonical_features_exited{0u};
+    std::size_t canonical_features_persisted{0u};
+    std::size_t canonical_feature_classification_changes{0u};
+    std::size_t canonical_features_became_rooted{0u};
+    std::size_t canonical_features_became_rootless{0u};
+    std::size_t canonical_aggregate_slaves_before{0u};
+    std::size_t canonical_aggregate_slaves_after{0u};
+    std::size_t canonical_aggregate_slaves_entered{0u};
+    std::size_t canonical_aggregate_slaves_left{0u};
+    Real canonical_rootless_active_physical_volume_before{0.0};
+    Real canonical_rootless_active_physical_volume_after{0.0};
+    Real canonical_rootless_active_physical_volume_delta{0.0};
+    bool canonical_topology_changed{false};
+    std::vector<SmallCutAggregationActiveFeatureTransitionReport>
+        canonical_feature_transitions{};
+};
+
+/**
+ * Result of the most recent successful aggregation refresh.
+ *
+ * Feature/slave/count fields form the communicator-canonical ledger; the
+ * separately labeled lineage is rank-local. Candidate fields count vertices,
+ * while aggregate, pin, and suppression
  * fields count DOFs. Active-feature fields count communicator-global,
  * face-connected components of cells with retained selected-side volume. A
  * structurally rooted feature contains at least one full-active cell; a
@@ -214,6 +382,10 @@ struct SmallCutAggregationRefreshReport {
     geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     int interface_marker{-1};
+    SmallCutAggregationCanonicalGeometryIdentity geometry_identity{};
+    SmallCutAggregationLocalPublicationLineage local_lineage{};
+    std::uint64_t canonical_feature_class_fingerprint{0u};
+    std::uint64_t canonical_slave_set_fingerprint{0u};
     std::size_t maximum_root_path_length{0u};
     std::size_t maximum_observed_root_path{0u};
     std::size_t root_path_guard_rejections{0u};
@@ -237,6 +409,13 @@ struct SmallCutAggregationRefreshReport {
     Real canonical_rootless_active_physical_volume{0.0};
     std::vector<SmallCutAggregationActiveFeatureReport>
         canonical_active_features{};
+    // Empty on the first successful refresh and after any failed refresh.
+    // Otherwise compares the immediately preceding successful publication of
+    // this constraint instance. Geometry identity availability is explicit;
+    // low-level contexts without source publication provenance are never
+    // mislabeled as canonical geometry snapshots.
+    std::optional<SmallCutAggregationTopologyTransitionReport>
+        canonical_topology_transition{};
 };
 
 /**
@@ -409,6 +588,7 @@ public:
         std::shared_ptr<
             const detail::SmallCutAggregationPendingProlongation>
             pending_prolongation{};
+        std::uint64_t successful_publication_ordinal{0u};
     };
 
     /// @param excluded_boundary_markers Boundary markers whose face vertices
@@ -485,6 +665,7 @@ private:
     std::optional<SmallCutAggregationRefreshReport> completed_refresh_report_{};
     std::shared_ptr<const detail::SmallCutAggregationPendingProlongation>
         pending_prolongation_{};
+    std::uint64_t successful_publication_ordinal_{0u};
 };
 
 } // namespace constraints

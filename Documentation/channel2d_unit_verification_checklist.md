@@ -1,0 +1,762 @@
+# Channel2D Unit Verification Checklist
+
+Scope: serial `Channel2D`, 2D `Tri3`, NS-VMS, FSILS `GMRES` with diagonal preconditioner, generalized-alpha with `rho_infinity = 0.5`.
+
+Use this checklist to track whether each class or function in the audited `Channel2D` execution path has been thoroughly verified by focused unit tests. Check an item only when unit tests directly validate accuracy and robustness for that responsibility. End-to-end case logs or performance qualifications are useful evidence, but they are not sufficient by themselves.
+
+Legend:
+
+- `Invoked` means the item is on the audited `Channel2D` runtime path.
+- `Not invoked` means the item is explicitly out of the `Channel2D` runtime path but is listed so scope decisions remain visible.
+- `Unit verified` is intentionally unchecked until a focused test is identified or added.
+
+## 1. Application Entry And Dispatch
+
+- [ ] `Invoked` `main` - `Code/Source/solver/main.cpp:912`; reads XML, detects `Use_new_OOP_solver=true`, dispatches to OOP path.
+- [ ] `Invoked` `ApplicationDriver::shouldUseNewSolver` - `Code/Source/solver/Application/Core/ApplicationDriver.cpp:261`.
+- [ ] `Invoked` `ApplicationDriver::run` - `Code/Source/solver/Application/Core/ApplicationDriver.cpp:286`.
+- [ ] `Invoked` `ApplicationDriver::runWithParameters` - `Code/Source/solver/Application/Core/ApplicationDriver.cpp:302`; steady/transient selection, solver option construction, callback wiring.
+- [ ] `Invoked` `parseBoolEnv` - env-var overrides for `SVMP_NEWTON_LINE_SEARCH`, `SVMP_NEWTON_ACCEPT_INEXACT_LINEAR`, `SVMP_JACOBIAN_REBUILD_PERIOD`, `SVMP_FSILS_GMRES_REORTH`, and `SVMP_OOP_SOLVER_TRACE`.
+
+## 2. Simulation Setup
+
+- [ ] `Invoked` `SimulationBuilder::SimulationBuilder` - `Code/Source/solver/Application/Core/SimulationBuilder.cpp:405`.
+- [ ] `Invoked` `SimulationBuilder::build` - `Code/Source/solver/Application/Core/SimulationBuilder.cpp:410`.
+- [ ] `Invoked` `SimulationBuilder::loadMeshes` - `Code/Source/solver/Application/Core/SimulationBuilder.cpp:433`.
+- [ ] `Invoked` `MeshTranslator::loadMesh` - `Code/Source/solver/Application/Core/MeshTranslator.cpp:54`.
+- [ ] `Invoked` `svmp::Mesh::load_parallel` - mesh loading entry used by `MeshTranslator`.
+- [ ] `Invoked` `detectFormat` - mesh format detection used during load.
+- [ ] `Invoked` `applyFaceLabels` - face label application during mesh load.
+- [ ] `Invoked` `applyDomainLabels` - domain label application during mesh load.
+- [ ] `Invoked` `SimulationBuilder::createFESystem` - `Code/Source/solver/Application/Core/SimulationBuilder.cpp:483`.
+- [ ] `Invoked` `FESystem::FESystem` - `Code/Source/solver/FE/Systems/FESystem.cpp`; registers `FieldRegistry`, `DofHandler`, `AffineConstraints`, `SparsityPattern`, `AuxiliaryStateManager`, and `OperatorRegistry`.
+- [ ] `Invoked` `FieldRegistry` - constructed and registered by `FESystem`.
+- [ ] `Invoked` `DofHandler` - constructed and registered by `FESystem`.
+- [ ] `Invoked` `AffineConstraints` - constructed and registered by `FESystem`.
+- [ ] `Invoked` `SparsityPattern` - constructed and registered by `FESystem`.
+- [ ] `Invoked` `AuxiliaryStateManager` - constructed by `FESystem`; empty auxiliary layout for `Channel2D`.
+- [ ] `Invoked` `OperatorRegistry` - constructed and registered by `FESystem`.
+- [ ] `Invoked` `SimulationBuilder::createPhysicsModules` - `Code/Source/solver/Application/Core/SimulationBuilder.cpp:503`.
+- [ ] `Invoked` `EquationTranslator::buildInput` - `Code/Source/solver/Application/Core/EquationTranslator.cpp:62`.
+- [ ] `Invoked` `EquationTranslator::createModule` - `Code/Source/solver/Application/Core/EquationTranslator.cpp:187`.
+- [ ] `Invoked` `EquationModuleRegistry::create` - `Code/Source/solver/Physics/EquationModuleRegistry.cpp:51`.
+- [ ] `Invoked` `forceLink_NavierStokesRegister` - NS-VMS factory registration path.
+- [ ] `Invoked` `SimulationBuilder::setupSystem` - `Code/Source/solver/Application/Core/SimulationBuilder.cpp:536`.
+- [ ] `Invoked` `FESystem::setup` - `Code/Source/solver/FE/Systems/SystemSetup.cpp:1328`; DOF distribution, constraint finalization, sparsity finalization, per-module `registerOn`.
+- [ ] `Invoked` `SimulationBuilder::createSolvers` - `Code/Source/solver/Application/Core/SimulationBuilder.cpp:622`.
+- [ ] `Invoked` `selectBackend` - backend selection for FSILS.
+- [ ] `Invoked` `translateSolverOptions` - XML to solver option translation.
+- [ ] `Invoked` `build_fsils_dof_permutation` - `Code/Source/solver/Application/Core/SimulationBuilder.cpp:289`.
+- [ ] `Invoked` `BackendFactory::create` - `Code/Source/solver/FE/Backends/BackendFactory.h:67`.
+- [ ] `Invoked` `BackendFactory::createLinearSolver` - creates FSILS linear solver.
+- [ ] `Invoked` `BackendFactory::createMatrix` - creates FSILS matrix.
+- [ ] `Invoked` `SimulationBuilder::allocateHistory` - `Code/Source/solver/Application/Core/SimulationBuilder.cpp:781`.
+- [ ] `Invoked` `TimeHistory::allocate` - `Code/Source/solver/FE/TimeStepping/TimeHistory.h:46`; depth 2 for generalized-alpha.
+- [ ] `Not invoked` MPI partitioning paths - out of serial `Channel2D` scope.
+- [ ] `Not invoked` PETSc backend creation - out of `Channel2D` FSILS scope.
+- [ ] `Not invoked` Trilinos backend creation - out of `Channel2D` FSILS scope.
+- [ ] `Not invoked` `finalizeAuxiliaryLayout` with non-empty auxiliaries - auxiliary layout is empty for `Channel2D`.
+
+## 3. NS-VMS Physics Module Installation
+
+- [ ] `Invoked` `IncompressibleNavierStokesVMSModule::installInto` - `Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp:80`.
+- [ ] `Invoked` `FESystem::addField` - velocity and pressure registration.
+- [ ] `Invoked` `FESystem::addOperator` - registers `"equations"`.
+- [ ] `Invoked` `StateField` - `Code/Source/solver/FE/Forms/Vocabulary.h:120`.
+- [ ] `Invoked` `TestField` - `Code/Source/solver/FE/Forms/Vocabulary.h:128`.
+- [ ] `Invoked` `FormExpr::constant` - scalar/vector/tensor constant construction.
+- [ ] `Invoked` `FormExpr::asVector` - vector construction.
+- [ ] `Invoked` `FormExpr::asTensor` - tensor construction.
+- [ ] `Invoked` `FormExpr::effectiveTimeStep` - time-step terminal in form AST.
+- [ ] `Invoked` `FormExpr::Jinv` - inverse Jacobian terminal in form AST.
+- [ ] `Invoked` `grad` - differential operator.
+- [ ] `Invoked` `div` - differential operator.
+- [ ] `Invoked` `dt` - time derivative operator.
+- [ ] `Invoked` `sym` - symmetric-gradient helper.
+- [ ] `Invoked` `transpose` - tensor transpose helper.
+- [ ] `Invoked` `trace` - tensor trace helper.
+- [ ] `Invoked` `sqrt` - expression math helper.
+- [ ] `Invoked` `inner` - inner product helper.
+- [ ] `Invoked` `doubleContraction` - tensor contraction helper.
+- [ ] `Invoked` `constitutive` - constitutive expression helper.
+- [ ] `Invoked` `FormExpr::dx` - cell integral measure.
+- [ ] `Invoked` NS-VMS momentum form - `IncompressibleNavierStokesVMSModule.cpp:155`.
+- [ ] `Invoked` NS-VMS continuity form - `IncompressibleNavierStokesVMSModule.cpp:156`.
+- [ ] `Invoked` NS-VMS VMS augmentation - `IncompressibleNavierStokesVMSModule.cpp:158`; includes `tau_M`, `tau_C`, SUPG, LSIC, and `tau_B` cross-stress terms.
+- [ ] `Invoked` NS-VMS residual form construction - `IncompressibleNavierStokesVMSModule.cpp:264`.
+- [ ] `Invoked` `Factories::toTractionBC` - `Code/Source/solver/Physics/Formulations/NavierStokes/NavierStokesBCFactories.h:143`.
+- [ ] `Invoked` `Factories::toVelocityEssentialBC` - `Code/Source/solver/Physics/Formulations/NavierStokes/NavierStokesBCFactories.h:180`.
+- [ ] `Invoked` `BoundaryConditionManager::install` - `Code/Source/solver/Physics/Formulations/NavierStokes/BoundaryConditionManager.h:98`.
+- [ ] `Invoked` `BoundaryConditionManager::validate` - `Code/Source/solver/Physics/Formulations/NavierStokes/BoundaryConditionManager.h:105`.
+- [ ] `Invoked` `BoundaryConditionManager::applyAll` - `Code/Source/solver/Physics/Formulations/NavierStokes/BoundaryConditionManager.h:249`.
+- [ ] `Invoked` `bc::EssentialBC` - strong velocity Dirichlet path.
+- [ ] `Invoked` `bc::NaturalBC` - traction boundary path.
+- [ ] `Invoked` `bc::ReservedBC` - reserved boundary condition descriptor path.
+- [ ] `Invoked` `BoundaryConditionAffineConstraint` - persisted affine constraint for strong Dirichlet handling.
+- [ ] `Not invoked` `Factories::toTractionRobinBC` - out of `Channel2D` boundary scope.
+- [ ] `Not invoked` `Factories::toOutflowBC` - out of `Channel2D` boundary scope.
+- [ ] `Not invoked` `Factories::toCoupledOutflowBC` - out of `Channel2D` boundary scope.
+- [ ] `Not invoked` `Factories::applyVelocityNitscheBCs` - weak Dirichlet list is default-empty.
+- [ ] `Not invoked` `rcrOutflowModel` and RCR auxiliary DSL - out of `Channel2D` scope.
+- [ ] `Not invoked` `BoundaryReductionService` - out of `Channel2D` scope.
+- [ ] `Invoked` `systems::installFormulation` - `Code/Source/solver/FE/Forms/FormsInstaller.cpp:1684`.
+- [ ] `Invoked` `lowerStateFields` - `Code/Source/solver/FE/Forms/FormsInstaller.cpp:281`.
+- [ ] `Invoked` `gatherStateFields` - `Code/Source/solver/FE/Forms/FormsInstaller.cpp:195`.
+- [ ] `Invoked` `analysis::scanFormExpr` - `Code/Source/solver/FE/Forms/FormsInstaller.cpp:1757`.
+- [ ] `Invoked` `FormulationRecord` - formulation metadata storage.
+- [ ] `Invoked` `FESystem::addFormulationRecord` - records formulation metadata.
+- [ ] `Invoked` `FESystem::addContribution` - adds compiled contribution.
+- [ ] `Invoked` `FESystem::addBoundaryConditionDescriptor` - records boundary descriptors.
+
+## 4. Form Compilation Pipeline
+
+- [x] `Invoked` `FormCompiler::FormCompiler` - created with `use_symbolic_tangent = true`.
+  - Supporting unit tests found: broad constructor use in `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp`; symbolic-tangent options are exercised through `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:384` `TEST(MixedFormPerformance, InstallFormulation_MixedResidual_AssemblesCorrectly)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:38` `TEST(FormCompilerTest, ConstructorAndSetOptionsPreserveSymbolicTangentOptions)` directly validates constructor option storage, `use_symbolic_tangent=true`, JIT/tensor option round-trip, compile preservation, and `setOptions()` replacement.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:80` `TEST(FormCompilerTest, DefaultAndMoveConstructorsPreserveOptionsAndUsability)` validates default construction, move construction, option preservation, and compile usability after construction.
+  - Checked: direct constructor/setter/default/move option tests now cover the FormCompiler-owned part of the symbolic-tangent option contract.
+- [x] `Invoked` `FormCompiler::compileMixed` - `Code/Source/solver/FE/Forms/FormCompiler.cpp:1065`; detects 2-field mixed velocity/pressure form.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_MixedFormIR.cpp:173` `TEST(CompileMixed, SingleFieldDelegatesToSinglePath)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_MixedFormIR.cpp:205` `TEST(CompileMixed, TwoFieldStokesLikeBilinear)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_MixedFormIR.cpp:263` `TEST(CompileMixed, TwoFieldResidual)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_MixedFormIR.cpp:310` `TEST(CompileMixed, MultipleTermsSameBlock)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_MixedFormIR.cpp:344` `TEST(CompileMixed, BoundaryTermsPreserveMarkers)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_MixedFormIR.cpp:662` `TEST(CompileMixed, ThreeFieldSparseLayoutPreservesOrderingDomainsAndProvenance)` validates three-field sparse block layout, inactive blocks, field ordering, boundary/interface metadata, and provenance.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_MixedFormIR.cpp:778` and `:797` reject duplicate test/trial function names.
+  - Checked: direct positive and negative unit tests cover single-field, two-field, three-field sparse, boundary/interface, provenance, domain summary, residual, bilinear, linear, and auto-detect behavior.
+- [x] `Invoked` `FormCompiler::compileImpl` - `Code/Source/solver/FE/Forms/FormCompiler.cpp:885`.
+  - Supporting unit tests found: indirectly covered by `compileResidual`, `compileBilinear`, and `compileMixed` tests in `test_FormCompiler.cpp` and `test_MixedFormIR.cpp`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:154` `TEST(FormCompilerTest, CompileImplRejectsUnresolvedCoupledAndAuxiliaryPlaceholders)` validates unresolved boundary-reduction and auxiliary placeholder rejection through public compile entry points.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:180` `TEST(FormCompilerTest, CompileImplRejectsUnloweredIndexedAccessWhenJITDisabled)` validates the JIT-option branch that rejects unlowered indexed access in interpreter mode and accepts it when JIT is explicitly enabled.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:199` `TEST(FormCompilerTest, CompileImplMarksFaceGeometryAndNeighborRequirements)` validates interior/interface face term classification, markers, normals, neighbor data, and face-orientation requirements.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:235` `TEST(FormCompilerTest, CompileImplPopulatesDumpAndSortedFieldRequirements)` validates dump metadata and deterministic/sorted required-field discovery.
+  - Checked: the internal helper remains private, but its distinct validation, options, metadata, required-field, and face-metadata branches are now directly exercised through public APIs.
+- [x] `Invoked` `FormCompiler::compileResidual` - `Code/Source/solver/FE/Forms/FormCompiler.cpp:995`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:146` `TEST(FormCompilerTest, CompileResidualRequiresTrialAndTest)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:416` `TEST(FormCompilerTest, MultipleDtFactorsAllowedInResidual)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:455`, `:471`, `:490`, and `:510` validate required-data inference for Hessian, vector Hessian, HCurl curl, and HDiv divergence residuals.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:270` `TEST(FormCompilerTest, CompileResidualPreservesMultiDomainMetadataAndRequirements)` validates multi-domain residual metadata, marker preservation, and required-data propagation.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:546` `TEST(FormCompilerTest, BlockBilinearAndResidualCompileEachBlockIndependently)`.
+  - Checked: direct tests cover validation failures, temporal terms, data requirements, multi-domain metadata, marker preservation, and block residual compilation.
+- [x] `Invoked` `FormCompiler::compileBilinear` - `Code/Source/solver/FE/Forms/FormCompiler.cpp:987`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:118` `TEST(FormCompilerTest, RequiresTopLevelIntegrals)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:138` `TEST(FormCompilerTest, CompileBilinearRejectsMissingSymbols)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:318` `TEST(FormCompilerTest, CompilesMultipleTermsAndMarkers)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:388`, `:398`, and `:416` validate time-derivative splitting/order/error behavior.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:455`, `:471`, `:490`, and `:510` validate required-data inference.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormCompiler.cpp:546` validates independent block bilinear compilation.
+  - Checked: direct tests cover top-level validation, symbol validation, multi-term markers, temporal handling, data flags, and block compilation.
+- [x] `Invoked` `MixedFormIR::block` - `Code/Source/solver/FE/Forms/MixedFormIR.h`; block accessor.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_MixedFormIR.cpp:94` `TEST(MixedFormIR, ActiveBlocksTracking)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_MixedFormIR.cpp:130` `TEST(MixedFormIR, BlockAccessConst)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_MixedFormIR.cpp:146` `TEST(MixedFormIR, BlockOptAccess)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_MixedFormIR.cpp:160` `TEST(MixedFormIR, OutOfRangeAccess)`.
+  - Checked: direct data-structure tests validate block presence, block access, optional access, and range behavior.
+- [x] `Invoked` `SymbolicNonlinearFormKernel` - `Code/Source/solver/FE/Forms/FormKernels.h:379`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:267` through `:741` validate many Jacobians against AD across polynomial, quotient, Poisson, Hessian, nonlinear diffusion, curl, tensor, DG, Nitsche, conditionals, min/max, normalization, and time derivatives.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:840` `TEST(SymbolicNonlinearFormKernelTest, FiniteDifferenceMatchesSymbolicTangent)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_NonlinearFormKernel_Boundary.cpp:123`, `:182`, `:240`, `:488`, `:546`, and `:603` validate boundary symbolic kernels against central differences.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_NonlinearFormKernel_ElementCoverage.cpp:475` through `:561` validate element coverage against central differences.
+  - Checked: direct kernel tests validate residual/tangent accuracy over cell, boundary, interface/DG, tensor, temporal, and multiple element paths.
+- [x] `Invoked` `SymbolicNonlinearFormKernel::rebuildTangentIR` - `Code/Source/solver/FE/Forms/FormKernels.h:441`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:840` validates the rebuilt symbolic tangent against finite differences.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:267` through `:741` validate rebuilt tangents against AD for many operators.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_MatrixAndEigenOps.cpp:120` through `:255` validate matrix/eigen tangent rebuilds against central differences in 2D and 3D.
+  - Checked: although private, the function's observable output is the tangent IR, and direct kernel tangent tests thoroughly validate that output.
+- [x] `Invoked` `differentiateResidual` - `Code/Source/solver/FE/Forms/SymbolicDifferentiation.cpp:1597`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:267` through `:741` exercise default active-trial differentiation through `SymbolicNonlinearFormKernel`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:1136`, `:1159`, and `:1179` validate matrix-function, eigen/history, and smooth-op differentiation creation.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/Tensor/test_TensorDifferentiation.cpp:30` calls `differentiateResidual` after differentiability checking.
+  - Checked: public default overload is broadly validated by AD, finite-difference, and no-throw differentiation tests.
+- [x] `Invoked` `differentiateResidual` overload - `Code/Source/solver/FE/Forms/SymbolicDifferentiation.cpp:1605`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:152` `TEST(SymbolicDifferentiationMultiFieldTest, DifferentiateWrtFieldIdMatchesAD)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:210` `TEST(SymbolicDifferentiationMultiFieldTest, DifferentiateWrtFieldIdRewritesTrialPrimalToProvidedField)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:46` validates differentiation with stable `AuxiliaryOutputRef` IDs.
+  - Checked: direct overload tests validate `StateField`/field-terminal, trial-state rewrite, and auxiliary-output target paths.
+- [x] `Invoked` `differentiateResidual` overload - `Code/Source/solver/FE/Forms/SymbolicDifferentiation.cpp:1656`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:152` validates the `FieldId` overload against AD.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:210` validates explicit trial-state-field rewrite behavior.
+  - Checked: direct unit tests cover the overload's field-target semantics and multi-field rewrite behavior.
+- [x] `Invoked` `differentiateResidualImpl` - `Code/Source/solver/FE/Forms/SymbolicDifferentiation.cpp:796`.
+  - Supporting unit tests found: heavily covered indirectly by all public `differentiateResidual` overload tests in `test_SymbolicDifferentiation.cpp`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:911` `TEST(SymbolicDifferentiationImplContract, PublicEntryPointsSurfaceValidationErrors)` validates invalid residual, symbolic-differentiability rejection, and invalid target-terminal errors surfaced through public entry points.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:935` `TEST(SymbolicDifferentiationImplContract, SpecificTrialFunctionTargetsOnlyMatchingTrial)` validates explicit trial-function targeting and non-targeted trial-function zeroing.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:954` `TEST(SymbolicDifferentiationImplContract, AuxiliaryOutputTargetDifferentiatesOnlyMatchingSlot)` validates auxiliary-output target selection by stable slot ID.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:971` `TEST(SymbolicDifferentiationImplContract, FieldIdTargetsRejectInconsistentMetadata)` validates FieldId target-configuration rejection for inconsistent space signatures and inconsistent symbol names.
+  - Checked: the internal helper remains private, but focused public-entry tests now isolate its validation, explicit target-selection, auxiliary target, and target-configuration error paths.
+- [x] `Invoked` `checkSymbolicDifferentiability` - `Code/Source/solver/FE/Forms/SymbolicDifferentiation.h:37`.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Forms/Tensor/test_TensorDifferentiation.cpp:30` calls `checkSymbolicDifferentiability(residual).ok`.
+  - Supporting unit tests found: broad rejection/validation tests in `Code/Source/solver/FE/Tests/Unit/Forms/test_JITValidation.cpp` cover JIT validation, not this symbolic differentiability checker directly.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:849` `TEST(SymbolicDifferentiabilityCheck, AcceptsBroadSupportedExpressionShapes)` validates positive coverage for smooth ops and history terminals.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:864` `TEST(SymbolicDifferentiabilityCheck, ReportsInvalidExpression)` validates invalid-expression diagnostics and the `canDifferentiateSymbolically()` wrapper.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:876` `TEST(SymbolicDifferentiabilityCheck, ReportsNestedConstitutiveNodes)` validates negative/error-path reporting for nested constitutive output nodes that must be inlined before differentiation.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:894` `TEST(SymbolicDifferentiabilityCheck, ReportsDirectConstitutiveNodesInsideComposite)` validates issue reporting for direct constitutive output nodes inside otherwise differentiable composite expressions.
+  - Checked: direct positive, invalid, wrapper, direct/nested constitutive, and negative issue-reporting behavior are now covered.
+- [x] `Invoked` `KernelIR::optimize` - `Code/Source/solver/FE/Forms/JIT/KernelIR.h:68`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:118` through `:388` cover constant folding, identity elimination, zero simplification, CSE, and DCE.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:672` through `:891` cover divergence/trace/determinant, transcendental folding, min/max, conditionals, and compound folding.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:936` through `:1320` cover strength reduction and tensor-operator rewrites.
+  - Checked: direct optimizer tests cover a broad set of algebraic, tensor, transcendental, conditional, CSE, and DCE behavior.
+- [x] `Invoked` `KernelIR::subtreeCosts` - `Code/Source/solver/FE/Forms/JIT/KernelIR.h:78`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:528` `TEST(KernelIRCost, LeafCostIsOne)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:538` `TEST(KernelIRCost, BinaryOpCostAddsChildren)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:550` `TEST(KernelIRCost, TranscendentalOpsInflated)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:569` `TEST(KernelIRCost, FieldAndHistoryLeavesRepresentReduceSums)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:582` `TEST(KernelIRCost, FieldAndBasisGradientsIncludeTransformOverhead)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:595` `TEST(KernelIRCost, MatrixSpectralOpsAreInflatedRelativeToAlgebraicOps)`.
+  - Checked: direct cost tests validate leaf, binary, transcendental, field/history reduction, geometry-transform, and matrix spectral cost behavior.
+- [x] `Invoked` `KernelIR::perOpStructuralHashes` - `Code/Source/solver/FE/Forms/JIT/KernelIR.h:60`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:165` `TEST(KernelIRHashing, PerOpStructuralHashesMatchStableRootHash)` validates vector sizing, nonzero per-op hashes, and root-hash parity with `stableHash64()`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:182` `TEST(KernelIRHashing, PerOpStructuralHashesIdentifyDuplicateSubtreesWithoutCSE)` validates equal structural hashes for duplicated subtrees when CSE is disabled.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:205` `TEST(KernelIRHashing, PerOpStructuralHashesAreCommutativeButMetadataSensitive)` validates commutative-order stability and metadata/op sensitivity.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:225` `TEST(KernelIRHashing, PerOpStructuralHashesTrackOptimizeResult)` validates hash consistency after optimization and DCE.
+  - Checked: direct per-op hash tests now cover determinism, duplicated subtree equivalence, commutative canonical behavior, metadata sensitivity, and post-optimization consistency.
+- [x] `Invoked` `LLVMGen::compileAndAddKernel` - `Code/Source/solver/FE/Forms/JIT/LLVMGen.h:42`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_Vectorization.cpp:172` directly calls `LLVMGen::compileAndAddKernel` and asserts vectorized IR properties.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_LLVMGen_ScalarOps.cpp:58` through `:199` validate generated scalar operators against expected values/interpreter behavior.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_LLVMGen_DifferentialOps.cpp:66` through `:194` validate gradient, divergence, curl, and Hessian codegen.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_LLVMGen_TensorOps.cpp:60` through `:378` validate tensor operator codegen.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_LLVMGen_GeometryOps.cpp:128` through `:233`, `test_LLVMGen_FieldOps.cpp:85` through `:115`, and `test_LLVMGen_TimeOps.cpp:76` through `:117` validate geometry, field, and time terminals.
+  - Checked: broad LLVMGen operator tests plus a direct compile-and-add call validate scalar cell-kernel codegen accuracy and robustness.
+- [x] `Invoked` `LLVMGen::compileAndAddCoupledKernel` - `Code/Source/solver/FE/Forms/JIT/LLVMGen.h:62`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:583` `TEST(MixedFormPerformance, InstallFormulation_MonolithicJITParity_VersusPerBlockFallback)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:747`, `:770`, `:793`, and `:816` validate monolithic JIT parity for transient mixed and VMS residual paths, including generalized-alpha.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_StokesVMS_Tangent.cpp:227` validates Triangle3 Stokes/VMS JIT output against interpreter for all blocks.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_Vectorization.cpp:322` `TEST(JITCoupledKernels, CompileDirectBlockOrderingAndOutputBuffers)` directly compiles a three-block coupled kernel, resolves the symbol/address, invokes the coupled ABI, and validates matrix-only, vector-only, and mixed output routing.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_Vectorization.cpp:447` `TEST(JITCoupledKernels, RejectsEmptyAndMissingBlockSpecs)` validates empty and missing-IR coupled block rejection.
+  - Checked: the coupled LLVM path is validated through direct ABI/output routing tests, invalid-spec tests, monolithic mixed-kernel parity, and Stokes/VMS block parity tests.
+- [x] `Invoked` `LLVMGen::compileAndAddColocatedKernels` - `Code/Source/solver/FE/Forms/JIT/LLVMGen.h:85`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_Vectorization.cpp:254` `TEST(JITColocatedKernels, CompileColocatedAddressesAssembleLikeFallback)` compiles two colocated cell kernels, validates symbol resolution, injects the returned addresses, and checks numerical parity against interpreter fallback.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_Vectorization.cpp:480` `TEST(JITColocatedKernels, RejectsNullFormIRSpec)` validates error handling for invalid colocated specs.
+  - Checked: colocated module grouping, per-kernel symbol resolution, invalid-spec rejection, and assembled numerical parity are directly tested.
+- [x] `Invoked` `JITEngine::tryLoadFromObjectCache` - `Code/Source/solver/FE/Forms/JIT/JITEngine.h:52`.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_DiskCache.cpp:55` `TEST(JITDiskCache, ObjectCacheSecondCompilerFasterThanColdCompile)` exercises disk object-cache reuse through the public compiler path.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITEngine_Lifecycle.cpp:22` checks engine creation, target properties, and object-cache stats access.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp:263` `TEST(JITCompilerCache, ObjectCacheLoadsFromDiskAcrossCompilerInstances)` deterministically verifies disk object-cache creation, second-compiler disk hit, byte read accounting, and stable symbol/key reuse.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp:309` `TEST(JITCompilerCache, CorruptDiskObjectFallsBackToRecompile)` verifies invalid cached object bytes are treated as a miss and do not poison fallback compilation.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp:366` `TEST(JITCompilerCache, CacheDirectoriesAreIsolated)` validates same-key kernels do not cross-hit across separate cache directories.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp:415` `TEST(JITCompilerCache, WrongSymbolDiskObjectIsRejectedAndRecompiled)` validates valid-but-wrong-symbol disk objects are rejected and recompiled.
+  - Checked: deterministic hit/miss, directory isolation, corrupt-cache recovery, and stale/wrong-symbol recovery behavior are tested through the public compiler path that invokes `tryLoadFromObjectCache`.
+- [x] `Invoked` `FileSystemObjectCache` - cache under `~/.cache/svMultiPhysics/jit_cache/`.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_DiskCache.cpp:55` asserts cache files are created and second compiler is faster when perf tests are enabled.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp:263` deterministically verifies file-backed object creation and disk-cache reuse without relying on timing.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp:309` verifies invalid object handling removes the corrupt cached object path from the hot load path and recompiles successfully.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp:366` validates cache-directory isolation for identical symbols/keys.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp:415` validates object-symbol validation rejects stale/wrong-symbol cache files.
+  - Checked: deterministic file creation, disk lookup, directory isolation, invalid object handling, wrong-symbol object handling, and cache miss/recompile behavior are covered.
+- [x] `Invoked` `computeKernelCacheKey` - `Code/Source/solver/FE/Forms/JIT/JITCacheKey.cpp`.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp:25` checks identical functional integrands hit the kernel cache and return the same address.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_CacheRegression.cpp:80` checks distinct functional integrands produce distinct cache entries, but the test is perf-gated.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp:223` validates that optimization-level changes produce distinct cache keys for the same integrand.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCacheKey.cpp:126` checks deterministic keys for identical explicit inputs.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCacheKey.cpp:141` checks schema, ABI, form kind, domain/marker, IR-hash, and space-signature contributions.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCacheKey.cpp:155` checks target triple, data layout, CPU name/features, LLVM version, and hardware-profile contributions.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCacheKey.cpp:165` checks optimization, vectorization, SIMD, debug-info, tensor-codegen, and specialization-codegen option contributions.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCacheKey.cpp:205` proves non-codegen diagnostics/cache/dump controls do not perturb the kernel key.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCacheKey.cpp:237` and `:263` check matched specialization inputs are included and unmatched specialization values are ignored.
+  - Checked: direct helper coverage now proves all currently advertised structural, target/hardware, tensor, specialization, and non-codegen option contracts.
+- [x] `Invoked` `stableSymbolForKernel` - `Code/Source/solver/FE/Forms/JIT/JITCacheKey.cpp`.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp:25`, `:62`, and `:91` indirectly exercise stable symbol reuse through cache hit, disabled-cache, and concurrent-compile behavior.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp:223` asserts the public compiled symbol has the stable `svmp_fe_jit_kernel_` prefix and exactly matches the hexadecimal cache key.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCacheKey.cpp:133` directly checks the pure cache-key-to-symbol conversion.
+  - Checked: stable-symbol determinism and cache-key-to-symbol mapping are directly tested.
+- [x] `Invoked` `stableHash64` - stable `KernelIR` hashing.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:107` `TEST(KernelIRHashing, DifferentExprsDifferentHash)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:118` `TEST(KernelIRHashing, StableHashCoversLeafMetadataAndNonCommutativeOrder)` validates parameter metadata, non-commutative operand order, field ID, space metadata, and display-name-insensitive codegen identity.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:144` `TEST(KernelIRHashing, StableHashHandlesEmptyAndRejectsMalformedIR)` validates empty-IR stability and malformed-IR rejection.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITValidation.cpp:74` `TEST(KernelIR, StableHashIgnoresCommutativeOperandOrder)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_KernelIR_Lowering.cpp:1072` and `:1087` validate stable hash differences/sameness for hardware profiles.
+  - Checked: direct tests validate distinct expression hashes, metadata sensitivity, non-commutative order, commutative canonicalization, malformed IR handling, codegen-identity invariants, and profile hash equality/inequality.
+- [x] `Invoked` `JITKernelWrapper` - `Code/Source/solver/FE/Forms/JIT/JITKernelWrapper.h:42`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:980`, `:1028`, and `:1080` compare JIT wrapper kernels against interpreter for scalar, Triangle3 gradient/geometry, and vector convection cases.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_ExtendedParity.cpp:229` through `:332` compare wrapper output against interpreter for smooth, vector-basis, matrix, DG, Nitsche, and history-convolution cases.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_TangentFiniteDifferences.cpp:215` through `:518` compare JIT tangents against central differences for a broad set of operators.
+  - Checked: wrapper behavior is validated through broad JIT/interpreter and finite-difference parity tests.
+- [x] `Invoked` `JITKernelWrapper::computeCell` - `Code/Source/solver/FE/Forms/JIT/JITKernelWrapper.h:81`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:980`, `:1028`, and `:1080` assemble cells through `JITKernelWrapper` and compare against interpreter.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_StokesVMS_Tangent.cpp:227` validates Triangle3 Stokes/VMS cell assembly through JIT against interpreter for all blocks.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_TangentFiniteDifferences.cpp:215` through `:518` validates cell residual/tangent accuracy against central differences.
+  - Checked: direct cell-execution behavior is covered by interpreter and finite-difference parity tests.
+- [x] `Invoked` `JITKernelWrapper::computeCellBatch` - `Code/Source/solver/FE/Forms/JIT/JITKernelWrapper.h:83`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_SIMDBatch.cpp:390` `TEST(JITSIMDBatchParity, ScalarLaplacian_Tetra4)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_SIMDBatch.cpp:414` `TEST(JITSIMDBatchParity, NonlinearReactionDiffusion_Tetra4)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_SIMDBatch.cpp:430` `TEST(JITSIMDBatchParity, SingleCellUnderfilledBatch_Tetra4)` validates underfilled batch-size parity.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_SIMDBatch.cpp:446` `TEST(JITSIMDBatchParity, VectorizationDisabledBatchMatchesScalarPath_Tetra4)` validates scalar fallback parity when vectorization is disabled.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_SIMDBatch.cpp:466` `TEST(JITSIMDBatchParity, VectorTestScalarTrialCrossBlock_Triangle3)` validates vector-test/scalar-trial mixed block layout parity.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_SIMDBatch.cpp:501` `TEST(JITSIMDBatchParity, StokesVMS_VV_Triangle3)`.
+  - Checked: batched cell execution is validated against scalar JIT for linear, nonlinear, underfilled, vectorization-disabled, vector/scalar cross-block, and Stokes/VMS Triangle3 paths.
+- [x] `Invoked` `JITKernelWrapper::ensureCompiled` - `Code/Source/solver/FE/Forms/JIT/JITKernelWrapper.h:123`.
+  - Supporting unit tests found: all `JITKernelWrapper::computeCell` and `computeCellBatch` tests exercise `ensureCompiled` indirectly through lazy compilation.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp:470` `TEST(JITKernelWrapper, EnsureCompiledIsExplicitAndIdempotent)` validates explicit compile state transition and repeated-call idempotence.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_Vectorization.cpp:254` injects precompiled colocated addresses via `setExternalCellAddress()` after wrapper compilation and validates numerical parity.
+  - Checked: explicit compile readiness, idempotence, injected precompiled address use, and broad lazy cell execution are covered.
+- [x] `Invoked` `MonolithicCellKernel` - `Code/Source/solver/FE/Forms/MonolithicCellKernel.h:40`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:335` `TEST(MixedFormPerformance, InstallMixedFormIR_CreatesMonolithicCellKernel)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:384` `TEST(MixedFormPerformance, InstallFormulation_MixedResidual_AssemblesCorrectly)`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:583`, `:747`, `:770`, `:793`, and `:816` validate monolithic JIT parity against per-block fallback across mixed and transient/VMS forms.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:997` `TEST(MonolithicCellKernelBlockSpec, RoutesMatrixVectorAndMixedBlocksIndependently)` validates matrix-only, vector-only, and mixed block coexistence and routing metadata.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_FormsInstaller.cpp:880` and `:1026` assert coupled formulation installation uses monolithic cell-kernel plans.
+  - Checked: creation, installation, block count, one-sided/mixed block routing metadata, assembly correctness, and monolithic/per-block parity are directly tested.
+- [x] `Invoked` `MonolithicCellKernel::BlockSpec` - coupled block layout metadata.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:335` checks monolithic kernel creation and `numBlocks()`.
+  - Supporting unit tests found: monolithic parity tests in `test_MixedFormPerformance.cpp:583`, `:747`, `:770`, `:793`, and `:816` indirectly validate block routing/layout through numerical parity.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:898` `TEST(MonolithicCellKernelBlockSpec, PreservesResolvedMixedBlockMetadata)` directly inspects field IDs, matrix/vector intent flags, fallback kernel handles, optional IR ownership, spaces, row/column dof maps, row/column offsets, mutable metadata, and resolved-state bookkeeping.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:997` `TEST(MonolithicCellKernelBlockSpec, RoutesMatrixVectorAndMixedBlocksIndependently)` directly inspects matrix-only, vector-only, and mixed block intent flags, offsets, maps, fallback kernels, and IR ownership in one kernel.
+  - Checked: direct metadata preservation, one-sided/mixed block coexistence, and numerical monolithic parity cover the block layout contract.
+
+## 5. Basis And Quadrature
+
+- [ ] `Invoked` `LagrangeBasis` - `Code/Source/solver/FE/Basis/LagrangeBasis.h:42`.
+- [ ] `Invoked` `LagrangeBasis::evaluate_values` - P1 Tri3 values.
+- [ ] `Invoked` `LagrangeBasis::evaluate_gradients` - P1 Tri3 gradients.
+- [ ] `Invoked` `LagrangeBasis::evaluate_hessians` - P1 Tri3 Hessian request path.
+- [ ] `Invoked` `LagrangeBasis::build_simplex_nodes` - `Code/Source/solver/FE/Basis/LagrangeBasis.h:79`.
+- [ ] `Invoked` `BasisFactory::create` - `Code/Source/solver/FE/Basis/BasisFactory.cpp:854`.
+- [ ] `Invoked` `BasisRequest` - basis construction request object.
+- [ ] `Invoked` `BasisCache::instance` - `Code/Source/solver/FE/Basis/BasisCache.h:73`.
+- [ ] `Invoked` `BasisCache::get_or_compute` - `Code/Source/solver/FE/Basis/BasisCache.h:77`.
+- [ ] `Invoked` `StandardAssembler::resolveQuadratureRule` - `Code/Source/solver/FE/Assembly/StandardAssembler.cpp:3869`.
+- [ ] `Invoked` `resolve_cell_quadrature` - `Code/Source/solver/FE/Systems/SystemSetup.cpp:3982`.
+- [ ] `Invoked` `QuadratureFactory::create` - `Code/Source/solver/FE/Quadrature/QuadratureFactory.cpp:164`.
+- [ ] `Invoked` `SymmetricTriangleQuadrature` - `Code/Source/solver/FE/Quadrature/SymmetricTriangleQuadrature.cpp:107`.
+
+## 6. Time Loop, Time Integration, And Newton
+
+- [ ] `Invoked` `TimeLoop::run` - `Code/Source/solver/TimeLoop/TimeLoop.cpp:257`.
+- [ ] `Invoked` `GeneralizedAlphaFirstOrderIntegrator::buildContext` - `Code/Source/solver/FE/TimeStepping/GeneralizedAlpha.cpp:54`.
+- [ ] `Invoked` `assembly::TimeIntegrationContext` - receives generalized-alpha coefficients.
+- [ ] `Invoked` `TimeHistory::resetCurrentToPrevious` - step state initialization.
+- [ ] `Invoked` `TimeHistory::updateGhosts` - serial no-op/consistency path.
+- [ ] `Invoked` `TimeHistory::u` - current solution accessor.
+- [ ] `Invoked` `TransientSystem` - wraps `FESystem`.
+- [ ] `Invoked` `BDFIntegrator` - history integrator constructed with order 1 by `ApplicationDriver.cpp:606`.
+- [ ] `Invoked` `callbacks.on_step_start` - wired in `ApplicationDriver.cpp:610`.
+- [ ] `Invoked` `callbacks.on_nonlinear_done` - wired in `ApplicationDriver.cpp:610`.
+- [ ] `Invoked` `callbacks.on_step_accepted` - wired in `ApplicationDriver.cpp:626`.
+- [ ] `Invoked` `NewtonSolver::allocateWorkspace` - `Code/Source/solver/FE/TimeStepping/NewtonSolver.cpp:3175`.
+- [ ] `Invoked` `NewtonSolver::solveStep` - `Code/Source/solver/FE/TimeStepping/NewtonSolver.cpp:3244`.
+- [ ] `Invoked` `makeStateView` - Newton state view construction.
+- [ ] `Invoked` `makeNewtonState` - Newton state construction.
+- [ ] `Invoked` `syncHistoryState` - constraints distribute plus history ghost update.
+- [ ] `Invoked` `syncCurrentState` - `constraints.updateGhostsAndDistribute`.
+- [ ] `Invoked` `assembleJacobianAndResidual` - combined assembly path with `same_op=true`.
+- [ ] `Invoked` `assembleResidualOnly` - residual-only assembly path.
+- [ ] `Invoked` `residualNormForConvergence` - `Code/Source/solver/FE/TimeStepping/NewtonSolver.cpp:807`; owned-row norm for FSILS.
+- [ ] `Invoked` `borderedResidualNormComponentsForConvergence` - auxiliary component is zero for `Channel2D`.
+- [ ] `Invoked` `scalarToleranceSatisfied` - Newton scalar residual tolerance check.
+- [ ] `Invoked` `applyPtcDiagonalShift` - linear-failure retry path exercised at step 0, iteration 0.
+- [ ] `Invoked` `applyDtIncrementScaling` lambda - no-op because `scale_dt_increments=false`.
+- [ ] `Invoked` `axpy(history.u(), -1.0, du)` - Newton update.
+- [ ] `Invoked` `copyVector` - `Code/Source/solver/FE/TimeStepping/NewtonSolver.cpp:789`.
+- [ ] `Invoked` `axpy` helper - `Code/Source/solver/FE/TimeStepping/NewtonSolver.cpp:799`.
+- [ ] `Invoked` `GenericVector::norm` - residual/increment norm support.
+- [ ] `Invoked` `GenericVector::dot` - linear algebra support.
+- [ ] `Not invoked` `evaluateLineSearchTrial` lambda - line search is off.
+- [ ] `Not invoked` auxiliary delta application - no bordered auxiliary state.
+- [ ] `Not invoked` local condensed recovery - no bordered/local-condensed auxiliary state.
+- [ ] `Not invoked` step-tolerance convergence check - disabled in `Channel2D`.
+- [ ] `Not invoked` PTC SER update - only linear-failure PTC trigger is active.
+
+## 7. Assembly Subsystem
+
+- [x] `Invoked` `FESystem::assemble` - `Code/Source/solver/FE/Systems/FESystem.cpp:2457`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_FESystem.cpp:328` `TEST(FESystem, AssembleAccumulatesMultipleCellTerms)` compares system assembly against direct `StandardAssembler` reference assembly and checks exact doubled matrix entries.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_FESystem.cpp:368` `TEST(FESystem, AssembleVectorUsesSolutionInjectionWhenRequested)` validates current-solution injection into an assembled residual.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_JacobianVerification.cpp:68`, `:189`, and `:400` validate assembled system Jacobians against central differences and Taylor remainder behavior for coupled Stokes, nonlinear residuals, and SUPG-style stabilization.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_NavierStokesCoupled.cpp:109` and `:228` validate coupled Navier-Stokes-style residual/Jacobian assembly against finite differences.
+  - Checked: system-level assembly is directly tested for matrix/vector routing, state injection, multi-term accumulation, and assembled tangent accuracy.
+- [x] `Invoked` `assembleOperator` - `Code/Source/solver/FE/Systems/SystemAssembly.cpp:652`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_SystemAssembly.cpp:91`, `:123`, and `:152` cover matrix-only, vector-only, and combined matrix/vector operator assembly.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_SystemAssembly.cpp:188` and `:226` validate `zero_outputs=true` clearing and `zero_outputs=false` accumulation.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_SystemAssembly.cpp:263`, `:282`, `:301`, and `:328` validate null-output rejection, empty-operator behavior, and global-kernel-only assembly.
+  - Checked: public operator assembly orchestration is covered for requested-output combinations, output lifetime semantics, invalid arguments, empty operators, and global kernels.
+- [x] `Invoked` `StandardAssembler::assembleCellsFused` - `Code/Source/solver/FE/Assembly/StandardAssembler.cpp:5379`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:584` validates monolithic JIT fused assembly parity against per-block fallback for matrix and vector output.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:748`, `:771`, `:794`, and `:817` validate fused transient mixed/VMS residual assembly parity, including generalized-alpha state.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_BackendParity.cpp:543` verifies resolved-insertion-capable and plain insertion backends produce identical fused matrix/vector results.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_JacobianVerification.cpp:68`, `:189`, and `:400` validate fused system assembly tangent accuracy against finite differences.
+  - Checked: fused cell assembly is tested through public system assembly for mixed/coupled blocks, monolithic-vs-fallback parity, resolved-insertion parity, transient state, and tangent consistency.
+- [x] `Invoked` `StandardAssembler::prepareGeometry` - `Code/Source/solver/FE/Assembly/StandardAssembler.cpp:3949`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:2403` validates near-zero tetra Jacobian scaling by comparing the assembled mass entry to the exact small physical volume.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:2434` validates inverted-cell orientation handling by requiring the same mass matrix as the non-inverted tetra.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:1510`, `:1539`, `:1567`, and `:1596` validate physical face measures and normals for tetra and 2D triangle boundary faces.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_ManufacturedSolutionConvergence_ElementTypes.cpp:1139` validates Triangle3 P1 Poisson convergence at expected order, exercising geometry, weights, and gradients in the full cell assembly path.
+  - Checked: observable cell/face geometry outputs are tested against exact measures, orientation invariance, degenerate scaling, and convergence rates.
+- [x] `Invoked` `cached_mapping_` - geometry cache used by `prepareGeometry`.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:2403` and `:2434` indirectly exercise repeated geometry mapping use through small/inverted tetra assembly.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Assembly/test_ManufacturedSolutionConvergence_ElementTypes.cpp:1139` indirectly exercises repeated Triangle3 geometry preparation across mesh refinements.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:2948` validates non-affine Quad4 monolithic fused assembly parity against sequential fallback, including affine/non-affine geometry classification used by the mapping cache.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:3085` validates reuse of one `StandardAssembler` across Quad4 then Tetra4 assembly against a fresh-assembler reference, proving cached mapping topology invalidation.
+  - Checked: geometry cache reuse is covered for repeated geometry, topology changes, affine/non-affine classification, orientation, degenerate scaling, and convergence-sensitive gradient use.
+- [x] `Invoked` `cached_geom_h_` - cell-size geometry cache.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormVocabulary.cpp:229` `TEST(FormVocabularyTest, EntityMeasureTerminalsWorkOnCellAndFace)` validates assembled `h()` on a unit tetra against the exact expected diameter.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_NonlinearFormKernel_Boundary.cpp:182`, `:240`, `:660`, and `:723` validate `h()`-dependent Nitsche boundary residual/Jacobian assembly against central differences.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_JacobianVerification.cpp:400` validates an `h()`-dependent SUPG-style residual/Jacobian against central differences and quadratic Taylor remainder.
+  - Checked: cell-size values used by weak forms are tested by exact terminal assembly and nonlinear tangent consistency.
+- [x] `Invoked` `cached_geom_volume_` - cell volume geometry cache.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormVocabulary.cpp:229` validates assembled `vol()` on a unit tetra against exact volume contribution.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:2403` validates exact near-zero volume scaling in the assembled mass matrix.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Geometry/test_JacobianCacheGeometryQuadrature.cpp:363`, `:392`, and `:409` validate triangle/tetra physical measure scaling and positive volume under reversed orientation in the geometry-quadrature layer used by assembly.
+  - Checked: volume/measure values are directly tested with exact terminal assembly and edge-case geometric scaling.
+- [x] `Invoked` `StandardAssembler::prepareBasis` - `Code/Source/solver/FE/Assembly/StandardAssembler.cpp:4404`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:1962` validates physical Hessian transformation against finite-difference gradients on a non-affine quad.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_NonlinearFormKernel.cpp:36`, `:261`, and `:320` validate assembled basis/gradient/Hessian-dependent Jacobians against finite differences.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_ManufacturedSolutionConvergence_ElementTypes.cpp:1139` and `:1364` validate Triangle3 scalar Poisson and vector elasticity convergence at expected order.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_TangentFiniteDifferences.cpp:215`, `:247`, and `:281` validate gradient/vector-gradient/boundary basis assembly paths against central differences.
+  - Checked: basis values, physical gradients, Hessians, vector-valued spaces, and face basis use are tested through finite-difference and convergence checks.
+- [x] `Invoked` `cached_test_bcache_` - cached test basis data.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Assembly/test_ManufacturedSolutionConvergence_ElementTypes.cpp:1139` and `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:584` indirectly exercise repeated test-space basis evaluation through assembly.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:3142` validates reused-assembler parity for a same-space warmup followed by rectangular Q1/Q2 fused assembly, covering scalar test-basis cache reuse/invalidation across assembly modes.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:3231` validates cache refresh from no-Hessian Q2 assembly to Hessian-required Q2 assembly, then scalar-space to ProductSpace assembly with nonzero offsets.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:3305` validates reused-vs-fresh parity after a same-space warmup followed by offset rectangular Q1/Q2 fused assembly.
+  - Checked: test-basis cache reuse and invalidation are directly covered for changed spaces/orders, quadrature-sensitive Q1/Q2 use, Hessian required-data changes, ProductSpace transitions, topology changes through cached mapping tests, and nonzero offsets.
+- [x] `Invoked` `cached_trial_bcache_` - cached trial basis data.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp:246`, `:284`, and `:316` indirectly exercise separate row/trial spaces in rectangular cell, boundary, and vector-only assembly.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Systems/test_BackendParity.cpp:543` indirectly exercises mixed trial-field state assembly with resolved insertion enabled.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:3142` directly compares reused and fresh assemblers for rectangular Q1/Q2 fused assembly after a same-space warmup, proving trial-basis cache refresh for a changed scalar trial space.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:3231` validates trial-basis refresh for Hessian required-data changes and scalar-to-ProductSpace transition with nonzero offsets.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:3305` isolates trial-basis refresh across row/column offsets and Q1/Q2 quadrature-sensitive rectangular assembly.
+  - Checked: trial-basis cache reuse and invalidation are directly covered for different trial spaces/orders, offsets, quadrature-sensitive Q1/Q2 use, required-data changes, and ProductSpace transitions.
+- [x] `Invoked` qpt-major values cache for coupled blocks - `StandardAssembler.cpp:5793`.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:584`, `:748`, `:771`, `:794`, and `:817` indirectly exercise coupled-block qpt-major data through monolithic/fallback parity.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_SIMDBatch.cpp:430`, `:446`, and `:466` validate underfilled, scalar-fallback, and vector-test/scalar-trial batch parity.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:3142` adds focused reused-vs-fresh parity for scalar qpt-major basis data after same-space to rectangular fused reuse.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:3373` validates monolithic coupled-block qpt-major cache refresh on one reused `StandardAssembler` across Q1-to-Q2 space changes and no-Hessian-to-Hessian required-data changes.
+  - Checked: coupled-block qpt-major values and derivative cache reuse are covered for monolithic multi-block assembly, changed spaces/orders, quadrature-sensitive Q1/Q2 use, and Hessian/no-Hessian transitions.
+- [x] `Invoked` `test_phys_gradients` arena data - physical test gradients.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_NonlinearFormKernel.cpp:36` validates gradient-dependent cell Jacobian assembly against finite differences.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_TangentFiniteDifferences.cpp:215` and `:247` validate Poisson and intrinsic vector-gradient tangents against central differences.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_JacobianVerification.cpp:400` validates SUPG-style test-gradient usage against central differences and Taylor remainder.
+  - Checked: physical test-gradient data is covered by cell, vector-gradient, and stabilized residual tangent checks.
+- [x] `Invoked` `trial_phys_gradients` arena data - physical trial gradients.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_NonlinearFormKernel.cpp:36`, `:141`, and `:201` validate scalar, HCurl curl, and HDiv divergence trial-gradient-related Jacobians against finite differences.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_JacobianVerification.cpp:68` and `:400` validate coupled and stabilization trial-gradient contributions against central differences.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_TangentFiniteDifferences.cpp:215`, `:231`, and `:247` validate JIT assembled trial-gradient tangents against central differences.
+  - Checked: physical trial-gradient data is tested in scalar, mixed/coupled, vector-basis, and stabilized tangent paths.
+- [x] `Invoked` `physical_hessians` arena data - physical Hessian path.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:1962` validates physical Hessians against finite-difference gradients for non-affine geometry.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_NonlinearFormKernel.cpp:261`, `:320`, and `:383` validate scalar, vector, and discrete-field Hessian residual/Jacobian behavior against finite differences.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_HessianVectorProduct.cpp:154` validates Hessian-vector-product assembly through field solution access and JIT/interpreter handling.
+  - Checked: Hessian arena data is tested directly against finite differences and through nonlinear field-dependent residuals.
+- [x] `Invoked` `StandardAssembler::populateFieldSolutionDataFast` - `Code/Source/solver/FE/Assembly/StandardAssembler.cpp:13368`.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Systems/test_MixedFormPerformance.cpp:748`, `:771`, `:794`, and `:817` indirectly exercise fast field population in fused transient/mixed residual assembly.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Systems/test_BackendParity.cpp:543` indirectly validates fused field state population under resolved insertion parity.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_SIMDBatch.cpp:430`, `:446`, and `:466` validate batched/fallback parity for selected JIT assembly cases.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:2948` validates monolithic fused field population against sequential fallback for scalar values, scalar gradients, ProductSpace vector values, vector Jacobians, and two history states on a non-affine Quad4.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:3447` validates the Hessian/laplacian fallback contract for scalar and ProductSpace vector fields when `populateFieldSolutionDataFast` intentionally declines those requirements.
+  - Checked: fast field population is covered for scalar/vector values, gradients/Jacobians, history states, non-affine geometry, and the explicit Hessian/laplacian fallback contract.
+- [x] `Invoked` `StandardAssembler::populateFieldSolutionData` - fallback path at `StandardAssembler.cpp:11378` and `StandardAssembler.cpp:12162`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_FESystem.cpp:368` validates state-vector injection into assembled residual coefficients.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_NonlinearFormKernel.cpp:383` validates discrete-field Hessian data affects both residual and Jacobian correctly.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:152`, `:210`, and `:267` validate field-access-backed symbolic/AD Jacobians against AD or finite differences.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_FsilsSolutionViewGhostUpdateMPI.cpp:377` and `:419` validate current/history solution views are gathered through owner-authoritative ghost updates under MPI.
+  - Checked: fallback field population is covered for current solution, field access, scalar/vector derivative data, Hessians, history, and MPI ghosted solution views.
+- [x] `Invoked` `StandardAssembler::ensureResolvedMatrixTable` - `Code/Source/solver/FE/Assembly/StandardAssembler.cpp:1543`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_BackendParity.cpp:543` proves `StandardAssembler` requests and uses resolved matrix entries when the backend advertises that capability, with exact parity against plain insertion.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1955` and `:1997` validate FSILS resolved matrix slots match direct matrix insertion for contiguous and irregular/invalid-column cases.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsAssemblyParityMPI.cpp:1298` validates MPI-owned-row insertion counters for direct and resolved matrix insertion paths.
+  - Checked: resolved matrix table behavior is validated through assembler-level capability parity and FSILS slot-level direct-vs-resolved parity.
+- [x] `Invoked` `StandardAssembler::ensureResolvedVectorTable` - `Code/Source/solver/FE/Assembly/StandardAssembler.cpp:1631`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_BackendParity.cpp:543` proves `StandardAssembler` requests and uses resolved vector entries when available, with exact parity against plain insertion.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:2041` and `:2079` validate FSILS resolved vector entries match direct vector insertion for contiguous add and irregular insert cases.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsAssemblyParityMPI.cpp:1193` validates owner-authoritative vector update/ghost behavior for FSILS vectors.
+  - Checked: resolved vector table behavior is validated through assembler-level capability parity and backend direct-vs-resolved parity.
+- [x] `Invoked` `StandardAssembler::ensureCellConstrainedFlags` - `Code/Source/solver/FE/Assembly/StandardAssembler.cpp:1604`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:2469` validates constrained-chain local matrix/vector contributions are distributed to master DOFs and constrained rows remain unpopulated.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_AssemblyConstraintDistributor_Integration.cpp:27` and `:78` validate symmetric and nonsymmetric MPC elimination distributes constrained rows/columns correctly.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_FESystem.cpp:475` validates constraint sparsity augmentation adds required master couplings at the system level.
+  - Checked: constrained-cell detection is verified through observable constrained insertion, row/column distribution, and system sparsity augmentation behavior.
+- [x] `Invoked` `JITKernelWrapper::computeCellBatch` - batched coupled kernel dispatch.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_SIMDBatch.cpp:390`, `:414`, and `:501` validate batched scalar Laplacian, nonlinear reaction-diffusion, and Stokes/VMS output parity.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_SIMDBatch.cpp:430`, `:446`, and `:466` validate underfilled batch, vectorization-disabled scalar fallback, and vector-test/scalar-trial cross-block parity.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:1834`, `:1852`, and `:1870` verify `StandardAssembler` selects batched dispatch when enabled and falls back to scalar when batching is disabled or unsupported.
+  - Checked: batched cell dispatch is covered for selection behavior and numerical parity across linear, nonlinear, mixed, underfilled, and fallback configurations.
+- [x] `Invoked` `assembly::jit::CoupledCellKernelBatchArgsV1` - batch kernel argument ABI.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_Vectorization.cpp:322` directly compiles and invokes a coupled kernel through `CoupledCellKernelBatchArgsV1`, validating matrix-only, vector-only, and mixed output buffers.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_JITKernelArgsPacking.cpp:198` validates time-integration/history stencil pointers in packed JIT kernel arguments.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_SIMDBatch.cpp:390`, `:430`, and `:466` validate the ABI indirectly through batched assembly parity.
+  - Checked: the batch ABI is directly invoked and indirectly validated through assembled numerical parity.
+- [x] `Invoked` `JITKernelWrapper::computeCell` - V6 single-cell fallback path.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_SymbolicDifferentiation.cpp:980`, `:1028`, and `:1080` compare JIT wrapper cell output against interpreter output.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_TangentFiniteDifferences.cpp:215` through `:518` validate single-cell JIT tangent outputs against central differences for a broad operator set.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:1852` and `:1870` verify scalar cell dispatch is used when batching is disabled or unsupported.
+  - Checked: scalar JIT cell execution and assembler fallback dispatch are covered by interpreter parity, finite-difference tangents, and dispatch-selection tests.
+- [x] `Invoked` `StandardAssembler::insertLocal` - `Code/Source/solver/FE/Assembly/StandardAssembler.cpp:12907`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:1790`, `:1806`, and `:1822` validate matrix, vector, and combined local-to-global insertion paths.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:1939` validates shared DOFs receive multiple local contributions exactly.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:2266` validates rectangular row/column offsets during insertion.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:2319`, `:2349`, and `:2376` validate empty-output no-op behavior and finite-value rejection for NaN/Inf local outputs.
+  - Checked: local insertion is tested for matrix/vector/both, accumulation, rectangular offsets, empty output, and invalid numeric output.
+- [x] `Invoked` `GlobalSystemView::addMatrixEntriesResolved` - resolved matrix insertion.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_BackendParity.cpp:543` validates resolved matrix insertion is used by assembler and matches plain insertion exactly.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1955` and `:1997` validate resolved FSILS matrix insertion matches direct insertion for contiguous and irregular blocks.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsAssemblyParityMPI.cpp:1298` validates resolved matrix insertion participates in owned-row drop/off-owner accounting under MPI.
+  - Checked: resolved matrix insertion is covered at adapter and FSILS backend levels, including MPI-owned-row accounting.
+- [x] `Invoked` `GlobalSystemView::addVectorEntriesResolved` - resolved vector insertion.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_BackendParity.cpp:543` validates resolved vector insertion is used by assembler and matches plain insertion exactly.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:2041` and `:2079` validate resolved FSILS vector insertion matches direct insertion for contiguous and irregular blocks.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsAssemblyParityMPI.cpp:1193` validates owner-authoritative FSILS vector update/ghost behavior.
+  - Checked: resolved vector insertion is covered at adapter and FSILS backend levels, including owner-authoritative vector behavior.
+- [x] `Invoked` `StandardAssembler::assembleBoundaryFaces` - `Code/Source/solver/FE/Assembly/StandardAssembler.cpp:2195`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormKernel_Boundary.cpp:28`, `:58`, and `:87` validate boundary `ds` integration, marker filtering, and vector boundary mass block structure.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_NonlinearFormKernel_Boundary.cpp:123`, `:182`, `:240`, `:488`, `:546`, and `:603` validate nonlinear boundary Jacobians against central differences.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_JIT_TangentFiniteDifferences.cpp:281` and `:301` validate JIT boundary tangents against central differences.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp:284` validates rectangular boundary term insertion into the correct off-diagonal block.
+  - Checked: boundary assembly is tested for scalar/vector integration, marker filtering, nonlinear/JIT tangent accuracy, and rectangular block routing.
+- [x] `Invoked` `StandardAssembler::prepareContextFace` - `Code/Source/solver/FE/Assembly/StandardAssembler.cpp:2301`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:1510` validates face quadrature, reference-face coordinates, physical measure, and normal direction on a tetra face.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:1539`, `:1567`, `:1596`, `:1625`, `:1651`, and `:1677` validate physical face measures for tetra, triangle, wedge, and pyramid topologies.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:1703` validates interior-face preparation for both sides, opposing normals, area, and physical-point alignment.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_NonlinearFormKernel_Boundary.cpp:660`, `:723`, and `:780` validate combined cell-plus-boundary context preparation against central differences.
+  - Checked: face context preparation is tested against exact measures/normals across topologies and nonlinear finite-difference boundary behavior.
+- [x] `Invoked` `StandardAssembler::gatherVectorCoefficients` - `Code/Source/solver/FE/Assembly/StandardAssembler.cpp:2322`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_FESystem.cpp:368` validates gathered current solution coefficients are visible to assembled residual kernels.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp:316` validates vector-only rectangular terms gather trial-field solution values correctly.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_NonlinearFormKernel.cpp:36` and `Code/Source/solver/FE/Tests/Unit/Forms/test_NonlinearFormKernel_Boundary.cpp:123` validate gathered coefficients feed cell and boundary nonlinear Jacobians that match finite differences.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_FsilsSolutionViewGhostUpdateMPI.cpp:377` and `:419` validate gathering from FSILS solution views uses current/history ghost values correctly under MPI.
+  - Checked: coefficient gathering is tested for raw vectors, field-specific trial state, nonlinear tangent consistency, boundary use, and ghosted FSILS views.
+- [x] `Invoked` boundary-face `insertLocal` - `Code/Source/solver/FE/Assembly/StandardAssembler.cpp:2391`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormKernel_Boundary.cpp:28` verifies a single boundary face inserts the expected linear boundary vector.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormKernel_Boundary.cpp:58` verifies only marked faces contribute to the inserted boundary result.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormKernel_Boundary.cpp:87` verifies vector boundary mass insertion preserves block-diagonal structure.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp:284` validates boundary rectangular matrix insertion into an off-diagonal block.
+  - Checked: boundary local-to-global insertion is tested for scalar/vector, marker-filtered, and rectangular matrix contributions.
+- [x] `Invoked` `mesh.forEachBoundaryFace` - boundary marker face iteration.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_MeshAccess.cpp:180` validates boundary/interior face iteration and marker-filtered boundary face callbacks for a two-triangle mesh.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_MeshAccess.cpp:246` validates local face indices and marker-filtered boundary iteration for two tetrahedra.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormKernel_Boundary.cpp:58` validates assembler-level boundary marker filtering produces the expected assembled result.
+  - Checked: boundary marker iteration is tested at mesh-access and assembled-result levels.
+- [ ] `Not invoked` `ColoredAssembler` - OpenMP graph-colored path out of scope with `OMP=1`.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Assembly/test_ColoredAssembler.cpp` and `Code/Source/solver/FE/Tests/Unit/Assembly/test_AssemblyLoop.cpp:510` exercise colored assembly behavior outside the audited serial `Channel2D` path.
+  - Not checked: out of serial `Channel2D` scope.
+- [ ] `Not invoked` graph-colored parallel assembly path - out of serial `Channel2D` scope.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Assembly/test_AssemblyLoop.cpp:487`, `:510`, and `:536` compare OpenMP/colored/deterministic loop behavior outside the audited serial path.
+  - Not checked: out of serial `Channel2D` scope.
+- [ ] `Not invoked` `ParallelAssembler` MPI path - out of serial `Channel2D` scope.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Assembly/test_ParallelAssembler.cpp`, `test_SerialParallelEquivalenceMPI.cpp`, and `test_FESystemSerialParallelEquivalenceMPI.cpp` exercise MPI assembly outside the audited serial path.
+  - Not checked: out of serial `Channel2D` scope.
+- [ ] `Not invoked` interior/DG/interface kernels - out of continuous Galerkin `Channel2D` scope.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Forms/test_FormKernel_DG.cpp`, `test_NonlinearFormKernel_DGHelpers.cpp`, `Code/Source/solver/FE/Tests/Unit/Systems/test_FESystem.cpp:426`, and `Code/Source/solver/FE/Tests/Unit/Assembly/test_StandardAssembler.cpp:1703` exercise interior/DG/interface-adjacent paths outside the audited continuous-Galerkin `Channel2D` path.
+  - Not checked: out of continuous-Galerkin `Channel2D` scope.
+- [ ] `Not invoked` multirate assembly - out of `Channel2D` scope.
+  - Supporting unit tests found: no focused `Channel2D`-path unit test evidence was identified in this audit.
+  - Not checked: out of `Channel2D` scope.
+- [ ] `Not invoked` Region auxiliary output - no auxiliary output for `Channel2D`.
+  - Supporting unit tests found: auxiliary scope tests exist under `Code/Source/solver/FE/Tests/Unit/Auxiliary` and `Code/Source/solver/FE/Tests/Unit/Assembly/test_AuxiliaryScopeCompletionMPI.cpp`, but this path is not invoked by `Channel2D`.
+  - Not checked: out of `Channel2D` scope.
+- [ ] `Not invoked` QuadraturePoint auxiliary output - no auxiliary output for `Channel2D`.
+  - Supporting unit tests found: quadrature-point auxiliary scope tests exist in `Code/Source/solver/FE/Tests/Unit/Systems/test_FormsInstaller.cpp:1574`, `:1607`, `:1850`, `:1925`, `:1989`, and `:2021`, plus MPI auxiliary completion tests outside the audited `Channel2D` path.
+  - Not checked: out of `Channel2D` scope.
+
+## 8. Linear Solver: FSILS GMRES With Diagonal Preconditioner
+
+- [x] `Invoked` `FsilsLinearSolver::setOptions` - `Code/Source/solver/FE/Backends/FSILS/FsilsLinearSolver.cpp:794`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance.cpp:147` validates invalid public solver options throw for FSILS, including non-positive iteration limits and negative tolerances.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance.cpp:357` validates FSILS rejects unsupported initial guesses.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1101` validates metadata-driven BlockSchur option normalization.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:2639` validates a small restarted-GMRES Krylov dimension is honored and reports nonconvergence instead of silently falling back.
+  - Checked: public option validation, FSILS-specific unsupported options, normalized metadata, and GMRES restart configuration are covered.
+- [x] `Invoked` `FsilsLinearSolver::setRankOneUpdates` - `Code/Source/solver/FE/Backends/FSILS/FsilsLinearSolver.cpp:821`; empty updates for `Channel2D`.
+  - Supporting unit tests: default empty-update operation is exercised by all plain FSILS solves in `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1058`, `:1218`, and `:2639`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1338` and `:1440` validate non-empty rank-one updates for 3-DOF and 4-DOF serial systems by checking the full corrected operator residual.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_BlockSchurMPI.cpp:1267`, `:3220`, and `:3391` validate rank-one update solves under MPI and compare manufactured mode response.
+  - Checked: the empty Channel2D contract is covered through plain solves, and non-empty update semantics are covered by corrected-residual serial and MPI tests.
+- [x] `Invoked` `FsilsLinearSolver::setEffectiveTimeStep` - `Code/Source/solver/FE/Backends/FSILS/FsilsLinearSolver.cpp:859`.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Backends/test_BlockSchurMPI.cpp:1438`, `:1616`, `:1791`, `:1977`, `:2420`, `:2595`, `:2988`, `:3199`, and `:3374` call `setEffectiveTimeStep()` in rank-one/reduced-field MPI scenarios.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:388` verifies positive finite storage and invalid/non-finite fallback to `1.0`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:411` verifies the explicit BlockSchur stage-scaling diagnostic path preserves the external rank-one corrected operator.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/TimeStepping/test_NewtonSolver.cpp:1271` verifies Newton passes stage `dt_eff` when available and falls back to the base time step otherwise.
+  - Checked: FSILS storage/fallback, Newton handoff, and stage-scaling external-operator invariance are covered.
+- [x] `Invoked` `FsilsLinearSolver::solve` - `Code/Source/solver/FE/Backends/FSILS/FsilsLinearSolver.cpp:1145`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance.cpp:115`, `:171`, and `:730` validate backend mismatch, size mismatch, and singular-system failure behavior.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance.cpp:199`, `:255`, `:311`, `:448`, `:479`, `:543`, `:592`, `:636`, `:693`, `:769`, `:886`, `:1006`, `:1044`, `:1160`, `:1202`, and `:1335` validate known solutions, deterministic repeated solves, residual tolerances, zero RHS, scaling, duplicate assembly, assembly order, Dirichlet rows, multi-DOF systems, and forced nonconvergence.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1218` validates FSILS GMRES with diagonal preconditioning on a known 2-DOF system and checks the true matrix residual.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverMPI.cpp:141` and `Code/Source/solver/FE/Tests/Unit/Assembly/test_TimeLoopFsilsConvergenceMPI.cpp:785` validate distributed FSILS solving and a full MPI generalized-alpha/GMRES time-loop path.
+  - Checked: solve orchestration is covered for input validation, known serial solutions, residual tolerance modes, deterministic behavior, nonconvergence reporting, multi-DOF layout, MPI ownership, and time-loop integration.
+- [x] `Invoked` `fsils_solve` - `Code/Source/solver/FE/Backends/FSILS/liner_solver/solve.cpp:122`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1058`, `:1218`, `:1273`, `:515`, and `:2639` exercise the legacy FSILS entry through CG, vector GMRES, BlockSchur, and restarted-GMRES failure reporting.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance.cpp:448`, `:543`, `:592`, `:636`, `:693`, `:769`, `:886`, and `:1335` validate the public solver path that dispatches into `fsils_solve` for convergence, tolerance, edge-case, and failure behavior.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverMPI.cpp:141` and `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackendMPI.cpp:28` validate MPI overlap solves through `fsils_solve`.
+  - Checked: the legacy solve entry is covered through public FSILS solves across serial, MPI, vector-DOF, diagonal-preconditioned, and failure-reporting cases.
+- [x] `Invoked` `precond_diag` - `Code/Source/solver/FE/Backends/FSILS/liner_solver/precond.cpp:393`.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1218` and `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance.cpp:543`, `:636`, `:886`, and `:1202` indirectly exercise diagonal preconditioning through successful FSILS solves.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:795` directly validates exact dof=3 diagonal extraction, negative-diagonal `abs()` scaling, zero-diagonal fallback, RHS scaling, and symmetric `W*K*W` block scaling against an independent reference.
+  - Checked: the no-face/no-reduced-update `Channel2D` diagonal-preconditioner contract is directly tested, with non-Channel2D face/reduced-update scaling covered separately by BlockSchur/low-rank tests.
+- [x] `Invoked` `gmres_v` - `Code/Source/solver/FE/Backends/FSILS/liner_solver/gmres.cpp:2096`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1218` validates vector-DOF GMRES on a known solution and independently checks the matrix residual.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_TimeLoopFsilsConvergenceMPI.cpp:785` validates a distributed FE generalized-alpha solve using FSILS GMRES/diagonal on a velocity-pressure style vector-DOF system.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1338`, `:1440`, `:1557`, `:2042`, `:2142`, and `:2497` validate vector-GMRES with FSILS auxiliary/rank-one/reduced update paths by checking full corrected residuals.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_BlockSchurMPI.cpp:1456`, `:2762`, `:3009`, `:3220`, and `:3391` validate vector-GMRES comparison paths for MPI rank-one/reduced/grouped bordered coupling systems.
+  - Checked: vector GMRES is covered for known vector-DOF solutions, residual accuracy, distributed FE integration, and auxiliary coupling comparison paths.
+- [ ] `Not invoked` `gmres_s` - scalar GMRES path; it shares GMRES infrastructure but is not the vector-DOF path for serial `Channel2D`.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance.cpp:199`, `:255`, `:543`, `:592`, `:636`, `:693`, `:769`, and `:1335` exercise scalar FSILS GMRES on serial scalar systems.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:2639` validates restarted scalar GMRES honors iteration limits and reports nonconvergence without fallback.
+  - Not checked: out of the audited `Channel2D` vector-DOF path.
+- [x] `Invoked` `fsils_spar_mul` - sparse matrix-vector product.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1218`, `:1338`, `:1557`, and `:2639` exercise SpMV indirectly through GMRES and post-solve residual checks.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance.cpp:448`, `:479`, `:543`, and `:1202` exercise SpMV indirectly through Poisson, nonsymmetric, and multi-DOF solves.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:868` directly validates the public SS, SV, VS, and dof=3 VV SpMV variants against independent dense references and verifies non-owned/ghost output rows are zeroed.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:954` directly validates the dynamic-DOF VV SpMV path against an independent dense reference.
+  - Checked: scalar, scalar-to-vector, vector-to-scalar, vector-to-vector, dof=3, dynamic-DOF, and owned-output zeroing behavior are directly covered.
+- [x] `Invoked` `fsils_nc_dot_v` - vector-DOF dot product.
+  - Supporting unit tests found: vector-GMRES solve tests such as `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1218`, `:1338`, and `:1440` indirectly exercise local vector dot products in Arnoldi orthogonalization.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:515` directly compares `fsils_nc_dot_v` against an independent owned-node reference for DOFs 1-5 with signed values and poisoned non-owned tails.
+  - Checked: direct owned-span dot-product semantics are covered for specialized and dynamic vector DOF counts.
+- [x] `Invoked` `fused_dot_zz_v` - fused CGS helper used by GMRES internals where enabled.
+  - Supporting unit tests found: vector-GMRES solve tests such as `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1218`, `:1338`, and `:1440` indirectly exercise fused Arnoldi helpers.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:569` directly compares `fused_dot_zz_v` against unfused dot and norm references for DOFs 1-5, multiple Arnoldi columns, signed values, and poisoned non-owned tails.
+  - Checked: fused dot/zz semantics are directly covered for specialized and dynamic vector DOF counts.
+- [x] `Invoked` `fused_update_v_inplace` - fused GMRES update helper where enabled.
+  - Supporting unit tests found: vector-GMRES solve tests such as `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1218`, `:1338`, and `:1440` indirectly exercise fused vector-update helpers.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:569` directly compares `fused_update_v_inplace` against an unfused `u_next -= sum_j h_j u_j` reference for DOFs 1-5 and restart depths 1-3.
+  - Checked: fused vector update semantics are directly covered for specialized and dynamic vector DOF counts.
+- [x] `Invoked` `bc_pre` - `Code/Source/solver/FE/Backends/FSILS/liner_solver/gmres.cpp` and `Code/Source/solver/FE/Backends/FSILS/liner_solver/ns_solver.cpp`.
+  - Supporting unit tests found: plain FSILS solves exercise the no-face/no-legacy-BC path.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance.cpp:1160` validates public zero-row Dirichlet behavior, but that is matrix-side Dirichlet handling rather than a direct legacy face-BC `bc_pre` test.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:740` directly verifies coupled face norm accumulation, non-coupled no-op behavior, shared-face owned-node filtering, and momentum-component filtering.
+  - Checked: the no-face path remains covered by solves and the direct coupled-face preprocessing contract is covered by a manufactured face fixture.
+- [x] `Invoked` `fsils_bcast` - `Code/Source/solver/FE/Backends/FSILS/liner_solver/bcast.cpp`; serial no-op/allreduce path.
+  - Supporting unit tests found: serial vector-GMRES tests such as `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1218`, `:1338`, and `:1440` exercise the serial no-op path.
+  - Supporting unit tests found: MPI FSILS solve tests exercise FSILS communication broadly, but no test directly targets `fsils_bcast` or `fsils_bcast_v`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:490` verifies serial scalar, legacy vector, and `std::vector` no-op behavior.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackendMPI.cpp:50` verifies scalar, legacy vector, and `std::vector` allreduce behavior against independent `MPI_Allreduce`.
+  - Checked: serial no-op and MPI allreduce semantics are directly covered for scalar and vector overloads.
+- [x] `Invoked` `fsi_ls_normv` - `Code/Source/solver/FE/Backends/FSILS/liner_solver/norm.cpp`.
+  - Supporting unit tests found: vector-GMRES and CG solve tests exercise `fsi_ls_normv` indirectly through residual norms.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverMPI.cpp:68` validates public FSILS vector norms are owned-node authoritative, but that uses `FsilsVector::norm()` rather than the legacy `fsi_ls_normv` path.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:515` directly compares `fsi_ls_normv` against an independent serial reference for DOFs 1-5 with poisoned non-owned tails excluded by the owned-node count.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackendMPI.cpp:50` directly compares `fsi_ls_normv` against independent MPI global reduction for multi-DOF owned-node data with poisoned local tails.
+  - Checked: serial owned-node norm and MPI allreduce norm semantics are directly covered.
+- [x] `Invoked` `omp_sum_v` - `Code/Source/solver/FE/Backends/FSILS/liner_solver/omp_la.cpp`.
+  - Supporting unit tests found: GMRES and CG solve tests indirectly exercise vector AXPY updates.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:515` directly compares `omp_sum_v` against an independent `U += r * V` reference for DOFs 1-5, negative scale, zero scale, and full local-span updates.
+  - Checked: vector AXPY semantics are directly covered for specialized and dynamic vector DOF counts.
+- [x] `Invoked` GMRES Givens rotation internals - `gmres.cpp`.
+  - Supporting unit tests found: vector-GMRES solve tests, restarted-GMRES nonconvergence reporting, and tolerance-mode tests indirectly exercise the Givens least-squares update.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:645` directly validates the production Givens helper against an independent reference, including prior-rotation application, residual recurrence, normalization, and zero-hypot breakdown behavior.
+  - Checked: Givens rotation and residual-update semantics are directly covered independently of full GMRES solves.
+- [x] `Invoked` GMRES Hessenberg back-solve internals - `gmres.cpp`.
+  - Supporting unit tests found: vector-GMRES solve tests and restarted-GMRES tests indirectly exercise Hessenberg back-substitution.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:645` directly validates the production Hessenberg back-solve helper against a known triangular system and verifies compatible/incompatible near-zero diagonal handling.
+  - Checked: Hessenberg back-substitution and singular-breakdown handling are directly covered independently of full GMRES solves.
+- [x] `Invoked` `halo.sync_owned_to_ghost_vector` - serial no-op path.
+  - Supporting unit tests: all serial FSILS solves exercise the single-rank/no-op halo path.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverMPI.cpp:267` validates public FSILS ghost updates copy owner values to ghost storage.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverMPI.cpp:141` and `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackendMPI.cpp:28` validate overlap solves produce matching shared-node values across MPI ranks.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Assembly/test_FsilsSolutionViewGhostUpdateMPI.cpp:440` and `:540` validate stale ghosts change assembly until `updateGhosts()` is called for current and history views.
+  - Checked: serial no-op and MPI owner-to-ghost consistency are covered through direct vector ghost tests, distributed solves, and assembly sensitivity tests.
+- [x] `Invoked` PTC retry infrastructure - exercised once at step 0, iteration 0.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/TimeStepping/test_NewtonSolver.cpp:1238` validates Newton throws when a linear solve fails without PTC recovery and prevents a failed zero-metadata `SolverReport` from being accepted through the nonlinear floor predicate.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/TimeStepping/test_NewtonSolver.cpp:1324` verifies linear-failure retry activation, dt-only lumped mass construction, physical Jacobian restoration, and the applied diagonal shift magnitude.
+  - Checked: the linear-failure PTC retry path is covered for mass lumping, physical-Jacobian restoration, retry, and gamma-scaled diagonal shift.
+- [ ] `Not invoked` `bicgs.cpp` / BiCGStab - out of `Channel2D` linear solver scope.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance.cpp:407` exercises BiCGStab for backends where available, but this path is out of the audited `Channel2D` GMRES scope.
+  - Not checked: out of `Channel2D` scope.
+- [ ] `Not invoked` `cgrad.cpp` / CG - out of `Channel2D` linear solver scope.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1058`, `:1177`, `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance.cpp:448`, and `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverMPI.cpp:141` validate FSILS CG outside the audited GMRES path.
+  - Not checked: out of `Channel2D` GMRES scope.
+- [ ] `Not invoked` `pc_gmres.cpp` - out of `Channel2D` linear solver scope.
+  - Supporting unit tests found: no focused `Channel2D`-path unit test evidence was identified in this audit.
+  - Not checked: out of `Channel2D` GMRES scope.
+- [ ] `Not invoked` `ns_solver.cpp` / BlockSchur - out of `Channel2D` GMRES scope.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:515`, `:580`, `:799`, `:1284`, `:1384`, `:1527`, `:1629`, and `:1739`, plus MPI tests in `Code/Source/solver/FE/Tests/Unit/Backends/test_BlockSchurMPI.cpp`, validate BlockSchur behavior outside the audited GMRES path.
+  - Not checked: out of `Channel2D` GMRES scope.
+- [ ] `Not invoked` `ge.cpp` / Gauss elimination - out of `Channel2D` linear solver scope.
+  - Supporting unit tests found: no focused `Channel2D`-path unit test evidence was identified in this audit.
+  - Not checked: out of `Channel2D` GMRES scope.
+- [ ] `Not invoked` `distributed_mpi_ops.cpp` - out of serial `Channel2D` scope.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverMPI.cpp:68`, `:141`, and `:267`, plus `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackendMPI.cpp:28` and `:145`, exercise distributed FSILS ownership, ghosting, and shared-face reduction outside the serial `Channel2D` path.
+  - Not checked: out of serial `Channel2D` scope.
+- [ ] `Not invoked` `distributed_low_rank_correction.cpp` - out of serial/no-low-rank `Channel2D` scope.
+  - Supporting unit tests found: serial low-rank tests in `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:580`, `:799`, `:975`, `:1073`, `:1184`, `:1284`, and MPI low-rank tests in `Code/Source/solver/FE/Tests/Unit/Backends/test_BlockSchurMPI.cpp:1267`, `:1456`, `:1820`, `:2010`, and `:2276` exercise low-rank correction behavior outside the audited path.
+  - Not checked: out of serial/no-low-rank `Channel2D` scope.
+- [ ] `Not invoked` `block_schur_strategy_selector.cpp` - BlockSchur path not used.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:983`, `:1003`, and `:1024` validate selected BlockSchur strategy choices outside the audited GMRES path.
+  - Not checked: out of `Channel2D` GMRES scope.
+- [ ] `Not invoked` `add_bc_mul.cpp` BlockSchur path - BlockSchur path not used.
+  - Supporting unit tests found: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:975` and `Code/Source/solver/FE/Tests/Unit/Backends/test_BlockSchurMPI.cpp:1820` validate face-cache `add_bc_mul` parity outside the audited GMRES path.
+  - Not checked: out of `Channel2D` GMRES scope.
+- [ ] `Not invoked` `fsils_spar_mul_sv_ss_fused` - fused Schur SpMV path not used.
+  - Supporting unit tests found: BlockSchur and low-rank tests exercise Schur-related paths outside the audited GMRES solve, but no focused `Channel2D`-path test evidence was identified.
+  - Not checked: out of `Channel2D` GMRES scope.
+
+## 9. Matrix And Vector Backends
+
+- [x] `Invoked` `FsilsMatrix` - `Code/Source/solver/FE/Backends/FSILS/FsilsMatrix.h`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsAssemblyParityMPI.cpp:303`, `:455`, `:638`, and `:824` validate owned-row FSILS matrix assembly against an independent dense reference across serial FE ordering, permuted FE ordering, natural indexing, and inverse-permutation normalization.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsAssemblyParityMPI.cpp:996` validates mixed auxiliary owner maps drive both sparsity and numeric FSILS matrix assembly without dropped entries.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:2713` and `:2755` validate resolved-slot matrix insertion parity against direct assembly for contiguous/add and irregular/insert cases.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:3076`, `:3131`, and `:3183` directly validate `multAdd`, cached irregular `Add`/`Max`/`Min` insertion, and block insertion parity against independent dense/direct assembly references.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:3335` and `:3395` directly validate permutation-aware `getEntry()` behavior on sparse structure and deterministic resolved-slot reuse across repeated and reordered cache queries.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance.cpp:1006`, `:1044`, `:1134`, `:1160`, and `:1202` validate duplicate assembly linearity, assembly-order determinism, deterministic missing-entry behavior, Dirichlet zero-row behavior, and multi-DOF matrix usage through the public FSILS solve path.
+  - Checked: class-level owned-row layout, permutation-aware assembly, sparse-entry access, mixed-layout assembly, cached/resolved insertion, block insertion, `multAdd`, and solver-consumed matrix behavior are covered directly.
+- [x] `Invoked` `FsilsMatrix::addMatrixEntriesResolved` - resolved CSR matrix assembly.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:2713` directly validates contiguous resolved-slot `Add` insertion against direct `addMatrixEntries`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:2755` directly validates irregular resolved-slot `Insert` insertion, including invalid-column skipping, against direct `addMatrixEntries`.
+  - Checked: both additive and insert-style resolved matrix entry insertion paths are directly compared against an independent direct assembly reference.
+- [x] `Invoked` `FsilsMatrix::resolveMatrixEntries` - pre-resolves CSR insertion slots.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:2713` exercises the cached slot resolution path for a dense contiguous local block and verifies the resolved writes hit the same matrix entries as direct assembly.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:2755` exercises cached slot resolution for an irregular row/column set with an invalid trailing column and verifies the resolved writes match direct insertion semantics.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:3395` directly validates that repeated and reordered resolution requests produce stable slot identities for the same FE row/column pairs.
+  - Checked: resolved slot lookup is directly covered for contiguous and irregular sparsity patterns, including fallback skipping of invalid entries and cache-stable reuse.
+- [x] `Invoked` `FsilsMatrix::finalizeAssembly` - matrix finalization.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsAssemblyParityMPI.cpp:303`, `:455`, `:638`, and `:824` compare finalized FSILS matrices against independently assembled dense references on two MPI ranks.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsAssemblyParityMPI.cpp:1298` validates that finalize-time accounting exposes owned-row authoritative off-owner-write and dropped-entry counters.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance.cpp:1006` and `:1044` validate finalized matrices preserve duplicate-contribution linearity and assembly-order determinism through the public solve path.
+  - Checked: finalize-time compression/visibility of assembled entries and owned-row bookkeeping are directly validated in serial and MPI contexts.
+- [x] `Invoked` `FsilsVector` - `Code/Source/solver/FE/Backends/FSILS/FsilsVector.h`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverMPI.cpp:68` and `:267` validate owned-node dot/norm semantics and owner-to-ghost synchronization on distributed FSILS vectors.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsAssemblyParityMPI.cpp:1193` validates owner-authoritative ghost updates and the explicit raw-contribution accumulation contract for FSILS vectors.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:2799` and `:2837` validate resolved-slot vector insertion parity against direct vector assembly.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:3243` and `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackendMPI.cpp:456` directly validate `zero`, `set`, `add`, `scale`, `copyFrom`, and local-size mismatch rejection across standalone and shared-layout vectors.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:3444` and `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackendMPI.cpp:505` directly validate stable vector-entry resolution cache reuse, resolved gather through the assembly view, and distributed `ownedFeDofs()` ownership reporting on overlap layouts.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsAssemblyParityMPI.cpp:303`, `:455`, `:638`, and `:824` compare assembled FSILS vectors against dense references and verify solution-vector values after solves.
+  - Checked: class-level local storage access, mutation/copy behavior, ghost semantics, ownership reporting, resolved insertion/access, and solver-consumed vector behavior are directly covered.
+- [x] `Invoked` `FsilsVector::addVectorEntriesResolved` - resolved vector assembly.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:2799` directly validates contiguous resolved-slot `Add` vector insertion against direct `addVectorEntries`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:2837` directly validates irregular resolved-slot `Insert` vector insertion against direct `addVectorEntries`.
+  - Checked: additive and insert-style resolved vector entry insertion are directly compared against an independent direct assembly reference.
+- [x] `Invoked` `FsilsVector::norm` - vector norm.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverMPI.cpp:68` directly compares `FsilsVector::norm()` against an independent owned-node MPI reduction and verifies ghost entries are excluded.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverMPI.cpp:141` uses `FsilsVector::norm()` in a distributed relative-residual check after a solved overlap system.
+  - Checked: owned-node norm semantics are directly validated in distributed FSILS layout and exercised again in solved residual evaluation.
+- [x] `Invoked` `FsilsVector::dot` - vector dot product.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverMPI.cpp:68` directly compares `FsilsVector::dot()` against an independent owned-node MPI reduction and verifies ghost entries are excluded.
+  - Checked: distributed owned-node dot-product semantics are directly validated.
+- [x] `Invoked` `FsilsVector::localSpan` - local vector data access.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverMPI.cpp:68` writes owned and ghost values through `localSpan()` and validates the resulting dot/norm behavior.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverMPI.cpp:267` writes through `localSpan()`, calls `updateGhosts()`, and verifies ghost values become owner-authoritative.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:2799` and `:2837` compare `localSpan()` contents after direct and resolved vector assembly.
+  - Checked: `localSpan()` read/write access is directly validated for owned entries, ghost entries, and post-assembly data inspection.
+- [x] `Invoked` `FsilsFactory` - `Code/Source/solver/FE/Backends/FSILS/FsilsFactory.cpp`.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1218` directly validates that `createVector(size)` and `createVector(local_size, global_size)` return standalone FSILS vectors before any matrix layout is cached.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1239` directly validates serial `createMatrix(...)` -> `createVector(size)` cache reuse, shared-layout propagation, permutation forwarding, and size-mismatch rejection.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackendMPI.cpp:326` directly validates distributed `createMatrix(...)` -> `createVector(local_size, global_size)` overlap-layout reuse and both local/global mismatch error paths on two MPI ranks.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackendMPI.cpp:412` directly validates propagation of an explicitly provided MPI communicator into the cached FSILS shared layout and derived vectors.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1101` and `:1145` validate `createLinearSolver()` option normalization and mixed-layout contract rejection/acceptance.
+  - Checked: standalone fallback, cached serial layout reuse, cached distributed overlap-layout reuse, communicator/permutation/layout propagation, and mismatch/error handling are now covered directly.
+- [x] `Invoked` `BackendFactory` FSILS registration - creates FSILS backend objects.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1273` directly validates FSILS creation by `BackendKind` and case-insensitive backend name, verifies forwarded `dof_per_node` and permutation metadata on the created FSILS matrix/vector objects, and validates invalid FSILS arguments are rejected at the factory boundary.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance.cpp:32` and `:145` create backend factories through `BackendFactory::create(kind, opts)` for all available serial backends, including FSILS, and exercise the returned backend through the conformance suite.
+  - Checked: explicit FSILS registration/dispatch, forwarded FSILS-specific creation options, and invalid-argument handling are directly covered.
+- [x] `Invoked` `FsilsLegacyStatics` - legacy FSILS state holder.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1313` directly validates the legacy static defaults and proves type-isolated storage for `Vector`, `Array`, and `Array3` specializations used by FSILS.
+  - Supporting unit tests: `Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp:1367` directly validates lifecycle-driven static updates for legacy `Vector`, `Array`, and `Array3` containers, including the compiled `Array_gather_stats` behavior.
+  - Checked: initialization, specialization isolation, and concrete mutation/reset behavior of the legacy FSILS static storage are now covered directly.
+
+## 10. Constraints
+
+- [ ] `Invoked` `AffineConstraints::finalize` - setup-time constraint finalization.
+- [ ] `Invoked` `AffineConstraints::distribute` - per-iteration strong Dirichlet enforcement.
+- [ ] `Invoked` `AffineConstraints::updateGhostsAndDistribute` - current-state synchronization and constraint enforcement.
+- [ ] `Invoked` `DirichletConstraints` interface - exposed through `FESystem::constraints`.
+- [ ] `Invoked` `FESystem::constraints` - constraint accessor.
+- [ ] `Not invoked` `GaugeRegistry::gaugeRegistryIfPresent` meaningful gauge path - no gauge activation for `Channel2D`.
+- [ ] `Not invoked` `validateNullspaceBasis` - no gauge/nullspace validation for `Channel2D`.
+
+## 11. VTK Output
+
+- [ ] `Invoked` `callbacks.on_step_accepted` lambda - `Code/Source/solver/Application/Core/ApplicationDriver.cpp:626`.
+- [ ] `Invoked` `FESystem::evaluateFieldAtVertices` - field output at vertices.
+- [ ] `Invoked` `EntityDofMap::getVertexDofs` - direct Lagrange vertex DOF lookup.
+- [ ] `Invoked` VTU writer utility - VTK output path used every 2 accepted steps.

@@ -1,0 +1,119 @@
+{
+  "checks": [
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "process_return_code",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": null,
+      "expected": null,
+      "metric": "termination_reason",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 21,
+      "expected": 21,
+      "metric": "test_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "failure_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "error_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "disabled_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "missing_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "incomplete_or_skipped_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "tests_with_failure_records",
+      "passed": true,
+      "relation": "equal"
+    }
+  ],
+  "command": [
+    "/home/zack/Downloads/svMultiPhysics/build-fe-check/test_fe_systems",
+    "--gtest_filter=CutIntegrationInfrastructure.ContentRevisionTracksGeneratedRuleMutations:CutIntegrationInfrastructure.ImportsGeneratedLevelSetInterfaceDomainByMarker:CutIntegrationInfrastructure.ImportsGeneratedLevelSetInterfaceDomainForRequestedVolumeSide:CutIntegrationInfrastructure.GeneratedCutVolumesRejectStaleSourceRevision:CutIntegrationInfrastructure.GeneratedInterfaceRulesRejectStaleSourceRevision:CutIntegrationInfrastructure.FullCellGeneratedRulesCarryDiagnosticMetadata:CutIntegrationInfrastructure.IndexesGeneratedLevelSetVolumeRulesByMarkerAndSide:CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesConstantsAcrossPaths:CutIntegrationInfrastructure.FixedGeometryDiagnosticsCountHighOrderRules:CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesLinearFieldsAcrossPaths:CutIntegrationInfrastructure.AssemblyContextCarriesQuadratureMetadataAndHooks:CutIntegrationInfrastructure.InvalidationSeparatesGeometryAndFELayoutChanges:CutIntegrationInfrastructure.ImportsClosedCutTopologyIntoAllAssemblyPathBindings:CutIntegrationInfrastructure.ImportsCurvedIsoparametricTopologyQuadrature:CutIntegrationInfrastructure.QuadraticCurvedPlaneCutDataIsIdenticalAcrossAllExecutionPaths:CutIntegrationInfrastructure.ImportsLinearizedCutQuadratureForEveryAdvertisedFamily:CutIntegrationInfrastructure.LinearizedPlaneCutDataIsIdenticalAcrossAllExecutionPaths:CutIntegrationInfrastructure.LinearizedCutDataIsIdenticalAcrossAllExecutionPaths:CutIntegrationInfrastructure.ProductionCutScalarOperatorsMatchAnalyticHalfCubePlaneCut:FormsInstaller.FormsInstaller_RevisionBoundFullSideCutVolumeUsesSnapshotRulePoints:FormsInstaller.FormsInstaller_UnflaggedFullMeasureCutVolumeUsesRulePoints",
+    "--gtest_color=no",
+    "--gtest_output=json:/home/zack/Downloads/svMultiPhysics/Documentation/qualification_logs/free_surface_wp2_geometry_20260720_b6c60d9f/groups/systems_serial/gtest.json"
+  ],
+  "execution": {
+    "memory_mib": 6144,
+    "output_mib": 192,
+    "wall_time_seconds": 1200
+  },
+  "expected_tests": [
+    "CutIntegrationInfrastructure.ContentRevisionTracksGeneratedRuleMutations",
+    "CutIntegrationInfrastructure.ImportsGeneratedLevelSetInterfaceDomainByMarker",
+    "CutIntegrationInfrastructure.ImportsGeneratedLevelSetInterfaceDomainForRequestedVolumeSide",
+    "CutIntegrationInfrastructure.GeneratedCutVolumesRejectStaleSourceRevision",
+    "CutIntegrationInfrastructure.GeneratedInterfaceRulesRejectStaleSourceRevision",
+    "CutIntegrationInfrastructure.FullCellGeneratedRulesCarryDiagnosticMetadata",
+    "CutIntegrationInfrastructure.IndexesGeneratedLevelSetVolumeRulesByMarkerAndSide",
+    "CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesConstantsAcrossPaths",
+    "CutIntegrationInfrastructure.FixedGeometryDiagnosticsCountHighOrderRules",
+    "CutIntegrationInfrastructure.GeneratedLevelSetInterfaceIntegratesLinearFieldsAcrossPaths",
+    "CutIntegrationInfrastructure.AssemblyContextCarriesQuadratureMetadataAndHooks",
+    "CutIntegrationInfrastructure.InvalidationSeparatesGeometryAndFELayoutChanges",
+    "CutIntegrationInfrastructure.ImportsClosedCutTopologyIntoAllAssemblyPathBindings",
+    "CutIntegrationInfrastructure.ImportsCurvedIsoparametricTopologyQuadrature",
+    "CutIntegrationInfrastructure.QuadraticCurvedPlaneCutDataIsIdenticalAcrossAllExecutionPaths",
+    "CutIntegrationInfrastructure.ImportsLinearizedCutQuadratureForEveryAdvertisedFamily",
+    "CutIntegrationInfrastructure.LinearizedPlaneCutDataIsIdenticalAcrossAllExecutionPaths",
+    "CutIntegrationInfrastructure.LinearizedCutDataIsIdenticalAcrossAllExecutionPaths",
+    "CutIntegrationInfrastructure.ProductionCutScalarOperatorsMatchAnalyticHalfCubePlaneCut",
+    "FormsInstaller.FormsInstaller_RevisionBoundFullSideCutVolumeUsesSnapshotRulePoints",
+    "FormsInstaller.FormsInstaller_UnflaggedFullMeasureCutVolumeUsesRulePoints"
+  ],
+  "group_id": "systems_serial",
+  "gtest_output_copies": 1,
+  "mpi_ranks": 1,
+  "outcome": "PASS",
+  "resources": {
+    "final_output_bytes": 15831,
+    "peak_resident_kib_sampled": 33488,
+    "return_code": 0,
+    "termination_reason": null,
+    "wall_time_seconds": 0.1531476069940254
+  }
+}

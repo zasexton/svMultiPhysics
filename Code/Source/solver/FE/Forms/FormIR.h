@@ -63,6 +63,12 @@ struct IntegralTerm {
 
     // Data requirements for this term
     assembly::RequiredData required_data{assembly::RequiredData::None};
+
+    // Present only for an explicitly selected physical exterior boundary.
+    // FullPhysical terms dispatch through Boundary; GeneratedActiveSubset
+    // terms dispatch through InterfaceFace while retaining their physical
+    // boundary identity for installation-time provenance validation.
+    std::optional<ExteriorBoundaryMeasure> exterior_boundary_measure{};
 };
 
 /**

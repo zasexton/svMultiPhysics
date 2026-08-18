@@ -1,0 +1,30 @@
+{
+  "benchmark": "2D tilted square-tank settling equilibrium",
+  "dimensions_m": {
+    "initial_fill_height": 0.5,
+    "tank_height": 1.0,
+    "tank_length": 1.0
+  },
+  "expected_results": "expected_results.json",
+  "mesh_tools": [
+    "PyVista",
+    "structured quadrilateral grid"
+  ],
+  "notes": [
+    "Negative level-set values denote the active fluid.",
+    "Velocity and pressure are interpreted physically on the active wet side; OOP VTK output keeps background values unmasked so interface diagnostics can interpolate across phi=0.",
+    "The initial surface is horizontal; the body force is tilted at t=0.",
+    "At equilibrium, the free surface is perpendicular to the tilted body force.",
+    "The final free-surface line passes through the square center, preserving area 0.5.",
+    "The default settling mode is a finite-time smoke/regression run; strict final-equilibrium slope checks are reserved for --initial-state equilibrium.",
+    "Use --initial-state equilibrium --time-steps 5 to generate a static-equilibrium companion mode.",
+    "Use --verification-profile early_transient for short refined settling smoke runs that should not gate final slope/intercept or hydrostatic pressure-gradient convergence.",
+    "Use --verification-profile transient_pressure for staged refined transient targets that should gate pressure-gradient recovery before final-equilibrium intercept/slope closure.",
+    "Use --verification-profile transient_pressure_interior for staged contact-line-aware targets that gate interior free-surface pressure while keeping wall-contact pressure as bounded diagnostics.",
+    "Use --verification-profile transient_pressure_core for staged targets that gate the core free-surface pressure trace while retaining bounded wall-contact and one-cell near-wall guards.",
+    "Use --use-cut-metadata-scale, --cut-cell-metadata-scale-cap, and --cut-cell-*-gradient-penalty only for explicit stabilization diagnostics; the default generated smoke keeps metadata scaling disabled and unbounded.",
+    "Use --element-order 2 --fluid-taylor-hood to generate an opt-in P2/P1 refined diagnostic; the default checked-in smoke remains linear/equal-order."
+  ],
+  "representation": "unfitted_level_set",
+  "source": "analytic hydrostatic free-surface equilibrium in a tilted frame"
+}

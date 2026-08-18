@@ -359,6 +359,7 @@ endif()
 
 set(FE_MATH_SOURCES
     Math/DenseLinearAlgebra.cpp
+    Math/DenseExactDyadic.cpp
 )
 
 # NOTE: These modules are planned but not yet implemented
@@ -779,6 +780,7 @@ set(FE_ASSEMBLY_HEADERS
     Assembly/BackgroundEntityMeasures.h
     Assembly/BatchedProjection.h
     Assembly/BatchedStiffness.h
+    Analysis/GeneratedBoundaryAggregateTraceCertificate.h
     Assembly/InterfacePairContext.h
     Assembly/GeometricNonlinearityHooks.h
     Assembly/JIT/KernelArgs.h
@@ -819,6 +821,7 @@ set(FE_ASSEMBLY_SOURCES
     Assembly/BatchedStiffness.cpp
     Assembly/StandardAssembler.cpp
     Constraints/SmallCutAggregationConstraint.cpp
+    Analysis/GeneratedBoundaryAggregateTraceCertificate.cpp
     Assembly/AssemblerFactory.cpp
     Assembly/ParallelAssembler.cpp
     Assembly/GhostContributionManager.cpp
@@ -928,6 +931,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetCurvatureProjection.h
     LevelSet/LevelSetInterfaceLifecycle.h
     LevelSet/LevelSetImplicitCutQuadratureBackend.h
+    LevelSet/LevelSetStaticCapillaryEquilibrium.h
     LevelSet/LevelSetVolume.h
     LevelSet/LevelSetReinitialization.h
     LevelSet/LevelSetDiagnostics.h
@@ -946,6 +950,7 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetCurvatureProjection.cpp
     LevelSet/LevelSetInterfaceLifecycle.cpp
     LevelSet/LevelSetImplicitCutQuadratureBackend.cpp
+    LevelSet/LevelSetStaticCapillaryEquilibrium.cpp
     LevelSet/LevelSetVolume.cpp
     LevelSet/LevelSetReinitialization.cpp
     LevelSet/LevelSetDiagnostics.cpp
@@ -1695,6 +1700,23 @@ target_include_directories(svfe
         $<INSTALL_INTERFACE:include>
 )
 
+# Exact binary64/dyadic certification uses only Boost.Multiprecision's
+# header-only cpp_int backend.  Keep the dependency private on both targets
+# that compile FE_MATH_SOURCES because no installed FE header exposes a Boost
+# type.
+find_package(Boost 1.71 REQUIRED)
+if(TARGET Boost::headers)
+    target_link_libraries(svfe PRIVATE Boost::headers)
+    target_link_libraries(svfe_dofs PRIVATE Boost::headers)
+elseif(TARGET Boost::boost)
+    target_link_libraries(svfe PRIVATE Boost::boost)
+    target_link_libraries(svfe_dofs PRIVATE Boost::boost)
+else()
+    target_include_directories(svfe SYSTEM PRIVATE ${Boost_INCLUDE_DIRS})
+    target_include_directories(
+        svfe_dofs SYSTEM PRIVATE ${Boost_INCLUDE_DIRS})
+endif()
+
 target_compile_definitions(svfe PUBLIC SVMP_FE_WITH_MESH=$<BOOL:${FE_WITH_MESH}>)
 target_compile_definitions(svfe PUBLIC SVMP_FE_ENABLE_LLVM_JIT=$<BOOL:${FE_ENABLE_LLVM_JIT_RESOLVED}>)
 target_compile_definitions(svfe PRIVATE SVMP_FE_ASSEMBLY_TIMING)
@@ -2363,6 +2385,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetOptions.cpp
             Tests/Unit/LevelSet/test_LevelSetReinitialization.cpp
             Tests/Unit/LevelSet/test_LevelSetRestart.cpp
+            Tests/Unit/LevelSet/test_LevelSetStaticCapillaryEquilibrium.cpp
             Tests/Unit/LevelSet/test_LevelSetTransport.cpp
             Tests/Unit/LevelSet/test_LevelSetVolume.cpp
             Tests/Unit/LevelSet/test_main.cpp
@@ -2799,6 +2822,7 @@ if(FE_BUILD_TESTS)
         if(FE_WITH_MESH)
             list(APPEND FE_ASSEMBLY_TEST_SOURCES
                 Tests/Unit/Assembly/test_CompositeMeshAccess.cpp
+                Tests/Unit/Assembly/test_GeneratedBoundaryAggregateTraceCertificate.cpp
                 Tests/Unit/Assembly/test_MeshAccess.cpp
                 Tests/Unit/Assembly/test_MeshAccess_HighOrder.cpp
             )

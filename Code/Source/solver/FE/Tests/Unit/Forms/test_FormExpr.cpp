@@ -15,6 +15,9 @@
 #include "Forms/FormExpr.h"
 #include "Spaces/H1Space.h"
 
+#include <optional>
+#include <stdexcept>
+
 namespace svmp {
 namespace FE {
 namespace forms {
@@ -115,6 +118,123 @@ TEST(FormExprTest, OperatorsAndMeasures)
     EXPECT_EQ(dS_term.node()->type(), FormExprType::InteriorFaceIntegral);
 
     EXPECT_EQ(ds_term.node()->boundaryMarker().value_or(-1), 2);
+}
+
+TEST(FormExprTest, ExteriorBoundaryMeasuresAreExplicitAndDistinct)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto integrand = u * v;
+
+    const auto full =
+        ExteriorBoundaryMeasure::fullPhysical(/*physical_boundary_marker=*/2);
+    const auto active =
+        ExteriorBoundaryMeasure::generatedActiveSubset(
+            /*physical_boundary_marker=*/2,
+            /*generated_active_boundary_marker=*/17);
+
+    const auto full_term = integrand.dExteriorBoundary(full);
+    ASSERT_EQ(full_term.node()->type(), FormExprType::BoundaryIntegral);
+    EXPECT_EQ(full_term.node()->boundaryMarker().value_or(-1), 2);
+    ASSERT_NE(full_term.node()->exteriorBoundaryMeasure(), nullptr);
+    EXPECT_EQ(*full_term.node()->exteriorBoundaryMeasure(), full);
+    EXPECT_TRUE(
+        full_term.node()->exteriorBoundaryMeasure()->isFullPhysical());
+    EXPECT_EQ(
+        full_term.node()
+            ->exteriorBoundaryMeasure()
+            ->physicalBoundaryMarker(),
+        2);
+    EXPECT_EQ(
+        full_term.node()
+            ->exteriorBoundaryMeasure()
+            ->generatedActiveBoundaryMarker(),
+        -1);
+
+    const auto active_term = integrand.dExteriorBoundary(active);
+    ASSERT_EQ(active_term.node()->type(), FormExprType::InterfaceIntegral);
+    EXPECT_EQ(active_term.node()->interfaceMarker().value_or(-1), 17);
+    ASSERT_NE(active_term.node()->exteriorBoundaryMeasure(), nullptr);
+    EXPECT_EQ(*active_term.node()->exteriorBoundaryMeasure(), active);
+    EXPECT_TRUE(active_term.node()
+                    ->exteriorBoundaryMeasure()
+                    ->isGeneratedActiveSubset());
+    EXPECT_EQ(
+        active_term.node()
+            ->exteriorBoundaryMeasure()
+            ->physicalBoundaryMarker(),
+        2);
+    EXPECT_EQ(
+        active_term.node()
+            ->exteriorBoundaryMeasure()
+            ->generatedActiveBoundaryMarker(),
+        17);
+
+    EXPECT_EQ(integrand.ds(2).node()->exteriorBoundaryMeasure(), nullptr);
+    EXPECT_EQ(integrand.dI(17).node()->exteriorBoundaryMeasure(), nullptr);
+    EXPECT_NE(full, active);
+    EXPECT_NE(full_term.toString(), integrand.ds(2).toString());
+    EXPECT_NE(active_term.toString(), integrand.dI(17).toString());
+    EXPECT_NE(full_term.toString(), active_term.toString());
+}
+
+TEST(FormExprTest, ExteriorBoundaryMeasuresRejectInvalidMarkers)
+{
+    EXPECT_THROW(
+        (void)ExteriorBoundaryMeasure::fullPhysical(-1),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)ExteriorBoundaryMeasure::generatedActiveSubset(-1, 4),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)ExteriorBoundaryMeasure::generatedActiveSubset(3, -1),
+        std::invalid_argument);
+}
+
+TEST(FormExprTest, TransformNodesPreservesExteriorBoundaryMeasure)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto integrand = FormExpr::constant(2.0) * u * v;
+
+    const auto replace_constant =
+        [](const FormExprNode& node) -> std::optional<FormExpr> {
+        if (node.type() == FormExprType::Constant &&
+            node.constantValue().value_or(0.0) == 2.0) {
+            return FormExpr::constant(3.0);
+        }
+        return std::nullopt;
+    };
+
+    const auto full =
+        ExteriorBoundaryMeasure::fullPhysical(/*physical_boundary_marker=*/5);
+    const auto full_original = integrand.dExteriorBoundary(full);
+    const auto full_transformed =
+        full_original.transformNodes(replace_constant);
+    EXPECT_NE(full_transformed.nodeShared(), full_original.nodeShared());
+    ASSERT_NE(
+        full_transformed.node()->exteriorBoundaryMeasure(), nullptr);
+    EXPECT_EQ(
+        *full_transformed.node()->exteriorBoundaryMeasure(), full);
+    EXPECT_EQ(
+        full_transformed.node()->boundaryMarker().value_or(-1), 5);
+
+    const auto active =
+        ExteriorBoundaryMeasure::generatedActiveSubset(
+            /*physical_boundary_marker=*/5,
+            /*generated_active_boundary_marker=*/29);
+    const auto active_original = integrand.dExteriorBoundary(active);
+    const auto active_transformed =
+        active_original.transformNodes(replace_constant);
+    EXPECT_NE(active_transformed.nodeShared(), active_original.nodeShared());
+    ASSERT_NE(
+        active_transformed.node()->exteriorBoundaryMeasure(), nullptr);
+    EXPECT_EQ(
+        *active_transformed.node()->exteriorBoundaryMeasure(), active);
+    EXPECT_EQ(
+        active_transformed.node()->interfaceMarker().value_or(-1), 29);
 }
 
 TEST(FormExprTest, TimeDerivativeNode)

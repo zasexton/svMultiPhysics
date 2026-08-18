@@ -1,0 +1,159 @@
+{
+  "checks": [
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "process_return_code",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": null,
+      "expected": null,
+      "metric": "termination_reason",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 61,
+      "expected": 61,
+      "metric": "test_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "failure_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "error_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "disabled_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "missing_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "incomplete_or_skipped_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "tests_with_failure_records",
+      "passed": true,
+      "relation": "equal"
+    }
+  ],
+  "command": [
+    "/home/zack/Downloads/svMultiPhysics/build-fe-check/test_fe_geometry",
+    "--gtest_filter=GeneratedActiveBoundaryDomain.HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly:GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules:GeneratedActiveBoundaryDomain.RejectsScalarRootThatDoesNotMatchAuthoritativeContactTrace:GeneratedActiveBoundaryDomain.RejectsUnimplementedHighOrderImplicitBoundaryRestriction:GeneratedActiveBoundaryDomain.WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases:GeneratedActiveBoundaryDomain.CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping:FreeSurfaceGeometrySnapshot.OwnsOneRevisionAndPointwisePhysicalMappingForEveryRuleFamily:FreeSurfaceGeometrySnapshot.RejectsStoredOffInterfaceResidual:FreeSurfaceGeometrySnapshot.SeparatesUnprunedLifecycleVolumeFromRetainedAssemblyVolume:FreeSurfaceGeometrySnapshot.RejectsStaleGlobalIdentityAndOwner:FreeSurfaceGeometrySnapshot.CollectiveValidatorRejectsDuplicateAndMissingRuleOwners:FreeSurfaceGeometrySnapshot.DiscreteFunctionalExcludesGhostRuleContributions:FreeSurfaceGeometrySnapshot.RejectsPointOutsideParentReferenceCell:FreeSurfaceGeometrySnapshot.RejectsQuadraturePointOnWrongPhase:FreeSurfaceGeometrySnapshot.RejectsNormalOpposedToRepresentedGradient:FreeSurfaceGeometrySnapshot.RejectsIncorrectConstantMoment:FreeSurfaceGeometrySnapshot.RejectsIncorrectLinearPartitionMoment:FreeSurfaceGeometrySnapshot.RejectsCompensatingPerPhaseMomentDefects:FreeSurfaceGeometrySnapshot.CertifiesQuadraticVolumeRulesFromSourceSubcells:FreeSurfaceGeometrySnapshot.RejectsInterfaceMomentDefectWithValidRootsAndMeasure:FreeSurfaceGeometrySnapshot.MaterializesFullCurvedCellRuleForMappingAndMomentValidation:FreeSurfaceGeometrySnapshot.RejectsImpossibleClaimedQuadraticOrder:FreeSurfaceGeometrySnapshot.RejectsAchievedOrderBelowPolicy:FreeSurfaceGeometrySnapshot.RejectsStaleAndDuplicateContactDomains:FreeSurfaceGeometrySnapshot.RejectsMissingExpectedContactTrace:FreeSurfaceGeometrySnapshotCache.HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease:FreeSurfaceGeometrySnapshotCache.RevisionKeyIncludesAuthoritativeQuadratureContent:GeneratedInterfaceBoundaryIntersectionDomain.Builds2DPointOnMarkedBoundaryEdge:GeneratedInterfaceBoundaryIntersectionDomain.GlobalIdentityIsIndependentOfRepartitionedLocalFaceNumbering:GeneratedInterfaceBoundaryIntersectionDomain.WrongBoundaryMarkerProducesZeroMeasure:GeneratedInterfaceBoundaryIntersectionDomain.Builds3DSegmentOnMarkedBoundaryFace:GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventContactWithoutSourceSurfaceFragment:GeneratedInterfaceBoundaryIntersectionDomain.ImportsRulesIntoCutContextByGeneratedMarker:GeneratedInterfaceBoundaryIntersectionDomain.RestrictsAuthoritativeFragmentOnHighOrderParentGeometry:GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventHighOrderContactWithoutSourceFragment:GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventAmbiguousContactWithoutSourceFragment:GeneratedInterfaceBoundaryIntersectionDomain.ProvenanceValidatorRejectsOrphanContactFragment:GeneratedInterfaceBoundaryIntersectionDomain.RejectsCurrentFrameToPreventMixedGeometryContracts:GeneratedInterfaceBoundaryIntersectionDomain.ReportsLinearCornerQuadratureOrderHonestly:GeneratedInterfaceBoundaryIntersectionDomain.CutContextRejectsGeneratedMarkerCollisions:GeneratedInterfaceBoundaryIntersectionDomain.OwnedAndGhostViewsYieldOneGlobalPointMultiplicity:LevelSetInterfaceBuilder.CutsLinearTriangleWithSingleSegment:LevelSetInterfaceBuilder.CutsLinearQuadWithSingleSegment:LevelSetInterfaceBuilder.CutsLinearTetrahedronWithTriangularPatch:LevelSetInterfaceBuilder.CutsLinearTetrahedronWithQuadrilateralPatch:LevelSetInterfaceBuilder.GeneratedNormalsMatchLinearLevelSetGradients:LevelSetInterfaceBuilder.CircleInterfaceLengthConvergesUnderRefinement:LevelSetInterfaceBuilder.SphereInterfaceAreaConvergesUnderRefinement:LevelSetInterfaceBuilder.CurvedInterfaceNormalsConvergeToAnalyticNormals:LevelSetInterfaceBuilder.ClassifiesCutEdgeCases:LevelSetInterfaceBuilder.PreservesSmallVolumeFractionsNearVertexAndEdge:LevelSetInterfaceBuilder.VolumeQuadratureMatchesConservativeToleranceBandFractions:LevelSetInterfaceDomain.CutVolumeMetadataIsDeterministicForOwnedAndGhostRegions:LevelSetInterfaceDomain.LinearCellCutsExportFullSideVolumeRules:LevelSetInterfaceDomain.LinearCellCutsExportCutSideVolumeRules:LevelSetInterfaceDomain.CutVolumeRulesConserveConstantsForSupportedElementTypes:LevelSetInterfaceDomain.PlanarCutVolumeSupportsPositiveOrderFiveRules:LevelSetInterfaceDomain.CutVolumeQuadratureConvergesForQuadraticFields:LevelSetInterfaceDomain.ConfigurableQuadratureOrderIsRecordedAndValidated:LevelSetInterfaceDomain.CurvedPatchUsesStoredHighOrderQuadratureMetadata:LevelSetInterfaceDomain.SeparateInterfaceAndVolumeQuadratureOrders",
+    "--gtest_color=no",
+    "--gtest_output=json:/home/zack/Downloads/svMultiPhysics/Documentation/qualification_logs/free_surface_wp2_geometry_20260720_b6c60d9f/groups/geometry_serial/gtest.json"
+  ],
+  "execution": {
+    "memory_mib": 4096,
+    "output_mib": 128,
+    "wall_time_seconds": 900
+  },
+  "expected_tests": [
+    "GeneratedActiveBoundaryDomain.HalfWetEdgeUsesAuthoritativeContactAndPartitionsExactly",
+    "GeneratedActiveBoundaryDomain.CompletelyDrySideHasExactlyZeroRules",
+    "GeneratedActiveBoundaryDomain.RejectsScalarRootThatDoesNotMatchAuthoritativeContactTrace",
+    "GeneratedActiveBoundaryDomain.RejectsUnimplementedHighOrderImplicitBoundaryRestriction",
+    "GeneratedActiveBoundaryDomain.WetFractionSweepIntegratesBoundaryPolynomialsForBothPhases",
+    "GeneratedActiveBoundaryDomain.CurvedQuadraticParentUsesPointwisePhysicalBoundaryMapping",
+    "FreeSurfaceGeometrySnapshot.OwnsOneRevisionAndPointwisePhysicalMappingForEveryRuleFamily",
+    "FreeSurfaceGeometrySnapshot.RejectsStoredOffInterfaceResidual",
+    "FreeSurfaceGeometrySnapshot.SeparatesUnprunedLifecycleVolumeFromRetainedAssemblyVolume",
+    "FreeSurfaceGeometrySnapshot.RejectsStaleGlobalIdentityAndOwner",
+    "FreeSurfaceGeometrySnapshot.CollectiveValidatorRejectsDuplicateAndMissingRuleOwners",
+    "FreeSurfaceGeometrySnapshot.DiscreteFunctionalExcludesGhostRuleContributions",
+    "FreeSurfaceGeometrySnapshot.RejectsPointOutsideParentReferenceCell",
+    "FreeSurfaceGeometrySnapshot.RejectsQuadraturePointOnWrongPhase",
+    "FreeSurfaceGeometrySnapshot.RejectsNormalOpposedToRepresentedGradient",
+    "FreeSurfaceGeometrySnapshot.RejectsIncorrectConstantMoment",
+    "FreeSurfaceGeometrySnapshot.RejectsIncorrectLinearPartitionMoment",
+    "FreeSurfaceGeometrySnapshot.RejectsCompensatingPerPhaseMomentDefects",
+    "FreeSurfaceGeometrySnapshot.CertifiesQuadraticVolumeRulesFromSourceSubcells",
+    "FreeSurfaceGeometrySnapshot.RejectsInterfaceMomentDefectWithValidRootsAndMeasure",
+    "FreeSurfaceGeometrySnapshot.MaterializesFullCurvedCellRuleForMappingAndMomentValidation",
+    "FreeSurfaceGeometrySnapshot.RejectsImpossibleClaimedQuadraticOrder",
+    "FreeSurfaceGeometrySnapshot.RejectsAchievedOrderBelowPolicy",
+    "FreeSurfaceGeometrySnapshot.RejectsStaleAndDuplicateContactDomains",
+    "FreeSurfaceGeometrySnapshot.RejectsMissingExpectedContactTrace",
+    "FreeSurfaceGeometrySnapshotCache.HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease",
+    "FreeSurfaceGeometrySnapshotCache.RevisionKeyIncludesAuthoritativeQuadratureContent",
+    "GeneratedInterfaceBoundaryIntersectionDomain.Builds2DPointOnMarkedBoundaryEdge",
+    "GeneratedInterfaceBoundaryIntersectionDomain.GlobalIdentityIsIndependentOfRepartitionedLocalFaceNumbering",
+    "GeneratedInterfaceBoundaryIntersectionDomain.WrongBoundaryMarkerProducesZeroMeasure",
+    "GeneratedInterfaceBoundaryIntersectionDomain.Builds3DSegmentOnMarkedBoundaryFace",
+    "GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventContactWithoutSourceSurfaceFragment",
+    "GeneratedInterfaceBoundaryIntersectionDomain.ImportsRulesIntoCutContextByGeneratedMarker",
+    "GeneratedInterfaceBoundaryIntersectionDomain.RestrictsAuthoritativeFragmentOnHighOrderParentGeometry",
+    "GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventHighOrderContactWithoutSourceFragment",
+    "GeneratedInterfaceBoundaryIntersectionDomain.ScalarFieldCannotInventAmbiguousContactWithoutSourceFragment",
+    "GeneratedInterfaceBoundaryIntersectionDomain.ProvenanceValidatorRejectsOrphanContactFragment",
+    "GeneratedInterfaceBoundaryIntersectionDomain.RejectsCurrentFrameToPreventMixedGeometryContracts",
+    "GeneratedInterfaceBoundaryIntersectionDomain.ReportsLinearCornerQuadratureOrderHonestly",
+    "GeneratedInterfaceBoundaryIntersectionDomain.CutContextRejectsGeneratedMarkerCollisions",
+    "GeneratedInterfaceBoundaryIntersectionDomain.OwnedAndGhostViewsYieldOneGlobalPointMultiplicity",
+    "LevelSetInterfaceBuilder.CutsLinearTriangleWithSingleSegment",
+    "LevelSetInterfaceBuilder.CutsLinearQuadWithSingleSegment",
+    "LevelSetInterfaceBuilder.CutsLinearTetrahedronWithTriangularPatch",
+    "LevelSetInterfaceBuilder.CutsLinearTetrahedronWithQuadrilateralPatch",
+    "LevelSetInterfaceBuilder.GeneratedNormalsMatchLinearLevelSetGradients",
+    "LevelSetInterfaceBuilder.CircleInterfaceLengthConvergesUnderRefinement",
+    "LevelSetInterfaceBuilder.SphereInterfaceAreaConvergesUnderRefinement",
+    "LevelSetInterfaceBuilder.CurvedInterfaceNormalsConvergeToAnalyticNormals",
+    "LevelSetInterfaceBuilder.ClassifiesCutEdgeCases",
+    "LevelSetInterfaceBuilder.PreservesSmallVolumeFractionsNearVertexAndEdge",
+    "LevelSetInterfaceBuilder.VolumeQuadratureMatchesConservativeToleranceBandFractions",
+    "LevelSetInterfaceDomain.CutVolumeMetadataIsDeterministicForOwnedAndGhostRegions",
+    "LevelSetInterfaceDomain.LinearCellCutsExportFullSideVolumeRules",
+    "LevelSetInterfaceDomain.LinearCellCutsExportCutSideVolumeRules",
+    "LevelSetInterfaceDomain.CutVolumeRulesConserveConstantsForSupportedElementTypes",
+    "LevelSetInterfaceDomain.PlanarCutVolumeSupportsPositiveOrderFiveRules",
+    "LevelSetInterfaceDomain.CutVolumeQuadratureConvergesForQuadraticFields",
+    "LevelSetInterfaceDomain.ConfigurableQuadratureOrderIsRecordedAndValidated",
+    "LevelSetInterfaceDomain.CurvedPatchUsesStoredHighOrderQuadratureMetadata",
+    "LevelSetInterfaceDomain.SeparateInterfaceAndVolumeQuadratureOrders"
+  ],
+  "group_id": "geometry_serial",
+  "gtest_output_copies": 1,
+  "mpi_ranks": 1,
+  "outcome": "PASS",
+  "resources": {
+    "final_output_bytes": 35624,
+    "peak_resident_kib_sampled": 8696,
+    "return_code": 0,
+    "termination_reason": null,
+    "wall_time_seconds": 0.1047770909499377
+  }
+}

@@ -19,6 +19,7 @@
 #include "Spaces/L2Space.h"
 #include "Spaces/ProductSpace.h"
 
+#include <algorithm>
 #include <array>
 #include <stdexcept>
 #include <utility>
@@ -367,6 +368,166 @@ TEST(CompileMixed, BoundaryTermsPreserveMarkers)
     EXPECT_FALSE(mir.block(0, 1).hasCellTerms());
     ASSERT_EQ(mir.block(0, 1).terms().size(), 1u);
     EXPECT_EQ(mir.block(0, 1).terms()[0].boundary_marker, 3);
+}
+
+TEST(CompileMixed, ExteriorBoundarySelectionSurvivesBlockCompilation)
+{
+    FormCompiler compiler;
+
+    spaces::H1Space V(ElementType::Tetra4, 1);
+    spaces::L2Space Q(ElementType::Tetra4, 0);
+
+    const auto u = FormExpr::trialFunction(V, "u");
+    const auto v = FormExpr::testFunction(V, "v");
+    const auto p = FormExpr::trialFunction(Q, "p");
+    const auto q = FormExpr::testFunction(Q, "q");
+
+    const auto full =
+        ExteriorBoundaryMeasure::fullPhysical(
+            /*physical_boundary_marker=*/3);
+    const auto active =
+        ExteriorBoundaryMeasure::generatedActiveSubset(
+            /*physical_boundary_marker=*/5,
+            /*generated_active_boundary_marker=*/41);
+    const auto form =
+        (u * v).dExteriorBoundary(full) +
+        (p * q).dExteriorBoundary(active);
+
+    const auto mir =
+        compiler.compileMixed(form, FormKind::Bilinear);
+
+    ASSERT_TRUE(mir.hasBlock(0, 0));
+    ASSERT_EQ(mir.block(0, 0).terms().size(), 1u);
+    const auto& full_term = mir.block(0, 0).terms().front();
+    EXPECT_EQ(full_term.domain, IntegralDomain::Boundary);
+    EXPECT_EQ(full_term.boundary_marker, 3);
+    ASSERT_TRUE(full_term.exterior_boundary_measure.has_value());
+    EXPECT_EQ(*full_term.exterior_boundary_measure, full);
+
+    ASSERT_TRUE(mir.hasBlock(1, 1));
+    ASSERT_EQ(mir.block(1, 1).terms().size(), 1u);
+    const auto& active_term = mir.block(1, 1).terms().front();
+    EXPECT_EQ(active_term.domain, IntegralDomain::InterfaceFace);
+    EXPECT_EQ(active_term.interface_marker, 41);
+    ASSERT_TRUE(active_term.exterior_boundary_measure.has_value());
+    EXPECT_EQ(*active_term.exterior_boundary_measure, active);
+
+    EXPECT_TRUE(mir.domainSummary().has_boundary_terms);
+    EXPECT_TRUE(mir.domainSummary().has_interface_face_terms);
+    ASSERT_EQ(
+        mir.domainSummary().exterior_boundary_measures.size(), 2u);
+    EXPECT_NE(
+        std::find(
+            mir.domainSummary().exterior_boundary_measures.begin(),
+            mir.domainSummary().exterior_boundary_measures.end(),
+            full),
+        mir.domainSummary().exterior_boundary_measures.end());
+    EXPECT_NE(
+        std::find(
+            mir.domainSummary().exterior_boundary_measures.begin(),
+            mir.domainSummary().exterior_boundary_measures.end(),
+            active),
+        mir.domainSummary().exterior_boundary_measures.end());
+}
+
+TEST(CompileMixed,
+     SingleFieldExteriorBoundaryPopulatesDomainSummary)
+{
+    FormCompiler compiler;
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u =
+        FormExpr::trialFunction(space, "u");
+    const auto v =
+        FormExpr::testFunction(space, "v");
+    const auto active =
+        ExteriorBoundaryMeasure::generatedActiveSubset(
+            /*physical_boundary_marker=*/5,
+            /*generated_active_boundary_marker=*/47);
+
+    const auto mir = compiler.compileMixed(
+        (u * v).dExteriorBoundary(active),
+        FormKind::Bilinear);
+
+    ASSERT_EQ(mir.numTestFields(), 1u);
+    ASSERT_EQ(mir.numTrialFields(), 1u);
+    ASSERT_TRUE(mir.hasBlock(0, 0));
+    EXPECT_TRUE(
+        mir.domainSummary().has_interface_face_terms);
+    EXPECT_FALSE(
+        mir.domainSummary().has_boundary_terms);
+    ASSERT_EQ(
+        mir.domainSummary()
+            .exterior_boundary_measures.size(),
+        1u);
+    EXPECT_EQ(
+        mir.domainSummary()
+            .exterior_boundary_measures.front(),
+        active);
+    ASSERT_EQ(
+        mir.domainSummary().interface_markers.size(),
+        1u);
+    EXPECT_EQ(
+        mir.domainSummary().interface_markers.front(),
+        47);
+}
+
+TEST(CompileMixed,
+     SingleFieldFastPathSummarizesEverySupportedExteriorDomain)
+{
+    FormCompiler compiler;
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u =
+        FormExpr::trialFunction(space, "u");
+    const auto v =
+        FormExpr::testFunction(space, "v");
+    const auto integrand = u * v;
+    const auto full =
+        ExteriorBoundaryMeasure::fullPhysical(
+            /*physical_boundary_marker=*/5);
+    const auto active =
+        ExteriorBoundaryMeasure::generatedActiveSubset(
+            /*physical_boundary_marker=*/5,
+            /*generated_active_boundary_marker=*/47);
+
+    const auto mir = compiler.compileMixed(
+        integrand.dx() +
+            (FormExpr::constant(2.0) * integrand)
+                .dExteriorBoundary(full) +
+            (FormExpr::constant(3.0) * integrand)
+                .dExteriorBoundary(active) +
+            (FormExpr::constant(4.0) * integrand)
+                .dCutVolume(
+                    /*interface_marker=*/53,
+                    CutVolumeSide::Negative),
+        FormKind::Bilinear);
+
+    ASSERT_EQ(mir.numTestFields(), 1u);
+    ASSERT_EQ(mir.numTrialFields(), 1u);
+    ASSERT_TRUE(mir.hasBlock(0, 0));
+    ASSERT_EQ(mir.block(0, 0).terms().size(), 4u);
+    const auto& summary = mir.domainSummary();
+    EXPECT_TRUE(summary.has_cell_terms);
+    EXPECT_TRUE(summary.has_boundary_terms);
+    EXPECT_FALSE(summary.has_interior_face_terms);
+    EXPECT_TRUE(summary.has_interface_face_terms);
+    EXPECT_TRUE(summary.has_cut_volume_terms);
+    ASSERT_EQ(summary.boundary_markers.size(), 1u);
+    EXPECT_EQ(summary.boundary_markers.front(), 5);
+    ASSERT_EQ(summary.interface_markers.size(), 1u);
+    EXPECT_EQ(summary.interface_markers.front(), 47);
+    ASSERT_EQ(summary.exterior_boundary_measures.size(), 2u);
+    EXPECT_NE(
+        std::find(
+            summary.exterior_boundary_measures.begin(),
+            summary.exterior_boundary_measures.end(),
+            full),
+        summary.exterior_boundary_measures.end());
+    EXPECT_NE(
+        std::find(
+            summary.exterior_boundary_measures.begin(),
+            summary.exterior_boundary_measures.end(),
+            active),
+        summary.exterior_boundary_measures.end());
 }
 
 // ============================================================================

@@ -127,12 +127,16 @@ struct MixedFormDomainSummary {
     bool has_boundary_terms{false};
     bool has_interior_face_terms{false};
     bool has_interface_face_terms{false};
+    bool has_cut_volume_terms{false};
 
     /// Boundary markers referenced by boundary terms (-1 = all)
     std::vector<int> boundary_markers{};
 
     /// Interface markers referenced by interface terms (-1 = all)
     std::vector<int> interface_markers{};
+
+    /// Explicit physical/generated exterior-boundary selections.
+    std::vector<ExteriorBoundaryMeasure> exterior_boundary_measures{};
 };
 
 /**

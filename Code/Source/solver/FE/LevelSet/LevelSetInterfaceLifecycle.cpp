@@ -1283,11 +1283,14 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
     stampImplicitFallbackStatus(
         backend_result.cut,
         backend_result.fallback_used);
+    const auto parent_corner_topology_key =
+        interfaces::levelSetParentCornerTopologyKey(domain.request(), input);
     for (auto& fragment : backend_result.cut.fragments) {
         fragment.parent_cell_global_id = mesh.globalEntityIdsAvailable()
                                              ? mesh.getCellGlobalId(cell_id)
                                              : cell_id;
         fragment.owner_rank = mesh.getCellOwnerRank(cell_id);
+        fragment.parent_corner_topology_key = parent_corner_topology_key;
         fragment.stable_id = 0u;
         domain.addFragment(std::move(fragment));
     }
@@ -1296,6 +1299,7 @@ detectUnqualifiedSameSignHighOrderComponentForCell(
                                            ? mesh.getCellGlobalId(cell_id)
                                            : cell_id;
         region.owner_rank = mesh.getCellOwnerRank(cell_id);
+        region.parent_corner_topology_key = parent_corner_topology_key;
         region.stable_id = 0u;
         domain.addVolumeRegion(std::move(region));
     }
@@ -2193,6 +2197,7 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
         field,
         field_dofs.getDofStateRevision(),
         revision);
+    request.generated_domain_id = options.domain_id;
     request.interface_marker = marker;
     request.isovalue = options.isovalue;
     request.tolerance = options.tolerance;

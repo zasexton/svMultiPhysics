@@ -71,6 +71,71 @@ TEST(JITValidation, AllowsExternalCallsInRelaxedModeButMarksNonCacheable)
     EXPECT_FALSE(r.cacheable);
 }
 
+TEST(JITValidation, ScalarValueShapeQueryIsStructuralAndFailClosed)
+{
+    using namespace svmp::FE::forms;
+
+    const auto constant = FormExpr::constant(Real(-2.0));
+    const auto coefficient = FormExpr::coefficient(
+        "scalar_shape_coefficient",
+        [](Real, Real, Real) { return Real(1.0); });
+    const auto vector = FormExpr::asVector({
+        FormExpr::constant(Real(1.0)),
+        FormExpr::constant(Real(2.0)),
+        FormExpr::constant(Real(3.0)),
+    });
+    const auto vector_signature = [](int dimension) {
+        FormExprNode::SpaceSignature signature{};
+        signature.space_type = svmp::FE::spaces::SpaceType::H1;
+        signature.field_type = svmp::FE::FieldType::Vector;
+        signature.continuity = svmp::FE::Continuity::C0;
+        signature.value_dimension = dimension;
+        signature.topological_dimension = dimension;
+        signature.polynomial_order = 1;
+        signature.element_type =
+            dimension == 2 ? svmp::FE::ElementType::Triangle3
+                           : svmp::FE::ElementType::Tetra4;
+        return signature;
+    };
+    const auto velocity_2d = FormExpr::stateField(
+        0, vector_signature(2), "scalar_shape_velocity_2d");
+    const auto velocity_3d = FormExpr::stateField(
+        1, vector_signature(3), "scalar_shape_velocity_3d");
+    auto two_component_3d_signature = vector_signature(3);
+    two_component_3d_signature.value_dimension = 2;
+    const auto two_component_velocity_3d = FormExpr::stateField(
+        2,
+        two_component_3d_signature,
+        "scalar_shape_two_component_velocity_3d");
+    const auto reference_coordinate = FormExpr::referenceCoordinate();
+    const auto vector_2d = FormExpr::asVector({
+        FormExpr::constant(Real(1.0)),
+        FormExpr::constant(Real(2.0)),
+    });
+
+    EXPECT_TRUE(jit::hasScalarValueShape(constant));
+    EXPECT_TRUE(jit::hasScalarValueShape(coefficient));
+    EXPECT_TRUE(jit::hasScalarValueShape(constant.abs()));
+    EXPECT_TRUE(jit::hasScalarValueShape(component(vector, 1)));
+    EXPECT_TRUE(jit::hasScalarValueShape(
+        inner(velocity_2d, FormExpr::currentNormal())));
+    EXPECT_TRUE(jit::hasScalarValueShape(
+        inner(velocity_3d, FormExpr::currentNormal())));
+    EXPECT_TRUE(jit::hasScalarValueShape(
+        inner(vector_2d, reference_coordinate), 2));
+    EXPECT_FALSE(jit::hasScalarValueShape(FormExpr{}));
+    EXPECT_FALSE(jit::hasScalarValueShape(vector));
+    EXPECT_FALSE(jit::hasScalarValueShape(FormExpr::identity(3)));
+    EXPECT_FALSE(jit::hasScalarValueShape(normalize(vector)));
+    EXPECT_FALSE(jit::hasScalarValueShape(min(vector, vector)));
+    EXPECT_FALSE(jit::hasScalarValueShape(inner(constant, vector)));
+    EXPECT_FALSE(jit::hasScalarValueShape(trace(constant)));
+    EXPECT_FALSE(jit::hasScalarValueShape(
+        inner(two_component_velocity_3d, velocity_3d)));
+    EXPECT_FALSE(jit::hasScalarValueShape(
+        component(reference_coordinate, 2), 2));
+}
+
 TEST(KernelIR, StableHashIgnoresCommutativeOperandOrder)
 {
     using namespace svmp::FE::forms;

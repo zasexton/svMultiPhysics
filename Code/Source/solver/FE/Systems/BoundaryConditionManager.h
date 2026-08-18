@@ -15,6 +15,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <sstream>
 #include <utility>
@@ -168,7 +169,8 @@ public:
                forms::FormExpr& residual,
                const forms::FormExpr& u,
                const forms::FormExpr& v,
-               FieldId field_id)
+               FieldId field_id,
+               std::string_view operator_tag = {})
     {
         for (const auto& bc : bcs_) {
             if (!bc) {
@@ -183,7 +185,7 @@ public:
         // at the end of this method, so we must query analysisMetadata() now.
         // Also lower each descriptor into normalized ContributionDescriptors,
         // and derive gauge anchoring evidence from descriptors.
-        collectAnalysisMetadata_(system, field_id);
+        collectAnalysisMetadata_(system, field_id, operator_tag);
 
         for (const auto& bc : bcs_) {
             if (!bc) {
@@ -217,14 +219,15 @@ public:
                const forms::FormExpr& u,
                const forms::FormExpr& v,
                FieldId field_id,
-               std::vector<forms::bc::StrongDirichlet>& constraints)
+               std::vector<forms::bc::StrongDirichlet>& constraints,
+               std::string_view operator_tag = {})
     {
         auto strong = getStrongConstraints(field_id);
         for (auto& c : strong) {
             constraints.push_back(std::move(c));
         }
 
-        apply(system, residual, u, v, field_id);
+        apply(system, residual, u, v, field_id, operator_tag);
     }
 
     // ====================================================================
@@ -255,12 +258,13 @@ public:
                   forms::FormExpr& residual,
                   const forms::FormExpr& u,
                   const forms::FormExpr& v,
-                  FieldId field_id)
+                  FieldId field_id,
+                  std::string_view operator_tag = {})
     {
         validate();
 
         auto strong = getStrongConstraints(field_id);
-        apply(system, residual, u, v, field_id);
+        apply(system, residual, u, v, field_id, operator_tag);
 
         if (!strong.empty()) {
             installStrongDirichlet(system, strong);
@@ -335,7 +339,9 @@ private:
 
     /// Shared implementation: collect analysis metadata and gauge anchoring
     /// evidence from all BCs.  Called by both apply() and applyAll(field_id).
-    void collectAnalysisMetadata_(FESystem& system, FieldId field_id)
+    void collectAnalysisMetadata_(FESystem& system,
+                                  FieldId field_id,
+                                  std::string_view operator_tag = {})
     {
         auto& reg = system.gaugeRegistry();
         const auto& rec = system.fieldRecord(field_id);
@@ -391,7 +397,8 @@ private:
                     }
                 }
 
-                system.addBoundaryConditionDescriptor(std::move(d));
+                system.addBoundaryConditionDescriptor(
+                    std::move(d), operator_tag);
             }
         }
     }
