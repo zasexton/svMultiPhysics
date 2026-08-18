@@ -549,7 +549,7 @@ checksum-bound evidence.
 Execution also remains fail closed on resources. The runner requires
 `MemAvailable >= 10240 MiB` before it starts, retains `4096 MiB` host-memory
 and filesystem-free-space floors while every build or test subprocess
-session is live, forces clean builds to one job, enforces a `1536 MiB`
+session is live, forces clean builds to one job, enforces a `3072 MiB`
 ceiling for both per-process build address space and sampled aggregate
 resident memory across the build process session, keeps each focused test
 process at its `1024 MiB` group ceiling, applies per-file output limits, and
