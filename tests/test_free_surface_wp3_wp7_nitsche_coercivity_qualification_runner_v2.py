@@ -40,7 +40,40 @@ def matrix_document():
 
 
 def valid_draft_document():
-    return matrix_document()
+    matrix = matrix_document()
+    matrix["status"] = "DRAFT_UNEXECUTED"
+    matrix["implementation_source_commit"] = None
+    matrix["source_inventory_hash_status"] = (
+        "DRAFT_OBSERVED_NOT_FROZEN"
+    )
+    matrix["runner_sha256"] = "0" * 64
+    matrix["draft_promotion_contract"].update(
+        {
+            "current_state": "DRAFT_UNEXECUTED",
+            "source_hashes_frozen": False,
+            "qualification_evidence_executed": False,
+            "validate_only_allowed": True,
+            "execution_allowed": False,
+            "required_execution_state": "FROZEN_BEFORE_EXECUTION",
+        }
+    )
+    return matrix
+
+
+def test_checked_in_qualification_bundle_hashes_match_lifecycle_state():
+    runner = load_runner()
+    matrix = matrix_document()
+
+    assert runner.normalized_registry_sha256(MATRIX_PATH) == (
+        runner.EXPECTED_NORMALIZED_REGISTRY_SHA256
+    )
+    if matrix["status"] == "DRAFT_UNEXECUTED":
+        assert matrix["runner_sha256"] == "0" * 64
+    else:
+        assert matrix["status"] == "FROZEN_BEFORE_EXECUTION"
+        assert hashlib.sha256(RUNNER_PATH.read_bytes()).hexdigest() == (
+            matrix["runner_sha256"]
+        )
 
 
 def valid_frozen_document(commit_length=40):
@@ -87,6 +120,7 @@ def trace_records(runner, gap=None):
                     dry = fraction == 0.0
                     upper_bound = 0.0 if dry else 4.0
                     ratio = upper_bound / 12.0
+                    quotient_patch_count = 0 if dry else 1
                     cases.append(
                         {
                             "case_id": f"trace-case-{ordinal:03d}",
@@ -104,6 +138,10 @@ def trace_records(runner, gap=None):
                             "form_binding_source_match": True,
                             "boundary_rule_count": 0 if dry else 1,
                             "patch_count": 0 if dry else 1,
+                            "exact_common_kernel_metadata_valid": True,
+                            "exact_common_kernel_quotient_patch_count": (
+                                quotient_patch_count
+                            ),
                             "trace_upper_bound": upper_bound,
                             "effective_penalty_multiplier": 12.0,
                             "trace_to_penalty_ratio": ratio,
@@ -135,6 +173,8 @@ def trace_records(runner, gap=None):
         "dry_case_count": 12,
         "deterministic_case_count": 108,
         "revision_match_case_count": 108,
+        "exact_common_kernel_metadata_valid_case_count": 108,
+        "exact_common_kernel_quotient_patch_count": 96,
         "maximum_trace_upper_bound": 4.0,
         "minimum_finite_sample_energy_lower_bound": wet_lower_bound,
         "minimum_sampled_eigenvalue_gap": gap,
@@ -193,7 +233,7 @@ def test_draft_validate_only_is_accepted_and_execution_is_rejected(
     )
     assert result["implementation_source_observation"] == source_observation
     assert result["group_count"] == 4
-    assert result["test_count"] == 20
+    assert result["test_count"] == 26
     assert result["outcome"] == "DRAFT_SOURCE_DRIFT"
 
     with pytest.raises(ValueError, match="full execution requires promotion"):
@@ -630,7 +670,7 @@ def test_exact_dyadic_math_group_and_source_contract_are_exact():
 
     assert matrix["status"] == "DRAFT_UNEXECUTED"
     assert len(matrix["groups"]) == 4
-    assert sum(len(group["tests"]) for group in matrix["groups"]) == 20
+    assert sum(len(group["tests"]) for group in matrix["groups"]) == 26
     math_group = matrix["groups"][0]
     assert math_group == {
         "id": runner.EXACT_DYADIC_GROUP_ID,
@@ -644,6 +684,11 @@ def test_exact_dyadic_math_group_and_source_contract_are_exact():
             "output_mib": 64,
         },
     }
+    assert len(runner.EXACT_DYADIC_TESTS) == 16
+    assert sum(
+        test.startswith("DenseLinearAlgebra.ExactFactorized")
+        for test in runner.EXACT_DYADIC_TESTS
+    ) == 6
     assert matrix["build_targets"]["math"] == "test_fe_math"
     assert matrix["build_cmake_homes"]["math"] == (
         "Code/Source/solver/FE"
@@ -651,14 +696,40 @@ def test_exact_dyadic_math_group_and_source_contract_are_exact():
     trace_contract = matrix["certified_aggregate_trace_contract"]
     assert trace_contract["maximum_exact_retained_quotient_dimension"] == 32
     assert trace_contract["quotient_authority"] == (
-        "exact_binary64_dyadic_D_spd_N_psd_and_qD_minus_N_psd"
+        "exact_binary64_dyadic_factorized_positive_Gram_D_and_N_psd_"
+        "common_kernel_rank_identity_then_D_spd_N_psd_and_qD_minus_N_psd_"
+        "on_the_exact_principal_gauge"
+    )
+    assert trace_contract["proof_input"] == (
+        "raw_affine_Gram_factors_with_exact_positive_sum_product_weights"
+    )
+    assert trace_contract["tangent_quotient"] == (
+        "exact_sparse_raw_to_retained_coordinate_map"
+    )
+    assert trace_contract["gram_map_rows_order"] == "strictly_increasing"
+    assert trace_contract["zero_dimensional_quotient"] == (
+        "vacuous_after_complete_factor_map_and_work_preflight"
+    )
+    assert trace_contract["secondary_common_kernel"] == (
+        "exact_rank(D_plus_N)_equals_rank(D)_proof_with_deterministic_"
+        "principal_coordinate_gauge_or_fail_closed"
+    )
+    assert trace_contract["factorized_provenance"] == (
+        "proof_flags_counts_work_metrics_and_nonzero_input_digest_bound_"
+        "into_certificate_digest"
     )
     assert trace_contract["floating_spectral_role"] == (
         "optional_diagnostics_only"
     )
+    assert trace_contract["formed_dense_matrix_role"] == (
+        "optional_floating_diagnostics_only"
+    )
     assert matrix["certificate_envelope"][
         "hard_exact_retained_quotient_dimension_cap"
     ] == 32
+    assert matrix["certificate_envelope"] == (
+        runner.EXPECTED_CERTIFICATE_ENVELOPE
+    )
     source_roles = {
         entry["path"]: entry["role"]
         for entry in matrix["implementation_sources"]
@@ -674,7 +745,14 @@ def test_exact_dyadic_math_group_and_source_contract_are_exact():
     [
         ("maximum_exact_retained_quotient_dimension", 31),
         ("quotient_authority", "floating_generalized_eigensolver"),
+        ("proof_input", "formed_dense_binary64_matrix"),
+        ("tangent_quotient", "rounded_dense_tangent"),
+        ("gram_map_rows_order", "unordered"),
+        ("zero_dimensional_quotient", "rejected"),
+        ("secondary_common_kernel", "rounded_nullspace_projection"),
+        ("factorized_provenance", "not_digest_bound"),
         ("floating_spectral_role", "qualification_authority"),
+        ("formed_dense_matrix_role", "qualification_authority"),
     ],
 )
 def test_exact_dyadic_trace_contract_drift_is_rejected(field, replacement):
@@ -722,6 +800,16 @@ def test_exact_dyadic_cap_source_group_and_math_target_drift_are_rejected():
     with pytest.raises(
         ValueError,
         match="build target/CMake-home inventory changed",
+    ):
+        runner.validate_v2_contract(changed)
+
+    changed = valid_draft_document()
+    changed["certificate_envelope"][
+        "hard_factorized_transform_visit_cap"
+    ] = 1048575
+    with pytest.raises(
+        ValueError,
+        match="factorized certificate envelope changed",
     ):
         runner.validate_v2_contract(changed)
 
@@ -1040,8 +1128,8 @@ def test_runtime_gates_are_an_exact_one_to_one_test_map():
     runner.validate_v2_contract(matrix)
 
     tests = [gate["test"] for gate in matrix["runtime_gates"]]
-    assert len(tests) == 20
-    assert len(set(tests)) == 20
+    assert len(tests) == 26
+    assert len(set(tests)) == 26
 
     duplicate = copy.deepcopy(matrix)
     duplicate["runtime_gates"][1]["test"] = (
@@ -1106,6 +1194,8 @@ def test_trace_parser_accepts_gap_at_negative_comparison_tolerance():
     assert evidence["observed_case_count"] == 108
     assert evidence["wet_case_count"] == 96
     assert evidence["dry_case_count"] == 12
+    assert evidence["exact_common_kernel_metadata_valid_case_count"] == 108
+    assert evidence["exact_common_kernel_quotient_patch_count"] == 96
     assert evidence["minimum_sampled_eigenvalue_gap"] == -1.0e-11
 
 
@@ -1184,6 +1274,25 @@ def test_trace_parser_requires_form_binding_provenance():
     ):
         runner.parse_trace_evidence(trace_stdout(runner, cases, summary))
 
+
+def test_trace_parser_requires_exact_common_kernel_production_evidence():
+    runner = load_runner()
+    cases, summary = trace_records(runner)
+    cases[1]["exact_common_kernel_metadata_valid"] = False
+    with pytest.raises(ValueError, match="common-kernel metadata is invalid"):
+        runner.parse_trace_evidence(trace_stdout(runner, cases, summary))
+
+    cases, summary = trace_records(runner)
+    cases[1]["exact_common_kernel_quotient_patch_count"] = 2
+    with pytest.raises(ValueError, match="exceeds its patch count"):
+        runner.parse_trace_evidence(trace_stdout(runner, cases, summary))
+
+    cases, summary = trace_records(runner)
+    for case in cases:
+        case["exact_common_kernel_quotient_patch_count"] = 0
+    summary["exact_common_kernel_quotient_patch_count"] = 0
+    with pytest.raises(ValueError, match="did not exercise"):
+        runner.parse_trace_evidence(trace_stdout(runner, cases, summary))
 
 def test_trace_json_records_reject_duplicate_object_keys():
     runner = load_runner()

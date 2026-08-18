@@ -16,6 +16,7 @@
 #include "Assembly/CutIntegrationContext.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Constraints/SmallCutAggregationConstraint.h"
+#include "Dofs/EntityDofMap.h"
 #include "Forms/BoundaryConditions.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
@@ -40,6 +41,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -1318,6 +1320,8 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     ASSERT_LT(
         volume_rule_indices.front(),
         context->volumeRules().size());
+    const auto expected_denominator_weight_terms =
+        context->volumeRules()[volume_rule_indices.front()].points.size();
     const auto volume_stable_id =
         context
             ->volumeRules()[
@@ -1335,6 +1339,15 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         report.active_cells.front()
             .retained_rule_stable_ids.front(),
         volume_stable_id);
+    const auto boundary_rule_indices =
+        context->generatedInterfaceRuleIndexSpanForMarker(
+            kActiveBoundaryMarker);
+    ASSERT_EQ(boundary_rule_indices.size(), 1u);
+    ASSERT_LT(
+        boundary_rule_indices.front(),
+        context->interfaceRules().size());
+    const auto expected_numerator_weight_terms =
+        context->interfaceRules()[boundary_rule_indices.front()].points.size();
 
     GeneratedBoundaryAggregateTraceCertificationOptions
         options;
@@ -1437,6 +1450,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         patch.rigid_mode_quotient_status,
         GeneratedBoundaryRigidModeQuotientStatus::
             Applied);
+    EXPECT_TRUE(patch.exact_rigid_factor_action_proven);
     EXPECT_EQ(patch.maximum_cell_support_overlap, 1u);
     EXPECT_NEAR(
         patch.retained_support_physical_volume,
@@ -1489,6 +1503,134 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         bound.exact_dyadic.upper_inequality_proven);
     EXPECT_EQ(bound.exact_dyadic.dimension, 3u);
     EXPECT_EQ(bound.exact_dyadic.denominator_rank, 3u);
+    EXPECT_EQ(
+        bound.exact_dyadic.proof_input,
+        math::DenseExactDyadicProofInput::
+            FactorizedBinary64PositiveForm);
+    EXPECT_TRUE(
+        bound.exact_dyadic
+            .exact_factorized_materialization_proven);
+    EXPECT_TRUE(bound.exact_dyadic.exact_sparse_map_applied);
+    EXPECT_EQ(
+        bound.exact_dyadic.numerator_gram_block_count,
+        patch.boundary_rule_stable_ids.size());
+    EXPECT_EQ(
+        bound.exact_dyadic.denominator_gram_block_count,
+        patch.support_cell_gids.size());
+    EXPECT_EQ(bound.exact_dyadic.numerator_gram_row_count, 2u);
+    EXPECT_EQ(bound.exact_dyadic.denominator_gram_row_count, 3u);
+    EXPECT_EQ(
+        bound.exact_dyadic.numerator_weight_term_count,
+        expected_numerator_weight_terms);
+    EXPECT_EQ(
+        bound.exact_dyadic.denominator_weight_term_count,
+        expected_denominator_weight_terms);
+    EXPECT_GT(bound.exact_dyadic.transform_entry_count, 0u);
+    EXPECT_GT(bound.exact_dyadic.exact_transform_visit_count, 0u);
+    EXPECT_GT(bound.exact_dyadic.exact_nonzero_outer_pair_count, 0u);
+    EXPECT_GT(
+        bound.exact_dyadic.factor_materialization_update_count,
+        0u);
+    EXPECT_GT(bound.exact_dyadic.modeled_input_bytes, 0u);
+    EXPECT_NE(bound.exact_dyadic.factorized_input_digest, 0u);
+    EXPECT_EQ(bound.exact_dyadic.factorized_input_dimension, 3u);
+    EXPECT_TRUE(bound.exact_dyadic.exact_common_kernel_proven);
+    EXPECT_FALSE(
+        bound.exact_dyadic.exact_common_kernel_quotient_applied);
+    EXPECT_EQ(bound.exact_dyadic.exact_common_kernel_nullity, 0u);
+    EXPECT_TRUE(
+        bound.exact_dyadic
+            .exact_common_kernel_eliminated_coordinates.empty());
+
+    EXPECT_NO_THROW(
+        validateGeneratedBoundaryAggregateTraceCertificateDigest(
+            certificate));
+    const auto expect_exact_metadata_tamper_rejected =
+        [&](std::string_view label, auto mutate) {
+            SCOPED_TRACE(std::string(label));
+            auto tampered = certificate;
+            mutate(
+                tampered.patches.front()
+                    .generalized_bound.exact_dyadic);
+            EXPECT_THROW(
+                validateGeneratedBoundaryAggregateTraceCertificateDigest(
+                    tampered),
+                std::runtime_error);
+        };
+    using ExactProof =
+        math::DenseExactDyadicSpdGeneralizedUpperBound;
+    const std::array<std::pair<std::string_view, bool ExactProof::*>, 4>
+        exact_flags{{
+            {"factorized materialization flag",
+             &ExactProof::exact_factorized_materialization_proven},
+            {"sparse map flag", &ExactProof::exact_sparse_map_applied},
+            {"common-kernel proof flag",
+             &ExactProof::exact_common_kernel_proven},
+            {"common-kernel quotient flag",
+             &ExactProof::exact_common_kernel_quotient_applied},
+        }};
+    for (const auto& [label, member] : exact_flags) {
+        expect_exact_metadata_tamper_rejected(
+            label,
+            [member](ExactProof& exact) {
+                exact.*member = !(exact.*member);
+            });
+    }
+    const std::array<
+        std::pair<std::string_view, std::size_t ExactProof::*>,
+        13>
+        exact_counts{{
+            {"numerator block count",
+             &ExactProof::numerator_gram_block_count},
+            {"denominator block count",
+             &ExactProof::denominator_gram_block_count},
+            {"numerator row count",
+             &ExactProof::numerator_gram_row_count},
+            {"denominator row count",
+             &ExactProof::denominator_gram_row_count},
+            {"numerator weight count",
+             &ExactProof::numerator_weight_term_count},
+            {"denominator weight count",
+             &ExactProof::denominator_weight_term_count},
+            {"transform entry count",
+             &ExactProof::transform_entry_count},
+            {"transform visit count",
+             &ExactProof::exact_transform_visit_count},
+            {"outer-pair count",
+             &ExactProof::exact_nonzero_outer_pair_count},
+            {"materialization update count",
+             &ExactProof::factor_materialization_update_count},
+            {"modeled input bytes",
+             &ExactProof::modeled_input_bytes},
+            {"factorized input dimension",
+             &ExactProof::factorized_input_dimension},
+            {"common-kernel nullity",
+             &ExactProof::exact_common_kernel_nullity},
+        }};
+    for (const auto& [label, member] : exact_counts) {
+        expect_exact_metadata_tamper_rejected(
+            label,
+            [member](ExactProof& exact) {
+                ++(exact.*member);
+            });
+    }
+    expect_exact_metadata_tamper_rejected(
+        "factorized proof source",
+        [](ExactProof& exact) {
+            exact.proof_input =
+                math::DenseExactDyadicProofInput::DenseBinary64Matrix;
+        });
+    expect_exact_metadata_tamper_rejected(
+        "factorized input digest",
+        [](ExactProof& exact) {
+            exact.factorized_input_digest ^= UINT64_C(1);
+        });
+    expect_exact_metadata_tamper_rejected(
+        "common-kernel eliminated coordinates",
+        [](ExactProof& exact) {
+            exact.exact_common_kernel_eliminated_coordinates.push_back(0u);
+        });
+
     EXPECT_GE(
         bound.conservative_upper_bound,
         bound.exact_dyadic.directly_proven_upper_bound);
@@ -1788,6 +1930,21 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                 kInterfaceMarker,
                 geometry::CutIntegrationSide::Negative);
     ASSERT_EQ(volume_rule_indices.size(), 2u);
+    std::size_t expected_denominator_weight_terms = 0u;
+    for (const auto rule_index : volume_rule_indices) {
+        ASSERT_LT(rule_index, context->volumeRules().size());
+        expected_denominator_weight_terms +=
+            context->volumeRules()[rule_index].points.size();
+    }
+    const auto boundary_rule_indices =
+        context->generatedInterfaceRuleIndexSpanForMarker(
+            kActiveBoundaryMarker);
+    ASSERT_EQ(boundary_rule_indices.size(), 1u);
+    ASSERT_LT(
+        boundary_rule_indices.front(),
+        context->interfaceRules().size());
+    const auto expected_numerator_weight_terms =
+        context->interfaceRules()[boundary_rule_indices.front()].points.size();
     for (const auto& active_cell :
          report.active_cells) {
         ASSERT_EQ(
@@ -2090,6 +2247,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         patch.rigid_mode_quotient_status,
         GeneratedBoundaryRigidModeQuotientStatus::
             Applied);
+    EXPECT_TRUE(patch.exact_rigid_factor_action_proven);
     EXPECT_EQ(patch.maximum_cell_support_overlap, 1u);
     EXPECT_NEAR(
         patch.retained_support_physical_volume,
@@ -2104,6 +2262,8 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     EXPECT_EQ(bound.dimension, 6u);
     EXPECT_EQ(bound.positive_rank, 3u);
     EXPECT_EQ(bound.nullity, 3u);
+    // The correctly ordered rounded pencil remains a useful diagnostic, but
+    // only the raw factorized proof is authoritative for acceptance.
     EXPECT_TRUE(bound.denominator_converged);
     EXPECT_TRUE(bound.quotient_converged);
     EXPECT_TRUE(bound.explicit_nullspace.applied);
@@ -2136,6 +2296,40 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         bound.exact_dyadic.upper_inequality_proven);
     EXPECT_EQ(bound.exact_dyadic.dimension, 3u);
     EXPECT_EQ(bound.exact_dyadic.denominator_rank, 3u);
+    EXPECT_EQ(
+        bound.exact_dyadic.proof_input,
+        math::DenseExactDyadicProofInput::
+            FactorizedBinary64PositiveForm);
+    EXPECT_TRUE(
+        bound.exact_dyadic
+            .exact_factorized_materialization_proven);
+    EXPECT_TRUE(bound.exact_dyadic.exact_sparse_map_applied);
+    EXPECT_EQ(bound.exact_dyadic.numerator_gram_block_count, 1u);
+    EXPECT_EQ(bound.exact_dyadic.denominator_gram_block_count, 2u);
+    EXPECT_EQ(bound.exact_dyadic.numerator_gram_row_count, 2u);
+    EXPECT_EQ(bound.exact_dyadic.denominator_gram_row_count, 6u);
+    EXPECT_EQ(
+        bound.exact_dyadic.numerator_weight_term_count,
+        expected_numerator_weight_terms);
+    EXPECT_EQ(
+        bound.exact_dyadic.denominator_weight_term_count,
+        expected_denominator_weight_terms);
+    EXPECT_GT(bound.exact_dyadic.transform_entry_count, 0u);
+    EXPECT_GT(bound.exact_dyadic.exact_transform_visit_count, 0u);
+    EXPECT_GT(bound.exact_dyadic.exact_nonzero_outer_pair_count, 0u);
+    EXPECT_GT(
+        bound.exact_dyadic.factor_materialization_update_count,
+        0u);
+    EXPECT_GT(bound.exact_dyadic.modeled_input_bytes, 0u);
+    EXPECT_NE(bound.exact_dyadic.factorized_input_digest, 0u);
+    EXPECT_EQ(bound.exact_dyadic.factorized_input_dimension, 3u);
+    EXPECT_TRUE(bound.exact_dyadic.exact_common_kernel_proven);
+    EXPECT_FALSE(
+        bound.exact_dyadic.exact_common_kernel_quotient_applied);
+    EXPECT_EQ(bound.exact_dyadic.exact_common_kernel_nullity, 0u);
+    EXPECT_TRUE(
+        bound.exact_dyadic
+            .exact_common_kernel_eliminated_coordinates.empty());
     EXPECT_GE(
         bound.conservative_upper_bound,
         bound.exact_dyadic.directly_proven_upper_bound);

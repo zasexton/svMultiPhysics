@@ -946,7 +946,12 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
     systems::AssemblyRequest assembly_request;
     assembly_request.op = "velocity";
     assembly_request.want_matrix = true;
+    std::vector<Real> zero_solution(
+        static_cast<std::size_t>(
+            system.dofHandler().getNumDofs()),
+        Real{0.0});
     systems::SystemStateView state;
+    state.u = zero_solution;
     const auto assembly_outcome =
         invokeCollectively(
             MPI_COMM_WORLD,
@@ -1468,6 +1473,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
         patch.rigid_mode_quotient_status,
         GeneratedBoundaryRigidModeQuotientStatus::
             Applied);
+    EXPECT_TRUE(patch.exact_rigid_factor_action_proven);
     EXPECT_EQ(
         patch.maximum_cell_support_overlap,
         1u);
@@ -1487,8 +1493,10 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
     EXPECT_EQ(bound.dimension, 6u);
     EXPECT_EQ(bound.positive_rank, 3u);
     EXPECT_EQ(bound.nullity, 3u);
-    EXPECT_TRUE(bound.denominator_converged);
-    EXPECT_TRUE(bound.quotient_converged);
+    // The gathered rounded pencil is unavailable as a floating diagnostic;
+    // the raw factorized proof controls acceptance on both ranks.
+    EXPECT_FALSE(bound.denominator_converged);
+    EXPECT_FALSE(bound.quotient_converged);
     EXPECT_TRUE(
         bound.explicit_nullspace.applied);
     EXPECT_EQ(
@@ -1516,6 +1524,80 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
         bound.exact_dyadic.upper_inequality_proven);
     EXPECT_EQ(bound.exact_dyadic.dimension, 3u);
     EXPECT_EQ(bound.exact_dyadic.denominator_rank, 3u);
+    EXPECT_EQ(
+        bound.exact_dyadic.proof_input,
+        math::DenseExactDyadicProofInput::
+            FactorizedBinary64PositiveForm);
+    EXPECT_TRUE(
+        bound.exact_dyadic
+            .exact_factorized_materialization_proven);
+    EXPECT_TRUE(bound.exact_dyadic.exact_sparse_map_applied);
+    EXPECT_EQ(bound.exact_dyadic.numerator_gram_block_count, 1u);
+    EXPECT_EQ(bound.exact_dyadic.denominator_gram_block_count, 2u);
+    EXPECT_EQ(bound.exact_dyadic.numerator_gram_row_count, 2u);
+    EXPECT_EQ(bound.exact_dyadic.denominator_gram_row_count, 6u);
+    EXPECT_GE(bound.exact_dyadic.numerator_weight_term_count, 1u);
+    EXPECT_GT(bound.exact_dyadic.transform_entry_count, 0u);
+    EXPECT_GT(bound.exact_dyadic.exact_transform_visit_count, 0u);
+    EXPECT_GT(bound.exact_dyadic.exact_nonzero_outer_pair_count, 0u);
+    EXPECT_GT(
+        bound.exact_dyadic.factor_materialization_update_count,
+        0u);
+    EXPECT_GT(bound.exact_dyadic.modeled_input_bytes, 0u);
+    EXPECT_NE(bound.exact_dyadic.factorized_input_digest, 0u);
+    EXPECT_EQ(bound.exact_dyadic.factorized_input_dimension, 3u);
+    EXPECT_TRUE(bound.exact_dyadic.exact_common_kernel_proven);
+    EXPECT_FALSE(
+        bound.exact_dyadic.exact_common_kernel_quotient_applied);
+    EXPECT_EQ(bound.exact_dyadic.exact_common_kernel_nullity, 0u);
+    EXPECT_TRUE(
+        bound.exact_dyadic
+            .exact_common_kernel_eliminated_coordinates.empty());
+
+    const std::array<std::uint64_t, 20> local_exact_metadata{{
+        static_cast<std::uint64_t>(bound.exact_dyadic.proof_input),
+        bound.exact_dyadic.exact_factorized_materialization_proven
+            ? 1u
+            : 0u,
+        bound.exact_dyadic.exact_sparse_map_applied ? 1u : 0u,
+        bound.exact_dyadic.numerator_gram_block_count,
+        bound.exact_dyadic.denominator_gram_block_count,
+        bound.exact_dyadic.numerator_gram_row_count,
+        bound.exact_dyadic.denominator_gram_row_count,
+        bound.exact_dyadic.numerator_weight_term_count,
+        bound.exact_dyadic.denominator_weight_term_count,
+        bound.exact_dyadic.transform_entry_count,
+        bound.exact_dyadic.exact_transform_visit_count,
+        bound.exact_dyadic.exact_nonzero_outer_pair_count,
+        bound.exact_dyadic.factor_materialization_update_count,
+        bound.exact_dyadic.modeled_input_bytes,
+        bound.exact_dyadic.factorized_input_digest,
+        bound.exact_dyadic.factorized_input_dimension,
+        bound.exact_dyadic.exact_common_kernel_proven ? 1u : 0u,
+        bound.exact_dyadic.exact_common_kernel_quotient_applied
+            ? 1u
+            : 0u,
+        bound.exact_dyadic.exact_common_kernel_nullity,
+        bound.exact_dyadic
+            .exact_common_kernel_eliminated_coordinates.size(),
+    }};
+    std::array<std::uint64_t, 20> minimum_exact_metadata{};
+    std::array<std::uint64_t, 20> maximum_exact_metadata{};
+    MPI_Allreduce(
+        local_exact_metadata.data(),
+        minimum_exact_metadata.data(),
+        static_cast<int>(local_exact_metadata.size()),
+        MPI_UINT64_T,
+        MPI_MIN,
+        MPI_COMM_WORLD);
+    MPI_Allreduce(
+        local_exact_metadata.data(),
+        maximum_exact_metadata.data(),
+        static_cast<int>(local_exact_metadata.size()),
+        MPI_UINT64_T,
+        MPI_MAX,
+        MPI_COMM_WORLD);
+    EXPECT_EQ(minimum_exact_metadata, maximum_exact_metadata);
     EXPECT_GE(
         bound.conservative_upper_bound,
         bound.exact_dyadic.directly_proven_upper_bound);

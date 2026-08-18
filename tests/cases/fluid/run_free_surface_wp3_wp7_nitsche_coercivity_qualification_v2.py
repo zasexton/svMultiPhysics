@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the additive WP-3/WP-7 exact-dyadic and aggregate-trace prerequisite."""
+"""Run the additive WP-3/WP-7 exact-math and aggregate-trace prerequisite."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ V1_METHOD_PATH = (
 )
 
 EXPECTED_NORMALIZED_REGISTRY_SHA256 = (
-    "59b3c9f0c496659b92cafd09af30a69c8999a5e7421de70f0d92def4f7dec261"
+    "5ee8562136457b6b9c8bc28f51e1883286342771e4e7eb21612aa64a004581b3"
 )
 RUNNER_SHA256_ZERO_SENTINEL = "0" * 64
 EXPECTED_SHARED_RUNNER_SHA256 = (
@@ -171,9 +171,28 @@ EXPECTED_TRACE_CONTRACT = {
     "maximum_terminal_tangent_dimension": 128,
     "maximum_exact_retained_quotient_dimension": 32,
     "quotient_authority": (
-        "exact_binary64_dyadic_D_spd_N_psd_and_qD_minus_N_psd"
+        "exact_binary64_dyadic_factorized_positive_Gram_D_and_N_psd_"
+        "common_kernel_rank_identity_then_D_spd_N_psd_and_qD_minus_N_psd_"
+        "on_the_exact_principal_gauge"
+    ),
+    "proof_input": (
+        "raw_affine_Gram_factors_with_exact_positive_sum_product_weights"
+    ),
+    "tangent_quotient": "exact_sparse_raw_to_retained_coordinate_map",
+    "gram_map_rows_order": "strictly_increasing",
+    "zero_dimensional_quotient": (
+        "vacuous_after_complete_factor_map_and_work_preflight"
+    ),
+    "secondary_common_kernel": (
+        "exact_rank(D_plus_N)_equals_rank(D)_proof_with_deterministic_"
+        "principal_coordinate_gauge_or_fail_closed"
+    ),
+    "factorized_provenance": (
+        "proof_flags_counts_work_metrics_and_nonzero_input_digest_bound_"
+        "into_certificate_digest"
     ),
     "floating_spectral_role": "optional_diagnostics_only",
+    "formed_dense_matrix_role": "optional_floating_diagnostics_only",
     "patch_inequality": (
         "integral_Gamma_(h_normal/mu)*abs(2*mu*epsilon(v)*n)^2 <= "
         "C_patch*integral_support_2*mu*epsilon(v):epsilon(v)"
@@ -236,20 +255,64 @@ EXACT_DYADIC_TESTS = (
     "ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap",
     "DenseLinearAlgebra."
     "ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs",
+    "DenseLinearAlgebra."
+    "ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding",
+    "DenseLinearAlgebra."
+    "ExactFactorizedBoundKeepsUnroundedSparseTangentSum",
+    "DenseLinearAlgebra."
+    "ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales",
+    "DenseLinearAlgebra."
+    "ExactFactorizedBoundRejectsSingularAndMalformedInputs",
+    "DenseLinearAlgebra."
+    "ExactFactorizedBoundUsesLinearPositiveScaleMultipliers",
+    "DenseLinearAlgebra."
+    "ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient",
 )
 EXPECTED_EXACT_DYADIC_SOURCE_ROLES = {
     "Code/Source/solver/FE/Math/DenseLinearAlgebra.h": (
-        "floating diagnostics and exact dyadic generalized-bound contract"
+        "floating diagnostics plus exact dense and factorized binary64-"
+        "dyadic generalized-bound contracts"
     ),
     "Code/Source/solver/FE/Math/DenseExactDyadic.cpp": (
-        "authoritative exact binary64-dyadic SPD quotient certification"
+        "authoritative exact binary64-dyadic dense and factorized positive-"
+        "Gram quotient certification"
     ),
     "Code/Source/solver/FE/Math/DenseLinearAlgebra.cpp": (
         "dense generalized eigenvalue certification implementation"
     ),
     "Code/Source/solver/FE/Tests/Unit/Math/test_DenseLinearAlgebra.cpp": (
-        "floating and exact-dyadic generalized-bound evidence"
+        "floating, exact-dense, and exact-factorized generalized-bound "
+        "evidence"
     ),
+}
+EXPECTED_CERTIFICATE_ENVELOPE = {
+    "synthetic_full_active_boundary_patches_supported": True,
+    "rooted_aggregation_patches_supported": True,
+    "rootless_aggregation_patches_supported": False,
+    "closed_affine_constraints_required": True,
+    "current_cut_context_required_for_execution": True,
+    "current_free_surface_snapshot_required": True,
+    "current_generated_source_value_revision_required": True,
+    "current_affine_constraint_layout_revision_required": True,
+    "physical_boundary_marker_bound": True,
+    "collective_on_field_communicator": True,
+    "canonical_digest_scope": "communicator_and_algebraic_partition",
+    "rank_local_revisions_excluded_from_canonical_digest": True,
+    "hard_terminal_tangent_dimension_cap": 128,
+    "hard_exact_retained_quotient_dimension_cap": 32,
+    "hard_factorized_gram_block_cap": 16384,
+    "hard_factorized_gram_row_cap_per_form": 262144,
+    "hard_factorized_weight_term_cap_per_form": 1048576,
+    "hard_factorized_product_factor_cap_per_block": 4,
+    "hard_factorized_transform_entry_cap": 1048576,
+    "hard_factorized_raw_factor_coefficient_cap": 1048576,
+    "hard_factorized_transform_visit_cap": 1048576,
+    "hard_factorized_outer_pair_cap": 8388608,
+    "hard_factorized_modeled_input_byte_cap": 67108864,
+    "hard_exact_arithmetic_update_cap": 2000000,
+    "hard_exact_integer_bit_cap": 262144,
+    "hard_exact_binary64_search_step_cap": 64,
+    "factor_and_work_caps_fail_closed_before_content_scans": True,
 }
 EXPECTED_BUILD_TARGETS = {
     "math": "test_fe_math",
@@ -343,8 +406,8 @@ EXPECTED_RESOURCE_SAFEGUARDS = {
 }
 EXPECTED_GATES = {
     "expected_group_count": 4,
-    "expected_distinct_test_count": 20,
-    "expected_quantitative_evidence_count": 7,
+    "expected_distinct_test_count": 26,
+    "expected_quantitative_evidence_count": 8,
     "expected_failures": 0,
     "expected_errors": 0,
     "expected_disabled": 0,
@@ -369,6 +432,10 @@ EXPECTED_QUANTITATIVE_EVIDENCE = {
         TRACE_TEST,
         "wp3_wp7_nitsche_trace_v2_minimum_sampled_eigenvalue_gap",
     ): ("real", "greater_than_or_equal", -1.0e-11),
+    (
+        TRACE_TEST,
+        "wp3_wp7_nitsche_trace_v2_exact_common_kernel_quotient_patch_count",
+    ): ("integer", "greater_than", 0),
     (
         TRACE_TEST,
         "wp3_wp7_nitsche_trace_v2_method_coercivity_lower_bound",
@@ -925,14 +992,12 @@ def validate_v2_contract(registry: dict[str, Any]) -> dict[str, Any]:
     ):
         raise ValueError("v2 build target/CMake-home inventory changed")
     certificate_envelope = registry.get("certificate_envelope")
-    if (
-        not isinstance(certificate_envelope, dict)
-        or certificate_envelope.get(
-            "hard_exact_retained_quotient_dimension_cap"
-        )
-        != EXACT_DYADIC_RETAINED_QUOTIENT_DIMENSION_CAP
-    ):
+    if not isinstance(certificate_envelope, dict) or certificate_envelope.get(
+        "hard_exact_retained_quotient_dimension_cap"
+    ) != EXACT_DYADIC_RETAINED_QUOTIENT_DIMENSION_CAP:
         raise ValueError("exact-dyadic retained quotient cap changed")
+    if certificate_envelope != EXPECTED_CERTIFICATE_ENVELOPE:
+        raise ValueError("factorized certificate envelope changed")
     _validate_group_contracts(registry)
     _validate_runtime_gates(registry)
     if registry.get("gates") != EXPECTED_GATES:
@@ -1270,6 +1335,7 @@ def parse_trace_evidence(stdout: str) -> dict[str, Any]:
     normalized_cases: list[dict[str, Any]] = []
     wet_count = 0
     dry_count = 0
+    exact_common_kernel_quotient_patch_count = 0
     maximum_upper_bound = 0.0
     minimum_lower_bound = math.inf
     minimum_eigenvalue_gap = math.inf
@@ -1349,6 +1415,20 @@ def parse_trace_evidence(stdout: str) -> dict[str, Any]:
             case.get("patch_count"),
             f"{label} patch count",
         )
+        if case.get("exact_common_kernel_metadata_valid") is not True:
+            raise ValueError(
+                f"{label} exact common-kernel metadata is invalid"
+            )
+        quotient_patch_count = _integer(
+            case.get("exact_common_kernel_quotient_patch_count"),
+            f"{label} exact common-kernel quotient patch count",
+        )
+        if quotient_patch_count > patch_count:
+            raise ValueError(
+                f"{label} exact common-kernel quotient patch count "
+                "exceeds its patch count"
+            )
+        exact_common_kernel_quotient_patch_count += quotient_patch_count
         if case.get("deterministic") is not True:
             raise ValueError(f"{label} certificate is not deterministic")
         if case.get("revision_match") is not True:
@@ -1394,6 +1474,7 @@ def parse_trace_evidence(stdout: str) -> dict[str, Any]:
             if (
                 boundary_rules != 0
                 or patch_count != 0
+                or quotient_patch_count != 0
                 or upper_bound != 0.0
                 or lower_bound != 1.0
             ):
@@ -1460,6 +1541,10 @@ def parse_trace_evidence(stdout: str) -> dict[str, Any]:
         raise ValueError("trace wet/dry case counts changed")
     if not math.isfinite(minimum_eigenvalue_gap):
         raise ValueError("trace evidence has no wet eigenvalue gaps")
+    if exact_common_kernel_quotient_patch_count <= 0:
+        raise ValueError(
+            "trace evidence did not exercise the exact common-kernel quotient"
+        )
 
     summary = summaries[0]
     if set(summary) != EXPECTED_TRACE_SUMMARY_FIELDS:
@@ -1474,6 +1559,12 @@ def parse_trace_evidence(stdout: str) -> dict[str, Any]:
         "dry_case_count": EXPECTED_TRACE_DRY_CASE_COUNT,
         "deterministic_case_count": EXPECTED_TRACE_CASE_COUNT,
         "revision_match_case_count": EXPECTED_TRACE_CASE_COUNT,
+        "exact_common_kernel_metadata_valid_case_count": (
+            EXPECTED_TRACE_CASE_COUNT
+        ),
+        "exact_common_kernel_quotient_patch_count": (
+            exact_common_kernel_quotient_patch_count
+        ),
     }
     for field, expected in expected_summary_values.items():
         if summary.get(field) != expected:
@@ -1521,6 +1612,12 @@ def parse_trace_evidence(stdout: str) -> dict[str, Any]:
         "dry_case_count": dry_count,
         "deterministic_case_count": len(normalized_cases),
         "revision_match_case_count": len(normalized_cases),
+        "exact_common_kernel_metadata_valid_case_count": len(
+            normalized_cases
+        ),
+        "exact_common_kernel_quotient_patch_count": (
+            exact_common_kernel_quotient_patch_count
+        ),
         "maximum_trace_upper_bound": maximum_upper_bound,
         "minimum_finite_sample_energy_lower_bound": minimum_lower_bound,
         "minimum_sampled_eigenvalue_gap": minimum_eigenvalue_gap,
@@ -1587,6 +1684,12 @@ def _trace_evidence_reference(output_root: Path) -> dict[str, Any]:
         "observed_case_count": evidence.get("observed_case_count"),
         "wet_case_count": evidence.get("wet_case_count"),
         "dry_case_count": evidence.get("dry_case_count"),
+        "exact_common_kernel_metadata_valid_case_count": evidence.get(
+            "exact_common_kernel_metadata_valid_case_count"
+        ),
+        "exact_common_kernel_quotient_patch_count": evidence.get(
+            "exact_common_kernel_quotient_patch_count"
+        ),
         "maximum_trace_upper_bound": evidence.get(
             "maximum_trace_upper_bound"
         ),
@@ -1615,6 +1718,8 @@ EXPECTED_TRACE_CASE_FIELDS = {
     "form_binding_source_match",
     "boundary_rule_count",
     "patch_count",
+    "exact_common_kernel_metadata_valid",
+    "exact_common_kernel_quotient_patch_count",
     "trace_upper_bound",
     "effective_penalty_multiplier",
     "trace_to_penalty_ratio",
@@ -1638,6 +1743,8 @@ EXPECTED_TRACE_SUMMARY_FIELDS = {
     "dry_case_count",
     "deterministic_case_count",
     "revision_match_case_count",
+    "exact_common_kernel_metadata_valid_case_count",
+    "exact_common_kernel_quotient_patch_count",
     "maximum_trace_upper_bound",
     "minimum_finite_sample_energy_lower_bound",
     "minimum_sampled_eigenvalue_gap",

@@ -6,11 +6,11 @@ This document specifies the version-2 certified aggregate-trace prerequisite
 for the generated-boundary velocity-Nitsche route. Its only accepted claim is
 `joint_low_level_prerequisite`.
 
-The matching matrix is `DRAFT_UNEXECUTED`. Its implementation-source hashes
-are a draft observation of a concurrent worktree, not an execution baseline,
-and the v2 qualification groups have not been run. Execution must remain
-disabled until the sources and v2 runner are deliberately frozen and the
-matrix is promoted to `FROZEN_BEFORE_EXECUTION`.
+The matching matrix carries the authoritative lifecycle status. While that
+status is `DRAFT_UNEXECUTED`, its implementation-source hashes are only an
+observation, not an execution baseline, and full execution is disabled. The
+runner permits execution only after the sources and runner are deliberately
+frozen and the matrix is promoted to `FROZEN_BEFORE_EXECUTION`.
 
 The method-wide coercivity lower bound remains deliberately `null`, with
 uniform-bound status `UNFROZEN_NO_BOUND_INVENTED`. FSR-16, FSR-07, WP-3,
@@ -18,10 +18,12 @@ WP-7, and Q1 all remain `OPEN`. In particular, a positive certificate for the
 supported finite-dimensional route is not a mesh-family theorem and does not
 close any of those outcomes.
 
-The current source contains an unexecuted exact-dyadic hardening of the patch
-quotient. It has not been compiled or run under this record, is not included
-in a frozen matrix, and is not qualification evidence. The matrix and all
-dispositions therefore remain unchanged.
+The factorized exact-dyadic hardening of the patch quotient becomes
+qualification evidence only through a frozen, hash-matched source inventory
+and a successful execution of every required group. A draft source snapshot
+or an implementation result obtained outside that binding is not
+qualification evidence. In every lifecycle state, the closure dispositions
+above remain unchanged by this prerequisite alone.
 
 The v2 matrix byte-locks these parent artifacts:
 
@@ -114,10 +116,11 @@ C_i
   2\mu\,\varepsilon(v):\varepsilon(v).
 \]
 
-The present implementation divides the numerator and denominator matrices by
-their common positive factor \(2\mu\) before dense certification. This leaves
-the quotient unchanged and avoids viscosity-dependent overflow or underflow.
-It does not extend the result to variable or constitutive viscosity.
+The present implementation removes the common positive factor \(2\mu\) from
+the numerator and denominator Gram forms before exact certification. This
+leaves the quotient unchanged and avoids viscosity-dependent overflow or
+underflow. It does not extend the result to variable or constitutive
+viscosity.
 
 The supported envelope is intentionally narrow:
 
@@ -139,34 +142,63 @@ Rootless aggregation, non-affine geometry, quadrilateral or hexahedral Q1,
 higher order, variable viscosity, and current-frame certification are outside
 this envelope and fail closed.
 
-## Patch construction and dense bound
+## Patch construction and factorized exact bound
 
 The finalized aggregation report supplies canonical active cells, retained
 volume-rule identities, patch support, slave rows, owners, and revision
 metadata. Certification reconstructs the closed tangent rows from canonical
 DOF owners and gathers each retained volume and generated boundary
 contribution from its declared provider. All participating ranks perform the
-same deterministic dense certification.
+same deterministic factorized exact certification.
 
-For each boundary-carrying patch, the implementation forms:
+For each boundary-carrying patch, the implementation retains:
 
-- a positive-semidefinite denominator from retained support strain energy;
-- a positive-semidefinite numerator from the scaled normal-traction trace;
-- the exact terminal tangent map after applying finalized affine
-  prolongation;
+- raw affine symmetric-strain Gram factors for the retained support energy;
+- raw affine normal-traction Gram factors for the scaled boundary trace;
+- positive quadrature weights as exact sums, with positive geometric scale
+  factors such as \(h_n\) retained as exact products;
+- the finalized affine prolongation and retained-coordinate gauge as one
+  exact sparse raw-to-quotient tangent map;
 - structural rigid-mode candidates appropriate to the spatial dimension.
 
-A rigid-mode quotient is applied only after exact reproduction, exact
-binary64 pencil-action checks, and a modular full-column-rank proof. The
-modular elimination also selects an exactly nonsingular set of coordinate
-anchors. Deleting those coordinates produces the retained principal quotient
-without a rounded orthogonal projection.
+Affine P1 gradients and tractions must be bitwise invariant at every
+quadrature point of the corresponding contribution. Quadrature-point weights
+are accumulated as positive terms, not as one rounded binary64 total. The
+strain form retains its diagonal/off-diagonal row multipliers; the traction
+form retains its separate integer multiplier and the \(h_n\) product factor.
+Every primitive binary64 value is interpreted as an exact dyadic. A block's
+`map_rows` are required to be strictly increasing, so duplicate and ordering
+validation is deterministic and linear in the bounded input size.
 
-The retained numerator and denominator are interpreted as their exact
-binary64 dyadic values. A fixed-cap, fraction-free integer congruence proves
-that the retained denominator is positive definite and the numerator is
-positive semidefinite. For a finite nonnegative binary64 candidate \(q\), the
-same oracle proves
+A rigid-mode quotient is applied only after the raw factors annihilate the
+structural rigid parameters exactly, the sparse tangent reproduces those
+parameters exactly, and modular elimination proves full column rank. The
+elimination also selects an exactly nonsingular set of coordinate anchors.
+Deleting those coordinates produces the retained principal quotient without
+a rounded orthogonal projection. Each transformed Gram coefficient remains
+an exact sum of raw-factor/tangent-coefficient products until the integer
+matrices are materialized; no formed binary64 tangent row or matrix is used by
+the acceptance proof.
+
+The structural rigid gauge is followed by an exact secondary common-kernel
+check. Both materialized positive forms must be PSD, and the backend proves
+
+\[
+\operatorname{rank}(D_q+N_q)=\operatorname{rank}(D_q)
+\]
+
+with fraction-free integer congruence. For PSD forms this equality is exactly
+equivalent to \(\ker D_q\subseteq\ker N_q\). A deterministic exact pivot set
+then selects a full-rank principal coordinate gauge for the remaining finite
+quotient. A rank increase rejects the certificate because the generalized
+bound would be infinite. This secondary step covers exact zero-energy
+directions left by binary64 affine prolongation without classifying a small
+positive mode as zero.
+
+A fixed-cap, fraction-free integer congruence proves that the factorized
+final denominator is positive definite and the numerator is positive
+semidefinite. For a finite nonnegative binary64 candidate \(q\), the same
+oracle proves
 
 \[
 qD_q-N_q \succeq 0
@@ -174,18 +206,28 @@ qD_q-N_q \succeq 0
 
 exactly. Since \(D_q\succ0\), that predicate is monotone in \(q\). An ordered
 binary64 bit search returns a representable value that was itself proved;
-failure of the maximum finite value rejects the certificate. Integer-bit,
-modeled-memory, arithmetic-update, quotient-dimension, and search-count bounds
-all fail closed; the finite binary64 search is additionally bounded to at most
-64 bisection steps. No tolerance, diagonal shift, or small-positive-mode
-deletion participates in acceptance.
+failure of the maximum finite value rejects the certificate. A
+zero-dimensional retained map is accepted as the vacuous SPD/PSD quotient
+with coefficient zero, but only after the complete factor, sparse-map,
+modeled-input, and worst-case-work preflight succeeds.
 
-The cyclic-Jacobi generalized eigensolver is now optional diagnostics on the
-same retained quotient. When it resolves the spectrum, its padded value may
-raise the published coefficient; monotonicity of the already-proved dyadic
-inequality makes that larger finite value safe. When it cannot resolve a tiny
-positive mode, the exact dyadic coefficient remains the sole authority and
-the floating spectral fields remain unavailable. The patch value is therefore
+The factorized backend fails closed at fixed caps: 16,384 total Gram blocks;
+262,144 factor rows and 1,048,576 positive weight terms per form; four positive
+product factors per block; 1,048,576 sparse-map entries, raw factor
+coefficients, and transform visits; 8,388,608 outer pairs; 64 MiB modeled
+factor input; 2,000,000 worst-case exact arithmetic updates; 262,144 integer
+bits; quotient dimension 32; and 64 binary64 search steps. Count and
+modeled-byte caps are enforced before the corresponding caller-owned content
+is scanned. No tolerance, diagonal shift, or small-positive-mode deletion
+participates in acceptance.
+
+Formed dense binary64 numerator and denominator matrices exist only for the
+optional cyclic-Jacobi diagnostics on the same retained quotient. When that
+solver resolves the spectrum, its padded value may raise the published
+coefficient; monotonicity of the already-proved dyadic inequality makes that
+larger finite value safe. When it cannot resolve a tiny positive mode, the
+factorized exact-dyadic coefficient remains the sole authority and the
+floating spectral fields remain unavailable. The patch value is therefore
 not merely a computed floating largest eigenvalue.
 
 Aggregation supports may overlap and aggregation patches do not partition the
@@ -211,10 +253,15 @@ digest, canonical certificate digest, revision stamps, patch counts, support
 overlap, retained volume, boundary measure, and conservative bounds. The
 canonical digest is scoped to the communicator and algebraic partition.
 Rank-local revision numbers are intentionally not part of that digest.
-The revised digest also binds the exact proof flags, retained ranks, failing-
-neighbor availability and, when available, the adjacent failing binary64
-value, the directly proved coefficient, proof/search counts, and maximum
-integer bit width.
+The revised digest also binds the exact proof-input kind, factorized
+materialization and sparse-map flags, Gram block/row and positive-weight-term
+counts, transform and outer-pair work counts, modeled bytes, nonzero
+factorized-input provenance digest, pre- and post-common-kernel dimensions,
+the exact common-kernel proof/application flags, eliminated-coordinate count
+and identities, retained ranks, failing-neighbor
+availability and, when available, the adjacent failing binary64 value, the
+directly proved coefficient, proof/search counts, and maximum integer bit
+width.
 
 ## Symmetric penalty gate
 
@@ -328,17 +375,36 @@ Navier-slip closure remains outside this matrix.
 
 ## Version-2 evidence groups
 
-The matching matrix defines four groups and 20 distinct tests.
+The matching matrix defines four groups and 26 distinct tests.
 
-### Exact dyadic quotient group
+### Exact dense and factorized dyadic quotient group
 
-Ten serial math tests require direct proof of a diagonal equality bound and
-an exact-zero numerator bound without an invented failing neighbor,
-retention of a one-ULP positive mode, exact three-by-three Bareiss division,
-and a symmetric pivot around a zero leading coordinate. They also require
-fail-closed rejection of a late indefinite pivot, a semidefinite denominator,
-an indefinite numerator, an upper bound larger than every finite binary64
-value, a quotient above the fixed dimension cap, and malformed matrix input.
+Sixteen serial math tests include the ten legacy formed-dense exact tests.
+Those require direct proof of a diagonal equality bound and an exact-zero
+numerator bound without an invented failing neighbor, retention of a one-ULP
+positive mode, exact three-by-three Bareiss division, and a symmetric pivot
+around a zero leading coordinate. They also require fail-closed rejection of
+a late indefinite pivot, a semidefinite denominator, an indefinite numerator,
+an upper bound larger than every finite binary64 value, a quotient above the
+fixed dimension cap, and malformed matrix input.
+
+The six factorized tests additionally require:
+
+1. certification from a raw rank-one Gram factor when entrywise binary64
+   matrix formation would destroy exact positive semidefiniteness;
+2. preservation of a sparse tangent coefficient sum that would otherwise
+   round away a half-ULP term;
+3. exact positive sum/product scales whose formed binary64 values would
+   underflow or overflow;
+4. strict-SPD rejection of a singular denominator, exact secondary quotient
+   of a compatible common kernel, rejection when the numerator acts on that
+   kernel, and fail-closed rejection of zero scale, nonfinite factor,
+   non-strict `map_rows`, and genuinely nonmonotone sparse offsets;
+5. multi-term positive weights plus numerator and denominator integer,
+   product, and row-multiplier paths with linear, not squared, scaling; and
+6. a vacuous zero-dimensional quotient after full bounded preflight, with
+   factorized proof flags, counts, work metrics, and a nonzero provenance
+   digest.
 
 ### Serial certificate group
 
@@ -401,7 +467,10 @@ multiplier is 12. Every case requires one nonzero deterministic,
 revision-matched certificate, a nonzero aggregation digest, a nonzero
 form-binding metadata digest with a matching source formulation record, a
 finite nonnegative upper bound strictly below 12, a grouped symmetric ratio
-below one, and a positive finite-space energy ratio.
+below one, and a positive finite-space energy ratio. Every patch must expose
+internally consistent factorized exact common-kernel metadata, and the full
+sweep must apply the exact secondary quotient on at least one production
+patch.
 
 For a dry case, the exact contract is zero generated boundary rules, zero
 patches, zero trace upper bound, and energy ratio one. For a wet case, the
@@ -411,18 +480,20 @@ than the analytic finite-space ratio after subtracting the eigensolver
 tolerance, up to the comparison tolerance `1e-11`.
 
 The diagnostic emits 108 structured case records and one structured summary.
-Its seven GTest properties require:
+Its eight GTest properties require:
 
 - case count equal to `108`;
 - maximum upper bound less than `12`;
 - minimum finite-sample lower ratio greater than `0`;
 - minimum sampled eigenvalue gap at least `-1e-11`;
+- exact common-kernel quotient patch count greater than `0`;
 - method coercivity lower bound equal to the string `null`;
 - uniform-bound status equal to `UNFROZEN_NO_BOUND_INVENTED`;
 - accepted claim equal to `joint_low_level_prerequisite`.
 
-Those values are gates to be evaluated during a future frozen execution. This
-draft document does not report them as executed evidence.
+Those values become evidence only when evaluated by a successful frozen
+execution. Their presence in a draft matrix or this derivation does not report
+them as executed evidence.
 
 ## Evidence still required
 
@@ -447,16 +518,15 @@ The following remain outside the v2 prerequisite:
 Until those exits are satisfied under their owning qualifications, FSR-16,
 FSR-07, WP-3, WP-7, and Q1 remain open.
 
-## Draft validation and promotion
+## Validation and promotion
 
-The v2 matrix may be checked structurally while it remains
-`DRAFT_UNEXECUTED`. A full runner must reject execution in that state.
-On 2026-08-18 a static byte-hash comparison found all 41 draft implementation
-inventory entries present and matching the then-current worktree bytes,
-including the exact-dyadic backend. This was not a runner execution, and no
-runner unit tests or qualification groups have been executed on those bytes.
-The inventory remains an observed, moving source snapshot rather than a frozen
-baseline, so this check is not qualification evidence.
+The v2 matrix may be checked structurally while its status is
+`DRAFT_UNEXECUTED`; a full runner must reject execution in that state. Hashes
+recorded in a draft inventory are observations of a moving source snapshot,
+not a frozen baseline or qualification evidence. They become authoritative
+only when every inventory entry is locked to the recorded implementation
+commit, the reciprocal matrix/runner binding is complete, and the matrix
+status is `FROZEN_BEFORE_EXECUTION`.
 
 Earlier synthetic single-tetra and structured-channel Nitsche success cases
 did not provide the native mesh, aggregation state, and authoritative snapshot
@@ -470,10 +540,11 @@ Before promotion, every source in the inventory must be stable and
 intentionally SHA-256 locked. The stable implementation inventory is first
 committed; that commit remains an ancestor of the later clean qualification
 checkout, and every inventoried blob must match both the recorded commit and
-the checkout. The v2 runner itself must be frozen, exact test discovery must
-be confirmed, and the disabled diagnostic route must be explicitly enabled.
-Only then may the matrix be changed to `FROZEN_BEFORE_EXECUTION` and used to
-collect checksum-bound evidence.
+the checkout. The v2 runner itself and normalized matrix digest must then be
+frozen, discovery must return all 16 named `DenseLinearAlgebra.Exact*` tests,
+and the disabled diagnostic route must be explicitly enabled. Only then may
+the matrix be changed to `FROZEN_BEFORE_EXECUTION` and used to collect
+checksum-bound evidence.
 
 Execution also remains fail closed on resources. The runner requires
 `MemAvailable >= 10240 MiB` before it starts, retains `4096 MiB` host-memory

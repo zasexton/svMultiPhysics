@@ -90,7 +90,7 @@
       "commit the stable implementation inventory and record that ancestor commit before freezing the qualification metadata",
       "replace the draft-observed source inventory with intentionally frozen SHA-256 locks",
       "commit the exact v2 matrix and runner bytes together at the qualification execution HEAD",
-      "revalidate exact test discovery and the disabled-test execution route",
+      "revalidate discovery of all 16 named DenseLinearAlgebra.Exact* tests and the disabled-test execution route",
       "execute all four groups without failure, error, skip, or disabled result",
       "bind structured evidence and final provenance to the reciprocally locked normalized matrix hash, exact runner hash, qualification bundle commit, and frozen source hashes"
     ]
@@ -159,12 +159,12 @@
     {
       "path": "Code/Source/solver/FE/Math/DenseLinearAlgebra.h",
       "sha256": "ebd21c2a96deecf63d4f884d99768983f244a06cea7798e054f78fb3c6d5e778",
-      "role": "floating diagnostics and exact dyadic generalized-bound contract"
+      "role": "floating diagnostics plus exact dense and factorized binary64-dyadic generalized-bound contracts"
     },
     {
       "path": "Code/Source/solver/FE/Math/DenseExactDyadic.cpp",
       "sha256": "9333a9d6d09b923c76d71563dfcad2baa5a7226538349805f0c555054006ae01",
-      "role": "authoritative exact binary64-dyadic SPD quotient certification"
+      "role": "authoritative exact binary64-dyadic dense and factorized positive-Gram quotient certification"
     },
     {
       "path": "Code/Source/solver/FE/Math/DenseLinearAlgebra.cpp",
@@ -174,7 +174,7 @@
     {
       "path": "Code/Source/solver/FE/Tests/Unit/Math/test_DenseLinearAlgebra.cpp",
       "sha256": "15835e76e963fc21e33640670dfe81b970413200b04692a5130d933ad1cf21b2",
-      "role": "floating and exact-dyadic generalized-bound evidence"
+      "role": "floating, exact-dense, and exact-factorized generalized-bound evidence"
     },
     {
       "path": "Code/Source/solver/FE/Constraints/SmallCutAggregationConstraint.h",
@@ -330,8 +330,15 @@
     "one_active_feature_per_patch": true,
     "maximum_terminal_tangent_dimension": 128,
     "maximum_exact_retained_quotient_dimension": 32,
-    "quotient_authority": "exact_binary64_dyadic_D_spd_N_psd_and_qD_minus_N_psd",
+    "quotient_authority": "exact_binary64_dyadic_factorized_positive_Gram_D_and_N_psd_common_kernel_rank_identity_then_D_spd_N_psd_and_qD_minus_N_psd_on_the_exact_principal_gauge",
+    "proof_input": "raw_affine_Gram_factors_with_exact_positive_sum_product_weights",
+    "tangent_quotient": "exact_sparse_raw_to_retained_coordinate_map",
+    "gram_map_rows_order": "strictly_increasing",
+    "zero_dimensional_quotient": "vacuous_after_complete_factor_map_and_work_preflight",
+    "secondary_common_kernel": "exact_rank(D_plus_N)_equals_rank(D)_proof_with_deterministic_principal_coordinate_gauge_or_fail_closed",
+    "factorized_provenance": "proof_flags_counts_work_metrics_and_nonzero_input_digest_bound_into_certificate_digest",
     "floating_spectral_role": "optional_diagnostics_only",
+    "formed_dense_matrix_role": "optional_floating_diagnostics_only",
     "patch_inequality": "integral_Gamma_(h_normal/mu)*abs(2*mu*epsilon(v)*n)^2 <= C_patch*integral_support_2*mu*epsilon(v):epsilon(v)",
     "global_bound_rule": "outward_rounded_maximum_over_active_cells_of_summed_overlapping_patch_bounds",
     "effective_penalty_multiplier": "alpha_i=gamma_i*p^2_when_scaled_else_gamma_i",
@@ -357,7 +364,20 @@
     "canonical_digest_scope": "communicator_and_algebraic_partition",
     "rank_local_revisions_excluded_from_canonical_digest": true,
     "hard_terminal_tangent_dimension_cap": 128,
-    "hard_exact_retained_quotient_dimension_cap": 32
+    "hard_exact_retained_quotient_dimension_cap": 32,
+    "hard_factorized_gram_block_cap": 16384,
+    "hard_factorized_gram_row_cap_per_form": 262144,
+    "hard_factorized_weight_term_cap_per_form": 1048576,
+    "hard_factorized_product_factor_cap_per_block": 4,
+    "hard_factorized_transform_entry_cap": 1048576,
+    "hard_factorized_raw_factor_coefficient_cap": 1048576,
+    "hard_factorized_transform_visit_cap": 1048576,
+    "hard_factorized_outer_pair_cap": 8388608,
+    "hard_factorized_modeled_input_byte_cap": 67108864,
+    "hard_exact_arithmetic_update_cap": 2000000,
+    "hard_exact_integer_bit_cap": 262144,
+    "hard_exact_binary64_search_step_cap": 64,
+    "factor_and_work_caps_fail_closed_before_content_scans": true
   },
   "lifecycle_contract": {
     "policy_registration": "derived_from_an_opaque_exact-state-test_full-space-signature_binding_whose_anchor_is_one_unscaled_top-level_additive_summand_and_committed_by_formulation_install_before_system_setup",
@@ -420,6 +440,8 @@
       "form_binding_source_match",
       "boundary_rule_count",
       "patch_count",
+      "exact_common_kernel_metadata_valid",
+      "exact_common_kernel_quotient_patch_count",
       "trace_upper_bound",
       "effective_penalty_multiplier",
       "trace_to_penalty_ratio",
@@ -443,6 +465,8 @@
       "dry_case_count",
       "deterministic_case_count",
       "revision_match_case_count",
+      "exact_common_kernel_metadata_valid_case_count",
+      "exact_common_kernel_quotient_patch_count",
       "maximum_trace_upper_bound",
       "minimum_finite_sample_energy_lower_bound",
       "minimum_sampled_eigenvalue_gap",
@@ -530,6 +554,57 @@
       ]
     },
     {
+      "id": "serial_exact_factorized_preserves_raw_psd",
+      "test": "DenseLinearAlgebra.ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding",
+      "requirements": [
+        "a raw affine rank-one Gram factor is certified as positive semidefinite even when entrywise binary64 formation makes the corresponding dense matrix exactly indefinite",
+        "the result records factorized-positive-form proof authority, successful factor materialization and sparse-map application, exact block and row counts, and a nonzero factorized-input provenance digest"
+      ]
+    },
+    {
+      "id": "serial_exact_factorized_sparse_tangent_sum",
+      "test": "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnroundedSparseTangentSum",
+      "requirements": [
+        "the exact sparse tangent map retains a one-plus-half-ULP coefficient sum that would round back to one if formed in binary64",
+        "transform visits, nonzero outer pairs, and factor-materialization work are recorded"
+      ]
+    },
+    {
+      "id": "serial_exact_factorized_nonrepresentable_positive_scales",
+      "test": "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales",
+      "requirements": [
+        "positive scale sums and products remain exact dyadic expressions when their formed binary64 products would underflow to zero or overflow to infinity",
+        "both self pencils return the directly proved bound one"
+      ]
+    },
+    {
+      "id": "serial_exact_factorized_malformed_input_rejection",
+      "test": "DenseLinearAlgebra.ExactFactorizedBoundRejectsSingularAndMalformedInputs",
+      "requirements": [
+        "the strict SPD entry point rejects a singular denominator while the PSD entry point exactly quotients a compatible common kernel and rejects numerator action on that kernel",
+        "zero positive-scale terms and nonfinite raw factors are rejected",
+        "Gram block map_rows must be strictly increasing for bounded linear-time duplicate validation",
+        "a shape-valid sparse map with genuinely nonmonotone row offsets is rejected without an earlier shape check masking that condition",
+        "shape-derived transform-work caps are enforced before caller scalar payloads are scanned"
+      ]
+    },
+    {
+      "id": "serial_exact_factorized_linear_scale_multipliers",
+      "test": "DenseLinearAlgebra.ExactFactorizedBoundUsesLinearPositiveScaleMultipliers",
+      "requirements": [
+        "multi-term positive sums, positive product factors, block integer multipliers, and per-factor-row multipliers all act linearly rather than being inadvertently squared",
+        "both numerator and denominator multiplier paths are exercised and the outward binary64 bound is the successor of 1.4"
+      ]
+    },
+    {
+      "id": "serial_exact_factorized_vacuous_quotient",
+      "test": "DenseLinearAlgebra.ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient",
+      "requirements": [
+        "a zero-dimensional sparse-map output is accepted only after complete factor, map, modeled-input, and work-cap preflight",
+        "the vacuous quotient records factorized proof flags, zero ranks and bound, zero transform/materialization work, and a nonzero factorized-input provenance digest"
+      ]
+    },
+    {
       "id": "serial_form_binding_exact_anchor",
       "test": "GeneratedBoundaryAggregateTraceCertificate.FormBindingRequiresExactlyOneRouteAnchorBeforeMutation",
       "requirements": [
@@ -547,8 +622,9 @@
       "test": "GeneratedBoundaryAggregateTraceCertificate.FullActiveUnitTriangleHasAnalyticBoundFour",
       "requirements": [
         "analytic largest quotient eigenvalue equals four within the test tolerance",
-        "exact binary64 common-kernel actions and anchor rank are proved before the quotient",
-        "the retained denominator is proved SPD, the numerator PSD, and the published coefficient satisfies an exact dyadic qD-N PSD proof",
+        "raw affine symmetric-strain and traction Gram factors annihilate the structural rigid modes exactly, and exact tangent reproduction plus anchor rank are proved before the quotient",
+        "the exact sparse tangent quotient preserves positive quadrature-weight sums and boundary h-normal product factors until the retained denominator is proved SPD, the numerator PSD, and the published coefficient satisfies an exact dyadic qD-N PSD proof",
+        "factorized proof flags, block/row/weight/work counts, and a nonzero factorized-input digest are validated and bound into the canonical certificate digest",
         "the conservative upper bound is finite, no smaller than the quotient, and outward-close to four",
         "the eager production record validates effective penalty eight and a positive symmetric energy ratio",
         "repeated certification preserves canonical digest and bound",
@@ -563,8 +639,9 @@
         "the actual rooted aggregation prolongation is used",
         "the retained support volume is 79/128 and generated boundary measure is 1/8",
         "the rigid-mode quotient removes exactly three structural null modes",
-        "exact binary64 common-kernel actions and anchor rank are proved before the coordinate gauge",
-        "the retained three-coordinate quotient carries complete exact dyadic denominator, numerator, and upper-inequality proofs",
+        "raw affine Gram factors annihilate the structural rigid modes exactly, and exact tangent reproduction plus anchor rank are proved before the coordinate gauge",
+        "the retained three-coordinate exact sparse tangent quotient carries complete factorized exact-dyadic denominator, numerator, and upper-inequality proofs",
+        "factorized proof flags, block/row/weight/work counts, and a nonzero factorized-input digest are validated and bound into the canonical certificate digest",
         "the analytic largest quotient eigenvalue equals 32/79 within the test tolerance",
         "the conservative global bound covers the patch bound",
         "repeated certification preserves canonical digest and bound"
@@ -619,7 +696,7 @@
         "the rooted aggregate crosses rank ownership and closes slave rows onto rank-zero masters",
         "report shape and nonzero canonical report digest agree on both ranks",
         "the nonzero canonical certificate digest agrees on both ranks while rank-local context revisions differ",
-        "both ranks retain identical complete exact-action, anchor-rank, denominator-SPD, numerator-PSD, and qD-N proof metadata",
+        "both ranks retain identical complete exact factor-action, tangent-reproduction, anchor-rank, denominator-SPD, numerator-PSD, qD-N, factorized count/work, and nonzero provenance-digest metadata",
         "the analytic largest quotient eigenvalue is 32/79 within the test tolerance",
         "collective certification and assembly preflight both succeed"
       ]
@@ -631,6 +708,7 @@
         "the runner explicitly enables this single disabled diagnostic",
         "all 108 unique case identities are emitted: 96 wet and 12 dry",
         "every case has one nonzero deterministic revision-matched certificate and aggregation digest",
+        "every patch reports internally consistent factorized exact common-kernel metadata, and the sweep applies the exact secondary quotient on at least one production patch",
         "every case has a nonzero form-binding metadata digest and a matching source formulation record",
         "every upper bound is finite, nonnegative, and strictly below configured penalty twelve",
         "every grouped symmetric ratio equals its route ratio and is strictly below one",
@@ -669,7 +747,13 @@
         "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsIndefiniteNumerator",
         "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsUnrepresentableUpperBound",
         "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap",
-        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs"
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnroundedSparseTangentSum",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales",
+        "DenseLinearAlgebra.ExactFactorizedBoundRejectsSingularAndMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundUsesLinearPositiveScaleMultipliers",
+        "DenseLinearAlgebra.ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient"
       ],
       "execution": {
         "wall_time_seconds": 300,
@@ -760,6 +844,13 @@
     },
     {
       "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "property": "wp3_wp7_nitsche_trace_v2_exact_common_kernel_quotient_patch_count",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
       "property": "wp3_wp7_nitsche_trace_v2_method_coercivity_lower_bound",
       "type": "string",
       "relation": "equal",
@@ -782,8 +873,8 @@
   ],
   "gates": {
     "expected_group_count": 4,
-    "expected_distinct_test_count": 20,
-    "expected_quantitative_evidence_count": 7,
+    "expected_distinct_test_count": 26,
+    "expected_quantitative_evidence_count": 8,
     "expected_failures": 0,
     "expected_errors": 0,
     "expected_disabled": 0,
@@ -791,7 +882,7 @@
   },
   "closure_contract": [
     {
-      "claim": "exact_binary64_dyadic_spd_quotient_prerequisite",
+      "claim": "exact_binary64_dyadic_dense_and_factorized_spd_quotient_prerequisite",
       "evidence": [
         "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundProvesDiagonalEquality",
         "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRetainsTinyPositiveMode",
@@ -802,7 +893,13 @@
         "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsIndefiniteNumerator",
         "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsUnrepresentableUpperBound",
         "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap",
-        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs"
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnroundedSparseTangentSum",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales",
+        "DenseLinearAlgebra.ExactFactorizedBoundRejectsSingularAndMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundUsesLinearPositiveScaleMultipliers",
+        "DenseLinearAlgebra.ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient"
       ]
     },
     {

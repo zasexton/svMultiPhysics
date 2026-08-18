@@ -61,17 +61,20 @@ constexpr std::size_t kMaximumRetainedRulesPerCell = 64u;
 constexpr std::size_t kMaximumBoundaryRules = 8192u;
 constexpr std::size_t kMaximumQuadraturePointsPerRule = 4096u;
 constexpr std::size_t kMaximumLocalQuadraturePoints = 1024u * 1024u;
+constexpr std::size_t kMaximumCellWeightTerms =
+    kMaximumRetainedRulesPerCell *
+    kMaximumQuadraturePointsPerRule;
 constexpr std::size_t kMaximumConstraintEntries =
     kHardMaximumReducedDimension;
 constexpr std::size_t kMaximumPatchRawDofs = 8192u;
 constexpr std::size_t kMaximumDenseModeledBytes = 8u * 1024u * 1024u;
 constexpr std::size_t kMaximumLocalWords = 4u * 1024u * 1024u;
 constexpr std::size_t kMaximumGatheredWords = 16u * 1024u * 1024u;
-// The canonical rank-exchange payload is unchanged by the exact quotient
-// proof.  Version its certificate digest independently so a proof-schema
-// change does not masquerade as an incompatible wire encoding.
-constexpr std::uint64_t kWireVersion = 1u;
-constexpr std::uint64_t kCertificateDigestVersion = 2u;
+// Wire version 2 exchanges positive quadrature weights and raw affine Gram
+// factors rather than entrywise-rounded dense matrices.  The certificate
+// digest independently binds the factorized proof schema and proof source.
+constexpr std::uint64_t kWireVersion = 2u;
+constexpr std::uint64_t kCertificateDigestVersion = 4u;
 
 [[noreturn]] void reject(std::string_view diagnostic)
 {
@@ -83,6 +86,18 @@ constexpr std::uint64_t kCertificateDigestVersion = 2u;
 [[nodiscard]] bool finitePositive(Real value) noexcept
 {
     return std::isfinite(value) && value > Real{0.0};
+}
+
+[[nodiscard]] std::size_t affineVelocityDofCount(
+    std::size_t dimension) noexcept
+{
+    return dimension * (dimension + 1u);
+}
+
+[[nodiscard]] std::size_t symmetricTensorComponentCount(
+    std::size_t dimension) noexcept
+{
+    return dimension * (dimension + 1u) / 2u;
 }
 
 [[nodiscard]] bool sameRealBits(Real left, Real right) noexcept
@@ -498,7 +513,8 @@ struct CellContribution {
         constraints::SmallCutAggregationActiveCellKind::Cut};
     std::vector<std::uint64_t> stable_rule_ids{};
     std::vector<DofDescriptor> dofs{};
-    std::vector<Real> denominator{};
+    std::vector<Real> positive_volume_point_weights{};
+    std::vector<Real> symmetric_strain_factor_rows{};
     Real retained_measure{0.0};
 };
 
@@ -507,7 +523,9 @@ struct BoundaryContribution {
     GlobalIndex parent_cell_gid{INVALID_GLOBAL_INDEX};
     GlobalIndex parent_face_gid{INVALID_GLOBAL_INDEX};
     std::vector<GlobalIndex> raw_dofs{};
-    std::vector<Real> numerator{};
+    Real h_normal{0.0};
+    std::vector<Real> positive_boundary_point_weights{};
+    std::vector<Real> traction_factor_rows{};
     Real physical_measure{0.0};
 };
 
@@ -568,8 +586,12 @@ void encodePayload(WireWriter& writer,
         for (const auto& descriptor : cell.dofs) {
             encodeDescriptor(writer, descriptor);
         }
-        writer.pushSize(cell.denominator.size());
-        for (const Real value : cell.denominator) {
+        writer.pushSize(cell.positive_volume_point_weights.size());
+        for (const Real value : cell.positive_volume_point_weights) {
+            writer.pushReal(value);
+        }
+        writer.pushSize(cell.symmetric_strain_factor_rows.size());
+        for (const Real value : cell.symmetric_strain_factor_rows) {
             writer.pushReal(value);
         }
     }
@@ -580,12 +602,17 @@ void encodePayload(WireWriter& writer,
         writer.pushSigned(boundary.parent_cell_gid);
         writer.pushSigned(boundary.parent_face_gid);
         writer.pushReal(boundary.physical_measure);
+        writer.pushReal(boundary.h_normal);
         writer.pushSize(boundary.raw_dofs.size());
         for (const auto dof : boundary.raw_dofs) {
             writer.pushSigned(dof);
         }
-        writer.pushSize(boundary.numerator.size());
-        for (const Real value : boundary.numerator) {
+        writer.pushSize(boundary.positive_boundary_point_weights.size());
+        for (const Real value : boundary.positive_boundary_point_weights) {
+            writer.pushReal(value);
+        }
+        writer.pushSize(boundary.traction_factor_rows.size());
+        for (const Real value : boundary.traction_factor_rows) {
             writer.pushReal(value);
         }
     }
@@ -675,29 +702,34 @@ void decodePayload(std::span<const std::int64_t> words,
         for (std::size_t index = 0u; index < dof_count; ++index) {
             cell.dofs.push_back(decodeDescriptor(reader, dimension));
         }
-        const auto matrix_count =
+        const auto weight_count =
             reader.sizeValue(
-                checkedSquare(dof_count, "cell matrix"),
-                "cell matrix entry count");
-        if (matrix_count != checkedSquare(dof_count, "cell matrix")) {
-            reject("cell denominator has an incompatible dimension");
+                kMaximumCellWeightTerms,
+                "cell positive-weight count");
+        if (weight_count == 0u) {
+            reject("cell exact Gram form has no positive weight");
         }
-        cell.denominator.reserve(matrix_count);
-        for (std::size_t index = 0u; index < matrix_count; ++index) {
-            cell.denominator.push_back(reader.realValue());
-        }
-        for (std::size_t row = 0u; row < dof_count; ++row) {
-            for (std::size_t column = row;
-                 column < dof_count;
-                 ++column) {
-                if (!sameRealBits(
-                        cell.denominator[
-                            row * dof_count + column],
-                        cell.denominator[
-                            column * dof_count + row])) {
-                    reject("cell denominator is not exactly symmetric");
-                }
+        cell.positive_volume_point_weights.reserve(weight_count);
+        for (std::size_t index = 0u; index < weight_count; ++index) {
+            const Real weight = reader.realValue();
+            if (!finitePositive(weight)) {
+                reject("cell exact Gram weight is not positive");
             }
+            cell.positive_volume_point_weights.push_back(weight);
+        }
+        const auto expected_factor_count =
+            symmetricTensorComponentCount(dimension) * dof_count;
+        const auto factor_count =
+            reader.sizeValue(
+                expected_factor_count,
+                "cell strain-factor entry count");
+        if (factor_count != expected_factor_count) {
+            reject("cell exact strain-factor shape is incompatible");
+        }
+        cell.symmetric_strain_factor_rows.reserve(factor_count);
+        for (std::size_t index = 0u; index < factor_count; ++index) {
+            cell.symmetric_strain_factor_rows.push_back(
+                reader.realValue());
         }
         if (cell.cell_gid < 0 ||
             !finitePositive(cell.retained_measure) ||
@@ -740,6 +772,7 @@ void decodePayload(std::span<const std::int64_t> words,
         boundary.parent_cell_gid = reader.signedValue();
         boundary.parent_face_gid = reader.signedValue();
         boundary.physical_measure = reader.realValue();
+        boundary.h_normal = reader.realValue();
         const auto dof_count =
             reader.sizeValue(
                 12u, "boundary cell DOF count");
@@ -754,35 +787,39 @@ void decodePayload(std::span<const std::int64_t> words,
             }
             boundary.raw_dofs.push_back(dof);
         }
-        const auto matrix_count =
+        const auto weight_count =
             reader.sizeValue(
-                checkedSquare(dof_count, "boundary matrix"),
-                "boundary matrix entry count");
-        if (matrix_count !=
-            checkedSquare(dof_count, "boundary matrix")) {
-            reject("boundary numerator has an incompatible dimension");
+                kMaximumQuadraturePointsPerRule,
+                "boundary positive-weight count");
+        if (weight_count == 0u) {
+            reject("boundary exact Gram form has no positive weight");
         }
-        boundary.numerator.reserve(matrix_count);
-        for (std::size_t index = 0u; index < matrix_count; ++index) {
-            boundary.numerator.push_back(reader.realValue());
-        }
-        for (std::size_t row = 0u; row < dof_count; ++row) {
-            for (std::size_t column = row;
-                 column < dof_count;
-                 ++column) {
-                if (!sameRealBits(
-                        boundary.numerator[
-                            row * dof_count + column],
-                        boundary.numerator[
-                            column * dof_count + row])) {
-                    reject("boundary numerator is not exactly symmetric");
-                }
+        boundary.positive_boundary_point_weights.reserve(weight_count);
+        for (std::size_t index = 0u; index < weight_count; ++index) {
+            const Real weight = reader.realValue();
+            if (!finitePositive(weight)) {
+                reject("boundary exact Gram weight is not positive");
             }
+            boundary.positive_boundary_point_weights.push_back(weight);
+        }
+        const auto expected_factor_count = dimension * dof_count;
+        const auto factor_count =
+            reader.sizeValue(
+                expected_factor_count,
+                "boundary traction-factor entry count");
+        if (factor_count != expected_factor_count) {
+            reject("boundary exact traction-factor shape is incompatible");
+        }
+        boundary.traction_factor_rows.reserve(factor_count);
+        for (std::size_t index = 0u; index < factor_count; ++index) {
+            boundary.traction_factor_rows.push_back(
+                reader.realValue());
         }
         if (boundary.stable_rule_id == 0u ||
             boundary.parent_cell_gid < 0 ||
             boundary.parent_face_gid < 0 ||
-            !finitePositive(boundary.physical_measure)) {
+            !finitePositive(boundary.physical_measure) ||
+            !finitePositive(boundary.h_normal)) {
             reject("boundary record has invalid provenance or measure");
         }
         if (!data.boundaries
@@ -1257,6 +1294,7 @@ struct SelectedState {
     digestMix(digest, kMaximumBoundaryRules);
     digestMix(digest, kMaximumQuadraturePointsPerRule);
     digestMix(digest, kMaximumLocalQuadraturePoints);
+    digestMix(digest, kMaximumCellWeightTerms);
     digestMix(digest, kMaximumConstraintEntries);
     digestMix(digest, kMaximumPatchRawDofs);
     digestMix(digest, kMaximumDenseModeledBytes);
@@ -1428,22 +1466,6 @@ using Tensor = std::array<std::array<Real, 3>, 3>;
     return result;
 }
 
-[[nodiscard]] Real tensorDot(const Tensor& left,
-                             const Tensor& right,
-                             std::size_t dimension) noexcept
-{
-    Real result = 0.0;
-    for (std::size_t row = 0u; row < dimension; ++row) {
-        for (std::size_t column = 0u;
-             column < dimension;
-             ++column) {
-            result +=
-                left[row][column] * right[row][column];
-        }
-    }
-    return result;
-}
-
 [[nodiscard]] std::array<Real, 3> strainNormalBasis(
     const Tensor& strain,
     const std::array<Real, 3>& normal,
@@ -1461,37 +1483,46 @@ using Tensor = std::array<std::array<Real, 3>, 3>;
     return result;
 }
 
-[[nodiscard]] Real vectorDot(
-    const std::array<Real, 3>& left,
-    const std::array<Real, 3>& right,
-    std::size_t dimension) noexcept
+void adoptOrVerifyAffineFactorRows(
+    std::vector<Real>& canonical,
+    std::span<const Real> point_rows,
+    std::string_view label)
 {
-    Real result = 0.0;
-    for (std::size_t component = 0u;
-         component < dimension;
-         ++component) {
-        result += left[component] * right[component];
+    if (canonical.empty()) {
+        canonical.assign(point_rows.begin(), point_rows.end());
+        return;
     }
-    return result;
+    if (canonical.size() != point_rows.size()) {
+        reject(std::string(label) + " factor shape changed across points");
+    }
+    for (std::size_t index = 0u;
+         index < canonical.size();
+         ++index) {
+        if (!sameRealBits(canonical[index], point_rows[index])) {
+            reject(
+                std::string(label) +
+                " is not bitwise constant on the affine P1 rule");
+        }
+    }
 }
 
-[[nodiscard]] std::vector<Real> assembleCellDenominator(
+void assembleCellDenominator(
     const assembly::IMeshAccess& mesh,
     GlobalIndex local_cell,
     std::span<const geometry::CutQuadratureRule* const> rules,
     std::span<const DofDescriptor> dofs,
     std::size_t dimension,
-    long double& measure)
+    long double& measure,
+    std::vector<Real>& positive_point_weights,
+    std::vector<Real>& symmetric_strain_factor_rows)
 {
     if (rules.empty() ||
-        dofs.size() != dimension * (dimension + 1u)) {
+        dofs.size() != affineVelocityDofCount(dimension)) {
         reject("retained cell has an invalid rule or P1 DOF count");
     }
     basis::LagrangeBasis p1_basis(
         mesh.getCellType(local_cell), 1);
     const std::size_t n = dofs.size();
-    std::vector<long double> accumulated(
-        checkedSquare(n, "cell denominator"), 0.0L);
 
     for (const auto* rule : rules) {
         if (rule == nullptr ||
@@ -1505,6 +1536,15 @@ using Tensor = std::array<std::array<Real, 3>, 3>;
         measure +=
             static_cast<long double>(mapped.physical_measure);
         for (const auto& point : mapped.points) {
+            if (!finitePositive(point.physical_weight) ||
+                positive_point_weights.size() >=
+                    kMaximumCellWeightTerms) {
+                reject(
+                    "retained cell has an invalid or excessive exact "
+                    "quadrature weight set");
+            }
+            positive_point_weights.push_back(
+                point.physical_weight);
             const math::Vector<Real, 3> xi{
                 point.reference_point[0],
                 point.reference_point[1],
@@ -1532,53 +1572,47 @@ using Tensor = std::array<std::array<Real, 3>, 3>;
                             gradient, component, dimension));
                 }
             }
-            for (std::size_t row = 0u; row < n; ++row) {
-                for (std::size_t column = row;
-                     column < n;
-                     ++column) {
-                    accumulated[row * n + column] +=
-                        static_cast<long double>(
-                            point.physical_weight) *
-                        static_cast<long double>(
-                            tensorDot(
-                                strains[row],
-                                strains[column],
-                                dimension));
+            std::vector<Real> point_rows;
+            point_rows.reserve(
+                symmetricTensorComponentCount(dimension) * n);
+            for (std::size_t tensor_row = 0u;
+                 tensor_row < dimension;
+                 ++tensor_row) {
+                for (std::size_t tensor_column = tensor_row;
+                     tensor_column < dimension;
+                     ++tensor_column) {
+                    for (const auto& strain : strains) {
+                        point_rows.push_back(
+                            strain[tensor_row][tensor_column]);
+                    }
                 }
             }
+            adoptOrVerifyAffineFactorRows(
+                symmetric_strain_factor_rows,
+                point_rows,
+                "cell symmetric-strain factor");
         }
     }
-
-    std::vector<Real> result(
-        checkedSquare(n, "cell denominator"), Real{0.0});
-    for (std::size_t row = 0u; row < n; ++row) {
-        for (std::size_t column = row;
-             column < n;
-             ++column) {
-            const Real value =
-                static_cast<Real>(
-                    accumulated[row * n + column]);
-            if (!std::isfinite(value)) {
-                reject("cell denominator entry is nonfinite");
-            }
-            result[row * n + column] = value;
-            result[column * n + row] = value;
-        }
+    if (positive_point_weights.empty() ||
+        symmetric_strain_factor_rows.size() !=
+            symmetricTensorComponentCount(dimension) * n) {
+        reject("retained cell exact Gram data is incomplete");
     }
-    return result;
 }
 
-[[nodiscard]] std::vector<Real> assembleBoundaryNumerator(
+void assembleBoundaryNumerator(
     const assembly::IMeshAccess& mesh,
     const geometry::CutQuadratureRule& rule,
     std::span<const DofDescriptor> dofs,
     std::size_t dimension,
     Real h_normal,
-    long double& measure)
+    long double& measure,
+    std::vector<Real>& positive_point_weights,
+    std::vector<Real>& traction_factor_rows)
 {
     if (rule.kind != geometry::CutQuadratureKind::Interface ||
         rule.frame != geometry::CutGeometryFrame::Reference ||
-        dofs.size() != dimension * (dimension + 1u) ||
+        dofs.size() != affineVelocityDofCount(dimension) ||
         !finitePositive(h_normal)) {
         reject("generated-boundary rule has incompatible trace metadata");
     }
@@ -1592,10 +1626,17 @@ using Tensor = std::array<std::array<Real, 3>, 3>;
     measure =
         static_cast<long double>(mapped.physical_measure);
     const std::size_t n = dofs.size();
-    std::vector<long double> accumulated(
-        checkedSquare(n, "boundary numerator"), 0.0L);
 
     for (const auto& point : mapped.points) {
+        if (!finitePositive(point.physical_weight) ||
+            positive_point_weights.size() >=
+                kMaximumQuadraturePointsPerRule) {
+            reject(
+                "generated-boundary rule has an invalid or excessive "
+                "exact quadrature weight set");
+        }
+        positive_point_weights.push_back(
+            point.physical_weight);
         Real normal_norm_squared = 0.0;
         for (std::size_t component = 0u;
              component < dimension;
@@ -1643,42 +1684,25 @@ using Tensor = std::array<std::array<Real, 3>, 3>;
                         dimension));
             }
         }
-        const long double scale =
-            static_cast<long double>(point.physical_weight) *
-            static_cast<long double>(
-                Real{2.0} * h_normal);
-        for (std::size_t row = 0u; row < n; ++row) {
-            for (std::size_t column = row;
-                 column < n;
-                 ++column) {
-                accumulated[row * n + column] +=
-                    scale *
-                    static_cast<long double>(
-                        vectorDot(
-                            tractions[row],
-                            tractions[column],
-                            dimension));
+        std::vector<Real> point_rows;
+        point_rows.reserve(dimension * n);
+        for (std::size_t traction_component = 0u;
+             traction_component < dimension;
+             ++traction_component) {
+            for (const auto& traction : tractions) {
+                point_rows.push_back(
+                    traction[traction_component]);
             }
         }
+        adoptOrVerifyAffineFactorRows(
+            traction_factor_rows,
+            point_rows,
+            "boundary traction factor");
     }
-
-    std::vector<Real> result(
-        checkedSquare(n, "boundary numerator"), Real{0.0});
-    for (std::size_t row = 0u; row < n; ++row) {
-        for (std::size_t column = row;
-             column < n;
-             ++column) {
-            const Real value =
-                static_cast<Real>(
-                    accumulated[row * n + column]);
-            if (!std::isfinite(value)) {
-                reject("boundary numerator entry is nonfinite");
-            }
-            result[row * n + column] = value;
-            result[column * n + row] = value;
-        }
+    if (positive_point_weights.empty() ||
+        traction_factor_rows.size() != dimension * n) {
+        reject("generated-boundary exact Gram data is incomplete");
     }
-    return result;
 }
 
 [[nodiscard]] bool measuresAgree(Real left, Real right) noexcept
@@ -1881,14 +1905,15 @@ struct LocalData {
                 "canonical report cell");
         }
         long double retained_measure = 0.0L;
-        contribution.denominator =
-            assembleCellDenominator(
-                mesh,
-                local_found->second,
-                ordered_rules,
-                contribution.dofs,
-                selected.dimension,
-                retained_measure);
+        assembleCellDenominator(
+            mesh,
+            local_found->second,
+            ordered_rules,
+            contribution.dofs,
+            selected.dimension,
+            retained_measure,
+            contribution.positive_volume_point_weights,
+            contribution.symmetric_strain_factor_rows);
         contribution.retained_measure =
             static_cast<Real>(retained_measure);
         if (!finitePositive(contribution.retained_measure) ||
@@ -2076,14 +2101,16 @@ struct LocalData {
             contribution.raw_dofs.push_back(descriptor.dof);
         }
         long double physical_measure = 0.0L;
-        contribution.numerator =
-            assembleBoundaryNumerator(
-                mesh,
-                *rule,
-                dofs,
-                selected.dimension,
-                background.h_normal,
-                physical_measure);
+        contribution.h_normal = background.h_normal;
+        assembleBoundaryNumerator(
+            mesh,
+            *rule,
+            dofs,
+            selected.dimension,
+            background.h_normal,
+            physical_measure,
+            contribution.positive_boundary_point_weights,
+            contribution.traction_factor_rows);
         contribution.physical_measure =
             static_cast<Real>(physical_measure);
         if (!finitePositive(
@@ -2193,6 +2220,10 @@ void validateCanonicalData(
         if (cell.kind != report_cell.kind ||
             cell.stable_rule_ids !=
                 report_cell.retained_rule_stable_ids ||
+            cell.positive_volume_point_weights.empty() ||
+            cell.symmetric_strain_factor_rows.size() !=
+                symmetricTensorComponentCount(selected.dimension) *
+                    cell.dofs.size() ||
             !measuresAgree(
                 cell.retained_measure,
                 report_cell.retained_physical_volume)) {
@@ -2291,10 +2322,10 @@ void validateCanonicalData(
         if (cell == data.cells.end() ||
             boundary.raw_dofs.size() !=
                 cell->second.dofs.size() ||
-            boundary.numerator.size() !=
-                checkedSquare(
-                    boundary.raw_dofs.size(),
-                    "boundary numerator")) {
+            boundary.positive_boundary_point_weights.empty() ||
+            boundary.traction_factor_rows.size() !=
+                selected.dimension * boundary.raw_dofs.size() ||
+            !finitePositive(boundary.h_normal)) {
             reject("boundary record lacks its canonical parent cell");
         }
         std::set<GlobalIndex> unique;
@@ -2451,7 +2482,180 @@ struct WorkPatch {
     return result;
 }
 
-[[nodiscard]] std::vector<Real> symmetrizedRealMatrix(
+struct ExactGramBlockStorage {
+    std::vector<std::size_t> map_rows{};
+    std::size_t factor_row_count{0u};
+    std::vector<Real> row_major_raw_factors{};
+    std::vector<std::uint64_t> row_multipliers{};
+    std::uint64_t integer_multiplier{1u};
+    std::vector<Real> positive_sum_terms{};
+    std::vector<Real> positive_product_factors{};
+
+    [[nodiscard]] math::DenseExactDyadicGramBlockView view() const noexcept
+    {
+        return {
+            map_rows,
+            factor_row_count,
+            row_major_raw_factors,
+            row_multipliers,
+            {integer_multiplier,
+             positive_sum_terms,
+             positive_product_factors}};
+    }
+};
+
+void canonicalizeExactGramBlockColumns(
+    ExactGramBlockStorage& block,
+    std::string_view label)
+{
+    const auto column_count = block.map_rows.size();
+    if (column_count == 0u ||
+        block.factor_row_count == 0u ||
+        block.factor_row_count >
+            std::numeric_limits<std::size_t>::max() / column_count ||
+        block.row_major_raw_factors.size() !=
+            block.factor_row_count * column_count) {
+        reject(std::string(label) + " has malformed exact Gram columns");
+    }
+    std::vector<std::pair<std::size_t, std::size_t>> order;
+    order.reserve(column_count);
+    for (std::size_t column = 0u;
+         column < column_count;
+         ++column) {
+        order.emplace_back(block.map_rows[column], column);
+    }
+    std::sort(order.begin(), order.end());
+    for (std::size_t column = 1u;
+         column < order.size();
+         ++column) {
+        if (order[column - 1u].first == order[column].first) {
+            reject(std::string(label) + " repeats an exact Gram map row");
+        }
+    }
+    std::vector<std::size_t> sorted_rows(column_count);
+    std::vector<Real> sorted_factors(
+        block.row_major_raw_factors.size());
+    for (std::size_t column = 0u;
+         column < column_count;
+         ++column) {
+        sorted_rows[column] = order[column].first;
+        const auto source_column = order[column].second;
+        for (std::size_t factor_row = 0u;
+             factor_row < block.factor_row_count;
+             ++factor_row) {
+            sorted_factors[factor_row * column_count + column] =
+                block.row_major_raw_factors[
+                    factor_row * column_count + source_column];
+        }
+    }
+    block.map_rows = std::move(sorted_rows);
+    block.row_major_raw_factors = std::move(sorted_factors);
+}
+
+[[nodiscard]] std::vector<std::uint64_t>
+symmetricStrainRowMultipliers(std::size_t dimension)
+{
+    std::vector<std::uint64_t> result;
+    result.reserve(symmetricTensorComponentCount(dimension));
+    for (std::size_t row = 0u; row < dimension; ++row) {
+        for (std::size_t column = row;
+             column < dimension;
+             ++column) {
+            result.push_back(row == column ? 1u : 2u);
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] std::optional<std::vector<Real>> roundedGramMatrix(
+    const ExactGramBlockStorage& block,
+    std::string_view label)
+{
+    const std::size_t raw_dimension = block.map_rows.size();
+    if (raw_dimension == 0u ||
+        block.factor_row_count == 0u ||
+        block.row_major_raw_factors.size() !=
+            block.factor_row_count * raw_dimension ||
+        (!block.row_multipliers.empty() &&
+         block.row_multipliers.size() != block.factor_row_count) ||
+        block.integer_multiplier == 0u ||
+        block.positive_sum_terms.empty()) {
+        reject(std::string(label) + " exact Gram storage is malformed");
+    }
+    long double scale = 0.0L;
+    for (const Real weight : block.positive_sum_terms) {
+        if (!finitePositive(weight)) {
+            reject(std::string(label) + " has a nonpositive Gram weight");
+        }
+        scale += static_cast<long double>(weight);
+    }
+    scale *= static_cast<long double>(block.integer_multiplier);
+    for (const Real factor : block.positive_product_factors) {
+        if (!finitePositive(factor)) {
+            reject(std::string(label) + " has a nonpositive Gram scale");
+        }
+        scale *= static_cast<long double>(factor);
+    }
+    if (!std::isfinite(scale) || scale <= 0.0L) {
+        return std::nullopt;
+    }
+    std::vector<long double> accumulated(
+        checkedSquare(raw_dimension, label), 0.0L);
+    for (std::size_t factor_row = 0u;
+         factor_row < block.factor_row_count;
+         ++factor_row) {
+        const auto multiplier = block.row_multipliers.empty()
+            ? UINT64_C(1)
+            : block.row_multipliers[factor_row];
+        if (multiplier == 0u) {
+            reject(std::string(label) + " has a zero Gram row multiplier");
+        }
+        const long double row_scale =
+            scale * static_cast<long double>(multiplier);
+        for (std::size_t row = 0u;
+             row < raw_dimension;
+             ++row) {
+            const Real left = block.row_major_raw_factors[
+                factor_row * raw_dimension + row];
+            if (!std::isfinite(left)) {
+                reject(std::string(label) + " has a nonfinite Gram factor");
+            }
+            for (std::size_t column = row;
+                 column < raw_dimension;
+                 ++column) {
+                const Real right = block.row_major_raw_factors[
+                    factor_row * raw_dimension + column];
+                if (!std::isfinite(right)) {
+                    reject(
+                        std::string(label) +
+                        " has a nonfinite Gram factor");
+                }
+                accumulated[row * raw_dimension + column] +=
+                    row_scale *
+                    static_cast<long double>(left) *
+                    static_cast<long double>(right);
+            }
+        }
+    }
+    std::vector<Real> result(
+        accumulated.size(), Real{0});
+    for (std::size_t row = 0u; row < raw_dimension; ++row) {
+        for (std::size_t column = row;
+             column < raw_dimension;
+             ++column) {
+            const Real value = static_cast<Real>(
+                accumulated[row * raw_dimension + column]);
+            if (!std::isfinite(value)) {
+                return std::nullopt;
+            }
+            result[row * raw_dimension + column] = value;
+            result[column * raw_dimension + row] = value;
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] std::optional<std::vector<Real>> symmetrizedRealMatrix(
     std::span<const long double> wide,
     std::size_t dimension,
     std::string_view label)
@@ -2487,14 +2691,12 @@ struct WorkPatch {
             if (!std::isfinite(upper) ||
                 !std::isfinite(lower) ||
                 std::abs(upper - lower) > tolerance) {
-                reject(
-                    std::string(label) +
-                    " loses symmetry during tangent transformation");
+                return std::nullopt;
             }
             const long double value = upper;
             const Real cast = static_cast<Real>(value);
             if (!std::isfinite(cast)) {
-                reject(std::string(label) + " contains a nonfinite entry");
+                return std::nullopt;
             }
             result[row * dimension + column] = cast;
             result[column * dimension + row] = cast;
@@ -3166,38 +3368,6 @@ provenIndependentRowCoordinates(
         .has_value();
 }
 
-[[nodiscard]] bool hasExactNullspaceAction(
-    std::span<const Real> matrix,
-    std::size_t dimension,
-    std::span<const Real> nullspace,
-    std::size_t nullity)
-{
-    if (matrix.size() !=
-            checkedSquare(dimension, "nullspace action matrix") ||
-        nullspace.size() != dimension * nullity) {
-        reject("exact nullspace-action inputs have incompatible sizes");
-    }
-    for (std::size_t row = 0u; row < dimension; ++row) {
-        for (std::size_t mode = 0u;
-             mode < nullity;
-             ++mode) {
-            ExactBinary64ProductAccumulator action;
-            for (std::size_t column = 0u;
-                 column < dimension;
-                 ++column) {
-                action.addProduct(
-                    matrix[row * dimension + column],
-                    nullspace[
-                        column * nullity + mode]);
-            }
-            if (!action.isZero()) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
 [[nodiscard]] bool hasExactRigidReproduction(
     const std::set<GlobalIndex>& raw_dofs,
     const std::map<GlobalIndex, std::size_t>& terminal_index,
@@ -3302,9 +3472,87 @@ provenIndependentRowCoordinates(
     return true;
 }
 
+[[nodiscard]] bool exactGramBlocksAnnihilateRigidParameters(
+    std::span<const ExactGramBlockStorage> blocks,
+    std::span<const GlobalIndex> ordered_raw_dofs,
+    const CanonicalData& data,
+    std::size_t dimension,
+    const std::array<Real, 3>& center,
+    Real coordinate_scale)
+{
+    const std::size_t rigid_count =
+        rigidParameterCount(dimension);
+    std::vector<Real> raw_rigid_values(
+        ordered_raw_dofs.size() * rigid_count,
+        Real{0});
+    for (std::size_t raw = 0u;
+         raw < ordered_raw_dofs.size();
+         ++raw) {
+        const auto descriptor =
+            data.descriptors.find(ordered_raw_dofs[raw]);
+        if (descriptor == data.descriptors.end()) {
+            reject("exact Gram rigid action lacks a DOF descriptor");
+        }
+        const auto values = rigidEvaluation(
+            descriptor->second,
+            dimension,
+            center,
+            coordinate_scale);
+        for (std::size_t parameter = 0u;
+             parameter < rigid_count;
+             ++parameter) {
+            raw_rigid_values[raw * rigid_count + parameter] =
+                values[parameter];
+        }
+    }
+    for (const auto& block : blocks) {
+        const auto raw_dimension = block.map_rows.size();
+        if (raw_dimension == 0u ||
+            block.factor_row_count == 0u ||
+            block.row_major_raw_factors.size() !=
+                block.factor_row_count * raw_dimension) {
+            reject("exact Gram rigid action has malformed factor storage");
+        }
+        for (const auto raw : block.map_rows) {
+            if (raw >= ordered_raw_dofs.size()) {
+                reject("exact Gram rigid action references an unknown raw DOF");
+            }
+        }
+        for (std::size_t factor_row = 0u;
+             factor_row < block.factor_row_count;
+             ++factor_row) {
+            for (std::size_t parameter = 0u;
+                 parameter < rigid_count;
+                 ++parameter) {
+                ExactBinary64ProductAccumulator action;
+                for (std::size_t local = 0u;
+                     local < raw_dimension;
+                     ++local) {
+                    const auto raw = block.map_rows[local];
+                    action.addProduct(
+                        block.row_major_raw_factors[
+                            factor_row * raw_dimension + local],
+                        raw_rigid_values[
+                            raw * rigid_count + parameter]);
+                }
+                if (!action.isZero()) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 struct PatchPencil {
     std::vector<Real> numerator{};
     std::vector<Real> denominator{};
+    bool rounded_dense_diagnostics_available{false};
+    std::vector<ExactGramBlockStorage> exact_numerator_blocks{};
+    std::vector<ExactGramBlockStorage> exact_denominator_blocks{};
+    std::vector<std::size_t> raw_to_terminal_row_offsets{};
+    std::vector<math::DenseExactDyadicSparseMapEntry>
+        raw_to_terminal_entries{};
     std::vector<Real> explicit_nullspace{};
     std::size_t raw_dof_count{0u};
     std::size_t terminal_dimension{0u};
@@ -3317,6 +3565,7 @@ struct PatchPencil {
                 NotApplicable};
     Real rigid_reproduction_tolerance{0.0};
     Real maximum_rigid_reproduction_residual{0.0};
+    bool exact_rigid_factor_action_proven{false};
     Real retained_measure{0.0};
     Real boundary_measure{0.0};
 };
@@ -3401,8 +3650,38 @@ struct PatchPencil {
     for (const auto dof : terminal_dofs) {
         terminal_index.emplace(dof, next_terminal++);
     }
+    const std::vector<GlobalIndex> ordered_raw_dofs(
+        raw_dofs.begin(), raw_dofs.end());
+    std::map<GlobalIndex, std::size_t> patch_raw_index;
+    std::size_t next_raw = 0u;
+    for (const auto dof : ordered_raw_dofs) {
+        patch_raw_index.emplace(dof, next_raw++);
+    }
+    std::vector<std::size_t> raw_to_terminal_row_offsets;
+    std::vector<math::DenseExactDyadicSparseMapEntry>
+        raw_to_terminal_entries;
+    raw_to_terminal_row_offsets.reserve(raw_dofs.size() + 1u);
+    raw_to_terminal_row_offsets.push_back(0u);
+    for (const auto dof : ordered_raw_dofs) {
+        const auto& tangent = data.rows.at(dof);
+        for (const auto& entry : tangent.entries) {
+            const auto terminal = terminal_index.find(entry.master_dof);
+            if (terminal == terminal_index.end()) {
+                reject("patch tangent uses an unknown terminal coordinate");
+            }
+            raw_to_terminal_entries.push_back({
+                terminal->second,
+                entry.weight});
+        }
+        raw_to_terminal_row_offsets.push_back(
+            raw_to_terminal_entries.size());
+    }
+
     std::vector<long double> denominator(
         dense_entries, 0.0L);
+    bool denominator_diagnostics_available = true;
+    std::vector<ExactGramBlockStorage> exact_denominator_blocks;
+    exact_denominator_blocks.reserve(patch.support_cell_gids.size());
     for (const auto cell_gid :
          patch.support_cell_gids) {
         const auto& cell =
@@ -3412,16 +3691,49 @@ struct PatchPencil {
         for (const auto& descriptor : cell.dofs) {
             cell_dofs.push_back(descriptor.dof);
         }
-        accumulateReducedMatrix(
-            cell.denominator,
-            cell_dofs,
-            data.rows,
-            terminal_index,
-            denominator);
+        ExactGramBlockStorage exact_block;
+        exact_block.map_rows.reserve(cell_dofs.size());
+        for (const auto dof : cell_dofs) {
+            const auto raw = patch_raw_index.find(dof);
+            if (raw == patch_raw_index.end()) {
+                reject("cell exact Gram block references an unknown raw DOF");
+            }
+            exact_block.map_rows.push_back(raw->second);
+        }
+        exact_block.factor_row_count =
+            symmetricTensorComponentCount(dimension);
+        exact_block.row_major_raw_factors =
+            cell.symmetric_strain_factor_rows;
+        exact_block.row_multipliers =
+            symmetricStrainRowMultipliers(dimension);
+        exact_block.integer_multiplier = 1u;
+        exact_block.positive_sum_terms =
+            cell.positive_volume_point_weights;
+        if (denominator_diagnostics_available) {
+            const auto raw_matrix = roundedGramMatrix(
+                exact_block, "cell denominator diagnostic");
+            if (raw_matrix.has_value()) {
+                accumulateReducedMatrix(
+                    *raw_matrix,
+                    cell_dofs,
+                    data.rows,
+                    terminal_index,
+                    denominator);
+            } else {
+                denominator_diagnostics_available = false;
+            }
+        }
+        canonicalizeExactGramBlockColumns(
+            exact_block, "cell denominator");
+        exact_denominator_blocks.push_back(
+            std::move(exact_block));
     }
 
     std::vector<long double> numerator(
         dense_entries, 0.0L);
+    bool numerator_diagnostics_available = true;
+    std::vector<ExactGramBlockStorage> exact_numerator_blocks;
+    exact_numerator_blocks.reserve(patch.boundary_rule_ids.size());
     Real boundary_measure = 0.0;
     for (const auto stable_id :
          patch.boundary_rule_ids) {
@@ -3432,29 +3744,78 @@ struct PatchPencil {
                 boundary_measure,
                 boundary.physical_measure,
                 "patch boundary measure");
-        accumulateReducedMatrix(
-            boundary.numerator,
-            boundary.raw_dofs,
-            data.rows,
-            terminal_index,
-            numerator);
+        ExactGramBlockStorage exact_block;
+        exact_block.map_rows.reserve(boundary.raw_dofs.size());
+        for (const auto dof : boundary.raw_dofs) {
+            const auto raw = patch_raw_index.find(dof);
+            if (raw == patch_raw_index.end()) {
+                reject(
+                    "boundary exact Gram block references an unknown raw DOF");
+            }
+            exact_block.map_rows.push_back(raw->second);
+        }
+        exact_block.factor_row_count = dimension;
+        exact_block.row_major_raw_factors =
+            boundary.traction_factor_rows;
+        exact_block.integer_multiplier = 2u;
+        exact_block.positive_sum_terms =
+            boundary.positive_boundary_point_weights;
+        exact_block.positive_product_factors.push_back(
+            boundary.h_normal);
+        if (numerator_diagnostics_available) {
+            const auto raw_matrix = roundedGramMatrix(
+                exact_block, "boundary numerator diagnostic");
+            if (raw_matrix.has_value()) {
+                accumulateReducedMatrix(
+                    *raw_matrix,
+                    boundary.raw_dofs,
+                    data.rows,
+                    terminal_index,
+                    numerator);
+            } else {
+                numerator_diagnostics_available = false;
+            }
+        }
+        canonicalizeExactGramBlockColumns(
+            exact_block, "boundary numerator");
+        exact_numerator_blocks.push_back(
+            std::move(exact_block));
     }
 
     PatchPencil result;
     result.raw_dof_count = raw_dofs.size();
     result.terminal_dimension = terminal_dofs.size();
+    result.exact_denominator_blocks =
+        std::move(exact_denominator_blocks);
+    result.exact_numerator_blocks =
+        std::move(exact_numerator_blocks);
+    result.raw_to_terminal_row_offsets =
+        std::move(raw_to_terminal_row_offsets);
+    result.raw_to_terminal_entries =
+        std::move(raw_to_terminal_entries);
     result.retained_measure = retained_measure;
     result.boundary_measure = boundary_measure;
-    result.denominator =
-        symmetrizedRealMatrix(
-            denominator,
-            terminal_dofs.size(),
-            "patch denominator");
-    result.numerator =
-        symmetrizedRealMatrix(
-            numerator,
-            terminal_dofs.size(),
-            "patch numerator");
+    if (denominator_diagnostics_available &&
+        numerator_diagnostics_available) {
+        auto rounded_denominator =
+            symmetrizedRealMatrix(
+                denominator,
+                terminal_dofs.size(),
+                "patch denominator");
+        auto rounded_numerator =
+            symmetrizedRealMatrix(
+                numerator,
+                terminal_dofs.size(),
+                "patch numerator");
+        if (rounded_denominator.has_value() &&
+            rounded_numerator.has_value()) {
+            result.denominator =
+                std::move(*rounded_denominator);
+            result.numerator =
+                std::move(*rounded_numerator);
+            result.rounded_dense_diagnostics_available = true;
+        }
+    }
 
     if (terminal_dofs.empty()) {
         return result;
@@ -3650,6 +4011,27 @@ struct PatchPencil {
     if (rigid_nullspace.nullity == 0u) {
         return result;
     }
+    if (!exactGramBlocksAnnihilateRigidParameters(
+            result.exact_denominator_blocks,
+            ordered_raw_dofs,
+            data,
+            dimension,
+            center,
+            coordinate_scale) ||
+        !exactGramBlocksAnnihilateRigidParameters(
+            result.exact_numerator_blocks,
+            ordered_raw_dofs,
+            data,
+            dimension,
+            center,
+            coordinate_scale)) {
+        result.explicit_nullspace.clear();
+        result.rigid_quotient_status =
+            GeneratedBoundaryRigidModeQuotientStatus::
+                NonzeroPencilAction;
+        return result;
+    }
+    result.exact_rigid_factor_action_proven = true;
     if (!hasExactRigidReproduction(
             raw_dofs,
             terminal_index,
@@ -3673,22 +4055,6 @@ struct PatchPencil {
         result.rigid_quotient_status =
             GeneratedBoundaryRigidModeQuotientStatus::
                 CandidateRankNotProven;
-        return result;
-    }
-    if (!hasExactNullspaceAction(
-            result.denominator,
-            result.terminal_dimension,
-            result.explicit_nullspace,
-            rigid_nullspace.nullity) ||
-        !hasExactNullspaceAction(
-            result.numerator,
-            result.terminal_dimension,
-            result.explicit_nullspace,
-            rigid_nullspace.nullity)) {
-        result.explicit_nullspace.clear();
-        result.rigid_quotient_status =
-            GeneratedBoundaryRigidModeQuotientStatus::
-                NonzeroPencilAction;
         return result;
     }
     result.structural_rigid_mode_count =
@@ -3739,15 +4105,17 @@ certifyPatch(
         pencil.rigid_reproduction_tolerance;
     result.maximum_rigid_mode_reproduction_residual =
         pencil.maximum_rigid_reproduction_residual;
+    result.exact_rigid_factor_action_proven =
+        pencil.exact_rigid_factor_action_proven;
     result.retained_support_physical_volume =
         pencil.retained_measure;
     result.generated_boundary_physical_measure =
         pencil.boundary_measure;
-    if (pencil.terminal_dimension == 0u) {
-        result.generalized_bound.dimension = 0u;
-        result.generalized_bound.denominator_converged = true;
-        result.generalized_bound.quotient_converged = true;
-        return result;
+    if (pencil.structural_rigid_mode_count >
+            pencil.terminal_dimension ||
+        (pencil.structural_rigid_mode_count != 0u &&
+         !pencil.exact_rigid_factor_action_proven)) {
+        reject("patch structural quotient lacks its exact factor action proof");
     }
     const auto expected_positive_rank =
         pencil.terminal_dimension -
@@ -3790,67 +4158,209 @@ certifyPatch(
             "patch pencil quotient retained-coordinate count is "
             "inconsistent");
     }
-    std::vector<Real> retained_numerator(
-        expected_positive_rank *
-            expected_positive_rank,
-        Real{0.0});
-    std::vector<Real> retained_denominator(
-        expected_positive_rank *
-            expected_positive_rank,
-        Real{0.0});
-    for (std::size_t row = 0u;
-         row < retained.size();
-         ++row) {
-        for (std::size_t column = 0u;
-             column < retained.size();
-             ++column) {
-            const auto retained_entry =
-                row * retained.size() +
-                column;
-            const auto source_entry =
-                retained[row] *
-                    pencil.terminal_dimension +
-                retained[column];
-            retained_numerator[retained_entry] =
-                pencil.numerator[source_entry];
-            retained_denominator[retained_entry] =
-                pencil.denominator[
-                    source_entry];
+
+    if (pencil.raw_dof_count == 0u ||
+        pencil.raw_to_terminal_row_offsets.size() !=
+            pencil.raw_dof_count + 1u ||
+        pencil.raw_to_terminal_row_offsets.front() != 0u ||
+        pencil.raw_to_terminal_row_offsets.back() !=
+            pencil.raw_to_terminal_entries.size()) {
+        reject("patch exact sparse tangent map has an invalid shape");
+    }
+    const auto missing_coordinate =
+        std::numeric_limits<std::size_t>::max();
+    std::vector<std::size_t> terminal_to_retained(
+        pencil.terminal_dimension, missing_coordinate);
+    for (std::size_t quotient = 0u;
+         quotient < retained.size();
+         ++quotient) {
+        terminal_to_retained[retained[quotient]] = quotient;
+    }
+    std::vector<std::size_t> quotient_row_offsets;
+    std::vector<math::DenseExactDyadicSparseMapEntry>
+        quotient_entries;
+    quotient_row_offsets.reserve(pencil.raw_dof_count + 1u);
+    quotient_entries.reserve(pencil.raw_to_terminal_entries.size());
+    quotient_row_offsets.push_back(0u);
+    for (std::size_t raw = 0u;
+         raw < pencil.raw_dof_count;
+         ++raw) {
+        const auto begin = pencil.raw_to_terminal_row_offsets[raw];
+        const auto end = pencil.raw_to_terminal_row_offsets[raw + 1u];
+        if (begin > end ||
+            end > pencil.raw_to_terminal_entries.size()) {
+            reject("patch exact sparse tangent offsets are not monotone");
+        }
+        std::size_t previous = missing_coordinate;
+        for (std::size_t entry_index = begin;
+             entry_index < end;
+             ++entry_index) {
+            const auto& entry =
+                pencil.raw_to_terminal_entries[entry_index];
+            if (entry.output_coordinate >=
+                    pencil.terminal_dimension ||
+                !std::isfinite(entry.coefficient) ||
+                entry.coefficient == Real{0}) {
+                reject("patch exact sparse tangent entry is invalid");
+            }
+            const auto quotient =
+                terminal_to_retained[entry.output_coordinate];
+            if (quotient == missing_coordinate) {
+                continue;
+            }
+            if (previous != missing_coordinate &&
+                quotient <= previous) {
+                reject(
+                    "patch exact quotient tangent row is not strictly "
+                    "ordered");
+            }
+            quotient_entries.push_back({quotient, entry.coefficient});
+            previous = quotient;
+        }
+        quotient_row_offsets.push_back(quotient_entries.size());
+    }
+
+    std::vector<math::DenseExactDyadicGramBlockView>
+        exact_numerator_views;
+    std::vector<math::DenseExactDyadicGramBlockView>
+        exact_denominator_views;
+    exact_numerator_views.reserve(
+        pencil.exact_numerator_blocks.size());
+    exact_denominator_views.reserve(
+        pencil.exact_denominator_blocks.size());
+    std::size_t expected_numerator_rows = 0u;
+    std::size_t expected_denominator_rows = 0u;
+    std::size_t expected_numerator_weight_terms = 0u;
+    std::size_t expected_denominator_weight_terms = 0u;
+    for (const auto& block : pencil.exact_numerator_blocks) {
+        exact_numerator_views.push_back(block.view());
+        expected_numerator_rows += block.factor_row_count;
+        expected_numerator_weight_terms +=
+            block.positive_sum_terms.size();
+    }
+    for (const auto& block : pencil.exact_denominator_blocks) {
+        exact_denominator_views.push_back(block.view());
+        expected_denominator_rows += block.factor_row_count;
+        expected_denominator_weight_terms +=
+            block.positive_sum_terms.size();
+    }
+
+    std::vector<Real> retained_numerator;
+    std::vector<Real> retained_denominator;
+    if (pencil.rounded_dense_diagnostics_available) {
+        retained_numerator.assign(
+            checkedSquare(
+                expected_positive_rank,
+                "patch retained numerator"),
+            Real{0.0});
+        retained_denominator.assign(
+            checkedSquare(
+                expected_positive_rank,
+                "patch retained denominator"),
+            Real{0.0});
+        for (std::size_t row = 0u;
+             row < retained.size();
+             ++row) {
+            for (std::size_t column = 0u;
+                 column < retained.size();
+                 ++column) {
+                const auto retained_entry =
+                    row * retained.size() +
+                    column;
+                const auto source_entry =
+                    retained[row] *
+                        pencil.terminal_dimension +
+                    retained[column];
+                retained_numerator[retained_entry] =
+                    pencil.numerator[source_entry];
+                retained_denominator[retained_entry] =
+                    pencil.denominator[
+                        source_entry];
+            }
         }
     }
 
-    math::DenseExactDyadicSpdGeneralizedUpperBound
-        exact_bound;
-    if (expected_positive_rank == 0u) {
-        exact_bound.applied = true;
-        exact_bound.denominator_positive_definite_proven = true;
-        exact_bound.numerator_positive_semidefinite_proven = true;
-        exact_bound.upper_inequality_proven = true;
-    } else {
-        exact_bound =
-            math::dense_exact_dyadic_spd_generalized_upper_bound(
-                retained_numerator,
-                retained_denominator,
+    const auto exact_bound =
+        math::dense_exact_dyadic_psd_generalized_factorized_upper_bound(
+            exact_numerator_views,
+            exact_denominator_views,
+            math::DenseExactDyadicSparseMapView{
+                pencil.raw_dof_count,
                 expected_positive_rank,
-                "generated-boundary aggregate viscous trace exact "
-                "coordinate quotient");
-    }
+                quotient_row_offsets,
+                quotient_entries},
+            "generated-boundary aggregate viscous trace exact "
+            "factorized coordinate quotient");
     if (!exact_bound.applied ||
         !exact_bound.denominator_positive_definite_proven ||
         !exact_bound.numerator_positive_semidefinite_proven ||
         !exact_bound.upper_inequality_proven ||
-        exact_bound.dimension != expected_positive_rank ||
-        exact_bound.denominator_rank != expected_positive_rank ||
+        exact_bound.proof_input !=
+            math::DenseExactDyadicProofInput::
+                FactorizedBinary64PositiveForm ||
+        !exact_bound.exact_factorized_materialization_proven ||
+        !exact_bound.exact_sparse_map_applied ||
+        !exact_bound.exact_common_kernel_proven ||
+        exact_bound.factorized_input_dimension !=
+            expected_positive_rank ||
+        exact_bound.exact_common_kernel_nullity >
+            expected_positive_rank ||
+        exact_bound.dimension !=
+            expected_positive_rank -
+                exact_bound.exact_common_kernel_nullity ||
+        exact_bound.denominator_rank != exact_bound.dimension ||
+        exact_bound.exact_common_kernel_quotient_applied !=
+            (exact_bound.exact_common_kernel_nullity != 0u) ||
+        exact_bound.exact_common_kernel_eliminated_coordinates.size() !=
+            exact_bound.exact_common_kernel_nullity ||
+        exact_bound.numerator_gram_block_count !=
+            exact_numerator_views.size() ||
+        exact_bound.denominator_gram_block_count !=
+            exact_denominator_views.size() ||
+        exact_bound.numerator_gram_row_count !=
+            expected_numerator_rows ||
+        exact_bound.denominator_gram_row_count !=
+            expected_denominator_rows ||
+        exact_bound.numerator_weight_term_count !=
+            expected_numerator_weight_terms ||
+        exact_bound.denominator_weight_term_count !=
+            expected_denominator_weight_terms ||
+        exact_bound.transform_entry_count !=
+            quotient_entries.size() ||
+        exact_bound.factorized_input_digest == 0u ||
         !std::isfinite(
             exact_bound.directly_proven_upper_bound) ||
         exact_bound.directly_proven_upper_bound < Real{0.0}) {
         reject(
             "patch exact dyadic quotient proof is incomplete");
     }
+    for (std::size_t index = 0u;
+         index <
+            exact_bound
+                .exact_common_kernel_eliminated_coordinates.size();
+         ++index) {
+        const auto coordinate =
+            exact_bound
+                .exact_common_kernel_eliminated_coordinates[index];
+        if (coordinate >= expected_positive_rank ||
+            (index != 0u &&
+             coordinate <=
+                 exact_bound
+                     .exact_common_kernel_eliminated_coordinates[
+                         index - 1u])) {
+            reject(
+                "patch exact common-kernel quotient coordinates are "
+                "invalid");
+        }
+    }
 
+    const auto exact_positive_rank = exact_bound.dimension;
+    const auto exact_additional_nullity =
+        exact_bound.exact_common_kernel_nullity;
     math::DensePsdGeneralizedEigenvalueBound bound;
     bool floating_diagnostics_available = false;
-    if (expected_positive_rank != 0u) {
+    if (expected_positive_rank != 0u &&
+        pencil.rounded_dense_diagnostics_available) {
         try {
             bound =
                 math::dense_psd_generalized_eigenvalue_bound(
@@ -3860,8 +4370,8 @@ certifyPatch(
                     "generated-boundary aggregate viscous trace "
                     "coordinate quotient diagnostics");
             floating_diagnostics_available =
-                bound.positive_rank == expected_positive_rank &&
-                bound.nullity == 0u &&
+                bound.positive_rank == exact_positive_rank &&
+                bound.nullity == exact_additional_nullity &&
                 bound.denominator_converged &&
                 bound.quotient_converged;
         } catch (const FEException&) {
@@ -3871,15 +4381,21 @@ certifyPatch(
     }
     if (!floating_diagnostics_available) {
         bound = {};
-        bound.denominator_scale =
-            math::dense_matrix_max_abs(retained_denominator);
-        bound.numerator_scale =
-            math::dense_matrix_max_abs(retained_numerator);
-        bound.positive_rank = expected_positive_rank;
+        if (pencil.rounded_dense_diagnostics_available) {
+            bound.denominator_scale =
+                math::dense_matrix_max_abs(retained_denominator);
+            bound.numerator_scale =
+                math::dense_matrix_max_abs(retained_numerator);
+        }
+        bound.positive_rank = exact_positive_rank;
         bound.largest_quotient_eigenvalue =
             exact_bound.directly_proven_upper_bound;
         bound.conservative_upper_bound =
             exact_bound.directly_proven_upper_bound;
+        bound.denominator_converged =
+            exact_positive_rank == 0u;
+        bound.quotient_converged =
+            exact_positive_rank == 0u;
     }
     bound.conservative_upper_bound =
         std::max({
@@ -3887,8 +4403,10 @@ certifyPatch(
             bound.largest_quotient_eigenvalue,
             exact_bound.directly_proven_upper_bound});
     bound.dimension = pencil.terminal_dimension;
-    bound.positive_rank = expected_positive_rank;
-    bound.nullity = pencil.structural_rigid_mode_count;
+    bound.positive_rank = exact_positive_rank;
+    bound.nullity =
+        pencil.structural_rigid_mode_count +
+        exact_additional_nullity;
     bound.exact_dyadic = exact_bound;
     bound.explicit_nullspace.applied =
         pencil.structural_rigid_mode_count != 0u;
@@ -3896,10 +4414,12 @@ certifyPatch(
         pencil.structural_rigid_mode_count;
     bound.explicit_nullspace.reduced_dimension =
         expected_positive_rank;
-    bound.explicit_nullspace.original_denominator_scale =
-        math::dense_matrix_max_abs(pencil.denominator);
-    bound.explicit_nullspace.original_numerator_scale =
-        math::dense_matrix_max_abs(pencil.numerator);
+    if (pencil.rounded_dense_diagnostics_available) {
+        bound.explicit_nullspace.original_denominator_scale =
+            math::dense_matrix_max_abs(pencil.denominator);
+        bound.explicit_nullspace.original_numerator_scale =
+            math::dense_matrix_max_abs(pencil.numerator);
+    }
     bound.explicit_nullspace.exact_binary64_actions_proven = true;
     bound.explicit_nullspace.exact_binary64_anchor_rank_proven = true;
     bound.explicit_nullspace.eliminated_coordinates = anchors;
@@ -3983,6 +4503,46 @@ certifyPatch(
             digestMix(digest, value.binary64_search_steps);
             digestMix(digest, value.exact_update_count);
             digestMix(digest, value.maximum_integer_bits);
+            digestMix(
+                digest,
+                static_cast<std::uint64_t>(value.proof_input));
+            digestMix(
+                digest,
+                value.exact_factorized_materialization_proven ? 1u : 0u);
+            digestMix(
+                digest,
+                value.exact_sparse_map_applied ? 1u : 0u);
+            digestMix(digest, value.numerator_gram_block_count);
+            digestMix(digest, value.denominator_gram_block_count);
+            digestMix(digest, value.numerator_gram_row_count);
+            digestMix(digest, value.denominator_gram_row_count);
+            digestMix(digest, value.numerator_weight_term_count);
+            digestMix(digest, value.denominator_weight_term_count);
+            digestMix(digest, value.transform_entry_count);
+            digestMix(digest, value.exact_transform_visit_count);
+            digestMix(digest, value.exact_nonzero_outer_pair_count);
+            digestMix(
+                digest,
+                value.factor_materialization_update_count);
+            digestMix(digest, value.modeled_input_bytes);
+            digestMix(digest, value.factorized_input_digest);
+            digestMix(digest, value.factorized_input_dimension);
+            digestMix(
+                digest,
+                value.exact_common_kernel_proven ? 1u : 0u);
+            digestMix(
+                digest,
+                value.exact_common_kernel_quotient_applied ? 1u : 0u);
+            digestMix(digest, value.exact_common_kernel_nullity);
+            digestMix(
+                digest,
+                value
+                    .exact_common_kernel_eliminated_coordinates.size());
+            for (const auto coordinate :
+                 value
+                     .exact_common_kernel_eliminated_coordinates) {
+                digestMix(digest, coordinate);
+            }
         };
     const auto mix_bound =
         [&](std::uint64_t& digest,
@@ -4144,6 +4704,9 @@ certifyPatch(
             patch.maximum_rigid_mode_reproduction_residual);
         digestMix(
             digest,
+            patch.exact_rigid_factor_action_proven ? 1u : 0u);
+        digestMix(
+            digest,
             patch.maximum_cell_support_overlap);
         mix_real(
             digest,
@@ -4159,6 +4722,16 @@ certifyPatch(
 }
 
 } // namespace
+
+void validateGeneratedBoundaryAggregateTraceCertificateDigest(
+    const GeneratedBoundaryAggregateTraceCertificate& certificate)
+{
+    if (certificate.canonical_certificate_digest == 0u ||
+        certificateDigest(certificate) !=
+            certificate.canonical_certificate_digest) {
+        reject("canonical certificate digest is absent or stale");
+    }
+}
 
 GeneratedBoundaryAggregateTraceCertificate
 certifyGeneratedBoundaryAggregateTrace(

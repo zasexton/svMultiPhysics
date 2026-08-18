@@ -78,11 +78,11 @@ struct GeneratedBoundaryAggregateTraceCertificationOptions {
  *          integral_support 2 mu eps(v) : eps(v)
  *
  * on the exact closed tangent rows of this patch. The implementation divides
- * both matrices by the common positive factor `2 mu` before dense
- * certification, preserving the quotient while avoiding viscosity-dependent
- * overflow and underflow. Acceptance is controlled by the exact dyadic proof
- * stored in `generalized_bound.exact_dyadic`; floating eigensolver values are
- * diagnostics only.
+ * both forms by the common positive factor `2 mu` before certification,
+ * preserving the quotient while avoiding viscosity-dependent overflow and
+ * underflow. Acceptance is controlled by the exact factorized dyadic proof
+ * stored in `generalized_bound.exact_dyadic`; formed dense matrices and their
+ * floating eigensolver values are diagnostics only.
  */
 struct GeneratedBoundaryAggregateTracePatchCertificate {
     std::size_t canonical_patch_index{
@@ -101,10 +101,11 @@ struct GeneratedBoundaryAggregateTracePatchCertificate {
             GeneratedBoundaryRigidModeQuotientStatus::
                 NotApplicable};
     // The tolerance and residual describe the floating candidate search.
-    // Exact reproduction, exact binary64 pencil action, and a modular
+    // Exact raw Gram-factor action, exact tangent reproduction, and a modular
     // full-column-rank proof are required before a candidate is applied.
     Real rigid_mode_reproduction_tolerance{0.0};
     Real maximum_rigid_mode_reproduction_residual{0.0};
+    bool exact_rigid_factor_action_proven{false};
     std::size_t maximum_cell_support_overlap{0u};
     Real retained_support_physical_volume{0.0};
     Real generated_boundary_physical_measure{0.0};
@@ -150,6 +151,16 @@ struct GeneratedBoundaryAggregateTraceCertificate {
     Real global_conservative_upper_bound{0.0};
     std::vector<GeneratedBoundaryAggregateTracePatchCertificate> patches{};
 };
+
+/**
+ * Reject a certificate whose stored canonical digest is absent or stale.
+ *
+ * The recomputation covers the complete canonical certificate payload,
+ * including exact factorized-proof diagnostics. Rank-local cache-validity
+ * revisions remain excluded by the certificate contract.
+ */
+void validateGeneratedBoundaryAggregateTraceCertificateDigest(
+    const GeneratedBoundaryAggregateTraceCertificate& certificate);
 
 /**
  * Certify the generated-boundary viscous trace bound on the live aggregate

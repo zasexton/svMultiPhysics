@@ -836,7 +836,8 @@ struct TetraStripArrays {
     const PlaneCutPosition& cut,
     FE::Real mesh_scale,
     int wall_marker,
-    int anchor_marker)
+    int anchor_marker,
+    bool top_wall_parent)
 {
     const auto arrays =
         makeFiveCubeTetraStripArrays(mesh_scale);
@@ -876,7 +877,10 @@ struct TetraStripArrays {
         for (const auto vertex : vertices) {
             const auto point = base->get_vertex_coords(vertex);
             on_wall =
-                on_wall && on_plane(point[2], FE::Real{0.0}) &&
+                on_wall &&
+                on_plane(
+                    point[2],
+                    top_wall_parent ? mesh_scale : FE::Real{0.0}) &&
                 point[0] >= FE::Real{3.0} * mesh_scale -
                                 FE::Real{1.0e-13} &&
                 point[0] <= FE::Real{4.0} * mesh_scale +
@@ -890,8 +894,10 @@ struct TetraStripArrays {
         // Qualify one native triangular exterior face.  Its two vertices on
         // the right edge keep the requested 1e-8 wet fraction away from an
         // interface fragment whose area is below the authoritative geometry
-        // tolerance; the sweep is about wet-boundary measure, not an
-        // independently collapsed sub-tolerance interface sliver.
+        // tolerance.  In the top-wall variant, the opposite tetrahedron
+        // vertex is on the active side for every positive wall fraction, so
+        // the boundary-fraction sweep does not independently collapse its
+        // parent volume support.
         if (on_wall && right_edge_vertex_count == 2u) {
             base->set_boundary_label(
                 face, static_cast<label_t>(wall_marker));
@@ -4292,7 +4298,8 @@ struct NitscheEnergyOrientation {
     FE::Real active_wall_fraction,
     FE::Real mesh_scale,
     const NitscheEnergyOrientation& orientation,
-    FE::geometry::CutIntegrationSide active_side)
+    FE::geometry::CutIntegrationSide active_side,
+    bool top_wall_parent)
 {
     if (!(active_wall_fraction >= FE::Real{0.0}) ||
         !(active_wall_fraction <= FE::Real{1.0}) ||
@@ -4334,6 +4341,9 @@ struct NitscheEnergyOrientation {
     const auto physical_offset =
         mesh_scale *
         (FE::Real{3.0} * orientation.raw_normal[0] +
+         (top_wall_parent
+              ? orientation.raw_normal[2]
+              : FE::Real{0.0}) +
          projected_patch_coordinate);
 
     std::array<FE::Real, 3> unit_normal{{
@@ -4621,6 +4631,8 @@ struct NitscheEnergySample {
     std::size_t trace_certificate_count{0u};
     std::size_t trace_certificate_patch_count{0u};
     std::size_t trace_certificate_boundary_rule_count{0u};
+    std::size_t
+        trace_exact_common_kernel_quotient_patch_count{0u};
     std::uint64_t trace_certificate_digest{0u};
     std::uint64_t trace_certificate_aggregation_digest{0u};
     std::uint64_t trace_certificate_cut_context_revision{0u};
@@ -4636,6 +4648,7 @@ struct NitscheEnergySample {
     bool trace_certificate_deterministic{false};
     bool trace_certificate_revision_match{false};
     bool trace_form_binding_source_match{false};
+    bool trace_exact_common_kernel_metadata_valid{false};
     FE::Real symmetric_operator_relative_skew{0.0};
     FE::Real energy_norm_relative_skew{0.0};
     FE::Real production_reconstruction_relative_error{0.0};
@@ -4737,19 +4750,23 @@ public:
         NitscheEnergyOrientation orientation,
         FE::geometry::CutIntegrationSide active_side,
         std::size_t maximum_root_path_length =
-            nitsche_energy_maximum_root_path_length)
+            nitsche_energy_maximum_root_path_length,
+        bool top_wall_parent = true)
         : mesh_scale_(mesh_scale)
         , orientation_(std::move(orientation))
         , active_side_(active_side)
+        , top_wall_parent_(top_wall_parent)
         , mesh_(makeNitscheEnergyTetraStripMesh(
               nitscheEnergyStripCut(
                   FE::Real{0.25},
                   mesh_scale_,
                   orientation_,
-                  active_side_),
+                  active_side_,
+                  top_wall_parent_),
               mesh_scale_,
               wall_marker,
-              anchor_marker))
+              anchor_marker,
+              top_wall_parent_))
         , velocity_space_(
               FE::spaces::SpaceFactory::create_vector_h1(
                   FE::ElementType::Tetra4,
@@ -4866,7 +4883,8 @@ public:
             active_wall_fraction,
             mesh_scale_,
             orientation_,
-            active_side_);
+            active_side_,
+            top_wall_parent_);
         setScalarVertexField(
             solution_, system_, phi_, cut);
         setMeshVertexField(*mesh_, cut);
@@ -4925,6 +4943,56 @@ public:
             throw std::runtime_error(
                 "Nitsche energy eager trace certificate is bound to "
                 "the wrong production route");
+        }
+        bool trace_exact_common_kernel_metadata_valid =
+            trace_record.certificate.patches.size() ==
+            trace_record.certificate.certified_patch_count;
+        std::size_t
+            trace_exact_common_kernel_quotient_patch_count = 0u;
+        for (const auto& patch :
+             trace_record.certificate.patches) {
+            const auto& exact =
+                patch.generalized_bound.exact_dyadic;
+            const auto& eliminated =
+                exact.exact_common_kernel_eliminated_coordinates;
+            bool coordinates_valid = true;
+            for (std::size_t index = 0u;
+                 index < eliminated.size();
+                 ++index) {
+                coordinates_valid =
+                    coordinates_valid &&
+                    eliminated[index] <
+                        exact.factorized_input_dimension &&
+                    (index == 0u ||
+                     eliminated[index] > eliminated[index - 1u]);
+            }
+            trace_exact_common_kernel_metadata_valid =
+                trace_exact_common_kernel_metadata_valid &&
+                exact.applied &&
+                exact.denominator_positive_definite_proven &&
+                exact.numerator_positive_semidefinite_proven &&
+                exact.upper_inequality_proven &&
+                exact.proof_input ==
+                    FE::math::DenseExactDyadicProofInput::
+                        FactorizedBinary64PositiveForm &&
+                exact.exact_factorized_materialization_proven &&
+                exact.exact_sparse_map_applied &&
+                exact.factorized_input_digest != 0u &&
+                exact.exact_common_kernel_proven &&
+                exact.exact_common_kernel_nullity <=
+                    exact.factorized_input_dimension &&
+                exact.dimension ==
+                    exact.factorized_input_dimension -
+                        exact.exact_common_kernel_nullity &&
+                exact.denominator_rank == exact.dimension &&
+                exact.exact_common_kernel_quotient_applied ==
+                    (exact.exact_common_kernel_nullity != 0u) &&
+                eliminated.size() ==
+                    exact.exact_common_kernel_nullity &&
+                coordinates_valid;
+            trace_exact_common_kernel_quotient_patch_count +=
+                static_cast<std::size_t>(
+                    exact.exact_common_kernel_quotient_applied);
         }
         bool trace_certificate_deterministic = false;
         const auto* trace_evidence =
@@ -5131,6 +5199,8 @@ public:
         sample.trace_certificate_boundary_rule_count =
             trace_record.certificate
                 .generated_boundary_rule_count;
+        sample.trace_exact_common_kernel_quotient_patch_count =
+            trace_exact_common_kernel_quotient_patch_count;
         sample.trace_certificate_digest =
             trace_record.certificate
                 .canonical_certificate_digest;
@@ -5173,6 +5243,8 @@ public:
                     sample
                         .trace_source_formulation_record_index]
                     .active_fields.end();
+        sample.trace_exact_common_kernel_metadata_valid =
+            trace_exact_common_kernel_metadata_valid;
         sample.trace_certificate_upper_bound =
             trace_record.certificate
                 .global_conservative_upper_bound;
@@ -5354,6 +5426,7 @@ private:
     NitscheEnergyOrientation orientation_{};
     FE::geometry::CutIntegrationSide active_side_{
         FE::geometry::CutIntegrationSide::Negative};
+    bool top_wall_parent_{true};
     std::shared_ptr<Mesh> mesh_{};
     std::shared_ptr<FE::spaces::ProductSpace>
         velocity_space_{};
@@ -8988,6 +9061,10 @@ TEST(FreeSurfaceCutStability,
     std::size_t dry_exact_zero_case_count = 0u;
     std::size_t aggregation_exercised_case_count = 0u;
     std::size_t diagnostic_structure_verified_case_count = 0u;
+    std::size_t
+        exact_common_kernel_metadata_valid_case_count = 0u;
+    std::size_t
+        exact_common_kernel_quotient_patch_count = 0u;
     std::set<int> generated_active_boundary_markers;
     std::size_t maximum_observed_root_path = 0u;
     std::size_t maximum_root_path_guard_rejections = 0u;
@@ -9044,7 +9121,8 @@ TEST(FreeSurfaceCutStability,
             mesh_scales.front(),
             orientations.back(),
             FE::geometry::CutIntegrationSide::Negative,
-            nitsche_energy_default_maximum_root_path_length);
+            nitsche_energy_default_maximum_root_path_length,
+            /*top_wall_parent=*/false);
         try {
             static_cast<void>(
                 default_guard_problem.evaluate(FE::Real{1.0e-4}));
@@ -9078,11 +9156,15 @@ TEST(FreeSurfaceCutStability,
             PersistentNitscheEnergyProblem negative_problem(
                 mesh_scale,
                 orientation,
-                FE::geometry::CutIntegrationSide::Negative);
+                FE::geometry::CutIntegrationSide::Negative,
+                nitsche_energy_maximum_root_path_length,
+                /*top_wall_parent=*/true);
             PersistentNitscheEnergyProblem positive_problem(
                 mesh_scale,
                 orientation,
-                FE::geometry::CutIntegrationSide::Positive);
+                FE::geometry::CutIntegrationSide::Positive,
+                nitsche_energy_maximum_root_path_length,
+                /*top_wall_parent=*/true);
             samples_by_scale[scale_index][0].reserve(
                 fractions.size());
             samples_by_scale[scale_index][1].reserve(
@@ -9117,6 +9199,27 @@ TEST(FreeSurfaceCutStability,
                         realPropertyValue(mesh_scale));
 
                     ++case_count;
+                    EXPECT_TRUE(
+                        sample
+                            .trace_exact_common_kernel_metadata_valid);
+                    EXPECT_LE(
+                        sample
+                            .trace_exact_common_kernel_quotient_patch_count,
+                        sample.trace_certificate_patch_count);
+                    if (sample
+                            .trace_exact_common_kernel_metadata_valid) {
+                        ++exact_common_kernel_metadata_valid_case_count;
+                    }
+                    if (dry) {
+                        EXPECT_EQ(
+                            sample
+                                .trace_exact_common_kernel_quotient_patch_count,
+                            0u);
+                    } else {
+                        exact_common_kernel_quotient_patch_count +=
+                            sample
+                                .trace_exact_common_kernel_quotient_patch_count;
+                    }
                     const auto fraction_absolute_error =
                         std::abs(
                             sample.observed_wall_fraction -
@@ -9730,6 +9833,11 @@ TEST(FreeSurfaceCutStability,
     EXPECT_EQ(
         diagnostic_structure_verified_case_count,
         expected_case_count);
+    EXPECT_EQ(
+        exact_common_kernel_metadata_valid_case_count,
+        expected_case_count);
+    EXPECT_GT(
+        exact_common_kernel_quotient_patch_count, 0u);
     EXPECT_EQ(generated_active_boundary_markers.size(), 2u);
     EXPECT_LE(
         maximum_observed_root_path,
@@ -10069,6 +10177,10 @@ TEST(FreeSurfaceCutStability,
     std::size_t dry_case_count = 0u;
     std::size_t deterministic_case_count = 0u;
     std::size_t revision_match_case_count = 0u;
+    std::size_t
+        exact_common_kernel_metadata_valid_case_count = 0u;
+    std::size_t
+        exact_common_kernel_quotient_patch_count = 0u;
     FE::Real maximum_trace_upper_bound{0.0};
     FE::Real minimum_finite_sample_energy_lower_bound{
         std::numeric_limits<FE::Real>::infinity()};
@@ -10080,11 +10192,15 @@ TEST(FreeSurfaceCutStability,
             PersistentNitscheEnergyProblem negative_problem(
                 mesh_scale,
                 orientation,
-                FE::geometry::CutIntegrationSide::Negative);
+                FE::geometry::CutIntegrationSide::Negative,
+                nitsche_energy_maximum_root_path_length,
+                /*top_wall_parent=*/true);
             PersistentNitscheEnergyProblem positive_problem(
                 mesh_scale,
                 orientation,
-                FE::geometry::CutIntegrationSide::Positive);
+                FE::geometry::CutIntegrationSide::Positive,
+                nitsche_energy_maximum_root_path_length,
+                /*top_wall_parent=*/true);
             for (const auto fraction : fractions) {
                 for (std::size_t side_index = 0u;
                      side_index < 2u;
@@ -10112,6 +10228,13 @@ TEST(FreeSurfaceCutStability,
                     if (sample.trace_certificate_revision_match) {
                         ++revision_match_case_count;
                     }
+                    if (sample
+                            .trace_exact_common_kernel_metadata_valid) {
+                        ++exact_common_kernel_metadata_valid_case_count;
+                    }
+                    exact_common_kernel_quotient_patch_count +=
+                        sample
+                            .trace_exact_common_kernel_quotient_patch_count;
 
                     EXPECT_EQ(
                         sample.trace_certificate_count, 1u);
@@ -10138,6 +10261,13 @@ TEST(FreeSurfaceCutStability,
                         sample.trace_certificate_deterministic);
                     EXPECT_TRUE(
                         sample.trace_certificate_revision_match);
+                    EXPECT_TRUE(
+                        sample
+                            .trace_exact_common_kernel_metadata_valid);
+                    EXPECT_LE(
+                        sample
+                            .trace_exact_common_kernel_quotient_patch_count,
+                        sample.trace_certificate_patch_count);
                     EXPECT_TRUE(std::isfinite(
                         sample.trace_certificate_upper_bound));
                     EXPECT_GE(
@@ -10177,6 +10307,10 @@ TEST(FreeSurfaceCutStability,
                         EXPECT_EQ(
                             sample.trace_certificate_upper_bound,
                             FE::Real{0.0});
+                        EXPECT_EQ(
+                            sample
+                                .trace_exact_common_kernel_quotient_patch_count,
+                            0u);
                         EXPECT_EQ(
                             sample
                                 .trace_finite_sample_energy_lower_bound,
@@ -10268,6 +10402,16 @@ TEST(FreeSurfaceCutStability,
                         << ","
                         << "\"patch_count\":"
                         << sample.trace_certificate_patch_count << ","
+                        << "\"exact_common_kernel_metadata_valid\":"
+                        << (sample
+                                    .trace_exact_common_kernel_metadata_valid
+                                ? "true"
+                                : "false")
+                        << ","
+                        << "\"exact_common_kernel_quotient_patch_count\":"
+                        << sample
+                               .trace_exact_common_kernel_quotient_patch_count
+                        << ","
                         << "\"trace_upper_bound\":"
                         << sample.trace_certificate_upper_bound << ","
                         << "\"effective_penalty_multiplier\":"
@@ -10322,6 +10466,11 @@ TEST(FreeSurfaceCutStability,
         deterministic_case_count, expected_case_count);
     EXPECT_EQ(
         revision_match_case_count, expected_case_count);
+    EXPECT_EQ(
+        exact_common_kernel_metadata_valid_case_count,
+        expected_case_count);
+    EXPECT_GT(
+        exact_common_kernel_quotient_patch_count, 0u);
     EXPECT_LT(
         maximum_trace_upper_bound, configured_penalty);
     EXPECT_GT(
@@ -10345,6 +10494,9 @@ TEST(FreeSurfaceCutStability,
         "wp3_wp7_nitsche_trace_v2_minimum_sampled_eigenvalue_gap",
         realPropertyValue(minimum_sampled_eigenvalue_gap));
     RecordProperty(
+        "wp3_wp7_nitsche_trace_v2_exact_common_kernel_quotient_patch_count",
+        exact_common_kernel_quotient_patch_count);
+    RecordProperty(
         "wp3_wp7_nitsche_trace_v2_method_coercivity_lower_bound",
         "null");
     RecordProperty(
@@ -10364,6 +10516,10 @@ TEST(FreeSurfaceCutStability,
         << deterministic_case_count << ","
         << "\"revision_match_case_count\":"
         << revision_match_case_count << ","
+        << "\"exact_common_kernel_metadata_valid_case_count\":"
+        << exact_common_kernel_metadata_valid_case_count << ","
+        << "\"exact_common_kernel_quotient_patch_count\":"
+        << exact_common_kernel_quotient_patch_count << ","
         << "\"maximum_trace_upper_bound\":"
         << maximum_trace_upper_bound << ","
         << "\"minimum_finite_sample_energy_lower_bound\":"

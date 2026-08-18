@@ -11,6 +11,7 @@
 #include "Core/Types.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <span>
 #include <string>
@@ -74,6 +75,11 @@ struct DenseSymmetricEigenvalueBounds {
  * predicates.  The search is over finite nonnegative binary64 values, so the
  * returned coefficient is itself one of the values proved directly.
  */
+enum class DenseExactDyadicProofInput : std::uint8_t {
+    DenseBinary64Matrix = 0,
+    FactorizedBinary64PositiveForm = 1,
+};
+
 struct DenseExactDyadicSpdGeneralizedUpperBound {
     bool applied{false};
     bool denominator_positive_definite_proven{false};
@@ -91,6 +97,71 @@ struct DenseExactDyadicSpdGeneralizedUpperBound {
     std::size_t binary64_search_steps{0};
     std::size_t exact_update_count{0};
     std::size_t maximum_integer_bits{0};
+    DenseExactDyadicProofInput proof_input{
+        DenseExactDyadicProofInput::DenseBinary64Matrix};
+    bool exact_factorized_materialization_proven{false};
+    bool exact_sparse_map_applied{false};
+    std::size_t numerator_gram_block_count{0};
+    std::size_t denominator_gram_block_count{0};
+    std::size_t numerator_gram_row_count{0};
+    std::size_t denominator_gram_row_count{0};
+    std::size_t numerator_weight_term_count{0};
+    std::size_t denominator_weight_term_count{0};
+    std::size_t transform_entry_count{0};
+    std::size_t exact_transform_visit_count{0};
+    std::size_t exact_nonzero_outer_pair_count{0};
+    std::size_t factor_materialization_update_count{0};
+    std::size_t modeled_input_bytes{0};
+    std::uint64_t factorized_input_digest{0};
+    // The factorized PSD entry point may discover an additional exact common
+    // kernel after the caller's structural coordinate gauge.  These fields
+    // bind that deterministic secondary principal quotient.  Coordinates
+    // are relative to the sparse map's original output ordering.
+    std::size_t factorized_input_dimension{0};
+    bool exact_common_kernel_proven{false};
+    bool exact_common_kernel_quotient_applied{false};
+    std::size_t exact_common_kernel_nullity{0};
+    std::vector<std::size_t>
+        exact_common_kernel_eliminated_coordinates{};
+};
+
+/** One nonzero in a canonical sparse raw-to-quotient tangent map. */
+struct DenseExactDyadicSparseMapEntry {
+    std::size_t output_coordinate{0};
+    Real coefficient{0};
+};
+
+struct DenseExactDyadicSparseMapView {
+    std::size_t input_dimension{0};
+    std::size_t output_dimension{0};
+    std::span<const std::size_t> row_offsets{};
+    std::span<const DenseExactDyadicSparseMapEntry> entries{};
+};
+
+struct DenseExactDyadicPositiveScaleView {
+    std::uint64_t integer_multiplier{1};
+    std::span<const Real> positive_sum_terms{};
+    std::span<const Real> positive_product_factors{};
+};
+
+/**
+ * A positive Gram block before exact sparse tangent transformation.
+ *
+ * Its contribution is
+ *
+ *   integer_multiplier * sum(positive_sum_terms)
+ *     * product(positive_product_factors)
+ *     * sum_r row_multipliers[r]
+ *       * (raw_factors[r] * sparse_map)^T
+ *       * (raw_factors[r] * sparse_map).
+ */
+struct DenseExactDyadicGramBlockView {
+    std::span<const std::size_t> map_rows{};
+    std::size_t factor_row_count{0};
+    std::span<const Real> row_major_raw_factors{};
+    // Empty means that every row multiplier is one.
+    std::span<const std::uint64_t> row_multipliers{};
+    DenseExactDyadicPositiveScaleView scale{};
 };
 
 /**
@@ -218,6 +289,47 @@ dense_exact_dyadic_spd_generalized_upper_bound(
     std::size_t n,
     std::string_view label =
         "exact dyadic SPD generalized quotient");
+
+/**
+ * Prove a generalized upper bound from transformed positive Gram blocks.
+ *
+ * Every binary64 primitive is interpreted as an exact dyadic. Positive
+ * weights remain sums/products, and each transformed coefficient remains an
+ * exact sum of coefficient/tangent-weight products until the integer Gram
+ * matrices are formed. The sparse map must already target the caller's
+ * principal coordinate gauge; structural-nullspace validation remains the
+ * caller's prerequisite. Each block's `map_rows` must be strictly increasing,
+ * with factor columns stored in the same order. This avoids all intermediate
+ * entrywise and tangent-row rounding while permitting bounded linear-time
+ * validation. A zero-dimensional output map is accepted as the vacuous
+ * principal quotient after the full factor/map preflight succeeds.
+ */
+[[nodiscard]] DenseExactDyadicSpdGeneralizedUpperBound
+dense_exact_dyadic_spd_generalized_factorized_upper_bound(
+    std::span<const DenseExactDyadicGramBlockView> numerator,
+    std::span<const DenseExactDyadicGramBlockView> denominator,
+    DenseExactDyadicSparseMapView raw_to_quotient,
+    std::string_view label =
+        "exact dyadic SPD generalized factorized quotient");
+
+/**
+ * Prove a generalized upper bound from factorized positive semidefinite
+ * forms, discovering any exact common kernel left after the caller's
+ * structural coordinate gauge.
+ *
+ * The backend first proves both formed Gram matrices PSD.  It proves kernel
+ * compatibility by showing that `rank(D + N) == rank(D)` exactly, selects a
+ * deterministic full-rank principal coordinate gauge from `D`, and applies
+ * the SPD proof to that gauge.  No tolerance or rounded nullspace decision is
+ * used.  A zero-rank compatible pencil is accepted as a vacuous quotient.
+ */
+[[nodiscard]] DenseExactDyadicSpdGeneralizedUpperBound
+dense_exact_dyadic_psd_generalized_factorized_upper_bound(
+    std::span<const DenseExactDyadicGramBlockView> numerator,
+    std::span<const DenseExactDyadicGramBlockView> denominator,
+    DenseExactDyadicSparseMapView raw_to_quotient,
+    std::string_view label =
+        "exact dyadic PSD generalized factorized quotient");
 
 /**
  * Compute a finite upper generalized-eigenvalue bound for a PSD pencil.

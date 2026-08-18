@@ -12,6 +12,7 @@
 #include <cmath>
 #include <limits>
 #include <span>
+#include <string_view>
 #include <vector>
 
 using namespace svmp::FE;
@@ -1318,6 +1319,463 @@ TEST(DenseLinearAlgebra,
             2u,
             "wrong-sized exact numerator"),
         FEException);
+}
+
+TEST(DenseLinearAlgebra,
+     ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding) {
+    const Real adjacent_above_one =
+        std::nextafter(
+            Real(1),
+            std::numeric_limits<Real>::infinity());
+    const std::vector<Real> rounded_rank_one{
+        Real(1), adjacent_above_one,
+        adjacent_above_one,
+        adjacent_above_one * adjacent_above_one,
+    };
+    const std::vector<Real> identity{
+        Real(1), Real(0),
+        Real(0), Real(1),
+    };
+    EXPECT_THROW(
+        (void)dense_exact_dyadic_spd_generalized_upper_bound(
+            rounded_rank_one,
+            identity,
+            2u,
+            "entrywise-rounded rank-one form"),
+        FEException);
+
+    const std::vector<std::size_t> row_offsets{0u, 1u, 2u};
+    const std::vector<DenseExactDyadicSparseMapEntry> map_entries{
+        {0u, Real(1)},
+        {1u, Real(1)},
+    };
+    const DenseExactDyadicSparseMapView identity_map{
+        2u, 2u, row_offsets, map_entries};
+    const std::vector<std::size_t> map_rows{0u, 1u};
+    const std::vector<Real> weights{Real(1)};
+    const std::vector<Real> numerator_factors{
+        Real(1), adjacent_above_one};
+    const std::vector<Real> denominator_factors{
+        Real(1), Real(0),
+        Real(0), Real(1),
+    };
+    const DenseExactDyadicGramBlockView numerator_block{
+        map_rows,
+        1u,
+        numerator_factors,
+        {},
+        {1u, weights, {}}};
+    const DenseExactDyadicGramBlockView denominator_block{
+        map_rows,
+        2u,
+        denominator_factors,
+        {},
+        {1u, weights, {}}};
+    const std::array numerator_blocks{numerator_block};
+    const std::array denominator_blocks{denominator_block};
+
+    const auto bound =
+        dense_exact_dyadic_spd_generalized_factorized_upper_bound(
+            numerator_blocks,
+            denominator_blocks,
+            identity_map,
+            "exact rank-one positive form");
+    const Real expected =
+        std::nextafter(
+            std::nextafter(
+                Real(2),
+                std::numeric_limits<Real>::infinity()),
+            std::numeric_limits<Real>::infinity());
+    EXPECT_EQ(bound.directly_proven_upper_bound, expected);
+    EXPECT_EQ(bound.denominator_rank, 2u);
+    EXPECT_EQ(bound.numerator_rank, 1u);
+    EXPECT_EQ(
+        bound.proof_input,
+        DenseExactDyadicProofInput::
+            FactorizedBinary64PositiveForm);
+    EXPECT_TRUE(bound.exact_factorized_materialization_proven);
+    EXPECT_TRUE(bound.exact_sparse_map_applied);
+    EXPECT_EQ(bound.numerator_gram_block_count, 1u);
+    EXPECT_EQ(bound.denominator_gram_block_count, 1u);
+    EXPECT_EQ(bound.numerator_gram_row_count, 1u);
+    EXPECT_EQ(bound.denominator_gram_row_count, 2u);
+    EXPECT_NE(bound.factorized_input_digest, 0u);
+    EXPECT_EQ(bound.factorized_input_dimension, 2u);
+    EXPECT_TRUE(bound.exact_common_kernel_proven);
+    EXPECT_FALSE(bound.exact_common_kernel_quotient_applied);
+    EXPECT_EQ(bound.exact_common_kernel_nullity, 0u);
+    EXPECT_TRUE(
+        bound.exact_common_kernel_eliminated_coordinates.empty());
+}
+
+TEST(DenseLinearAlgebra,
+     ExactFactorizedBoundKeepsUnroundedSparseTangentSum) {
+    const Real half_ulp = std::scalbn(Real(1), -53);
+    ASSERT_EQ(Real(1) + half_ulp, Real(1));
+
+    const std::vector<std::size_t> row_offsets{0u, 1u, 2u};
+    const std::vector<DenseExactDyadicSparseMapEntry> map_entries{
+        {0u, Real(1)},
+        {0u, Real(1)},
+    };
+    const DenseExactDyadicSparseMapView sum_map{
+        2u, 1u, row_offsets, map_entries};
+    const std::vector<std::size_t> map_rows{0u, 1u};
+    const std::vector<Real> weights{Real(1)};
+    const std::vector<Real> numerator_factors{
+        Real(1), half_ulp};
+    const std::vector<Real> denominator_factors{
+        Real(1), Real(0)};
+    const DenseExactDyadicGramBlockView numerator_block{
+        map_rows,
+        1u,
+        numerator_factors,
+        {},
+        {1u, weights, {}}};
+    const DenseExactDyadicGramBlockView denominator_block{
+        map_rows,
+        1u,
+        denominator_factors,
+        {},
+        {1u, weights, {}}};
+    const std::array numerator_blocks{numerator_block};
+    const std::array denominator_blocks{denominator_block};
+
+    const auto bound =
+        dense_exact_dyadic_spd_generalized_factorized_upper_bound(
+            numerator_blocks,
+            denominator_blocks,
+            sum_map,
+            "unrounded exact sparse tangent sum");
+    const Real expected =
+        std::nextafter(
+            std::nextafter(
+                Real(1),
+                std::numeric_limits<Real>::infinity()),
+            std::numeric_limits<Real>::infinity());
+    EXPECT_EQ(bound.directly_proven_upper_bound, expected);
+    EXPECT_EQ(bound.exact_transform_visit_count, 4u);
+    EXPECT_EQ(bound.exact_nonzero_outer_pair_count, 2u);
+    EXPECT_GT(bound.factor_materialization_update_count, 0u);
+}
+
+TEST(DenseLinearAlgebra,
+     ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales) {
+    const std::vector<std::size_t> row_offsets{0u, 1u};
+    const std::vector<DenseExactDyadicSparseMapEntry> map_entries{
+        {0u, Real(1)}};
+    const DenseExactDyadicSparseMapView identity_map{
+        1u, 1u, row_offsets, map_entries};
+    const std::vector<std::size_t> map_rows{0u};
+    const std::vector<Real> factors{Real(1)};
+
+    const auto prove_self_pencil =
+        [&](Real positive_sum_term, Real product_factor) {
+            const std::array sum_terms{positive_sum_term};
+            const std::array product_factors{product_factor};
+            const DenseExactDyadicGramBlockView block{
+                map_rows,
+                1u,
+                factors,
+                {},
+                {1u, sum_terms, product_factors}};
+            const std::array blocks{block};
+            return dense_exact_dyadic_spd_generalized_factorized_upper_bound(
+                blocks,
+                blocks,
+                identity_map,
+                "exact nonrepresentable positive scale");
+        };
+
+    EXPECT_EQ(
+        std::numeric_limits<Real>::denorm_min() * Real(0.5),
+        Real(0));
+    const auto underflow = prove_self_pencil(
+        std::numeric_limits<Real>::denorm_min(), Real(0.5));
+    EXPECT_EQ(underflow.directly_proven_upper_bound, Real(1));
+    EXPECT_EQ(underflow.denominator_rank, 1u);
+
+    EXPECT_TRUE(std::isinf(
+        std::numeric_limits<Real>::max() * Real(2)));
+    const auto overflow = prove_self_pencil(
+        std::numeric_limits<Real>::max(), Real(2));
+    EXPECT_EQ(overflow.directly_proven_upper_bound, Real(1));
+    EXPECT_EQ(overflow.denominator_rank, 1u);
+}
+
+TEST(DenseLinearAlgebra,
+     ExactFactorizedBoundRejectsSingularAndMalformedInputs) {
+    const std::vector<std::size_t> row_offsets{0u, 1u, 2u};
+    const std::vector<DenseExactDyadicSparseMapEntry> map_entries{
+        {0u, Real(1)},
+        {1u, Real(1)},
+    };
+    const DenseExactDyadicSparseMapView identity_map{
+        2u, 2u, row_offsets, map_entries};
+    const std::vector<std::size_t> map_rows{0u, 1u};
+    std::vector<Real> weights{Real(1)};
+    std::vector<Real> rank_one{Real(1), Real(1)};
+    DenseExactDyadicGramBlockView block{
+        map_rows,
+        1u,
+        rank_one,
+        {},
+        {1u, weights, {}}};
+    std::array blocks{block};
+    EXPECT_THROW(
+        (void)dense_exact_dyadic_spd_generalized_factorized_upper_bound(
+            blocks,
+            blocks,
+            identity_map,
+            "singular exact factorized denominator"),
+        FEException);
+
+    const auto common_kernel_bound =
+        dense_exact_dyadic_psd_generalized_factorized_upper_bound(
+            blocks,
+            blocks,
+            identity_map,
+            "compatible singular exact factorized pencil");
+    EXPECT_TRUE(common_kernel_bound.exact_common_kernel_proven);
+    EXPECT_TRUE(
+        common_kernel_bound.exact_common_kernel_quotient_applied);
+    EXPECT_EQ(common_kernel_bound.factorized_input_dimension, 2u);
+    EXPECT_EQ(common_kernel_bound.dimension, 1u);
+    EXPECT_EQ(common_kernel_bound.denominator_rank, 1u);
+    EXPECT_EQ(common_kernel_bound.exact_common_kernel_nullity, 1u);
+    ASSERT_EQ(
+        common_kernel_bound
+            .exact_common_kernel_eliminated_coordinates.size(),
+        1u);
+    EXPECT_LT(
+        common_kernel_bound
+            .exact_common_kernel_eliminated_coordinates.front(),
+        2u);
+    EXPECT_EQ(
+        common_kernel_bound.directly_proven_upper_bound,
+        Real(1));
+
+    const std::vector<Real> identity_factors{
+        Real(1), Real(0),
+        Real(0), Real(1)};
+    const DenseExactDyadicGramBlockView identity_block{
+        map_rows,
+        2u,
+        identity_factors,
+        {},
+        {1u, weights, {}}};
+    const std::array identity_blocks{identity_block};
+    EXPECT_THROW(
+        (void)dense_exact_dyadic_psd_generalized_factorized_upper_bound(
+            identity_blocks,
+            blocks,
+            identity_map,
+            "incompatible singular exact factorized pencil"),
+        FEException);
+
+    weights.front() = Real(0);
+    block.scale.positive_sum_terms = weights;
+    blocks.front() = block;
+    EXPECT_THROW(
+        (void)dense_exact_dyadic_spd_generalized_factorized_upper_bound(
+            {}, blocks, identity_map, "zero positive scale"),
+        FEException);
+
+    weights.front() = Real(1);
+    rank_one.front() =
+        std::numeric_limits<Real>::quiet_NaN();
+    block.row_major_raw_factors = rank_one;
+    block.scale.positive_sum_terms = weights;
+    blocks.front() = block;
+    EXPECT_THROW(
+        (void)dense_exact_dyadic_spd_generalized_factorized_upper_bound(
+            {}, blocks, identity_map, "nonfinite raw factor"),
+        FEException);
+
+    rank_one.front() = Real(1);
+    block.row_major_raw_factors = rank_one;
+    const std::vector<std::size_t> unsorted_map_rows{1u, 0u};
+    block.map_rows = unsorted_map_rows;
+    blocks.front() = block;
+    try {
+        (void)dense_exact_dyadic_spd_generalized_factorized_upper_bound(
+            {}, blocks, identity_map, "unordered exact Gram map rows");
+        FAIL() << "expected decreasing Gram map-row rejection";
+    } catch (const FEException& error) {
+        EXPECT_NE(
+            std::string_view(error.what()).find(
+                "map rows are not strictly ordered"),
+            std::string_view::npos)
+            << error.what();
+    }
+
+    const std::vector<std::size_t> duplicate_map_rows{0u, 0u};
+    block.map_rows = duplicate_map_rows;
+    blocks.front() = block;
+    try {
+        (void)dense_exact_dyadic_spd_generalized_factorized_upper_bound(
+            {}, blocks, identity_map, "duplicate exact Gram map rows");
+        FAIL() << "expected duplicate Gram map-row rejection";
+    } catch (const FEException& error) {
+        EXPECT_NE(
+            std::string_view(error.what()).find(
+                "map rows are not strictly ordered"),
+            std::string_view::npos)
+            << error.what();
+    }
+
+    block.map_rows = map_rows;
+    blocks.front() = block;
+    const std::vector<std::size_t> bad_offsets{0u, 2u, 1u, 2u};
+    const DenseExactDyadicSparseMapView malformed_map{
+        3u, 2u, bad_offsets, map_entries};
+    try {
+        (void)dense_exact_dyadic_spd_generalized_factorized_upper_bound(
+            {}, blocks, malformed_map, "nonmonotone sparse offsets");
+        FAIL() << "expected nonmonotone sparse-offset rejection";
+    } catch (const FEException& error) {
+        EXPECT_NE(
+            std::string_view(error.what()).find(
+                "offsets are not monotone"),
+            std::string_view::npos)
+            << error.what();
+    }
+
+    constexpr std::size_t excessive_factor_rows = 174763u;
+    const std::vector<std::size_t> transform_offsets{
+        0u, 2u, 4u, 6u};
+    const std::vector<DenseExactDyadicSparseMapEntry> transform_entries{
+        {0u, Real(1)}, {1u, Real(1)},
+        {0u, Real(1)}, {1u, Real(1)},
+        {0u, Real(1)}, {1u, Real(1)},
+    };
+    const DenseExactDyadicSparseMapView excessive_transform_map{
+        3u, 2u, transform_offsets, transform_entries};
+    const std::vector<std::size_t> transform_map_rows{0u, 1u, 2u};
+    std::vector<Real> excessive_transform_factors(
+        excessive_factor_rows * transform_map_rows.size(),
+        Real(1));
+    excessive_transform_factors.front() =
+        std::numeric_limits<Real>::quiet_NaN();
+    const DenseExactDyadicGramBlockView excessive_transform_block{
+        transform_map_rows,
+        excessive_factor_rows,
+        excessive_transform_factors,
+        {},
+        {1u, weights, {}}};
+    const std::array excessive_transform_blocks{
+        excessive_transform_block};
+    try {
+        (void)dense_exact_dyadic_spd_generalized_factorized_upper_bound(
+            {},
+            excessive_transform_blocks,
+            excessive_transform_map,
+            "excessive exact Gram transform work");
+        FAIL() << "expected transform-work cap rejection";
+    } catch (const FEException& error) {
+        EXPECT_NE(
+            std::string_view(error.what()).find(
+                "transform-visit count exceeds its cap"),
+            std::string_view::npos)
+            << error.what();
+    }
+}
+
+TEST(DenseLinearAlgebra,
+     ExactFactorizedBoundUsesLinearPositiveScaleMultipliers) {
+    const std::array<std::size_t, 2> row_offsets{0u, 1u};
+    const std::array<DenseExactDyadicSparseMapEntry, 1> map_entries{{
+        {0u, Real(1)}}};
+    const DenseExactDyadicSparseMapView identity_map{
+        1u, 1u, row_offsets, map_entries};
+    const std::array<std::size_t, 1> map_rows{0u};
+    const std::array<Real, 1> factors{Real(1)};
+    const std::array<Real, 2> numerator_weights{Real(1), Real(2)};
+    const std::array<Real, 1> numerator_products{Real(5)};
+    const std::array<std::uint64_t, 1> numerator_rows{UINT64_C(7)};
+    const DenseExactDyadicGramBlockView numerator_block{
+        map_rows,
+        1u,
+        factors,
+        numerator_rows,
+        {UINT64_C(2), numerator_weights, numerator_products}};
+
+    const std::array<Real, 2> denominator_weights{Real(2), Real(3)};
+    const std::array<Real, 1> denominator_products{Real(2)};
+    const std::array<std::uint64_t, 1> denominator_rows{UINT64_C(5)};
+    const DenseExactDyadicGramBlockView denominator_block{
+        map_rows,
+        1u,
+        factors,
+        denominator_rows,
+        {UINT64_C(3), denominator_weights, denominator_products}};
+    const std::array numerator_blocks{numerator_block};
+    const std::array denominator_blocks{denominator_block};
+
+    const auto bound =
+        dense_exact_dyadic_spd_generalized_factorized_upper_bound(
+            numerator_blocks,
+            denominator_blocks,
+            identity_map,
+            "linear exact positive scales");
+
+    // 2*(1+2)*5*7 / (3*(2+3)*2*5) = 7/5.  The nearest
+    // binary64 value is below 7/5, so the least proved upper value is its
+    // immediate successor.
+    EXPECT_EQ(
+        bound.directly_proven_upper_bound,
+        std::nextafter(
+            Real(1.4), std::numeric_limits<Real>::infinity()));
+    EXPECT_EQ(bound.numerator_weight_term_count, 2u);
+    EXPECT_EQ(bound.denominator_weight_term_count, 2u);
+    EXPECT_EQ(bound.numerator_gram_row_count, 1u);
+    EXPECT_EQ(bound.denominator_gram_row_count, 1u);
+}
+
+TEST(DenseLinearAlgebra,
+     ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient) {
+    const std::array<std::size_t, 2> row_offsets{0u, 0u};
+    const std::array<DenseExactDyadicSparseMapEntry, 0> map_entries{};
+    const DenseExactDyadicSparseMapView zero_map{
+        1u, 0u, row_offsets, map_entries};
+    const std::array<std::size_t, 1> map_rows{0u};
+    const std::array<Real, 1> factors{Real(1)};
+    const std::array<Real, 1> weights{Real(1)};
+    const DenseExactDyadicGramBlockView block{
+        map_rows,
+        1u,
+        factors,
+        {},
+        {UINT64_C(1), weights, {}}};
+    const std::array blocks{block};
+
+    const auto bound =
+        dense_exact_dyadic_spd_generalized_factorized_upper_bound(
+            blocks,
+            blocks,
+            zero_map,
+            "vacuous exact factorized quotient");
+
+    EXPECT_TRUE(bound.applied);
+    EXPECT_TRUE(bound.denominator_positive_definite_proven);
+    EXPECT_TRUE(bound.numerator_positive_semidefinite_proven);
+    EXPECT_TRUE(bound.upper_inequality_proven);
+    EXPECT_EQ(bound.dimension, 0u);
+    EXPECT_EQ(bound.denominator_rank, 0u);
+    EXPECT_EQ(bound.numerator_rank, 0u);
+    EXPECT_EQ(bound.directly_proven_upper_bound, Real(0));
+    EXPECT_EQ(
+        bound.proof_input,
+        DenseExactDyadicProofInput::FactorizedBinary64PositiveForm);
+    EXPECT_TRUE(bound.exact_factorized_materialization_proven);
+    EXPECT_TRUE(bound.exact_sparse_map_applied);
+    EXPECT_EQ(bound.transform_entry_count, 0u);
+    EXPECT_EQ(bound.factor_materialization_update_count, 0u);
+    EXPECT_NE(bound.factorized_input_digest, 0u);
+    EXPECT_EQ(bound.factorized_input_dimension, 0u);
+    EXPECT_TRUE(bound.exact_common_kernel_proven);
+    EXPECT_FALSE(bound.exact_common_kernel_quotient_applied);
+    EXPECT_EQ(bound.exact_common_kernel_nullity, 0u);
 }
 
 TEST(DenseLinearAlgebra, PseudoInverseHandlesSingularMatrixWithoutNormalEquations) {
