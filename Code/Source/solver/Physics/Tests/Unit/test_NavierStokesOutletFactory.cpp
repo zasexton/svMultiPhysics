@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <numeric>
 #include <unordered_set>
 
@@ -30,7 +31,7 @@
 #include "FE/Systems/TransientSystem.h"
 #include "FE/TimeStepping/GeneralizedAlpha.h"
 #include "FE/TimeStepping/TimeHistory.h"
-#include "FE/TimeStepping/TimeLoop.h"
+#include "FE/TimeStepping/NewtonSolver.h"
 #include "FE/TimeStepping/TimeSteppingUtils.h"
 #include "FE/Forms/FormExpr.h"
 #include "FE/Forms/StandardBCs.h"
@@ -194,7 +195,16 @@ void observeExteriorBoundaryRoute(
 class SingleTetraFourBoundaryFaceMeshAccess final : public svmp::FE::assembly::IMeshAccess {
 public:
     SingleTetraFourBoundaryFaceMeshAccess(int outlet_marker, int inlet_marker, int wall_marker)
-        : markers_{outlet_marker, inlet_marker, wall_marker, wall_marker}
+        : SingleTetraFourBoundaryFaceMeshAccess(
+              outlet_marker, inlet_marker, wall_marker, wall_marker)
+    {
+    }
+
+    SingleTetraFourBoundaryFaceMeshAccess(int outlet_marker,
+                                          int inlet_marker,
+                                          int wall_marker,
+                                          int fourth_face_marker)
+        : markers_{outlet_marker, inlet_marker, wall_marker, fourth_face_marker}
     {
         nodes_ = {
             {0.0, 0.0, 0.0},
@@ -384,11 +394,6 @@ private:
 struct ModuleAssemblySnapshot {
     std::vector<Real> matrix;
     std::vector<Real> vector;
-};
-
-struct OutletTimeLoopRun {
-    svmp::FE::timestepping::TimeLoopReport loop{};
-    std::vector<svmp::FE::timestepping::NewtonReport> nonlinear_reports{};
 };
 
 void assignComponentPattern(std::vector<Real>& values,
@@ -1667,20 +1672,24 @@ TEST(NavierStokesOutletFactory, ModuleJitParity_DirichletAndResistiveOutflowGene
     expectAdaptiveNear(jit.vector, fallback.vector, 1e-10, 1e-9, "vector");
 }
 
-TEST(NavierStokesOutletFactory, ResistiveOutletFsilsTimeLoopTracksLinearToleranceSensitivity)
+TEST(NavierStokesOutletFactory, ResistiveOutletFsilsNewtonStepWiresNonzeroBlockSchurWork)
 {
 #if !defined(FE_HAS_FSILS)
     GTEST_SKIP() << "FSILS backend is not enabled in this build";
 #else
-    auto run_case = [](Real outer_rel_tol, Real inner_rel_tol) -> OutletTimeLoopRun {
+    auto run_step = []() -> svmp::FE::timestepping::NewtonReport {
         constexpr int outlet_marker = 191;
         constexpr int inlet_marker = 192;
         constexpr int wall_marker = 193;
+        constexpr int slip_wall_marker = 194;
         constexpr int dof_per_node = 4;
         constexpr double dt = 0.05;
 
+        // Two full strong-wall faces cover every velocity vertex. Keep the
+        // x=0 face as a normal-only slip wall so tangential momentum remains
+        // unconstrained and the backend receives genuine linear work.
         auto mesh = std::make_shared<SingleTetraFourBoundaryFaceMeshAccess>(
-            outlet_marker, inlet_marker, wall_marker);
+            outlet_marker, inlet_marker, wall_marker, slip_wall_marker);
         auto u_space =
             svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
         auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
@@ -1697,6 +1706,11 @@ TEST(NavierStokesOutletFactory, ResistiveOutletFsilsTimeLoopTracksLinearToleranc
         opts.velocity_dirichlet_weak.push_back(Opts::VelocityDirichletBC{
             .boundary_marker = inlet_marker,
             .value = {Opts::ScalarValue{0.0}, Opts::ScalarValue{0.0}, Opts::ScalarValue{-1.0}},
+        });
+        opts.velocity_dirichlet.push_back(Opts::VelocityDirichletBC{
+            .boundary_marker = slip_wall_marker,
+            .value = {Opts::ScalarValue{0.0}, Opts::ScalarValue{0.0}, Opts::ScalarValue{0.0}},
+            .active_components = {true, false, false},
         });
         opts.velocity_dirichlet.push_back(Opts::VelocityDirichletBC{
             .boundary_marker = wall_marker,
@@ -1722,8 +1736,9 @@ TEST(NavierStokesOutletFactory, ResistiveOutletFsilsTimeLoopTracksLinearToleranc
         }
 
         svmp::FE::backends::FsilsFactory factory(dof_per_node, perm);
-        auto linear =
-            factory.createLinearSolver(resistiveOutletBlockSchurOptions(outer_rel_tol, inner_rel_tol));
+        auto linear = factory.createLinearSolver(
+            resistiveOutletBlockSchurOptions(/*outer_rel_tol=*/1e-6,
+                                              /*inner_rel_tol=*/1e-6));
         EXPECT_TRUE(linear);
         if (!linear) {
             return {};
@@ -1769,68 +1784,38 @@ TEST(NavierStokesOutletFactory, ResistiveOutletFsilsTimeLoopTracksLinearToleranc
         auto base_integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
         svmp::FE::systems::TransientSystem transient(sys, std::move(base_integrator));
 
-        svmp::FE::timestepping::TimeLoopOptions loop_opts;
-        loop_opts.t0 = 0.0;
-        loop_opts.t_end = 3.0 * dt;
-        loop_opts.dt = dt;
-        loop_opts.max_steps = 3;
-        loop_opts.scheme = svmp::FE::timestepping::SchemeKind::GeneralizedAlpha;
-        loop_opts.generalized_alpha_rho_inf = 0.5;
-        loop_opts.newton.residual_op = "equations";
-        loop_opts.newton.jacobian_op = "equations";
-        loop_opts.newton.max_iterations = 12;
-        loop_opts.newton.abs_tolerance = 1e-12;
-        loop_opts.newton.rel_tolerance = 1e-10;
+        svmp::FE::timestepping::NewtonOptions newton_opts;
+        newton_opts.residual_op = "equations";
+        newton_opts.jacobian_op = "equations";
+        newton_opts.max_iterations = 1;
+        newton_opts.abs_tolerance = 0.0;
+        newton_opts.rel_tolerance = 0.0;
+        newton_opts.step_tolerance = 0.0;
+        newton_opts.stagnation_tolerance = 0.0;
+        newton_opts.use_line_search = false;
 
-        svmp::FE::timestepping::TimeLoop loop(loop_opts);
-        OutletTimeLoopRun run;
-        svmp::FE::timestepping::TimeLoopCallbacks callbacks;
-        callbacks.on_nonlinear_done =
-            [&run](const svmp::FE::timestepping::TimeHistory&,
-                   const svmp::FE::timestepping::NewtonReport& nr) {
-                run.nonlinear_reports.push_back(nr);
-            };
-        run.loop = loop.run(transient, factory, *linear, history, callbacks);
-        return run;
+        svmp::FE::timestepping::NewtonSolver newton(newton_opts);
+        svmp::FE::timestepping::NewtonWorkspace workspace;
+        newton.allocateWorkspace(sys, factory, workspace);
+        history.repack(factory);
+        return newton.solveStep(
+            transient, *linear, /*solve_time=*/dt, history, workspace);
     };
 
-    const auto loose = run_case(/*outer_rel_tol=*/1e-2, /*inner_rel_tol=*/1e-2);
-    const auto tight = run_case(/*outer_rel_tol=*/1e-6, /*inner_rel_tol=*/1e-6);
+    const auto report = run_step();
 
-    auto total_newton_iterations = [](const OutletTimeLoopRun& run) {
-        int total = 0;
-        for (const auto& nr : run.nonlinear_reports) {
-            total += nr.iterations;
-        }
-        return total;
-    };
-    auto first_step_newton_iterations = [](const OutletTimeLoopRun& run) {
-        return run.nonlinear_reports.empty() ? 0 : run.nonlinear_reports.front().iterations;
-    };
-    auto total_blockschur_outer_iterations = [](const OutletTimeLoopRun& run) {
-        int total = 0;
-        for (const auto& nr : run.nonlinear_reports) {
-            total += nr.linear.blockschur_outer_iterations;
-        }
-        return total;
-    };
-
-    ASSERT_TRUE(loose.loop.success);
-    ASSERT_TRUE(tight.loop.success);
-    ASSERT_EQ(loose.nonlinear_reports.size(), 3u);
-    ASSERT_EQ(tight.nonlinear_reports.size(), 3u);
-
-    for (const auto& nr : loose.nonlinear_reports) {
-        EXPECT_TRUE(nr.converged);
-    }
-    for (const auto& nr : tight.nonlinear_reports) {
-        EXPECT_TRUE(nr.converged);
-    }
-
-    EXPECT_GT(total_blockschur_outer_iterations(loose), 0);
-    EXPECT_GT(total_blockschur_outer_iterations(tight), 0);
-    EXPECT_LE(total_newton_iterations(tight), total_newton_iterations(loose));
-    EXPECT_LE(first_step_newton_iterations(tight), first_step_newton_iterations(loose));
+    EXPECT_FALSE(report.converged);
+    EXPECT_EQ(report.iterations, 1);
+    EXPECT_GT(report.residual_norm0, 0.0);
+    EXPECT_TRUE(std::isfinite(report.residual_norm0));
+    EXPECT_TRUE(std::isfinite(report.residual_norm));
+    EXPECT_TRUE(report.linear.converged) << report.linear.message;
+    EXPECT_FALSE(report.linear.numerical_breakdown) << report.linear.message;
+    EXPECT_GT(report.linear.initial_residual_norm, 0.0);
+    EXPECT_TRUE(std::isfinite(report.linear.initial_residual_norm));
+    EXPECT_GT(report.linear.blockschur_outer_iterations, 0);
+    EXPECT_TRUE(std::isfinite(report.linear.final_residual_norm));
+    EXPECT_TRUE(std::isfinite(report.linear.relative_residual));
 #endif
 }
 

@@ -824,6 +824,136 @@ Real fullOperatorRelativeResidual(FsilsFactory& factory,
     return r->norm() / denom;
 }
 
+struct NativeRankOneChain4Dof {
+    static constexpr int dof = 4;
+    static constexpr GlobalIndex n_nodes = 3;
+    static constexpr GlobalIndex n_global = n_nodes * dof;
+
+    std::unique_ptr<GenericMatrix> matrix;
+    std::unique_ptr<GenericVector> rhs;
+    RankOneUpdate update;
+};
+
+NativeRankOneChain4Dof makeNativeRankOneChain4Dof(FsilsFactory& factory,
+                                                   int rank,
+                                                   int size)
+{
+    EXPECT_TRUE(size == 1 || size == 2);
+
+    constexpr int dof = NativeRankOneChain4Dof::dof;
+    constexpr GlobalIndex n_global = NativeRankOneChain4Dof::n_global;
+    const IndexRange owned = size == 1
+                                 ? IndexRange{0, n_global}
+                                 : ((rank == 0) ? IndexRange{0, dof}
+                                                : IndexRange{dof, n_global});
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+
+    const auto addElementPattern = [&](GlobalIndex first_dof) {
+        std::array<GlobalIndex, 2 * dof> element_dofs{};
+        for (int i = 0; i < 2 * dof; ++i) {
+            element_dofs[static_cast<std::size_t>(i)] = first_dof + i;
+        }
+        pattern.addElementCouplings(element_dofs);
+    };
+    if (size == 1) {
+        addElementPattern(0);
+        addElementPattern(dof);
+    } else {
+        addElementPattern(rank == 0 ? 0 : dof);
+    }
+
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (size == 2 && rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{4, 5, 6, 7};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 8, 16, 24, 32};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(32);
+        for (int row = 0; row < dof; ++row) {
+            for (GlobalIndex column = 0; column < 2 * dof; ++column) {
+                ghost_cols.push_back(column);
+            }
+        }
+        pattern.setGhostRows(std::move(ghost_rows),
+                             std::move(ghost_row_ptr),
+                             std::move(ghost_cols));
+    }
+
+    NativeRankOneChain4Dof chain;
+    chain.matrix = factory.createMatrix(pattern);
+    chain.rhs = factory.createVector(n_global);
+
+    constexpr int element_dof = 2 * dof;
+    std::array<Real, element_dof * element_dof> element_matrix{};
+    const auto setElementEntry = [&](int row, int column, Real value) {
+        element_matrix[static_cast<std::size_t>(row * element_dof + column)] = value;
+    };
+
+    const Real node_block[dof][dof] = {
+        {6.0, 1.0, 0.5,  1.0},
+        {1.0, 5.0, 0.3, -0.4},
+        {0.5, 0.3, 4.5,  0.6},
+        {1.0,-0.4, 0.6,  1.2},
+    };
+    const Real neighbor_block[dof][dof] = {
+        {-1.5, 0.0,  0.0, -0.2},
+        { 0.0,-1.0,  0.0,  0.3},
+        { 0.0, 0.0, -1.2, -0.1},
+        {-0.2, 0.3, -0.1,  0.2},
+    };
+    for (int row = 0; row < dof; ++row) {
+        for (int column = 0; column < dof; ++column) {
+            setElementEntry(row, column, node_block[row][column]);
+            setElementEntry(row, column + dof, neighbor_block[row][column]);
+            setElementEntry(row + dof, column, neighbor_block[column][row]);
+            setElementEntry(row + dof, column + dof, node_block[row][column]);
+        }
+    }
+
+    auto matrix_view = chain.matrix->createAssemblyView();
+    matrix_view->beginAssemblyPhase();
+    const auto addElementMatrix = [&](GlobalIndex first_dof) {
+        std::array<GlobalIndex, element_dof> element_dofs{};
+        for (int i = 0; i < element_dof; ++i) {
+            element_dofs[static_cast<std::size_t>(i)] = first_dof + i;
+        }
+        matrix_view->addMatrixEntries(element_dofs,
+                                      element_matrix,
+                                      assembly::AddMode::Add);
+    };
+    if (size == 1) {
+        addElementMatrix(0);
+        addElementMatrix(dof);
+    } else {
+        addElementMatrix(rank == 0 ? 0 : dof);
+    }
+    matrix_view->finalizeAssembly();
+    chain.matrix->finalizeAssembly();
+
+    chain.update.sigma = Real(1600.0);
+    chain.update.active_components = {0, 1, 2};
+    chain.update.prefer_native_face = true;
+    if (size == 1 || rank == 1) {
+        chain.update.v = {
+            {8,  Real(0.10)},
+            {9,  Real(0.05)},
+            {10, Real(-0.08)},
+        };
+    }
+
+    auto exact = factory.createVector(n_global);
+    std::fill(exact->localSpan().begin(), exact->localSpan().end(), Real(1.0));
+    exact->updateGhosts();
+    chain.matrix->mult(*exact, *chain.rhs);
+    addRankOneContribution(factory,
+                           *chain.rhs,
+                           *exact,
+                           std::span<const RankOneUpdate>(&chain.update, 1),
+                           MPI_COMM_WORLD);
+    return chain;
+}
+
 } // namespace
 
 #if defined(FE_HAS_PETSC) && FE_HAS_PETSC
@@ -3711,113 +3841,10 @@ TEST(FsilsBackendMPI, RankOneUpdateSolversConvergeComparable4DOF)
         GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
     }
 
-    constexpr int dof = 4;
-    constexpr GlobalIndex n_nodes = 3;
-    constexpr GlobalIndex n_global = n_nodes * dof;
-
-    const IndexRange owned = (rank == 0) ? IndexRange{0, 4} : IndexRange{4, 12};
-    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
-
-    if (rank == 0) {
-        const std::array<GlobalIndex, 8> edofs = {0, 1, 2, 3, 4, 5, 6, 7};
-        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
-    } else {
-        const std::array<GlobalIndex, 8> edofs = {4, 5, 6, 7, 8, 9, 10, 11};
-        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
-    }
-
-    pattern.ensureDiagonal();
-    pattern.finalize();
-
-    if (rank == 0) {
-        std::vector<GlobalIndex> ghost_rows{4, 5, 6, 7};
-        std::vector<GlobalIndex> ghost_row_ptr{0, 8, 16, 24, 32};
-        std::vector<GlobalIndex> ghost_cols;
-        ghost_cols.reserve(32);
-        for (int r = 0; r < dof; ++r) {
-            for (GlobalIndex c = 0; c < static_cast<GlobalIndex>(2 * dof); ++c) {
-                ghost_cols.push_back(c);
-            }
-        }
-        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
-    }
-
+    constexpr int dof = NativeRankOneChain4Dof::dof;
+    constexpr GlobalIndex n_global = NativeRankOneChain4Dof::n_global;
     FsilsFactory factory(dof);
-    auto A = factory.createMatrix(pattern);
-    auto b = factory.createVector(n_global);
-
-    auto viewA = A->createAssemblyView();
-    viewA->beginAssemblyPhase();
-
-    const int edof = 2 * dof;
-    std::vector<Real> Ke(edof * edof, 0.0);
-    const auto setKe = [&](int r, int c, Real v) {
-        Ke[static_cast<std::size_t>(r * edof + c)] = v;
-    };
-
-    const Real B[4][4] = {
-        {6.0, 1.0, 0.5,  1.0},
-        {1.0, 5.0, 0.3, -0.4},
-        {0.5, 0.3, 4.5,  0.6},
-        {1.0,-0.4, 0.6,  1.2},
-    };
-    const Real C[4][4] = {
-        {-1.5, 0.0,  0.0, -0.2},
-        { 0.0,-1.0,  0.0,  0.3},
-        { 0.0, 0.0, -1.2, -0.1},
-        {-0.2, 0.3, -0.1,  0.2},
-    };
-
-    for (int r = 0; r < dof; ++r) {
-        for (int c = 0; c < dof; ++c) {
-            setKe(r, c, B[r][c]);
-            setKe(r, c + dof, C[r][c]);
-            setKe(r + dof, c, C[c][r]);
-            setKe(r + dof, c + dof, B[r][c]);
-        }
-    }
-
-    if (rank == 0) {
-        std::vector<GlobalIndex> idx(edof);
-        for (int i = 0; i < edof; ++i) {
-            idx[static_cast<std::size_t>(i)] = i;
-        }
-        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
-                                std::span<const Real>(Ke.data(), Ke.size()),
-                                assembly::AddMode::Add);
-    } else {
-        std::vector<GlobalIndex> idx(edof);
-        for (int i = 0; i < edof; ++i) {
-            idx[static_cast<std::size_t>(i)] = 4 + i;
-        }
-        viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
-                                std::span<const Real>(Ke.data(), Ke.size()),
-                                assembly::AddMode::Add);
-    }
-    viewA->finalizeAssembly();
-    A->finalizeAssembly();
-
-    RankOneUpdate upd{};
-    upd.sigma = 1600.0;
-    upd.active_components = {0, 1, 2};
-    // Route the distributed rank-one correction through FSILS' native face path.
-    upd.prefer_native_face = true;
-    if (rank == 1) {
-        upd.v = {
-            {8,  0.10},
-            {9,  0.05},
-            {10, -0.08},
-        };
-    }
-
-    auto x_exact = factory.createVector(n_global);
-    {
-        auto xs = x_exact->localSpan();
-        std::fill(xs.begin(), xs.end(), Real(1.0));
-    }
-    x_exact->updateGhosts();
-    A->mult(*x_exact, *b);
-    addRankOneContribution(factory, *b, *x_exact, std::span<const RankOneUpdate>(&upd, 1), MPI_COMM_WORLD);
+    auto chain = makeNativeRankOneChain4Dof(factory, rank, size);
 
     const std::array<SolverMethod, 2> methods{
         SolverMethod::BlockSchur,
@@ -3853,10 +3880,10 @@ TEST(FsilsBackendMPI, RankOneUpdateSolversConvergeComparable4DOF)
 
         auto solver = factory.createLinearSolver(opts);
         ASSERT_TRUE(solver->supportsNativeRankOneUpdates());
-        solver->setRankOneUpdates(std::span<const RankOneUpdate>(&upd, 1));
+        solver->setRankOneUpdates(std::span<const RankOneUpdate>(&chain.update, 1));
         solver->setEffectiveTimeStep(1.0 / 300.0);
 
-        const auto rep = solver->solve(*A, *x_case, *b);
+        const auto rep = solver->solve(*chain.matrix, *x_case, *chain.rhs);
         EXPECT_TRUE(rep.converged);
         expectSolverReportSane(rep, (method == SolverMethod::GMRES) ? 400 : opts.max_iter);
         EXPECT_EQ(rep.message.find("fallback"), std::string::npos);
@@ -3864,11 +3891,107 @@ TEST(FsilsBackendMPI, RankOneUpdateSolversConvergeComparable4DOF)
             expectBlockSchurMetricsPresent(rep);
         }
 
-        const Real rel = fullOperatorRelativeResidual(factory, *A, *x_case, *b,
-                                                      std::span<const RankOneUpdate>(&upd, 1),
+        const Real rel = fullOperatorRelativeResidual(factory, *chain.matrix, *x_case, *chain.rhs,
+                                                      std::span<const RankOneUpdate>(&chain.update, 1),
                                                       MPI_COMM_WORLD);
         EXPECT_LE(rel, 1e-8);
     }
+}
+
+TEST(FsilsBackendMPI, NativeRankOneBlockSchurOuterToleranceControlsWorkAndTrueResidual)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 1 && size != 2) {
+        GTEST_SKIP() << "This test supports one or two MPI ranks";
+    }
+
+    ScopedEnvVar enable_native_face(
+        "SVMP_FSILS_ENABLE_MPI_NATIVE_FACE_RANK_ONE", "1");
+    FsilsFactory factory(NativeRankOneChain4Dof::dof);
+    auto chain = makeNativeRankOneChain4Dof(factory, rank, size);
+
+    struct SolveOutcome {
+        SolverReport report;
+        Real true_relative_residual{0.0};
+    };
+    const auto solveWithOuterTolerance = [&](Real outer_relative_tolerance) {
+        auto solution = factory.createVector(NativeRankOneChain4Dof::n_global);
+        solution->zero();
+
+        auto options = makeFsilsBlockSchurOptions(
+            /*dof_per_node=*/NativeRankOneChain4Dof::dof,
+            /*primary_components=*/3,
+            /*constraint_components=*/1,
+            FsilsBlockSchurSchurPreconditioner::DiagL,
+            FsilsBlockSchurMomentumApproximation::DiagK);
+        options.rel_tol = outer_relative_tolerance;
+        options.abs_tol = 0.0;
+        options.max_iter = 30;
+        options.krylov_dim = 40;
+        options.fsils_blockschur_gm_max_iter = 160;
+        options.fsils_blockschur_cg_max_iter = 160;
+        options.fsils_blockschur_gm_rel_tol = 1e-12;
+        options.fsils_blockschur_cg_rel_tol = 1e-12;
+        options.fsils_residual_check_policy = FsilsResidualCheckPolicy::Always;
+
+        auto solver = factory.createLinearSolver(options);
+        EXPECT_TRUE(solver->supportsNativeRankOneUpdates());
+        solver->setRankOneUpdates(
+            std::span<const RankOneUpdate>(&chain.update, 1));
+        solver->setEffectiveTimeStep(1.0 / 300.0);
+
+        SolveOutcome outcome;
+        outcome.report = solver->solve(*chain.matrix, *solution, *chain.rhs);
+        EXPECT_TRUE(outcome.report.converged) << outcome.report.message;
+        EXPECT_FALSE(outcome.report.numerical_breakdown);
+        expectSolverReportSane(outcome.report, options.max_iter);
+        expectBlockSchurMetricsPresent(outcome.report);
+        EXPECT_EQ(outcome.report.message.find("fallback"), std::string::npos)
+            << outcome.report.message;
+        EXPECT_LE(outcome.report.relative_residual, outer_relative_tolerance);
+
+        outcome.true_relative_residual = fullOperatorRelativeResidual(
+            factory,
+            *chain.matrix,
+            *solution,
+            *chain.rhs,
+            std::span<const RankOneUpdate>(&chain.update, 1),
+            MPI_COMM_WORLD);
+        return outcome;
+    };
+
+    constexpr Real loose_outer_tolerance = 5e-2;
+    constexpr Real tight_outer_tolerance = 1e-8;
+    const auto loose = solveWithOuterTolerance(loose_outer_tolerance);
+    const auto tight = solveWithOuterTolerance(tight_outer_tolerance);
+
+    const auto realAsString = [](Real value) {
+        ::testing::Message message;
+        message << value;
+        return message.GetString();
+    };
+    RecordProperty("loose_outer_iterations", loose.report.blockschur_outer_iterations);
+    RecordProperty("tight_outer_iterations", tight.report.blockschur_outer_iterations);
+    RecordProperty("loose_true_relative_residual",
+                   realAsString(loose.true_relative_residual));
+    RecordProperty("tight_true_relative_residual",
+                   realAsString(tight.true_relative_residual));
+
+    SCOPED_TRACE(::testing::Message()
+                 << "loose outer=" << loose.report.blockschur_outer_iterations
+                 << " true residual=" << loose.true_relative_residual
+                 << "; tight outer=" << tight.report.blockschur_outer_iterations
+                 << " true residual=" << tight.true_relative_residual);
+    EXPECT_GT(loose.true_relative_residual, Real(1e-5));
+    EXPECT_LE(tight.true_relative_residual, tight_outer_tolerance);
+    EXPECT_LT(Real(100.0) * tight.true_relative_residual,
+              loose.true_relative_residual);
+    EXPECT_GT(tight.report.blockschur_outer_iterations,
+              loose.report.blockschur_outer_iterations);
 }
 
 TEST(FsilsBackendMPI, MultiModeNativeRankOneSolversTrackManufacturedModeResponse)
