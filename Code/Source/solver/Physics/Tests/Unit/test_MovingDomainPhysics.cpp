@@ -418,6 +418,59 @@ bool formulationRecordsContainBoundaryMarker(
     return false;
 }
 
+struct ExteriorBoundaryRouteObservation {
+    bool exact_generated_active{false};
+    bool whole_physical{false};
+};
+
+void observeExteriorBoundaryRoute(
+    const FormExprNode* node,
+    int physical_marker,
+    int generated_marker,
+    ExteriorBoundaryRouteObservation& observation)
+{
+    if (node == nullptr) {
+        return;
+    }
+    if (const auto* measure = node->exteriorBoundaryMeasure()) {
+        observation.exact_generated_active |=
+            measure->isGeneratedActiveSubset() &&
+            measure->physicalBoundaryMarker() == physical_marker &&
+            measure->generatedActiveBoundaryMarker() == generated_marker;
+        observation.whole_physical |=
+            measure->isFullPhysical() &&
+            measure->physicalBoundaryMarker() == physical_marker;
+    } else if (node->type() == FormExprType::BoundaryIntegral &&
+               node->boundaryMarker() == physical_marker) {
+        observation.whole_physical = true;
+    }
+    for (const auto* child : node->children()) {
+        observeExteriorBoundaryRoute(
+            child, physical_marker, generated_marker, observation);
+    }
+}
+
+ExteriorBoundaryRouteObservation formulationRecordsExteriorBoundaryRoute(
+    const FE::systems::FESystem& system,
+    int physical_marker,
+    int generated_marker)
+{
+    ExteriorBoundaryRouteObservation observation;
+    for (const auto& record : system.formulationRecords()) {
+        observeExteriorBoundaryRoute(
+            record.residual_expr.get(),
+            physical_marker,
+            generated_marker,
+            observation);
+        for (const auto& [block, expr] : record.block_residual_exprs) {
+            (void)block;
+            observeExteriorBoundaryRoute(
+                expr.get(), physical_marker, generated_marker, observation);
+        }
+    }
+    return observation;
+}
+
 int stableContactLineMarker(FE::FieldId phi_field,
                             int interface_marker,
                             int wall_boundary_marker,
@@ -2325,7 +2378,7 @@ public:
         contact_marker_ =
             stableContactLineMarker(phi_, interface_marker_, wall_marker_);
 
-        system_->setCutIntegrationContext(context(std::nullopt));
+        system_->setCutIntegrationContext(context(FE::Real{0.0}));
         system_->setup({}, makeSingleTetraSetupInputs());
         const std::array<FE::Real, 3> level_set_gradient =
             active_side_ == FE::geometry::CutIntegrationSide::Positive
@@ -2418,7 +2471,9 @@ public:
 
     [[nodiscard]] bool usesWholePhysicalBoundary() const
     {
-        return formulationRecordsContainBoundaryMarker(*system_, wall_marker_);
+        return formulationRecordsExteriorBoundaryRoute(
+                   *system_, wall_marker_, active_marker_)
+            .whole_physical;
     }
 
     [[nodiscard]] FE::Real velocityResidualComponentContribution(
@@ -6341,7 +6396,7 @@ TEST(MovingDomainPhysics,
         system.declareFreeSurfaceDiscreteFunctional(
             std::move(duplicate));
         FAIL() << "Expected duplicate active-volume ownership to fail";
-    } catch (const std::invalid_argument& error) {
+    } catch (const FE::InvalidArgumentException& error) {
         EXPECT_NE(
             std::string(error.what()).find(
                 "permits exactly one bulk owner"),
@@ -7558,10 +7613,10 @@ TEST(MovingDomainPhysics,
         ns::IncompressibleNavierStokesVMSModule module(
             u_space, p_space, std::move(opts));
         module.registerOn(system);
-        const bool uses_generated_trace =
-            formulationRecordsContainInterfaceMarker(system, sharp_marker);
-        const bool uses_whole_face =
-            formulationRecordsContainBoundaryMarker(system, physical_marker);
+        const auto route = formulationRecordsExteriorBoundaryRoute(
+            system, physical_marker, sharp_marker);
+        const bool uses_generated_trace = route.exact_generated_active;
+        const bool uses_whole_face = route.whole_physical;
         EXPECT_TRUE(uses_generated_trace);
         EXPECT_FALSE(uses_whole_face);
         generated_trace_count +=
@@ -7815,10 +7870,10 @@ TEST(MovingDomainPhysics,
         const int sharp_marker =
             FE::interfaces::stableGeneratedActiveBoundaryMarker(key);
 
-        const bool uses_generated_trace =
-            formulationRecordsContainInterfaceMarker(system, sharp_marker);
-        const bool uses_whole_face =
-            formulationRecordsContainBoundaryMarker(system, physical_marker);
+        const auto route = formulationRecordsExteriorBoundaryRoute(
+            system, physical_marker, sharp_marker);
+        const bool uses_generated_trace = route.exact_generated_active;
+        const bool uses_whole_face = route.whole_physical;
         EXPECT_TRUE(uses_generated_trace);
         EXPECT_FALSE(uses_whole_face);
         generated_trace_count +=

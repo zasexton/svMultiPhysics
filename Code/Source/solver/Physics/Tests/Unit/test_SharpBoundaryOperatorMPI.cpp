@@ -2221,7 +2221,10 @@ public:
             *system_,
             "sharp_entity_measure_probe",
             {velocity_},
-            FE::forms::inner(metric_values, metric_test).dI(active_marker_));
+            FE::forms::inner(metric_values, metric_test)
+                .dExteriorBoundary(
+                    FE::forms::ExteriorBoundaryMeasure::generatedActiveSubset(
+                        wall_marker_, active_marker_)));
 
         system_->setCutIntegrationContext(context(FE::Real{0.0}));
         FE::systems::SetupOptions setup_options;
@@ -3231,7 +3234,8 @@ TEST(FreeSurfaceSharpBoundaryOperators,
             (void)harness.assemble(std::nullopt);
         } catch (const std::exception& error) {
             if (std::string(error.what()).find(
-                    "missing InterfaceMesh or generated cut-interface rules") !=
+                    "generated-active boundary selector marker has no "
+                    "generated-active provenance") !=
                 std::string::npos) {
                 ++rejection_count;
                 continue;

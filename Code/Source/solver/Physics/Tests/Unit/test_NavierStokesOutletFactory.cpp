@@ -159,6 +159,38 @@ bool containsExprType(const svmp::FE::forms::FormExpr& expr,
     return found;
 }
 
+struct ExteriorBoundaryRouteObservation {
+    bool exact_generated_active{false};
+    bool whole_physical{false};
+};
+
+void observeExteriorBoundaryRoute(
+    const FormExprNode* node,
+    int physical_marker,
+    int generated_marker,
+    ExteriorBoundaryRouteObservation& observation)
+{
+    if (node == nullptr) {
+        return;
+    }
+    if (const auto* measure = node->exteriorBoundaryMeasure()) {
+        observation.exact_generated_active |=
+            measure->isGeneratedActiveSubset() &&
+            measure->physicalBoundaryMarker() == physical_marker &&
+            measure->generatedActiveBoundaryMarker() == generated_marker;
+        observation.whole_physical |=
+            measure->isFullPhysical() &&
+            measure->physicalBoundaryMarker() == physical_marker;
+    } else if (node->type() == FormExprType::BoundaryIntegral &&
+               node->boundaryMarker() == physical_marker) {
+        observation.whole_physical = true;
+    }
+    for (const auto* child : node->children()) {
+        observeExteriorBoundaryRoute(
+            child, physical_marker, generated_marker, observation);
+    }
+}
+
 class SingleTetraFourBoundaryFaceMeshAccess final : public svmp::FE::assembly::IMeshAccess {
 public:
     SingleTetraFourBoundaryFaceMeshAccess(int outlet_marker, int inlet_marker, int wall_marker)
@@ -785,16 +817,11 @@ TEST(NavierStokesOutletFactory,
         auto momentum = inner(grad(u), grad(v)).dx();
         manager.applyAll(sys, momentum, u, v, u_field);
         ASSERT_NE(momentum.node(), nullptr);
-        const auto scan =
-            svmp::FE::analysis::scanFormExpr(*momentum.node());
-        const bool generated_trace =
-            std::find(scan.interface_markers.begin(),
-                      scan.interface_markers.end(),
-                      generated_marker) != scan.interface_markers.end();
-        const bool physical_trace =
-            std::find(scan.boundary_markers.begin(),
-                      scan.boundary_markers.end(),
-                      physical_marker) != scan.boundary_markers.end();
+        ExteriorBoundaryRouteObservation route;
+        observeExteriorBoundaryRoute(
+            momentum.node(), physical_marker, generated_marker, route);
+        const bool generated_trace = route.exact_generated_active;
+        const bool physical_trace = route.whole_physical;
         EXPECT_TRUE(generated_trace);
         EXPECT_FALSE(physical_trace);
         generated_trace_count +=
