@@ -1676,7 +1676,8 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     bool use_constitutive_viscosity = false,
     bool reverse_wall_orientation = false,
     std::optional<std::array<FE::Real, 4>> liquid_pressure_nodal_values =
-        std::nullopt)
+        std::nullopt,
+    bool registration_only = false)
 {
     constexpr int interface_marker = 167;
     constexpr int wall_marker = 57;
@@ -1766,6 +1767,16 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     module.registerOn(system);
     const auto velocity = system.findFieldByName("u");
     const auto pressure = system.findFieldByName("p");
+    if (registration_only) {
+        DynamicContactAngleAssembly out;
+        out.velocity_field = velocity;
+        out.pressure_field = pressure;
+        out.level_set_field = phi;
+        out.discrete_functional_declarations.assign(
+            system.freeSurfaceDiscreteFunctionalDeclarations().begin(),
+            system.freeSurfaceDiscreteFunctionalDeclarations().end());
+        return out;
+    }
     const int contact_marker =
         stableContactLineMarker(phi, interface_marker, wall_marker);
     std::array<FE::Real, 3> level_set_gradient{
@@ -11744,7 +11755,10 @@ TEST(MovingDomainPhysics,
         ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
         /*liquid_pressure=*/0.0,
         /*external_pressure=*/0.0,
-        /*use_constitutive_viscosity=*/true);
+        /*use_constitutive_viscosity=*/true,
+        /*reverse_wall_orientation=*/false,
+        /*liquid_pressure_nodal_values=*/std::nullopt,
+        /*registration_only=*/true);
 
     ASSERT_EQ(assembled.discrete_functional_declarations.size(), 1u);
     const auto& declaration =
@@ -12188,6 +12202,15 @@ TEST(MovingDomainPhysics,
     context->addGeneratedInterfaceDomain(
         interface_domain, FE::geometry::CutIntegrationSide::Negative);
     context->addGeneratedInterfaceBoundaryIntersectionDomain(domain);
+    FE::interfaces::GeneratedActiveBoundaryRequest active_request;
+    active_request.source = interface_request.source;
+    active_request.generated_domain_id = "free_surface";
+    active_request.interface_marker = interface_marker;
+    active_request.boundary_marker = bottom_marker;
+    active_request.side = FE::geometry::CutIntegrationSide::Negative;
+    active_request.quadrature_order = 1;
+    context->addGeneratedActiveBoundaryDomain(
+        FE::interfaces::GeneratedActiveBoundaryDomain(active_request));
 
     testing::internal::CaptureStdout();
     testing::internal::CaptureStderr();
