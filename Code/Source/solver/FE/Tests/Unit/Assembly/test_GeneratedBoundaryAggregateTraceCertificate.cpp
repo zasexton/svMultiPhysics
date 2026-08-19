@@ -61,7 +61,8 @@ void installFormBoundTracePolicy(
     FieldId velocity,
     const spaces::FunctionSpace& velocity_space,
     Real gamma,
-    bool symmetric)
+    bool symmetric,
+    Real minimum_symmetric_energy_ratio = Real{0.25})
 {
     const auto u =
         forms::FormExpr::stateField(
@@ -96,6 +97,8 @@ void installFormBoundTracePolicy(
         systems::GeneratedBoundaryNitscheTraceInstallRequest{
             .binding = std::move(terms.binding),
             .volume_interface_marker = kInterfaceMarker,
+            .minimum_symmetric_energy_ratio =
+                minimum_symmetric_energy_ratio,
         });
     (void)systems::installFormulation(
         system,
@@ -1670,6 +1673,9 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     EXPECT_EQ(
         eager.front().effective_penalty_multiplier,
         Real{8.0});
+    EXPECT_EQ(
+        eager.front().policy.minimum_symmetric_energy_ratio,
+        Real{0.25});
     EXPECT_GE(
         eager.front().trace_to_penalty_ratio,
         certificate.global_conservative_upper_bound /
@@ -1685,10 +1691,10 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         eager.front()
             .symmetric_energy_ratio_lower_bound
             .has_value());
-    EXPECT_GT(
+    EXPECT_EQ(
         *eager.front()
              .symmetric_energy_ratio_lower_bound,
-        Real{0.0});
+        eager.front().policy.minimum_symmetric_energy_ratio);
 
     const auto repeated =
         certifyGeneratedBoundaryAggregateTrace(
@@ -2654,6 +2660,517 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
 }
 
 TEST(GeneratedBoundaryAggregateTraceCertificate,
+     SymmetricPolicyRejectsAPositiveButSubfloorEnergyRatio)
+{
+    const ScopedEnvironmentVariable slave_all_cut(
+        "SVMP_AGGREGATION_SLAVE_ALL_CUT",
+        "0");
+    const ScopedEnvironmentVariable linear_extension(
+        "SVMP_AGGREGATION_LINEAR_EXTENSION",
+        "0");
+    const ScopedEnvironmentVariable allow_unaggregated(
+        "SVMP_AGGREGATION_ALLOW_UNAGGREGATED",
+        "0");
+    const ScopedEnvironmentVariable maximum_lines(
+        "SVMP_AGGREGATION_MAX_LINES",
+        nullptr);
+
+    auto mesh = unitTriangleMesh();
+    auto scalar_space =
+        std::make_shared<spaces::H1Space>(
+            ElementType::Triangle3,
+            /*order=*/1);
+    auto velocity_space =
+        std::make_shared<spaces::ProductSpace>(
+            scalar_space,
+            /*components=*/2);
+
+    systems::FESystem system(mesh);
+    const auto velocity =
+        system.addField(
+            systems::FieldSpec{
+                .name = "velocity",
+                .space = velocity_space,
+                .components = 2});
+    system.addOperator("velocity");
+    system.addSystemConstraint(
+        std::make_unique<
+            constraints::SmallCutAggregationConstraint>(
+            velocity,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+    installFormBoundTracePolicy(
+        system,
+        velocity,
+        *velocity_space,
+        Real{5.0},
+        true,
+        Real{0.25});
+    ASSERT_NO_THROW(system.setup());
+
+    auto context =
+        std::make_shared<
+            assembly::CutIntegrationContext>();
+    context->addFreeSurfaceGeometrySnapshot(
+        fullNegativeSnapshot(system.meshAccess()),
+        geometry::CutIntegrationSide::Negative);
+    system.setCutIntegrationContext(context);
+    try {
+        system.rebuildConstraintState();
+        FAIL() << "a positive symmetric ratio below the configured floor "
+                  "must fail closed";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "trace-to-penalty ratio exceeds the downward-safe "
+                "cap for the configured accepted-state energy floor"),
+            std::string::npos)
+            << error.what();
+    }
+    EXPECT_TRUE(
+        system.generatedBoundaryNitscheTraceCertificates()
+            .empty());
+}
+
+TEST(GeneratedBoundaryAggregateTraceCertificate,
+     SymmetricEnergyFloorAcceptsTheSafeCapAndRejectsItsNextUlp)
+{
+    const ScopedEnvironmentVariable slave_all_cut(
+        "SVMP_AGGREGATION_SLAVE_ALL_CUT",
+        "0");
+    const ScopedEnvironmentVariable linear_extension(
+        "SVMP_AGGREGATION_LINEAR_EXTENSION",
+        "0");
+    const ScopedEnvironmentVariable allow_unaggregated(
+        "SVMP_AGGREGATION_ALLOW_UNAGGREGATED",
+        "0");
+    const ScopedEnvironmentVariable maximum_lines(
+        "SVMP_AGGREGATION_MAX_LINES",
+        nullptr);
+
+    struct CaseResult {
+        bool accepted{false};
+        bool assembly_succeeded{false};
+        std::size_t certificate_count{0u};
+        Real certificate_upper_bound{
+            std::numeric_limits<Real>::quiet_NaN()};
+        Real route_ratio{
+            std::numeric_limits<Real>::quiet_NaN()};
+        Real grouped_ratio{
+            std::numeric_limits<Real>::quiet_NaN()};
+        std::optional<Real> stored_energy_floor{};
+        std::string error{};
+    };
+
+    const auto run_case =
+        [&](Real gamma,
+            Real minimum_energy_ratio,
+            bool assemble) {
+            auto mesh = unitTriangleMesh();
+            auto scalar_space =
+                std::make_shared<spaces::H1Space>(
+                    ElementType::Triangle3,
+                    /*order=*/1);
+            auto velocity_space =
+                std::make_shared<spaces::ProductSpace>(
+                    scalar_space,
+                    /*components=*/2);
+
+            systems::FESystem system(mesh);
+            const auto velocity =
+                system.addField(
+                    systems::FieldSpec{
+                        .name = "velocity",
+                        .space = velocity_space,
+                        .components = 2});
+            system.addOperator("velocity");
+            system.addSystemConstraint(
+                std::make_unique<
+                    constraints::SmallCutAggregationConstraint>(
+                    velocity,
+                    geometry::CutIntegrationSide::Negative,
+                    kInterfaceMarker));
+            installFormBoundTracePolicy(
+                system,
+                velocity,
+                *velocity_space,
+                gamma,
+                true,
+                minimum_energy_ratio);
+            system.setup();
+
+            auto context =
+                std::make_shared<
+                    assembly::CutIntegrationContext>();
+            context->addFreeSurfaceGeometrySnapshot(
+                fullNegativeSnapshot(system.meshAccess()),
+                geometry::CutIntegrationSide::Negative);
+            system.setCutIntegrationContext(context);
+
+            CaseResult result;
+            try {
+                system.rebuildConstraintState();
+                result.accepted = true;
+            } catch (const std::exception& error) {
+                result.error = error.what();
+                result.certificate_count =
+                    system
+                        .generatedBoundaryNitscheTraceCertificates()
+                        .size();
+                return result;
+            }
+
+            const auto records =
+                system
+                    .generatedBoundaryNitscheTraceCertificates();
+            result.certificate_count = records.size();
+            if (records.size() != 1u) {
+                throw std::runtime_error(
+                    "safe-cap test expected one trace certificate");
+            }
+            const auto& record = records.front();
+            result.certificate_upper_bound =
+                record.certificate
+                    .global_conservative_upper_bound;
+            result.route_ratio =
+                record.trace_to_penalty_ratio;
+            result.grouped_ratio =
+                record
+                    .grouped_symmetric_trace_to_penalty_ratio;
+            result.stored_energy_floor =
+                record.symmetric_energy_ratio_lower_bound;
+
+            if (assemble) {
+                assembly::DenseMatrixView matrix(
+                    system.dofHandler().getNumDofs());
+                systems::AssemblyRequest request;
+                request.op = "velocity";
+                request.want_matrix = true;
+                std::vector<Real> zero_solution(
+                    static_cast<std::size_t>(
+                        system.dofHandler().getNumDofs()),
+                    Real{0.0});
+                systems::SystemStateView state;
+                state.u = zero_solution;
+                (void)systems::assembleOperator(
+                    system,
+                    request,
+                    state,
+                    &matrix,
+                    nullptr);
+                result.assembly_succeeded = true;
+            }
+            return result;
+        };
+
+    CaseResult probe;
+    ASSERT_NO_THROW(
+        probe = run_case(
+            Real{8.0},
+            Real{0.25},
+            false));
+    ASSERT_TRUE(probe.accepted);
+    ASSERT_EQ(probe.certificate_count, 1u);
+    ASSERT_GT(probe.certificate_upper_bound, Real{0.0});
+    ASSERT_TRUE(std::isfinite(probe.certificate_upper_bound));
+
+    const Real infinity =
+        std::numeric_limits<Real>::infinity();
+    const Real exact_threshold =
+        Real{9.0} / Real{16.0};
+    const Real first_rejected =
+        std::nextafter(exact_threshold, Real{0.0});
+    const Real safe_cap =
+        std::nextafter(first_rejected, Real{0.0});
+    ASSERT_EQ(
+        std::nextafter(first_rejected, infinity),
+        exact_threshold);
+    ASSERT_EQ(
+        std::nextafter(safe_cap, infinity),
+        first_rejected);
+    ASSERT_LT(first_rejected, exact_threshold);
+
+    const auto gamma_for_outward_ratio =
+        [&](Real target) {
+            Real gamma =
+                probe.certificate_upper_bound /
+                std::nextafter(target, Real{0.0});
+            for (int attempt = 0; attempt < 32; ++attempt) {
+                const Real observed =
+                    std::nextafter(
+                        probe.certificate_upper_bound / gamma,
+                        infinity);
+                if (observed == target) {
+                    return gamma;
+                }
+                gamma =
+                    std::nextafter(
+                        gamma,
+                        observed > target
+                            ? infinity
+                            : Real{0.0});
+            }
+            throw std::runtime_error(
+                "could not calibrate an adjacent outward trace ratio");
+        };
+
+    Real safe_gamma{0.0};
+    Real first_rejected_gamma{0.0};
+    ASSERT_NO_THROW(
+        safe_gamma =
+            gamma_for_outward_ratio(safe_cap));
+    ASSERT_NO_THROW(
+        first_rejected_gamma =
+            gamma_for_outward_ratio(first_rejected));
+
+    CaseResult safe;
+    ASSERT_NO_THROW(
+        safe = run_case(
+            safe_gamma,
+            Real{0.25},
+            true));
+    ASSERT_TRUE(safe.accepted);
+    EXPECT_EQ(safe.certificate_count, 1u);
+    EXPECT_EQ(
+        safe.certificate_upper_bound,
+        probe.certificate_upper_bound);
+    EXPECT_EQ(safe.route_ratio, safe_cap);
+    EXPECT_EQ(safe.grouped_ratio, safe_cap);
+    ASSERT_TRUE(safe.stored_energy_floor.has_value());
+    EXPECT_EQ(*safe.stored_energy_floor, Real{0.25});
+    EXPECT_TRUE(safe.assembly_succeeded);
+
+    CaseResult relaxed_witness;
+    ASSERT_NO_THROW(
+        relaxed_witness = run_case(
+            first_rejected_gamma,
+            Real{0.125},
+            false));
+    ASSERT_TRUE(relaxed_witness.accepted);
+    EXPECT_EQ(
+        relaxed_witness.certificate_upper_bound,
+        probe.certificate_upper_bound);
+    EXPECT_EQ(
+        relaxed_witness.route_ratio,
+        first_rejected);
+    EXPECT_EQ(
+        relaxed_witness.grouped_ratio,
+        first_rejected);
+
+    CaseResult rejected;
+    ASSERT_NO_THROW(
+        rejected = run_case(
+            first_rejected_gamma,
+            Real{0.25},
+            false));
+    EXPECT_FALSE(rejected.accepted);
+    EXPECT_EQ(rejected.certificate_count, 0u);
+    EXPECT_NE(
+        rejected.error.find(
+            "exceeds the downward-safe cap"),
+        std::string::npos)
+        << rejected.error;
+}
+
+TEST(GeneratedBoundaryAggregateTraceCertificate,
+     SymmetricPoliciesApplyTheEnergyFloorToTheirOperatorLevelGroup)
+{
+    const ScopedEnvironmentVariable slave_all_cut(
+        "SVMP_AGGREGATION_SLAVE_ALL_CUT",
+        "0");
+    const ScopedEnvironmentVariable linear_extension(
+        "SVMP_AGGREGATION_LINEAR_EXTENSION",
+        "0");
+    const ScopedEnvironmentVariable allow_unaggregated(
+        "SVMP_AGGREGATION_ALLOW_UNAGGREGATED",
+        "0");
+    const ScopedEnvironmentVariable maximum_lines(
+        "SVMP_AGGREGATION_MAX_LINES",
+        nullptr);
+
+    const auto run_group =
+        [&](Real gamma, bool expect_acceptance) {
+            SCOPED_TRACE(
+                expect_acceptance
+                    ? "accepted operator-level group"
+                    : "rejected operator-level group");
+            auto mesh = unitTriangleMesh();
+            auto scalar_space =
+                std::make_shared<spaces::H1Space>(
+                    ElementType::Triangle3,
+                    /*order=*/1);
+            auto velocity_space =
+                std::make_shared<spaces::ProductSpace>(
+                    scalar_space,
+                    /*components=*/2);
+
+            systems::FESystem system(mesh);
+            const auto velocity_a =
+                system.addField(
+                    systems::FieldSpec{
+                        .name = "velocity_a",
+                        .space = velocity_space,
+                        .components = 2});
+            const auto velocity_b =
+                system.addField(
+                    systems::FieldSpec{
+                        .name = "velocity_b",
+                        .space = velocity_space,
+                        .components = 2});
+            system.addOperator("velocity");
+            system.addSystemConstraint(
+                std::make_unique<
+                    constraints::SmallCutAggregationConstraint>(
+                    velocity_a,
+                    geometry::CutIntegrationSide::Negative,
+                    kInterfaceMarker));
+            system.addSystemConstraint(
+                std::make_unique<
+                    constraints::SmallCutAggregationConstraint>(
+                    velocity_b,
+                    geometry::CutIntegrationSide::Negative,
+                    kInterfaceMarker));
+
+            const auto make_terms =
+                [&](FieldId velocity,
+                    std::string_view suffix) {
+                    const auto u =
+                        forms::FormExpr::stateField(
+                            velocity,
+                            *velocity_space,
+                            "u_trace_group_" +
+                                std::string(suffix));
+                    const auto v =
+                        forms::FormExpr::testFunction(
+                            velocity,
+                            *velocity_space,
+                            "v_trace_group_" +
+                                std::string(suffix));
+                    const auto zero =
+                        forms::FormExpr::asVector({
+                            forms::FormExpr::constant(
+                                Real{0.0}),
+                            forms::FormExpr::constant(
+                                Real{0.0}),
+                        });
+                    return forms::bc::
+                        buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+                            u,
+                            v,
+                            zero,
+                            forms::FormExpr::constant(
+                                Real{2.5}),
+                            kWallMarker,
+                            kActiveBoundaryMarker,
+                            forms::bc::TraceNitscheOptions{
+                                .gamma = gamma,
+                                .variant = forms::bc::
+                                    NitscheVariant::Symmetric,
+                                .scale_with_p = false});
+                };
+            auto terms_a =
+                make_terms(velocity_a, "a");
+            auto terms_b =
+                make_terms(velocity_b, "b");
+            systems::FormInstallOptions install;
+            install
+                .generated_boundary_nitsche_trace_requests
+                .push_back(
+                    systems::
+                        GeneratedBoundaryNitscheTraceInstallRequest{
+                            .binding =
+                                std::move(terms_a.binding),
+                            .volume_interface_marker =
+                                kInterfaceMarker,
+                            .minimum_symmetric_energy_ratio =
+                                Real{0.25},
+                        });
+            install
+                .generated_boundary_nitsche_trace_requests
+                .push_back(
+                    systems::
+                        GeneratedBoundaryNitscheTraceInstallRequest{
+                            .binding =
+                                std::move(terms_b.binding),
+                            .volume_interface_marker =
+                                kInterfaceMarker,
+                            .minimum_symmetric_energy_ratio =
+                                Real{0.25},
+                        });
+            (void)systems::installFormulation(
+                system,
+                "velocity",
+                {velocity_a, velocity_b},
+                terms_a.route_contribution +
+                    terms_b.route_contribution,
+                install);
+            ASSERT_NO_THROW(system.setup());
+
+            auto context =
+                std::make_shared<
+                    assembly::CutIntegrationContext>();
+            context->addFreeSurfaceGeometrySnapshot(
+                fullNegativeSnapshot(
+                    system.meshAccess()),
+                geometry::CutIntegrationSide::Negative);
+            system.setCutIntegrationContext(context);
+
+            if (!expect_acceptance) {
+                try {
+                    system.rebuildConstraintState();
+                    FAIL() << "the operator-level risk sum must reject "
+                              "two individually sub-cap routes";
+                } catch (const std::runtime_error& error) {
+                    EXPECT_NE(
+                        std::string(error.what()).find(
+                            "trace-to-penalty ratio exceeds the "
+                            "downward-safe cap"),
+                        std::string::npos)
+                        << error.what();
+                }
+                EXPECT_TRUE(
+                    system
+                        .generatedBoundaryNitscheTraceCertificates()
+                        .empty());
+                return;
+            }
+
+            ASSERT_NO_THROW(
+                system.rebuildConstraintState());
+            const auto records =
+                system
+                    .generatedBoundaryNitscheTraceCertificates();
+            ASSERT_EQ(records.size(), 2u);
+            EXPECT_GT(
+                records[0]
+                    .grouped_symmetric_trace_to_penalty_ratio,
+                records[0].trace_to_penalty_ratio);
+            EXPECT_EQ(
+                records[0]
+                    .grouped_symmetric_trace_to_penalty_ratio,
+                records[1]
+                    .grouped_symmetric_trace_to_penalty_ratio);
+            for (const auto& record : records) {
+                EXPECT_LT(
+                    record
+                        .grouped_symmetric_trace_to_penalty_ratio,
+                    Real{9.0} / Real{16.0});
+                ASSERT_TRUE(
+                    record
+                        .symmetric_energy_ratio_lower_bound
+                        .has_value());
+                EXPECT_EQ(
+                    *record
+                         .symmetric_energy_ratio_lower_bound,
+                    Real{0.25});
+            }
+        };
+
+    run_group(Real{16.0}, true);
+    run_group(Real{10.0}, false);
+}
+
+TEST(GeneratedBoundaryAggregateTraceCertificate,
      UnsymmetricPolicyRetainsTheBoundWithoutACoercivityThreshold)
 {
     const ScopedEnvironmentVariable slave_all_cut(
@@ -2698,7 +3215,8 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         velocity,
         *velocity_space,
         Real{1.0},
-        false);
+        false,
+        std::numeric_limits<Real>::quiet_NaN());
     ASSERT_NO_THROW(system.setup());
 
     auto context =
@@ -2713,6 +3231,9 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     const auto eager =
         system.generatedBoundaryNitscheTraceCertificates();
     ASSERT_EQ(eager.size(), 1u);
+    EXPECT_EQ(
+        eager.front().policy.minimum_symmetric_energy_ratio,
+        Real{0.0});
     EXPECT_GT(
         eager.front().trace_to_penalty_ratio,
         Real{1.0});

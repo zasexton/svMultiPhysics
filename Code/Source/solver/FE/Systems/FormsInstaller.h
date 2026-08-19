@@ -52,6 +52,14 @@ class FESystem;
 struct GeneratedBoundaryNitscheTraceInstallRequest {
     forms::bc::GeneratedBoundaryNitscheTraceFormBinding binding;
     int volume_interface_marker{-1};
+    /// Required lower bound for the symmetric Nitsche energy ratio on every
+    /// accepted generated-boundary state.  The exact trace certificate is
+    /// evaluated before assembly and the state is rejected when its outward
+    /// risk ratio exceeds the downward-safe cap for this value.  At this
+    /// generic FE layer the bound is conditional on the caller installing
+    /// the matching bulk viscous energy; the form binding authenticates only
+    /// the boundary route.
+    Real minimum_symmetric_energy_ratio{0.25};
     std::size_t maximum_reduced_dimension{128u};
 };
 

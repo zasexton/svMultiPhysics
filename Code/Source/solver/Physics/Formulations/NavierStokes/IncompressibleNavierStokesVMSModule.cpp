@@ -7198,7 +7198,12 @@ tangentialPolicyProvenance(
         << jsonReal(options.nitsche_gamma)
         << ",\"symmetric\":" << jsonBool(options.nitsche_symmetric)
         << ",\"scale_with_polynomial_order\":"
-        << jsonBool(options.nitsche_scale_with_p) << '}'
+        << jsonBool(options.nitsche_scale_with_p)
+        << ",\"generated_active_boundary_minimum_energy_ratio\":"
+        << jsonReal(
+               options
+                   .generated_boundary_nitsche_minimum_energy_ratio)
+        << '}'
         << ",\"stabilization\":{\"vms_enabled\":"
         << jsonBool(effective_enable_vms)
         << ",\"ct_m\":" << jsonReal(options.ct_m)
@@ -7820,6 +7825,20 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         effective_free_surfaces);
     const auto active_pressure_domain =
         activePressureDomainFor(effective_free_surfaces);
+    if (!(options_
+              .generated_boundary_nitsche_minimum_energy_ratio >
+          FE::Real{0.0}) ||
+        !(options_
+              .generated_boundary_nitsche_minimum_energy_ratio <
+          FE::Real{1.0}) ||
+        !std::isfinite(
+            options_
+                .generated_boundary_nitsche_minimum_energy_ratio)) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule::registerOn: "
+            "generated_boundary_nitsche_minimum_energy_ratio must be "
+            "finite and strictly between zero and one");
+    }
     if (!options_.velocity_dirichlet_weak.empty() &&
         (!(options_.nitsche_gamma > FE::Real{0.0}) ||
          !std::isfinite(options_.nitsche_gamma))) {
@@ -9117,6 +9136,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                         .volume_interface_marker =
                             pending_small_cut_aggregation
                                 ->interface_marker,
+                        .minimum_symmetric_energy_ratio =
+                            options_
+                                .generated_boundary_nitsche_minimum_energy_ratio,
                     });
         }
     }

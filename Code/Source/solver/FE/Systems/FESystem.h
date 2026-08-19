@@ -738,7 +738,11 @@ inline constexpr GeneratedBoundaryNitscheTracePolicyId
  * the residual installed for its source formulation. Certification consumes
  * the effective penalty sealed by that binding; it does not mutate or select
  * a penalty. Symmetric routes are accepted only when the grouped certified
- * trace-to-penalty ratio for their operator is strictly below one.
+ * trace-to-penalty ratio for their operator is no greater than a
+ * downward-safe cap for the configured positive energy floor on every
+ * accepted state. At this generic FE layer that floor is conditional on the
+ * caller installing the matching bulk viscous energy; the bound route
+ * authenticates only the boundary consistency and penalty contribution.
  * Unsymmetric routes retain the same revision-bound trace certificate as a
  * continuity diagnostic without applying the symmetric coercivity
  * inequality.
@@ -758,6 +762,7 @@ struct GeneratedBoundaryNitscheTracePolicy {
     int penalty_polynomial_order{0};
     Real effective_penalty_multiplier{0.0};
     bool symmetric{true};
+    Real minimum_symmetric_energy_ratio{0.25};
     std::size_t maximum_reduced_dimension{128u};
     std::size_t source_formulation_record_index{
         std::numeric_limits<std::size_t>::max()};
@@ -768,8 +773,9 @@ struct GeneratedBoundaryNitscheTracePolicy {
  * Current eager certificate and the exact policy coefficient it validates.
  *
  * For symmetric routes, every record on the same operator carries the same
- * grouped normalized trace sum and guaranteed finite-space energy ratio.
- * The ratio is intentionally absent for unsymmetric routes.
+ * grouped normalized trace sum. Each guaranteed finite-space energy ratio
+ * equals that route's configured floor. The ratio is intentionally absent
+ * for unsymmetric routes.
  */
 struct GeneratedBoundaryNitscheTraceCertificateRecord {
     GeneratedBoundaryNitscheTracePolicy policy{};
@@ -782,6 +788,8 @@ struct GeneratedBoundaryNitscheTraceCertificateRecord {
     Real effective_penalty_multiplier{0.0};
     Real trace_to_penalty_ratio{0.0};
     Real grouped_symmetric_trace_to_penalty_ratio{0.0};
+    /// Conditional lower bound for the matching bulk-plus-penalty energy
+    /// model; generic FE registration does not authenticate the bulk term.
     std::optional<Real> symmetric_energy_ratio_lower_bound{};
 };
 

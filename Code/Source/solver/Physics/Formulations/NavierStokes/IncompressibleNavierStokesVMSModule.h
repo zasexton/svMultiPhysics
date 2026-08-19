@@ -587,6 +587,12 @@ struct IncompressibleNavierStokesVMSOptions {
     FE::Real nitsche_gamma{10.0};
     bool nitsche_symmetric{true};
     bool nitsche_scale_with_p{true};
+    // Generated active-boundary symmetric routes are accepted only when the
+    // exact current-state trace certificate proves at least this fraction of
+    // the bulk-plus-penalty energy norm.  This is not applied to fitted or
+    // unsymmetric routes, but it remains serialized configuration and must
+    // always be finite and strictly between zero and one.
+    FE::Real generated_boundary_nitsche_minimum_energy_ratio{0.25};
 };
 
 class IncompressibleNavierStokesVMSModule final : public PhysicsModule {

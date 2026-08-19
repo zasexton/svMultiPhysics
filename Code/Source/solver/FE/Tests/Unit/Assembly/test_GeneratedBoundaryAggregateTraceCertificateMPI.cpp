@@ -30,6 +30,7 @@
 #include "Systems/FormsInstaller.h"
 #include "Systems/SystemAssembly.h"
 #include "Systems/SystemSetup.h"
+#include "Systems/SystemsExceptions.h"
 
 #include <mpi.h>
 
@@ -65,7 +66,9 @@ constexpr GlobalIndex kCutCellGid = 11;
 void installFormBoundTracePolicy(
     systems::FESystem& system,
     FieldId velocity,
-    const spaces::FunctionSpace& velocity_space)
+    const spaces::FunctionSpace& velocity_space,
+    Real gamma = Real{1.0},
+    Real minimum_symmetric_energy_ratio = Real{0.25})
 {
     const auto u =
         forms::FormExpr::stateField(
@@ -90,7 +93,7 @@ void installFormBoundTracePolicy(
                 kWallMarker,
                 kActiveBoundaryMarker,
                 forms::bc::TraceNitscheOptions{
-                    .gamma = Real{1.0},
+                    .gamma = gamma,
                     .variant =
                         forms::bc::NitscheVariant::Symmetric,
                     .scale_with_p = false});
@@ -99,6 +102,8 @@ void installFormBoundTracePolicy(
         systems::GeneratedBoundaryNitscheTraceInstallRequest{
             .binding = std::move(terms.binding),
             .volume_interface_marker = kInterfaceMarker,
+            .minimum_symmetric_energy_ratio =
+                minimum_symmetric_energy_ratio,
         });
     (void)systems::installFormulation(
         system,
@@ -424,6 +429,11 @@ struct CollectiveOutcome {
     {
         return maximum_threw == 0;
     }
+
+    [[nodiscard]] bool allFailed() const noexcept
+    {
+        return minimum_threw == 1;
+    }
 };
 
 template <typename Callable>
@@ -721,6 +731,199 @@ rootedSnapshot(
 }
 
 TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
+     PolicyFloorMismatchFailsCollectivelyBeforeCertificatePublication)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "Run with exactly two MPI ranks";
+    }
+
+    auto mesh =
+        std::make_shared<
+            TwoTriangleAggregationMeshAccess>(
+                rank, size);
+    auto scalar_space =
+        std::make_shared<spaces::H1Space>(
+            ElementType::Triangle3,
+            1);
+    auto velocity_space =
+        std::make_shared<spaces::ProductSpace>(
+            scalar_space,
+            2);
+    systems::FESystem system(mesh);
+    const auto velocity =
+        system.addField(
+            systems::FieldSpec{
+                .name = "velocity",
+                .space = velocity_space,
+                .components = 2});
+    system.addOperator("velocity");
+    system.addSystemConstraint(
+        std::make_unique<
+            constraints::SmallCutAggregationConstraint>(
+            velocity,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+    installFormBoundTracePolicy(
+        system,
+        velocity,
+        *velocity_space,
+        Real{1.0},
+        rank == 0 ? Real{0.25} : Real{0.5});
+
+    systems::SetupInputs inputs;
+    inputs.topology_override =
+        twoTriangleTopology(rank);
+    const auto setup_outcome =
+        invokeCollectively(
+            MPI_COMM_WORLD,
+            [&] {
+                system.setup(
+                    setupOptions(
+                        rank,
+                        size,
+                        MPI_COMM_WORLD),
+                    inputs);
+            });
+    EXPECT_TRUE(setup_outcome.allFailed())
+        << setup_outcome.local_message;
+    EXPECT_FALSE(system.isSetup());
+    EXPECT_THROW(
+        (void)system
+            .generatedBoundaryNitscheTraceCertificates(),
+        systems::InvalidStateException);
+#endif
+}
+
+TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
+     SubfloorCertificateFailsCollectivelyWithoutPartialPublication)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "Run with exactly two MPI ranks";
+    }
+
+    const ScopedEnvironmentVariable slave_all_cut(
+        "SVMP_AGGREGATION_SLAVE_ALL_CUT",
+        "0");
+    const ScopedEnvironmentVariable linear_extension(
+        "SVMP_AGGREGATION_LINEAR_EXTENSION",
+        "0");
+    const ScopedEnvironmentVariable allow_unaggregated(
+        "SVMP_AGGREGATION_ALLOW_UNAGGREGATED",
+        "0");
+    const ScopedEnvironmentVariable maximum_lines(
+        "SVMP_AGGREGATION_MAX_LINES",
+        nullptr);
+
+    auto mesh =
+        std::make_shared<
+            TwoTriangleAggregationMeshAccess>(
+                rank, size);
+    auto scalar_space =
+        std::make_shared<spaces::H1Space>(
+            ElementType::Triangle3,
+            1);
+    auto velocity_space =
+        std::make_shared<spaces::ProductSpace>(
+            scalar_space,
+            2);
+    systems::FESystem system(mesh);
+    const auto velocity =
+        system.addField(
+            systems::FieldSpec{
+                .name = "velocity",
+                .space = velocity_space,
+                .components = 2});
+    system.addOperator("velocity");
+    system.addSystemConstraint(
+        std::make_unique<
+            constraints::SmallCutAggregationConstraint>(
+            velocity,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+    installFormBoundTracePolicy(
+        system,
+        velocity,
+        *velocity_space,
+        Real{0.5},
+        Real{0.25});
+
+    systems::SetupInputs inputs;
+    inputs.topology_override =
+        twoTriangleTopology(rank);
+    const auto setup_outcome =
+        invokeCollectively(
+            MPI_COMM_WORLD,
+            [&] {
+                system.setup(
+                    setupOptions(
+                        rank,
+                        size,
+                        MPI_COMM_WORLD),
+                    inputs);
+            });
+    ASSERT_TRUE(setup_outcome.allSucceeded())
+        << setup_outcome.local_message;
+
+    std::shared_ptr<
+        const interfaces::FreeSurfaceGeometrySnapshot>
+        snapshot;
+    const auto snapshot_outcome =
+        invokeCollectively(
+            MPI_COMM_WORLD,
+            [&] {
+                snapshot =
+                    rootedSnapshot(
+                        system.meshAccess(),
+                        rank,
+                        size);
+            });
+    ASSERT_TRUE(snapshot_outcome.allSucceeded())
+        << snapshot_outcome.local_message;
+    ASSERT_NE(snapshot, nullptr);
+
+    auto context =
+        std::make_shared<
+            assembly::CutIntegrationContext>();
+    context->addFreeSurfaceGeometrySnapshot(
+        snapshot,
+        geometry::CutIntegrationSide::Negative);
+    system.setCutIntegrationContext(context);
+
+    const auto rebuild_outcome =
+        invokeCollectively(
+            MPI_COMM_WORLD,
+            [&] {
+                system.rebuildConstraintState();
+            });
+    EXPECT_TRUE(rebuild_outcome.allFailed())
+        << rebuild_outcome.local_message;
+    EXPECT_NE(
+        rebuild_outcome.local_message.find(
+            "exceeds the downward-safe cap"),
+        std::string::npos)
+        << rebuild_outcome.local_message;
+    EXPECT_TRUE(system.isSetup());
+    EXPECT_TRUE(
+        system.generatedBoundaryNitscheTraceCertificates()
+            .empty());
+#endif
+}
+
+TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
      RootedCrossRankAggregateHasAnalyticBoundThirtyTwoOverSeventyNine)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -928,6 +1131,9 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
     EXPECT_EQ(
         eager.front().effective_penalty_multiplier,
         Real{1.0});
+    EXPECT_EQ(
+        eager.front().policy.minimum_symmetric_energy_ratio,
+        Real{0.25});
     EXPECT_LT(
         eager.front()
             .grouped_symmetric_trace_to_penalty_ratio,
@@ -936,10 +1142,10 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
         eager.front()
             .symmetric_energy_ratio_lower_bound
             .has_value());
-    EXPECT_GT(
+    EXPECT_EQ(
         *eager.front()
              .symmetric_energy_ratio_lower_bound,
-        Real{0.0});
+        Real{0.25});
 
     assembly::DenseMatrixView preflight_matrix(
         system.dofHandler().getNumDofs());

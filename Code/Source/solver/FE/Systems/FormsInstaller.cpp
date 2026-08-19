@@ -3152,6 +3152,13 @@ makeFormBoundGeneratedBoundaryNitscheTracePolicies(
             "formulation");
         FE_THROW_IF(
             request.volume_interface_marker < 0 ||
+                (binding.symmetric() &&
+                 (!(request.minimum_symmetric_energy_ratio >
+                    Real{0.0}) ||
+                  !(request.minimum_symmetric_energy_ratio <
+                    Real{1.0}) ||
+                  !std::isfinite(
+                      request.minimum_symmetric_energy_ratio))) ||
                 request.maximum_reduced_dimension == 0u ||
                 request.maximum_reduced_dimension > 128u ||
                 binding.metadataDigest() == 0u ||
@@ -3185,6 +3192,10 @@ makeFormBoundGeneratedBoundaryNitscheTracePolicies(
             .effective_penalty_multiplier =
                 binding.effectivePenaltyMultiplier(),
             .symmetric = binding.symmetric(),
+            .minimum_symmetric_energy_ratio =
+                binding.symmetric()
+                    ? request.minimum_symmetric_energy_ratio
+                    : Real{0.0},
             .maximum_reduced_dimension =
                 request.maximum_reduced_dimension,
             .source_formulation_record_index =

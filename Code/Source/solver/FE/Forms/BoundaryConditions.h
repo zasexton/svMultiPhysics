@@ -763,7 +763,10 @@ buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
  * formulation installer additionally requires the exact immutable route
  * anchor to occur once as an unscaled top-level additive summand in the
  * original residual being installed before it derives a generated-boundary
- * trace-certificate policy.
+ * trace-certificate policy. This binding authenticates only that boundary
+ * route; it does not authenticate a matching bulk viscous form. Any
+ * coercivity interpretation of the resulting trace policy is therefore
+ * conditional on the caller providing the corresponding bulk energy.
  */
 class GeneratedBoundaryNitscheTraceFormBinding {
 public:

@@ -2243,6 +2243,10 @@ void mixGeneratedBoundaryNitscheTracePolicy(
         digest, policy.symmetric ? 1u : 0u);
     mixGeneratedBoundaryTraceHash(
         digest,
+        generatedBoundaryTraceRealBits(
+            policy.minimum_symmetric_energy_ratio));
+    mixGeneratedBoundaryTraceHash(
+        digest,
         static_cast<std::uint64_t>(
             policy.maximum_reduced_dimension));
     mixGeneratedBoundaryTraceHash(
@@ -2276,6 +2280,8 @@ void mixGeneratedBoundaryNitscheTracePolicy(
         generatedBoundaryTraceRealBits(
             policy.effective_penalty_multiplier),
         policy.symmetric,
+        generatedBoundaryTraceRealBits(
+            policy.minimum_symmetric_energy_ratio),
         policy.maximum_reduced_dimension,
         policy.source_formulation_record_index,
         policy.form_binding_digest};
@@ -2353,6 +2359,42 @@ void mixGeneratedBoundaryNitscheTracePolicy(
     }
     return std::nextafter(
         sum, std::numeric_limits<Real>::infinity());
+}
+
+[[nodiscard]] Real downwardRoundedSymmetricRiskLimit(
+    Real minimum_energy_ratio)
+{
+    if (!(minimum_energy_ratio > Real{0.0}) ||
+        !(minimum_energy_ratio < Real{1.0}) ||
+        !std::isfinite(minimum_energy_ratio)) {
+        throw std::runtime_error(
+            "FESystem: generated-boundary Nitsche minimum symmetric "
+            "energy ratio is invalid");
+    }
+
+    // The policy A >= (1 - sqrt(R))(K + P) meets the requested energy
+    // floor c whenever R <= (1 - c)^2.  Round each positive operation
+    // toward zero by an additional representable step so this cap cannot
+    // exceed the exact-real threshold, independent of the active floating-
+    // point rounding mode.  Underflow to zero is conservative.
+    Real complement = Real{1.0} - minimum_energy_ratio;
+    if (!(complement > Real{0.0}) ||
+        !std::isfinite(complement)) {
+        throw std::runtime_error(
+            "FESystem: generated-boundary Nitsche symmetric risk "
+            "limit has an invalid complement");
+    }
+    complement = std::nextafter(complement, Real{0.0});
+    Real limit = complement * complement;
+    if (!(limit >= Real{0.0}) || !std::isfinite(limit)) {
+        throw std::runtime_error(
+            "FESystem: generated-boundary Nitsche symmetric risk "
+            "limit is invalid");
+    }
+    if (limit != Real{0.0}) {
+        limit = std::nextafter(limit, Real{0.0});
+    }
+    return limit;
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -17044,6 +17086,15 @@ void FESystem::prepareFormBoundGeneratedBoundaryNitscheTracePolicies(
             !(policy.effective_penalty_multiplier > Real{0.0}) ||
             !std::isfinite(
                 policy.effective_penalty_multiplier) ||
+            (policy.symmetric &&
+             (!(policy.minimum_symmetric_energy_ratio >
+                Real{0.0}) ||
+              !(policy.minimum_symmetric_energy_ratio <
+                Real{1.0}) ||
+              !std::isfinite(
+                  policy.minimum_symmetric_energy_ratio))) ||
+            (!policy.symmetric &&
+             policy.minimum_symmetric_energy_ratio != Real{0.0}) ||
             policy.maximum_reduced_dimension == 0u ||
             policy.maximum_reduced_dimension > 128u ||
             policy.source_formulation_record_index !=
@@ -17183,7 +17234,17 @@ void FESystem::refreshGeneratedBoundaryNitscheTraceCertificates(
                 !(policy.effective_penalty_multiplier >
                   Real{0.0}) ||
                 !std::isfinite(
-                    policy.effective_penalty_multiplier)) {
+                    policy.effective_penalty_multiplier) ||
+                (policy.symmetric &&
+                 (!(policy.minimum_symmetric_energy_ratio >
+                    Real{0.0}) ||
+                  !(policy.minimum_symmetric_energy_ratio <
+                    Real{1.0}) ||
+                  !std::isfinite(
+                      policy.minimum_symmetric_energy_ratio))) ||
+                (!policy.symmetric &&
+                 policy.minimum_symmetric_energy_ratio !=
+                     Real{0.0})) {
                 throw std::runtime_error(
                     "FESystem: generated-boundary Nitsche trace policy "
                     "has invalid form-binding metadata");
@@ -17488,23 +17549,19 @@ void FESystem::refreshGeneratedBoundaryNitscheTraceCertificates(
                     "FESystem: symmetric generated-boundary Nitsche "
                     "trace certificate requires sum(C_i/alpha_i) < 1");
             }
-            Real energy_ratio = Real{1.0};
-            if (grouped_ratio != Real{0.0}) {
-                energy_ratio =
-                    Real{1.0} -
-                    std::sqrt(grouped_ratio);
-                energy_ratio = std::nextafter(
-                    energy_ratio,
-                    -std::numeric_limits<Real>::infinity());
-            }
-            if (!(energy_ratio > Real{0.0}) ||
-                !std::isfinite(energy_ratio)) {
+            const Real risk_limit =
+                downwardRoundedSymmetricRiskLimit(
+                    record.policy
+                        .minimum_symmetric_energy_ratio);
+            if (grouped_ratio > risk_limit) {
                 throw std::runtime_error(
                     "FESystem: symmetric generated-boundary Nitsche "
-                    "energy-ratio lower bound is not positive");
+                    "trace-to-penalty ratio exceeds the downward-safe "
+                    "cap for the configured accepted-state energy "
+                    "floor");
             }
             record.symmetric_energy_ratio_lower_bound =
-                energy_ratio;
+                record.policy.minimum_symmetric_energy_ratio;
         }
     } catch (...) {
         local_group_exception = std::current_exception();
@@ -17585,9 +17642,47 @@ void FESystem::requireCurrentGeneratedBoundaryNitscheTraceCertificates(
                        generatedBoundaryNitscheTracePolicyKey(
                            rhs->policy);
             });
+        std::vector<const GeneratedBoundaryNitscheTracePolicy*>
+            live_policies;
+        live_policies.reserve(policy_count);
+        for (const auto& policy :
+             generated_boundary_nitsche_trace_policies_) {
+            if (policy.op == op) {
+                live_policies.push_back(&policy);
+            }
+        }
+        std::sort(
+            live_policies.begin(),
+            live_policies.end(),
+            [](const auto* lhs, const auto* rhs) {
+                return generatedBoundaryNitscheTracePolicyKey(
+                           *lhs) <
+                       generatedBoundaryNitscheTracePolicyKey(
+                           *rhs);
+            });
+        if (live_policies.size() != records.size()) {
+            throw std::runtime_error(
+                "FESystem: generated-boundary Nitsche live policy "
+                "table differs from its certificate cache");
+        }
+        for (std::size_t index = 0u;
+             index < records.size();
+             ++index) {
+            if (live_policies[index]->id !=
+                    records[index]->policy.id ||
+                generatedBoundaryNitscheTracePolicyKey(
+                    *live_policies[index]) !=
+                    generatedBoundaryNitscheTracePolicyKey(
+                        records[index]->policy)) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche cached "
+                    "policy differs from its live policy");
+            }
+        }
         mixGeneratedBoundaryTraceHash(
             local_digest,
             static_cast<std::uint64_t>(records.size()));
+        Real recomputed_symmetric_group_ratio{0.0};
         for (const auto* record : records) {
             if (record->policy
                         .source_formulation_record_index >=
@@ -17619,6 +17714,9 @@ void FESystem::requireCurrentGeneratedBoundaryNitscheTraceCertificates(
                     "FESystem: generated-boundary Nitsche trace "
                     "certificate source formulation metadata is stale");
             }
+            analysis::
+                validateGeneratedBoundaryAggregateTraceCertificateDigest(
+                    record->certificate);
             if (!sameConstraintRevisionSnapshot(
                     record->constraint_revision,
                     current_constraint_revision) ||
@@ -17674,6 +17772,25 @@ void FESystem::requireCurrentGeneratedBoundaryNitscheTraceCertificates(
                     "certificate does not own the current aggregation "
                     "report");
             }
+            const Real recomputed_trace_to_penalty_ratio =
+                outwardRoundedPositiveRatio(
+                    record->certificate
+                        .global_conservative_upper_bound,
+                    record->effective_penalty_multiplier);
+            if (generatedBoundaryTraceRealBits(
+                    record->trace_to_penalty_ratio) !=
+                generatedBoundaryTraceRealBits(
+                    recomputed_trace_to_penalty_ratio)) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche cached trace "
+                    "ratio differs from its certificate and penalty");
+            }
+            if (record->policy.symmetric) {
+                recomputed_symmetric_group_ratio =
+                    outwardRoundedPositiveSum(
+                        recomputed_symmetric_group_ratio,
+                        recomputed_trace_to_penalty_ratio);
+            }
             if (!cut_integration_context_
                      ->hasFreeSurfaceGeometrySnapshotForMarker(
                          record->policy
@@ -17708,20 +17825,66 @@ void FESystem::requireCurrentGeneratedBoundaryNitscheTraceCertificates(
                   Real{0.0}) ||
                 !std::isfinite(
                     record->trace_to_penalty_ratio) ||
+                !(record
+                      ->grouped_symmetric_trace_to_penalty_ratio >=
+                  Real{0.0}) ||
+                !std::isfinite(
+                    record
+                        ->grouped_symmetric_trace_to_penalty_ratio) ||
                 (record->policy.symmetric &&
-                 (!record
+                 (!(record->policy
+                        .minimum_symmetric_energy_ratio >
+                    Real{0.0}) ||
+                  !(record->policy
+                        .minimum_symmetric_energy_ratio <
+                    Real{1.0}) ||
+                  !std::isfinite(
+                      record->policy
+                          .minimum_symmetric_energy_ratio) ||
+                  !record
                        ->symmetric_energy_ratio_lower_bound
                        .has_value() ||
-                  !(*record
-                         ->symmetric_energy_ratio_lower_bound >
-                    Real{0.0}) ||
-                  !(record
-                        ->grouped_symmetric_trace_to_penalty_ratio <
-                    Real{1.0})))) {
+                  generatedBoundaryTraceRealBits(
+                      *record
+                           ->symmetric_energy_ratio_lower_bound) !=
+                      generatedBoundaryTraceRealBits(
+                          record->policy
+                              .minimum_symmetric_energy_ratio))) ||
+                (!record->policy.symmetric &&
+                 (record->policy
+                          .minimum_symmetric_energy_ratio !=
+                      Real{0.0} ||
+                  record
+                      ->symmetric_energy_ratio_lower_bound
+                      .has_value()))) {
                 throw std::runtime_error(
                     "FESystem: generated-boundary Nitsche trace "
                     "certificate cache failed its current-state "
                     "contract");
+            }
+        }
+        for (const auto* record : records) {
+            if (generatedBoundaryTraceRealBits(
+                    record
+                        ->grouped_symmetric_trace_to_penalty_ratio) !=
+                generatedBoundaryTraceRealBits(
+                    recomputed_symmetric_group_ratio)) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche cached "
+                    "operator-level ratio differs from the outward "
+                    "sum of its current route ratios");
+            }
+            if (record->policy.symmetric &&
+                (!(recomputed_symmetric_group_ratio <
+                   Real{1.0}) ||
+                 recomputed_symmetric_group_ratio >
+                     downwardRoundedSymmetricRiskLimit(
+                         record->policy
+                             .minimum_symmetric_energy_ratio))) {
+                throw std::runtime_error(
+                    "FESystem: generated-boundary Nitsche cached "
+                    "operator-level ratio fails the configured "
+                    "accepted-state energy floor");
             }
             mixGeneratedBoundaryNitscheTracePolicy(
                 local_digest, record->policy);

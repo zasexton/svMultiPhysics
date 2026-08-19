@@ -4644,6 +4644,7 @@ struct NitscheEnergySample {
     FE::Real trace_effective_penalty_multiplier{0.0};
     FE::Real trace_to_penalty_ratio{0.0};
     FE::Real trace_grouped_symmetric_ratio{0.0};
+    FE::Real trace_required_minimum_energy_ratio{0.0};
     FE::Real trace_finite_sample_energy_lower_bound{0.0};
     bool trace_certificate_deterministic{false};
     bool trace_certificate_revision_match{false};
@@ -4937,9 +4938,16 @@ public:
                     .generated_active_boundary_marker !=
                 generated_context.selected_boundary_marker ||
             !trace_record.policy.symmetric ||
+            !(trace_record.policy
+                  .minimum_symmetric_energy_ratio >
+              FE::Real{0.0}) ||
             !trace_record
                  .symmetric_energy_ratio_lower_bound
-                 .has_value()) {
+                 .has_value() ||
+            *trace_record
+                    .symmetric_energy_ratio_lower_bound !=
+                trace_record.policy
+                    .minimum_symmetric_energy_ratio) {
             throw std::runtime_error(
                 "Nitsche energy eager trace certificate is bound to "
                 "the wrong production route");
@@ -5255,6 +5263,9 @@ public:
         sample.trace_grouped_symmetric_ratio =
             trace_record
                 .grouped_symmetric_trace_to_penalty_ratio;
+        sample.trace_required_minimum_energy_ratio =
+            trace_record.policy
+                .minimum_symmetric_energy_ratio;
         sample.trace_finite_sample_energy_lower_bound =
             *trace_record
                  .symmetric_energy_ratio_lower_bound;
@@ -10136,7 +10147,7 @@ TEST(FreeSurfaceCutStability,
 }
 
 TEST(FreeSurfaceCutStability,
-     DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2)
+     DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Generated-boundary trace evidence requires native mesh support.";
@@ -10171,6 +10182,13 @@ TEST(FreeSurfaceCutStability,
     constexpr std::size_t expected_wet_case_count{96u};
     constexpr std::size_t expected_dry_case_count{12u};
     constexpr FE::Real configured_penalty{12.0};
+    constexpr FE::Real required_method_energy_floor{0.25};
+    const FE::Real required_safe_risk_cap =
+        std::nextafter(
+            std::nextafter(
+                FE::Real{9.0} / FE::Real{16.0},
+                FE::Real{0.0}),
+            FE::Real{0.0});
     constexpr FE::Real comparison_tolerance{1.0e-11};
     std::size_t case_count = 0u;
     std::size_t wet_case_count = 0u;
@@ -10279,19 +10297,25 @@ TEST(FreeSurfaceCutStability,
                     EXPECT_EQ(
                         sample.trace_effective_penalty_multiplier,
                         configured_penalty);
+                    EXPECT_EQ(
+                        sample.trace_required_minimum_energy_ratio,
+                        required_method_energy_floor);
                     EXPECT_GE(
                         sample.trace_to_penalty_ratio,
                         FE::Real{0.0});
                     EXPECT_LT(
                         sample.trace_grouped_symmetric_ratio,
                         FE::Real{1.0});
+                    EXPECT_LE(
+                        sample.trace_grouped_symmetric_ratio,
+                        required_safe_risk_cap);
                     EXPECT_EQ(
                         sample.trace_grouped_symmetric_ratio,
                         sample.trace_to_penalty_ratio);
-                    EXPECT_GT(
+                    EXPECT_EQ(
                         sample
                             .trace_finite_sample_energy_lower_bound,
-                        FE::Real{0.0});
+                        required_method_energy_floor);
 
                     FE::Real sampled_eigenvalue_gap =
                         std::numeric_limits<FE::Real>::quiet_NaN();
@@ -10314,7 +10338,7 @@ TEST(FreeSurfaceCutStability,
                         EXPECT_EQ(
                             sample
                                 .trace_finite_sample_energy_lower_bound,
-                            FE::Real{1.0});
+                            required_method_energy_floor);
                     } else {
                         EXPECT_GT(
                             sample
@@ -10353,7 +10377,7 @@ TEST(FreeSurfaceCutStability,
 
                     std::cout
                         << std::setprecision(17)
-                        << "WP3_WP7_NITSCHE_TRACE_V2_CASE {"
+                        << "WP3_WP7_NITSCHE_TRACE_V3_CASE {"
                         << "\"case_id\":\""
                         << sample.case_id << "_h_"
                         << realPropertyValue(mesh_scale) << "\","
@@ -10417,6 +10441,9 @@ TEST(FreeSurfaceCutStability,
                         << "\"effective_penalty_multiplier\":"
                         << sample.trace_effective_penalty_multiplier
                         << ","
+                        << "\"required_minimum_energy_ratio\":"
+                        << sample.trace_required_minimum_energy_ratio
+                        << ","
                         << "\"trace_to_penalty_ratio\":"
                         << sample.trace_to_penalty_ratio << ","
                         << "\"grouped_symmetric_ratio\":"
@@ -10473,42 +10500,42 @@ TEST(FreeSurfaceCutStability,
         exact_common_kernel_quotient_patch_count, 0u);
     EXPECT_LT(
         maximum_trace_upper_bound, configured_penalty);
-    EXPECT_GT(
+    EXPECT_EQ(
         minimum_finite_sample_energy_lower_bound,
-        FE::Real{0.0});
+        required_method_energy_floor);
     EXPECT_GE(
         minimum_sampled_eigenvalue_gap,
         -comparison_tolerance);
 
     RecordProperty(
-        "wp3_wp7_nitsche_trace_v2_case_count",
+        "wp3_wp7_nitsche_trace_v3_case_count",
         case_count);
     RecordProperty(
-        "wp3_wp7_nitsche_trace_v2_maximum_upper_bound",
+        "wp3_wp7_nitsche_trace_v3_maximum_upper_bound",
         realPropertyValue(maximum_trace_upper_bound));
     RecordProperty(
-        "wp3_wp7_nitsche_trace_v2_minimum_finite_sample_lower_bound",
+        "wp3_wp7_nitsche_trace_v3_minimum_finite_sample_lower_bound",
         realPropertyValue(
             minimum_finite_sample_energy_lower_bound));
     RecordProperty(
-        "wp3_wp7_nitsche_trace_v2_minimum_sampled_eigenvalue_gap",
+        "wp3_wp7_nitsche_trace_v3_minimum_sampled_eigenvalue_gap",
         realPropertyValue(minimum_sampled_eigenvalue_gap));
     RecordProperty(
-        "wp3_wp7_nitsche_trace_v2_exact_common_kernel_quotient_patch_count",
+        "wp3_wp7_nitsche_trace_v3_exact_common_kernel_quotient_patch_count",
         exact_common_kernel_quotient_patch_count);
     RecordProperty(
-        "wp3_wp7_nitsche_trace_v2_method_coercivity_lower_bound",
-        "null");
+        "wp3_wp7_nitsche_trace_v3_method_coercivity_lower_bound",
+        realPropertyValue(required_method_energy_floor));
     RecordProperty(
-        "wp3_wp7_nitsche_trace_v2_uniform_bound_status",
-        "UNFROZEN_NO_BOUND_INVENTED");
+        "wp3_wp7_nitsche_trace_v3_uniform_bound_status",
+        "ENFORCED_ACCEPTED_STATE_FLOOR");
     RecordProperty(
-        "wp3_wp7_nitsche_trace_v2_accepted_claim",
-        "joint_low_level_prerequisite");
+        "wp3_wp7_nitsche_trace_v3_accepted_claim",
+        "accepted_state_coercivity_policy_prerequisite");
 
     std::cout
         << std::setprecision(17)
-        << "WP3_WP7_NITSCHE_TRACE_V2_SUMMARY {"
+        << "WP3_WP7_NITSCHE_TRACE_V3_SUMMARY {"
         << "\"case_count\":" << case_count << ","
         << "\"wet_case_count\":" << wet_case_count << ","
         << "\"dry_case_count\":" << dry_case_count << ","
@@ -10526,11 +10553,12 @@ TEST(FreeSurfaceCutStability,
         << minimum_finite_sample_energy_lower_bound << ","
         << "\"minimum_sampled_eigenvalue_gap\":"
         << minimum_sampled_eigenvalue_gap << ","
-        << "\"method_coercivity_lower_bound\":null,"
+        << "\"method_coercivity_lower_bound\":"
+        << required_method_energy_floor << ","
         << "\"uniform_bound_status\":"
-        << "\"UNFROZEN_NO_BOUND_INVENTED\","
+        << "\"ENFORCED_ACCEPTED_STATE_FLOOR\","
         << "\"accepted_claim\":"
-        << "\"joint_low_level_prerequisite\"}"
+        << "\"accepted_state_coercivity_policy_prerequisite\"}"
         << '\n';
 #endif
 }
