@@ -36,12 +36,12 @@
     "wp7": "OPEN",
     "q1": "OPEN"
   },
-  "implementation_source_commit": "7a59c8f46716d7c508f954112c12bbf6eb171b7f",
+  "implementation_source_commit": "1a2ed265b12eb7117cd269f6c7bb876e5ba38601",
   "method_coercivity_lower_bound": null,
   "uniform_bound_status": "UNFROZEN_NO_BOUND_INVENTED",
   "matching_derivation": "Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method_v2.md",
   "proposed_runner": "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification_v2.py",
-  "runner_sha256": "9ea71b8e48f993f5041a670fda59954b6d6245411e5844479d7f8e7ed541015d",
+  "runner_sha256": "8d995e70e77e27e3e9b7c15401150cc34e673ecd273d88bc1f6f55af60ac245d",
   "qualification_bundle_binding": {
     "authority": "reciprocal_SHA256_plus_clean_qualification_execution_HEAD",
     "matrix_sha256_source": "runner_embedded_normalized_matrix_SHA256",
@@ -313,7 +313,7 @@
     },
     {
       "path": "tests/cases/fluid/run_free_surface_wp2_geometry_qualification.py",
-      "sha256": "4b2e8a97ff080450c560e921e58a9dd92474ff561faabbcb10bacd6264f542d9",
+      "sha256": "5387dd19618139aeee45bb6f3c77f27fd8b26ce28713d221a866e1eea4662037",
       "role": "resource-bounded generic qualification execution base"
     }
   ],
