@@ -236,6 +236,20 @@ public:
     {
         coordinates.assign(nodes_.begin(), nodes_.end());
     }
+    [[nodiscard]] bool supportsCoordinateFrame(
+        FE::assembly::CoordinateFrame frame) const override
+    {
+        return frame == FE::assembly::CoordinateFrame::Active ||
+               frame == FE::assembly::CoordinateFrame::Reference ||
+               frame == FE::assembly::CoordinateFrame::Current;
+    }
+    void getCellCoordinates(
+        FE::GlobalIndex /*cell_id*/,
+        FE::assembly::CoordinateFrame /*frame*/,
+        std::vector<std::array<FE::Real, 3>>& coordinates) const override
+    {
+        coordinates.assign(nodes_.begin(), nodes_.end());
+    }
     [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
         FE::GlobalIndex /*face_id*/,
         FE::GlobalIndex /*cell_id*/) const override
@@ -1258,8 +1272,6 @@ public:
             interface_marker_,
             FE::Real{0.37},
             FE::geometry::CutIntegrationSide::Negative);
-        system_->setCutIntegrationContext(initial_geometry.context);
-
         FE::systems::SetupOptions setup_options;
 #if FE_HAS_MPI || defined(MESH_HAS_MPI)
         if (serial_communicator) {
@@ -1280,6 +1292,7 @@ public:
                 *mesh_,
                 serial_communicator ? 0 : rank_,
                 serial_communicator ? 1 : size_));
+        system_->setCutIntegrationContext(initial_geometry.context);
 
         solution_.assign(
             static_cast<std::size_t>(
@@ -1476,7 +1489,6 @@ public:
             interface_height_,
             FE::geometry::CutIntegrationSide::Negative);
         active_marker_ = geometry_.active_markers[1];
-        system_->setCutIntegrationContext(geometry_.context);
         system_->registerGeneratedEmbeddedInterfaceMarker(active_marker_);
 
         FE::forms::BoundaryFunctional flow;
@@ -1530,6 +1542,7 @@ public:
             setup_options,
             makeStructuredChannelSetupInputs(
                 *mesh_, rank_, size_));
+        system_->setCutIntegrationContext(geometry_.context);
 
         solution_.assign(
             static_cast<std::size_t>(
@@ -2033,12 +2046,16 @@ public:
                                  FE::Real nitsche_gamma = FE::Real{12.0})
         : family_(family)
         , active_side_(active_side)
-        , owner_rank_(owner_rank)
+        , owner_rank_(serial_communicator ? 0 : owner_rank)
         , operator_scale_(operator_scale)
         , length_scale_(length_scale)
         , nitsche_gamma_(nitsche_gamma)
         , mesh_(std::make_shared<PartitionedSingleTetraBoundaryMesh>(
-              wall_marker_, rank, size, owner_rank, length_scale))
+              wall_marker_,
+              serial_communicator ? 0 : rank,
+              serial_communicator ? 1 : size,
+              serial_communicator ? 0 : owner_rank,
+              length_scale))
         , system_(std::make_unique<FE::systems::FESystem>(mesh_))
     {
         auto velocity_space = makeVelocitySpace(mesh_);
@@ -2226,7 +2243,6 @@ public:
                     FE::forms::ExteriorBoundaryMeasure::generatedActiveSubset(
                         wall_marker_, active_marker_)));
 
-        system_->setCutIntegrationContext(context(FE::Real{0.0}));
         FE::systems::SetupOptions setup_options;
 #if FE_HAS_MPI || defined(MESH_HAS_MPI)
         if (serial_communicator) {
@@ -2245,6 +2261,7 @@ public:
             setup_options,
             makePartitionedSingleTetraSetupInputs(
                 serial_communicator ? 0 : owner_rank_));
+        system_->setCutIntegrationContext(context(FE::Real{0.0}));
 
         const std::array<FE::Real, 3> level_set_gradient =
             active_side_ == FE::geometry::CutIntegrationSide::Positive
@@ -3773,7 +3790,7 @@ public:
                 .external_pressure = FE::Real{0.0},
                 .tangential_mesh_policy =
                     ns::FreeSurfaceTangentialMeshPolicy::Free,
-                .tangential_mesh_penalty = FE::Real{0.0},
+                .tangential_mesh_penalty = FE::Real{1.0},
                 .kinematic_enforcement =
                     ns::FreeSurfaceKinematicEnforcement::Penalty,
                 .kinematic_penalty = FE::Real{9.0},
@@ -4062,14 +4079,25 @@ TEST(MovingDomainPhysicsMPI,
     expect_coordinated_rejection(
         fixture, std::move(rate_revision_drift), 1u);
 
-    FittedALENumericHistoryFixture declaration_drift_fixture(
-        rank, size, /*drift_declaration=*/true);
-    expect_coordinated_rejection(
-        declaration_drift_fixture,
-        declaration_drift_fixture.metadata(
-            /*state_revision=*/701u,
-            /*rate_revision=*/802u),
-        0u);
+    bool declaration_rejected = false;
+    std::string declaration_error;
+    try {
+        FittedALENumericHistoryFixture declaration_drift_fixture(
+            rank, size, /*drift_declaration=*/true);
+        static_cast<void>(declaration_drift_fixture);
+    } catch (const std::exception& error) {
+        declaration_rejected = true;
+        declaration_error = error.what();
+    }
+    EXPECT_EQ(globalSum(declaration_rejected ? 1 : 0), size);
+    EXPECT_EQ(
+        globalSum(
+            declaration_error.find(
+                "boundary-reduction exterior-measure table differs across "
+                "communicator ranks") != std::string::npos
+                ? 1
+                : 0),
+        size);
 
     ::testing::Test::RecordProperty(
         "fitted_ale_operator_stage_global_moment_count", 4);
