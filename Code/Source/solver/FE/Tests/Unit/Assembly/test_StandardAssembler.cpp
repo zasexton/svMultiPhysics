@@ -1113,6 +1113,89 @@ private:
     int matrix_vector_calls_{0};
 };
 
+class BatchedRequestSensitiveKernel final : public AssemblyKernel {
+public:
+    BatchedRequestSensitiveKernel(bool can_matrix,
+                                  bool can_vector,
+                                  Real matrix_value,
+                                  Real vector_value)
+        : can_matrix_(can_matrix),
+          can_vector_(can_vector),
+          matrix_value_(matrix_value),
+          vector_value_(vector_value)
+    {
+    }
+
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        fillOutput(ctx, output);
+    }
+
+    void computeCellBatch(std::span<const AssemblyContext* const> contexts,
+                          std::span<KernelOutput> outputs) override
+    {
+        EXPECT_EQ(contexts.size(), outputs.size());
+        for (std::size_t slot = 0; slot < contexts.size(); ++slot) {
+            ASSERT_NE(contexts[slot], nullptr);
+            fillOutput(*contexts[slot], outputs[slot]);
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override { return RequiredData::None; }
+
+    [[nodiscard]] int matrixOnlyOutputs() const noexcept { return matrix_only_outputs_; }
+    [[nodiscard]] int vectorOnlyOutputs() const noexcept { return vector_only_outputs_; }
+    [[nodiscard]] int matrixVectorOutputs() const noexcept { return matrix_vector_outputs_; }
+
+private:
+    void fillOutput(const AssemblyContext& ctx, KernelOutput& output)
+    {
+        bool want_matrix = output.has_matrix || !output.local_matrix.empty();
+        bool want_vector = output.has_vector || !output.local_vector.empty();
+        if (!want_matrix && !want_vector) {
+            want_matrix = can_matrix_;
+            want_vector = can_vector_;
+        }
+        want_matrix = can_matrix_ && want_matrix;
+        want_vector = can_vector_ && want_vector;
+
+        if (want_matrix && want_vector) {
+            ++matrix_vector_outputs_;
+        } else if (want_matrix) {
+            ++matrix_only_outputs_;
+        } else if (want_vector) {
+            ++vector_only_outputs_;
+        }
+
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        output.reserve(n_test, n_trial, want_matrix, want_vector);
+
+        if (want_matrix) {
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                for (LocalIndex j = 0; j < n_trial; ++j) {
+                    output.matrixEntry(i, j) = (i == j) ? matrix_value_ : Real{0.0};
+                }
+            }
+        }
+        if (want_vector) {
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                output.vectorEntry(i) = vector_value_;
+            }
+        }
+    }
+
+    bool can_matrix_{false};
+    bool can_vector_{false};
+    Real matrix_value_{0.0};
+    Real vector_value_{0.0};
+    int matrix_only_outputs_{0};
+    int vector_only_outputs_{0};
+    int matrix_vector_outputs_{0};
+};
+
 class RectangularMassKernel final : public AssemblyKernel {
 public:
     void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
@@ -3325,6 +3408,86 @@ TEST_F(StandardAssemblerTest, UsesBatchedCellPathWhenEnabled)
     EXPECT_EQ(result.elements_assembled, 2);
     EXPECT_EQ(kernel.computeCellCalls(), 0);
     EXPECT_EQ(kernel.computeCellBatchCalls(), 1);
+}
+
+TEST_F(StandardAssemblerTest, FusedBatchRefreshesVectorRequestAfterMatrixOnlyTerm)
+{
+    assembler_->initialize();
+
+    AssemblyOptions options = assembler_->getOptions();
+    options.use_batching = true;
+    options.batch_size = 8;
+    assembler_->setOptions(options);
+
+    BatchedRequestSensitiveKernel matrix_vector_kernel(
+        /*can_matrix=*/true, /*can_vector=*/true, Real{2.0}, Real{3.0});
+    BatchedRequestSensitiveKernel matrix_only_kernel(
+        /*can_matrix=*/true, /*can_vector=*/false, Real{5.0}, Real{0.0});
+
+    const std::array<FusedCellTerm, 2> initial_terms = {{
+        FusedCellTerm{
+            .test_space = space_.get(),
+            .trial_space = space_.get(),
+            .kernel = &matrix_vector_kernel,
+            .row_dof_map = &dof_map_,
+            .col_dof_map = &dof_map_,
+            .row_dof_offset = 0,
+            .col_dof_offset = 0,
+            .matrix_view = system_.get(),
+            .vector_view = system_.get(),
+            .assemble_matrix = true,
+            .assemble_vector = true,
+        },
+        FusedCellTerm{
+            .test_space = space_.get(),
+            .trial_space = space_.get(),
+            .kernel = &matrix_only_kernel,
+            .row_dof_map = &dof_map_,
+            .col_dof_map = &dof_map_,
+            .row_dof_offset = 0,
+            .col_dof_offset = 0,
+            .matrix_view = system_.get(),
+            .vector_view = nullptr,
+            .assemble_matrix = true,
+            .assemble_vector = false,
+        },
+    }};
+
+    const auto initial_result = assembler_->assembleCellsFused(
+        *mesh_, std::span<const FusedCellTerm>(initial_terms));
+    ASSERT_TRUE(initial_result.success);
+    EXPECT_EQ(matrix_vector_kernel.matrixVectorOutputs(), 2);
+    EXPECT_EQ(matrix_only_kernel.matrixOnlyOutputs(), 2);
+
+    system_->zero();
+    BatchedRequestSensitiveKernel vector_kernel(
+        /*can_matrix=*/true, /*can_vector=*/true, Real{11.0}, Real{7.0});
+    const FusedCellTerm vector_term{
+        .test_space = space_.get(),
+        .trial_space = space_.get(),
+        .kernel = &vector_kernel,
+        .row_dof_map = &dof_map_,
+        .col_dof_map = &dof_map_,
+        .row_dof_offset = 0,
+        .col_dof_offset = 0,
+        .matrix_view = nullptr,
+        .vector_view = system_.get(),
+        .assemble_matrix = false,
+        .assemble_vector = true,
+    };
+
+    const auto vector_result = assembler_->assembleCellsFused(
+        *mesh_, std::span<const FusedCellTerm>(&vector_term, 1));
+    ASSERT_TRUE(vector_result.success);
+    EXPECT_EQ(vector_kernel.vectorOnlyOutputs(), 2);
+    EXPECT_EQ(vector_kernel.matrixOnlyOutputs(), 0);
+    EXPECT_EQ(vector_result.vector_entries_inserted, 8);
+
+    EXPECT_DOUBLE_EQ(system_->getVectorEntry(0), Real{7.0});
+    EXPECT_DOUBLE_EQ(system_->getVectorEntry(1), Real{14.0});
+    EXPECT_DOUBLE_EQ(system_->getVectorEntry(2), Real{14.0});
+    EXPECT_DOUBLE_EQ(system_->getVectorEntry(3), Real{14.0});
+    EXPECT_DOUBLE_EQ(system_->getVectorEntry(4), Real{7.0});
 }
 
 TEST_F(StandardAssemblerTest, FallsBackToScalarCellPathWhenBatchingDisabled)

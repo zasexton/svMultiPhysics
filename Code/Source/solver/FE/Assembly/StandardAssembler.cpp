@@ -16452,7 +16452,19 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                          view.variables, view.old_lifecycle, view.work_lifecycle);
                 }
 
-                batch_outputs[slot].clear();
+                auto& output = batch_outputs[slot];
+                output.n_test_dofs =
+                    static_cast<LocalIndex>(batch_dofs[0][slot].row_dofs.size());
+                output.n_trial_dofs =
+                    static_cast<LocalIndex>(batch_dofs[0][slot].col_dofs.size());
+                output.reserveNoZero(
+                    output.n_test_dofs,
+                    output.n_trial_dofs,
+                    terms[0].assemble_matrix,
+                    terms[0].assemble_vector);
+                output.has_matrix = terms[0].assemble_matrix;
+                output.has_vector = terms[0].assemble_vector;
+                output.clear();
                 batch_context_ptrs[slot] = &ctx;
             }
 
@@ -16523,7 +16535,19 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                              view.variables, view.old_lifecycle, view.work_lifecycle);
                     }
 
-                    batch_outputs[slot].clear();
+                    auto& output = batch_outputs[slot];
+                    output.n_test_dofs =
+                        static_cast<LocalIndex>(batch_dofs[ti][slot].row_dofs.size());
+                    output.n_trial_dofs =
+                        static_cast<LocalIndex>(batch_dofs[ti][slot].col_dofs.size());
+                    output.reserveNoZero(
+                        output.n_test_dofs,
+                        output.n_trial_dofs,
+                        t.assemble_matrix,
+                        t.assemble_vector);
+                    output.has_matrix = t.assemble_matrix;
+                    output.has_vector = t.assemble_vector;
+                    output.clear();
                     batch_context_ptrs[slot] = &ctx;
                 }
 
