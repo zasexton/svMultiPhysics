@@ -36,12 +36,12 @@
     "wp7": "OPEN",
     "q1": "OPEN"
   },
-  "implementation_source_commit": "990b7e15f1ab1ea47a415d0dc0f281e827f75d6c",
+  "implementation_source_commit": "7a59c8f46716d7c508f954112c12bbf6eb171b7f",
   "method_coercivity_lower_bound": null,
   "uniform_bound_status": "UNFROZEN_NO_BOUND_INVENTED",
   "matching_derivation": "Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method_v2.md",
   "proposed_runner": "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification_v2.py",
-  "runner_sha256": "f307e6bf1c9cc73d33d858e5673ce683ea3034f6267bb7ca06aae19da9042b4a",
+  "runner_sha256": "9ea71b8e48f993f5041a670fda59954b6d6245411e5844479d7f8e7ed541015d",
   "qualification_bundle_binding": {
     "authority": "reciprocal_SHA256_plus_clean_qualification_execution_HEAD",
     "matrix_sha256_source": "runner_embedded_normalized_matrix_SHA256",
@@ -58,7 +58,7 @@
     "runtime_mem_available_floor_mib": 4096,
     "runtime_filesystem_free_floor_mib": 4096,
     "build_parallel": 1,
-    "build_process_session_memory_mib": 1024,
+    "build_process_session_memory_mib": 3072,
     "build_process_file_output_mib": 1024,
     "build_target_inventory_parse_limit_mib": 8,
     "binary_link_provenance_uses_monitored_process_sessions": true,
@@ -308,7 +308,7 @@
     },
     {
       "path": "Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method_v2.md",
-      "sha256": "e2befd01d7fbd5b8a2d1f5c470968af49242b461caf8119bcafa1493c9538061",
+      "sha256": "3b951a76a0694a9b6d1bc5fa859f036dc9173ee40fe41ca43abe3b27f101fd39",
       "role": "matching finite-dimensional prerequisite derivation and claim boundary"
     },
     {

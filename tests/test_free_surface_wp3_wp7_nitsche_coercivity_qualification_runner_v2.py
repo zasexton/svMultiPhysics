@@ -841,6 +841,12 @@ def test_resource_safeguards_are_exact_and_preflight_is_fail_closed(
     runner = load_runner()
     matrix = valid_draft_document()
     runner.validate_v2_contract(matrix)
+    assert (
+        runner.EXPECTED_RESOURCE_SAFEGUARDS[
+            "build_process_session_memory_mib"
+        ]
+        == 3072
+    )
 
     changed = copy.deepcopy(matrix)
     changed["resource_safeguards"]["build_parallel"] = 2
@@ -1045,6 +1051,7 @@ def test_build_phase_cannot_pass_a_resource_monitoring_failure(
     def monitored(*arguments, **options):
         Path(arguments[3]).write_bytes(b"")
         Path(arguments[4]).write_bytes(b"")
+        observed["arguments"] = arguments
         observed["options"] = options
         return {
             "return_code": 0,
@@ -1075,6 +1082,8 @@ def test_build_phase_cannot_pass_a_resource_monitoring_failure(
     assert result["monitored_build_directory"] == str(
         build_directory.resolve()
     )
+    assert observed["arguments"][7] == 3072
+    assert observed["arguments"][8] == 1024
     assert observed["options"]["filesystem_path"] == (
         build_directory.resolve()
     )

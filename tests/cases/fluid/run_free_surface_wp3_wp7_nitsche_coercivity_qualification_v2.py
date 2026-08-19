@@ -39,7 +39,7 @@ V1_METHOD_PATH = (
 )
 
 EXPECTED_NORMALIZED_REGISTRY_SHA256 = (
-    "ffc1e7cb0e28d8848873b09185fd3208de6a9256a53d6b3f92b047aa2441f529"
+    "bb7e287855cc008737f3ef364618a53a25afde95a63edbcc614400c5021f3f67"
 )
 RUNNER_SHA256_ZERO_SENTINEL = "0" * 64
 EXPECTED_SHARED_RUNNER_SHA256 = (
@@ -384,7 +384,7 @@ EXPECTED_RESOURCE_SAFEGUARDS = {
     "runtime_mem_available_floor_mib": 4096,
     "runtime_filesystem_free_floor_mib": 4096,
     "build_parallel": 1,
-    "build_process_session_memory_mib": 1024,
+    "build_process_session_memory_mib": 3072,
     "build_process_file_output_mib": 1024,
     "build_target_inventory_parse_limit_mib": 8,
     "binary_link_provenance_uses_monitored_process_sessions": True,
