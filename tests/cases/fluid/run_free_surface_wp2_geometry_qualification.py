@@ -77,6 +77,7 @@ TARGET_INVENTORY_PARSE_LIMIT_BYTES = 8 * 1024 * 1024
 BINARY_LINK_PROVENANCE_TIMEOUT_SECONDS = 60
 BINARY_LINK_PROVENANCE_MEMORY_MIB = 256
 BINARY_LINK_PROVENANCE_OUTPUT_MIB = 4
+PROCESS_SESSION_NATURAL_DRAIN_GRACE_SECONDS = 1.0
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -534,6 +535,14 @@ def flatten_gtest(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return flattened
 
 
+def gtest_name_is_disabled(name: str) -> bool:
+    suite_name, separator, test_name = name.partition(".")
+    return bool(separator) and (
+        suite_name.startswith("DISABLED_")
+        or test_name.startswith("DISABLED_")
+    )
+
+
 def coerce_quantitative_value(
     raw_value: Any, value_type: str
 ) -> tuple[Any, str | None]:
@@ -771,8 +780,21 @@ def evaluate_serial_result(
     return_code: int,
     termination_reason: str | None,
     gates: dict[str, Any],
+    explicitly_enabled_disabled_tests: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     expected = set(expected_tests)
+    explicitly_enabled = set(explicitly_enabled_disabled_tests or ())
+    if not explicitly_enabled.issubset(expected):
+        raise ValueError(
+            "explicitly enabled disabled tests must be selected tests"
+        )
+    if any(
+        not gtest_name_is_disabled(name)
+        for name in explicitly_enabled
+    ):
+        raise ValueError(
+            "explicitly enabled disabled test lacks a disabled name"
+        )
     actual = flatten_gtest(document)
     actual_names = set(actual)
     skipped_records = sorted(
@@ -787,6 +809,58 @@ def evaluate_serial_result(
     failed_records = sorted(
         name for name, result in actual.items() if result.get("failures")
     )
+    reported_disabled_count = document.get("disabled")
+    disabled_checks: list[dict[str, Any]]
+    if explicitly_enabled:
+        executed_enabled = sorted(
+            name
+            for name in explicitly_enabled
+            if name in actual
+            and actual[name].get("result") == "COMPLETED"
+            and actual[name].get("status") == "RUN"
+        )
+        declared_disabled = sorted(
+            name for name in actual if gtest_name_is_disabled(name)
+        )
+        unexpected_disabled = sorted(
+            set(declared_disabled) - explicitly_enabled
+        )
+        remaining_disabled_count = reported_disabled_count
+        if (
+            isinstance(reported_disabled_count, int)
+            and not isinstance(reported_disabled_count, bool)
+        ):
+            remaining_disabled_count -= len(executed_enabled)
+        disabled_checks = [
+            equal_check(
+                "reported_disabled_count",
+                reported_disabled_count,
+                gates["expected_disabled"] + len(explicitly_enabled),
+            ),
+            equal_check(
+                "disabled_count",
+                remaining_disabled_count,
+                gates["expected_disabled"],
+            ),
+            equal_check(
+                "explicitly_enabled_disabled_tests_executed",
+                executed_enabled,
+                sorted(explicitly_enabled),
+            ),
+            equal_check(
+                "unexpected_disabled_tests",
+                unexpected_disabled,
+                [],
+            ),
+        ]
+    else:
+        disabled_checks = [
+            equal_check(
+                "disabled_count",
+                reported_disabled_count,
+                gates["expected_disabled"],
+            )
+        ]
     return [
         equal_check("process_return_code", return_code, 0),
         equal_check("termination_reason", termination_reason, None),
@@ -797,11 +871,7 @@ def evaluate_serial_result(
             gates["expected_failures"],
         ),
         equal_check("error_count", document.get("errors"), gates["expected_errors"]),
-        equal_check(
-            "disabled_count",
-            document.get("disabled"),
-            gates["expected_disabled"],
-        ),
+        *disabled_checks,
         equal_check("skipped_count", reported_skipped_count, gates["expected_skipped"]),
         equal_check(
             "skipped_result_count",
@@ -884,6 +954,7 @@ def evaluate_mpi_gtest_results(
     expected_tests: list[str],
     ranks: int,
     gates: dict[str, Any],
+    explicitly_enabled_disabled_tests: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     expected_names = sorted(f"gtest_rank_{rank}.json" for rank in range(ranks))
     observed_names = sorted(
@@ -925,6 +996,7 @@ def evaluate_mpi_gtest_results(
                 0,
                 None,
                 gates,
+                explicitly_enabled_disabled_tests,
             ):
                 document_check["metric"] = (
                     f"mpi_gtest_rank_{rank}:{document_check['metric']}"
@@ -1255,6 +1327,7 @@ def run_monitored(
     filesystem_free_sample_count = 0
     reaped_launcher_max_resident_kib: int | None = None
     reaped_launcher_rusage_available = False
+    launcher_exit_drain_started: float | None = None
     process_session_id: int | None = None
     termination_reason: str | None = None
     termination: dict[str, Any] | None = None
@@ -1423,16 +1496,25 @@ def run_monitored(
                     termination = terminate_process_session(process)
                     break
                 if polled_return_code is not None:
-                    break
+                    if not process_session_members(process.pid):
+                        break
+                    if launcher_exit_drain_started is None:
+                        launcher_exit_drain_started = time.monotonic()
+                    elif (
+                        time.monotonic() - launcher_exit_drain_started
+                        >= PROCESS_SESSION_NATURAL_DRAIN_GRACE_SECONDS
+                    ):
+                        termination_reason = (
+                            "launcher_exited_with_lingering_session_processes"
+                        )
+                        termination = terminate_process_session(process)
+                        break
                 if not session_sample["enumeration_available"]:
                     termination_reason = "session_resource_monitoring_unavailable"
                 if termination_reason is not None:
                     termination = terminate_process_session(process)
                     break
                 time.sleep(0.05)
-            if termination_reason is None and process_session_members(process.pid):
-                termination_reason = "launcher_exited_with_lingering_session_processes"
-                termination = terminate_process_session(process)
             try:
                 return_code = process.wait(
                     timeout=1 if termination_reason is not None else None
@@ -2241,6 +2323,21 @@ def run_gtest_group(
     binary = binaries[group["binary"]]
     test_filter = ":".join(group["tests"])
     ranks = group["mpi_ranks"]
+    explicitly_enabled_disabled_tests: set[str] = set()
+    if group.get("gtest_also_run_disabled_tests") is True:
+        if ranks != 1:
+            raise ValueError(
+                "explicit disabled-test execution requires a serial group"
+            )
+        explicitly_enabled_disabled_tests = {
+            name
+            for name in group["tests"]
+            if gtest_name_is_disabled(name)
+        }
+        if not explicitly_enabled_disabled_tests:
+            raise ValueError(
+                "explicit disabled-test execution requires a selected disabled test"
+            )
     if ranks == 1:
         gtest_path = group_directory / "gtest.json"
         command = [
@@ -2249,6 +2346,8 @@ def run_gtest_group(
             "--gtest_color=no",
             f"--gtest_output=json:{gtest_path}",
         ]
+        if explicitly_enabled_disabled_tests:
+            command.insert(2, "--gtest_also_run_disabled_tests")
     else:
         gtest_path = None
         rank_wrapper = (
@@ -2320,6 +2419,7 @@ def run_gtest_group(
                 resources["return_code"],
                 resources["termination_reason"],
                 gates,
+                explicitly_enabled_disabled_tests,
             )
         except (
             AttributeError,
@@ -2361,6 +2461,7 @@ def run_gtest_group(
             group["tests"],
             ranks,
             gates,
+            explicitly_enabled_disabled_tests,
         )
         checks.extend(mpi_gtest_checks)
         if not all(check["passed"] for check in mpi_gtest_checks):

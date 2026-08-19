@@ -1037,6 +1037,87 @@ def test_monitored_wrapper_pins_threads_and_runtime_floors(
     }
 
 
+def test_shared_monitor_allows_natural_mpi_session_drain(
+    monkeypatch,
+    tmp_path,
+):
+    runner = load_runner()
+    monkeypatch.setattr(
+        runner.strict_runner,
+        "PROCESS_SESSION_NATURAL_DRAIN_GRACE_SECONDS",
+        1.0,
+    )
+    child_program = "import time; time.sleep(0.2)"
+    parent_program = (
+        "import subprocess, sys; "
+        f"subprocess.Popen([sys.executable, '-c', {child_program!r}])"
+    )
+    output_root = tmp_path / "natural_drain"
+    output_root.mkdir()
+
+    resources = runner._shared_run_monitored(
+        [sys.executable, "-c", parent_program],
+        runner.os.environ.copy(),
+        tmp_path,
+        output_root / "stdout.txt",
+        output_root / "stderr.txt",
+        output_root,
+        10,
+        256,
+        8,
+        "mpi",
+        1,
+    )
+
+    assert resources["return_code"] == 0
+    assert resources["termination_reason"] is None
+    assert resources["termination"] is None
+    assert resources["resource_monitoring_outcome"] == "PASS"
+
+
+def test_shared_monitor_terminates_mpi_session_beyond_drain_grace(
+    monkeypatch,
+    tmp_path,
+):
+    runner = load_runner()
+    monkeypatch.setattr(
+        runner.strict_runner,
+        "PROCESS_SESSION_NATURAL_DRAIN_GRACE_SECONDS",
+        0.1,
+    )
+    child_program = "import time; time.sleep(30)"
+    parent_program = (
+        "import subprocess, sys; "
+        f"subprocess.Popen([sys.executable, '-c', {child_program!r}])"
+    )
+    output_root = tmp_path / "lingering_session"
+    output_root.mkdir()
+
+    resources = runner._shared_run_monitored(
+        [sys.executable, "-c", parent_program],
+        runner.os.environ.copy(),
+        tmp_path,
+        output_root / "stdout.txt",
+        output_root / "stderr.txt",
+        output_root,
+        10,
+        256,
+        8,
+        "mpi",
+        1,
+    )
+
+    assert resources["return_code"] == 0
+    assert resources["termination_reason"] == (
+        "launcher_exited_with_lingering_session_processes"
+    )
+    assert resources["termination"] is not None
+    assert resources["termination"][
+        "all_session_processes_terminated"
+    ]
+    assert resources["resource_monitoring_outcome"] == "PASS"
+
+
 def test_build_phase_cannot_pass_a_resource_monitoring_failure(
     monkeypatch,
     tmp_path,

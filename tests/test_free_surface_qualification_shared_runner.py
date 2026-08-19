@@ -380,3 +380,146 @@ def test_mpi_group_launch_assigns_unique_result_path_per_rank(
     assert command[:4] == ["/usr/bin/mpiexec", "--oversubscribe", "-n", "2"]
     assert "/bin/sh" in command
     assert "gtest_rank_${rank_value}.json" in command[6]
+
+
+def test_serial_group_accepts_explicitly_executed_disabled_test(
+    tmp_path,
+    monkeypatch,
+):
+    runner = load_runner()
+    test_name = "DiagnosticSuite.DISABLED_SelectedDiagnostic"
+    group = {
+        "id": "selected_disabled",
+        "binary": "physics",
+        "mpi_ranks": 1,
+        "gtest_output_copies": 1,
+        "gtest_also_run_disabled_tests": True,
+        "tests": [test_name],
+        "execution": {
+            "wall_time_seconds": 60,
+            "memory_mib": 256,
+            "output_mib": 16,
+        },
+    }
+    captured = {}
+
+    def fake_run_monitored(
+        command,
+        _environment,
+        _source_root,
+        stdout_path,
+        stderr_path,
+        group_directory,
+        *_arguments,
+        **_options,
+    ):
+        captured["command"] = command
+        stdout_path.write_bytes(b"")
+        stderr_path.write_bytes(b"")
+        document = gtest_document(test_name)
+        document["disabled"] = 1
+        document["testsuites"][0]["disabled"] = 1
+        write_json(group_directory / "gtest.json", document)
+        return {
+            "return_code": 0,
+            "termination_reason": None,
+            "resource_monitoring_outcome": "PASS",
+            "termination": None,
+        }
+
+    monkeypatch.setattr(runner, "run_monitored", fake_run_monitored)
+    output_root = tmp_path / "artifacts"
+    output_root.mkdir()
+
+    result = runner.run_gtest_group(
+        group,
+        ZERO_GATES,
+        {"physics": Path("/tmp/test-binary")},
+        Path("/usr/bin/mpiexec"),
+        ROOT,
+        output_root,
+    )
+
+    checks = {check["metric"]: check for check in result["checks"]}
+    assert result["outcome"] == "PASS"
+    assert "--gtest_also_run_disabled_tests" in captured["command"]
+    assert checks["reported_disabled_count"]["actual"] == 1
+    assert checks["disabled_count"]["actual"] == 0
+    assert checks[
+        "explicitly_enabled_disabled_tests_executed"
+    ]["passed"]
+
+
+def test_explicit_disabled_test_must_have_completed(tmp_path):
+    runner = load_runner()
+    test_name = "DiagnosticSuite.DISABLED_SelectedDiagnostic"
+    document = gtest_document(
+        test_name,
+        {"status": "NOTRUN", "result": "SUPPRESSED"},
+    )
+    document["disabled"] = 1
+
+    checks = runner.evaluate_serial_result(
+        [test_name],
+        document,
+        0,
+        None,
+        ZERO_GATES,
+        {test_name},
+    )
+    by_metric = {check["metric"]: check for check in checks}
+
+    assert not by_metric["disabled_count"]["passed"]
+    assert not by_metric[
+        "explicitly_enabled_disabled_tests_executed"
+    ]["passed"]
+    assert not by_metric["incomplete_or_skipped_tests"]["passed"]
+
+
+def test_explicit_disabled_test_rejects_unexpected_disabled_result():
+    runner = load_runner()
+    expected_name = "DiagnosticSuite.DISABLED_SelectedDiagnostic"
+    unexpected_name = "DiagnosticSuite.DISABLED_UnexpectedDiagnostic"
+    document = {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "disabled": 2,
+        "skipped": 0,
+        "testsuites": [
+            {
+                "name": "DiagnosticSuite",
+                "testsuite": [
+                    {
+                        "name": expected_name.split(".", 1)[1],
+                        "status": "RUN",
+                        "result": "COMPLETED",
+                        "failures": [],
+                    },
+                    {
+                        "name": unexpected_name.split(".", 1)[1],
+                        "status": "RUN",
+                        "result": "COMPLETED",
+                        "failures": [],
+                    },
+                ],
+            }
+        ],
+    }
+
+    checks = runner.evaluate_serial_result(
+        [expected_name],
+        document,
+        0,
+        None,
+        ZERO_GATES,
+        {expected_name},
+    )
+    by_metric = {check["metric"]: check for check in checks}
+
+    assert not by_metric["reported_disabled_count"]["passed"]
+    assert not by_metric["disabled_count"]["passed"]
+    assert not by_metric["unexpected_disabled_tests"]["passed"]
+    assert by_metric["unexpected_disabled_tests"]["actual"] == [
+        unexpected_name
+    ]
