@@ -2196,6 +2196,265 @@ TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainByMark
         nullptr);
 }
 
+TEST(CutIntegrationInfrastructure,
+     ComposesDirectGeneratedVolumeRuleWithLevelSetInterfaceDomain)
+{
+    constexpr int marker = 63;
+    constexpr std::uint64_t source_revision = 11u;
+
+    auto direct_rule = makeAxisAlignedBoxCutVolumeQuadrature(
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 1.0, 1.0}},
+        0,
+        0.25,
+        CutIntegrationSide::Negative,
+        "direct-level-set-volume");
+    direct_rule.provenance.parent_entity = 7;
+    direct_rule.provenance.marker = marker;
+    direct_rule.provenance.cut_topology_revision = 31u;
+    direct_rule.provenance.predicate_policy_key = 19u;
+    direct_rule.provenance.source_value_revision = source_revision;
+
+    CutCellAssemblyMetadata direct_metadata;
+    direct_metadata.cell = 7;
+    direct_metadata.parent_entity = 7;
+    direct_metadata.volume_fraction = direct_rule.volume_fraction;
+    direct_metadata.side = CutIntegrationSide::Negative;
+    direct_metadata.provenance_id = "direct-level-set-volume";
+    direct_metadata.cut_topology_id = "direct-volume-7-negative";
+    direct_metadata.revision_key = 31u;
+    direct_metadata.cut_topology_revision = 31u;
+    direct_metadata.quadrature_policy_key = 19u;
+    direct_metadata.source_value_revision = source_revision;
+
+    CutIntegrationContext context;
+    context.addGeneratedVolumeRule(
+        marker, direct_metadata, direct_rule);
+    const auto volume_revision = context.contentRevision();
+    const auto diagnostics_before =
+        context.generatedVolumeDiagnosticsForMarkerAndSide(
+            marker, CutIntegrationSide::Negative);
+
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(
+        /*field_id=*/6,
+        /*layout_revision=*/2,
+        source_revision);
+    request.generated_domain_id = "composed-level-set-domain";
+    request.interface_marker = marker;
+    request.quadrature_order = 0;
+    request.interface_quadrature_order = 0;
+    request.volume_quadrature_order = 0;
+    request.quadrature_policy_key = 19u;
+
+    LevelSetInterfaceDomain domain(request);
+    CutInterfaceFragment fragment;
+    fragment.parent_cell = 8;
+    fragment.kind = CutInterfaceFragmentKind::Segment;
+    fragment.measure = 1.0;
+    fragment.normal = {{1.0, 0.0, 0.0}};
+    fragment.quadrature_points.push_back(
+        CutInterfaceQuadraturePoint{
+            .point = {{0.25, 0.5, 0.0}},
+            .parent_coordinate = {{0.25, 0.5, 0.0}},
+            .normal = fragment.normal,
+            .weight = fragment.measure,
+        });
+    domain.addFragment(std::move(fragment));
+
+    ASSERT_NO_THROW(context.addGeneratedInterfaceDomain(domain));
+    EXPECT_GT(context.contentRevision(), volume_revision);
+    EXPECT_TRUE(context.hasGeneratedLevelSetInterfaceMarker(marker));
+    EXPECT_TRUE(context.hasGeneratedInterfaceMarker(marker));
+    EXPECT_TRUE(context.hasGeneratedVolumeMarker(marker));
+    ASSERT_EQ(context.generatedVolumeMarkers().size(), 1u);
+    EXPECT_EQ(context.generatedVolumeMarkers().front(), marker);
+
+    const auto volume_rules =
+        context.generatedVolumeRulesForMarker(marker);
+    ASSERT_EQ(volume_rules.size(), 1u);
+    ASSERT_NE(volume_rules.front(), nullptr);
+    EXPECT_EQ(volume_rules.front()->provenance.parent_entity, 7);
+    EXPECT_EQ(volume_rules.front()->provenance.marker, marker);
+    EXPECT_EQ(volume_rules.front()->provenance.source_value_revision,
+              source_revision);
+    const auto volume_indices =
+        context.generatedVolumeRuleIndicesForMarkerAndSide(
+            marker, CutIntegrationSide::Negative);
+    ASSERT_EQ(volume_indices.size(), 1u);
+    EXPECT_EQ(volume_indices.front(), 0u);
+
+    const auto diagnostics_after =
+        context.generatedVolumeDiagnosticsForMarkerAndSide(
+            marker, CutIntegrationSide::Negative);
+    EXPECT_EQ(diagnostics_after.rule_count,
+              diagnostics_before.rule_count);
+    EXPECT_DOUBLE_EQ(diagnostics_after.active_volume,
+                     diagnostics_before.active_volume);
+    EXPECT_EQ(diagnostics_after.quadrature_points,
+              diagnostics_before.quadrature_points);
+    ASSERT_TRUE(context.hasExpectedGeneratedSourceValueRevision(marker));
+    EXPECT_EQ(context.expectedGeneratedSourceValueRevision(marker),
+              source_revision);
+    ASSERT_EQ(context.interfaceRulesForMarker(marker).size(), 1u);
+    ASSERT_NE(
+        context.findGeneratedLevelSetInterfacePublicationProvenance(marker),
+        nullptr);
+}
+
+TEST(CutIntegrationInfrastructure,
+     FailedLevelSetDomainImportPreservesDirectVolumeIndicesAndDiagnostics)
+{
+    constexpr int marker = 64;
+    constexpr std::uint64_t source_revision = 13u;
+
+    CutIntegrationContext context;
+    const auto add_direct_rule =
+        [&](CutIntegrationSide side,
+            Real cut_coordinate,
+            MeshIndex parent_entity,
+            std::string provenance_id) {
+            auto rule = makeAxisAlignedBoxCutVolumeQuadrature(
+                {{0.0, 0.0, 0.0}},
+                {{1.0, 1.0, 1.0}},
+                0,
+                cut_coordinate,
+                side,
+                provenance_id);
+            rule.provenance.parent_entity = parent_entity;
+            rule.provenance.marker = marker;
+            rule.provenance.cut_topology_revision =
+                static_cast<std::uint64_t>(parent_entity + 100);
+            rule.provenance.predicate_policy_key = 23u;
+            rule.provenance.source_value_revision = source_revision;
+
+            CutCellAssemblyMetadata metadata;
+            metadata.cell = parent_entity;
+            metadata.parent_entity = parent_entity;
+            metadata.volume_fraction = rule.volume_fraction;
+            metadata.side = side;
+            metadata.provenance_id = provenance_id;
+            metadata.cut_topology_id = provenance_id;
+            metadata.revision_key =
+                rule.provenance.cut_topology_revision;
+            metadata.cut_topology_revision =
+                rule.provenance.cut_topology_revision;
+            metadata.quadrature_policy_key = 23u;
+            metadata.source_value_revision = source_revision;
+            context.addGeneratedVolumeRule(
+                marker, std::move(metadata), std::move(rule));
+        };
+    add_direct_rule(CutIntegrationSide::Negative,
+                    0.25,
+                    7,
+                    "direct-negative-volume");
+    add_direct_rule(CutIntegrationSide::Positive,
+                    0.75,
+                    8,
+                    "direct-positive-volume");
+
+    const auto revision_before = context.contentRevision();
+    const auto volume_rule_count_before = context.volumeRules().size();
+    const auto metadata_count_before = context.metadata().size();
+    const auto binding_count_before = context.bindings().size();
+    const auto volume_markers_before = context.generatedVolumeMarkers();
+    const auto negative_indices_before =
+        context.generatedVolumeRuleIndicesForMarkerAndSide(
+            marker, CutIntegrationSide::Negative);
+    const auto positive_indices_before =
+        context.generatedVolumeRuleIndicesForMarkerAndSide(
+            marker, CutIntegrationSide::Positive);
+    const auto negative_diagnostics_before =
+        context.generatedVolumeDiagnosticsForMarkerAndSide(
+            marker, CutIntegrationSide::Negative);
+    const auto positive_diagnostics_before =
+        context.generatedVolumeDiagnosticsForMarkerAndSide(
+            marker, CutIntegrationSide::Positive);
+
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(
+        /*field_id=*/7,
+        /*layout_revision=*/2,
+        source_revision);
+    request.interface_marker = marker;
+    request.volume_quadrature_order = 0;
+    request.quadrature_policy_key = 23u;
+    LevelSetInterfaceDomain malformed_domain(request);
+
+    CutInterfaceVolumeRegion valid_region;
+    valid_region.parent_cell = 20;
+    valid_region.side = CutIntegrationSide::Negative;
+    valid_region.parent_measure = 1.0;
+    valid_region.measure = 0.2;
+    valid_region.volume_fraction = 0.2;
+    valid_region.centroid = {{0.1, 0.2, 0.0}};
+    valid_region.topology_id = "valid-volume-before-failure";
+    malformed_domain.addVolumeRegion(std::move(valid_region));
+
+    CutInterfaceVolumeRegion mismatched_region;
+    mismatched_region.interface_marker = marker + 1;
+    mismatched_region.parent_cell = 21;
+    mismatched_region.side = CutIntegrationSide::Positive;
+    mismatched_region.parent_measure = 1.0;
+    mismatched_region.measure = 0.3;
+    mismatched_region.volume_fraction = 0.3;
+    mismatched_region.centroid = {{0.8, 0.2, 0.0}};
+    mismatched_region.topology_id = "mismatched-volume-marker";
+    malformed_domain.addVolumeRegion(std::move(mismatched_region));
+
+    EXPECT_THROW(
+        context.addGeneratedInterfaceDomain(malformed_domain),
+        std::invalid_argument);
+
+    EXPECT_EQ(context.contentRevision(), revision_before);
+    EXPECT_EQ(context.volumeRules().size(), volume_rule_count_before);
+    EXPECT_EQ(context.metadata().size(), metadata_count_before);
+    EXPECT_EQ(context.bindings().size(), binding_count_before);
+    EXPECT_EQ(context.generatedVolumeMarkers(), volume_markers_before);
+    EXPECT_TRUE(context.hasGeneratedVolumeMarker(marker));
+    EXPECT_FALSE(context.hasGeneratedLevelSetInterfaceMarker(marker));
+    EXPECT_FALSE(context.hasGeneratedInterfaceMarker(marker));
+    EXPECT_EQ(
+        context.findGeneratedLevelSetInterfacePublicationProvenance(marker),
+        nullptr);
+    EXPECT_FALSE(context.hasExpectedGeneratedSourceValueRevision(marker));
+
+    EXPECT_EQ(
+        context.generatedVolumeRuleIndicesForMarkerAndSide(
+            marker, CutIntegrationSide::Negative),
+        negative_indices_before);
+    EXPECT_EQ(
+        context.generatedVolumeRuleIndicesForMarkerAndSide(
+            marker, CutIntegrationSide::Positive),
+        positive_indices_before);
+    const auto negative_diagnostics_after =
+        context.generatedVolumeDiagnosticsForMarkerAndSide(
+            marker, CutIntegrationSide::Negative);
+    const auto positive_diagnostics_after =
+        context.generatedVolumeDiagnosticsForMarkerAndSide(
+            marker, CutIntegrationSide::Positive);
+    EXPECT_EQ(negative_diagnostics_after.rule_count,
+              negative_diagnostics_before.rule_count);
+    EXPECT_DOUBLE_EQ(negative_diagnostics_after.active_volume,
+                     negative_diagnostics_before.active_volume);
+    EXPECT_EQ(negative_diagnostics_after.quadrature_points,
+              negative_diagnostics_before.quadrature_points);
+    EXPECT_DOUBLE_EQ(negative_diagnostics_after.min_rule_measure,
+                     negative_diagnostics_before.min_rule_measure);
+    EXPECT_DOUBLE_EQ(negative_diagnostics_after.max_rule_measure,
+                     negative_diagnostics_before.max_rule_measure);
+    EXPECT_EQ(positive_diagnostics_after.rule_count,
+              positive_diagnostics_before.rule_count);
+    EXPECT_DOUBLE_EQ(positive_diagnostics_after.active_volume,
+                     positive_diagnostics_before.active_volume);
+    EXPECT_EQ(positive_diagnostics_after.quadrature_points,
+              positive_diagnostics_before.quadrature_points);
+    EXPECT_DOUBLE_EQ(positive_diagnostics_after.min_rule_measure,
+                     positive_diagnostics_before.min_rule_measure);
+    EXPECT_DOUBLE_EQ(positive_diagnostics_after.max_rule_measure,
+                     positive_diagnostics_before.max_rule_measure);
+}
+
 TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainForRequestedVolumeSide)
 {
     CutInterfaceDomainRequest request;

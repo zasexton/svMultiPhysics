@@ -725,7 +725,6 @@ public:
                 generated_interface_boundary_provenance_by_marker_.end() ||
             generated_active_boundary_provenance_by_marker_.find(marker) !=
                 generated_active_boundary_provenance_by_marker_.end() ||
-            generated_volume_rule_indices_by_marker_.contains(marker) ||
             generated_interface_rule_indices_by_marker_.contains(marker) ||
             generated_interface_two_sided_bindings_by_marker_.contains(
                 marker)) {
@@ -755,6 +754,32 @@ public:
         const auto old_generated_pruned_volume_measure =
             generated_pruned_volume_measure_;
         const auto old_content_revision = content_revision_;
+        const auto marker_indices_before =
+            generated_volume_rule_indices_by_marker_.find(marker);
+        const bool had_marker_indices =
+            marker_indices_before !=
+            generated_volume_rule_indices_by_marker_.end();
+        const auto old_marker_index_count =
+            had_marker_indices
+                ? marker_indices_before->second.size()
+                : std::size_t{0u};
+        const auto side_buckets_before =
+            generated_volume_rule_indices_by_marker_and_side_.find(
+                marker);
+        const bool had_side_buckets =
+            side_buckets_before !=
+            generated_volume_rule_indices_by_marker_and_side_.end();
+        std::array<std::size_t, 2> old_side_index_counts{{0u, 0u}};
+        std::array<GeneratedVolumeRuleDiagnostics, 2>
+            old_side_diagnostics{};
+        if (had_side_buckets) {
+            for (std::size_t side = 0u; side < 2u; ++side) {
+                old_side_index_counts[side] =
+                    side_buckets_before->second[side].indices.size();
+                old_side_diagnostics[side] =
+                    side_buckets_before->second[side].diagnostics;
+            }
+        }
         struct ExpectedRevisionCheckpoint {
             int marker{-1};
             bool existed{false};
@@ -953,10 +978,43 @@ public:
                 old_generated_level_set_interface_marker_size);
             generated_level_set_interface_provenance_by_marker_.erase(
                 marker);
-            generated_volume_rule_indices_by_marker_.erase(
-                marker);
-            generated_volume_rule_indices_by_marker_and_side_.erase(
-                marker);
+            const auto marker_indices =
+                generated_volume_rule_indices_by_marker_.find(marker);
+            if (had_marker_indices) {
+                if (marker_indices !=
+                    generated_volume_rule_indices_by_marker_.end()) {
+                    marker_indices->second.resize(
+                        old_marker_index_count);
+                }
+            } else if (
+                marker_indices !=
+                generated_volume_rule_indices_by_marker_.end()) {
+                generated_volume_rule_indices_by_marker_.erase(
+                    marker_indices);
+            }
+            const auto side_buckets =
+                generated_volume_rule_indices_by_marker_and_side_.find(
+                    marker);
+            if (had_side_buckets) {
+                if (side_buckets !=
+                    generated_volume_rule_indices_by_marker_and_side_
+                        .end()) {
+                    for (std::size_t side = 0u;
+                         side < 2u;
+                         ++side) {
+                        side_buckets->second[side].indices.resize(
+                            old_side_index_counts[side]);
+                        side_buckets->second[side].diagnostics =
+                            old_side_diagnostics[side];
+                    }
+                }
+            } else if (
+                side_buckets !=
+                generated_volume_rule_indices_by_marker_and_side_
+                    .end()) {
+                generated_volume_rule_indices_by_marker_and_side_.erase(
+                    side_buckets);
+            }
             generated_interface_rule_indices_by_marker_.erase(
                 marker);
             generated_interface_two_sided_bindings_by_marker_.erase(
