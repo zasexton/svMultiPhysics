@@ -1,0 +1,119 @@
+{
+  "closure_contract": [
+    {
+      "claim": "exact_binary64_dyadic_dense_and_factorized_spd_quotient_prerequisite",
+      "evidence": [
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundProvesDiagonalEquality",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRetainsTinyPositiveMode",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesThreeByThreeBareissDivision",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesSymmetricPsdPivotSwap",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsLateIndefinitePivot",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsSemidefiniteDenominator",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsIndefiniteNumerator",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsUnrepresentableUpperBound",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnroundedSparseTangentSum",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales",
+        "DenseLinearAlgebra.ExactFactorizedBoundRejectsSingularAndMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundUsesLinearPositiveScaleMultipliers",
+        "DenseLinearAlgebra.ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient"
+      ]
+    },
+    {
+      "claim": "serial_certified_aggregate_trace_prerequisite",
+      "evidence": [
+        "GeneratedBoundaryAggregateTraceCertificate.FormBindingRequiresExactlyOneRouteAnchorBeforeMutation",
+        "GeneratedBoundaryAggregateTraceCertificate.FullActiveUnitTriangleHasAnalyticBoundFour",
+        "GeneratedBoundaryAggregateTraceCertificate.RootedCutSquareCertifiesActualAggregateProlongation",
+        "GeneratedBoundaryAggregateTraceCertificate.RootlessAggregateSupportIsRejected",
+        "GeneratedBoundaryAggregateTraceCertificate.ImportedGeneratedDomainsWithoutAuthoritativeSnapshotFailClosed",
+        "GeneratedBoundaryAggregateTraceCertificate.ScalarFieldIsRejectedAsAnUnsupportedTraceSpace",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricPolicyRejectsAnInsufficientConfiguredPenalty",
+        "GeneratedBoundaryAggregateTraceCertificate.UnsymmetricPolicyRetainsTheBoundWithoutACoercivityThreshold"
+      ]
+    },
+    {
+      "claim": "exact_two_rank_collective_certified_trace_prerequisite",
+      "evidence": [
+        "GeneratedBoundaryAggregateTraceCertificateMPI.RootedCrossRankAggregateHasAnalyticBoundThirtyTwoOverSeventyNine"
+      ]
+    },
+    {
+      "claim": "finite_108_case_certified_trace_and_sampled_spectrum_consistency_prerequisite",
+      "evidence": [
+        "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2"
+      ]
+    }
+  ],
+  "gates": {
+    "expected_disabled": 0,
+    "expected_distinct_test_count": 26,
+    "expected_errors": 0,
+    "expected_failures": 0,
+    "expected_group_count": 4,
+    "expected_quantitative_evidence_count": 8,
+    "expected_skipped": 0
+  },
+  "matrix_status_at_execution": "FROZEN_BEFORE_EXECUTION",
+  "qualification_scope": "Certified finite-dimensional aggregate trace and symmetric-Nitsche prerequisite evidence in the stated affine P1 constant-viscosity envelope; this matrix does not close FSR-16, FSR-07, WP-3, WP-7, Q1, or establish a uniform method coercivity bound.",
+  "quantitative_evidence": [
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_case_count",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": 108,
+      "type": "integer"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_maximum_upper_bound",
+      "relation": "less_than",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": 12.0,
+      "type": "real"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_minimum_finite_sample_lower_bound",
+      "relation": "greater_than",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": 0.0,
+      "type": "real"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_minimum_sampled_eigenvalue_gap",
+      "relation": "greater_than_or_equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": -1e-11,
+      "type": "real"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_exact_common_kernel_quotient_patch_count",
+      "relation": "greater_than",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": 0,
+      "type": "integer"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_method_coercivity_lower_bound",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": "null",
+      "type": "string"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_uniform_bound_status",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": "UNFROZEN_NO_BOUND_INVENTED",
+      "type": "string"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_accepted_claim",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": "joint_low_level_prerequisite",
+      "type": "string"
+    }
+  ]
+}

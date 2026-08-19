@@ -1,0 +1,182 @@
+{
+  "tests": 16,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-08-18T20:22:33Z",
+  "time": "0.003s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "DenseLinearAlgebra",
+      "tests": 16,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-08-18T20:22:33Z",
+      "time": "0.002s",
+      "testsuite": [
+        {
+          "name": "ExactDyadicSpdGeneralizedBoundProvesDiagonalEquality",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1081,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactDyadicSpdGeneralizedBoundRetainsTinyPositiveMode",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1126,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactDyadicSpdGeneralizedBoundExercisesThreeByThreeBareissDivision",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1151,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactDyadicSpdGeneralizedBoundExercisesSymmetricPsdPivotSwap",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1175,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactDyadicSpdGeneralizedBoundRejectsLateIndefinitePivot",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1199,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactDyadicSpdGeneralizedBoundRejectsSemidefiniteDenominator",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1220,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactDyadicSpdGeneralizedBoundRejectsIndefiniteNumerator",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1239,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactDyadicSpdGeneralizedBoundRejectsUnrepresentableUpperBound",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1258,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1275,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1286,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1324,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactFactorizedBoundKeepsUnroundedSparseTangentSum",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1411,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1462,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactFactorizedBoundRejectsSingularAndMalformedInputs",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1506,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0.001s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactFactorizedBoundUsesLinearPositiveScaleMultipliers",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1684,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        },
+        {
+          "name": "ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Math\/test_DenseLinearAlgebra.cpp",
+          "line": 1735,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "DenseLinearAlgebra"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,969 @@
+{
+  "artifact_schema_version": 1,
+  "builds": [
+    {
+      "binaries_before_clean": {
+        "assembly": {
+          "exists": true,
+          "is_file": true,
+          "path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_assembly",
+          "sha256": "e35cac8a9c389808696ceb9bdf518382cfb5a6916a746ec9a1087952e66b01c1"
+        },
+        "assembly_mpi": {
+          "exists": true,
+          "is_file": true,
+          "path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_assembly_mpi",
+          "sha256": "7bc663a59f924a1ea627367c188340e907a7d72d7d4aec5ccacfd1369f5cbf5d"
+        },
+        "math": {
+          "exists": true,
+          "is_file": true,
+          "path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_math",
+          "sha256": "d82242fb333d3ee43a1f276fc9afd5ced11aec073ae322431546b488908100ca"
+        }
+      },
+      "binary_keys": [
+        "assembly",
+        "assembly_mpi",
+        "math"
+      ],
+      "build": {
+        "all_supplied_binaries_recreated": true,
+        "binaries_after_build": {
+          "assembly": {
+            "executable": true,
+            "exists": true,
+            "path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_assembly",
+            "sha256": "e35cac8a9c389808696ceb9bdf518382cfb5a6916a746ec9a1087952e66b01c1"
+          },
+          "assembly_mpi": {
+            "executable": true,
+            "exists": true,
+            "path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_assembly_mpi",
+            "sha256": "7bc663a59f924a1ea627367c188340e907a7d72d7d4aec5ccacfd1369f5cbf5d"
+          },
+          "math": {
+            "executable": true,
+            "exists": true,
+            "path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_math",
+            "sha256": "d82242fb333d3ee43a1f276fc9afd5ced11aec073ae322431546b488908100ca"
+          }
+        },
+        "command": [
+          "/share/software/user/open/cmake/3.31.4/bin/cmake",
+          "--build",
+          "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+          "--parallel",
+          "1",
+          "--target",
+          "test_fe_assembly",
+          "test_fe_assembly_mpi",
+          "test_fe_math"
+        ],
+        "elapsed_seconds": 1874.6853326760174,
+        "monitored_build_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+        "outcome": "PASS",
+        "process_return_code": 0,
+        "resource_monitoring": {
+          "aggregate_memory_measurement": "sampled_peak",
+          "complete_session_process_coverage": true,
+          "filesystem_free_sample_count": 16515,
+          "final_output_bytes": 2474868,
+          "host_available_sample_count": 16515,
+          "launch_mode": "direct_serial",
+          "memory_enforcement_method": "per_process_address_and_file_size_limits_plus_sampled_session_resident_memory",
+          "memory_enforcement_scope": "spawned_process_session",
+          "minimum_filesystem_free_mib": 4096,
+          "minimum_host_available_mib": 4096,
+          "minimum_observed_filesystem_free_mib": 104834850,
+          "minimum_observed_host_available_mib": 228986,
+          "monitor_sample_count": 16514,
+          "monitored_filesystems": [
+            "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+            "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/evidence"
+          ],
+          "peak_aggregate_resident_kib_sampled": 2083724,
+          "peak_process_count_sampled": 10,
+          "peak_process_group_count_sampled": 1,
+          "peak_resident_kib_sampled": 4720,
+          "peak_resident_sample_count": 10,
+          "process_session_id": 15364,
+          "reaped_launcher_fallback_allowed": true,
+          "reaped_launcher_fallback_requires_session_enumeration": true,
+          "reaped_launcher_fallback_scope": "direct_serial_launcher_process",
+          "reaped_launcher_fallback_source": "wait4_ru_maxrss",
+          "reaped_launcher_fallback_used": false,
+          "reaped_launcher_max_resident_kib": 2066028,
+          "reaped_launcher_rusage_available": true,
+          "required_simultaneous_process_samples": 1,
+          "resident_read_failure_count": 8,
+          "resource_monitoring_method": "sampled_process_session",
+          "resource_monitoring_outcome": "PASS",
+          "return_code": 0,
+          "session_enumeration_failure_count": 0,
+          "stat_read_failure_count": 52,
+          "successful_session_sample_count": 16513,
+          "termination": null,
+          "termination_reason": null,
+          "wall_time_seconds": 1874.6853326760174
+        },
+        "return_code": 0,
+        "stderr": "builds/build_01/build_stderr.txt",
+        "stderr_sha256": "9eda8dec77fe426c5fda5bb95f574040c54907d8e9450eebcb26a2728f4557b8",
+        "stdout": "builds/build_01/build_stdout.txt",
+        "stdout_sha256": "d8717699dfb81f9784325230934c85b8f15bac51119f8ab821c86ad2b7701f43",
+        "termination": null,
+        "termination_reason": null,
+        "timed_out": false
+      },
+      "build_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+      "cache_is_symlink_after_build": false,
+      "cache_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/CMakeCache.txt",
+      "cache_present_after_build": true,
+      "cache_sha256": "bd93507e2ed7e132e7dd17a587c9e0cf66c8129b6fa384d977fedf6b661f0436",
+      "clean": {
+        "all_supplied_binaries_absent": true,
+        "binaries_after_clean": {
+          "assembly": {
+            "exists": false,
+            "is_file": false,
+            "path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_assembly"
+          },
+          "assembly_mpi": {
+            "exists": false,
+            "is_file": false,
+            "path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_assembly_mpi"
+          },
+          "math": {
+            "exists": false,
+            "is_file": false,
+            "path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_math"
+          }
+        },
+        "cache_is_symlink_after_clean": false,
+        "cache_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/CMakeCache.txt",
+        "cache_present_after_clean": true,
+        "cmake_home_directory_after_clean": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/FE",
+        "cmake_home_matches_after_clean": true,
+        "command": [
+          "/share/software/user/open/cmake/3.31.4/bin/cmake",
+          "--build",
+          "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+          "--target",
+          "clean"
+        ],
+        "elapsed_seconds": 1.4789480619947426,
+        "monitored_build_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+        "outcome": "PASS",
+        "process_return_code": 0,
+        "resource_monitoring": {
+          "aggregate_memory_measurement": "sampled_peak",
+          "complete_session_process_coverage": true,
+          "filesystem_free_sample_count": 13,
+          "final_output_bytes": 318886,
+          "host_available_sample_count": 13,
+          "launch_mode": "direct_serial",
+          "memory_enforcement_method": "per_process_address_and_file_size_limits_plus_sampled_session_resident_memory",
+          "memory_enforcement_scope": "spawned_process_session",
+          "minimum_filesystem_free_mib": 4096,
+          "minimum_host_available_mib": 4096,
+          "minimum_observed_filesystem_free_mib": 104834869,
+          "minimum_observed_host_available_mib": 231270,
+          "monitor_sample_count": 12,
+          "monitored_filesystems": [
+            "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+            "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/evidence"
+          ],
+          "peak_aggregate_resident_kib_sampled": 16788,
+          "peak_process_count_sampled": 6,
+          "peak_process_group_count_sampled": 1,
+          "peak_resident_kib_sampled": 4720,
+          "peak_resident_sample_count": 6,
+          "process_session_id": 15219,
+          "reaped_launcher_fallback_allowed": true,
+          "reaped_launcher_fallback_requires_session_enumeration": true,
+          "reaped_launcher_fallback_scope": "direct_serial_launcher_process",
+          "reaped_launcher_fallback_source": "wait4_ru_maxrss",
+          "reaped_launcher_fallback_used": false,
+          "reaped_launcher_max_resident_kib": 20140,
+          "reaped_launcher_rusage_available": true,
+          "required_simultaneous_process_samples": 1,
+          "resident_read_failure_count": 0,
+          "resource_monitoring_method": "sampled_process_session",
+          "resource_monitoring_outcome": "PASS",
+          "return_code": 0,
+          "session_enumeration_failure_count": 0,
+          "stat_read_failure_count": 0,
+          "successful_session_sample_count": 12,
+          "termination": null,
+          "termination_reason": null,
+          "wall_time_seconds": 1.4789480619947426
+        },
+        "return_code": 0,
+        "single_configuration_after_clean": true,
+        "stderr": "builds/build_01/clean_stderr.txt",
+        "stderr_sha256": "c507f2880cb48ab6af9abcc339c8b8aa31ed937c1167f9c8de3f7ff232568cc7",
+        "stdout": "builds/build_01/clean_stdout.txt",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "termination": null,
+        "termination_reason": null,
+        "timed_out": false
+      },
+      "cmake_home_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/FE",
+      "cmake_home_matches": true,
+      "configure": {
+        "cache_is_symlink_after_configure": false,
+        "cache_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/CMakeCache.txt",
+        "cache_present_after_configure": true,
+        "cmake_home_directory_after_configure": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/FE",
+        "cmake_home_matches_after_configure": true,
+        "command": [
+          "/share/software/user/open/cmake/3.31.4/bin/cmake",
+          "-S",
+          "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/FE",
+          "-B",
+          "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe"
+        ],
+        "elapsed_seconds": 15.561514831992099,
+        "expected_cmake_home": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/FE",
+        "monitored_build_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+        "outcome": "PASS",
+        "process_return_code": 0,
+        "resource_monitoring": {
+          "aggregate_memory_measurement": "sampled_peak",
+          "complete_session_process_coverage": true,
+          "filesystem_free_sample_count": 127,
+          "final_output_bytes": 318478,
+          "host_available_sample_count": 127,
+          "launch_mode": "direct_serial",
+          "memory_enforcement_method": "per_process_address_and_file_size_limits_plus_sampled_session_resident_memory",
+          "memory_enforcement_scope": "spawned_process_session",
+          "minimum_filesystem_free_mib": 4096,
+          "minimum_host_available_mib": 4096,
+          "minimum_observed_filesystem_free_mib": 104834849,
+          "minimum_observed_host_available_mib": 231225,
+          "monitor_sample_count": 126,
+          "monitored_filesystems": [
+            "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+            "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/evidence"
+          ],
+          "peak_aggregate_resident_kib_sampled": 42704,
+          "peak_process_count_sampled": 9,
+          "peak_process_group_count_sampled": 1,
+          "peak_resident_kib_sampled": 19716,
+          "peak_resident_sample_count": 9,
+          "process_session_id": 14729,
+          "reaped_launcher_fallback_allowed": true,
+          "reaped_launcher_fallback_requires_session_enumeration": true,
+          "reaped_launcher_fallback_scope": "direct_serial_launcher_process",
+          "reaped_launcher_fallback_source": "wait4_ru_maxrss",
+          "reaped_launcher_fallback_used": false,
+          "reaped_launcher_max_resident_kib": 26128,
+          "reaped_launcher_rusage_available": true,
+          "required_simultaneous_process_samples": 1,
+          "resident_read_failure_count": 0,
+          "resource_monitoring_method": "sampled_process_session",
+          "resource_monitoring_outcome": "PASS",
+          "return_code": 0,
+          "session_enumeration_failure_count": 0,
+          "stat_read_failure_count": 0,
+          "successful_session_sample_count": 125,
+          "termination": null,
+          "termination_reason": null,
+          "wall_time_seconds": 15.561514831992099
+        },
+        "return_code": 0,
+        "single_configuration_after_configure": true,
+        "stderr": "builds/build_01/configure_stderr.txt",
+        "stderr_sha256": "f838663da8c460bb4fb1ce1a8d096c94da87f3b141050d24aa9df1c586ea5281",
+        "stdout": "builds/build_01/configure_stdout.txt",
+        "stdout_sha256": "cdb170a051fce9567dec535a89b66962b97b0ffdcf7a3225f19b173ca8f531bc",
+        "termination": null,
+        "termination_reason": null,
+        "timed_out": false
+      },
+      "diagnostic": null,
+      "expected_cmake_homes": [
+        "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/FE"
+      ],
+      "outcome": "PASS",
+      "single_configuration_after_build": true,
+      "targets": [
+        "test_fe_assembly",
+        "test_fe_assembly_mpi",
+        "test_fe_math"
+      ]
+    },
+    {
+      "binaries_before_clean": {
+        "physics": {
+          "exists": true,
+          "is_file": true,
+          "path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics/test_physics",
+          "sha256": "bf6244a4db06b4ae82835ff26da4500d5e27bceeaa38cbffcd29d8c64787d1ee"
+        }
+      },
+      "binary_keys": [
+        "physics"
+      ],
+      "build": {
+        "all_supplied_binaries_recreated": true,
+        "binaries_after_build": {
+          "physics": {
+            "executable": true,
+            "exists": true,
+            "path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics/test_physics",
+            "sha256": "bf6244a4db06b4ae82835ff26da4500d5e27bceeaa38cbffcd29d8c64787d1ee"
+          }
+        },
+        "command": [
+          "/share/software/user/open/cmake/3.31.4/bin/cmake",
+          "--build",
+          "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics",
+          "--parallel",
+          "1",
+          "--target",
+          "test_physics"
+        ],
+        "elapsed_seconds": 1848.7079711729893,
+        "monitored_build_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics",
+        "outcome": "PASS",
+        "process_return_code": 0,
+        "resource_monitoring": {
+          "aggregate_memory_measurement": "sampled_peak",
+          "complete_session_process_coverage": true,
+          "filesystem_free_sample_count": 17313,
+          "final_output_bytes": 4323504,
+          "host_available_sample_count": 17313,
+          "launch_mode": "direct_serial",
+          "memory_enforcement_method": "per_process_address_and_file_size_limits_plus_sampled_session_resident_memory",
+          "memory_enforcement_scope": "spawned_process_session",
+          "minimum_filesystem_free_mib": 4096,
+          "minimum_host_available_mib": 4096,
+          "minimum_observed_filesystem_free_mib": 104834863,
+          "minimum_observed_host_available_mib": 227988,
+          "monitor_sample_count": 17312,
+          "monitored_filesystems": [
+            "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics",
+            "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/evidence"
+          ],
+          "peak_aggregate_resident_kib_sampled": 2077844,
+          "peak_process_count_sampled": 10,
+          "peak_process_group_count_sampled": 1,
+          "peak_resident_kib_sampled": 4716,
+          "peak_resident_sample_count": 10,
+          "process_session_id": 27285,
+          "reaped_launcher_fallback_allowed": true,
+          "reaped_launcher_fallback_requires_session_enumeration": true,
+          "reaped_launcher_fallback_scope": "direct_serial_launcher_process",
+          "reaped_launcher_fallback_source": "wait4_ru_maxrss",
+          "reaped_launcher_fallback_used": false,
+          "reaped_launcher_max_resident_kib": 2065892,
+          "reaped_launcher_rusage_available": true,
+          "required_simultaneous_process_samples": 1,
+          "resident_read_failure_count": 15,
+          "resource_monitoring_method": "sampled_process_session",
+          "resource_monitoring_outcome": "PASS",
+          "return_code": 0,
+          "session_enumeration_failure_count": 0,
+          "stat_read_failure_count": 30,
+          "successful_session_sample_count": 17312,
+          "termination": null,
+          "termination_reason": null,
+          "wall_time_seconds": 1848.7079711729893
+        },
+        "return_code": 0,
+        "stderr": "builds/build_02/build_stderr.txt",
+        "stderr_sha256": "cbbf52fc09e72c7c92d07d4333bce7ca16aa779708424875f66021a687a0dc19",
+        "stdout": "builds/build_02/build_stdout.txt",
+        "stdout_sha256": "f9e2e30990f845c900cbaeb4da242d17f27bf608f368740dfa22717ab4e33da0",
+        "termination": null,
+        "termination_reason": null,
+        "timed_out": false
+      },
+      "build_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics",
+      "cache_is_symlink_after_build": false,
+      "cache_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics/CMakeCache.txt",
+      "cache_present_after_build": true,
+      "cache_sha256": "a1202b17c703479fdd19dc1495e957d439e145dac1f165cbc6f806030218fb11",
+      "clean": {
+        "all_supplied_binaries_absent": true,
+        "binaries_after_clean": {
+          "physics": {
+            "exists": false,
+            "is_file": false,
+            "path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics/test_physics"
+          }
+        },
+        "cache_is_symlink_after_clean": false,
+        "cache_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics/CMakeCache.txt",
+        "cache_present_after_clean": true,
+        "cmake_home_directory_after_clean": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/Physics",
+        "cmake_home_matches_after_clean": true,
+        "command": [
+          "/share/software/user/open/cmake/3.31.4/bin/cmake",
+          "--build",
+          "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics",
+          "--target",
+          "clean"
+        ],
+        "elapsed_seconds": 1.7881451720022596,
+        "monitored_build_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics",
+        "outcome": "PASS",
+        "process_return_code": 0,
+        "resource_monitoring": {
+          "aggregate_memory_measurement": "sampled_peak",
+          "complete_session_process_coverage": true,
+          "filesystem_free_sample_count": 18,
+          "final_output_bytes": 2490123,
+          "host_available_sample_count": 18,
+          "launch_mode": "direct_serial",
+          "memory_enforcement_method": "per_process_address_and_file_size_limits_plus_sampled_session_resident_memory",
+          "memory_enforcement_scope": "spawned_process_session",
+          "minimum_filesystem_free_mib": 4096,
+          "minimum_host_available_mib": 4096,
+          "minimum_observed_filesystem_free_mib": 104834847,
+          "minimum_observed_host_available_mib": 230707,
+          "monitor_sample_count": 17,
+          "monitored_filesystems": [
+            "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics",
+            "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/evidence"
+          ],
+          "peak_aggregate_resident_kib_sampled": 15964,
+          "peak_process_count_sampled": 6,
+          "peak_process_group_count_sampled": 1,
+          "peak_resident_kib_sampled": 4720,
+          "peak_resident_sample_count": 6,
+          "process_session_id": 27194,
+          "reaped_launcher_fallback_allowed": true,
+          "reaped_launcher_fallback_requires_session_enumeration": true,
+          "reaped_launcher_fallback_scope": "direct_serial_launcher_process",
+          "reaped_launcher_fallback_source": "wait4_ru_maxrss",
+          "reaped_launcher_fallback_used": false,
+          "reaped_launcher_max_resident_kib": 20144,
+          "reaped_launcher_rusage_available": true,
+          "required_simultaneous_process_samples": 1,
+          "resident_read_failure_count": 0,
+          "resource_monitoring_method": "sampled_process_session",
+          "resource_monitoring_outcome": "PASS",
+          "return_code": 0,
+          "session_enumeration_failure_count": 0,
+          "stat_read_failure_count": 0,
+          "successful_session_sample_count": 16,
+          "termination": null,
+          "termination_reason": null,
+          "wall_time_seconds": 1.7881451720022596
+        },
+        "return_code": 0,
+        "single_configuration_after_clean": true,
+        "stderr": "builds/build_02/clean_stderr.txt",
+        "stderr_sha256": "1823d9aa8e023a8f208c439d3ed33283cf28d6ac7178bf7e9d8299678b5e8253",
+        "stdout": "builds/build_02/clean_stdout.txt",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "termination": null,
+        "termination_reason": null,
+        "timed_out": false
+      },
+      "cmake_home_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/Physics",
+      "cmake_home_matches": true,
+      "configure": {
+        "cache_is_symlink_after_configure": false,
+        "cache_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics/CMakeCache.txt",
+        "cache_present_after_configure": true,
+        "cmake_home_directory_after_configure": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/Physics",
+        "cmake_home_matches_after_configure": true,
+        "command": [
+          "/share/software/user/open/cmake/3.31.4/bin/cmake",
+          "-S",
+          "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/Physics",
+          "-B",
+          "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics"
+        ],
+        "elapsed_seconds": 18.540516760986065,
+        "expected_cmake_home": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/Physics",
+        "monitored_build_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics",
+        "outcome": "PASS",
+        "process_return_code": 0,
+        "resource_monitoring": {
+          "aggregate_memory_measurement": "sampled_peak",
+          "complete_session_process_coverage": true,
+          "filesystem_free_sample_count": 170,
+          "final_output_bytes": 2489579,
+          "host_available_sample_count": 170,
+          "launch_mode": "direct_serial",
+          "memory_enforcement_method": "per_process_address_and_file_size_limits_plus_sampled_session_resident_memory",
+          "memory_enforcement_scope": "spawned_process_session",
+          "minimum_filesystem_free_mib": 4096,
+          "minimum_host_available_mib": 4096,
+          "minimum_observed_filesystem_free_mib": 104834846,
+          "minimum_observed_host_available_mib": 230693,
+          "monitor_sample_count": 169,
+          "monitored_filesystems": [
+            "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics",
+            "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/evidence"
+          ],
+          "peak_aggregate_resident_kib_sampled": 34116,
+          "peak_process_count_sampled": 9,
+          "peak_process_group_count_sampled": 1,
+          "peak_resident_kib_sampled": 16956,
+          "peak_resident_sample_count": 9,
+          "process_session_id": 26937,
+          "reaped_launcher_fallback_allowed": true,
+          "reaped_launcher_fallback_requires_session_enumeration": true,
+          "reaped_launcher_fallback_scope": "direct_serial_launcher_process",
+          "reaped_launcher_fallback_source": "wait4_ru_maxrss",
+          "reaped_launcher_fallback_used": false,
+          "reaped_launcher_max_resident_kib": 26144,
+          "reaped_launcher_rusage_available": true,
+          "required_simultaneous_process_samples": 1,
+          "resident_read_failure_count": 0,
+          "resource_monitoring_method": "sampled_process_session",
+          "resource_monitoring_outcome": "PASS",
+          "return_code": 0,
+          "session_enumeration_failure_count": 0,
+          "stat_read_failure_count": 1,
+          "successful_session_sample_count": 168,
+          "termination": null,
+          "termination_reason": null,
+          "wall_time_seconds": 18.540516760986065
+        },
+        "return_code": 0,
+        "single_configuration_after_configure": true,
+        "stderr": "builds/build_02/configure_stderr.txt",
+        "stderr_sha256": "55c6d5924a5fb2e534fbd3354133aebb897b47660924beea9b4d38b2b28769f2",
+        "stdout": "builds/build_02/configure_stdout.txt",
+        "stdout_sha256": "c11601f8ea9d2158863684fd65dcf4901a8008ba85bb30364862ec365672995d",
+        "termination": null,
+        "termination_reason": null,
+        "timed_out": false
+      },
+      "diagnostic": null,
+      "expected_cmake_homes": [
+        "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/Physics"
+      ],
+      "outcome": "PASS",
+      "single_configuration_after_build": true,
+      "targets": [
+        "test_physics"
+      ]
+    }
+  ],
+  "certified_aggregate_trace_contract": {
+    "aggregation_state": "current_finalized_trace_eligible_closed_tangent_rows",
+    "cache_binding": "cut_context_snapshot_source_value_affine_constraint_and_aggregation_revisions",
+    "certificate_selects_or_mutates_penalty": false,
+    "effective_penalty_multiplier": "alpha_i=gamma_i*p^2_when_scaled_else_gamma_i",
+    "factorized_provenance": "proof_flags_counts_work_metrics_and_nonzero_input_digest_bound_into_certificate_digest",
+    "finite_space_energy_ratio_lower_bound": "downward_rounded_(1-sqrt(R_op))",
+    "floating_spectral_role": "optional_diagnostics_only",
+    "formed_dense_matrix_role": "optional_floating_diagnostics_only",
+    "frame": "reference",
+    "global_bound_rule": "outward_rounded_maximum_over_active_cells_of_summed_overlapping_patch_bounds",
+    "gram_map_rows_order": "strictly_increasing",
+    "maximum_exact_retained_quotient_dimension": 32,
+    "maximum_terminal_tangent_dimension": 128,
+    "navier_slip_robin_coefficient_rescaled": false,
+    "one_active_feature_per_patch": true,
+    "patch_inequality": "integral_Gamma_(h_normal/mu)*abs(2*mu*epsilon(v)*n)^2 <= C_patch*integral_support_2*mu*epsilon(v):epsilon(v)",
+    "proof_input": "raw_affine_Gram_factors_with_exact_positive_sum_product_weights",
+    "quotient_authority": "exact_binary64_dyadic_factorized_positive_Gram_D_and_N_psd_common_kernel_rank_identity_then_D_spd_N_psd_and_qD_minus_N_psd_on_the_exact_principal_gauge",
+    "secondary_common_kernel": "exact_rank(D_plus_N)_equals_rank(D)_proof_with_deterministic_principal_coordinate_gauge_or_fail_closed",
+    "supported_cells": [
+      "Triangle3",
+      "Tetra4"
+    ],
+    "supported_space": "affine_p1_product_velocity",
+    "symmetric_acceptance": "R_op<1",
+    "symmetric_group_ratio": "R_op=outward_rounded_sum_i(C_i/alpha_i)",
+    "tangent_quotient": "exact_sparse_raw_to_retained_coordinate_map",
+    "unsymmetric_contract": "revision_bound_continuity_diagnostic_without_symmetric_threshold",
+    "viscosity": "constant_positive_finite",
+    "zero_dimensional_quotient": "vacuous_after_complete_factor_map_and_work_preflight"
+  },
+  "certified_aggregate_trace_evidence": {
+    "outcome": "NOT_PRODUCED",
+    "path": "aggregate_trace_certificate_evidence.json",
+    "present": false
+  },
+  "clean_first": true,
+  "configure_before_clean": true,
+  "diagnostic": null,
+  "method_coercivity_lower_bound": null,
+  "open_outcomes": {
+    "fsr07": "OPEN",
+    "fsr16": "OPEN",
+    "q1": "OPEN",
+    "wp3": "OPEN",
+    "wp7": "OPEN"
+  },
+  "outcome": "PASS",
+  "parallel": 1,
+  "path_contract": {
+    "build_directories_disjoint_from_repository_metadata": true,
+    "build_directories_disjoint_from_source_homes": true,
+    "build_source_roots": [
+      "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/FE",
+      "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/Physics"
+    ],
+    "git_common_directory": "/home/users/zsexton/svMultiPhysics/.git",
+    "git_directory": "/home/users/zsexton/svMultiPhysics/.git/worktrees/src3",
+    "git_top_level": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src",
+    "output_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/evidence",
+    "output_disjoint_from_protected_roots": true,
+    "repository_metadata_directories": [
+      "/home/users/zsexton/svMultiPhysics/.git",
+      "/home/users/zsexton/svMultiPhysics/.git/worktrees/src3"
+    ],
+    "selected_build_directories": [
+      "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+      "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics"
+    ],
+    "source_root": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src",
+    "source_root_matches_git_top_level": true
+  },
+  "post_build_source_commit": "e9ae9f8211ff8cac59bf9e128bfcd461ebeb7ff8",
+  "post_build_source_tree": "9fa1617410d81f3801bb53c6fdeec6619a06fd9d",
+  "post_build_tracked_sources_clean": true,
+  "post_build_untracked_sources": {
+    "allowed_output_path_count": 0,
+    "allowed_output_path_list_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "allowed_output_paths": [],
+    "allowed_output_root": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/evidence",
+    "ignored_scan_roots": [
+      "Code/Source/solver/FE",
+      "Code/Source/solver/Physics"
+    ],
+    "ignored_source_path_count": 0,
+    "ordinary_path_count": 0,
+    "path_count": 0,
+    "path_list_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "unexpected_path_count": 0,
+    "unexpected_path_list_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "unexpected_paths": []
+  },
+  "post_build_validation": [
+    {
+      "binary_key": "math",
+      "binary_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_math",
+      "executable": true,
+      "list_timeout_seconds": 60,
+      "listed_tests_present": true,
+      "missing_tests": [],
+      "passed": true
+    },
+    {
+      "binary_key": "assembly",
+      "binary_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_assembly",
+      "executable": true,
+      "list_timeout_seconds": 60,
+      "listed_tests_present": true,
+      "missing_tests": [],
+      "passed": true
+    },
+    {
+      "binary_key": "assembly_mpi",
+      "binary_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_assembly_mpi",
+      "executable": true,
+      "list_timeout_seconds": 60,
+      "listed_tests_present": true,
+      "missing_tests": [],
+      "passed": true
+    },
+    {
+      "binary_key": "physics",
+      "binary_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics/test_physics",
+      "executable": true,
+      "list_timeout_seconds": 60,
+      "listed_tests_present": true,
+      "missing_tests": [],
+      "passed": true
+    }
+  ],
+  "pre_build_source_provenance": {
+    "source_commit": "e9ae9f8211ff8cac59bf9e128bfcd461ebeb7ff8",
+    "source_tree": "9fa1617410d81f3801bb53c6fdeec6619a06fd9d",
+    "tracked_sources_clean": true,
+    "untracked_sources": {
+      "allowed_output_path_count": 0,
+      "allowed_output_path_list_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "allowed_output_paths": [],
+      "allowed_output_root": null,
+      "ignored_scan_roots": [
+        "Code/Source/solver/FE",
+        "Code/Source/solver/Physics"
+      ],
+      "ignored_source_path_count": 0,
+      "ordinary_path_count": 0,
+      "path_count": 0,
+      "path_list_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "unexpected_path_count": 0,
+      "unexpected_path_list_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "unexpected_paths": []
+    }
+  },
+  "qualification_bundle_binding": {
+    "artifacts": [
+      {
+        "normalized_sha256": "faf95bb651c482821bbca67e6da40886795685c0a54660c9b8fe3618b9d784a6",
+        "path": "tests/cases/fluid/free_surface_wp3_wp7_nitsche_coercivity_qualification_matrix_v2.json",
+        "role": "matrix",
+        "sha256": "a35818da1455763e630e243baf16b852a6d6c6b7a2112b72e517e6181d4fb407"
+      },
+      {
+        "path": "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification_v2.py",
+        "role": "runner",
+        "sha256": "8d995e70e77e27e3e9b7c15401150cc34e673ecd273d88bc1f6f55af60ac245d"
+      }
+    ],
+    "authority": "reciprocal_SHA256_plus_clean_qualification_execution_HEAD",
+    "binding_schema_version": 1,
+    "implementation_source_commit": "1a2ed265b12eb7117cd269f6c7bb876e5ba38601",
+    "normalized_matrix_sha256_embedded_in_runner": "faf95bb651c482821bbca67e6da40886795685c0a54660c9b8fe3618b9d784a6",
+    "qualification_bundle_commit": "e9ae9f8211ff8cac59bf9e128bfcd461ebeb7ff8",
+    "runner_sha256_from_matrix": "8d995e70e77e27e3e9b7c15401150cc34e673ecd273d88bc1f6f55af60ac245d"
+  },
+  "qualification_disposition": {
+    "fsr07_closed": false,
+    "fsr16_closed": false,
+    "q1_closed": false,
+    "uniform_coercivity_bound_established": false,
+    "wp3_closed": false,
+    "wp7_closed": false
+  },
+  "qualification_inputs": {
+    "canonical_registry": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/tests/cases/fluid/free_surface_wp3_wp7_nitsche_coercivity_qualification_matrix_v2.json",
+    "registry_sha256": "a35818da1455763e630e243baf16b852a6d6c6b7a2112b72e517e6181d4fb407",
+    "runner": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification_v2.py",
+    "runner_sha256": "8d995e70e77e27e3e9b7c15401150cc34e673ecd273d88bc1f6f55af60ac245d"
+  },
+  "qualification_scope": "Certified finite-dimensional aggregate trace and symmetric-Nitsche prerequisite evidence in the stated affine P1 constant-viscosity envelope; this matrix does not close FSR-16, FSR-07, WP-3, WP-7, Q1, or establish a uniform method coercivity bound.",
+  "requested_claim": "joint_low_level_prerequisite",
+  "separate_clean_phase": true,
+  "source_commit_before_build": "e9ae9f8211ff8cac59bf9e128bfcd461ebeb7ff8",
+  "source_root": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src",
+  "source_tree_before_build": "9fa1617410d81f3801bb53c6fdeec6619a06fd9d",
+  "target_inventory": [
+    {
+      "build_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+      "command": [
+        "/share/software/user/open/cmake/3.31.4/bin/cmake",
+        "--build",
+        "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+        "--target",
+        "help"
+      ],
+      "elapsed_seconds": 3.877634324016981,
+      "expected_targets": [
+        "test_fe_assembly",
+        "test_fe_assembly_mpi",
+        "test_fe_math"
+      ],
+      "listed_expected_targets": [
+        "test_fe_assembly",
+        "test_fe_assembly_mpi",
+        "test_fe_math"
+      ],
+      "missing_targets": [],
+      "monitored_build_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+      "outcome": "PASS",
+      "process_return_code": 0,
+      "resource_monitoring": {
+        "aggregate_memory_measurement": "sampled_peak",
+        "complete_session_process_coverage": true,
+        "filesystem_free_sample_count": 34,
+        "final_output_bytes": 298308,
+        "host_available_sample_count": 34,
+        "launch_mode": "direct_serial",
+        "memory_enforcement_method": "per_process_address_and_file_size_limits_plus_sampled_session_resident_memory",
+        "memory_enforcement_scope": "spawned_process_session",
+        "minimum_filesystem_free_mib": 4096,
+        "minimum_host_available_mib": 4096,
+        "minimum_observed_filesystem_free_mib": 104834849,
+        "minimum_observed_host_available_mib": 231272,
+        "monitor_sample_count": 33,
+        "monitored_filesystems": [
+          "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+          "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/evidence"
+        ],
+        "peak_aggregate_resident_kib_sampled": 9864,
+        "peak_process_count_sampled": 3,
+        "peak_process_group_count_sampled": 1,
+        "peak_resident_kib_sampled": 4720,
+        "peak_resident_sample_count": 3,
+        "process_session_id": 11782,
+        "reaped_launcher_fallback_allowed": true,
+        "reaped_launcher_fallback_requires_session_enumeration": true,
+        "reaped_launcher_fallback_scope": "direct_serial_launcher_process",
+        "reaped_launcher_fallback_source": "wait4_ru_maxrss",
+        "reaped_launcher_fallback_used": false,
+        "reaped_launcher_max_resident_kib": 22472,
+        "reaped_launcher_rusage_available": true,
+        "required_simultaneous_process_samples": 1,
+        "resident_read_failure_count": 5,
+        "resource_monitoring_method": "sampled_process_session",
+        "resource_monitoring_outcome": "PASS",
+        "return_code": 0,
+        "session_enumeration_failure_count": 0,
+        "stat_read_failure_count": 11,
+        "successful_session_sample_count": 33,
+        "termination": null,
+        "termination_reason": null,
+        "wall_time_seconds": 3.877634324016981
+      },
+      "return_code": 0,
+      "stderr": "builds/target_inventory_01_stderr.txt",
+      "stderr_sha256": "971daa4556a0f62d16717f8e0e0385af499f6deb734496b5502b6e62665f1077",
+      "stdout": "builds/target_inventory_01_stdout.txt",
+      "stdout_parse_diagnostic": null,
+      "stdout_parse_limit_bytes": 8388608,
+      "stdout_sha256": "56155ea858dedaa5c75138521ad94d675f6b3989004c5526b911dbffc01efe18",
+      "termination": null,
+      "termination_reason": null,
+      "timed_out": false
+    },
+    {
+      "build_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics",
+      "command": [
+        "/share/software/user/open/cmake/3.31.4/bin/cmake",
+        "--build",
+        "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics",
+        "--target",
+        "help"
+      ],
+      "elapsed_seconds": 0.3291268220054917,
+      "expected_targets": [
+        "test_physics"
+      ],
+      "listed_expected_targets": [
+        "test_physics"
+      ],
+      "missing_targets": [],
+      "monitored_build_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics",
+      "outcome": "PASS",
+      "process_return_code": 0,
+      "resource_monitoring": {
+        "aggregate_memory_measurement": "sampled_peak",
+        "complete_session_process_coverage": true,
+        "filesystem_free_sample_count": 4,
+        "final_output_bytes": 316048,
+        "host_available_sample_count": 4,
+        "launch_mode": "direct_serial",
+        "memory_enforcement_method": "per_process_address_and_file_size_limits_plus_sampled_session_resident_memory",
+        "memory_enforcement_scope": "spawned_process_session",
+        "minimum_filesystem_free_mib": 4096,
+        "minimum_host_available_mib": 4096,
+        "minimum_observed_filesystem_free_mib": 104834849,
+        "minimum_observed_host_available_mib": 231286,
+        "monitor_sample_count": 3,
+        "monitored_filesystems": [
+          "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics",
+          "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/evidence"
+        ],
+        "peak_aggregate_resident_kib_sampled": 6156,
+        "peak_process_count_sampled": 3,
+        "peak_process_group_count_sampled": 1,
+        "peak_resident_kib_sampled": 4716,
+        "peak_resident_sample_count": 3,
+        "process_session_id": 14556,
+        "reaped_launcher_fallback_allowed": true,
+        "reaped_launcher_fallback_requires_session_enumeration": true,
+        "reaped_launcher_fallback_scope": "direct_serial_launcher_process",
+        "reaped_launcher_fallback_source": "wait4_ru_maxrss",
+        "reaped_launcher_fallback_used": false,
+        "reaped_launcher_max_resident_kib": 20360,
+        "reaped_launcher_rusage_available": true,
+        "required_simultaneous_process_samples": 1,
+        "resident_read_failure_count": 1,
+        "resource_monitoring_method": "sampled_process_session",
+        "resource_monitoring_outcome": "PASS",
+        "return_code": 0,
+        "session_enumeration_failure_count": 0,
+        "stat_read_failure_count": 0,
+        "successful_session_sample_count": 3,
+        "termination": null,
+        "termination_reason": null,
+        "wall_time_seconds": 0.3291268220054917
+      },
+      "return_code": 0,
+      "stderr": "builds/target_inventory_02_stderr.txt",
+      "stderr_sha256": "c6449adaa1d8ab0dd73b3616b040d68143715f9325279867fd67268aaeea1237",
+      "stdout": "builds/target_inventory_02_stdout.txt",
+      "stdout_parse_diagnostic": null,
+      "stdout_parse_limit_bytes": 8388608,
+      "stdout_sha256": "81c1a5ddb54fba8f8d4d914448edc4bc56aad84fc7412525805e26b3078c9c33",
+      "termination": null,
+      "termination_reason": null,
+      "timed_out": false
+    }
+  ],
+  "timeout_seconds_per_phase": 3600,
+  "uniform_bound_status": "UNFROZEN_NO_BOUND_INVENTED",
+  "v1_parent_artifacts": [
+    {
+      "path": "tests/cases/fluid/free_surface_wp3_wp7_nitsche_coercivity_qualification_matrix.json",
+      "sha256": "a75bbec8efe800f049375f190c07a121b3e365098da783b43ec1ba9df9610589"
+    },
+    {
+      "path": "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification.py",
+      "sha256": "353c49c10881fd13acececb80cdf000c70abf7937f10021a2816d04d90bb9181"
+    },
+    {
+      "path": "Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method.md",
+      "sha256": "abc782ef828b3fd3996257f5544f85221d9c6d047b1cf730848ac93b695c6ead"
+    }
+  ],
+  "validation": [
+    {
+      "binary_key": "assembly",
+      "binary_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_assembly",
+      "cache_is_symlink": false,
+      "cache_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/CMakeCache.txt",
+      "cache_present": true,
+      "cmake_home_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/FE",
+      "diagnostic": null,
+      "expected_cmake_home": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/FE",
+      "passed": true,
+      "single_configuration": true,
+      "target": "test_fe_assembly"
+    },
+    {
+      "binary_key": "assembly_mpi",
+      "binary_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_assembly_mpi",
+      "cache_is_symlink": false,
+      "cache_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/CMakeCache.txt",
+      "cache_present": true,
+      "cmake_home_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/FE",
+      "diagnostic": null,
+      "expected_cmake_home": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/FE",
+      "passed": true,
+      "single_configuration": true,
+      "target": "test_fe_assembly_mpi"
+    },
+    {
+      "binary_key": "math",
+      "binary_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/test_fe_math",
+      "cache_is_symlink": false,
+      "cache_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe/CMakeCache.txt",
+      "cache_present": true,
+      "cmake_home_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/FE",
+      "diagnostic": null,
+      "expected_cmake_home": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/FE",
+      "passed": true,
+      "single_configuration": true,
+      "target": "test_fe_math"
+    },
+    {
+      "binary_key": "physics",
+      "binary_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics/test_physics",
+      "cache_is_symlink": false,
+      "cache_path": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics/CMakeCache.txt",
+      "cache_present": true,
+      "cmake_home_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/Physics",
+      "diagnostic": null,
+      "expected_cmake_home": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/Physics",
+      "passed": true,
+      "single_configuration": true,
+      "target": "test_physics"
+    }
+  ]
+}

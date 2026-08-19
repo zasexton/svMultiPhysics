@@ -1,0 +1,19 @@
+/bin/sh: warning: setlocale: LC_ALL: cannot change locale (C.UTF-8)
+/bin/sh: warning: setlocale: LC_ALL: cannot change locale (C.UTF-8)
+  === assembleOperator TIMING (rank 0, op='velocity') ===
+    Total:               0.000040 s
+    Cell terms:          0.000000 s  (  0.5%)
+    Boundary terms:      0.000000 s  (  0.1%)
+    Other (DG+global):   0.000040 s  ( 99.5%)
+      Interior faces:    0.000001 s  (  1.5%)
+      Interface faces:   0.000038 s  ( 96.0%)
+      Cut volumes:       0.000001 s  (  1.9%)
+      Global terms:      0.000000 s  (  0.1%)
+    MPI ranks:          2
+    Rank min/mean/max total:     0.000040 /  0.000199 /  0.000358 s
+    Rank min/mean/max cell:      0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max boundary:  0.000000 /  0.000000 /  0.000000 s
+    Rank min/mean/max other:     0.000040 /  0.000198 /  0.000357 s
+    Rank min/mean/max cut-vol:   0.000001 /  0.000001 /  0.000001 s
+  ================================================
+[svMultiPhysics::FE] assembleOperator diagnostic=process_memory phase=assemble_operator rank=0 op='velocity' process_vm_kb=576608 process_rss_kb=174128

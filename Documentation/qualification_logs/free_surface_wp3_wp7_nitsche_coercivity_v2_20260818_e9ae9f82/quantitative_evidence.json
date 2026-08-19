@@ -1,0 +1,112 @@
+{
+  "artifact_schema_version": 1,
+  "checks": [
+    {
+      "actual": "joint_low_level_prerequisite",
+      "diagnostic": null,
+      "group_id": "symmetric_nitsche_certified_trace_108_case_diagnostic",
+      "gtest_result": "groups/symmetric_nitsche_certified_trace_108_case_diagnostic/gtest.json",
+      "passed": true,
+      "property": "wp3_wp7_nitsche_trace_v2_accepted_claim",
+      "raw_value": "joint_low_level_prerequisite",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": "joint_low_level_prerequisite",
+      "type": "string"
+    },
+    {
+      "actual": 108,
+      "diagnostic": null,
+      "group_id": "symmetric_nitsche_certified_trace_108_case_diagnostic",
+      "gtest_result": "groups/symmetric_nitsche_certified_trace_108_case_diagnostic/gtest.json",
+      "passed": true,
+      "property": "wp3_wp7_nitsche_trace_v2_case_count",
+      "raw_value": "108",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": 108,
+      "type": "integer"
+    },
+    {
+      "actual": 16,
+      "diagnostic": null,
+      "group_id": "symmetric_nitsche_certified_trace_108_case_diagnostic",
+      "gtest_result": "groups/symmetric_nitsche_certified_trace_108_case_diagnostic/gtest.json",
+      "passed": true,
+      "property": "wp3_wp7_nitsche_trace_v2_exact_common_kernel_quotient_patch_count",
+      "raw_value": "16",
+      "relation": "greater_than",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": 0,
+      "type": "integer"
+    },
+    {
+      "actual": 1.3865887291231187,
+      "diagnostic": null,
+      "group_id": "symmetric_nitsche_certified_trace_108_case_diagnostic",
+      "gtest_result": "groups/symmetric_nitsche_certified_trace_108_case_diagnostic/gtest.json",
+      "passed": true,
+      "property": "wp3_wp7_nitsche_trace_v2_maximum_upper_bound",
+      "raw_value": "1.3865887291231187",
+      "relation": "less_than",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": 12.0,
+      "type": "real"
+    },
+    {
+      "actual": "null",
+      "diagnostic": null,
+      "group_id": "symmetric_nitsche_certified_trace_108_case_diagnostic",
+      "gtest_result": "groups/symmetric_nitsche_certified_trace_108_case_diagnostic/gtest.json",
+      "passed": true,
+      "property": "wp3_wp7_nitsche_trace_v2_method_coercivity_lower_bound",
+      "raw_value": "null",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": "null",
+      "type": "string"
+    },
+    {
+      "actual": 0.6600749189008555,
+      "diagnostic": null,
+      "group_id": "symmetric_nitsche_certified_trace_108_case_diagnostic",
+      "gtest_result": "groups/symmetric_nitsche_certified_trace_108_case_diagnostic/gtest.json",
+      "passed": true,
+      "property": "wp3_wp7_nitsche_trace_v2_minimum_finite_sample_lower_bound",
+      "raw_value": "0.66007491890085546",
+      "relation": "greater_than",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": 0.0,
+      "type": "real"
+    },
+    {
+      "actual": 2.7395417703357516e-05,
+      "diagnostic": null,
+      "group_id": "symmetric_nitsche_certified_trace_108_case_diagnostic",
+      "gtest_result": "groups/symmetric_nitsche_certified_trace_108_case_diagnostic/gtest.json",
+      "passed": true,
+      "property": "wp3_wp7_nitsche_trace_v2_minimum_sampled_eigenvalue_gap",
+      "raw_value": "2.7395417703357516e-05",
+      "relation": "greater_than_or_equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": -1e-11,
+      "type": "real"
+    },
+    {
+      "actual": "UNFROZEN_NO_BOUND_INVENTED",
+      "diagnostic": null,
+      "group_id": "symmetric_nitsche_certified_trace_108_case_diagnostic",
+      "gtest_result": "groups/symmetric_nitsche_certified_trace_108_case_diagnostic/gtest.json",
+      "passed": true,
+      "property": "wp3_wp7_nitsche_trace_v2_uniform_bound_status",
+      "raw_value": "UNFROZEN_NO_BOUND_INVENTED",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": "UNFROZEN_NO_BOUND_INVENTED",
+      "type": "string"
+    }
+  ],
+  "declared_check_count": 8,
+  "outcome": "PASS",
+  "passed_check_count": 8
+}

@@ -1,0 +1,40 @@
+{
+  "tests": 1,
+  "failures": 0,
+  "disabled": 1,
+  "errors": 0,
+  "timestamp": "2026-08-18T20:22:35Z",
+  "time": "379.758s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "FreeSurfaceCutStability",
+      "tests": 1,
+      "failures": 0,
+      "disabled": 1,
+      "errors": 0,
+      "timestamp": "2026-08-18T20:22:35Z",
+      "time": "379.757s",
+      "testsuite": [
+        {
+          "name": "DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_FreeSurfaceCutStability.cpp",
+          "line": 10138,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:35Z",
+          "time": "379.757s",
+          "classname": "FreeSurfaceCutStability",
+          "wp3_wp7_nitsche_trace_v2_case_count": "108",
+          "wp3_wp7_nitsche_trace_v2_maximum_upper_bound": "1.3865887291231187",
+          "wp3_wp7_nitsche_trace_v2_minimum_finite_sample_lower_bound": "0.66007491890085546",
+          "wp3_wp7_nitsche_trace_v2_minimum_sampled_eigenvalue_gap": "2.7395417703357516e-05",
+          "wp3_wp7_nitsche_trace_v2_exact_common_kernel_quotient_patch_count": "16",
+          "wp3_wp7_nitsche_trace_v2_method_coercivity_lower_bound": "null",
+          "wp3_wp7_nitsche_trace_v2_uniform_bound_status": "UNFROZEN_NO_BOUND_INVENTED",
+          "wp3_wp7_nitsche_trace_v2_accepted_claim": "joint_low_level_prerequisite"
+        }
+      ]
+    }
+  ]
+}

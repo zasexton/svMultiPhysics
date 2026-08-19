@@ -1,0 +1,102 @@
+{
+  "tests": 8,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-08-18T20:22:33Z",
+  "time": "0.008s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "GeneratedBoundaryAggregateTraceCertificate",
+      "tests": 8,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-08-18T20:22:33Z",
+      "time": "0.007s",
+      "testsuite": [
+        {
+          "name": "FormBindingRequiresExactlyOneRouteAnchorBeforeMutation",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 864,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "FullActiveUnitTriangleHasAnalyticBoundFour",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 1175,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0.002s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "RootedCutSquareCertifiesActualAggregateProlongation",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 1777,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0.001s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "RootlessAggregateSupportIsRejected",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 2370,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "ImportedGeneratedDomainsWithoutAuthoritativeSnapshotFailClosed",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 2455,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "ScalarFieldIsRejectedAsAnUnsupportedTraceSpace",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 2553,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "SymmetricPolicyRejectsAnInsufficientConfiguredPenalty",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 2593,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "UnsymmetricPolicyRetainsTheBoundWithoutACoercivityThreshold",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6\/src\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 2656,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-18T20:22:33Z",
+          "time": "0s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        }
+      ]
+    }
+  ]
+}

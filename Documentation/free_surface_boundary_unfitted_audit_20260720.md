@@ -1178,6 +1178,13 @@ Required tests and exits:
 - Run a manufactured channel while the interface crosses an inlet, outlet, and side wall. Force, flux, and penalty work must vary with the analytic wet measure. Compare left and right limits as a cut crosses a mesh vertex and require any global numerical jump to converge to zero with refinement.
 - Closure requires that no generic weak or natural operator on a supported cut physical boundary retains whole-face integration.
 
+Qualification evidence recorded on 2026-08-18:
+
+- The frozen `free_surface_wp3_wp7_symmetric_nitsche_certified_trace_prerequisite_v2` matrix passed from clean source commit `e9ae9f8211ff8cac59bf9e128bfcd461ebeb7ff8` and source tree `9fa1617410d81f3801bb53c6fdeec6619a06fd9d`.
+- All four predeclared serial/MPI groups passed, covering 26 distinct tests and eight quantitative evidence checks. The 108-case production diagnostic covered both active sides, axis-aligned and oblique cuts, three physical scales, and wet fractions from zero through one. Its maximum certified trace upper bound was `1.3865887291231187`, minimum finite-fixture energy lower bound was `0.6600749189008555`, and minimum sampled eigenvalue gap was `2.7395417703357516e-05`.
+- FE and Physics targets were configured and built independently from clean caches. The complete 66-file archive is checksum bound in [the version-2 aggregate-trace qualification record](qualification_logs/free_surface_wp3_wp7_nitsche_coercivity_v2_20260818_e9ae9f82/record.md) and [summary](qualification_logs/free_surface_wp3_wp7_nitsche_coercivity_v2_20260818_e9ae9f82/summary.json).
+- This evidence closes only the certified finite-dimensional aggregate-trace prerequisite in its declared affine P1, constant-viscosity envelope. The method-wide coercivity bound remains unfrozen; FSR-16, FSR-07, WP-3, WP-7, and Q1 remain open.
+
 ### WP-4: balanced capillary pressure, wall energy, and prescribed angle
 
 **Findings addressed:** FSR-03 and FSR-04.

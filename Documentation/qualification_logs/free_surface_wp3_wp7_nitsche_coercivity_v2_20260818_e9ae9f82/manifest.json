@@ -1,0 +1,329 @@
+{
+  "artifact_schema_version": 1,
+  "build_cmake_homes": {
+    "assembly": "Code/Source/solver/FE",
+    "assembly_mpi": "Code/Source/solver/FE",
+    "math": "Code/Source/solver/FE",
+    "physics": "Code/Source/solver/Physics"
+  },
+  "build_targets": {
+    "assembly": "test_fe_assembly",
+    "assembly_mpi": "test_fe_assembly_mpi",
+    "math": "test_fe_math",
+    "physics": "test_physics"
+  },
+  "certified_aggregate_trace_contract": {
+    "aggregation_state": "current_finalized_trace_eligible_closed_tangent_rows",
+    "cache_binding": "cut_context_snapshot_source_value_affine_constraint_and_aggregation_revisions",
+    "certificate_selects_or_mutates_penalty": false,
+    "effective_penalty_multiplier": "alpha_i=gamma_i*p^2_when_scaled_else_gamma_i",
+    "factorized_provenance": "proof_flags_counts_work_metrics_and_nonzero_input_digest_bound_into_certificate_digest",
+    "finite_space_energy_ratio_lower_bound": "downward_rounded_(1-sqrt(R_op))",
+    "floating_spectral_role": "optional_diagnostics_only",
+    "formed_dense_matrix_role": "optional_floating_diagnostics_only",
+    "frame": "reference",
+    "global_bound_rule": "outward_rounded_maximum_over_active_cells_of_summed_overlapping_patch_bounds",
+    "gram_map_rows_order": "strictly_increasing",
+    "maximum_exact_retained_quotient_dimension": 32,
+    "maximum_terminal_tangent_dimension": 128,
+    "navier_slip_robin_coefficient_rescaled": false,
+    "one_active_feature_per_patch": true,
+    "patch_inequality": "integral_Gamma_(h_normal/mu)*abs(2*mu*epsilon(v)*n)^2 <= C_patch*integral_support_2*mu*epsilon(v):epsilon(v)",
+    "proof_input": "raw_affine_Gram_factors_with_exact_positive_sum_product_weights",
+    "quotient_authority": "exact_binary64_dyadic_factorized_positive_Gram_D_and_N_psd_common_kernel_rank_identity_then_D_spd_N_psd_and_qD_minus_N_psd_on_the_exact_principal_gauge",
+    "secondary_common_kernel": "exact_rank(D_plus_N)_equals_rank(D)_proof_with_deterministic_principal_coordinate_gauge_or_fail_closed",
+    "supported_cells": [
+      "Triangle3",
+      "Tetra4"
+    ],
+    "supported_space": "affine_p1_product_velocity",
+    "symmetric_acceptance": "R_op<1",
+    "symmetric_group_ratio": "R_op=outward_rounded_sum_i(C_i/alpha_i)",
+    "tangent_quotient": "exact_sparse_raw_to_retained_coordinate_map",
+    "unsymmetric_contract": "revision_bound_continuity_diagnostic_without_symmetric_threshold",
+    "viscosity": "constant_positive_finite",
+    "zero_dimensional_quotient": "vacuous_after_complete_factor_map_and_work_preflight"
+  },
+  "certified_aggregate_trace_evidence": {
+    "outcome": "NOT_PRODUCED",
+    "path": "aggregate_trace_certificate_evidence.json",
+    "present": false
+  },
+  "closure_contract": [
+    {
+      "claim": "exact_binary64_dyadic_dense_and_factorized_spd_quotient_prerequisite",
+      "evidence": [
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundProvesDiagonalEquality",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRetainsTinyPositiveMode",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesThreeByThreeBareissDivision",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesSymmetricPsdPivotSwap",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsLateIndefinitePivot",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsSemidefiniteDenominator",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsIndefiniteNumerator",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsUnrepresentableUpperBound",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnroundedSparseTangentSum",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales",
+        "DenseLinearAlgebra.ExactFactorizedBoundRejectsSingularAndMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundUsesLinearPositiveScaleMultipliers",
+        "DenseLinearAlgebra.ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient"
+      ]
+    },
+    {
+      "claim": "serial_certified_aggregate_trace_prerequisite",
+      "evidence": [
+        "GeneratedBoundaryAggregateTraceCertificate.FormBindingRequiresExactlyOneRouteAnchorBeforeMutation",
+        "GeneratedBoundaryAggregateTraceCertificate.FullActiveUnitTriangleHasAnalyticBoundFour",
+        "GeneratedBoundaryAggregateTraceCertificate.RootedCutSquareCertifiesActualAggregateProlongation",
+        "GeneratedBoundaryAggregateTraceCertificate.RootlessAggregateSupportIsRejected",
+        "GeneratedBoundaryAggregateTraceCertificate.ImportedGeneratedDomainsWithoutAuthoritativeSnapshotFailClosed",
+        "GeneratedBoundaryAggregateTraceCertificate.ScalarFieldIsRejectedAsAnUnsupportedTraceSpace",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricPolicyRejectsAnInsufficientConfiguredPenalty",
+        "GeneratedBoundaryAggregateTraceCertificate.UnsymmetricPolicyRetainsTheBoundWithoutACoercivityThreshold"
+      ]
+    },
+    {
+      "claim": "exact_two_rank_collective_certified_trace_prerequisite",
+      "evidence": [
+        "GeneratedBoundaryAggregateTraceCertificateMPI.RootedCrossRankAggregateHasAnalyticBoundThirtyTwoOverSeventyNine"
+      ]
+    },
+    {
+      "claim": "finite_108_case_certified_trace_and_sampled_spectrum_consistency_prerequisite",
+      "evidence": [
+        "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2"
+      ]
+    }
+  ],
+  "findings": [
+    "FSR-16",
+    "FSR-07"
+  ],
+  "groups": [
+    {
+      "binary": "math",
+      "execution": {
+        "memory_mib": 1024,
+        "output_mib": 64,
+        "wall_time_seconds": 300
+      },
+      "gtest_output_copies": 1,
+      "id": "exact_dyadic_spd_quotient_serial",
+      "mpi_ranks": 1,
+      "tests": [
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundProvesDiagonalEquality",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRetainsTinyPositiveMode",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesThreeByThreeBareissDivision",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesSymmetricPsdPivotSwap",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsLateIndefinitePivot",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsSemidefiniteDenominator",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsIndefiniteNumerator",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsUnrepresentableUpperBound",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnroundedSparseTangentSum",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales",
+        "DenseLinearAlgebra.ExactFactorizedBoundRejectsSingularAndMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundUsesLinearPositiveScaleMultipliers",
+        "DenseLinearAlgebra.ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient"
+      ]
+    },
+    {
+      "binary": "assembly",
+      "execution": {
+        "memory_mib": 1024,
+        "output_mib": 64,
+        "wall_time_seconds": 600
+      },
+      "gtest_output_copies": 1,
+      "id": "aggregate_trace_certificate_serial",
+      "mpi_ranks": 1,
+      "tests": [
+        "GeneratedBoundaryAggregateTraceCertificate.FormBindingRequiresExactlyOneRouteAnchorBeforeMutation",
+        "GeneratedBoundaryAggregateTraceCertificate.FullActiveUnitTriangleHasAnalyticBoundFour",
+        "GeneratedBoundaryAggregateTraceCertificate.RootedCutSquareCertifiesActualAggregateProlongation",
+        "GeneratedBoundaryAggregateTraceCertificate.RootlessAggregateSupportIsRejected",
+        "GeneratedBoundaryAggregateTraceCertificate.ImportedGeneratedDomainsWithoutAuthoritativeSnapshotFailClosed",
+        "GeneratedBoundaryAggregateTraceCertificate.ScalarFieldIsRejectedAsAnUnsupportedTraceSpace",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricPolicyRejectsAnInsufficientConfiguredPenalty",
+        "GeneratedBoundaryAggregateTraceCertificate.UnsymmetricPolicyRetainsTheBoundWithoutACoercivityThreshold"
+      ]
+    },
+    {
+      "binary": "assembly_mpi",
+      "exact_mpi_ranks": true,
+      "execution": {
+        "memory_mib": 1024,
+        "output_mib": 64,
+        "wall_time_seconds": 600
+      },
+      "gtest_output_copies": 2,
+      "id": "aggregate_trace_certificate_exact_two_rank_mpi",
+      "mpi_ranks": 2,
+      "tests": [
+        "GeneratedBoundaryAggregateTraceCertificateMPI.RootedCrossRankAggregateHasAnalyticBoundThirtyTwoOverSeventyNine"
+      ]
+    },
+    {
+      "binary": "physics",
+      "execution": {
+        "memory_mib": 1024,
+        "output_mib": 64,
+        "wall_time_seconds": 3600
+      },
+      "gtest_also_run_disabled_tests": true,
+      "gtest_output_copies": 1,
+      "id": "symmetric_nitsche_certified_trace_108_case_diagnostic",
+      "mpi_ranks": 1,
+      "tests": [
+        "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2"
+      ]
+    }
+  ],
+  "matrix_id": "free_surface_wp3_wp7_symmetric_nitsche_certified_trace_prerequisite_v2",
+  "matrix_status_at_execution": "FROZEN_BEFORE_EXECUTION",
+  "method_coercivity_lower_bound": null,
+  "model_envelope": "reference_frame_affine_p1_product_velocity_on_linear_triangles_or_tetrahedra_with_constant_positive_finite_viscosity_generated_active_boundary_and_current_trace_eligible_small_cut_aggregation",
+  "open_outcomes": {
+    "fsr07": "OPEN",
+    "fsr16": "OPEN",
+    "q1": "OPEN",
+    "wp3": "OPEN",
+    "wp7": "OPEN"
+  },
+  "path_contract": {
+    "build_directories_disjoint_from_repository_metadata": true,
+    "build_directories_disjoint_from_source_homes": true,
+    "build_source_roots": [
+      "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/FE",
+      "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src/Code/Source/solver/Physics"
+    ],
+    "git_common_directory": "/home/users/zsexton/svMultiPhysics/.git",
+    "git_directory": "/home/users/zsexton/svMultiPhysics/.git/worktrees/src3",
+    "git_top_level": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src",
+    "output_directory": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/evidence",
+    "output_disjoint_from_protected_roots": true,
+    "repository_metadata_directories": [
+      "/home/users/zsexton/svMultiPhysics/.git",
+      "/home/users/zsexton/svMultiPhysics/.git/worktrees/src3"
+    ],
+    "selected_build_directories": [
+      "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-fe",
+      "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/build-physics"
+    ],
+    "source_root": "/scratch/users/zsexton/svmp-wp3-wp7-v2.rerun.e9ae9f82.e5m8M6/src",
+    "source_root_matches_git_top_level": true
+  },
+  "qualification_bundle_binding": {
+    "artifacts": [
+      {
+        "normalized_sha256": "faf95bb651c482821bbca67e6da40886795685c0a54660c9b8fe3618b9d784a6",
+        "path": "tests/cases/fluid/free_surface_wp3_wp7_nitsche_coercivity_qualification_matrix_v2.json",
+        "role": "matrix",
+        "sha256": "a35818da1455763e630e243baf16b852a6d6c6b7a2112b72e517e6181d4fb407"
+      },
+      {
+        "path": "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification_v2.py",
+        "role": "runner",
+        "sha256": "8d995e70e77e27e3e9b7c15401150cc34e673ecd273d88bc1f6f55af60ac245d"
+      }
+    ],
+    "authority": "reciprocal_SHA256_plus_clean_qualification_execution_HEAD",
+    "binding_schema_version": 1,
+    "implementation_source_commit": "1a2ed265b12eb7117cd269f6c7bb876e5ba38601",
+    "normalized_matrix_sha256_embedded_in_runner": "faf95bb651c482821bbca67e6da40886795685c0a54660c9b8fe3618b9d784a6",
+    "qualification_bundle_commit": "e9ae9f8211ff8cac59bf9e128bfcd461ebeb7ff8",
+    "runner_sha256_from_matrix": "8d995e70e77e27e3e9b7c15401150cc34e673ecd273d88bc1f6f55af60ac245d"
+  },
+  "qualification_disposition": {
+    "fsr07_closed": false,
+    "fsr16_closed": false,
+    "q1_closed": false,
+    "uniform_coercivity_bound_established": false,
+    "wp3_closed": false,
+    "wp7_closed": false
+  },
+  "qualification_scope": "Certified finite-dimensional aggregate trace and symmetric-Nitsche prerequisite evidence in the stated affine P1 constant-viscosity envelope; this matrix does not close FSR-16, FSR-07, WP-3, WP-7, Q1, or establish a uniform method coercivity bound.",
+  "quantitative_evidence": [
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_case_count",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": 108,
+      "type": "integer"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_maximum_upper_bound",
+      "relation": "less_than",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": 12.0,
+      "type": "real"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_minimum_finite_sample_lower_bound",
+      "relation": "greater_than",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": 0.0,
+      "type": "real"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_minimum_sampled_eigenvalue_gap",
+      "relation": "greater_than_or_equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": -1e-11,
+      "type": "real"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_exact_common_kernel_quotient_patch_count",
+      "relation": "greater_than",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": 0,
+      "type": "integer"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_method_coercivity_lower_bound",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": "null",
+      "type": "string"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_uniform_bound_status",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": "UNFROZEN_NO_BOUND_INVENTED",
+      "type": "string"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v2_accepted_claim",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV2",
+      "threshold": "joint_low_level_prerequisite",
+      "type": "string"
+    }
+  ],
+  "registry_sha256": "a35818da1455763e630e243baf16b852a6d6c6b7a2112b72e517e6181d4fb407",
+  "requested_claim": "joint_low_level_prerequisite",
+  "runner_sha256": "8d995e70e77e27e3e9b7c15401150cc34e673ecd273d88bc1f6f55af60ac245d",
+  "source_commit": "e9ae9f8211ff8cac59bf9e128bfcd461ebeb7ff8",
+  "source_tree": "9fa1617410d81f3801bb53c6fdeec6619a06fd9d",
+  "uniform_bound_status": "UNFROZEN_NO_BOUND_INVENTED",
+  "v1_parent_artifacts": [
+    {
+      "path": "tests/cases/fluid/free_surface_wp3_wp7_nitsche_coercivity_qualification_matrix.json",
+      "sha256": "a75bbec8efe800f049375f190c07a121b3e365098da783b43ec1ba9df9610589"
+    },
+    {
+      "path": "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification.py",
+      "sha256": "353c49c10881fd13acececb80cdf000c70abf7937f10021a2816d04d90bb9181"
+    },
+    {
+      "path": "Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method.md",
+      "sha256": "abc782ef828b3fd3996257f5544f85221d9c6d047b1cf730848ac93b695c6ead"
+    }
+  ],
+  "work_package": "WP-3/WP-7"
+}
