@@ -1583,7 +1583,7 @@ TEST(GeneratedActiveBoundaryDomain,
 }
 
 TEST(GeneratedActiveBoundaryDomain,
-     GeneratedInterfaceMarkersRejectLaterVolumeRuleReuse)
+     GeneratedInterfaceMarkerNamespacesControlLaterVolumeRuleReuse)
 {
     constexpr int wall_marker = 8;
     FE::assembly::CutIntegrationContext donor;
@@ -1629,8 +1629,24 @@ TEST(GeneratedActiveBoundaryDomain,
         base_context;
     base_context.addGeneratedInterfaceDomain(
         empty_interface);
-    expect_volume_rejected(
-        base_context, base_marker);
+    const auto base_revision =
+        base_context.contentRevision();
+    const auto base_volume_rule_count =
+        base_context.volumeRules().size();
+    auto base_rule = rule;
+    base_rule.provenance.marker = base_marker;
+    EXPECT_NO_THROW(
+        base_context.addGeneratedVolumeRule(
+            base_marker,
+            metadata,
+            std::move(base_rule)));
+    EXPECT_GT(base_context.contentRevision(),
+              base_revision);
+    EXPECT_EQ(base_context.volumeRules().size(),
+              base_volume_rule_count + 1u);
+    EXPECT_TRUE(
+        base_context.hasGeneratedVolumeMarker(
+            base_marker));
 
     constexpr int contact_marker = 192;
     auto contact_request =
@@ -2509,6 +2525,69 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_NO_THROW(
         context.assertAllFreeSurfaceGeometrySnapshotsCurrent());
     RecordProperty("duplicate_snapshot_import_rejection_count", 1);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
+     CompletedSnapshotPublicationRejectsDirectVolumeExtension)
+{
+    constexpr int interface_marker = 278;
+    const SingleQuadBoundaryMesh mesh;
+    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        verticalInterfaceWithVolumes(interface_marker),
+        {},
+        {},
+        mesh,
+        snapshotPolicyWithoutBoundary(),
+        verticalScalar(),
+        "completed_snapshot_direct_volume_extension");
+    ASSERT_NE(snapshot, nullptr);
+
+    FE::assembly::CutIntegrationContext context;
+    ASSERT_NO_THROW(context.addFreeSurfaceGeometrySnapshot(snapshot));
+    ASSERT_TRUE(
+        context.hasGeneratedLevelSetInterfaceMarker(interface_marker));
+    ASSERT_FALSE(context.volumeRules().empty());
+    ASSERT_EQ(context.metadata().size(), context.volumeRules().size());
+    EXPECT_NO_THROW(
+        context.assertAllFreeSurfaceGeometrySnapshotsCurrent());
+
+    const auto stored_rule = context.volumeRules().front();
+    const auto stored_metadata = context.metadata().front();
+    const auto content_revision = context.contentRevision();
+    const auto volume_rule_count = context.volumeRules().size();
+    const auto metadata_count = context.metadata().size();
+    const auto binding_count = context.bindings().size();
+    const auto volume_markers = context.generatedVolumeMarkers();
+    const auto snapshot_revision =
+        snapshot->revision().snapshot_revision_key;
+    ASSERT_NE(snapshot_revision, 0u);
+
+    const auto expect_rejected =
+        [&](std::uint64_t candidate_snapshot_revision) {
+            auto rule = stored_rule;
+            auto metadata = stored_metadata;
+            rule.provenance.free_surface_snapshot_revision_key =
+                candidate_snapshot_revision;
+            metadata.free_surface_snapshot_revision_key =
+                candidate_snapshot_revision;
+            EXPECT_THROW(
+                context.addGeneratedVolumeRule(
+                    interface_marker,
+                    std::move(metadata),
+                    std::move(rule)),
+                std::invalid_argument);
+            EXPECT_EQ(context.contentRevision(), content_revision);
+            EXPECT_EQ(context.volumeRules().size(), volume_rule_count);
+            EXPECT_EQ(context.metadata().size(), metadata_count);
+            EXPECT_EQ(context.bindings().size(), binding_count);
+            EXPECT_EQ(context.generatedVolumeMarkers(), volume_markers);
+            EXPECT_NO_THROW(
+                context.assertAllFreeSurfaceGeometrySnapshotsCurrent());
+        };
+
+    expect_rejected(0u);
+    expect_rejected(snapshot_revision + 1u);
+    expect_rejected(snapshot_revision);
 }
 
 TEST(FreeSurfaceGeometrySnapshot,

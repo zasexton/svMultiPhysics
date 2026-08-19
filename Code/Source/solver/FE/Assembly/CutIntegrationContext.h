@@ -518,6 +518,9 @@ public:
         }
         if (rule.provenance.source_value_revision == 0u) {
             rule.provenance.source_value_revision = metadata.source_value_revision;
+        } else if (metadata.source_value_revision == 0u) {
+            metadata.source_value_revision =
+                rule.provenance.source_value_revision;
         }
         if (metadata.free_surface_snapshot_revision_key != 0u &&
             rule.provenance.free_surface_snapshot_revision_key != 0u &&
@@ -533,18 +536,36 @@ public:
             metadata.free_surface_snapshot_revision_key =
                 rule.provenance.free_surface_snapshot_revision_key;
         }
+        const auto level_set_publication =
+            generated_level_set_interface_provenance_by_marker_.find(
+                marker);
+        const bool has_level_set_publication =
+            level_set_publication !=
+            generated_level_set_interface_provenance_by_marker_.end();
+        const bool unrelated_interface_namespace =
+            !has_level_set_publication &&
+            (hasGeneratedLevelSetInterfaceMarker(marker) ||
+             generated_interface_rule_indices_by_marker_.contains(
+                 marker) ||
+             generated_interface_two_sided_bindings_by_marker_.contains(
+                 marker) ||
+             free_surface_snapshot_revision_by_marker_.contains(marker));
         if (generated_interface_boundary_provenance_by_marker_.contains(
                 marker) ||
             generated_active_boundary_provenance_by_marker_.contains(
                 marker) ||
-            hasGeneratedLevelSetInterfaceMarker(marker) ||
-            generated_interface_rule_indices_by_marker_.contains(
-                marker) ||
-            generated_interface_two_sided_bindings_by_marker_.contains(
-                marker)) {
+            unrelated_interface_namespace) {
             throw std::invalid_argument(
                 "generated volume marker collides with an "
                 "existing generated-interface marker");
+        }
+        if (has_level_set_publication) {
+            validateGeneratedVolumeLevelSetComposition(
+                marker,
+                level_set_publication->second,
+                metadata,
+                rule,
+                hasGeneratedLevelSetInterfaceMarker(marker));
         }
         if (shouldPruneGeneratedVolumeRule(rule)) {
             ++generated_pruned_volume_rule_count_;
@@ -844,6 +865,23 @@ public:
         static_cast<void>(stored_provenance);
         setExpectedGeneratedSourceValueRevision(marker,
                                                 domain.request().source.value_revision);
+        if (had_marker_indices) {
+            for (const auto index : marker_indices_before->second) {
+                if (index >= metadata_.size() ||
+                    index >= volume_rules_.size()) {
+                    throw std::invalid_argument(
+                        "generated volume marker contains an invalid stored rule index");
+                }
+                auto existing_metadata = metadata_[index];
+                auto existing_rule = volume_rules_[index];
+                validateGeneratedVolumeLevelSetComposition(
+                    marker,
+                    stored_provenance->second,
+                    existing_metadata,
+                    existing_rule,
+                    false);
+            }
+        }
         const auto make_sensitivity_metadata =
             [&](const interfaces::GeneratedInterfaceSensitivityRecord& record) {
                 CutGeometrySensitivityMetadata metadata;
@@ -2949,6 +2987,93 @@ private:
             }
         }
         bindFacetStabilizationScales(handle, compact_metadata);
+    }
+
+    void validateGeneratedVolumeLevelSetComposition(
+        int marker,
+        const GeneratedLevelSetInterfacePublicationProvenance& publication,
+        CutCellAssemblyMetadata& metadata,
+        geometry::CutQuadratureRule& rule,
+        bool publication_complete) const {
+        if (publication.generated_interface_marker != marker ||
+            publication.request.interface_marker != marker ||
+            !publication.request.valid()) {
+            throw std::invalid_argument(
+                "generated volume marker has incompatible level-set publication provenance");
+        }
+        if (publication.volume_side_filter.has_value() &&
+            rule.side != *publication.volume_side_filter) {
+            throw std::invalid_argument(
+                "generated volume rule side does not match the imported level-set interface filter");
+        }
+
+        if (metadata.source_value_revision != 0u &&
+            rule.provenance.source_value_revision != 0u &&
+            metadata.source_value_revision !=
+                rule.provenance.source_value_revision) {
+            throw std::invalid_argument(
+                "generated level-set volume rule source revision must match metadata");
+        }
+        if (metadata.source_value_revision == 0u) {
+            metadata.source_value_revision =
+                rule.provenance.source_value_revision;
+        } else if (rule.provenance.source_value_revision == 0u) {
+            rule.provenance.source_value_revision =
+                metadata.source_value_revision;
+        }
+        const auto expected_source_revision =
+            expected_source_value_revision_by_marker_.find(marker);
+        const auto published_source_revision =
+            publication.request.source.value_revision;
+        if (expected_source_revision ==
+                expected_source_value_revision_by_marker_.end() ||
+            expected_source_revision->second !=
+                published_source_revision ||
+            metadata.source_value_revision !=
+                published_source_revision) {
+            throw std::invalid_argument(
+                "generated volume rule source revision does not match the imported level-set interface");
+        }
+
+        if (metadata.free_surface_snapshot_revision_key != 0u &&
+            rule.provenance.free_surface_snapshot_revision_key != 0u &&
+            metadata.free_surface_snapshot_revision_key !=
+                rule.provenance.free_surface_snapshot_revision_key) {
+            throw std::invalid_argument(
+                "generated level-set volume rule snapshot revision must match metadata");
+        }
+        if (metadata.free_surface_snapshot_revision_key == 0u) {
+            metadata.free_surface_snapshot_revision_key =
+                rule.provenance.free_surface_snapshot_revision_key;
+        } else if (
+            rule.provenance.free_surface_snapshot_revision_key == 0u) {
+            rule.provenance.free_surface_snapshot_revision_key =
+                metadata.free_surface_snapshot_revision_key;
+        }
+        const auto snapshot_binding =
+            free_surface_snapshot_revision_by_marker_.find(marker);
+        if (snapshot_binding ==
+            free_surface_snapshot_revision_by_marker_.end()) {
+            if (metadata.free_surface_snapshot_revision_key != 0u) {
+                throw std::invalid_argument(
+                    "generated volume rule declares a free-surface snapshot revision without an authoritative snapshot");
+            }
+            return;
+        }
+        if (publication_complete ||
+            snapshot_binding->second == 0u ||
+            (metadata.free_surface_snapshot_revision_key != 0u &&
+             metadata.free_surface_snapshot_revision_key !=
+                 snapshot_binding->second)) {
+            throw std::invalid_argument(
+                "generated volume rule snapshot revision does not match the imported level-set interface");
+        }
+        if (metadata.free_surface_snapshot_revision_key == 0u) {
+            metadata.free_surface_snapshot_revision_key =
+                snapshot_binding->second;
+            rule.provenance.free_surface_snapshot_revision_key =
+                snapshot_binding->second;
+        }
     }
 
     [[nodiscard]] static bool bindingVisibleToPath(const CutIntegrationBinding& binding,
