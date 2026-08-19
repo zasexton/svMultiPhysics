@@ -23,16 +23,17 @@
 #include "Basis/BasisCache.h"
 #include "Basis/BasisFunction.h"
 
-#include <chrono>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <thread>
-#include <mutex>
 #include <vector>
 
 #ifdef _OPENMP
@@ -593,6 +594,20 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
                      "FunctionalAssembler::prepareBoundaryFaceContext: non-Product space DOF count mismatch");
     }
     const bool need_basis_hessians = hasFlag(required_data, RequiredData::BasisHessians);
+    const bool need_reference_face =
+        hasFlag(required_data, RequiredData::ReferencePhysicalPoints) ||
+        hasFlag(required_data, RequiredData::ReferenceJacobians) ||
+        hasFlag(required_data, RequiredData::ReferenceMeasures) ||
+        hasFlag(required_data, RequiredData::ReferenceNormals) ||
+        hasFlag(required_data, RequiredData::ConfigurationTransforms);
+    const bool need_current_face =
+        hasFlag(required_data, RequiredData::CurrentPhysicalPoints) ||
+        hasFlag(required_data, RequiredData::CurrentJacobians) ||
+        hasFlag(required_data, RequiredData::CurrentMeasures) ||
+        hasFlag(required_data, RequiredData::CurrentNormals) ||
+        hasFlag(required_data, RequiredData::ConfigurationTransforms);
+    const bool need_surface_jacobians =
+        hasFlag(required_data, RequiredData::SurfaceJacobians);
 
     elements::ReferenceElement ref = elements::ReferenceElement::create(cell_type);
     const auto& face_nodes = ref.face_nodes(static_cast<std::size_t>(local_face_id));
@@ -802,6 +817,51 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
         }
     }
 
+    const auto evaluate_frame =
+        [&](CoordinateFrame frame,
+            bool compute_surface_jacobians,
+            bool compute_mean_curvatures) {
+            FE_THROW_IF(
+                !mesh.supportsCoordinateFrame(frame),
+                FEException,
+                "FunctionalAssembler::prepareBoundaryFaceContext: mesh adapter "
+                "cannot provide the requested coordinate frame");
+            std::vector<std::array<Real, 3>> coordinates;
+            mesh.getCellCoordinates(cell_id, frame, coordinates);
+            return geometry::evaluateFaceFrame(
+                cell_type,
+                local_face_id,
+                face_type,
+                *quad_rule,
+                coordinates,
+                {},
+                compute_surface_jacobians,
+                compute_mean_curvatures);
+        };
+
+    std::optional<geometry::FaceGeometryData> reference_geometry;
+    std::optional<geometry::FaceGeometryData> current_geometry;
+    std::optional<geometry::FaceGeometryData> active_surface_geometry;
+    if (need_reference_face) {
+        reference_geometry.emplace(evaluate_frame(
+            CoordinateFrame::Reference,
+            need_surface_jacobians && !need_current_face,
+            /*compute_mean_curvatures=*/false));
+    }
+    if (need_current_face) {
+        current_geometry.emplace(evaluate_frame(
+            CoordinateFrame::Current,
+            need_surface_jacobians,
+            hasFlag(required_data, RequiredData::CurrentNormals)));
+    }
+    if (need_surface_jacobians && !current_geometry.has_value() &&
+        !reference_geometry.has_value()) {
+        active_surface_geometry.emplace(evaluate_frame(
+            CoordinateFrame::Active,
+            /*compute_surface_jacobians=*/true,
+            /*compute_mean_curvatures=*/false));
+    }
+
     context.reserve(n_dofs, n_qpts, dim);
     context.configureFace(face_id, cell_id, local_face_id, space, space, required_data, ContextType::BoundaryFace);
     context.setCellDomainId(mesh.getCellDomainId(cell_id));
@@ -812,6 +872,61 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
     context.setTestBasisData(n_dofs, scratch.basis_values, scratch.ref_gradients);
     context.setPhysicalGradients(scratch.phys_gradients, scratch.phys_gradients);
     context.setNormals(scratch.normals);
+
+    if (reference_geometry.has_value()) {
+        const auto& frame = *reference_geometry;
+        context.setReferenceGeometry(
+            frame.cell_geometry.points,
+            frame.cell_geometry.jacobians,
+            frame.cell_geometry.inverse_jacobians,
+            frame.surface_measures);
+        if (hasFlag(required_data, RequiredData::ReferenceNormals)) {
+            context.setReferenceNormals(frame.normals);
+        }
+    }
+    if (current_geometry.has_value()) {
+        const auto& frame = *current_geometry;
+        context.setCurrentGeometry(
+            frame.cell_geometry.points,
+            frame.cell_geometry.jacobians,
+            frame.cell_geometry.inverse_jacobians,
+            frame.surface_measures);
+        if (hasFlag(required_data, RequiredData::CurrentNormals)) {
+            context.setCurrentNormals(frame.normals);
+            context.setCurrentMeanCurvatures(frame.mean_curvatures);
+        }
+    }
+    if (need_surface_jacobians) {
+        if (current_geometry.has_value()) {
+            context.setSurfaceJacobians(
+                current_geometry->surface_jacobians);
+        } else if (reference_geometry.has_value()) {
+            context.setSurfaceJacobians(
+                reference_geometry->surface_jacobians);
+        } else {
+            context.setSurfaceJacobians(
+                active_surface_geometry->surface_jacobians);
+        }
+    }
+    if (hasFlag(required_data, RequiredData::ConfigurationTransforms)) {
+        FE_CHECK_NOT_NULL(
+            reference_geometry.has_value() ? &*reference_geometry : nullptr,
+            "FunctionalAssembler::prepareBoundaryFaceContext: reference geometry");
+        FE_CHECK_NOT_NULL(
+            current_geometry.has_value() ? &*current_geometry : nullptr,
+            "FunctionalAssembler::prepareBoundaryFaceContext: current geometry");
+        std::vector<AssemblyContext::Matrix3x3> transforms(
+            static_cast<std::size_t>(n_qpts));
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            transforms[static_cast<std::size_t>(q)] =
+                geometry::configurationTransform(
+                    current_geometry->cell_geometry.jacobians[
+                        static_cast<std::size_t>(q)],
+                    reference_geometry->cell_geometry.inverse_jacobians[
+                        static_cast<std::size_t>(q)]);
+        }
+        context.setConfigurationTransforms(transforms);
+    }
 
     if (need_basis_hessians) {
         context.setTestBasisHessians(n_dofs, ref_hessians);

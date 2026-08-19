@@ -303,6 +303,34 @@ TEST(FunctionalAssemblerBoundaryTest, IntegrateConstantOverBoundaryFace)
     EXPECT_NEAR(area, 0.5, 1e-12);
 }
 
+TEST(FunctionalAssemblerBoundaryTest,
+     PopulatesFrameExplicitBoundaryGeometryForFormsKernel)
+{
+    constexpr int boundary_marker = 2;
+    forms::test::SingleTetraOneBoundaryFaceMeshAccess mesh(
+        boundary_marker);
+    auto dof_map = forms::test::createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    const auto current_normal = forms::FormExpr::currentNormal();
+    const auto reference_normal = forms::FormExpr::referenceNormal();
+    const auto integrand =
+        forms::inner(current_normal, reference_normal) +
+        forms::FormExpr::currentMeasure() +
+        forms::FormExpr::referenceMeasure();
+    auto kernel = forms::compileBoundaryFunctionalKernel(
+        integrand, boundary_marker);
+
+    FunctionalAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setDofMap(dof_map);
+    assembler.setSpace(space);
+
+    const Real value = assembler.assembleBoundaryScalar(
+        *kernel, boundary_marker);
+    EXPECT_NEAR(value, 1.5, 1e-12);
+}
+
 TEST(FunctionalAssemblerBoundaryTest, UniformlyTinyValidBoundaryFacePreservesMeasure)
 {
     constexpr Real scale = 1e-16;
