@@ -1,0 +1,1253 @@
+{
+  "schema_version": 3,
+  "matrix_id": "free_surface_wp3_wp7_symmetric_nitsche_accepted_state_floor_prerequisite_v3",
+  "status": "FROZEN_BEFORE_EXECUTION",
+  "status_reason": "The implementation inventory is frozen at the recorded clean source commit, and the reciprocal V3 matrix/runner SHA-256 locks are finalized for a clean qualification execution HEAD. No V3 qualification evidence has been executed.",
+  "work_package": "WP-3/WP-7",
+  "findings": [
+    "FSR-16",
+    "FSR-07"
+  ],
+  "qualification_scope": "Exact aggregate-trace certification plus a predeclared symmetric-Nitsche energy floor c*=1/4 for every accepted current state of the supported production Navier-Stokes viscous/Nitsche subform, whose module supplies the bulk viscous energy K. The generic FE gate is conditional on an installed caller-supplied coercive bulk form and does not independently prove that bulk hypothesis. This matrix does not close FSR-16, FSR-07, WP-3, WP-7, or Q1, and does not prove that every cut or mesh-family state will be accepted.",
+  "closure_request_policy": {
+    "accepted_claim": "accepted_state_coercivity_policy_prerequisite",
+    "rejected_claims": [
+      "fsr16_closure",
+      "fsr07_closure",
+      "wp3_closure",
+      "wp7_closure",
+      "wp3_wp7_joint_closure",
+      "q1_closure",
+      "unconditional_cut_and_mesh_family_acceptance"
+    ],
+    "diagnostic": "For the production Navier-Stokes viscous/Nitsche subform whose module supplies K, the exact current-state gate proves a uniform positive energy floor only for accepted states. The generic FE gate remains conditional on a caller-supplied coercive bulk form. Neither path supplies an acceptance or penalty-existence theorem, the broader operator and element-family envelope, mixed stability, convergence, conditioning, solver robustness, or physical campaign evidence required for closure."
+  },
+  "qualification_disposition": {
+    "fsr16_closed": false,
+    "fsr07_closed": false,
+    "wp3_closed": false,
+    "wp7_closed": false,
+    "q1_closed": false,
+    "accepted_state_uniform_coercivity_floor_is_qualification_target": true,
+    "matrix_itself_asserts_executed_qualification_evidence": false,
+    "unconditional_cut_and_mesh_family_acceptance_established": false
+  },
+  "open_outcomes": {
+    "fsr16": "OPEN",
+    "fsr07": "OPEN",
+    "wp3": "OPEN",
+    "wp7": "OPEN",
+    "q1": "OPEN"
+  },
+  "implementation_source_commit": "9ee2b96da03a6e350f580a4bcc9ac098ae979eb5",
+  "method_coercivity_lower_bound": 0.25,
+  "uniform_bound_status": "ENFORCED_ACCEPTED_STATE_FLOOR",
+  "matching_derivation": "Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method_v3.md",
+  "proposed_runner": "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification_v3.py",
+  "runner_sha256": "242713d48ba40adb15b52c54c2fbe4afba8277db5c0e7f5cdc5b36fa219d1365",
+  "qualification_bundle_binding": {
+    "authority": "reciprocal_SHA256_plus_canonical_bundle_commit_history",
+    "matrix_sha256_source": "runner_embedded_normalized_matrix_SHA256",
+    "matrix_hash_normalization": "replace_the_unique_runner_sha256_64_lowercase_hex_JSON_value_with_64_ASCII_zero_digits",
+    "runner_sha256_source": "matrix_runner_sha256",
+    "focused_test_sha256_source": "runner_embedded_focused_test_sha256",
+    "bundle_commit_resolution": "unique_direct_child_of_implementation_source_commit_on_validation_HEAD_ancestry_matching_exact_paths_and_frozen_blobs",
+    "exact_bundle_commit_blobs_required": [
+      "tests/cases/fluid/free_surface_wp3_wp7_nitsche_coercivity_qualification_matrix_v3.json",
+      "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification_v3.py",
+      "tests/test_free_surface_wp3_wp7_nitsche_coercivity_qualification_runner_v3.py"
+    ],
+    "bundle_commit_must_have_exactly_one_parent": true,
+    "bundle_commit_parent_must_equal_implementation_source_commit": true,
+    "bundle_commit_changed_paths_must_equal_exact_bundle_commit_blobs_required": true,
+    "bundle_commit_blobs_must_match_checked_out_frozen_bytes": true,
+    "validation_HEAD_must_descend_from_bundle_commit": true,
+    "execution_HEAD_must_equal_bundle_commit": true
+  },
+  "resource_safeguards": {
+    "execution_preflight_mem_available_mib": 10240,
+    "runtime_mem_available_floor_mib": 4096,
+    "runtime_filesystem_free_floor_mib": 4096,
+    "build_parallel": 1,
+    "build_process_session_memory_mib": 3072,
+    "build_process_file_output_mib": 1024,
+    "build_target_inventory_parse_limit_mib": 8,
+    "binary_link_provenance_uses_monitored_process_sessions": true,
+    "binary_link_provenance_timeout_seconds": 60,
+    "binary_link_provenance_memory_mib": 256,
+    "binary_link_provenance_output_mib": 4,
+    "binary_link_provenance_fails_closed": true,
+    "test_discovery_uses_monitored_process_sessions": true,
+    "test_process_file_size_limit_matches_group_output_mib": true,
+    "source_root_must_equal_runner_repository_root": true,
+    "source_worktree_requires_detached_head": true,
+    "source_worktree_requires_external_git_common_directory": true,
+    "source_worktree_requires_zero_ignored_paths": true,
+    "execution_HEAD_must_equal_bundle_commit": true,
+    "historical_validation_uses_recorded_implementation_source_commit": true,
+    "python_bytecode_writes_disabled": true,
+    "cmake_configure_uses_fresh": true,
+    "cmake_configure_requires_exact_source_and_build_arguments": true,
+    "cmake_configure_rejects_unrecognized_source_homes": true,
+    "cmake_configure_rejects_nonexact_cache_definitions": true,
+    "cmake_fresh_configure_definitions_by_source_home": {
+      "Code/Source/solver/FE": [
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DBUILD_TESTING=ON",
+        "-DBoost_INCLUDE_DIR=/share/software/user/open/boost/1.90.0/include",
+        "-DEigen3_DIR=/share/software/user/open/eigen/3.4.0/share/eigen3/cmake",
+        "-DFE_BUILD_TESTS=ON",
+        "-DFE_USE_SYSTEM_GTEST=OFF",
+        "-DFE_ENABLE_ASSEMBLY=ON",
+        "-DFE_WITH_MESH=ON",
+        "-DFE_ENABLE_MPI=ON",
+        "-DFE_ENABLE_METIS=OFF",
+        "-DFE_ENABLE_PARMETIS=OFF",
+        "-DMESH_ENABLE_MPI=ON",
+        "-DMESH_ENABLE_METIS=ON",
+        "-DMESH_ENABLE_PARMETIS=ON",
+        "-DMESH_ENABLE_VTK=OFF",
+        "-DMESH_ENABLE_EIGEN=ON",
+        "-DUSE_SYSTEM_EIGEN=ON",
+        "-DMESH_BUILD_TESTS=OFF",
+        "-DMESH_BUILD_SHARED=OFF"
+      ],
+      "Code/Source/solver/Physics": [
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DBUILD_TESTING=ON",
+        "-DBoost_INCLUDE_DIR=/share/software/user/open/boost/1.90.0/include",
+        "-DEigen3_DIR=/share/software/user/open/eigen/3.4.0/share/eigen3/cmake",
+        "-DPHYSICS_BUILD_TESTS=ON",
+        "-DPHYSICS_USE_SYSTEM_GTEST=OFF",
+        "-DPHYSICS_WITH_MESH=ON",
+        "-DFE_BUILD_TESTS=OFF",
+        "-DFE_ENABLE_ASSEMBLY=ON",
+        "-DFE_WITH_MESH=ON",
+        "-DFE_ENABLE_MPI=ON",
+        "-DFE_ENABLE_METIS=OFF",
+        "-DFE_ENABLE_PARMETIS=OFF",
+        "-DMESH_ENABLE_MPI=ON",
+        "-DMESH_ENABLE_METIS=ON",
+        "-DMESH_ENABLE_PARMETIS=ON",
+        "-DMESH_ENABLE_VTK=OFF",
+        "-DMESH_ENABLE_EIGEN=ON",
+        "-DUSE_SYSTEM_EIGEN=ON",
+        "-DMESH_BUILD_TESTS=OFF",
+        "-DMESH_BUILD_SHARED=OFF"
+      ]
+    },
+    "thread_environment": {
+      "BLIS_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "NUMEXPR_NUM_THREADS": "1",
+      "OMP_DYNAMIC": "FALSE",
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "VECLIB_MAXIMUM_THREADS": "1"
+    }
+  },
+  "draft_promotion_contract": {
+    "current_state": "FROZEN_BEFORE_EXECUTION",
+    "source_hashes_frozen": true,
+    "qualification_bundle_hashes_frozen": true,
+    "qualification_evidence_executed": false,
+    "validate_only_allowed": true,
+    "execution_allowed": true,
+    "required_execution_state": "FROZEN_BEFORE_EXECUTION",
+    "promotion_requirements": [
+      "author and review the exact V3 runner against this matrix",
+      "revalidate discovery of all 33 named tests and the disabled-test execution route",
+      "finalize the frozen lifecycle fields and reciprocal qualification-bundle contract while retaining the zero runner SHA-256 sentinel for normalized matrix hashing",
+      "compute and embed the normalized finalized matrix SHA-256 in the V3 runner",
+      "compute the finalized V3 runner SHA-256, replace the matrix zero sentinel, and verify that the normalized matrix digest is unchanged",
+      "commit the exact V3 matrix, runner, and focused test bytes together in the unique three-path bundle commit whose sole parent is the implementation source commit",
+      "resolve that immutable bundle commit on validation HEAD ancestry and require the detached execution HEAD to equal it exactly",
+      "validate frozen implementation sources from their recorded commit blobs without rebinding historical validation to later working-tree bytes",
+      "execute from the canonical source root in an isolated detached linked worktree whose common Git directory is external to that source root",
+      "require zero ignored source paths, suppress Python bytecode writes, and freshly configure CMake with the exact locked per-source-home cache definitions before the serialized clean build",
+      "execute all five groups without failure, error, skip, or disabled result",
+      "bind structured evidence and final provenance to the reciprocally locked normalized matrix hash, exact runner hash, qualification bundle commit, and frozen source hashes"
+    ]
+  },
+  "parent_artifacts": [
+    {
+      "path": "tests/cases/fluid/free_surface_wp3_wp7_nitsche_coercivity_qualification_matrix_v2.json",
+      "sha256": "a35818da1455763e630e243baf16b852a6d6c6b7a2112b72e517e6181d4fb407"
+    },
+    {
+      "path": "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification_v2.py",
+      "sha256": "8d995e70e77e27e3e9b7c15401150cc34e673ecd273d88bc1f6f55af60ac245d"
+    },
+    {
+      "path": "Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method_v2.md",
+      "sha256": "3b951a76a0694a9b6d1bc5fa859f036dc9173ee40fe41ca43abe3b27f101fd39"
+    },
+    {
+      "path": "Documentation/qualification_logs/free_surface_wp3_wp7_nitsche_coercivity_v2_20260818_e9ae9f82/checksums.txt",
+      "sha256": "b251010050632b8cf63002356add2d192cce20522e03e9cd35bcf5b16f1f1ef6"
+    }
+  ],
+  "source_inventory_hash_status": "FROZEN",
+  "implementation_sources": [
+    {
+      "path": "Code/Source/solver/FE/Analysis/GeneratedBoundaryAggregateTraceCertificate.h",
+      "sha256": "4ed2f971a57fd319bff6da53684de3699922944ba38de2ba7fc8e39b4a15084e",
+      "role": "public certificate envelope and result contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Analysis/GeneratedBoundaryAggregateTraceCertificate.cpp",
+      "sha256": "baf9ab500e8cab26df4508af2178f85debfcb43f2208ccb3a08c73d6a76522f6",
+      "role": "collective patch construction and deterministic generalized trace certification"
+    },
+    {
+      "path": "Code/Source/solver/FE/Assembly/BackgroundEntityMeasures.h",
+      "sha256": "264a304de1eeede256bca6f600ef0bb33d6accaae2b423f0ce87de958857f3d7",
+      "role": "shared physical background-entity measure contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Assembly/BackgroundEntityMeasures.cpp",
+      "sha256": "c7b2d5c376d0302403ff04249c65c5f24e48de11bd0f6e4a22c2788350ab9854",
+      "role": "shared physical background-entity measure implementation"
+    },
+    {
+      "path": "Code/Source/solver/FE/Assembly/CutIntegrationContext.h",
+      "sha256": "151ac6fa3a9aef4e1660355196a24239d91be28a10206aaa304a006b8e684ee3",
+      "role": "generated-domain rules, content revision, and snapshot binding contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Basis/LagrangeBasis.h",
+      "sha256": "3db26ab02074fd9bcdb03ab6a897e666a868f211fcca9f0e7dcabeaae9fba132",
+      "role": "affine-P1 basis value and gradient contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Basis/LagrangeBasis.cpp",
+      "sha256": "aacd3a3a21fdbd81b1455cd27808daf883edcd4924242b93b73a6bd5ac852f9f",
+      "role": "affine-P1 basis evaluation used by exact Gram-factor formation"
+    },
+    {
+      "path": "Code/Source/solver/FE/Geometry/CutQuadrature.h",
+      "sha256": "fab7babff287d789ce1f5476448bc0cd50190f011903160323b5708b053454de",
+      "role": "generated cut-quadrature rule, provenance, and validity contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Geometry/CutQuadrature.cpp",
+      "sha256": "15fd9e5c59583d25295a15e249675a1492592d154e445c23a48047afbff7afa8",
+      "role": "generated cut-quadrature construction and validation"
+    },
+    {
+      "path": "Code/Source/solver/FE/Interfaces/FreeSurfaceGeometrySnapshot.h",
+      "sha256": "4559ca9986f14ebe36cce001657836c4e92c33d9a0730cc127335bd232abd973",
+      "role": "authoritative free-surface geometry snapshot contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Interfaces/FreeSurfaceGeometrySnapshot.cpp",
+      "sha256": "53fab252ba8575c464f3e42e92f590fc9cd30fc734ff6b2f6508d97df79309a9",
+      "role": "authoritative free-surface geometry snapshot implementation"
+    },
+    {
+      "path": "Code/Source/solver/FE/Interfaces/LevelSetInterfaceDomain.h",
+      "sha256": "9cad3d36abd042af496783040baed3105db3e461259eca979af83fe9eeeea19d",
+      "role": "revision-bound generated interface and volume-domain contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Interfaces/LevelSetInterfaceBuilder.h",
+      "sha256": "82da03ccbb945ba7db469db79e34da704e0e41f5065fc7981e7699279a89c11f",
+      "role": "linear level-set cut-cell construction contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Interfaces/LevelSetInterfaceBuilder.cpp",
+      "sha256": "797da1b2d78af02ba95fb3c1846decdb95bba613ff3c11ab22ce08676488d3ef",
+      "role": "linear level-set interface and active-volume construction"
+    },
+    {
+      "path": "Code/Source/solver/FE/Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h",
+      "sha256": "728715b7c0af5146e3947a2dfa5be7cad05392032829d0fcbd513b754a64269f",
+      "role": "generated interface and physical-boundary intersection contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.cpp",
+      "sha256": "8323f78bc2c1b7e694c2ecd5ab42bb480acbdca93328d5899e118c9bc7dab3cd",
+      "role": "generated boundary-intersection construction and validation"
+    },
+    {
+      "path": "Code/Source/solver/FE/Interfaces/GeneratedActiveBoundaryDomain.h",
+      "sha256": "37941b4968fa920d7f30567ddfa9fe5ed72d4eaa26a4daf2cbee46611fe764f6",
+      "role": "generated sharp active-boundary domain and partition contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Interfaces/GeneratedActiveBoundaryDomain.cpp",
+      "sha256": "19e34d703969eb918419c2165fc8818d842fe38338791cbe935a130abd1175bf",
+      "role": "generated sharp active-boundary clipping and partition validation"
+    },
+    {
+      "path": "Code/Source/solver/FE/LevelSet/LevelSetCellEvaluator.h",
+      "sha256": "2e1fe5792ed5714c7601852607ef7f971352e0890c47102243f78f8576323205",
+      "role": "current scalar and reference-gradient evaluator contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/LevelSet/LevelSetCellEvaluator.cpp",
+      "sha256": "830eeb767a6f396788cd78510f1a533aad3ea523fe7d6896c1a02eaf7d2cfe57",
+      "role": "current level-set cell value and gradient evaluation"
+    },
+    {
+      "path": "Code/Source/solver/FE/LevelSet/LevelSetImplicitCutQuadratureBackend.h",
+      "sha256": "dbeda81b752ed6de4c2eb54e882bae0617078ffe526d08c71df0690b117ba08b",
+      "role": "implicit cut-quadrature dispatch contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/LevelSet/LevelSetImplicitCutQuadratureBackend.cpp",
+      "sha256": "d9cd142db2f80b65388fe25ba8489dcd68b4136d884e959b79753891f31635d7",
+      "role": "production implicit cut-quadrature dispatch and fallback implementation"
+    },
+    {
+      "path": "Code/Source/solver/FE/LevelSet/LevelSetInterfaceLifecycle.h",
+      "sha256": "a9ac264940069c23ab946a500aabb142398e32f68928763001298a5caa98fb2c",
+      "role": "revision-bound generated level-set lifecycle contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/LevelSet/LevelSetInterfaceLifecycle.cpp",
+      "sha256": "aaa529f7dda1bfc3a33eeafeee1f47571b22c74a6e7efe73488858188fcf63ae",
+      "role": "current-source generated-interface lifecycle and publication"
+    },
+    {
+      "path": "Code/Source/solver/FE/Geometry/CutQuadratureMapping.h",
+      "sha256": "8dfdd4f2ab763bbeefc62f381a44949361ef6fedd95362f01b413d41f7cc2d33",
+      "role": "reference-to-physical cut-quadrature mapping contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Geometry/CutQuadratureMapping.cpp",
+      "sha256": "d94241505fa2bcf027a28584099ce4c5a33ace9b63b228b441b2f66df098a0c8",
+      "role": "reference-to-physical cut-quadrature mapping implementation"
+    },
+    {
+      "path": "Code/Source/solver/FE/Math/DenseLinearAlgebra.h",
+      "sha256": "d713f8747f4555393cb9213ec2aaf0ce7ae61bcc5b001e762133b84b1ebb8359",
+      "role": "floating diagnostics plus exact dense and factorized binary64-dyadic generalized-bound contracts"
+    },
+    {
+      "path": "Code/Source/solver/FE/Math/DenseExactDyadic.cpp",
+      "sha256": "8180aeda02cf87ded2eb5d7d8739a255935e70c48f76eb07a6b64a3a9ddff34f",
+      "role": "authoritative exact binary64-dyadic dense and factorized positive-Gram quotient certification"
+    },
+    {
+      "path": "Code/Source/solver/FE/Math/DenseLinearAlgebra.cpp",
+      "sha256": "b2b532a99d739dc0f6804cb2a0a8342388402e476f36944b30a055139d4f0cb4",
+      "role": "dense generalized eigenvalue certification implementation"
+    },
+    {
+      "path": "Code/Source/solver/FE/Tests/Unit/Math/test_DenseLinearAlgebra.cpp",
+      "sha256": "a8b80a09a7e9d35c43eaeb5b64790339628f95fb4f4b6810f11cd594eff2bbe1",
+      "role": "floating, exact-dense, and exact-factorized generalized-bound evidence"
+    },
+    {
+      "path": "Code/Source/solver/FE/Constraints/AffineConstraints.h",
+      "sha256": "86f527fdf92da43e07b567e538fb0234b2a7dfbf94d954475b01033591e9157e",
+      "role": "closed tangent-row and layout-revision contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Constraints/AffineConstraints.cpp",
+      "sha256": "e1b19d79487391691dc35564f7e0c3645ca5028dbf73c9f7c9362592389638b4",
+      "role": "affine closure, tangent application, and revision implementation"
+    },
+    {
+      "path": "Code/Source/solver/FE/Constraints/SmallCutAggregationConstraint.h",
+      "sha256": "55907dcae0c750e76b92cd212ff0b9c07394acabfcec2c28b795fb691f2219be",
+      "role": "trace-eligible finalized aggregation report schema"
+    },
+    {
+      "path": "Code/Source/solver/FE/Constraints/SmallCutAggregationConstraint.cpp",
+      "sha256": "a7d7c94f077e529ac282b4a0c5cb74505ba63ca8ced77241284916775dbc0426",
+      "role": "canonical closed-tangent aggregation report production"
+    },
+    {
+      "path": "Code/Source/solver/FE/Forms/BoundaryConditions.h",
+      "sha256": "f4a32ef583db26e810d84da2fec3a8c992b84112ba7a47554a6ae5f8ca889b08",
+      "role": "opaque generated-boundary symmetric-gradient Nitsche route binding"
+    },
+    {
+      "path": "Code/Source/solver/FE/Forms/FormExpr.h",
+      "sha256": "b7157a67d037a8ec638b0b15044168119f01694981c98ca53ce5c7ad5fe35a0d",
+      "role": "bound route expression identity contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Forms/FormExpr.cpp",
+      "sha256": "00c55952f91da3b2ba6567f9a3bcc2e6f5a6643d18330d115a753b790f5e823f",
+      "role": "bound route expression identity implementation"
+    },
+    {
+      "path": "Code/Source/solver/FE/Analysis/FormulationRecord.h",
+      "sha256": "6c5c705b5344b76ac22b2dc538e38f6a66751427749ba26b269debece634b4c5",
+      "role": "installed-form provenance record contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Systems/FESystem.h",
+      "sha256": "5b0d7f6db715c8206c69147a7010362997e22cd2d592a08f134a82891199df48",
+      "role": "accepted-state floor policy, certificate record, cache, and public lifecycle interfaces"
+    },
+    {
+      "path": "Code/Source/solver/FE/Systems/FESystem.cpp",
+      "sha256": "a28053742402628a018efb5f1b069697686f4d044bd46c6caa499ceecbd8980d",
+      "role": "eager exact certification, outward operator grouping, rounding-safe floor gate, digest validation, revision validation, and collective agreement"
+    },
+    {
+      "path": "Code/Source/solver/FE/Systems/FormsInstaller.h",
+      "sha256": "05bf9690949bfdfe04579c6dd021e90a8b37bb441a23275ad9b8f0b14b903ebd",
+      "role": "form-bound policy installation request including the predeclared symmetric energy floor"
+    },
+    {
+      "path": "Code/Source/solver/FE/Systems/FormsInstaller.cpp",
+      "sha256": "94fce67cc87d963b81a12492d3cca48a52f3ce354b9dbd48d02b981d97f3c439",
+      "role": "exact route-anchor and floor validation with transactional policy installation"
+    },
+    {
+      "path": "Code/Source/solver/FE/Systems/SystemSetup.h",
+      "sha256": "75c41ef5896dfcde96355482083b36e49fc421452db1ba01a474ef8808060812",
+      "role": "system setup input and lifecycle entry contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Systems/SystemSetup.cpp",
+      "sha256": "cf82e81d271ebb4413dc9402440c3b4bc6870782c2bf54076fc13280e06b07ef",
+      "role": "setup and finalized constraint-refresh certification lifecycle"
+    },
+    {
+      "path": "Code/Source/solver/FE/Systems/SystemAssembly.h",
+      "sha256": "c70dc9e17ea153038096cb2a266875b519f418ae90f27ac7fe69735ce361327a",
+      "role": "current-certificate assembly-preflight entry contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Systems/SystemAssembly.cpp",
+      "sha256": "8c3d35e2d2fb6feb08da5a156e5b58bf10ae6f9907af73ee0bbe090978995fed",
+      "role": "assembly preflight requiring current certificates before output mutation"
+    },
+    {
+      "path": "Code/Source/solver/FE/Assembly/StandardAssembler.h",
+      "sha256": "188fea9185c008b8abe5d8564df28fe82a0f880cb20a8986b876b1ec83db4288",
+      "role": "standard assembly route contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Assembly/StandardAssembler.cpp",
+      "sha256": "455b91ac9a23de65c0d822f9690c4fcafae8f0f037202402b4124ea67a33e2e6",
+      "role": "standard assembly route implementation"
+    },
+    {
+      "path": "Code/Source/solver/FE/Forms/FormKernels.h",
+      "sha256": "df7a18ce3c64c1e4040429fa7f3ddef7f6b08601e9763bb94c2aed4b6aaa0445",
+      "role": "production sharp-boundary Nitsche form-kernel contract"
+    },
+    {
+      "path": "Code/Source/solver/FE/Forms/FormKernels.cpp",
+      "sha256": "dc37ed7d878e9ff7a6f77e84a4569a7f5a1448eb56fd1348e75c515be698e89f",
+      "role": "production sharp-boundary Nitsche form kernels"
+    },
+    {
+      "path": "Code/Source/solver/Physics/Formulations/NavierStokes/NavierStokesBCFactories.h",
+      "sha256": "e76695862e5d9be6fc094adbbb0e033facbe9d24bbcb4dd8451a6d0b29bc9728",
+      "role": "production velocity-Nitsche boundary form and penalty coefficient construction"
+    },
+    {
+      "path": "Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h",
+      "sha256": "6a0fa5234f93b30cc897a30cb72cef7615b35f8e86d296dc6c2b1154caaf1b77",
+      "role": "production generated-boundary energy-floor option and Nitsche qualification contract"
+    },
+    {
+      "path": "Code/Source/solver/Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp",
+      "sha256": "15e43a6e861533661afdf18edffb2a953412fd134f6d17cb72f5d930729c599e",
+      "role": "production validation, registration, and effective-configuration provenance for generated-boundary energy-floor policies"
+    },
+    {
+      "path": "Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+      "sha256": "890ef63dd1e5cae374ba17e3c214e4d59cfb838632c643e9c2e817c55e9dc22b",
+      "role": "serial analytic, accepted/subfloor, adjacent-ULP, operator-group, invalidation, and unsymmetric evidence"
+    },
+    {
+      "path": "Code/Source/solver/FE/Tests/Unit/Assembly/test_GeneratedBoundaryAggregateTraceCertificateMPI.cpp",
+      "sha256": "9c08af2cedd36cd88c5d4e7a50bf7f5f67922548eb7053256d9307574f0d6436",
+      "role": "exact two-rank policy-consensus, distributed-subfloor, cross-owner acceptance, and assembly-preflight evidence"
+    },
+    {
+      "path": "Code/Source/solver/Physics/Tests/Unit/test_FreeSurfaceCutStability.cpp",
+      "sha256": "8187a5c3eaca04957a0cf875cf0697a237faeb4a2fa7deb6bf139a613b529522",
+      "role": "108-case direct-gate, accepted-floor, exact-certificate, and sampled-spectrum diagnostic"
+    },
+    {
+      "path": "Code/Source/solver/Physics/Tests/Unit/test_MovingDomainPhysics.cpp",
+      "sha256": "b3b4594950b81b2d6481c5530a95e0caa31017313c6a726b47cf28912b4e7dbc",
+      "role": "production floor validation, policy binding, and effective-configuration provenance evidence"
+    },
+    {
+      "path": "Code/Source/solver/FE/CMakeLists.txt",
+      "sha256": "d403307474c858084a21783a5fadfad043da1b0cd74cce860793b95a5f07171c",
+      "role": "serial and MPI certificate test build routing"
+    },
+    {
+      "path": "Code/Source/solver/Physics/CMakeLists.txt",
+      "sha256": "a2f1968748ea4881d89f66641ffc1636dcbf4a288173edb5d9a6c6ee9482e845",
+      "role": "physics diagnostic test build routing"
+    },
+    {
+      "path": "Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method_v3.md",
+      "sha256": "d326507e013170c2be304166f4725f353dc771ac16ece77456bbaceaf2808d80",
+      "role": "matching accepted-state energy-floor derivation, rounding-safe gate, and claim boundary"
+    },
+    {
+      "path": "tests/cases/fluid/run_free_surface_wp2_geometry_qualification.py",
+      "sha256": "5387dd19618139aeee45bb6f3c77f27fd8b26ce28713d221a866e1eea4662037",
+      "role": "resource-bounded generic qualification execution base"
+    },
+    {
+      "path": "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification_v2.py",
+      "sha256": "8d995e70e77e27e3e9b7c15401150cc34e673ecd273d88bc1f6f55af60ac245d",
+      "role": "inherited fail-closed qualification validation and execution machinery imported by the V3 wrapper"
+    }
+  ],
+  "model_envelope": "production_Navier-Stokes_viscous_plus_generated-boundary_symmetric-Nitsche_subform_with_module-supplied_bulk_K_on_reference-frame_affine_P1_product_velocity_linear_triangles_or_tetrahedra_constant_positive_finite_viscosity_current_trace-eligible_small-cut_aggregation_and_predeclared_energy_floor;generic_FE_gate_is_conditional_on_an_installed_caller-supplied_coercive_bulk_form",
+  "certified_aggregate_trace_contract": {
+    "supported_space": "affine_p1_product_velocity",
+    "supported_cells": [
+      "Triangle3",
+      "Tetra4"
+    ],
+    "frame": "reference",
+    "viscosity": "constant_positive_finite",
+    "aggregation_state": "current_finalized_trace_eligible_closed_tangent_rows",
+    "one_active_feature_per_patch": true,
+    "maximum_terminal_tangent_dimension": 128,
+    "maximum_exact_retained_quotient_dimension": 32,
+    "quotient_authority": "exact_binary64_dyadic_factorized_positive_Gram_D_and_N_psd_common_kernel_rank_identity_then_D_spd_N_psd_and_qD_minus_N_psd_on_the_exact_principal_gauge",
+    "proof_input": "raw_affine_Gram_factors_with_exact_positive_sum_product_weights",
+    "tangent_quotient": "exact_sparse_raw_to_retained_coordinate_map",
+    "gram_map_rows_order": "strictly_increasing",
+    "zero_dimensional_quotient": "vacuous_after_complete_factor_map_and_work_preflight",
+    "secondary_common_kernel": "exact_rank(D_plus_N)_equals_rank(D)_proof_with_deterministic_principal_coordinate_gauge_or_fail_closed",
+    "factorized_provenance": "proof_flags_counts_work_metrics_and_nonzero_input_digest_bound_into_certificate_digest",
+    "floating_spectral_role": "optional_diagnostics_only",
+    "formed_dense_matrix_role": "optional_floating_diagnostics_only",
+    "patch_inequality": "integral_Gamma_(h_normal/mu)*abs(2*mu*epsilon(v)*n)^2 <= C_patch*integral_support_2*mu*epsilon(v):epsilon(v)",
+    "global_bound_rule": "outward_rounded_maximum_over_active_cells_of_summed_overlapping_patch_bounds",
+    "effective_penalty_multiplier": "alpha_i=gamma_i*p^2_when_scaled_else_gamma_i",
+    "symmetric_group_ratio": "R_op=outward_rounded_sum_i(C_i/alpha_i)",
+    "symmetric_acceptance": "R_op<=downward_safe_binary64_cap_for_(1-c)^2_with_predeclared_c_in_(0,1)",
+    "finite_space_energy_ratio_lower_bound": "exact_configured_floor_c_after_the_direct_outward-risk_gate",
+    "unsymmetric_contract": "revision_bound_continuity_diagnostic_with_exact_zero_policy_floor_and_no_symmetric_energy_bound",
+    "certificate_selects_or_mutates_penalty": false,
+    "navier_slip_robin_coefficient_rescaled": false,
+    "cache_binding": "floor_bits_bind_the_policy_signature_and_current_certificate-cache_digest_together_with_the_current_cut-context_snapshot_source-value_affine-constraint_and_aggregation_revisions",
+    "floor_bits_excluded_from_digests": [
+      "emitted_route_form_binding_digest",
+      "exact_aggregate_trace_certificate_digest"
+    ],
+    "coercive_bulk_energy_authority": "production_Navier-Stokes_module-supplied_viscous_K",
+    "generic_FE_gate_scope": "conditional_on_an_installed_caller-supplied_coercive_bulk_form",
+    "predeclared_method_energy_floor": 0.25,
+    "method_floor_safe_risk_cap_hex": "0x1.1fffffffffffep-1",
+    "method_floor_safe_risk_cap": 0.5624999999999998
+  },
+  "certificate_envelope": {
+    "synthetic_full_active_boundary_patches_supported": true,
+    "rooted_aggregation_patches_supported": true,
+    "rootless_aggregation_patches_supported": false,
+    "closed_affine_constraints_required": true,
+    "current_cut_context_required_for_execution": true,
+    "current_free_surface_snapshot_required": true,
+    "current_generated_source_value_revision_required": true,
+    "current_affine_constraint_layout_revision_required": true,
+    "physical_boundary_marker_bound": true,
+    "collective_on_field_communicator": true,
+    "canonical_digest_scope": "communicator_and_algebraic_partition",
+    "rank_local_revisions_excluded_from_canonical_digest": true,
+    "hard_terminal_tangent_dimension_cap": 128,
+    "hard_exact_retained_quotient_dimension_cap": 32,
+    "hard_factorized_gram_block_cap": 16384,
+    "hard_factorized_gram_row_cap_per_form": 262144,
+    "hard_factorized_weight_term_cap_per_form": 1048576,
+    "hard_factorized_product_factor_cap_per_block": 4,
+    "hard_factorized_transform_entry_cap": 1048576,
+    "hard_factorized_raw_factor_coefficient_cap": 1048576,
+    "hard_factorized_transform_visit_cap": 1048576,
+    "hard_factorized_outer_pair_cap": 8388608,
+    "hard_factorized_modeled_input_byte_cap": 67108864,
+    "hard_exact_arithmetic_update_cap": 2000000,
+    "hard_exact_integer_bit_cap": 262144,
+    "hard_exact_binary64_search_step_cap": 64,
+    "factor_and_work_caps_fail_closed_before_content_scans": true,
+    "floor_bits_bind_policy_signature": true,
+    "floor_bits_bind_current_certificate_cache_digest": true,
+    "floor_bits_bind_emitted_route_form_binding_digest": false,
+    "floor_bits_bind_exact_trace_certificate_digest": false,
+    "operator_group_risk_outward_rounded": true,
+    "assembly_recomputes_direct_floor_gate": true
+  },
+  "lifecycle_contract": {
+    "policy_registration": "derived_from_an_opaque_exact-state-test_full-space-signature_binding_with_one_unscaled_top-level_additive_anchor_and_a_finite_predeclared_symmetric_floor_committed_by_formulation_install_before_system_setup",
+    "setup_without_cut_context": "policy_table_validated_and_certificate_cache_left_empty",
+    "certificate_refresh": "eager_after_finalized_small_cut_aggregation_refresh_with_outward_operator-risk_sum_and_direct_floor_gate",
+    "context_or_constraint_change": "invalidate_then_collectively_recertify",
+    "assembly_preflight": "recompute_current_certificate_digest_route_ratios_operator_group_ratio_safe_cap_and_stored_floor_before_matrix_or_vector_mutation",
+    "failed_refresh_publication": "no_partial_certificate_cache_after_local_or_collective_floor_gate_failure",
+    "mpi_policy_table": "count_signature_and_floor_bits_must_agree_across_ranks",
+    "mpi_certificate": "canonical_certificate_digest_must_agree_while_rank_local_revision_values_may_differ"
+  },
+  "case_axes": {
+    "wall_fractions": [
+      0,
+      1e-08,
+      1e-06,
+      0.0001,
+      0.01,
+      0.1,
+      0.25,
+      0.49,
+      1
+    ],
+    "orientations": [
+      "axis",
+      "oblique"
+    ],
+    "affine_mesh_scales": [
+      0.5,
+      0.3333333333333333,
+      0.25
+    ],
+    "active_sides": [
+      "negative",
+      "positive"
+    ],
+    "case_count": 108,
+    "wet_case_count": 96,
+    "dry_case_count": 12,
+    "configured_penalty_multiplier": 12,
+    "sample_comparison_tolerance": 1e-11,
+    "required_minimum_energy_ratio": 0.25,
+    "downward_safe_group_ratio_cap": 0.5624999999999998,
+    "downward_safe_trace_upper_bound_limit_hex": "0x1.afffffffffffdp+2",
+    "downward_safe_trace_upper_bound_limit": 6.749999999999997
+  },
+  "structured_output_contract": {
+    "case_prefix": "WP3_WP7_NITSCHE_TRACE_V3_CASE ",
+    "summary_prefix": "WP3_WP7_NITSCHE_TRACE_V3_SUMMARY ",
+    "expected_case_records": 108,
+    "case_required_fields": [
+      "case_id",
+      "orientation",
+      "active_side",
+      "mesh_scale",
+      "target_wall_fraction",
+      "certificate_digest",
+      "aggregation_digest",
+      "cut_context_revision",
+      "snapshot_revision",
+      "source_value_revision",
+      "form_binding_digest",
+      "source_formulation_record_index",
+      "form_binding_source_match",
+      "boundary_rule_count",
+      "patch_count",
+      "exact_common_kernel_metadata_valid",
+      "exact_common_kernel_quotient_patch_count",
+      "trace_upper_bound",
+      "effective_penalty_multiplier",
+      "required_minimum_energy_ratio",
+      "trace_to_penalty_ratio",
+      "grouped_symmetric_ratio",
+      "finite_sample_energy_lower_bound",
+      "minimum_generalized_eigenvalue",
+      "eigensolver_tolerance",
+      "sampled_eigenvalue_gap",
+      "deterministic",
+      "revision_match"
+    ],
+    "case_identity_fields": [
+      "orientation",
+      "active_side",
+      "mesh_scale",
+      "target_wall_fraction"
+    ],
+    "summary_required_fields": [
+      "case_count",
+      "wet_case_count",
+      "dry_case_count",
+      "deterministic_case_count",
+      "revision_match_case_count",
+      "exact_common_kernel_metadata_valid_case_count",
+      "exact_common_kernel_quotient_patch_count",
+      "maximum_trace_upper_bound",
+      "minimum_finite_sample_energy_lower_bound",
+      "minimum_sampled_eigenvalue_gap",
+      "method_coercivity_lower_bound",
+      "uniform_bound_status",
+      "accepted_claim"
+    ]
+  },
+  "runtime_gates": [
+    {
+      "id": "serial_exact_dyadic_diagonal_equality",
+      "test": "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundProvesDiagonalEquality",
+      "requirements": [
+        "the returned finite binary64 coefficient is directly proved by qD-N positive semidefiniteness",
+        "the immediately preceding binary64 coefficient remains a proved failing lower neighbor",
+        "an exactly zero numerator returns q=0 without inventing a failing lower-bound neighbor"
+      ]
+    },
+    {
+      "id": "serial_exact_dyadic_equality_and_tiny_mode",
+      "test": "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRetainsTinyPositiveMode",
+      "requirements": [
+        "a one-ULP positive denominator mode is retained rather than tolerance-projected",
+        "the exact directly proved upper bound equals two"
+      ]
+    },
+    {
+      "id": "serial_exact_dyadic_three_by_three_bareiss",
+      "test": "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesThreeByThreeBareissDivision",
+      "requirements": [
+        "the three-by-three fraction-free update performs exact Bareiss division",
+        "the exact directly proved upper bound equals two"
+      ]
+    },
+    {
+      "id": "serial_exact_dyadic_symmetric_pivot",
+      "test": "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesSymmetricPsdPivotSwap",
+      "requirements": [
+        "a positive semidefinite numerator with a zero leading coordinate is certified through a symmetric pivot swap",
+        "the exact numerator rank is two and the directly proved upper bound is three"
+      ]
+    },
+    {
+      "id": "serial_exact_dyadic_indefinite_and_singular_rejection",
+      "test": "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsLateIndefinitePivot",
+      "requirements": [
+        "an indefinite mode exposed after earlier positive pivots is rejected",
+        "the same executed math group also rejects singular denominators and indefinite numerators"
+      ]
+    },
+    {
+      "id": "serial_exact_dyadic_semidefinite_denominator_rejection",
+      "test": "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsSemidefiniteDenominator",
+      "requirements": [
+        "a singular positive-semidefinite denominator is rejected because this helper accepts only an already-formed SPD quotient"
+      ]
+    },
+    {
+      "id": "serial_exact_dyadic_indefinite_numerator_rejection",
+      "test": "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsIndefiniteNumerator",
+      "requirements": [
+        "an indefinite numerator is rejected before any upper coefficient is published"
+      ]
+    },
+    {
+      "id": "serial_exact_dyadic_unrepresentable_bound_rejection",
+      "test": "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsUnrepresentableUpperBound",
+      "requirements": [
+        "failure of qD-N positive semidefiniteness at the maximum finite binary64 coefficient rejects the quotient"
+      ]
+    },
+    {
+      "id": "serial_exact_dyadic_resource_and_input_rejection",
+      "test": "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap",
+      "requirements": [
+        "a retained quotient above the fixed dimension cap is rejected",
+        "the same executed math group also rejects an unrepresentable finite upper bound and malformed matrices"
+      ]
+    },
+    {
+      "id": "serial_exact_dyadic_malformed_input_rejection",
+      "test": "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs",
+      "requirements": [
+        "asymmetric, nonfinite, and wrong-sized matrices are rejected before exact certification"
+      ]
+    },
+    {
+      "id": "serial_exact_factorized_preserves_raw_psd",
+      "test": "DenseLinearAlgebra.ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding",
+      "requirements": [
+        "a raw affine rank-one Gram factor is certified as positive semidefinite even when entrywise binary64 formation makes the corresponding dense matrix exactly indefinite",
+        "the result records factorized-positive-form proof authority, successful factor materialization and sparse-map application, exact block and row counts, and a nonzero factorized-input provenance digest"
+      ]
+    },
+    {
+      "id": "serial_exact_factorized_sparse_tangent_sum",
+      "test": "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnroundedSparseTangentSum",
+      "requirements": [
+        "the exact sparse tangent map retains a one-plus-half-ULP coefficient sum that would round back to one if formed in binary64",
+        "transform visits, nonzero outer pairs, and factor-materialization work are recorded"
+      ]
+    },
+    {
+      "id": "serial_exact_factorized_nonrepresentable_positive_scales",
+      "test": "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales",
+      "requirements": [
+        "positive scale sums and products remain exact dyadic expressions when their formed binary64 products would underflow to zero or overflow to infinity",
+        "both self pencils return the directly proved bound one"
+      ]
+    },
+    {
+      "id": "serial_exact_factorized_malformed_input_rejection",
+      "test": "DenseLinearAlgebra.ExactFactorizedBoundRejectsSingularAndMalformedInputs",
+      "requirements": [
+        "the strict SPD entry point rejects a singular denominator while the PSD entry point exactly quotients a compatible common kernel and rejects numerator action on that kernel",
+        "zero positive-scale terms and nonfinite raw factors are rejected",
+        "Gram block map_rows must be strictly increasing for bounded linear-time duplicate validation",
+        "a shape-valid sparse map with genuinely nonmonotone row offsets is rejected without an earlier shape check masking that condition",
+        "shape-derived transform-work caps are enforced before caller scalar payloads are scanned"
+      ]
+    },
+    {
+      "id": "serial_exact_factorized_linear_scale_multipliers",
+      "test": "DenseLinearAlgebra.ExactFactorizedBoundUsesLinearPositiveScaleMultipliers",
+      "requirements": [
+        "multi-term positive sums, positive product factors, block integer multipliers, and per-factor-row multipliers all act linearly rather than being inadvertently squared",
+        "both numerator and denominator multiplier paths are exercised and the outward binary64 bound is the successor of 1.4"
+      ]
+    },
+    {
+      "id": "serial_exact_factorized_vacuous_quotient",
+      "test": "DenseLinearAlgebra.ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient",
+      "requirements": [
+        "a zero-dimensional sparse-map output is accepted only after complete factor, map, modeled-input, and work-cap preflight",
+        "the vacuous quotient records factorized proof flags, zero ranks and bound, zero transform/materialization work, and a nonzero factorized-input provenance digest"
+      ]
+    },
+    {
+      "id": "serial_form_binding_exact_anchor",
+      "test": "GeneratedBoundaryAggregateTraceCertificate.FormBindingRequiresExactlyOneRouteAnchorBeforeMutation",
+      "requirements": [
+        "the canonical helper rejects discrete coefficients in place of either the state unknown or test function, mismatched state/test function-space signatures, and an invalid Nitsche variant",
+        "the canonical helper rejects prescribed-value DAGs with transitive state, trial, test, discrete-field, previous-solution, coupled auxiliary-data, or geometry-variation dependencies and rejects a prescribed vector whose value dimension differs from the bound velocity space",
+        "installation rejects a mutually matching state/test signature that differs from the registered field space before operator, policy, formulation, or contribution metadata mutation",
+        "an opaque binding whose canonical route anchor is absent from the installed residual is rejected",
+        "an opaque binding whose canonical route anchor occurs twice in the installed residual is rejected",
+        "an opaque binding whose canonical route anchor is scaled beneath a multiplication is rejected",
+        "all rejections occur before operator, policy, formulation, or contribution metadata mutation"
+      ]
+    },
+    {
+      "id": "serial_full_active_analytic_certificate",
+      "test": "GeneratedBoundaryAggregateTraceCertificate.FullActiveUnitTriangleHasAnalyticBoundFour",
+      "requirements": [
+        "the analytic largest quotient eigenvalue equals four within the test tolerance",
+        "raw affine symmetric-strain and traction Gram factors annihilate the structural rigid modes exactly, and exact tangent reproduction plus anchor rank are proved before the quotient",
+        "the exact sparse tangent quotient preserves positive quadrature-weight sums and boundary h-normal product factors until the retained denominator is proved SPD, the numerator PSD, and the published coefficient satisfies an exact dyadic qD-N PSD proof",
+        "factorized proof flags, block/row/weight/work counts, and a nonzero factorized-input digest are validated and bound into the canonical certificate digest",
+        "the conservative upper bound is finite, no smaller than the quotient, and outward-close to four",
+        "the eager FE record conditionally binds effective penalty eight, policy floor 0.25, grouped risk below the direct safe cap, and stored lower bound exactly 0.25",
+        "repeated certification preserves canonical digest and bound",
+        "mismatched route metadata and unsupported certificate options are rejected",
+        "cut-context replacement invalidates the cache and assembly rejects stale state before mutating the sentinel matrix"
+      ]
+    },
+    {
+      "id": "serial_rooted_aggregate_certificate",
+      "test": "GeneratedBoundaryAggregateTraceCertificate.RootedCutSquareCertifiesActualAggregateProlongation",
+      "requirements": [
+        "the actual rooted aggregation prolongation is used",
+        "the retained support volume is 79/128 and generated boundary measure is 1/8",
+        "the rigid-mode quotient removes exactly three structural null modes",
+        "raw affine Gram factors annihilate the structural rigid modes exactly, and exact tangent reproduction plus anchor rank are proved before the coordinate gauge",
+        "the retained three-coordinate exact sparse tangent quotient carries complete factorized exact-dyadic denominator, numerator, and upper-inequality proofs",
+        "factorized proof flags, block/row/weight/work counts, and a nonzero factorized-input digest are validated and bound into the canonical certificate digest",
+        "the analytic largest quotient eigenvalue equals 32/79 within the test tolerance",
+        "the conservative global bound covers the patch bound",
+        "repeated certification preserves canonical digest and bound",
+        "the accepted FE record stores the exact predeclared energy floor 0.25 under the caller-supplied bulk-coercivity hypothesis"
+      ]
+    },
+    {
+      "id": "serial_rootless_aggregate_rejected",
+      "test": "GeneratedBoundaryAggregateTraceCertificate.RootlessAggregateSupportIsRejected",
+      "requirements": [
+        "the finalized aggregation report contains exactly one trace-eligible rootless patch",
+        "direct aggregate trace certification rejects rootless support as outside the certified envelope"
+      ]
+    },
+    {
+      "id": "serial_authoritative_snapshot_required",
+      "test": "GeneratedBoundaryAggregateTraceCertificate.ImportedGeneratedDomainsWithoutAuthoritativeSnapshotFailClosed",
+      "requirements": [
+        "imported generated domains can retain structurally trace-eligible aggregation rows while lacking an authoritative free-surface snapshot",
+        "the report carries no authoritative free-surface snapshot revision",
+        "direct aggregate trace certification rejects the unsupported state"
+      ]
+    },
+    {
+      "id": "serial_product_velocity_space_required",
+      "test": "GeneratedBoundaryAggregateTraceCertificate.ScalarFieldIsRejectedAsAnUnsupportedTraceSpace",
+      "requirements": [
+        "a scalar H1 field is rejected because the certified envelope requires a product velocity space"
+      ]
+    },
+    {
+      "id": "serial_symmetric_threshold_rejection",
+      "test": "GeneratedBoundaryAggregateTraceCertificate.SymmetricPolicyRejectsAnInsufficientConfiguredPenalty",
+      "requirements": [
+        "a symmetric route with effective penalty multiplier four is rejected because its grouped risk exceeds the downward-safe cap for floor 0.25",
+        "no partial certificate record remains published"
+      ]
+    },
+    {
+      "id": "serial_positive_but_subfloor_energy_rejection",
+      "test": "GeneratedBoundaryAggregateTraceCertificate.SymmetricPolicyRejectsAPositiveButSubfloorEnergyRatio",
+      "requirements": [
+        "a state with a strictly positive classical symmetric-Nitsche lower bound is nevertheless rejected because it does not prove the configured floor 0.25",
+        "the failed refresh leaves the certificate cache empty"
+      ]
+    },
+    {
+      "id": "serial_symmetric_safe_cap_adjacent_ulp",
+      "test": "GeneratedBoundaryAggregateTraceCertificate.SymmetricEnergyFloorAcceptsTheSafeCapAndRejectsItsNextUlp",
+      "requirements": [
+        "an outward group ratio exactly equal to the frozen downward-safe cap for c=0.25 is accepted",
+        "the accepted record stores exactly 0.25 and current-state assembly preflight succeeds",
+        "the immediately larger binary64 ratio is accepted for a relaxed floor but rejected for floor 0.25 with no certificate publication"
+      ]
+    },
+    {
+      "id": "serial_operator_level_energy_floor_grouping",
+      "test": "GeneratedBoundaryAggregateTraceCertificate.SymmetricPoliciesApplyTheEnergyFloorToTheirOperatorLevelGroup",
+      "requirements": [
+        "two symmetric routes publish one common outward operator-level risk sum larger than either route ratio",
+        "the safe grouped configuration is accepted with both stored bounds exactly 0.25",
+        "two individually sub-cap routes whose sum exceeds the direct floor cap are rejected without partial certificate publication"
+      ]
+    },
+    {
+      "id": "serial_unsymmetric_continuity_only",
+      "test": "GeneratedBoundaryAggregateTraceCertificate.UnsymmetricPolicyRetainsTheBoundWithoutACoercivityThreshold",
+      "requirements": [
+        "an unsymmetric route retains its trace certificate even when C/alpha exceeds one",
+        "an otherwise invalid requested floor is ignored and the installed unsymmetric policy stores exact zero",
+        "the grouped symmetric ratio is zero and no symmetric energy-ratio lower bound is published"
+      ]
+    },
+    {
+      "id": "exact_two_rank_policy_floor_mismatch",
+      "test": "GeneratedBoundaryAggregateTraceCertificateMPI.PolicyFloorMismatchFailsCollectivelyBeforeCertificatePublication",
+      "requirements": [
+        "the test executes at exactly two MPI ranks without skip",
+        "rank-local policy floors 0.25 and 0.5 make collective setup fail on both ranks",
+        "the system remains not set up and no certificate accessor can observe partial state"
+      ]
+    },
+    {
+      "id": "exact_two_rank_subfloor_rejection_no_partial_publication",
+      "test": "GeneratedBoundaryAggregateTraceCertificateMPI.SubfloorCertificateFailsCollectivelyWithoutPartialPublication",
+      "requirements": [
+        "the test executes at exactly two MPI ranks without skip",
+        "collective setup and authoritative distributed snapshot construction succeed before certification",
+        "the distributed grouped risk exceeds the floor-0.25 safe cap and refresh fails on both ranks",
+        "the already-set-up system publishes no partial certificate cache"
+      ]
+    },
+    {
+      "id": "exact_two_rank_cross_owner_certificate",
+      "test": "GeneratedBoundaryAggregateTraceCertificateMPI.RootedCrossRankAggregateHasAnalyticBoundThirtyTwoOverSeventyNine",
+      "requirements": [
+        "the test executes at exactly two MPI ranks without skip",
+        "the rooted aggregate crosses rank ownership and closes slave rows onto rank-zero masters",
+        "report shape and nonzero canonical report digest agree on both ranks",
+        "the nonzero canonical certificate digest agrees on both ranks while rank-local context revisions differ",
+        "both ranks retain identical complete exact factor-action, tangent-reproduction, anchor-rank, denominator-SPD, numerator-PSD, qD-N, factorized count/work, and nonzero provenance-digest metadata",
+        "the analytic largest quotient eigenvalue is 32/79 within the test tolerance",
+        "both ranks bind policy floor and stored accepted-state lower bound exactly to 0.25",
+        "collective certification and assembly preflight both succeed"
+      ]
+    },
+    {
+      "id": "production_invalid_floor_and_policy_binding",
+      "test": "MovingDomainPhysics.GeneratedBoundaryNitscheRouteRegistersItsTracePolicy",
+      "requirements": [
+        "a nonpositive generated-boundary energy floor is rejected before velocity field, pressure field, operator, or trace-policy mutation",
+        "the supported generated symmetric route binds operator, field, markers, viscosity, penalty, polynomial scaling, exact form provenance, and floor 0.25 into one production policy",
+        "setup succeeds without prematurely publishing a certificate before a current cut context exists"
+      ]
+    },
+    {
+      "id": "production_floor_effective_configuration_provenance",
+      "test": "MovingDomainPhysics.NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults",
+      "requirements": [
+        "the exact effective Physics configuration artifact serializes generated_active_boundary_minimum_energy_ratio as 0.25",
+        "the serialized floor is bound alongside the existing Nitsche configuration defaults"
+      ]
+    },
+    {
+      "id": "accepted_state_floor_108_case_diagnostic",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "requirements": [
+        "the runner explicitly enables this single disabled diagnostic",
+        "all 108 unique case identities are emitted: 96 wet and 12 dry",
+        "every case has one nonzero deterministic revision-matched certificate and aggregation digest",
+        "every patch reports internally consistent factorized exact common-kernel metadata, and the sweep applies the exact secondary quotient on at least one production patch",
+        "every case has a nonzero form-binding metadata digest and a matching source formulation record",
+        "every case records required floor and stored accepted-state lower bound exactly 0.25",
+        "every grouped symmetric ratio equals its route ratio and is no larger than the frozen downward-safe floor cap",
+        "dry cases have zero boundary rules, zero patches, zero upper bound, and stored floor 0.25",
+        "wet cases have positive boundary-rule, patch, and upper-bound values",
+        "each wet sampled generalized eigenvalue supports floor 0.25 after the eigensolver and comparison tolerances"
+      ]
+    }
+  ],
+  "build_targets": {
+    "math": "test_fe_math",
+    "assembly": "test_fe_assembly",
+    "assembly_mpi": "test_fe_assembly_mpi",
+    "physics": "test_physics"
+  },
+  "build_cmake_homes": {
+    "math": "Code/Source/solver/FE",
+    "assembly": "Code/Source/solver/FE",
+    "assembly_mpi": "Code/Source/solver/FE",
+    "physics": "Code/Source/solver/Physics"
+  },
+  "groups": [
+    {
+      "id": "exact_dyadic_spd_quotient_serial",
+      "binary": "math",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundProvesDiagonalEquality",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRetainsTinyPositiveMode",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesThreeByThreeBareissDivision",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesSymmetricPsdPivotSwap",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsLateIndefinitePivot",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsSemidefiniteDenominator",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsIndefiniteNumerator",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsUnrepresentableUpperBound",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnroundedSparseTangentSum",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales",
+        "DenseLinearAlgebra.ExactFactorizedBoundRejectsSingularAndMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundUsesLinearPositiveScaleMultipliers",
+        "DenseLinearAlgebra.ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient"
+      ],
+      "execution": {
+        "wall_time_seconds": 300,
+        "memory_mib": 1024,
+        "output_mib": 64
+      }
+    },
+    {
+      "id": "aggregate_trace_certificate_serial",
+      "binary": "assembly",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "GeneratedBoundaryAggregateTraceCertificate.FormBindingRequiresExactlyOneRouteAnchorBeforeMutation",
+        "GeneratedBoundaryAggregateTraceCertificate.FullActiveUnitTriangleHasAnalyticBoundFour",
+        "GeneratedBoundaryAggregateTraceCertificate.RootedCutSquareCertifiesActualAggregateProlongation",
+        "GeneratedBoundaryAggregateTraceCertificate.RootlessAggregateSupportIsRejected",
+        "GeneratedBoundaryAggregateTraceCertificate.ImportedGeneratedDomainsWithoutAuthoritativeSnapshotFailClosed",
+        "GeneratedBoundaryAggregateTraceCertificate.ScalarFieldIsRejectedAsAnUnsupportedTraceSpace",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricPolicyRejectsAnInsufficientConfiguredPenalty",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricPolicyRejectsAPositiveButSubfloorEnergyRatio",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricEnergyFloorAcceptsTheSafeCapAndRejectsItsNextUlp",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricPoliciesApplyTheEnergyFloorToTheirOperatorLevelGroup",
+        "GeneratedBoundaryAggregateTraceCertificate.UnsymmetricPolicyRetainsTheBoundWithoutACoercivityThreshold"
+      ],
+      "execution": {
+        "wall_time_seconds": 600,
+        "memory_mib": 1024,
+        "output_mib": 64
+      }
+    },
+    {
+      "id": "aggregate_trace_certificate_exact_two_rank_mpi",
+      "binary": "assembly_mpi",
+      "mpi_ranks": 2,
+      "exact_mpi_ranks": true,
+      "gtest_output_copies": 2,
+      "tests": [
+        "GeneratedBoundaryAggregateTraceCertificateMPI.PolicyFloorMismatchFailsCollectivelyBeforeCertificatePublication",
+        "GeneratedBoundaryAggregateTraceCertificateMPI.SubfloorCertificateFailsCollectivelyWithoutPartialPublication",
+        "GeneratedBoundaryAggregateTraceCertificateMPI.RootedCrossRankAggregateHasAnalyticBoundThirtyTwoOverSeventyNine"
+      ],
+      "execution": {
+        "wall_time_seconds": 600,
+        "memory_mib": 1024,
+        "output_mib": 64
+      }
+    },
+    {
+      "id": "generated_boundary_nitsche_energy_floor_production_serial",
+      "binary": "physics",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "tests": [
+        "MovingDomainPhysics.GeneratedBoundaryNitscheRouteRegistersItsTracePolicy",
+        "MovingDomainPhysics.NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults"
+      ],
+      "execution": {
+        "wall_time_seconds": 600,
+        "memory_mib": 1024,
+        "output_mib": 64
+      }
+    },
+    {
+      "id": "symmetric_nitsche_accepted_state_floor_108_case_diagnostic",
+      "binary": "physics",
+      "mpi_ranks": 1,
+      "gtest_output_copies": 1,
+      "gtest_also_run_disabled_tests": true,
+      "tests": [
+        "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3"
+      ],
+      "execution": {
+        "wall_time_seconds": 3600,
+        "memory_mib": 1024,
+        "output_mib": 64
+      }
+    }
+  ],
+  "quantitative_evidence": [
+    {
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "property": "wp3_wp7_nitsche_trace_v3_case_count",
+      "type": "integer",
+      "relation": "equal",
+      "threshold": 108
+    },
+    {
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "property": "wp3_wp7_nitsche_trace_v3_maximum_upper_bound",
+      "type": "real",
+      "relation": "less_than_or_equal",
+      "threshold": 6.749999999999997
+    },
+    {
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "property": "wp3_wp7_nitsche_trace_v3_minimum_finite_sample_lower_bound",
+      "type": "real",
+      "relation": "equal",
+      "threshold": 0.25
+    },
+    {
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "property": "wp3_wp7_nitsche_trace_v3_minimum_sampled_eigenvalue_gap",
+      "type": "real",
+      "relation": "greater_than_or_equal",
+      "threshold": -1e-11
+    },
+    {
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "property": "wp3_wp7_nitsche_trace_v3_exact_common_kernel_quotient_patch_count",
+      "type": "integer",
+      "relation": "greater_than",
+      "threshold": 0
+    },
+    {
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "property": "wp3_wp7_nitsche_trace_v3_method_coercivity_lower_bound",
+      "type": "real",
+      "relation": "equal",
+      "threshold": 0.25
+    },
+    {
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "property": "wp3_wp7_nitsche_trace_v3_uniform_bound_status",
+      "type": "string",
+      "relation": "equal",
+      "threshold": "ENFORCED_ACCEPTED_STATE_FLOOR"
+    },
+    {
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "property": "wp3_wp7_nitsche_trace_v3_accepted_claim",
+      "type": "string",
+      "relation": "equal",
+      "threshold": "accepted_state_coercivity_policy_prerequisite"
+    }
+  ],
+  "gates": {
+    "expected_group_count": 5,
+    "expected_distinct_test_count": 33,
+    "expected_quantitative_evidence_count": 8,
+    "expected_failures": 0,
+    "expected_errors": 0,
+    "expected_disabled": 0,
+    "expected_skipped": 0
+  },
+  "closure_contract": [
+    {
+      "claim": "exact_binary64_dyadic_dense_and_factorized_spd_quotient_prerequisite",
+      "evidence": [
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundProvesDiagonalEquality",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRetainsTinyPositiveMode",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesThreeByThreeBareissDivision",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesSymmetricPsdPivotSwap",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsLateIndefinitePivot",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsSemidefiniteDenominator",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsIndefiniteNumerator",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsUnrepresentableUpperBound",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnroundedSparseTangentSum",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales",
+        "DenseLinearAlgebra.ExactFactorizedBoundRejectsSingularAndMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundUsesLinearPositiveScaleMultipliers",
+        "DenseLinearAlgebra.ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient"
+      ]
+    },
+    {
+      "claim": "serial_conditional_FE_energy_floor_gate_and_aggregate_trace_prerequisite",
+      "evidence": [
+        "GeneratedBoundaryAggregateTraceCertificate.FormBindingRequiresExactlyOneRouteAnchorBeforeMutation",
+        "GeneratedBoundaryAggregateTraceCertificate.FullActiveUnitTriangleHasAnalyticBoundFour",
+        "GeneratedBoundaryAggregateTraceCertificate.RootedCutSquareCertifiesActualAggregateProlongation",
+        "GeneratedBoundaryAggregateTraceCertificate.RootlessAggregateSupportIsRejected",
+        "GeneratedBoundaryAggregateTraceCertificate.ImportedGeneratedDomainsWithoutAuthoritativeSnapshotFailClosed",
+        "GeneratedBoundaryAggregateTraceCertificate.ScalarFieldIsRejectedAsAnUnsupportedTraceSpace",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricPolicyRejectsAnInsufficientConfiguredPenalty",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricPolicyRejectsAPositiveButSubfloorEnergyRatio",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricEnergyFloorAcceptsTheSafeCapAndRejectsItsNextUlp",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricPoliciesApplyTheEnergyFloorToTheirOperatorLevelGroup",
+        "GeneratedBoundaryAggregateTraceCertificate.UnsymmetricPolicyRetainsTheBoundWithoutACoercivityThreshold"
+      ]
+    },
+    {
+      "claim": "exact_two_rank_floor_consensus_rejection_and_acceptance_prerequisite",
+      "evidence": [
+        "GeneratedBoundaryAggregateTraceCertificateMPI.PolicyFloorMismatchFailsCollectivelyBeforeCertificatePublication",
+        "GeneratedBoundaryAggregateTraceCertificateMPI.SubfloorCertificateFailsCollectivelyWithoutPartialPublication",
+        "GeneratedBoundaryAggregateTraceCertificateMPI.RootedCrossRankAggregateHasAnalyticBoundThirtyTwoOverSeventyNine"
+      ]
+    },
+    {
+      "claim": "production_floor_policy_and_configuration_provenance_prerequisite",
+      "evidence": [
+        "MovingDomainPhysics.GeneratedBoundaryNitscheRouteRegistersItsTracePolicy",
+        "MovingDomainPhysics.NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults"
+      ]
+    },
+    {
+      "claim": "finite_108_case_accepted_floor_and_sampled_spectrum_consistency_prerequisite",
+      "evidence": [
+        "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3"
+      ]
+    }
+  ],
+  "method_limitations": [
+    "The positive value c*=1/4 targets a uniform contract over accepted current states of the production Navier-Stokes viscous/Nitsche subform whose module supplies K. The generic FE gate remains conditional on a caller-supplied coercive bulk form, and no pre-execution matrix entry is qualification evidence or an existence theorem guaranteeing that every cut or mesh-family state will pass the fixed floor gate.",
+    "Quadrilateral and hexahedral Q1, higher order, non-affine geometry, spatially variable or constitutive viscosity, and current-frame geometry are not certified.",
+    "The supported sharp route is generated-boundary symmetric velocity Nitsche on one physical marker with finalized trace-eligible aggregation; traction, pressure flux, outflow, physical Robin, Navier slip, and other boundary operators remain outside the certificate.",
+    "The two-rank evidence covers one exact cross-owner aggregate plus policy-mismatch and distributed-subfloor failures. It does not qualify four-or-more ranks, repartition sweeps, or rank-count invariance.",
+    "The 108-case diagnostic verifies the declared direct risk gate and compares the accepted floor with a finite sampled generalized eigenspectrum. It does not establish mixed velocity-pressure stability, conditioning, convergence, or an acceptance theorem beyond the exercised states.",
+    "The formulation installer verifies one exact canonical generated-interface symmetric-gradient route anchor and publishes its sealed effective penalty, while the policy floor is validated and installed separately. Certification consumes those values and never selects or mutates the penalty. Floor bits bind the policy signature and current certificate-cache digest but do not bind the emitted route/form-binding digest or exact aggregate-trace certificate digest. The binding-metadata digest is not a digest of the entire mixed assembled form, and this path must not rescale the physical Navier-slip coefficient mu/slip_length."
+  ],
+  "unresolved_required_evidence": [
+    "q1_quadrilateral_and_hexahedral_certification",
+    "higher_order_and_non_affine_geometry_certification",
+    "variable_viscosity_and_constitutive_tangent_certification",
+    "all_supported_sharp_boundary_operator_joint_scaling",
+    "traction_pressure_flux_outflow_robin_and_navier_slip_contracts",
+    "mixed_velocity_pressure_stability",
+    "viscous_transient_and_advection_regimes",
+    "mpi_four_or_more_ranks_and_repartition_invariance",
+    "cut_relative_reference_conditioning_and_expected_h_scaling",
+    "manufactured_velocity_pressure_and_divergence_error_rates",
+    "connected_disconnected_and_node_crossing_exits",
+    "production_preconditioner_and_iteration_spread",
+    "unconditional_acceptance_or_penalty_existence_over_cut_and_mesh_families"
+  ],
+  "prospective_tests": []
+}
