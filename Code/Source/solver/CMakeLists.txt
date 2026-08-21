@@ -178,6 +178,7 @@ set(CSRCS
   cmm.h cmm.cpp
   consts.h consts.cpp
   contact.h contact.cpp
+  darcy.h darcy.cpp
   distribute.h distribute.cpp
   eq_assem.h eq_assem.cpp
   fluid.h fluid.cpp
@@ -234,8 +235,7 @@ set(CSRCS
   active_stress_uniform_unsteady.cpp
   active_stress_ode.cpp
   active_stress_nash_panfilov.cpp
-  active_stress_regazzoni.cpp
-
+  
   SPLIT.c
 
   svZeroD_interface/LPNSolverInterface.h svZeroD_interface/LPNSolverInterface.cpp

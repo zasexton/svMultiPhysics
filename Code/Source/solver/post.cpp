@@ -1011,6 +1011,21 @@ void post(Simulation* simulation, const mshType& lM, Array<double>& res, const S
           }
         }
 
+      // MBF Flux calculation
+      // 
+      } else if (outGrp == OutputNameType::outGrp_mbfFlx) {
+        double kappa = eq.dmn[cDmn].prop[PhysicalProperyType::permeability];
+        int i = eq.s;
+        Vector<double> q(nsd);
+        for (int a = 0; a < eNoN; a++) {
+          for (int j = 0; j < nsd; j++) {
+            q(j) = q(j) + Nx(j, a) * yl(i, a);
+          }
+        }
+        for (int j = 0; j < nsd; j++) {
+          lRes(j) = -kappa * q(j);
+        }
+
       // Strain tensor invariants calculation   
       //
       } else if (outGrp == OutputNameType::outGrp_stInv) {

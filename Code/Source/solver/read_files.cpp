@@ -206,8 +206,8 @@ void read_bc(Simulation* simulation, EquationParameters* eq_params, eqType& lEq,
 
   if (effective_direction.size() != 0) {
     if (effective_direction.size() != com_mod.nsd) {
-      auto effective_size = (std::stringstream() << "(" << effective_direction.size() << ")").str();
-      auto space_dim = (std::stringstream() << "(" << com_mod.nsd << ")").str();
+      auto effective_size = "(" + std::to_string(effective_direction.size()) + ")";
+      auto space_dim = "(" + std::to_string(com_mod.nsd) + ")";
       svmp::raise<svmp::ParseException>("The size of the effective direction " + effective_size + 
           " does not equal the number of space dimensions " + space_dim); 
     }
@@ -1579,6 +1579,34 @@ void read_domain(Simulation* simulation, EquationParameters* eq_params, eqType& 
 
           case PhysicalProperyType::inverse_darcy_permeability:
             rtmp = domain_params->inverse_darcy_permeability.value();
+          break;
+
+          case PhysicalProperyType::permeability:
+            rtmp = domain_params->permeability.value();
+          break;
+
+          case PhysicalProperyType::porosity:
+            rtmp = domain_params->porosity.value();
+          break;
+
+          case PhysicalProperyType::porosity_pressure:
+            rtmp = domain_params->porosity_pressure.value();
+          break;
+
+          case PhysicalProperyType::media_compressibility:
+            rtmp = domain_params->media_compressibility.value();
+          break;
+
+          case PhysicalProperyType::fluid_compressibility:
+            rtmp = domain_params->fluid_compressibility.value();
+          break;
+
+          case PhysicalProperyType::darcy_fluid_viscosity:
+            rtmp = domain_params->darcy_fluid_viscosity.value();
+          break;
+
+          case PhysicalProperyType::density_pressure:
+            rtmp = domain_params->density_pressure.value();
           break;
         }
 

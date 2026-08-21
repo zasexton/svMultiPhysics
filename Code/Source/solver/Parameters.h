@@ -1623,6 +1623,13 @@ class DomainParameters : public ParameterLists
     Parameter<double> source_term;
     Parameter<double> time_step_for_integration;
     
+    Parameter<double> permeability;
+    Parameter<double> porosity;
+    Parameter<double> porosity_pressure;
+    Parameter<double> media_compressibility;
+    Parameter<double> fluid_compressibility;
+    Parameter<double> darcy_fluid_viscosity;
+    Parameter<double> density_pressure;
     // Inverse of Darcy permeability. Default value of 0.0 for Navier-Stokes and non-zero for Navier-Stokes-Brinkman
     Parameter<double> inverse_darcy_permeability;
 };

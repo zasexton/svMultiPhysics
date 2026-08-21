@@ -287,7 +287,8 @@ enum class EquationType
   phys_CMM = 209, 
   phys_CEP = 210,
   phys_ustruct = 211,  // Nonlinear elastodynamics using mixed VMS-stabilized formulation 
-  phys_stokes = 212
+  phys_stokes = 212,
+  phys_darcy = 213
 };
 
 constexpr auto Equation_CMM = EquationType::phys_CMM;
@@ -347,6 +348,7 @@ enum class OutputNameType {
   outGrp_activeTensionFibers = 529,
   outGrp_activeTensionSheets = 530,
   outGrp_activeTensionNormal = 531,
+  outGrp_mbfFlx = 532,
 
   out_velocity = 599,
   out_pressure = 598,
@@ -380,7 +382,9 @@ enum class OutputNameType {
   out_fibStretchRate = 570,
   out_activeTensionFibers = 569,
   out_activeTensionSheets = 568,
-  out_activeTensionNormal = 567
+  out_activeTensionNormal = 567,
+  out_MBF = 566,
+  out_mbfFlux = 565
 };
 
 /// @brief Simulation output file types. 
@@ -413,7 +417,14 @@ enum class PhysicalProperyType
   shell_thickness = 12, 
   ctau_M = 13,                 // stabilization coeffs. for USTRUCT (momentum, continuity)
   ctau_C = 14,
-  inverse_darcy_permeability = 15
+  inverse_darcy_permeability = 15,
+  permeability = 16,
+  porosity = 17,
+  porosity_pressure = 18,
+  media_compressibility = 19,
+  fluid_compressibility = 20,
+  darcy_fluid_viscosity = 21,
+  density_pressure = 22
 };
 
 enum class PreconditionerType 
