@@ -1192,6 +1192,13 @@ Accepted-state qualification evidence recorded on 2026-08-25:
 - FE and Physics targets were configured, cleaned, and rebuilt in fresh external caches before execution. Final provenance bound the clean detached source, matrix hash `e1f2bcdc07daa40c9298244be57046c2353fa9c001f632b22407256818c5d381`, runner hash `242713d48ba40adb15b52c54c2fbe4afba8277db5c0e7f5cdc5b36fa219d1365`, focused-test hash `a711e17e11122fb3700f2cdd48aeefe7e795d1dff3172dfea57e05682be4314a`, and executed binaries. The untouched 70-file archive and all 69 recorded checksums pass in [the version-3 accepted-state qualification record](qualification_logs/free_surface_wp3_wp7_nitsche_coercivity_v3_20260824_cb6cf91a/record.md) and [summary](qualification_logs/free_surface_wp3_wp7_nitsche_coercivity_v3_20260824_cb6cf91a/summary.json).
 - This evidence establishes only the predeclared `c*=1/4` floor for every accepted current state of the supported production Navier--Stokes viscous/Nitsche subform. The generic FE gate remains conditional on a caller-supplied coercive bulk form, unconditional cut- and mesh-family acceptance is not established, and FSR-16, FSR-07, WP-3, WP-7, and Q1 remain open.
 
+Current handoff after the 2026-08-25 accepted-state qualification:
+
+- The standalone `Physics_FreeSurfaceCutStability_MPI_2` prerequisite passed after a fresh Physics rebuild in Sherlock job `40669404` before the qualification run began.
+- Sherlock job `40737447` completed the frozen V3 matrix successfully. The archive above was published unchanged in descendant commit `fec50ece980a5d5d811a4341a6f7800094106902`, and focused runner validation at that archive-bearing descendant passed all 72 tests.
+- No formal closure status changed: FSR-16, FSR-07, WP-3, WP-7, and Q1 remain open, as do every other unchecked work package and qualification box.
+- Resume with WP-3 closure: inventory every production natural and weak exterior-boundary operator, remove or reject any whole-face fallback, fill remaining production manufactured-channel, wet-fraction, and MPI coverage gaps, and only then freeze a WP-3 closure matrix. Treat the full WP-7 conditioning matrix as subsequent work rather than credit from this prerequisite.
+
 ### WP-4: balanced capillary pressure, wall energy, and prescribed angle
 
 **Findings addressed:** FSR-03 and FSR-04.
