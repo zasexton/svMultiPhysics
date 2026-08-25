@@ -12,6 +12,7 @@
 #include "FE/Quadrature/GaussQuadrature.h"
 #include "FE/Quadrature/QuadratureRule.h"
 
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <exception>
@@ -245,4 +246,42 @@ TEST(QuadratureGeneratorTestSupport, ExercisesSharedLineRuleChecks)
                 svmp::CellFamily::Line, 1, {}, {});
         },
         "at least one point");
+}
+
+TEST(GaussLegendreImplementation, GeneratesRepresentativeSupportedRules)
+{
+    const std::array<int, 4> point_counts{
+        1, 2, 17, max_gauss_legendre_points()};
+
+    for (const int num_points : point_counts) {
+        SCOPED_TRACE(::testing::Message()
+                     << "num_points=" << num_points);
+        const QuadratureRule rule =
+            make_gauss_legendre_rule(num_points);
+
+        expect_common_line_metadata(
+            rule,
+            static_cast<std::size_t>(num_points),
+            2 * num_points - 1);
+        expect_line_rule_invariants(
+            rule,
+            LineEndpointPolicy::Excluded);
+        expect_advertised_line_exactness(rule);
+    }
+}
+
+TEST(GaussLegendreImplementation, RejectsRequestsOutsideSupportedRange)
+{
+    constexpr std::string_view expected_message =
+        "num_points must be in [1, 128]";
+
+    expect_exception_with_message<InvalidArgumentException>(
+        [] { (void)make_gauss_legendre_rule(0); },
+        expected_message);
+    expect_exception_with_message<InvalidArgumentException>(
+        [] {
+            (void)make_gauss_legendre_rule(
+                max_gauss_legendre_points() + 1);
+        },
+        expected_message);
 }
