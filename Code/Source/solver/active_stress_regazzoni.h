@@ -123,7 +123,9 @@ public:
   /**
    * @brief Constructor.
    */
-  RegazzoniActiveStress() : ActiveStress(n_state_variables) {}
+  RegazzoniActiveStress() : ActiveStress(/* n_state_variables = */ n_state_variables,
+                                        /* needs_fiber_stretch = */ true,
+                                        /* needs_fiber_stretch_rate = */ true) {}
 
   /**
    * @brief Construct an instance of model parameters.
