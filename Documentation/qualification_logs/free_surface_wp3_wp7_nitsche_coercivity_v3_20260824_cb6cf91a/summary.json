@@ -1,0 +1,157 @@
+{
+  "certified_aggregate_trace_contract": {
+    "aggregation_state": "current_finalized_trace_eligible_closed_tangent_rows",
+    "cache_binding": "floor_bits_bind_the_policy_signature_and_current_certificate-cache_digest_together_with_the_current_cut-context_snapshot_source-value_affine-constraint_and_aggregation_revisions",
+    "certificate_selects_or_mutates_penalty": false,
+    "coercive_bulk_energy_authority": "production_Navier-Stokes_module-supplied_viscous_K",
+    "effective_penalty_multiplier": "alpha_i=gamma_i*p^2_when_scaled_else_gamma_i",
+    "factorized_provenance": "proof_flags_counts_work_metrics_and_nonzero_input_digest_bound_into_certificate_digest",
+    "finite_space_energy_ratio_lower_bound": "exact_configured_floor_c_after_the_direct_outward-risk_gate",
+    "floating_spectral_role": "optional_diagnostics_only",
+    "floor_bits_excluded_from_digests": [
+      "emitted_route_form_binding_digest",
+      "exact_aggregate_trace_certificate_digest"
+    ],
+    "formed_dense_matrix_role": "optional_floating_diagnostics_only",
+    "frame": "reference",
+    "generic_FE_gate_scope": "conditional_on_an_installed_caller-supplied_coercive_bulk_form",
+    "global_bound_rule": "outward_rounded_maximum_over_active_cells_of_summed_overlapping_patch_bounds",
+    "gram_map_rows_order": "strictly_increasing",
+    "maximum_exact_retained_quotient_dimension": 32,
+    "maximum_terminal_tangent_dimension": 128,
+    "method_floor_safe_risk_cap": 0.5624999999999998,
+    "method_floor_safe_risk_cap_hex": "0x1.1fffffffffffep-1",
+    "navier_slip_robin_coefficient_rescaled": false,
+    "one_active_feature_per_patch": true,
+    "patch_inequality": "integral_Gamma_(h_normal/mu)*abs(2*mu*epsilon(v)*n)^2 <= C_patch*integral_support_2*mu*epsilon(v):epsilon(v)",
+    "predeclared_method_energy_floor": 0.25,
+    "proof_input": "raw_affine_Gram_factors_with_exact_positive_sum_product_weights",
+    "quotient_authority": "exact_binary64_dyadic_factorized_positive_Gram_D_and_N_psd_common_kernel_rank_identity_then_D_spd_N_psd_and_qD_minus_N_psd_on_the_exact_principal_gauge",
+    "secondary_common_kernel": "exact_rank(D_plus_N)_equals_rank(D)_proof_with_deterministic_principal_coordinate_gauge_or_fail_closed",
+    "supported_cells": [
+      "Triangle3",
+      "Tetra4"
+    ],
+    "supported_space": "affine_p1_product_velocity",
+    "symmetric_acceptance": "R_op<=downward_safe_binary64_cap_for_(1-c)^2_with_predeclared_c_in_(0,1)",
+    "symmetric_group_ratio": "R_op=outward_rounded_sum_i(C_i/alpha_i)",
+    "tangent_quotient": "exact_sparse_raw_to_retained_coordinate_map",
+    "unsymmetric_contract": "revision_bound_continuity_diagnostic_with_exact_zero_policy_floor_and_no_symmetric_energy_bound",
+    "viscosity": "constant_positive_finite",
+    "zero_dimensional_quotient": "vacuous_after_complete_factor_map_and_work_preflight"
+  },
+  "certified_aggregate_trace_evidence": {
+    "dry_case_count": 12,
+    "exact_common_kernel_metadata_valid_case_count": 108,
+    "exact_common_kernel_quotient_patch_count": 16,
+    "maximum_trace_upper_bound": 1.3865887291231187,
+    "minimum_finite_sample_energy_lower_bound": 0.25,
+    "minimum_sampled_eigenvalue_gap": 0.7499999999993009,
+    "observed_case_count": 108,
+    "outcome": "PASS",
+    "path": "aggregate_trace_certificate_evidence.json",
+    "present": true,
+    "sha256": "3e3be36d9ada371fedc1692d0d5fd073e6db553f83709719e2ff62f46b3d8e1a",
+    "wet_case_count": 96
+  },
+  "distinct_test_count": 33,
+  "final_provenance_diagnostics": [],
+  "final_provenance_outcome": "PASS",
+  "group_outcomes": {
+    "aggregate_trace_certificate_exact_two_rank_mpi": "PASS",
+    "aggregate_trace_certificate_serial": "PASS",
+    "exact_dyadic_spd_quotient_serial": "PASS",
+    "generated_boundary_nitsche_energy_floor_production_serial": "PASS",
+    "symmetric_nitsche_accepted_state_floor_108_case_diagnostic": "PASS"
+  },
+  "group_recorded_properties_check_count": 0,
+  "group_recorded_properties_outcome": "PASS",
+  "matrix_id": "free_surface_wp3_wp7_symmetric_nitsche_accepted_state_floor_prerequisite_v3",
+  "method_coercivity_lower_bound": 0.25,
+  "open_outcomes": {
+    "fsr07": "OPEN",
+    "fsr16": "OPEN",
+    "q1": "OPEN",
+    "wp3": "OPEN",
+    "wp7": "OPEN"
+  },
+  "overall_outcome": "PASS",
+  "qualification_bundle_binding": {
+    "artifacts": [
+      {
+        "git_blob_id": "618c02f772d95e80510bde29c7c7eb4477d5dbb8",
+        "git_mode": "100644",
+        "git_object_type": "blob",
+        "normalized_sha256": "0384998c268353f3ffb32b9cc24567d6be0695bcd8ec4082665ebc1dd67a60c4",
+        "path": "tests/cases/fluid/free_surface_wp3_wp7_nitsche_coercivity_qualification_matrix_v3.json",
+        "role": "matrix",
+        "sha256": "e1f2bcdc07daa40c9298244be57046c2353fa9c001f632b22407256818c5d381"
+      },
+      {
+        "git_blob_id": "a6f3584e38c3a697b9137146015a999602b434cf",
+        "git_mode": "100644",
+        "git_object_type": "blob",
+        "path": "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification_v3.py",
+        "role": "runner",
+        "sha256": "242713d48ba40adb15b52c54c2fbe4afba8277db5c0e7f5cdc5b36fa219d1365"
+      },
+      {
+        "git_blob_id": "7762df6933d4f9873e7ebe0ac31946998ac4b344",
+        "git_mode": "100644",
+        "git_object_type": "blob",
+        "path": "tests/test_free_surface_wp3_wp7_nitsche_coercivity_qualification_runner_v3.py",
+        "role": "focused_test",
+        "sha256": "a711e17e11122fb3700f2cdd48aeefe7e795d1dff3172dfea57e05682be4314a"
+      }
+    ],
+    "authority": "reciprocal_SHA256_plus_canonical_bundle_commit_history",
+    "binding_schema_version": 2,
+    "bundle_changed_paths": [
+      "tests/cases/fluid/free_surface_wp3_wp7_nitsche_coercivity_qualification_matrix_v3.json",
+      "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification_v3.py",
+      "tests/test_free_surface_wp3_wp7_nitsche_coercivity_qualification_runner_v3.py"
+    ],
+    "bundle_commit_resolution": "unique_direct_child_of_implementation_source_commit_on_validation_HEAD_ancestry_matching_exact_paths_and_frozen_blobs",
+    "bundle_parent_commit": "9ee2b96da03a6e350f580a4bcc9ac098ae979eb5",
+    "focused_test_sha256_from_runner": "a711e17e11122fb3700f2cdd48aeefe7e795d1dff3172dfea57e05682be4314a",
+    "implementation_source_commit": "9ee2b96da03a6e350f580a4bcc9ac098ae979eb5",
+    "normalized_matrix_sha256_embedded_in_runner": "0384998c268353f3ffb32b9cc24567d6be0695bcd8ec4082665ebc1dd67a60c4",
+    "qualification_bundle_commit": "cb6cf91a090414eef020e3c30924b0b30570ed27",
+    "runner_sha256_from_matrix": "242713d48ba40adb15b52c54c2fbe4afba8277db5c0e7f5cdc5b36fa219d1365",
+    "validation_head_commit": "cb6cf91a090414eef020e3c30924b0b30570ed27"
+  },
+  "qualification_disposition": {
+    "accepted_state_uniform_coercivity_floor_is_qualification_target": true,
+    "fsr07_closed": false,
+    "fsr16_closed": false,
+    "matrix_itself_asserts_executed_qualification_evidence": false,
+    "q1_closed": false,
+    "unconditional_cut_and_mesh_family_acceptance_established": false,
+    "wp3_closed": false,
+    "wp7_closed": false
+  },
+  "qualification_scope": "Exact aggregate-trace certification plus a predeclared symmetric-Nitsche energy floor c*=1/4 for every accepted current state of the supported production Navier-Stokes viscous/Nitsche subform, whose module supplies the bulk viscous energy K. The generic FE gate is conditional on an installed caller-supplied coercive bulk form and does not independently prove that bulk hypothesis. This matrix does not close FSR-16, FSR-07, WP-3, WP-7, or Q1, and does not prove that every cut or mesh-family state will be accepted.",
+  "quantitative_evidence_check_count": 8,
+  "quantitative_evidence_outcome": "PASS",
+  "requested_claim": "accepted_state_coercivity_policy_prerequisite",
+  "source_commit": "cb6cf91a090414eef020e3c30924b0b30570ed27",
+  "uniform_bound_status": "ENFORCED_ACCEPTED_STATE_FLOOR",
+  "v2_parent_artifacts": [
+    {
+      "path": "tests/cases/fluid/free_surface_wp3_wp7_nitsche_coercivity_qualification_matrix_v2.json",
+      "sha256": "a35818da1455763e630e243baf16b852a6d6c6b7a2112b72e517e6181d4fb407"
+    },
+    {
+      "path": "tests/cases/fluid/run_free_surface_wp3_wp7_nitsche_coercivity_qualification_v2.py",
+      "sha256": "8d995e70e77e27e3e9b7c15401150cc34e673ecd273d88bc1f6f55af60ac245d"
+    },
+    {
+      "path": "Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method_v2.md",
+      "sha256": "3b951a76a0694a9b6d1bc5fa859f036dc9173ee40fe41ca43abe3b27f101fd39"
+    },
+    {
+      "path": "Documentation/qualification_logs/free_surface_wp3_wp7_nitsche_coercivity_v2_20260818_e9ae9f82/checksums.txt",
+      "sha256": "b251010050632b8cf63002356add2d192cce20522e03e9cd35bcf5b16f1f1ef6"
+    }
+  ]
+}

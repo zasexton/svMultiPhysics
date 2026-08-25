@@ -1,0 +1,903 @@
+DenseMatrixViewTest.
+  Construction
+  RectangularConstruction
+  AddSingleEntry
+  AddModeAdd
+  AddModeInsert
+  AddModeMax
+  AddModeMin
+  AddModeTransitionsAddInsertAdd
+  AddMatrixEntriesEmptySpansNoOp
+  AddMatrixEntriesMismatchedSizesThrows
+  IsDistributedFalseForDenseViews
+  AddSquareBlock
+  AddRectangularBlock
+  SetDiagonal
+  ZeroRows
+  IsSymmetric
+  Clear
+  AssemblyPhase
+DenseMatrixViewThreadSafety.
+  ConcurrentAddsToDifferentLocations
+DenseMatrixViewStress.
+  VeryLargeMatrixConstructionOptional
+DenseVectorViewTest.
+  Construction
+  AddEntry
+  AddEntries
+  SetEntries
+  ZeroEntries
+  Norm
+DenseSystemViewTest.
+  Construction
+  CombinedAssembly
+  ZeroRowsAffectsMatrixOnly
+GlobalSystemViewFactoryTest.
+  CreateDenseMatrixView
+  CreateDenseVectorView
+  CreateDenseSystemView
+GlobalSystemViewEdgeCases.
+  OutOfRangeIgnored
+  ZeroSizeConstruction
+DofRemapTableTest.
+  SetAndMapBasic
+  MultipleMappings
+  SelfMapping
+  NegativeTargetStored
+  OverwriteExistingMapping
+RemappedSystemViewTest.
+  ConstructionDelegatesProperties
+  AddMatrixEntryUnmappedPassthroughOnly
+  AddMatrixEntryMappedRowDuplicates
+  AddMatrixEntryMappedRowAndColumnUsesMappedColumn
+  AddMatrixEntrySelfMappedRowDoesNotDuplicate
+  AddMatrixEntryNegativeMappedRowSkipped
+  AddMatrixEntriesBatchMixedMappings
+  AddVectorEntryMappedDuplicates
+  AddVectorEntriesBatchDuplicatesMappedOnly
+  SetDiagonalPassthroughNoDuplication
+  ZeroRowsPassthroughDoesNotAffectMappedRow
+  LifecycleDelegatesAndPhaseMatchesBase
+  NullBasePropertiesAreSafeAfterMove
+  ZeroDelegates
+  GetEntryDelegatesToBase
+KernelOutputTest.
+  Reserve
+  MatrixAccess
+  Clear
+RequiredDataTest.
+  BitwiseOr
+  StandardPreset
+  MovingDomainBitsUseWideMask
+MassKernelTest.
+  RequiredData
+  Properties
+  ComputeCell
+  WithCoefficient
+  ComputeCellBatchMatchesScalar
+StiffnessKernelTest.
+  RequiredData
+  Properties
+  ComputeCell
+  ComputeCellBatchMatchesScalar
+SourceKernelTest.
+  ConstantSource
+  FunctionSource
+  ComputeCellBatchMatchesScalar
+PoissonKernelTest.
+  ComputesBoth
+  EquivalentToSeparateKernels
+  ComputeCellBatchMatchesScalar
+CompositeKernelTest.
+  CombineMassAndStiffness
+  ThreeSubKernelsMassStiffnessSource
+  ComputeCellBatchMatchesScalar
+  ScaledCombination
+  ZeroScalingProducesZeroContribution
+  NegativeScalingSubtracts
+AssemblyKernelFaceSupport.
+  KernelWithBoundaryAndInteriorFaces
+AssemblyKernelBaseClasses.
+  BilinearAndLinearDefaults
+AssemblyKernelMaterialState.
+  MaterialStateSpecNonTrivialAndAligned
+AssemblyKernelQuery.
+  MaxTemporalDerivativeOrder
+  CompositeTemporalMetadata
+AssemblyContextTest.
+  DefaultConstruction
+  SetQuadratureData
+  SetPhysicalPoints
+  SetJacobianData
+  SetIntegrationWeights
+  CopyGeometryDataFromClonesPreparedGeometryState
+  MovingDomainDataAccessorsAreFrameExplicitAndFailLoudly
+  SetBasisData
+  SetPhysicalGradients
+  VectorBasisJacobiansUseQuadratureMajorStorageAndBuildSolutionJacobian
+  TrialBasisWithSameAsTest
+  SolutionData
+  Clear
+  BasisValuesSpan
+AssemblyContextHistory.
+  PreviousSolutionValueAndGradient
+  PreviousSolutionValueThrowsWithoutHistory
+  PreviousSolutionValueK1K2
+AssemblyContextMultiField.
+  FieldValueSingleScalarField
+  MultipleFieldsIndependentAccess
+  CopyFieldSolutionDataFromClonesActiveFieldState
+  PreviousScalarAndVectorFieldHistoryAccess
+  CopyFieldSolutionDataFromClonesHistoryState
+  CopyFieldSolutionDataSubsetFromKeepsRequestedHistoryOnly
+  FieldGradientOutOfRangeFieldThrows
+  FieldJacobianForVectorField
+  FieldHessianAndLaplacianForScalarField
+  VectorFieldComponentAccess
+AssemblyContextMaterialState.
+  BasicAccessAndIsolation
+  MultipleQuadraturePointsIndependentStorage
+  MultiComponentStateRoundTrip
+AssemblyContextMeasures.
+  CellAndFaceMeasureAccessRules
+AssemblyContextTypes.
+  ConfigureSetsContextType
+AssemblyContextPetrovGalerkin.
+  NonSquareTestTrialAndTrialBasisDistinct
+AssemblyContextPoolTest.
+  Construction
+  GetContext
+  OutOfRangeThrows
+AssemblyContextErrors.
+  QuadratureOutOfRange
+  BasisOutOfRange
+  SolutionNotSet
+  NormalForCellContext
+JITKernelArgsPacking.
+  CellBatchArgsCarriesBatchAbi
+  PacksCellKernelArgsPointersAndCounts
+  PacksMultiFieldSolutionTableV3AndChecksAlignment
+  PacksTimeIntegrationStencilsV5
+  PacksInterleavedGeometryV6
+  PacksFaceAdjacentCellVolumeV6
+  PacksVectorBasisJacobiansV6
+  PacksMaterialStateAlignmentV3
+  PacksInterfaceMarkerOverrideV2
+BackgroundEntityMeasures.
+  UnitTetraUsesBackgroundCellAndParentFace
+StandardAssemblerFaces.
+  BoundaryFaceUsesFaceQuadratureAndNormals
+  Tetra3D_ObliqueFace2MeasureMatchesPhysicalArea
+  Triangle2D_BoundaryEdge0MeasureMatchesPhysicalLength
+  Triangle2D_BoundaryEdge1MeasureMatchesPhysicalLength
+  Wedge3D_QuadFace2MeasureMatchesPhysicalArea
+  Wedge3D_ObliqueQuadFace3MeasureMatchesPhysicalArea
+  Pyramid3D_TriFace1MeasureMatchesPhysicalArea
+  InteriorFacePreparesBothSidesConsistently
+  InteriorStabilizationRejectsOrphanSnapshotMetadata
+StandardAssemblerMovingDomain.
+  BoundaryFacePreparesReferenceAndCurrentGeometry
+  MissingMeshMotionBindingThrowsClearly
+  KernelsAccessMeshMotionAndCurrentReferenceGeometry
+StandardAssemblerTest.
+  DefaultConstruction
+  Configuration
+  SetOptions
+  ReverseScatterPolicyIsPreserved
+  InitializeWithoutConfig
+  Initialize
+  AssembleMatrixIdentity
+  AssembleVectorIdentity
+  AssembleBoth
+  AssembleBothRequestsVectorAfterMatrixOnlyAssembly
+  UsesBatchedCellPathWhenEnabled
+  FusedBatchRefreshesVectorRequestAfterMatrixOnlyTerm
+  FallsBackToScalarCellPathWhenBatchingDisabled
+  FallsBackToScalarWhenKernelDoesNotSupportBatch
+  Finalize
+  Reset
+  TimingReport
+  MatrixSymmetry
+  SharedDofsReceiveMultipleContributions
+StandardAssemblerHessianTest.
+  PhysicalBasisHessiansMatchFiniteDifferenceGradient_NonAffineQuad
+StandardAssemblerCutVolumes.
+  UniformlySmallShapeRegularTetrahedronUsesScaleConditionedCellInverse
+  ReusesCutVolumeBasisCacheWithinEntryCap
+  ReusesCutVolumeBasisCacheAcrossCompatibleKernels
+  ReusesCutVolumeGeometryAcrossCompatibleKernels
+  EvictsLeastRecentCutVolumeBasisCacheEntryAtCap
+  ReusesCutVolumeBasisCacheForProductSpace
+  ReusesCutVolumeBasisCacheForHDivVectorBasis
+StandardAssemblerCutInterfaces.
+  MapsReferenceInterfaceMeasureToPhysicalSurface
+  RejectsOrphanSnapshotRuleWhenMarkerlessSelectionRequestsAll
+  SharpActiveBoundaryHalfWetMeasureAndFullyDryResidualAreExact
+  CodimensionTwoPointMeasureIsInvariantUnderRotationStretchAndHScaling
+  CodimensionTwoLineUsesAffineTangentJacobianAndCorrectHScaling
+  AssemblesOneSidedInterfaceLoadOnGeneratedSurface
+  BindsMaterialStateOnGeneratedSurfaceByCutTopologyRevision
+  DispatchesTwoSidedGeneratedInterfaceBlocks
+  SelectsSideSpecificFieldsForGeneratedTwoSidedAssembly
+  AssemblesAverageTwoSidedGeneratedInterfaceForm
+  AssemblesJumpTwoSidedGeneratedInterfaceForm
+  TwoPhaseNitscheDiffusionCancelsForContinuousGeneratedTrace
+  BalancedVectorTractionCouplingCancelsOnGeneratedInterface
+  AverageGeneratedTraceMatchesManufacturedSurfaceLoad
+StandardAssemblerEdgeCases.
+  EmptyMeshNoCrashAndNoInsertions
+  SingleElementMeshAssemblesIdentity
+  SingleNodePoint1IfSupported
+  RectangularAssemblyWithOffsets
+  KernelReturnsEmptyOutputNoInsertions
+  KernelReturnsNaNThrowsWhenEnabled
+  KernelReturnsInfThrowsWhenEnabled
+  NearZeroJacobianProducesSmallMassMatrix
+  InvertedElementMassMatrixMatchesNonInverted
+  ConstraintChainDistributesToMasters
+StandardAssemblerCaches.
+  ReusedAssemblerRebuildsFlatCoordinatesAfterGeometryRevision
+  FlatCoordinateCacheReusedForStaticDenseMeshes
+  ResolvedTablesRespectDofAndBackendLayoutRevisions
+  MonolithicCompiledDispatchDefersToSelectiveWeightFallback
+  MonolithicFieldPopulationFastPathMatchesSequentialFallbackOnQuad4
+  GeometryCacheInvalidatesAcrossQuadToTetraReuse
+  BasisCachesInvalidateAcrossSameSpaceToRectangularFusedReuse
+  BasisCachesRefreshAcrossHessianRequirementAndProductSpaceReuse
+  TrialBasisCacheRefreshesAcrossOffsetAndQuadratureReuse
+  CoupledQptMajorCacheRefreshesAcrossSpaceAndHessianRequirementReuse
+  FieldFastPathFallsBackForHessianAndLaplacianRequirements
+AssemblerFactory.
+  CreateStandardAssembler
+  CreateWithOptions
+  CreateAssemblerByStrategy
+VectorBasisOrientationAssembly.
+  HDivMassMatrixInvariantToCellVertexPermutation
+  HDivGradientMatrixInvariantToCellVertexPermutation
+  HCurlMassMatrixInvariantToCellVertexPermutation
+  HCurlGradientMatrixInvariantToCellVertexPermutation
+AssemblerSelectionFactory.
+  NamedStandard_NoDecorators
+  Auto_ConservativeSelectsStandard
+  Decorators_ComposeInDeterministicOrder
+  DGIncompatibleSelection_Throws
+  SolutionIncompatibleSelection_Throws
+  MultiFieldOffsetIncompatibleSelection_Throws
+  DeviceAssembler_DGRequirementAcceptedWithCpuFallback
+ParallelAssemblerTest.
+  DefaultConstruction
+  Configuration
+  SetGhostPolicy
+  SerialRank
+  Initialize
+  SerialAssemblyOwnedRowsOnly
+  SerialAssemblyReverseScatter
+  Finalize
+  GhostManagerAccess
+  DeterministicResults
+ParallelAssemblerFactory.
+  CreateParallelAssembler
+  CreateWithOptions
+GhostContributionManagerTest.
+  DefaultConstruction
+  ConstructWithDofMap
+  SetPolicy
+  SetDeterministic
+  Initialize
+  IsOwnedDof
+  AddMatrixContributionOwned
+  AddMatrixContributionGhost
+  AddMatrixContributionOwnedRowsOnly
+  AddVectorContributionOwned
+  AddVectorContributionGhost
+  AddMatrixContributionsBatch
+  ClearSendBuffers
+  ReserveBuffers
+  ExchangeContributionsSingleRank
+  NonBlockingExchange
+  ClearReceivedContributions
+  GetReceivedContributionsAfterExchange
+  NeighborCount
+  ExchangeStats
+  DeterministicBuffering
+  NonDeterministicModeSkipsSortingInSingleRankExchange
+  ReproducibleResults
+  EmptyExchange
+  MultipleExchanges
+  LargeContribution
+  MoveConstruction
+  MoveAssignment
+GhostContributionTest.
+  Ordering
+  EqualityComparison
+GhostBufferTest.
+  Clear
+  Reserve
+GhostContributionManagerBufferTest.
+  NonContiguousDofRangesBufferedCorrectly
+GhostContributionManagerMPITest.
+  TwoRankGhostExchange
+  MultiRankGhostExchange
+  LargeMessageHandling
+AssemblyLoopTest.
+  DefaultConstruction
+  ConstructionWithOptions
+  SetMesh
+  SetOptions
+  LoopModeEnum
+  LoopOptionsDefaults
+  CellWorkItem
+  BoundaryFaceWorkItem
+  InteriorFaceWorkItem
+  LoopStatisticsDefaults
+  SetColoring
+  NoColoringByDefault
+  ComputeElementColoringProducesValidColoring
+  ComputeOptimizedColoringDoesNotIncreaseColors
+  ForEachCellFunction
+  ForEachOwnedCellFunction
+  ForEachBoundaryFaceFunction
+  ForEachInteriorFaceFunction
+  CellLoopOpenMPProducesSameResultAsSequential
+  CellLoopColoredProducesSameResultAsSequential
+  DeterministicParallelAssemblyIsReproducible
+  UnifiedLoopCellAndBoundaryAssemblesContributions
+  UnifiedLoopCellBoundaryAndInteriorAssemblesDGContributions
+  PrefetchHintGenerationInSequentialLoop
+AssemblyConstraintDistributorTest.
+  DefaultConstruction
+  AssemblyConstraintOptionsDefaults
+  AssemblyConstraintOptionsCustom
+  SetOptions
+  GetOptionsReturnsReference
+  HasConstraintsInitiallyFalse
+  MoveConstruction
+  MoveAssignment
+  DenseSystemViewConstruction
+  DenseSystemViewAddMatrixEntry
+  DenseSystemViewAddVectorEntry
+  DenseSystemViewAddModeAccumulates
+  DenseSystemViewClear
+  DenseSystemViewZero
+  GlobalSystemMatrixAdapterConstruction
+  GlobalSystemMatrixAdapterAddValue
+  GlobalSystemMatrixAdapterAddValues
+  GlobalSystemMatrixAdapterSetDiagonal
+  GlobalSystemVectorAdapterConstruction
+  GlobalSystemVectorAdapterAddValue
+  GlobalSystemVectorAdapterAddValues
+  GlobalSystemVectorAdapterSetValue
+  GlobalSystemVectorAdapterGetValue
+  NumConstraintsWithoutConstraints
+  GetConstrainedDofsWithoutConstraints
+  DenseSystemViewRectangular
+AssemblyConstraintDistributorIntegrationTest.
+  MPC_SymmetricElimination_DistributesRowsAndColumnsToMasters
+  MPC_NonsymmetricElimination_StillDistributesConstrainedColumns
+NonlinearAssemblyDriverTest.
+  DefaultConstruction
+  ConstructionWithOptions
+  NonlinearAssemblyModeEnum
+  JacobianStrategyEnum
+  OptionsDefaults
+  SetMesh
+  SetKernel
+  SetCurrentSolution
+  SetCurrentSolutionDifferentValues
+  AssemblyStatsDefaults
+  JacobianVerificationResultDefaults
+  MockKernelCapabilities
+  MockKernelComputeResidual
+  MockKernelComputeJacobian
+  MockKernelComputeBoth
+  CreateNonlinearAssemblyDriver
+  CreateNonlinearAssemblyDriverWithOptions
+NonlinearAssemblyDriverEndToEndTest.
+  AssemblesMultiElementPoissonAndResidualMatchesMatrixTimesU
+  VerifyJacobianFDPassesForLinearPoisson
+  FiniteDifferenceJacobianMatchesAnalyticForLinearPoisson
+ColoredAssemblerTest.
+  DefaultConstruction
+  ConstructionWithColoringOptions
+  SetOptionsInvalidatesColoringAndForwardsToBase
+  ColoringAlgorithmEnum
+  ColoringOptionsDefaults
+  ColoringStatsDefaults
+  ElementGraphConstruction
+  ElementGraphWithSize
+  ElementGraphClear
+  NoColoringByDefault
+  SetColoring
+  SetColoringReturnsColors
+  BlockIndexDefault
+  BlockIndexConstruction
+  BlockIndexEquality
+  BlockIndexOrdering
+  BlockIndexIsDiagonal
+  MoveConstruction
+  MoveAssignment
+  VerifyColoringValidEmptyGraph
+  GetColoringStatsAfterSetColoring
+MatrixFreeAssemblerTest.
+  DefaultConstruction
+  ConstructionWithOptions
+  SetMesh
+  SetKernel
+  SetOptions
+  AssemblyLevelEnum
+  MatrixFreeOptionsDefaults
+  MatrixFreeStatsDefaults
+  GetStatsInitial
+  ResetStats
+  IsSetupInitiallyFalse
+  InvalidateSetup
+  DimensionsBeforeConfiguration
+  MockKernelApplyLocal
+  MockKernelApplyCount
+  MockKernelRequiredData
+  MockKernelSupportsBatched
+  CachingKernelSetupElement
+  CachingKernelApplyLocalCached
+  CachingKernelElementDataSize
+  CachedElementDataDefaults
+  CachedElementDataPopulation
+  MoveConstruction
+  MoveAssignment
+  CreateMatrixFreeAssembler
+  CreateMatrixFreeAssemblerWithOptions
+  SetCurrentSolution
+MatrixFreeAssemblerOperationTest.
+  ApplyIdentityOperatorDisjointDofs
+  ApplyScalingOperatorDisjointDofs
+  ApplyDirectMatchesApply
+  GetDiagonalIdentity
+  ApplyMatchesExplicitStiffnessAssemblySingleCell
+BlockAssemblerTest.
+  DefaultConstruction
+  ConstructionWithOptions
+  SetMesh
+  SetOptions
+  ConfigureFieldsComputesOffsets
+  BlockKernelAssignmentAndQuery
+  BlockAssemblerAssignmentAndDefault
+  BlockAssemblyModeEnum
+  BlockAssemblerOptionsDefaults
+  BlockIndexConstruction
+  BlockIndexEquality
+  BlockIndexLessThan
+  BlockIndexIsDiagonal
+  FieldConfigDefaults
+  FieldConfigPopulation
+  BlockSystemConfigDefaults
+  BlockSystemConfigGetField
+  BlockAssemblyStatsDefaults
+  BlockAssemblyStatsPopulation
+  MoveConstruction
+  MoveAssignment
+  CreateBlockAssembler
+  CreateBlockAssemblerWithOptions
+  GetLastStats
+  NumFieldsEmpty
+  GetConfigEmpty
+FunctionalKernelTest.
+  L2NormKernelRequiredData
+  L2NormKernelProperties
+  L2NormPostProcess
+  H1SeminormKernelProperties
+  EnergyKernelProperties
+  VolumeKernelProperties
+  BoundaryFluxKernelProperties
+L2ErrorKernelTest.
+  Construction
+  RequiredData
+H1ErrorKernelTest.
+  Construction
+FunctionalAssemblyOptionsTest.
+  Defaults
+FunctionalResultTest.
+  DefaultConstruction
+  Conversion
+FunctionalAssemblerTest.
+  DefaultConstruction
+  ConstructionWithOptions
+  AssembleScalarOverCellsTreatsEmptySubsetAsZero
+  SetOptions
+FunctionalAssemblerFactoryTest.
+  CreateDefault
+  CreateWithOptions
+KahanSummationTest.
+  Precision
+FunctionalAssemblerBoundaryTest.
+  IntegrateConstantOverBoundaryFace
+  PopulatesFrameExplicitBoundaryGeometryForFormsKernel
+  UniformlyTinyValidBoundaryFacePreservesMeasure
+  BoundaryFluxUsesElementLocalCoefficients
+  FormsBoundaryFunctionalKernelEvaluatesDiscreteField
+  BlockModePrimaryFieldBindingExtractsPrimarySlice
+  BlockModePrimaryFieldBindingUsesMonolithicRangeBeforeFieldLocalMap
+  BlockModeProductSpaceBindingUsesComponentBlockedOrdering
+ScratchDataTest.
+  DefaultConstruction
+  ParameterizedConstruction
+  Reserve
+  Clear
+  ContextAccess
+  ScratchMatrixAccess
+  ScratchVectorAccess
+  UserData
+  CopyConstruction
+  MoveConstruction
+CopyDataTest.
+  DefaultConstruction
+  Reserve
+  Clear
+  ValidityFlag
+  LocalMatrixStorage
+  LocalVectorStorage
+  DofStorage
+  CellId
+  FaceBlocks
+WorkStreamOptionsTest.
+  Defaults
+  CustomValues
+WorkStreamStatsTest.
+  DefaultValues
+WorkStreamAssemblerTest.
+  DefaultConstruction
+  ConstructionWithOptions
+  SetWorkStreamOptions
+  SetAssemblyOptions
+  MoveConstruction
+  MoveAssignment
+  Initialize
+  Reset
+  GetLastStats
+  ScratchDataFactory
+  ConcurrentScratchDataCreation
+  ConcurrentCopyDataCreation
+WorkStreamAssemblerFactoryTest.
+  CreateDefault
+  CreateWithOptions
+CacheStrategyTest.
+  EnumValues
+EvictionPolicyTest.
+  EnumValues
+CacheOptionsTest.
+  Defaults
+  CustomValues
+CacheStatsTest.
+  DefaultValues
+  UpdateHitRate
+  UpdateHitRateZero
+  UpdateHitRatePerfect
+CachedElementDataTest.
+  DefaultConstruction
+  MemoryBytes
+  PopulatedData
+ElementMatrixCacheTest.
+  DefaultConstruction
+  ConstructionWithOptions
+  SetOptions
+  InsertAndContains
+  Get
+  Invalidate
+  InvalidateAll
+  Clear
+  Statistics
+  Reserve
+  ResetStats
+  LRUEvictionEvictsLeastRecentlyUsed
+  FIFOEvictionEvictsFirstInserted
+  MemoryLimitEnforcementRejectsTooLargeElement
+  MemoryLimitEnforcementEvictsToStayWithinLimit
+  ConcurrentReads
+CachedAssemblerTest.
+  DefaultConstruction
+  ConstructionWithOptions
+  SetCacheOptions
+  SetAssemblyOptions
+  GetCacheStats
+  ResetCacheStats
+  InvalidateCache
+  NumCachedElements
+  CacheMemoryUsage
+  Initialize
+  Reset
+  MoveConstruction
+  MoveAssignment
+  InvalidationCallback
+CachedAssemblerCachingTest.
+  CacheHitAvoidsKernelRecompute
+  CacheEvictedWhenMaxElementsReduced
+  CacheEvictedWhenMaxMemoryBytesReduced
+  StrategyReferenceElementCaches
+  StrategyGeometricFactorsCaches
+  SelectiveInvalidationRecomputesOnlyInvalidatedCells
+  StrategyNoneDisablesCaching
+CachedAssemblerFactoryTest.
+  CreateDefault
+  CreateWithOptions
+VectorWidthTest.
+  DoubleWidth
+  FloatWidth
+  DefaultWidth
+VectorizationOptionsTest.
+  Defaults
+  CustomValues
+AlignedMemoryTest.
+  IsAligned
+  AlignUp
+AlignedVectorTest.
+  Allocation
+  Operations
+ElementBatchTest.
+  DefaultConstruction
+  ParameterizedConstruction
+  AddElement
+  IsFull
+  CellId
+  Clear
+  QuadWeightsAccess
+  JacobianDetsAccess
+  BasisValuesAccess
+  BasisGradientsAccess
+  QuadOffset
+  BasisOffset
+  GradOffset
+VectorizedQuadratureTest.
+  WeightedSum
+  ComputeJxW
+  GradientDotProduct
+BatchedMatrixAssemblyTest.
+  AssembleMassMatrices
+  AssembleStiffnessMatrices
+VectorizationHelperTest.
+  DefaultConstruction
+  ConstructionWithOptions
+  SetOptions
+  IsSIMDEnabled
+  EffectiveVectorWidth
+  OptimalBatchSize
+  CreateBatch
+  Dot
+  Norm
+  Axpy
+  Scale
+  Gemv
+  GetSIMDInfo
+  MoveConstruction
+VectorizationHelperFactoryTest.
+  CreateDefault
+  CreateWithOptions
+SymbolicAssemblerTest.
+  SymbolicOptionsRoundTrip
+  PrecompileBilinear
+  AssembleMassMatrix_SingleTetra
+  AssembleStiffnessMatrix_SingleTetra
+DeviceBackendTest.
+  EnumValues
+DeviceAssemblyLevelTest.
+  EnumValues
+DeviceMemoryModeTest.
+  EnumValues
+DeviceOptionsTest.
+  Defaults
+  CustomValues
+DeviceInfoTest.
+  DefaultValues
+  PopulatedValues
+DeviceAssemblyStatsTest.
+  DefaultValues
+  PopulatedValues
+DeviceMemoryTest.
+  DefaultConstruction
+  Allocate
+  Free
+  CopyFromHost
+  CopyToHost
+  MoveConstruction
+  MoveAssignment
+PartialAssemblyDataTest.
+  DefaultConstruction
+  Allocate
+  Free
+  PopulatedFlag
+  DeviceDataAccess
+  MoveConstruction
+  MoveAssignment
+DeviceAssemblerTest.
+  DefaultConstruction
+  ConstructionWithOptions
+  SetDeviceOptions
+  SetAssemblyOptions
+  GetDeviceInfo
+  GetLastStats
+  Initialize
+  Reset
+  AllocateVector
+  CopyToDevice
+  CopyFromDevice
+  Synchronize
+  MoveConstruction
+  MoveAssignment
+  IsGPUAvailable
+  GetGPUCount
+  GetBackendInfo
+DeviceAssemblerFactoryTest.
+  CreateDefault
+  CreateWithOptions
+  CreateAuto
+DeviceAssemblerIntegrationTest.
+  FullWorkflow
+  MultipleAllocations
+DeviceAssemblerPartialAssemblyTest.
+  ApplyThrowsWithoutSetup
+  SetupAndApplyCallsDeviceKernel
+  ApplySizeMismatchThrows
+DeviceAssemblerGPUTest.
+  CUDABackendKernelLaunchIfAvailable
+  HIPBackendKernelLaunchIfAvailable
+  SYCLBackendKernelLaunchIfAvailable
+ManufacturedSolutionConvergence.
+  PoissonQuad4_Q1_L2ConvergesAtOrderTwo
+  PoissonQuad4_Q2_L2ConvergesAtOrderThree
+  PoissonQuad4_Q1_NitscheDirichlet_L2ConvergesAtOrderTwo
+  PoissonQuad4_Q2_NitscheDirichlet_L2ConvergesAtOrderThree
+  AdvectionDiffusionQuad4_Q1_L2ConvergesAtOrderTwo
+  AdvectionDiffusionQuad4_Q2_L2ConvergesAtOrderThree
+  StokesTaylorHoodQuad4_Q2Q1_L2ConvergesAtExpectedRates
+  ElasticityQuad4_Q1_L2Converges_Nu03
+  ElasticityQuad4_Q1_L2Converges_Nu0499
+ConstrainedSolve.
+  PeriodicXAndInhomogeneousDirichletY_Q2PolynomialSolvesToRoundoff
+ManufacturedSolutionConvergenceElementTypes.
+  PoissonTriangle3_P1_L2ConvergesAtOrderTwo
+  PoissonTriangle3_P2_L2ConvergesAtOrderThree
+  PoissonTetra4_P1_L2ConvergesAtOrderTwo
+  PoissonTetra4_P2_L2ConvergesAtOrderThree
+  PoissonHex8_Q1_L2ConvergesAtOrderTwo
+  ElasticityTriangle3_P1_L2ConvergesAtOrderTwo
+AssemblySchedulerTest.
+  DefaultConstruction
+  ConstructionWithOptions
+  SetMesh
+  SetOptions
+  OrderingStrategyEnum
+  NUMAStrategyEnum
+  LoadBalanceModeEnum
+  SchedulerOptionsDefaults
+  NaturalSchedule
+  NaturalScheduleEmpty
+  HilbertScheduleProducesPermutation
+  HilbertScheduleRecordsTiming
+  MortonScheduleProducesPermutation
+  RCMScheduleProducesPermutation
+  ComplexityScheduleProducesPermutation
+  CacheBlockedScheduleProducesPermutation
+  ComputeStaticAssignment
+  ComputeThreadRanges
+  ComputeScheduleWithThreads
+  GetWorkStealingChunks
+  Morton2D
+  Morton3D
+  Hilbert2D
+  Discretize
+  ComplexityEstimatorEstimate
+  ComplexityEstimatorEstimateAll
+  ComplexityEstimatorTotalCost
+  ComplexityEstimatorLoadImbalance
+  NUMATopologyBasic
+  NUMATopologyComputeThreadMapping
+  NUMATopologyGetCPUsInNode
+  OptimizeColorOrder
+  OptimizeColorSequence
+  CustomComparator
+  SchedulingResultDefaults
+  SchedulingResultPopulated
+  MoveConstruction
+  MoveAssignment
+  CreateAssemblySchedulerDefault
+  CreateAssemblySchedulerWithOptions
+  CreateAssemblySchedulerWithOrdering
+  GetLastResult
+  GetComplexityEstimator
+  ComputeScheduleSubset
+  ElementComplexityCost
+  ElementComplexityArithmeticIntensity
+  ElementComplexityArithmeticIntensityZeroMemory
+AssemblyStatisticsTest.
+  DefaultConstruction
+  MoveConstruction
+  MoveAssignment
+  StartCollection
+  EndCollection
+  EndCollectionRecordsTotalTime
+  Reset
+  TimingCategoryName
+  TimingDataDefaults
+  TimingDataAccumulate
+  TimingDataReset
+  TimingDataMerge
+  ScopedTimerWithTimingData
+  ScopedTimerWithCallback
+  ScopedTimerElapsed
+  ScopedTimerStop
+  StartStopTiming
+  RecordTiming
+  EnableDisableCategory
+  GetAllTimings
+  FLOPDataDefaults
+  FLOPDataComputeTotal
+  FLOPDataFlopRate
+  RecordFLOPs
+  RecordFLOPsWithData
+  FLOPEstimatorStiffnessMatrix
+  FLOPEstimatorMassMatrix
+  FLOPEstimatorLoadVector
+  FLOPEstimatorJacobianEval
+  FLOPEstimatorBasisEval
+  MemoryStatsDefaults
+  MemoryStatsTrackAllocation
+  MemoryStatsTrackDeallocation
+  EnableMemoryTracking
+  DisableMemoryTracking
+  ThreadStatsDefaults
+  ThreadStatsTotalTime
+  SetNumThreads
+  RecordThreadStats
+  RecordElementCompletion
+  LoadBalanceStatsComputeImbalance
+  CacheStatsDefaults
+  CacheStatsHitRate
+  CacheStatsHitRateZero
+  RecordElement
+  RecordMatrixEntries
+  RecordVectorEntries
+  OptimizationSuggestionDefaults
+  OptimizationSuggestionOrdering
+  GetOptimizationSuggestions
+  PrintSummary
+  GetSummary
+  PrintDetailed
+  ExportJSON
+  ExportCSV
+  CompareWith
+  Merge
+  RecordTimingThreadSafe
+  RecordElementThreadSafe
+  GlobalStatistics
+  FormatBytes
+  FormatTime
+  FormatFLOPRate
+  FormatPercent
+  GetFLOPRate
+  EnableCacheStats
+  UpdateCacheStats
+CompositeMeshAccess.
+  OffsetsDisconnectedTetrahedralParticipants
+  RemapsBoundaryMarkersByParticipant
+  TraversesInteriorFacesPerParticipant
+  ProvidesCompressedBoundaryAndInteriorReverseMaps
+GeneratedBoundaryAggregateTraceCertificate.
+  FormBindingRequiresExactlyOneRouteAnchorBeforeMutation
+  FullActiveUnitTriangleHasAnalyticBoundFour
+  RootedCutSquareCertifiesActualAggregateProlongation
+  RootlessAggregateSupportIsRejected
+  ImportedGeneratedDomainsWithoutAuthoritativeSnapshotFailClosed
+  ScalarFieldIsRejectedAsAnUnsupportedTraceSpace
+  SymmetricPolicyRejectsAnInsufficientConfiguredPenalty
+  SymmetricPolicyRejectsAPositiveButSubfloorEnergyRatio
+  SymmetricEnergyFloorAcceptsTheSafeCapAndRejectsItsNextUlp
+  SymmetricPoliciesApplyTheEnergyFloorToTheirOperatorLevelGroup
+  UnsymmetricPolicyRetainsTheBoundWithoutACoercivityThreshold
+MeshAccess.
+  TwoTrianglesBoundaryAndInteriorFaces
+  BoundaryOnlyFacesResolveLocalReferenceFace
+  RevisionQueriesFollowMeshState
+  TwoTetrahedraLocalFaceIndexAndMarkers
+  CoordinateConfigurationOverrideIsDeterministic
+  DeformedConfigurationOverrideMatchesCurrentWhenPresent
+  WithoutOverrideUsesMeshActiveConfiguration
+  CurrentActiveConfigurationWithoutCurrentCoordsFallsBackToReference
+  OwnedCellIterationRespectsGhosts
+  SingleTetra10CellNodes

@@ -1,0 +1,132 @@
+{
+  "tests": 11,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-08-25T01:44:48Z",
+  "time": "0.017s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "GeneratedBoundaryAggregateTraceCertificate",
+      "tests": 11,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-08-25T01:44:48Z",
+      "time": "0.016s",
+      "testsuite": [
+        {
+          "name": "FormBindingRequiresExactlyOneRouteAnchorBeforeMutation",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 867,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "FullActiveUnitTriangleHasAnalyticBoundFour",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 1178,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0.002s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "RootedCutSquareCertifiesActualAggregateProlongation",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 1783,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0.001s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "RootlessAggregateSupportIsRejected",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 2376,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "ImportedGeneratedDomainsWithoutAuthoritativeSnapshotFailClosed",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 2461,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "ScalarFieldIsRejectedAsAnUnsupportedTraceSpace",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 2559,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "SymmetricPolicyRejectsAnInsufficientConfiguredPenalty",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 2599,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "SymmetricPolicyRejectsAPositiveButSubfloorEnergyRatio",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 2662,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "SymmetricEnergyFloorAcceptsTheSafeCapAndRejectsItsNextUlp",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 2735,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0.005s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "SymmetricPoliciesApplyTheEnergyFloorToTheirOperatorLevelGroup",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 2975,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0.003s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        },
+        {
+          "name": "UnsymmetricPolicyRetainsTheBoundWithoutACoercivityThreshold",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificate.cpp",
+          "line": 3173,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificate"
+        }
+      ]
+    }
+  ]
+}

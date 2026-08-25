@@ -1,0 +1,42 @@
+{
+  "tests": 2,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-08-25T01:44:48Z",
+  "time": "0.007s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "MovingDomainPhysics",
+      "tests": 2,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-08-25T01:44:48Z",
+      "time": "0.005s",
+      "testsuite": [
+        {
+          "name": "NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_MovingDomainPhysics.cpp",
+          "line": 10985,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0.002s",
+          "classname": "MovingDomainPhysics"
+        },
+        {
+          "name": "GeneratedBoundaryNitscheRouteRegistersItsTracePolicy",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/Physics\/Tests\/Unit\/test_MovingDomainPhysics.cpp",
+          "line": 13354,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0.003s",
+          "classname": "MovingDomainPhysics"
+        }
+      ]
+    }
+  ]
+}

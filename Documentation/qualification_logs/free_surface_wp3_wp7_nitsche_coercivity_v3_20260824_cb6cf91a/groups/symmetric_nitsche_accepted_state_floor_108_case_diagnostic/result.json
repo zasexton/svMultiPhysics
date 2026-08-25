@@ -1,0 +1,212 @@
+{
+  "certified_aggregate_trace_evidence": {
+    "dry_case_count": 12,
+    "exact_common_kernel_metadata_valid_case_count": 108,
+    "exact_common_kernel_quotient_patch_count": 16,
+    "maximum_trace_upper_bound": 1.3865887291231187,
+    "minimum_finite_sample_energy_lower_bound": 0.25,
+    "minimum_sampled_eigenvalue_gap": 0.7499999999993009,
+    "observed_case_count": 108,
+    "outcome": "PASS",
+    "path": "aggregate_trace_certificate_evidence.json",
+    "present": true,
+    "sha256": "3e3be36d9ada371fedc1692d0d5fd073e6db553f83709719e2ff62f46b3d8e1a",
+    "wet_case_count": 96
+  },
+  "checks": [
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "process_return_code",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": null,
+      "expected": null,
+      "metric": "termination_reason",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 1,
+      "expected": 1,
+      "metric": "test_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "failure_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "error_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 1,
+      "expected": 1,
+      "metric": "reported_disabled_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "disabled_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [
+        "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3"
+      ],
+      "expected": [
+        "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3"
+      ],
+      "metric": "explicitly_enabled_disabled_tests_executed",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_disabled_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "skipped_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": 0,
+      "expected": 0,
+      "metric": "skipped_result_count",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "skipped_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "missing_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "unexpected_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "incomplete_or_skipped_tests",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": [],
+      "expected": [],
+      "metric": "tests_with_failure_records",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "PASS",
+      "expected": "PASS",
+      "metric": "resource_monitoring_outcome",
+      "passed": true,
+      "relation": "equal"
+    },
+    {
+      "actual": "PASS",
+      "expected": "PASS",
+      "metric": "certified_aggregate_trace_evidence",
+      "passed": true,
+      "relation": "equal"
+    }
+  ],
+  "command": [
+    "/scratch/users/zsexton/svmp-wp3-wp7-v3.qual2.zdz9Ne/build-physics/test_physics",
+    "--gtest_filter=FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+    "--gtest_also_run_disabled_tests",
+    "--gtest_color=no",
+    "--gtest_output=json:/scratch/users/zsexton/svmp-wp3-wp7-v3.qual2.zdz9Ne/free_surface_wp3_wp7_nitsche_coercivity_v3_20260824_cb6cf91a/groups/symmetric_nitsche_accepted_state_floor_108_case_diagnostic/gtest.json"
+  ],
+  "diagnostic": null,
+  "execution": {
+    "memory_mib": 1024,
+    "output_mib": 64,
+    "wall_time_seconds": 3600
+  },
+  "expected_tests": [
+    "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3"
+  ],
+  "group_id": "symmetric_nitsche_accepted_state_floor_108_case_diagnostic",
+  "gtest_output_copies": 1,
+  "gtest_result_error": null,
+  "mpi_gtest_results": [],
+  "mpi_ranks": 1,
+  "outcome": "PASS",
+  "resources": {
+    "aggregate_memory_measurement": "sampled_peak",
+    "complete_session_process_coverage": true,
+    "filesystem_free_sample_count": 5199,
+    "final_output_bytes": 1353713,
+    "host_available_sample_count": 5199,
+    "launch_mode": "direct_serial",
+    "memory_enforcement_method": "per_process_address_and_file_size_limits_plus_sampled_session_resident_memory",
+    "memory_enforcement_scope": "spawned_process_session",
+    "minimum_filesystem_free_mib": 4096,
+    "minimum_host_available_mib": 4096,
+    "minimum_observed_filesystem_free_mib": 104830774,
+    "minimum_observed_host_available_mib": 236998,
+    "monitor_sample_count": 5198,
+    "monitored_filesystems": [
+      "/scratch/users/zsexton/svmp-wp3-wp7-v3.qual2.zdz9Ne/free_surface_wp3_wp7_nitsche_coercivity_v3_20260824_cb6cf91a/groups/symmetric_nitsche_accepted_state_floor_108_case_diagnostic"
+    ],
+    "peak_aggregate_resident_kib_sampled": 188480,
+    "peak_process_count_sampled": 1,
+    "peak_process_group_count_sampled": 1,
+    "peak_resident_kib_sampled": 188480,
+    "peak_resident_sample_count": 1,
+    "process_session_id": 24801,
+    "reaped_launcher_fallback_allowed": true,
+    "reaped_launcher_fallback_requires_session_enumeration": true,
+    "reaped_launcher_fallback_scope": "direct_serial_launcher_process",
+    "reaped_launcher_fallback_source": "wait4_ru_maxrss",
+    "reaped_launcher_fallback_used": false,
+    "reaped_launcher_max_resident_kib": 188480,
+    "reaped_launcher_rusage_available": true,
+    "required_simultaneous_process_samples": 1,
+    "resident_read_failure_count": 0,
+    "resource_monitoring_method": "sampled_process_session",
+    "resource_monitoring_outcome": "PASS",
+    "return_code": 0,
+    "session_enumeration_failure_count": 0,
+    "stat_read_failure_count": 0,
+    "successful_session_sample_count": 5198,
+    "termination": null,
+    "termination_reason": null,
+    "wall_time_seconds": 364.6348216990009
+  }
+}

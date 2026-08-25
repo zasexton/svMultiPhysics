@@ -1,0 +1,131 @@
+{
+  "closure_contract": [
+    {
+      "claim": "exact_binary64_dyadic_dense_and_factorized_spd_quotient_prerequisite",
+      "evidence": [
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundProvesDiagonalEquality",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRetainsTinyPositiveMode",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesThreeByThreeBareissDivision",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundExercisesSymmetricPsdPivotSwap",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsLateIndefinitePivot",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsSemidefiniteDenominator",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsIndefiniteNumerator",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsUnrepresentableUpperBound",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsDimensionAboveCap",
+        "DenseLinearAlgebra.ExactDyadicSpdGeneralizedBoundRejectsMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundPreservesPsdLostByEntrywiseRounding",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnroundedSparseTangentSum",
+        "DenseLinearAlgebra.ExactFactorizedBoundKeepsUnderflowingAndOverflowingPositiveScales",
+        "DenseLinearAlgebra.ExactFactorizedBoundRejectsSingularAndMalformedInputs",
+        "DenseLinearAlgebra.ExactFactorizedBoundUsesLinearPositiveScaleMultipliers",
+        "DenseLinearAlgebra.ExactFactorizedBoundProvesVacuousZeroDimensionalQuotient"
+      ]
+    },
+    {
+      "claim": "serial_conditional_FE_energy_floor_gate_and_aggregate_trace_prerequisite",
+      "evidence": [
+        "GeneratedBoundaryAggregateTraceCertificate.FormBindingRequiresExactlyOneRouteAnchorBeforeMutation",
+        "GeneratedBoundaryAggregateTraceCertificate.FullActiveUnitTriangleHasAnalyticBoundFour",
+        "GeneratedBoundaryAggregateTraceCertificate.RootedCutSquareCertifiesActualAggregateProlongation",
+        "GeneratedBoundaryAggregateTraceCertificate.RootlessAggregateSupportIsRejected",
+        "GeneratedBoundaryAggregateTraceCertificate.ImportedGeneratedDomainsWithoutAuthoritativeSnapshotFailClosed",
+        "GeneratedBoundaryAggregateTraceCertificate.ScalarFieldIsRejectedAsAnUnsupportedTraceSpace",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricPolicyRejectsAnInsufficientConfiguredPenalty",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricPolicyRejectsAPositiveButSubfloorEnergyRatio",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricEnergyFloorAcceptsTheSafeCapAndRejectsItsNextUlp",
+        "GeneratedBoundaryAggregateTraceCertificate.SymmetricPoliciesApplyTheEnergyFloorToTheirOperatorLevelGroup",
+        "GeneratedBoundaryAggregateTraceCertificate.UnsymmetricPolicyRetainsTheBoundWithoutACoercivityThreshold"
+      ]
+    },
+    {
+      "claim": "exact_two_rank_floor_consensus_rejection_and_acceptance_prerequisite",
+      "evidence": [
+        "GeneratedBoundaryAggregateTraceCertificateMPI.PolicyFloorMismatchFailsCollectivelyBeforeCertificatePublication",
+        "GeneratedBoundaryAggregateTraceCertificateMPI.SubfloorCertificateFailsCollectivelyWithoutPartialPublication",
+        "GeneratedBoundaryAggregateTraceCertificateMPI.RootedCrossRankAggregateHasAnalyticBoundThirtyTwoOverSeventyNine"
+      ]
+    },
+    {
+      "claim": "production_floor_policy_and_configuration_provenance_prerequisite",
+      "evidence": [
+        "MovingDomainPhysics.GeneratedBoundaryNitscheRouteRegistersItsTracePolicy",
+        "MovingDomainPhysics.NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults"
+      ]
+    },
+    {
+      "claim": "finite_108_case_accepted_floor_and_sampled_spectrum_consistency_prerequisite",
+      "evidence": [
+        "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3"
+      ]
+    }
+  ],
+  "gates": {
+    "expected_disabled": 0,
+    "expected_distinct_test_count": 33,
+    "expected_errors": 0,
+    "expected_failures": 0,
+    "expected_group_count": 5,
+    "expected_quantitative_evidence_count": 8,
+    "expected_skipped": 0
+  },
+  "matrix_status_at_execution": "FROZEN_BEFORE_EXECUTION",
+  "qualification_scope": "Exact aggregate-trace certification plus a predeclared symmetric-Nitsche energy floor c*=1/4 for every accepted current state of the supported production Navier-Stokes viscous/Nitsche subform, whose module supplies the bulk viscous energy K. The generic FE gate is conditional on an installed caller-supplied coercive bulk form and does not independently prove that bulk hypothesis. This matrix does not close FSR-16, FSR-07, WP-3, WP-7, or Q1, and does not prove that every cut or mesh-family state will be accepted.",
+  "quantitative_evidence": [
+    {
+      "property": "wp3_wp7_nitsche_trace_v3_case_count",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "threshold": 108,
+      "type": "integer"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v3_maximum_upper_bound",
+      "relation": "less_than_or_equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "threshold": 6.749999999999997,
+      "type": "real"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v3_minimum_finite_sample_lower_bound",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "threshold": 0.25,
+      "type": "real"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v3_minimum_sampled_eigenvalue_gap",
+      "relation": "greater_than_or_equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "threshold": -1e-11,
+      "type": "real"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v3_exact_common_kernel_quotient_patch_count",
+      "relation": "greater_than",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "threshold": 0,
+      "type": "integer"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v3_method_coercivity_lower_bound",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "threshold": 0.25,
+      "type": "real"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v3_uniform_bound_status",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "threshold": "ENFORCED_ACCEPTED_STATE_FLOOR",
+      "type": "string"
+    },
+    {
+      "property": "wp3_wp7_nitsche_trace_v3_accepted_claim",
+      "relation": "equal",
+      "test": "FreeSurfaceCutStability.DISABLED_SymmetricNitscheAggregateTraceCertificateMatrixV3",
+      "threshold": "accepted_state_coercivity_policy_prerequisite",
+      "type": "string"
+    }
+  ]
+}

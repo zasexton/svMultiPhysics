@@ -1,0 +1,2 @@
+[01:44:48.664] [R0] [WARN] Physics LLVM JIT is unavailable in this executable; continuing with the symbolic interpreter because JIT was not explicitly requested (FE_ENABLE_LLVM_JIT did not resolve to ON). diagnostic=physics_jit_unavailable_fallback
+[01:44:48.667] [R0] [WARN] IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=2725 level_set_field='phi_trace_registration' dynamic_stress=natural_zero kinematic_enforcement=None diagnostic=unfitted_free_surface_natural_mode

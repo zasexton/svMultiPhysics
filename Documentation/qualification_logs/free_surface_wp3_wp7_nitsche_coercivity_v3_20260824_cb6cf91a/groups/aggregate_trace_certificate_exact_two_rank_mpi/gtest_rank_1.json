@@ -1,0 +1,52 @@
+{
+  "tests": 3,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-08-25T01:44:48Z",
+  "time": "0.007s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "GeneratedBoundaryAggregateTraceCertificateMPI",
+      "tests": 3,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-08-25T01:44:48Z",
+      "time": "0.006s",
+      "testsuite": [
+        {
+          "name": "PolicyFloorMismatchFailsCollectivelyBeforeCertificatePublication",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificateMPI.cpp",
+          "line": 733,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0.002s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificateMPI"
+        },
+        {
+          "name": "SubfloorCertificateFailsCollectivelyWithoutPartialPublication",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificateMPI.cpp",
+          "line": 804,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0.002s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificateMPI"
+        },
+        {
+          "name": "RootedCrossRankAggregateHasAnalyticBoundThirtyTwoOverSeventyNine",
+          "file": "\/scratch\/users\/zsexton\/svmp-wp3-wp7-v3.qual2.zdz9Ne\/source\/Code\/Source\/solver\/FE\/Tests\/Unit\/Assembly\/test_GeneratedBoundaryAggregateTraceCertificateMPI.cpp",
+          "line": 926,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-08-25T01:44:48Z",
+          "time": "0.002s",
+          "classname": "GeneratedBoundaryAggregateTraceCertificateMPI"
+        }
+      ]
+    }
+  ]
+}
