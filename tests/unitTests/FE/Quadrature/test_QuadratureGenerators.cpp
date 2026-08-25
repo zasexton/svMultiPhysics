@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "FE/Common/FEException.h"
+#include "FE/Quadrature/GaussQuadrature.h"
 #include "FE/Quadrature/QuadratureRule.h"
 
 #include <cmath>
@@ -25,6 +26,12 @@ namespace {
 
 constexpr double kStructureTolerance = 1.0e-12;
 constexpr double kMomentTolerance = 2.0e-12;
+
+static_assert(max_gauss_legendre_points() == 128);
+static_assert(noexcept(max_gauss_legendre_points()));
+static_assert(
+    std::is_same_v<decltype(&make_gauss_legendre_rule),
+                   QuadratureRule (*)(int)>);
 
 enum class LineEndpointPolicy {
     Excluded,
