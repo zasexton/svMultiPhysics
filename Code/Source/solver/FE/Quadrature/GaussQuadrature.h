@@ -20,6 +20,9 @@ namespace svmp::FE::quadrature {
 
 /**
  * @brief Return the largest supported Gauss-Legendre point count.
+ * @details The 128-point ceiling is a project support bound that limits
+ * generator work and downstream product-rule growth while providing line
+ * exactness through degree 255.
  * @return The inclusive point-count limit, 128.
  */
 [[nodiscard]] constexpr int max_gauss_legendre_points() noexcept
