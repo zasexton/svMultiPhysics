@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstddef>
 #include <exception>
+#include <limits>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -27,6 +28,8 @@ namespace {
 
 constexpr double kStructureTolerance = 1.0e-12;
 constexpr double kMomentTolerance = 2.0e-12;
+constexpr double kFixtureTolerance =
+    64.0 * std::numeric_limits<double>::epsilon();
 
 static_assert(max_gauss_legendre_points() == 128);
 static_assert(noexcept(max_gauss_legendre_points()));
@@ -39,15 +42,17 @@ enum class LineEndpointPolicy {
     Included,
 };
 
-double analytic_line_monomial_integral(std::size_t power)
+long double analytic_line_monomial_integral(std::size_t power)
 {
     if (power % 2u != 0u) {
-        return 0.0;
+        return 0.0L;
     }
-    return 2.0 / (static_cast<double>(power) + 1.0);
+    return 2.0L / (static_cast<long double>(power) + 1.0L);
 }
 
-double accumulate_line_moment(const QuadratureRule& rule, std::size_t power)
+long double accumulate_line_moment(
+    const QuadratureRule& rule,
+    std::size_t power)
 {
     long double sum = 0.0L;
     long double correction = 0.0L;
@@ -70,7 +75,7 @@ double accumulate_line_moment(const QuadratureRule& rule, std::size_t power)
         sum = next_sum;
     }
 
-    return static_cast<double>(sum + correction);
+    return sum + correction;
 }
 
 void expect_common_line_metadata(
@@ -152,17 +157,23 @@ void expect_line_rule_invariants(
         EXPECT_DOUBLE_EQ(rule.point(rule.num_points() / 2u)[0], 0.0);
     }
 
-    EXPECT_NEAR(
-        accumulate_line_moment(rule, 0u),
-        rule.reference_cell_measure(),
-        tolerance);
+    const long double measure_error = std::abs(
+        accumulate_line_moment(rule, 0u) -
+        static_cast<long double>(rule.reference_cell_measure()));
+    EXPECT_LE(measure_error, static_cast<long double>(tolerance));
 }
 
-void expect_advertised_line_exactness(
+std::pair<long double, int> expect_advertised_line_exactness(
     const QuadratureRule& rule,
     double tolerance = kMomentTolerance)
 {
-    ASSERT_GE(rule.polynomial_exactness(), 0);
+    EXPECT_GE(rule.polynomial_exactness(), 0);
+    if (rule.polynomial_exactness() < 0) {
+        return {std::numeric_limits<long double>::infinity(), -1};
+    }
+
+    long double worst_error = 0.0L;
+    int worst_power = 0;
 
     for (int power = 0;
          power <= rule.polynomial_exactness();
@@ -170,11 +181,17 @@ void expect_advertised_line_exactness(
         SCOPED_TRACE(::testing::Message() << "monomial power=" << power);
         const std::size_t nonnegative_power =
             static_cast<std::size_t>(power);
-        EXPECT_NEAR(
-            accumulate_line_moment(rule, nonnegative_power),
-            analytic_line_monomial_integral(nonnegative_power),
-            tolerance);
+        const long double error = std::abs(
+            accumulate_line_moment(rule, nonnegative_power) -
+            analytic_line_monomial_integral(nonnegative_power));
+        if (error > worst_error) {
+            worst_error = error;
+            worst_power = power;
+        }
+        EXPECT_LE(error, static_cast<long double>(tolerance));
     }
+
+    return {worst_error, worst_power};
 }
 
 template <typename ExceptionType, typename Function>
@@ -220,14 +237,15 @@ TEST(QuadratureGeneratorTestSupport, ExercisesSharedLineRuleChecks)
         {{-1.0, 0.0, 0.0}, {1.0, 0.0, 0.0}},
         {1.0, 1.0});
 
-    EXPECT_DOUBLE_EQ(analytic_line_monomial_integral(0u), 2.0);
-    EXPECT_DOUBLE_EQ(analytic_line_monomial_integral(1u), 0.0);
-    EXPECT_DOUBLE_EQ(analytic_line_monomial_integral(2u), 2.0 / 3.0);
-    EXPECT_DOUBLE_EQ(analytic_line_monomial_integral(255u), 0.0);
-    EXPECT_NEAR(
-        accumulate_line_moment(interior_rule, 255u),
-        0.0,
-        kMomentTolerance);
+    EXPECT_EQ(analytic_line_monomial_integral(0u), 2.0L);
+    EXPECT_EQ(analytic_line_monomial_integral(1u), 0.0L);
+    EXPECT_EQ(
+        analytic_line_monomial_integral(2u),
+        2.0L / 3.0L);
+    EXPECT_EQ(analytic_line_monomial_integral(255u), 0.0L);
+    EXPECT_LE(
+        std::abs(accumulate_line_moment(interior_rule, 255u)),
+        static_cast<long double>(kMomentTolerance));
 
     expect_common_line_metadata(interior_rule, 3u, 5);
     expect_line_rule_invariants(
@@ -248,16 +266,15 @@ TEST(QuadratureGeneratorTestSupport, ExercisesSharedLineRuleChecks)
         "at least one point");
 }
 
-TEST(GaussLegendreImplementation, GeneratesRepresentativeSupportedRules)
+TEST(GaussLegendreImplementation, GeneratesCanonicalLowOrderRules)
 {
-    const std::array<int, 4> point_counts{
-        1, 2, 17, max_gauss_legendre_points()};
-
-    for (const int num_points : point_counts) {
-        SCOPED_TRACE(::testing::Message()
-                     << "num_points=" << num_points);
-        const QuadratureRule rule =
-            make_gauss_legendre_rule(num_points);
+    const auto expect_canonical_rule = [](
+        int num_points,
+        const auto& expected_points,
+        const auto& expected_weights) {
+        SCOPED_TRACE(
+            ::testing::Message() << "num_points=" << num_points);
+        const QuadratureRule rule = make_gauss_legendre_rule(num_points);
 
         expect_common_line_metadata(
             rule,
@@ -267,21 +284,199 @@ TEST(GaussLegendreImplementation, GeneratesRepresentativeSupportedRules)
             rule,
             LineEndpointPolicy::Excluded);
         expect_advertised_line_exactness(rule);
+
+        ASSERT_EQ(rule.num_points(), expected_points.size());
+        ASSERT_EQ(rule.num_points(), expected_weights.size());
+        for (std::size_t point_index = 0;
+             point_index < rule.num_points();
+             ++point_index) {
+            SCOPED_TRACE(
+                ::testing::Message() << "point index=" << point_index);
+            if (expected_points[point_index] == 0.0) {
+                EXPECT_DOUBLE_EQ(rule.point(point_index)[0], 0.0);
+            } else {
+                EXPECT_NEAR(
+                    rule.point(point_index)[0],
+                    expected_points[point_index],
+                    kFixtureTolerance);
+            }
+            EXPECT_NEAR(
+                rule.weight(point_index),
+                expected_weights[point_index],
+                kFixtureTolerance);
+        }
+
+        const std::size_t first_unadvertised_even_power =
+            static_cast<std::size_t>(2 * num_points);
+        const long double first_unadvertised_error = std::abs(
+            accumulate_line_moment(
+                rule, first_unadvertised_even_power) -
+            analytic_line_monomial_integral(
+                first_unadvertised_even_power));
+        EXPECT_GT(
+            first_unadvertised_error,
+            static_cast<long double>(kMomentTolerance));
+    };
+
+    expect_canonical_rule(
+        1,
+        std::array{0.0},
+        std::array{2.0});
+
+    const double two_point_abscissa = 1.0 / std::sqrt(3.0);
+    expect_canonical_rule(
+        2,
+        std::array{-two_point_abscissa, two_point_abscissa},
+        std::array{1.0, 1.0});
+
+    const double three_point_abscissa = std::sqrt(3.0 / 5.0);
+    expect_canonical_rule(
+        3,
+        std::array{
+            -three_point_abscissa, 0.0, three_point_abscissa},
+        std::array{5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0});
+}
+
+TEST(GaussLegendreImplementation, GeneratesEverySupportedRule)
+{
+    long double worst_structure_error = 0.0L;
+    int worst_structure_num_points = 0;
+    std::size_t worst_structure_point_index = 0u;
+    std::string_view worst_structure_component = "none";
+
+    long double worst_measure_error = 0.0L;
+    int worst_measure_num_points = 0;
+
+    long double worst_moment_error = 0.0L;
+    int worst_moment_num_points = 0;
+    int worst_moment_power = 0;
+
+    for (int num_points = 1;
+         num_points <= max_gauss_legendre_points();
+         ++num_points) {
+        SCOPED_TRACE(
+            ::testing::Message() << "num_points=" << num_points);
+        const QuadratureRule rule = make_gauss_legendre_rule(num_points);
+
+        expect_common_line_metadata(
+            rule,
+            static_cast<std::size_t>(num_points),
+            2 * num_points - 1);
+        expect_line_rule_invariants(
+            rule,
+            LineEndpointPolicy::Excluded);
+        const auto [rule_moment_error, rule_moment_power] =
+            expect_advertised_line_exactness(rule);
+        if (worst_moment_num_points == 0 ||
+            rule_moment_error > worst_moment_error) {
+            worst_moment_error = rule_moment_error;
+            worst_moment_num_points = num_points;
+            worst_moment_power = rule_moment_power;
+        }
+
+        const long double measure_error = std::abs(
+            accumulate_line_moment(rule, 0u) -
+            static_cast<long double>(rule.reference_cell_measure()));
+        if (worst_measure_num_points == 0 ||
+            measure_error > worst_measure_error) {
+            worst_measure_error = measure_error;
+            worst_measure_num_points = num_points;
+        }
+
+        const auto update_worst_structure = [
+            &worst_structure_error,
+            &worst_structure_num_points,
+            &worst_structure_point_index,
+            &worst_structure_component,
+            num_points](
+                long double error,
+                std::size_t point_index,
+                std::string_view component) {
+            if (worst_structure_num_points == 0 ||
+                error > worst_structure_error) {
+                worst_structure_error = error;
+                worst_structure_num_points = num_points;
+                worst_structure_point_index = point_index;
+                worst_structure_component = component;
+            }
+        };
+
+        for (std::size_t point_index = 0;
+             point_index < rule.num_points();
+             ++point_index) {
+            const std::size_t mirror_index =
+                rule.num_points() - 1u - point_index;
+            update_worst_structure(
+                std::abs(static_cast<long double>(
+                    rule.point(point_index)[1])),
+                point_index,
+                "inactive y coordinate");
+            update_worst_structure(
+                std::abs(static_cast<long double>(
+                    rule.point(point_index)[2])),
+                point_index,
+                "inactive z coordinate");
+            update_worst_structure(
+                std::abs(
+                    static_cast<long double>(
+                        rule.point(point_index)[0]) +
+                    static_cast<long double>(
+                        rule.point(mirror_index)[0])),
+                point_index,
+                "mirrored point");
+            update_worst_structure(
+                std::abs(
+                    static_cast<long double>(rule.weight(point_index)) -
+                    static_cast<long double>(rule.weight(mirror_index))),
+                point_index,
+                "mirrored weight");
+        }
+
+        if (rule.num_points() % 2u == 1u) {
+            const std::size_t center_index = rule.num_points() / 2u;
+            update_worst_structure(
+                std::abs(static_cast<long double>(
+                    rule.point(center_index)[0])),
+                center_index,
+                "odd-rule center");
+        }
     }
+
+    EXPECT_LE(
+        worst_structure_error,
+        static_cast<long double>(kStructureTolerance))
+        << "worst num_points=" << worst_structure_num_points
+        << ", point index=" << worst_structure_point_index
+        << ", component=" << worst_structure_component;
+    EXPECT_LE(
+        worst_measure_error,
+        static_cast<long double>(kStructureTolerance))
+        << "worst num_points=" << worst_measure_num_points;
+    EXPECT_LE(
+        worst_moment_error,
+        static_cast<long double>(kMomentTolerance))
+        << "worst num_points=" << worst_moment_num_points
+        << ", power=" << worst_moment_power;
 }
 
 TEST(GaussLegendreImplementation, RejectsRequestsOutsideSupportedRange)
 {
     constexpr std::string_view expected_message =
         "num_points must be in [1, 128]";
+    constexpr std::array invalid_point_counts{
+        std::numeric_limits<int>::min(),
+        -1,
+        0,
+        129,
+        std::numeric_limits<int>::max()};
 
-    expect_exception_with_message<InvalidArgumentException>(
-        [] { (void)make_gauss_legendre_rule(0); },
-        expected_message);
-    expect_exception_with_message<InvalidArgumentException>(
-        [] {
-            (void)make_gauss_legendre_rule(
-                max_gauss_legendre_points() + 1);
-        },
-        expected_message);
+    for (const int num_points : invalid_point_counts) {
+        SCOPED_TRACE(
+            ::testing::Message() << "num_points=" << num_points);
+        expect_exception_with_message<InvalidArgumentException>(
+            [num_points] {
+                (void)make_gauss_legendre_rule(num_points);
+            },
+            expected_message);
+    }
 }
